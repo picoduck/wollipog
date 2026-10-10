@@ -44,6 +44,19 @@ for (const style of ["interactive", "composer"]) {
     await expect(input).toHaveValue("Synthetic reload note");
   });
 
+  test(`${style} restores valid text when the provider declares a larger bound`, async ({ page }) => {
+    await page.goto(`/agent-questions-e2e.html?set=long-note&style=${style}`);
+    await chooseFirstTwo(page, style);
+    await page.getByRole("checkbox", { name: "Browser Tests", exact: true }).click();
+    await page.getByRole("button", { name: "Next", exact: true }).click();
+    const input = page.locator(style === "composer" ? ".composer-answer-input" : ".question-input");
+    await expect(input).toHaveAttribute("maxlength", "8000");
+    const value = "Synthetic note ".repeat(350);
+    await input.fill(value);
+    await page.reload();
+    await expect(input).toHaveValue(value);
+  });
+
   test(`${style} does not inherit drafts across sessions, occurrences or schemas`, async ({ page }) => {
     const url = `/agent-questions-e2e.html?set=forms&style=${style}`;
     await page.goto(url);

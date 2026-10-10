@@ -143,3 +143,23 @@ test("a failed storage update removes the earlier browser answer instead of rest
     Object.defineProperty(window, "sessionStorage", { configurable: true, value: browserStorage });
   }
 });
+
+test("valid text honors a larger provider bound in shared memory and browser recovery", () => {
+  const fields: AgentQuestion[] = [{ id: "note", question: "Add a note.", options: [], allowOther: true, maxLength: 8000 }];
+  const key = questionDraftIdentity("long-answer", fields, "long-occurrence");
+  const value = "x".repeat(5000);
+  storeQuestionDrafts("long-answer", key, { note: { kind: "entry", value } });
+  assert.deepEqual(storedQuestionDrafts("long-answer", key), { note: { kind: "entry", value } });
+  const entries = JSON.parse(data.get("wollipog:question-drafts:v1:local")!);
+  entries[0].sessionId = "long-reloaded";
+  data.set("wollipog:question-drafts:v1:local", JSON.stringify(entries));
+  assert.deepEqual(storedQuestionDrafts("long-reloaded", key), { note: { kind: "entry", value } });
+});
+
+test("invalid over-length edits remain correctable in this page but never enter browser recovery", () => {
+  const key = questionDraftIdentity("over-length", questions, "over-length-occurrence");
+  const value = "x".repeat(4001);
+  storeQuestionDrafts("over-length", key, { note: { kind: "entry", value } });
+  assert.deepEqual(storedQuestionDrafts("over-length", key), { note: { kind: "entry", value } });
+  assert.doesNotMatch([...data.values()].join(""), /x{4001}/);
+});

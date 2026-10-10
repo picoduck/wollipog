@@ -1,4 +1,4 @@
-import { parentControlRequestEligible, type AgentQuestion, type PendingApproval } from "@wollipog/protocol";
+import { DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH, parentControlRequestEligible, type AgentQuestion, type PendingApproval } from "@wollipog/protocol";
 import type { QuestionResponseDraft } from "./question-response.js";
 
 const STORAGE_PREFIX = "wollipog:question-drafts:v1:";
@@ -64,7 +64,7 @@ function records(scope: string): RecordEntry[] {
         const draft = value as QuestionResponseDraft;
         return draft.kind === "choice" ? Array.isArray(draft.labels) && draft.labels.length <= 100 &&
           draft.labels.every((label) => typeof label === "string" && label.length <= 4000)
-          : (draft.kind === "entry" || draft.kind === "other") && typeof draft.value === "string" && draft.value.length <= 4000;
+          : (draft.kind === "entry" || draft.kind === "other") && typeof draft.value === "string" && draft.value.length <= MAX_CHARS;
       });
     });
   } catch {
@@ -97,7 +97,7 @@ function safeValues(binding: Binding, values: Record<string, QuestionResponseDra
     if (value.kind === "choice") {
       if (value.labels.some((label) => !question.options.some((option) => option.label === label)) ||
           new Set(value.labels).size !== value.labels.length || (!question.multiSelect && value.labels.length > 1)) continue;
-    } else if (value.value.length > Math.min(question.maxLength ?? 4000, 4000)) continue;
+    } else if (durable && value.value.length > (question.maxLength ?? DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH)) continue;
     Object.defineProperty(safe, question.id, { value: structuredClone(value), enumerable: true, configurable: true, writable: true });
   }
   return safe;
