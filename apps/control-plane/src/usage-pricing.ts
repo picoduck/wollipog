@@ -171,13 +171,15 @@ export function priceUsage(
 ): PricedUsage {
   const base = table ? lookupRate(table, model) : null;
   let rate = base;
-  if (base && context) {
-    const requestedTier = context.serviceTier ?? "default";
+  if (base && (context || base.requestRates?.length)) {
+    const requestedTier = context?.serviceTier ?? "default";
     const tier = requestedTier === "fast" ? "priority" : requestedTier === "standard" ? "default" : requestedTier;
-    const requestInput = finiteNonNegative(context.requestInputTokens);
+    const requestInput = finiteNonNegative(context?.requestInputTokens);
     const variants = base.requestRates ?? [];
-    // Never use a turn's aggregated input to choose a per-request context premium.
-    if (variants.some((variant) => variant.inputThreshold !== undefined) && requestInput === null) rate = null;
+    // Missing context cannot imply a standard request. Require only the coordinates that can
+    // change this model's rate, and never use a turn's aggregated input for a request premium.
+    if (variants.some((variant) => variant.serviceTier !== "default") && context?.serviceTier === undefined ||
+        variants.some((variant) => variant.inputThreshold !== undefined) && requestInput === null) rate = null;
     else {
       const threshold = variants.reduce((maximum, variant) =>
         variant.inputThreshold !== undefined && requestInput !== null && requestInput > variant.inputThreshold

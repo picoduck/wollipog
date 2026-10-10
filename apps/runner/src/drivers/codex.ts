@@ -371,6 +371,8 @@ export class CodexDriver implements Driver {
           this.cb.onEvent({ kind: "agent_response_completed" });
         }
         const u = msg.usage ?? {};
+        // Exec reports turn totals, not request input sizes or the actual service tier. Leave
+        // pricingContext absent so accounting marks variant rates unpriced rather than guessing.
         this.cb.onEvent({
           kind: "token_usage",
           inputTokens: u.input_tokens,

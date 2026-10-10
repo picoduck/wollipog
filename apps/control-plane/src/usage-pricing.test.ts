@@ -89,6 +89,44 @@ test("mixed provenance resolves to the weakest source", () => {
   assert.equal(resolveCostSource({ providerReported: 0, modelPriced: 0, unpriced: 0 }), "unpriced");
 });
 
+test("variant rates require their request coordinates even when pricing context is absent", () => {
+  const table = parseRateTable({
+    "base-only": { input_cost_per_token: 1, output_cost_per_token: 2 },
+    "context-only": { input_cost_per_token: 1, output_cost_per_token: 2,
+      input_cost_per_token_above_272k_tokens: 3, output_cost_per_token_above_272k_tokens: 4 },
+    "tier-only": { input_cost_per_token: 1, output_cost_per_token: 2,
+      input_cost_per_token_priority: 3, output_cost_per_token_priority: 4, cache_read_input_token_cost_priority: 0.2 },
+    combined: { input_cost_per_token: 1, output_cost_per_token: 2,
+      input_cost_per_token_priority: 3, output_cost_per_token_priority: 4,
+      input_cost_per_token_above_272k_tokens: 3, output_cost_per_token_above_272k_tokens: 4 },
+    incomplete: { input_cost_per_token: 1, output_cost_per_token: 2,
+      input_cost_per_token_above_272k_tokens: 3 },
+  });
+  const buckets = { uncachedInputTokens: 300000, cachedInputTokens: 10, cacheCreationTokens: 0, outputTokens: 1 };
+  const unpriced = { costUsd: 0, costSource: "unpriced", cacheSavingsUsd: 0 };
+  for (const model of ["context-only", "tier-only", "combined", "incomplete"]) {
+    for (const context of [undefined, {}]) {
+      assert.deepEqual(priceUsage(table, model, buckets, undefined, context), unpriced, model);
+      for (const cost of [0, 42]) {
+        const reported = priceUsage(table, model, buckets, cost, context);
+        assert.equal(reported.costUsd, cost);
+        assert.equal(reported.costSource, "providerReported");
+        assert.equal(priceUsage(table, model, buckets, cost, context, true).costSource, "modelPriced");
+      }
+    }
+  }
+  assert.deepEqual(priceUsage(table, "combined", buckets, null, { requestInputTokens: 10 }), unpriced);
+  assert.deepEqual(priceUsage(table, "combined", buckets, null, { serviceTier: "default" }), unpriced);
+  assert.deepEqual(priceUsage(table, "context-only", buckets, null, { requestInputTokens: Number.NaN }), unpriced);
+  assert.equal(priceUsage(table, "context-only", buckets, null, { requestInputTokens: 10 }).costSource, "modelPriced");
+  assert.equal(priceUsage(table, "tier-only", buckets, null, { serviceTier: "standard" }).costSource, "modelPriced");
+  assert.equal(priceUsage(table, "tier-only", buckets, null, { serviceTier: "fast" }).costUsd, 900006);
+  const base = priceUsage(table, "base-only", buckets, null);
+  assert.equal(base.costSource, "modelPriced");
+  assert.equal(base.costUsd, 300003);
+  assert.deepEqual(priceUsage(table, "base-only", buckets, null, {}), base);
+});
+
 test("request tier and long-context rates apply to every billable bucket and cache savings", () => {
   const raw: Record<string, number> = {};
   const fields = ["input_cost_per_token", "output_cost_per_token", "cache_read_input_token_cost", "cache_creation_input_token_cost"];

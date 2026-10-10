@@ -95,6 +95,13 @@ cumulative suffix spanning turn/model boundaries stays unpriced while the next v
 its tokens. Compatibility notifications containing only `last` from an older turn are treated as
 replays; they cannot establish an unseen additive suffix.
 
+Codex exec emits turn totals without request-level pricing context. A model with published
+context-length or service-tier variants stays `unpriced` when the required request size or tier is
+missing, including when the entire context object is absent. Turn input totals cannot select a
+request's context tier. Base-only models still use their base rate, and provider-reported costs
+still take precedence. Unpriced tokens remain in totals with incomplete provenance and a cost
+lower bound; budgeted sessions with entirely unpriced usage use the existing `cost_unpriced` gate.
+
 Primary contracts: [Claude cost and usage](https://code.claude.com/docs/en/agent-sdk/cost-tracking), [SDK changelog](https://github.com/anthropics/claude-agent-sdk-typescript/blob/main/CHANGELOG.md), [Codex 0.160.0 thread usage](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/core/src/session/mod.rs), and [OpenAI API pricing](https://developers.openai.com/api/docs/pricing). The ccusage loader and pricing implementations were cross-checked for cumulative deltas, cache splitting, deduplication, and request tiers. Its precomputed-cost display mode does not turn SDK estimates into authoritative billing.
 
 Claude raw checkpoints carry their accounting scope. A process-scoped or unidentified checkpoint is never compared with a restored conversation total after a CLI upgrade; the local resume probe seeds that conversation prefix instead. New SDK-computed snapshot catch-up also retains estimate provenance. Published request-rate variants may omit an unused cache bucket; zero cache writes need no write rate, while nonzero usage of an unpublished bucket remains unpriced.
