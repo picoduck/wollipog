@@ -121,9 +121,11 @@ test("a nested worker opened from the activity beside a worker's request opens a
   const activity = page.getByRole("region", { name: "Worker Roster" }).locator(".subagent-output");
   const disclosure = activity.locator(".tl-work > .disclosure-trigger");
   if (await disclosure.count() && await disclosure.getAttribute("aria-expanded") === "false") await disclosure.click();
-  await activity.locator(".tl-agent > .btn").click();
+  const open = activity.locator(".tl-agent > .btn");
+  await open.click();
   await expect(page.getByRole("region", { name: "Inspect Parser", exact: true })).toBeVisible();
   await expect(page.locator(".agents-page .subagent-detail")).toBeVisible();
+  // Back, which this fixture has no header for, is covered in panel-pages.spec.ts.
 });
 
 test("an active-tail conflict on initial registry load retries against the current generation", async ({ page }) => {

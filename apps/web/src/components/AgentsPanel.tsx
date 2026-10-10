@@ -685,9 +685,13 @@ export function AgentsPanel(props: Props) {
   const filtered = rows.filter((row) => filter === "all" || (filter === "active" ? isCurrentWorker(row) : !isCurrentWorker(row)));
   const now = useTimelineClock(rows.length > 0);
   const selectFilter = (value: typeof filter) => { setFilter(value); setLimit(PAGE_SIZE); };
-  // The worker whose request is selected in Worker Attention, while it is the selected worker.
-  const attentionOwnerId = selectedRequest && !primaryInSession && selectedRequest.ownerToolUseId === requestedId
-    ? requestedId : null;
+  // The worker whose request is selected in Worker Attention, when it can be named safely: its
+  // activity stays beside the request while pages open and close over the roster.
+  const attentionOwnerId = (() => {
+    const ownerId = selectedRequest && !primaryInSession ? selectedRequest.ownerToolUseId : undefined;
+    if (!ownerId || projection.ambiguousIds.has(ownerId) || unresolvedOwnerIds.has(ownerId)) return null;
+    return agents.some((agent) => agent.id === ownerId) ? ownerId : null;
+  })();
   const openSubagentPage = (id: string) => {
     props.onSelect(id);
     pages.push(`subagent:${id}`);

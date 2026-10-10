@@ -36,6 +36,11 @@ const session = {
   archived: false, runId: null, parentSessionId: null, pendingApproval: null, createdAt: NOW - 60 * MINUTE,
   updatedAt: NOW, lastEventAt: NOW, messageCount: 80, tokensIn: 0, tokensOut: 0, costUsd: 0,
 } as SessionView;
+// `request=1`: the last worker asks the person something, answered in Worker Attention.
+if (params.get("request") === "1") session.pendingApproval = {
+  requestId: "permission-30", ownerToolUseId: "worker-30", title: "Run Payout Migrations?",
+  options: [{ optionId: "yes", name: "Allow", kind: "allow_once" }],
+} as SessionView["pendingApproval"];
 
 const TASKS = ["Audit", "Migrate", "Review", "Test", "Document", "Profile"];
 const AREAS = ["Invoices", "Ledger", "Refunds", "Webhooks", "Payouts"];
