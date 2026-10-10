@@ -1,4 +1,11 @@
-import type { ReactNode, Ref } from "react";
+import { useLayoutEffect, useState, type FocusEvent, type ReactNode, type Ref } from "react";
+import { KEYBOARD_EDITABLE } from "../mobile-viewport.js";
+
+/** Whether focus on this target summons the software keyboard (`KEYBOARD_EDITABLE`). */
+function isTextField(target: EventTarget | null): target is HTMLElement {
+  const element = target as HTMLElement | null;
+  return element?.nodeType === 1 && element.matches(KEYBOARD_EDITABLE);
+}
 
 /**
  * A side panel tool laid out as fixed slots around one scroller (docs/design-system.md §4.9; #2846):
@@ -8,6 +15,11 @@ import type { ReactNode, Ref } from "react";
  *
  * The toolbar slot is only the place above the scroller; the row inside it is the shared `.toolbar`
  * (§4.7), which the tool renders itself.
+ *
+ * While a text field inside the scroller has focus, such as Review's finding editor, the foot is
+ * marked `is-yielded`, and on a coarse pointer it gives its height to the scroller (#2907): there the
+ * software keyboard already takes the sheet's lower part, and the foot's controls can't be used while
+ * it serves that field. The foot stays mounted, so whatever it holds is intact when focus leaves.
  */
 export function PanelToolLayout({ toolbar, foot, scrollRef, scrollLabel, children }: {
   /** The fixed content above the scroller: normally one `.toolbar` row. */
@@ -19,6 +31,20 @@ export function PanelToolLayout({ toolbar, foot, scrollRef, scrollLabel, childre
   scrollLabel?: string;
   children: ReactNode;
 }) {
+  const [writing, setWriting] = useState<HTMLElement | null>(null);
+  // A field removed while it has focus (Add Finding closes its card) may fire no blur, so check
+  // after every render that the field is still the one focused.
+  useLayoutEffect(() => {
+    if (writing && (!writing.isConnected || writing.ownerDocument.activeElement !== writing)) setWriting(null);
+  });
+  // React's focus events also bubble out of portals (a dialog opened from the diff), which are not
+  // in the scroller: only a field the scroller's own DOM contains counts.
+  const fieldIn = (scroller: HTMLDivElement, target: EventTarget | null) =>
+    isTextField(target) && scroller.contains(target) ? target : null;
+  const onFocus = (event: FocusEvent<HTMLDivElement>) => setWriting(fieldIn(event.currentTarget, event.target));
+  // Moving straight from one field in the scroller to another keeps the foot yielded, with no frame
+  // in between that would bring it back.
+  const onBlur = (event: FocusEvent<HTMLDivElement>) => setWriting(fieldIn(event.currentTarget, event.relatedTarget));
   return (
     <>
       {toolbar != null && toolbar !== false && <div className="rpanel-toolbar">{toolbar}</div>}
@@ -29,10 +55,14 @@ export function PanelToolLayout({ toolbar, foot, scrollRef, scrollLabel, childre
         aria-label={scrollLabel}
         // A scroller with no focusable content still has to be reachable by keyboard to scroll.
         tabIndex={scrollLabel ? 0 : undefined}
+        onFocus={onFocus}
+        onBlur={onBlur}
       >
         {children}
       </div>
-      {foot != null && foot !== false && <div className="rpanel-foot">{foot}</div>}
+      {foot != null && foot !== false && (
+        <div className={writing ? "rpanel-foot is-yielded" : "rpanel-foot"}>{foot}</div>
+      )}
     </>
   );
 }

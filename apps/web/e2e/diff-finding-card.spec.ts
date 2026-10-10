@@ -5,8 +5,10 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
  * one neutral card whose only focus ring is the textarea's, its Severity and Required share a row
  * and Cancel and Add Finding the next one in a 400px panel, it leaves the code column's indent under
  * 480px, and on a phone Add Finding stays above the keyboard with no session composer on screen. A
- * resolved finding is one quiet line. The harnesses are the real side panel over the file-section
- * fixture with findings held in memory (`diff-sections-main.tsx`, the full shell's `reviewDiff=1`).
+ * resolved finding is one quiet line. While the card is written on a coarse pointer, Review's foot
+ * (the commit bar or a selection bar) gives its height to the scroller and returns intact (#2907).
+ * The harnesses are the real side panel over the file-section fixture with findings held in memory
+ * (`diff-sections-main.tsx`, the full shell's `reviewDiff=1`).
  */
 
 const CHECKOUT = "apps/shop/src/features/checkout/components/payment/CheckoutPage.tsx";
@@ -219,6 +221,34 @@ async function expectOneOptionsRow(card: Locator) {
   }
 }
 
+/**
+ * The full shell at 390×844 on Review, with Commit Message holding `message` and the editor open
+ * and focused under the checkout file's new line 21 through its line menu.
+ */
+async function openPhoneEditor(page: Page, message = "Fix the checkout total") {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/command-inbox-projects-e2e.html?scenario=git-visibility&reviewReady=1&reviewDiff=1&findings=1&fullShell=1");
+  await page.evaluate(() => localStorage.clear());
+  await page.reload();
+  await page.getByRole("button", { name: /Alpha Session/ }).click();
+  const expand = page.getByRole("button", { name: "Open Session", exact: true });
+  if (await expand.isVisible()) await expand.click();
+  await page.getByRole("button", { name: "Side Panel", exact: true }).click();
+  const panel = page.locator("#right-panel");
+  await panel.locator(".rpanel-switcher").tap();
+  await page.getByRole("menuitemradio", { name: "Review" }).tap();
+  await expect(panel.locator(".dfile").first()).toBeVisible();
+  await panel.getByLabel("Commit Message").fill(message);
+
+  const number = checkoutFile(panel).getByRole("button", { name: "Line 21 Actions", exact: true });
+  await number.scrollIntoViewIfNeeded();
+  await number.tap();
+  await page.getByRole("menuitem", { name: "Add Finding…" }).tap();
+  const card = panel.locator(".dedit");
+  await expect(card.locator("textarea")).toBeFocused();
+  return { panel, card };
+}
+
 test.describe("on a phone with a coarse pointer", () => {
   test.use({ hasTouch: true, isMobile: true });
 
@@ -228,25 +258,7 @@ test.describe("on a phone with a coarse pointer", () => {
   });
 
   test("with the textarea focused and the keyboard open, Add Finding is above it and no composer is rendered", async ({ page }) => {
-    await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto("/command-inbox-projects-e2e.html?scenario=git-visibility&reviewReady=1&reviewDiff=1&findings=1&fullShell=1");
-    await page.evaluate(() => localStorage.clear());
-    await page.reload();
-    await page.getByRole("button", { name: /Alpha Session/ }).click();
-    const expand = page.getByRole("button", { name: "Open Session", exact: true });
-    if (await expand.isVisible()) await expand.click();
-    await page.getByRole("button", { name: "Side Panel", exact: true }).click();
-    const panel = page.locator("#right-panel");
-    await panel.locator(".rpanel-switcher").tap();
-    await page.getByRole("menuitemradio", { name: "Review" }).tap();
-    await expect(panel.locator(".dfile").first()).toBeVisible();
-
-    const number = checkoutFile(panel).getByRole("button", { name: "Line 21 Actions", exact: true });
-    await number.scrollIntoViewIfNeeded();
-    await number.tap();
-    await page.getByRole("menuitem", { name: "Add Finding…" }).tap();
-    const card = panel.locator(".dedit");
-    await expect(card.locator("textarea")).toBeFocused();
+    const { panel, card } = await openPhoneEditor(page);
     await expectOneOptionsRow(card);
     // Where the keyboard covers the layout viewport, the sheet ends at its top edge (#2843).
     await page.evaluate(() => document.documentElement.style.setProperty("--keyboard-inset", "300px"));
@@ -263,5 +275,97 @@ test.describe("on a phone with a coarse pointer", () => {
     const fieldsOutside = await page.evaluate(() => [...document.querySelectorAll("textarea, [contenteditable='true']")]
       .filter((element) => !element.closest("#right-panel") && element.getClientRects().length > 0).length);
     expect(fieldsOutside, "no text field outside the sheet is laid out").toBe(0);
+    // The commit bar gives the foot's height to the scroller while the finding is written (#2907), so
+    // the whole card fits between the file's sticky header and the keyboard.
+    await expect(panel.locator(".rpanel-foot")).toBeHidden();
+    await expect(panel.locator(".commit-bar")).toBeHidden();
+    const head = await box(checkoutFile(panel).locator(".dfile-head"));
+    const outer = await box(card);
+    expect(outer.y, "the card's top, with the textarea's first line, is below the sticky header")
+      .toBeGreaterThanOrEqual(head.y + head.height);
+    expect(outer.y + outer.height, "the card's foot is above the keyboard").toBeLessThanOrEqual(keyboardTop);
+  });
+});
+
+/** The diff scroller's position, to show the commit bar's collapse and return never move the diff. */
+const diffScrollTop = (panel: Locator) => panel.locator(".rpanel-scroll").evaluate((element) => element.scrollTop);
+
+/**
+ * The keyboard stand-in, pinned: the app republishes `--keyboard-inset` from the visual viewport
+ * (`mobile-viewport.ts`), so an inline value can be cleared mid-test; a rule marked important holds
+ * until it is removed, which is the keyboard closing.
+ */
+async function openKeyboard(page: Page) {
+  const style = await page.addStyleTag({ content: ":root { --keyboard-inset: 300px !important; }" });
+  return { top: 844 - 300, close: () => style.evaluate((element) => element.remove()) };
+}
+
+test.describe("the commit bar while a finding is written (#2907)", () => {
+  test.describe("on a coarse pointer", () => {
+    test.use({ hasTouch: true, isMobile: true });
+
+    test("blurring the textarea brings the commit bar back with its message, and nothing moves", async ({ page }) => {
+      const { panel, card } = await openPhoneEditor(page, "Fix the checkout total");
+      const textarea = card.locator("textarea");
+      const keyboard = await openKeyboard(page);
+      await expect(panel.locator(".commit-bar")).toBeHidden();
+      await expect(card.getByRole("button", { name: "Add Finding" })).toBeInViewport();
+      const scrolled = await diffScrollTop(panel);
+
+      // The keyboard goes with the blur; the commit bar comes back as it was.
+      await textarea.evaluate((element: HTMLTextAreaElement) => element.blur());
+      await keyboard.close();
+      await expect(panel.locator(".commit-bar")).toBeVisible();
+      await expect(panel.getByLabel("Commit Message")).toHaveValue("Fix the checkout total");
+      expect(await page.evaluate(() => document.activeElement === document.body), "focus moved nowhere").toBe(true);
+      expect(await diffScrollTop(panel), "the diff kept its position").toBe(scrolled);
+
+      // Writing again takes the bar away again, and the diff still doesn't move.
+      await textarea.evaluate((element: HTMLTextAreaElement) => element.focus({ preventScroll: true }));
+      await expect(panel.locator(".commit-bar")).toBeHidden();
+      await expect(textarea).toBeFocused();
+      expect(await diffScrollTop(panel)).toBe(scrolled);
+    });
+
+    test("the findings selection bar in the foot follows the same rule", async ({ page }) => {
+      await open(page, "width=360");
+      const panel = page.locator("#right-panel");
+      const select = panel.getByRole("checkbox", { name: /^Select Finding on / }).first();
+      await select.scrollIntoViewIfNeeded();
+      await select.tap();
+      const bar = panel.locator(".finding-selection-bar");
+      await expect(bar).toContainText("1 finding selected");
+      // A checkbox summons no keyboard, so its focus leaves the bar where it is.
+      await expect(bar).toBeVisible();
+
+      const card = await openEditor(page, { touch: true });
+      await expect(card.locator("textarea")).toBeFocused();
+      await expect(bar).toBeHidden();
+      await card.locator("textarea").evaluate((element: HTMLTextAreaElement) => element.blur());
+      await expect(bar).toBeVisible();
+      await expect(bar).toContainText("1 finding selected");
+    });
+
+    test("focusing Commit Message keeps the commit bar above the keyboard", async ({ page }) => {
+      const { panel, card } = await openPhoneEditor(page);
+      const message = panel.getByLabel("Commit Message");
+      await card.locator("textarea").evaluate((element: HTMLTextAreaElement) => element.blur());
+      await message.focus();
+      const keyboard = await openKeyboard(page);
+      await expect(panel.locator(".commit-bar")).toBeVisible();
+      await expect(message).toBeFocused();
+      const field = await box(message);
+      expect(field.y + field.height, "Commit Message is above the keyboard").toBeLessThanOrEqual(keyboard.top);
+    });
+  });
+
+  test("on a fine pointer the commit bar stays while the textarea has focus", async ({ page }) => {
+    await open(page, "width=400");
+    const card = await openEditor(page);
+    await expect(card.locator("textarea")).toBeFocused();
+    const panel = page.locator("#right-panel");
+    await expect(panel.locator(".commit-bar")).toBeVisible();
+    const foot = await box(panel.locator(".rpanel-foot"));
+    expect(foot.height).toBeGreaterThan(0);
   });
 });
