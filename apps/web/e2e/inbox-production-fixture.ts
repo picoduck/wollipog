@@ -47,5 +47,13 @@ export async function installInboxFixture(page: Page) {
     sockets.push(socket);
     socket.send(JSON.stringify(snapshot));
   });
-  return { disconnect: () => { for (const socket of sockets) socket.close({ code: 1006 }); } };
+  return {
+    disconnect: () => { for (const socket of sockets) socket.close({ code: 1006 }); },
+    updateSession: (id: string, update: Partial<SessionView>) => {
+      const session = sessions.find((candidate) => candidate.id === id);
+      if (!session) throw new Error(`Unknown synthetic session: ${id}`);
+      Object.assign(session, update);
+      for (const socket of sockets) socket.send(JSON.stringify({ type: "session_upsert", session }));
+    },
+  };
 }

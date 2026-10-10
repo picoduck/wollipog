@@ -2,6 +2,51 @@ import { expect, test } from "@playwright/test";
 import { installInboxFixture } from "./inbox-production-fixture.js";
 import { encodeResourceId } from "../src/navigation.js";
 
+for (const origin of ["Sessions", "Session", "Stop Turn"] as const) {
+  test(`a suspended ${origin} cannot mutate its Session while another route loads @production`, async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const fixture = await installInboxFixture(page);
+    await page.addInitScript(() => {
+      const mutations: string[] = [];
+      Object.assign(window, { __LAZY_ROUTE_MUTATIONS__: mutations });
+      const fetch = window.fetch.bind(window);
+      window.fetch = (input, init) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (init?.method === "POST" && /\/api\/sessions\/[^/]+\/(archive|cancel)$/.test(url)) mutations.push(url);
+        return fetch(input, init);
+      };
+    });
+    let release!: () => void;
+    const pending = new Promise<void>((done) => { release = done; });
+    await page.route("**/assets/ArchivedSessionsView-*.js", async (route) => { await pending; await route.continue(); });
+    await page.goto("/index.html");
+    await page.getByRole("button", { name: /Synthetic Session 1\b/ }).click();
+    await expect(page.locator(".inbox-preview-skeleton")).toBeHidden();
+    if (origin !== "Sessions") await page.getByRole("button", { name: "Open Session", exact: true }).click();
+    if (origin === "Stop Turn") {
+      fixture.updateSession("synthetic-1", { status: "running", activeTurnId: "synthetic-turn" });
+      await expect(page.getByRole("button", { name: "Stop Turn", exact: true })).toBeEnabled();
+    }
+    await page.locator(origin === "Sessions" ? ".inbox-list" : ".detail-scroll").focus();
+    const digit = await page.getByRole("link", { name: "Archived Sessions", exact: true }).getAttribute("aria-keyshortcuts");
+    await page.keyboard.press(digit!.trim());
+    await expect(page.locator("[data-route-loading]")).toBeVisible();
+    await page.keyboard.press(origin === "Stop Turn" ? "Shift+Escape" : "e");
+    const mutations = () => page.evaluate(() => (window as unknown as { __LAZY_ROUTE_MUTATIONS__: string[] }).__LAZY_ROUTE_MUTATIONS__);
+    expect(await mutations()).toEqual([]);
+    release();
+    await expect(page.locator("[data-route-loading]")).toBeHidden();
+    await page.getByRole("link", { name: "Sessions", exact: true }).click();
+    await page.getByRole("button", { name: /Synthetic Session 1\b/ }).click();
+    await expect(page.locator(".inbox-preview-skeleton")).toBeHidden();
+    if (origin !== "Sessions") await page.getByRole("button", { name: "Open Session", exact: true }).click();
+    if (origin === "Stop Turn") await expect(page.getByRole("button", { name: "Stop Turn", exact: true })).toBeEnabled();
+    await page.locator(origin === "Sessions" ? ".inbox-list" : ".detail-scroll").focus();
+    await page.keyboard.press(origin === "Stop Turn" ? "Shift+Escape" : "e");
+    await expect.poll(async () => (await mutations()).length).toBe(1);
+  });
+}
+
 test("keyboard navigation from the inbox reader focuses a delayed route's title @production", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await installInboxFixture(page);
@@ -16,6 +61,7 @@ test("keyboard navigation from the inbox reader focuses a delayed route's title 
   const digit = await page.getByRole("link", { name: "Archived Sessions", exact: true }).getAttribute("aria-keyshortcuts");
   await page.keyboard.press(digit!.trim());
   await expect(page.locator("[data-route-loading]")).toBeVisible();
+  await expect(page.locator("[data-route-loading] #page-title")).toBeFocused();
   release();
   await expect(page.locator("[data-route-loading]")).toBeHidden();
   await expect(page.getByRole("heading", { name: "Archived Sessions", exact: true })).toBeFocused();

@@ -3913,7 +3913,7 @@ function SessionDetailLoaded({
     }
   }, [api, canStopTurn, cancelTurnRefusal, clearStopTurnAttempt, mutationKey, sessionId]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (mode !== "expanded" || !canStopTurn || cancelTurnRefusal !== null) return;
     const onStopTurnShortcut = (event: globalThis.KeyboardEvent) => {
       if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
