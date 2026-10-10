@@ -219,7 +219,7 @@ const rightPanel = {
   dragging: false,
   subagentTarget: null,
   toggle() {}, openMode() {}, show() {}, setMode() {}, setWidth() {},
-  setDragging() {}, close() {}, selectSubagent() {}, showSubagent() {},
+  expanded: false, setExpanded() {}, setDragging() {}, close() {}, selectSubagent() {}, showSubagent() {},
   consumeSubagentFocusRequest() {},
 };
 

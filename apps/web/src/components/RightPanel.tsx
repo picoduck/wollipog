@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { CampaignIcon, ChevronDownIcon, ChevronLeftIcon, CloseIcon, CommandLineIcon, DiffIcon, FolderIcon, GlobeIcon, GridIcon, QuestionIcon, InboxIcon, JobsIcon, LockIcon, TeamIcon } from "./Icons.js";
+import { Maximize2Icon, Minimize2Icon } from "./Icons.js";
 import {
   pendingRequests,
   runnerCapabilityRequirement,
@@ -17,7 +18,9 @@ import {
   RIGHT_PANEL_MAX_WIDTH,
   RIGHT_PANEL_MIN_WIDTH,
   clampRightPanelWidth,
+  rightPanelDragCeiling,
   rightPanelOverlays,
+  parseStoredRightPanelExpanded,
   parseStoredRightPanelMode,
   parseStoredRightPanelWidth,
   resolveRightPanelDrag,
@@ -55,12 +58,6 @@ import {
   type SessionToolId,
 } from "../session-tools.js";
 
-/** Viewport-aware width ceiling: the panel may take at most ~40% of the window, so the
- * transcript + composer always keep a usable share on narrow/split-screen windows. */
-function viewportPanelMax(): number {
-  return Math.floor(window.innerWidth * 0.4);
-}
-
 const EMPTY_PARENT_TURN_EVENTS: ReadonlyMap<string, number> = new Map();
 const EMPTY_GOVERNANCE_DECISIONS: readonly GovernanceDecision[] = [];
 const HIDDEN_CAMPAIGN: CampaignStatusAvailability = { kind: "hidden" };
@@ -96,7 +93,7 @@ export const PanelActionSlotContext = createContext<HTMLElement | null>(null);
 
 /**
  * The side panel header's action slot (#2843): the one extension point through which a tool puts
- * its own actions in the 48px header, between the tool switcher and Close Panel (on a phone, after
+ * its own actions in the 48px header, between the tool switcher and Expand Panel (on a phone, after
  * the switcher). A tool renders this anywhere inside its body; its children are portalled into the
  * header, in order, and leave with the tool. Use `.icon-btn` buttons (32px, 44px on touch) with a
  * Title Case `aria-label` and the same `title`; a pushed page's Back, an About popover and similar
@@ -118,6 +115,12 @@ export interface RightPanelState {
   open: boolean;
   mode: RightPanelMode;
   width: number;
+  /**
+   * Whether the panel fills the session's content area in place of the chat column (#2845). A
+   * per-device preference that outlives closing the panel, switching tools and sessions; phones
+   * ignore it.
+   */
+  expanded: boolean;
   dragging: boolean;
   /** Ephemeral selection; provider tool ids can expire when event history resets. */
   subagentTarget: { sessionId: string; eventEpoch: number; subagentId: string; focusRequest?: number } | null;
@@ -128,6 +131,7 @@ export interface RightPanelState {
   show: (mode: RightPanelMode) => void;
   setMode: (mode: RightPanelMode) => void;
   setWidth: (fn: (w: number) => number) => void;
+  setExpanded: (expanded: boolean) => void;
   setDragging: (d: boolean) => void;
   close: () => void;
   selectSubagent: (sessionId: string, eventEpoch: number, subagentId: string) => void;
@@ -158,6 +162,13 @@ export function useRightPanelState(navigationScope: string | null = null, attent
       return RIGHT_PANEL_DEFAULT_WIDTH;
     }
   });
+  const [expanded, setExpanded] = useState(() => {
+    try {
+      return parseStoredRightPanelExpanded(loadBrowserStorageValue("wollipog.rightpanel.expanded"));
+    } catch {
+      return false;
+    }
+  });
   const [dragging, setDragging] = useState(false);
   const [subagentTarget, setSubagentTarget] = useState<RightPanelState["subagentTarget"]>(null);
   const nextSubagentFocusRequest = useRef(0);
@@ -178,15 +189,17 @@ export function useRightPanelState(navigationScope: string | null = null, attent
       saveBrowserStorageValue("wollipog.rightpanel.open", open ? "1" : "0");
       saveBrowserStorageValue("wollipog.rightpanel.mode", mode);
       saveBrowserStorageValue("wollipog.rightpanel.width", String(width));
+      saveBrowserStorageValue("wollipog.rightpanel.expanded", expanded ? "1" : "0");
     } catch {
       /* localStorage unavailable — panel prefs are best-effort */
     }
-  }, [open, mode, width, dragging]);
+  }, [open, mode, width, expanded, dragging]);
 
   return {
     open,
     mode,
     width,
+    expanded,
     dragging,
     subagentTarget,
     toggle: () => setOpen((o) => !o),
@@ -200,6 +213,7 @@ export function useRightPanelState(navigationScope: string | null = null, attent
     },
     setMode,
     setWidth: (fn) => setWidthRaw((w) => fn(w)),
+    setExpanded,
     setDragging,
     close: () => setOpen(false),
     selectSubagent: (sessionId, eventEpoch, subagentId) => {
@@ -487,16 +501,6 @@ export function RightPanel({
     if (state.open && (!active || active === document.body)) switcherRef.current?.focus();
   }, [phone, state.open]);
 
-  // Viewport-aware ceiling as STATE (the rendered width and the separator's ARIA range both
-  // re-derive from it) — the stored width PREFERENCE is left untouched, so a temporary window
-  // shrink never clobbers the size the user chose. Same stance as the shell dock's height.
-  const [viewportMax, setViewportMax] = useState(() => viewportPanelMax());
-  useEffect(() => {
-    const onWinResize = () => setViewportMax(viewportPanelMax());
-    window.addEventListener("resize", onWinResize);
-    return () => window.removeEventListener("resize", onWinResize);
-  }, []);
-
   // The row the chat column and the panel share (`.detail-columns`), measured before paint so the
   // panel never shows docked for a frame where it overlays (§15.2; #2725). Its width does not depend
   // on the panel's presentation, so overlaying cannot flip the answer back.
@@ -517,26 +521,46 @@ export function RightPanel({
     observer.observe(columns);
     return () => observer.disconnect();
   }, [state.open]);
+  // The drag ceiling as derived state (the rendered width and the separator's ARIA range both
+  // re-derive from it): what the 480px rule leaves in the measured row (#2845). The stored width
+  // PREFERENCE is left untouched, so a temporary window shrink never clobbers the size the user
+  // chose. Same stance as the shell dock's height.
+  const ceiling = rightPanelDragCeiling(columnsWidth);
+  // Expanded, the panel fills the row in place of the chat column (#2845); phones have no Expand.
+  const expanded = state.open && state.expanded && !phone;
   // Every mode docks or overlays by the same rule; a phone's panel is full-screen (styles.css).
-  const overlay = state.open && !phone && columnsWidth !== null &&
-    rightPanelOverlays(columnsWidth, clampRightPanelWidth(state.width, viewportMax));
-  // A drag that widens the panel into an overlay loses its handle; end the drag with it.
+  // Expanded, the panel still knows which it would be, so Restore returns there.
+  const overlaysAtWidth = !phone && columnsWidth !== null &&
+    rightPanelOverlays(columnsWidth, clampRightPanelWidth(state.width, ceiling));
+  const overlay = state.open && !expanded && overlaysAtWidth;
+  // Only a docked panel has a resize handle.
+  const handleShown = !overlay && !expanded;
+  // A panel that loses its handle (a window shrinking it into an overlay) ends the drag with it.
   useEffect(() => {
-    if (!overlay || !dragRef.current) return;
+    if (handleShown || !dragRef.current) return;
     dragRef.current = null;
     state.setDragging(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [overlay]);
-  // Keyboard resizing past the chat's room removes the focused handle; focus stays in the panel, on
-  // Close Panel, rather than falling to the page.
+  }, [handleShown]);
+  // Removing the focused handle keeps focus in the panel, on Close Panel, rather than letting it fall
+  // to the page.
   useLayoutEffect(() => {
     if (!state.open) resizerFocused.current = false;
-    if (!overlay || !resizerFocused.current) return;
+    if (handleShown || !resizerFocused.current) return;
     resizerFocused.current = false;
     // Only focus that fell with the handle moves; focus somewhere else stays where it is.
     const active = document.activeElement;
     if (!active || active === document.body) closeRef.current?.focus();
-  }, [overlay, state.open]);
+  }, [handleShown, state.open]);
+  // Expanded, the panel hides the chat column it shares the row with (#2845). Focus left there (the
+  // composer, when the Side Panel chord or a transcript link opened the panel) moves to the switcher
+  // rather than staying on a control nobody can see.
+  useLayoutEffect(() => {
+    const aside = asideRef.current;
+    const active = document.activeElement;
+    if (!expanded || !aside || !active || aside.contains(active)) return;
+    if (aside.parentElement?.contains(active)) switcherRef.current?.focus();
+  }, [expanded]);
 
   // Guard against a mid-drag unmount: closing the panel (shortcut/header button)
   // unmounts the resizer mid-drag and the lostpointercapture never reaches React.
@@ -548,8 +572,11 @@ export function RightPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.open]);
 
-  // Requests also closes on Escape with focus outside the panel, as it always has (#2206); every tool
-  // closes on Escape from inside the panel (onPanelKeyDown below).
+  /** Escape's step for the panel itself: Restore Panel while expanded, then Close Panel (#2845). */
+  const dismiss = expanded ? () => state.setExpanded(false) : state.close;
+
+  // Requests also takes Escape with focus outside the panel, as it always has (#2206); every tool
+  // takes it from inside the panel (onPanelKeyDown below).
   useEffect(() => {
     if (!state.open || state.mode !== "requests") return;
     const closeOnEscape = (event: globalThis.KeyboardEvent) => {
@@ -560,11 +587,11 @@ export function RightPanel({
       // handled before the layer saw it.
       if (escapeTakenAbovePanel()) return;
       event.preventDefault();
-      state.close();
+      dismiss();
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [state]);
+  }, [state, dismiss]);
 
   const sessionEventEpoch = session.eventEpoch ?? 0;
   useEffect(() => {
@@ -588,7 +615,7 @@ export function RightPanel({
 
   // What actually renders: the preference clamped to the live viewport ceiling. Gestures
   // start from THIS (what the user sees), and only gestures write the preference back.
-  const effectiveWidth = clampRightPanelWidth(state.width, viewportMax);
+  const effectiveWidth = clampRightPanelWidth(state.width, ceiling);
 
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
@@ -609,14 +636,14 @@ export function RightPanel({
       state.setDragging(false);
       return;
     }
-    state.setWidth(() => resolveRightPanelDrag(d.startWidth, e.clientX - d.startX, viewportMax).width);
+    state.setWidth(() => resolveRightPanelDrag(d.startWidth, e.clientX - d.startX, ceiling).width);
   };
   const onPointerUp = (e: ReactPointerEvent<HTMLDivElement>) => {
     const d = dragRef.current;
     if (!d) return;
     dragRef.current = null;
     state.setDragging(false);
-    const r = resolveRightPanelDrag(d.startWidth, e.clientX - d.startX, viewportMax);
+    const r = resolveRightPanelDrag(d.startWidth, e.clientX - d.startX, ceiling);
     if (r.collapse) {
       // Snap closed, but keep the pre-drag width so reopening restores a sane size.
       state.close();
@@ -634,9 +661,9 @@ export function RightPanel({
   const onResizerKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
     // Left edge: ArrowLeft grows the panel, ArrowRight shrinks it. Step from the VISIBLE
     // width so the first keypress on a viewport-clamped panel adjusts by one step, not a jump.
-    if (e.key === "ArrowLeft") state.setWidth(() => clampRightPanelWidth(effectiveWidth + RIGHT_PANEL_KEY_STEP, viewportMax));
-    else if (e.key === "ArrowRight") state.setWidth(() => clampRightPanelWidth(effectiveWidth - RIGHT_PANEL_KEY_STEP, viewportMax));
-    else if (e.key === "Home") state.setWidth(() => clampRightPanelWidth(RIGHT_PANEL_MAX_WIDTH, viewportMax));
+    if (e.key === "ArrowLeft") state.setWidth(() => clampRightPanelWidth(effectiveWidth + RIGHT_PANEL_KEY_STEP, ceiling));
+    else if (e.key === "ArrowRight") state.setWidth(() => clampRightPanelWidth(effectiveWidth - RIGHT_PANEL_KEY_STEP, ceiling));
+    else if (e.key === "Home") state.setWidth(() => clampRightPanelWidth(RIGHT_PANEL_MAX_WIDTH, ceiling));
     else if (e.key === "End") state.setWidth(() => RIGHT_PANEL_MIN_WIDTH);
     else return;
     e.preventDefault();
@@ -646,7 +673,8 @@ export function RightPanel({
    * Escape closes the panel from any tool while focus is inside it (§16.2; #1260), once nothing
    * above the panel takes it: an open menu, popover or dialog, then whatever the tool itself layers
    * on its body (a selection, a pushed page, an expanded state). Such a tool layer handles Escape
-   * first and calls `preventDefault()`, which this respects. A terminal keeps Escape for its shell;
+   * first and calls `preventDefault()`, which this respects. An expanded panel restores before it
+   * closes (#2845). A terminal keeps Escape for its shell;
    * Ctrl+Esc leaves it first. React delivers this before the shell's window listener, so the session
    * never reads the press as "leave the session".
    */
@@ -656,7 +684,7 @@ export function RightPanel({
     if (event.target instanceof Element && event.target.closest(".xterm")) return;
     if (escapeTakenAbovePanel()) return;
     event.preventDefault();
-    state.close();
+    dismiss();
   };
 
   // The session's own requests are on its request dock (#2179); this panel lists its descendants'.
@@ -837,17 +865,17 @@ export function RightPanel({
 
   return (
     <>
-      {/* An overlaying panel has no handle: it keeps the width chosen while docked (#2725). The
-          handle is an 8px strip centred on the panel's edge that takes no room of its own; a line
-          shows on hover and focus, and the width shows beside it while dragging (#2843). */}
-      {!overlay && <div
+      {/* An overlaying or expanded panel has no handle: it keeps the width chosen while docked (#2725,
+          #2845). The handle is an 8px strip centred on the panel's edge that takes no room of its
+          own; a line shows on hover and focus, and the width shows beside it while dragging (#2843). */}
+      {handleShown && <div
         className="rpanel-resizer"
         role="separator"
         aria-orientation="vertical"
         aria-label="Resize Panel"
         aria-controls="right-panel"
         aria-valuemin={RIGHT_PANEL_MIN_WIDTH}
-        aria-valuemax={clampRightPanelWidth(Number.MAX_SAFE_INTEGER, viewportMax)}
+        aria-valuemax={ceiling}
         aria-valuenow={effectiveWidth}
         aria-valuetext={`${effectiveWidth} pixels`}
         data-dragging={state.dragging ? "true" : undefined}
@@ -868,19 +896,23 @@ export function RightPanel({
           from the right, over a scrim a press on which closes the panel as Close Panel does (§15.2;
           #2206, #2725). */}
       {overlay && <div className="rpanel-scrim" aria-hidden="true" onClick={state.close} />}
+      {/* Expanded from docked, a spacer holds the panel's docked footprint, so the hidden chat column
+          keeps the width it had: its transcript and Pinned Summary are measured as they will be on
+          Restore, and expanding or restoring reflows nothing (#2845). */}
+      {expanded && !overlaysAtWidth && <div className="rpanel-spacer" aria-hidden="true" style={{ width: effectiveWidth }} />}
       <aside
         ref={asideRef}
         id="right-panel"
         className="rpanel"
         data-mode={state.mode}
-        data-presentation={overlay ? "overlay" : "docked"}
-        style={{ width: effectiveWidth }}
+        data-presentation={expanded ? "expanded" : overlay ? "overlay" : "docked"}
+        style={expanded ? undefined : { width: effectiveWidth }}
         aria-label="Side Panel"
         onKeyDown={onPanelKeyDown}
       >
         {/* One 48px bar in every tool (§4.4): the tool switcher as the title, the tool's actions,
-            then Close Panel. A phone's panel covers the session bar, so its bar leads with Back to
-            Session instead and has no Close (#2843). */}
+            Expand Panel, then Close Panel. A phone's panel covers the session bar, so its bar leads
+            with Back to Session instead and has neither Expand nor Close (#2843, #2845). */}
         <div className="rpanel-head">
           {phone && (
             <button
@@ -895,6 +927,17 @@ export function RightPanel({
           )}
           <ToolSwitcher current={state.mode} context={toolContext} triggerRef={switcherRef} onChoose={chooseTool} />
           <div className="rpanel-actions" ref={setActionSlot} />
+          {!phone && (
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={() => state.setExpanded(!expanded)}
+              title={expanded ? "Restore Panel" : "Expand Panel"}
+              aria-label={expanded ? "Restore Panel" : "Expand Panel"}
+            >
+              {expanded ? <Minimize2Icon /> : <Maximize2Icon />}
+            </button>
+          )}
           {!phone && (
             <button ref={closeRef} type="button" className="icon-btn" onClick={state.close} title="Close Panel" aria-label="Close Panel">
               <CloseIcon />

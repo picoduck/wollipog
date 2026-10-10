@@ -436,7 +436,7 @@ test("the panel head's back control leaves only while a request's detail is show
       // The header never has a back control (#2843): Session Tools is the switcher's first item.
       const head = panel.container.querySelector(".rpanel-head")!;
       assert.deepEqual([...head.querySelectorAll("button")].map((button) => button.getAttribute("aria-label") ?? button.textContent),
-        ["Requests", "Close Panel"], name);
+        ["Requests", "Expand Panel", "Close Panel"], name);
       assert.equal(panel.container.querySelector(".request-panel-back") !== null, detailShown,
         `${name}: a request's detail keeps its own All Requests in the body`);
     } finally {
@@ -510,29 +510,49 @@ test("every mode overlays the chat with a scrim where docking would leave it und
   }
 });
 
-test("keyboard resizing into an overlay moves focus from the removed handle to Close Panel (#2725)", async () => {
+test("keyboard resizing stops at the chat's room, and a row narrowing into an overlay moves focus from the removed handle to Close Panel (#2725, #2845)", async () => {
+  // The row is observed for size changes; this one reports when the test says so.
+  const observers: Array<() => void> = [];
+  const priorObserver = globalThis.ResizeObserver;
+  globalThis.ResizeObserver = class {
+    constructor(private readonly callback: () => void) {}
+    observe() { observers.push(this.callback); }
+    unobserve() {}
+    disconnect() {}
+  } as unknown as typeof ResizeObserver;
   let state!: RightPanelState;
   const panel = await mountPanel(<PanelHarness onState={(next) => { state = next; }} />);
   try {
     await act(async () => { state.setWidth(() => 380); });
-    // 380px panel + 10px handle + 480px chat: one step wider and the chat would have 464px.
-    const rowWidth = 380 + 10 + 480;
+    // 380px panel + 10px handle + 480px chat: the panel may grow no further.
+    let rowWidth = 380 + 10 + 480;
     panel.container.getBoundingClientRect = () => ({
       width: rowWidth, height: 600, top: 0, left: 0, right: rowWidth, bottom: 600, x: 0, y: 0, toJSON: () => ({}),
     }) as DOMRect;
     await act(async () => state.show("files"));
     const handle = panel.container.querySelector<HTMLElement>(".rpanel-resizer")!;
     assert.equal(panel.container.querySelector<HTMLElement>("#right-panel")?.dataset.presentation, "docked");
+    assert.equal(handle.getAttribute("aria-valuemax"), "380");
     handle.focus();
-    await act(async () => {
-      handle.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }) as unknown as Event);
-    });
+    for (const key of ["ArrowLeft", "Home"]) {
+      await act(async () => {
+        handle.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key, bubbles: true }) as unknown as Event);
+      });
+      assert.equal(state.width, 380, `${key} stops at the ceiling`);
+      assert.equal(panel.container.querySelector<HTMLElement>("#right-panel")?.dataset.presentation, "docked", key);
+    }
+
+    // The window narrows under the 320px minimum's room: the handle goes, focus stays in the panel.
+    rowWidth = 700;
+    await act(async () => { for (const notify of observers) notify(); });
     assert.equal(panel.container.querySelector<HTMLElement>("#right-panel")?.dataset.presentation, "overlay");
     assertNoDomNode(panel.container.querySelector(".rpanel-resizer"));
     assert.ok((domWindow.document.activeElement as unknown as Element | null) ===
       (panel.container.querySelector('[aria-label="Close Panel"]') as unknown as Element), "focus moves to Close Panel");
+    assert.equal(state.width, 380, "the stored width is left alone");
   } finally {
     await panel.dispose();
+    globalThis.ResizeObserver = priorObserver;
   }
 });
 
@@ -619,9 +639,10 @@ test("the header is one bar with the tool switcher as its title and one Close, a
       assert.equal(switcher.textContent, name, mode);
       assert.equal(switcher.getAttribute("aria-haspopup"), "menu");
       assert.ok(switcher.querySelector(".rpanel-switcher-icon svg"), `${mode}: the tool's icon`);
-      // Switcher, the (empty) action slot, then Close Panel; no back control in any tool.
-      assert.deepEqual([...head.children].map((child) => child.className || child.getAttribute("aria-label")),
-        ["rpanel-title", "rpanel-actions", "icon-btn"], mode);
+      // Switcher, the (empty) action slot, Expand Panel (#2845), then Close Panel; no back control in
+      // any tool.
+      assert.deepEqual([...head.children].map((child) => child.getAttribute("aria-label") ?? child.className),
+        ["rpanel-title", "rpanel-actions", "Expand Panel", "Close Panel"], mode);
       assert.equal(head.querySelectorAll('[aria-label="Close Panel"]').length, 1, `${mode}: one Close`);
       for (const element of aside.querySelectorAll("*")) {
         assert.notEqual(element.textContent?.trim(), "Panel", `${mode}: no element reads "Panel"`);

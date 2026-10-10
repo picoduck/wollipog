@@ -7,9 +7,11 @@ import {
   RIGHT_PANEL_MIN_WIDTH,
   RIGHT_PANEL_SNAP_CLOSE_WIDTH,
   clampRightPanelWidth,
+  parseStoredRightPanelExpanded,
   parseStoredRightPanelMode,
   parseStoredRightPanelWidth,
   resolveRightPanelDrag,
+  rightPanelDragCeiling,
   rightPanelOverlays,
 } from "./right-panel.js";
 
@@ -102,10 +104,43 @@ test("rightPanelOverlays: the panel overlays exactly when docking would leave th
   // The row less the panel is the chat column; the handle straddles the panel's edge (#2843).
   assert.equal(rightPanelOverlays(400 + 480, 400), false, "480px left: docks");
   assert.equal(rightPanelOverlays(400 + 479, 400), true, "479px left: overlays");
-  // A 940px window with the 64px rail and a 376px panel (40% of the window) keeps 500px; with the
-  // 208px labelled rail it keeps 356px.
-  assert.equal(rightPanelOverlays(940 - 64, 376), false);
-  assert.equal(rightPanelOverlays(940 - 208, 376), true);
+  // A 940px window with the 64px rail and a 386px panel (its drag ceiling there) keeps 490px; with
+  // the 208px labelled rail even the 320px minimum leaves 412px.
+  assert.equal(rightPanelOverlays(940 - 64, 386), false);
+  assert.equal(rightPanelOverlays(940 - 208, 320), true);
   // The same width answers the same way whichever mode the panel shows: the rule has no mode.
   assert.equal(rightPanelOverlays(761 - 64, 320), true);
+});
+
+test("rightPanelDragCeiling: the panel may be dragged to the row less 480px and the 10px handle, within 320–640px (#2845)", () => {
+  // At 1280px with the 64px rail the full 640px fits; at 1100px with the 208px labelled rail the
+  // chat column keeps its 480px and the handle's 10px.
+  assert.equal(rightPanelDragCeiling(1280 - 64), RIGHT_PANEL_MAX_WIDTH);
+  assert.equal(rightPanelDragCeiling(1100 - 208), 1100 - 208 - 480 - 10);
+  assert.equal(rightPanelDragCeiling(640 + 480 + 10), 640, "exactly room for the maximum");
+  assert.equal(rightPanelDragCeiling(640 + 480 + 9), 639);
+  assert.equal(rightPanelDragCeiling(4000), RIGHT_PANEL_MAX_WIDTH, "capped at 640px however wide the row");
+  assert.equal(rightPanelDragCeiling(700), RIGHT_PANEL_MIN_WIDTH, "floored at 320px where the panel overlays anyway");
+  assert.equal(rightPanelDragCeiling(0), RIGHT_PANEL_MIN_WIDTH);
+  assert.equal(rightPanelDragCeiling(892.6), 402, "a fractional row rounds down, never past the rule");
+  assert.equal(rightPanelDragCeiling(null), RIGHT_PANEL_MAX_WIDTH, "an unmeasured row has only the 640px maximum");
+});
+
+test("a drag up to the ceiling never turns the panel into an overlay (#2845)", () => {
+  for (let row = 810; row <= 1600; row += 7) {
+    const ceiling = rightPanelDragCeiling(row);
+    const { width } = resolveRightPanelDrag(RIGHT_PANEL_DEFAULT_WIDTH, -10_000, ceiling);
+    assert.equal(width, ceiling, `row ${row}`);
+    assert.equal(rightPanelOverlays(row, width), false, `row ${row}: the chat keeps ${row - width}px`);
+  }
+  // Only a row too narrow for the 320px minimum overlays, whatever the stored width.
+  assert.equal(rightPanelOverlays(799, clampRightPanelWidth(640, rightPanelDragCeiling(799))), true);
+  assert.equal(rightPanelOverlays(800, clampRightPanelWidth(640, rightPanelDragCeiling(800))), false);
+});
+
+test("parseStoredRightPanelExpanded: only the stored \"1\" expands the panel (#2845)", () => {
+  assert.equal(parseStoredRightPanelExpanded("1"), true);
+  for (const raw of [null, "", "0", "true", "yes", " 1", "2"]) {
+    assert.equal(parseStoredRightPanelExpanded(raw), false, `raw=${JSON.stringify(raw)}`);
+  }
 });

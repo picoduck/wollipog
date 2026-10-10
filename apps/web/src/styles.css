@@ -3855,6 +3855,21 @@ textarea {
   z-index: var(--z-panel);
   box-shadow: var(--elev-2);
 }
+/* Expand Panel (#2845): the panel fills the session's content area beside the rail, under the
+   session bar, in place of the chat column, from either presentation and with no scrim or handle.
+   The chat column stays mounted underneath, hidden (out of the accessibility tree and the tab
+   order), and `.rpanel-spacer` keeps it at its docked width, so Restore brings it back as it was. The panel is the `rp` container still, so
+   its tools read the expanded width. */
+.detail-columns:has(> .rpanel[data-presentation="expanded"]) { position: relative; }
+.detail-columns:has(> .rpanel[data-presentation="expanded"]) > .detail-body { visibility: hidden; }
+.detail-columns > .rpanel-spacer { flex: none; }
+.detail-columns > .rpanel[data-presentation="expanded"] {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-panel);
+  /* The rail's own hairline is the edge. */
+  border-left: none;
+}
 /* The resize handle (#2843): an 8px hit strip centred on the panel's edge that takes no room of its
    own, above the content on either side of it. A 2px line and a grip in --control-outline show on
    hover, the line in the neutral --focus on keyboard focus, and the width in a tooltip while

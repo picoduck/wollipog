@@ -121,9 +121,13 @@ async function flush(delay = 0) {
   });
 }
 
-async function mount(current: SessionView, { client: overrides = {}, events }: {
+async function mount(current: SessionView, { client: overrides = {}, events, expanded, mode = "expanded" }: {
   client?: Partial<ApiClient>;
   events?: SessionEvent["payload"][];
+  /** How the view first mounts: the opened session, or the Sessions preview. */
+  mode?: "expanded" | "preview";
+  /** The side panel is open and expanded over the chat column (#2845); Restore calls are recorded. */
+  expanded?: { calls: boolean[] };
 } = {}) {
   const toasts: string[] = [];
   /** What a confirmation that runs its action would show as its failure. */
@@ -143,14 +147,16 @@ async function mount(current: SessionView, { client: overrides = {}, events }: {
     ...overrides,
   } as unknown as ApiClient;
   const rightPanel = {
-    open: false, mode: "launcher" as const, width: 360, dragging: false, subagentTarget: null,
-    toggle() {}, openMode() {}, show() {}, setMode() {}, setWidth() {}, setDragging() {},
+    open: expanded !== undefined, mode: "launcher" as const, width: 360, dragging: false, subagentTarget: null,
+    toggle() {}, openMode() {}, show() {}, setMode() {}, setWidth() {}, expanded: expanded !== undefined,
+    setExpanded(value: boolean) { expanded?.calls.push(value); }, setDragging() {},
     close() {}, selectSubagent() {}, showSubagent() {}, consumeSubagentFocusRequest() {},
   };
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  await act(async () => root.render(
+  let detailMode: "expanded" | "preview" = mode;
+  const render = () => root.render(
     <ApiProvider client={client}>
       <FeedbackContext.Provider value={{
         // Every confirmation is accepted; one that runs its own action keeps a failure, as its
@@ -171,12 +177,13 @@ async function mount(current: SessionView, { client: overrides = {}, events }: {
       } as never}>
         <StoreProvider connection={connection} navigation={navigation}>
           {events && <EventSeeder sessionId={current.id} payloads={events} />}
-          <SessionDetail sessionId={current.id} mode="expanded" rightPanel={rightPanel}
+          <SessionDetail sessionId={current.id} mode={detailMode} rightPanel={rightPanel}
             onOpenTerminal={() => {}} composerDraftLoader={async () => null} />
         </StoreProvider>
       </FeedbackContext.Provider>
-    </ApiProvider>,
-  ));
+    </ApiProvider>
+  );
+  await act(async () => render());
   await act(async () => socket.push({
     type: "snapshot",
     capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
@@ -202,6 +209,12 @@ async function mount(current: SessionView, { client: overrides = {}, events }: {
       assert.ok(control, `${label} is rendered`);
       assert.equal(control.disabled, false, `${label} is enabled`);
       await act(async () => { fireDomEvent.click(control); });
+      await flush();
+    },
+    /** Rerenders the same SessionDetail as the Sessions preview or the opened session. */
+    setMode: async (mode: "expanded" | "preview") => {
+      detailMode = mode;
+      await act(async () => render());
       await flush();
     },
     unmount: async () => {
@@ -588,6 +601,57 @@ test("an offline machine is named in the sentence, with nothing behind Show Deta
       "Couldn't restart this session. Build Box is offline. Try again once it reconnects.");
     assertNoDomNode(notice.querySelector(".notice-details-toggle"));
     assert.doesNotMatch(fixture.container.textContent ?? "", /runner is offline/u);
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("a failure an expanded side panel would hide restores the panel, so it is seen (#2845)", async () => {
+  const server = "the runner could not stop the active turn";
+  const expanded = { calls: [] as boolean[] };
+  const fixture = await mount(sessionView({ status: "running", activeTurnId: "turn-1" }), {
+    client: { cancelTurn: refuse(server) } as Partial<ApiClient>,
+    expanded,
+  });
+  try {
+    await fixture.click("Stop Turn");
+    await assertPlainFailure(fixture, "Turn Not Stopped", "Couldn't stop the turn. Try again or use Stop Session.", server);
+    assert.deepEqual(expanded.calls, [false], "the failure restores the panel once");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("a failure that arrives after its session was left leaves the next session's panel alone (#2845)", async () => {
+  let reject!: (cause: unknown) => void;
+  const expanded = { calls: [] as boolean[] };
+  const fixture = await mount(sessionView({}), {
+    client: { rewind: () => new Promise((_resolve, rejectRewind) => { reject = rejectRewind; }) } as Partial<ApiClient>,
+    events: CHECKPOINTED_TURNS,
+    expanded,
+  });
+  await chooseTranscriptAction(fixture.container, "More Message Actions", "Rewind Files to Before This Turn…", 1);
+  await flush();
+  assert.ok(reject, "the rewind is in flight");
+  await fixture.unmount();
+  reject(new ApiError("rewind failed: git checkout exited with 128", 409));
+  await flush();
+  assert.deepEqual(expanded.calls, [], "a departed view does not restore the shell's panel");
+});
+
+test("a session opened from its preview restores an expanded panel for a failure, though the preview made its handlers (#2845)", async () => {
+  const server = "the runner could not stop the active turn";
+  const expanded = { calls: [] as boolean[] };
+  const fixture = await mount(sessionView({ status: "running", activeTurnId: "turn-1" }), {
+    client: { cancelTurn: refuse(server) } as Partial<ApiClient>,
+    expanded,
+    mode: "preview",
+  });
+  try {
+    await fixture.setMode("expanded");
+    await fixture.click("Stop Turn");
+    await assertPlainFailure(fixture, "Turn Not Stopped", "Couldn't stop the turn. Try again or use Stop Session.", server);
+    assert.deepEqual(expanded.calls, [false], "the failure restores the panel");
   } finally {
     await fixture.unmount();
   }

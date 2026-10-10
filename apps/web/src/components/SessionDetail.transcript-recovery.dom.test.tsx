@@ -313,6 +313,8 @@ async function mountFixture(
     show() {},
     setMode() {},
     setWidth() {},
+    expanded: false,
+    setExpanded() {},
     setDragging() {},
     close() {},
     selectSubagent() {},

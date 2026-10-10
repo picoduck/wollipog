@@ -268,6 +268,8 @@ const rightPanel = {
   show: recordMode,
   setMode() {},
   setWidth() {},
+  expanded: false,
+  setExpanded() {},
   setDragging() {},
   close() {},
   selectSubagent() {},

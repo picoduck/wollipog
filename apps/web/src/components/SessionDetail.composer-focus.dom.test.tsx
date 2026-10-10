@@ -217,6 +217,11 @@ interface FixtureOptions {
   client?: Partial<ApiClient>;
   mainEventPayloads?: SessionEvent["payload"][];
   rightPanelMode?: "launcher" | "sidechat" | "background";
+  /**
+   * The side panel is expanded over the chat column (#2845); Restore Panel calls are recorded. `value`
+   * (default true) can change between renders.
+   */
+  rightPanelExpanded?: { calls: boolean[]; value?: boolean };
   composerDraftCleanup?: typeof deleteComposerDraftIfMatches;
   sessionCapabilities?: SessionView["agentCapabilities"];
   sessionPatch?: Partial<SessionView>;
@@ -315,6 +320,8 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
     show() {},
     setMode() {},
     setWidth() {},
+    get expanded() { return options.rightPanelExpanded ? options.rightPanelExpanded.value ?? true : false; },
+    setExpanded(value: boolean) { options.rightPanelExpanded?.calls.push(value); },
     setDragging() {},
     close() {},
     selectSubagent() {},
@@ -6922,4 +6929,95 @@ test("a draft that changed under a phone's side panel sheet is grown to fit when
       else delete (prototype as unknown as Record<string, unknown>)[name];
     }
   }
+});
+
+test("inserting a side-chat response restores an expanded side panel so the draft shows (#2845)", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const child = session("side-chat-expanded-child");
+  const relation: SideChatView = { parentSessionId: "unused-by-panel", session: child, createdAt: 1 };
+  const response: SessionEvent = {
+    id: 1,
+    sessionId: child.id,
+    seq: 1,
+    ts: 2,
+    payload: { kind: "agent_message", text: "side-chat answer", final: true },
+  };
+  const expanded = { calls: [] as boolean[] };
+  const fixture = await mountFixture(draft, {
+    rightPanelMode: "sidechat",
+    rightPanelExpanded: expanded,
+    client: {
+      sideChat: async () => ({ sideChat: relation }),
+      session: async (id: string) => ({ session: id === child.id ? child : session(id) }),
+      getSessionEventPage: async () => ({ events: [response], eventEpoch: 0, nextAfter: 1, cacheComplete: true }),
+    },
+  });
+  try {
+    await resolveDraft(draft, "");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
+    assert.equal(fixture.container.querySelector<HTMLElement>("#right-panel")?.dataset.presentation, "expanded");
+    const insert = [...fixture.container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Insert Latest Response into Primary Draft") as HTMLButtonElement;
+    assert.ok(insert);
+    await act(async () => insert.click());
+    assert.deepEqual(expanded.calls, [false], "Insert restores the panel beside the chat");
+    await act(async () => { flushFrames(); });
+    assert.equal(fixture.composer.value, "side-chat answer");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("the reader's keys are off while an expanded side panel hides the reader (#2845)", { timeout: 5_000 }, async () => {
+  for (const expanded of [false, true]) {
+    const draft = deferred<ComposerDraft | null>();
+    const fixture = await mountFixture(draft, {
+      rightPanelMode: "launcher",
+      ...(expanded ? { rightPanelExpanded: { calls: [] } } : {}),
+    });
+    try {
+      await resolveDraft(draft, "");
+      await act(async () => { flushFrames(); });
+      const reader = fixture.container.querySelector<HTMLElement>(".detail-scroll")!;
+      let scrolled = 0;
+      reader.scrollBy = (() => { scrolled += 1; }) as typeof reader.scrollBy;
+      await act(async () => { reader.focus(); });
+      await act(async () => {
+        reader.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "j", bubbles: true }) as never);
+        flushFrames();
+      });
+      assert.equal(scrolled, expanded ? 0 : 1, expanded ? "J reads nothing it cannot show" : "J scrolls beside a docked panel");
+    } finally {
+      await unmountFixture(fixture);
+    }
+  }
+});
+
+test("expanding the side panel over the composer ends dictation (#2845)", async () => {
+  await withTrackedRecognition(async () => {
+    const draft = deferred<ComposerDraft | null>();
+    const expanded = { calls: [] as boolean[], value: false };
+    const fixture = await mountFixture(draft, {
+      sessionCapabilities: PAUSED_LOOK_CAPABILITIES,
+      rightPanelMode: "launcher",
+      rightPanelExpanded: expanded,
+    });
+    try {
+      await resolveComposerDraft(draft, { text: "", images: [], updatedAt: 1 });
+      const mic = micButton(fixture);
+      await act(async () => fixture.composer.focus());
+      await pointer(mic, "pointerdown");
+      await pointer(mic, "pointerup");
+      assert.deepEqual(TrackedRecognition.log, ["start"]);
+      assert.equal(mic.getAttribute("aria-pressed"), "true");
+
+      expanded.value = true;
+      await fixture.setMode("expanded");
+      assert.deepEqual(TrackedRecognition.log.slice(0, 1), ["start"]);
+      assert.ok(TrackedRecognition.log.length > 1, "dictation ends when the panel hides the composer");
+      assert.equal(micButton(fixture).getAttribute("aria-pressed"), "false");
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
 });

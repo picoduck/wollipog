@@ -57,7 +57,7 @@ import {
   handleRovingChoiceKeyDown,
   rovingChoiceTabIndex,
 } from "./components/interactions.js";
-import { cycleFocusZone, escapeOwner, focusZone, indicateFocusZone, shortcutScopeForFocus } from "./focus-zones.js";
+import { cycleFocusZone, escapeOwner, focusZone, indicateFocusZone, sessionReadingTarget, shortcutScopeForFocus } from "./focus-zones.js";
 import { installTerminalExitBoundary } from "./terminal-focus.js";
 import {
   bareDigitPressed,
@@ -433,11 +433,16 @@ export function Shell() {
   // InboxView's `expand`, which rebuilds `handleSelect`, which gives every mounted InboxRow unequal
   // props — so a session upsert anywhere re-renders every visible row despite the memo. Making the
   // callbacks stable in InboxList and InboxView was necessary and not sufficient.
+  const isMobile = useIsMobile();
+  const rightPanelOpen = rightPanel.open;
+  const setRightPanelExpanded = rightPanel.setExpanded;
   const expandSession = useCallback((sessionId: string, focusComposer = false) => {
     setComposerFocusSessionId(focusComposer ? sessionId : null);
+    // Reply lands in the composer, which an open expanded side panel hides (#2845). A closed panel
+    // keeps its Expanded preference for its next open.
+    if (focusComposer && rightPanelOpen && !isMobile) setRightPanelExpanded(false);
     navigate({ name: "session", id: sessionId });
-  }, [navigate]);
-  const isMobile = useIsMobile();
+  }, [isMobile, navigate, rightPanelOpen, setRightPanelExpanded]);
   // The Pinned Summary: docked beside the reader, a drawer, or a phone sheet (#2147). Only one
   // overlay is open at a time, and the right panel is an overlay only on a phone, so there opening
   // either closes the other.
@@ -446,6 +451,11 @@ export function Shell() {
   });
   const pinnedSummaryRef = useRef(pinnedSummary);
   pinnedSummaryRef.current = pinnedSummary;
+  // Expanded, the side panel fills the session body's place, the summary's drawer included (#2845).
+  const sidePanelExpanded = rightPanel.open && rightPanel.expanded && !isMobile;
+  useEffect(() => {
+    if (sidePanelExpanded) pinnedSummaryRef.current.closeOverlay();
+  }, [sidePanelExpanded]);
   const rightPanelWasOpen = useRef(rightPanel.open);
   useEffect(() => {
     const opened = rightPanel.open && !rightPanelWasOpen.current;
@@ -568,12 +578,14 @@ export function Shell() {
       if (owner === "terminal") return;
       if (owner === "terminal-exit") {
         e.preventDefault();
-        document.querySelector<HTMLElement>(".main-body .detail-scroll")?.focus();
+        const main = document.querySelector(".main-body");
+        if (main) sessionReadingTarget(main)?.focus();
       } else if (owner === "composer") {
         e.preventDefault();
         (document.activeElement as HTMLElement | null)?.blur();
         window.requestAnimationFrame(() => {
-          document.querySelector<HTMLElement>(".main-body .detail-scroll")?.focus();
+          const main = document.querySelector(".main-body");
+          if (main) sessionReadingTarget(main)?.focus();
         });
       } else if (owner === "session-reading") {
         e.preventDefault();
@@ -724,9 +736,19 @@ export function Shell() {
       )}
       <SessionPanelToggles
         small={isMobile}
-        pinnedSummaryOpen={pinnedSummary.open}
+        pinnedSummaryOpen={pinnedSummary.open && !sidePanelExpanded}
         pinnedSummaryRef={pinnedSummary.toggleRef}
-        onPinnedSummary={pinnedSummary.toggle}
+        onPinnedSummary={() => {
+          // An expanded side panel hides the session body the summary lives in (#2845): the toggle
+          // brings the body back with the summary in it. The hidden body keeps its docked width, so
+          // the summary already docks or opens as a drawer as it will once restored.
+          if (sidePanelExpanded) {
+            rightPanel.setExpanded(false);
+            if (!pinnedSummary.open) pinnedSummary.toggle();
+            return;
+          }
+          pinnedSummary.toggle();
+        }}
         terminalSupported={terminalSupported}
         terminalOpen={dockVisible}
         onTerminal={() => {

@@ -25,6 +25,18 @@ export function focusZoneForElement(element: Element | null): FocusZone | null {
  * querySelector returns the first match in DOCUMENT order, not the first selector that matches,
  * so a list resolved to the brand link above the rail's current destination.
  */
+/** The tool switcher of a side panel expanded over the session's chat column (#2845). */
+const EXPANDED_PANEL_SWITCHER = '#right-panel[data-presentation="expanded"] .rpanel-switcher';
+
+/**
+ * Where focus lands when it returns to a session's reading pane (opening the session, leaving the
+ * terminal or the composer): the transcript, or the tool switcher of a side panel expanded over it,
+ * which hides the transcript (#2845).
+ */
+export function sessionReadingTarget(root: ParentNode): HTMLElement | null {
+  return root.querySelector<HTMLElement>(EXPANDED_PANEL_SWITCHER) ?? root.querySelector<HTMLElement>(".detail-scroll");
+}
+
 export const ZONE_TARGETS: Readonly<Record<FocusZone, readonly string[]>> = {
   // The current destination (the Settings control while in Settings), then the first destination.
   rail: ['[aria-current="page"]', ".rail-item"],
@@ -33,8 +45,9 @@ export const ZONE_TARGETS: Readonly<Record<FocusZone, readonly string[]>> = {
   // still needs a landing spot in each.
   list: [".inbox-list", ".inbox-state", ".inbox-skeleton", ".board-wrap"],
   // The Sessions reading pane lands on its transcript scroller, as opening a session does, or on its
-  // placeholder while the list loads.
-  main: [".detail-scroll", ".inbox-preview-skeleton"],
+  // placeholder while the list loads. An expanded side panel hides the transcript (#2845), so the
+  // session lands on the panel's tool switcher instead.
+  main: [EXPANDED_PANEL_SWITCHER, ".detail-scroll", ".inbox-preview-skeleton"],
 };
 
 function zoneRoot(targetDocument: Document, zone: FocusZone): HTMLElement | null {

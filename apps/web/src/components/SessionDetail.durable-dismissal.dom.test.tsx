@@ -215,7 +215,7 @@ async function mountFixture(options: {
     dragging: false,
     subagentTarget: null,
     toggle() {}, openMode() {}, show() {}, setMode() {}, setWidth() {},
-    setDragging() {}, close() {}, selectSubagent() {}, showSubagent() {},
+    expanded: false, setExpanded() {}, setDragging() {}, close() {}, selectSubagent() {}, showSubagent() {},
     consumeSubagentFocusRequest() {},
   };
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;

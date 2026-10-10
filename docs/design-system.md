@@ -333,7 +333,7 @@ elevation with `1px solid var(--border-strong)` in both themes. The modal backdr
 | `--list-pane-w` | 320px (280–440 resizable) | Master list in side-by-side master-detail. |
 | `--sessions-list-h` | 45% of the split area, whole rows | Stacked list height (§6.3): at least 3 rows; the preview keeps 240px. Sessions only. |
 | `--sessions-list-w` | 400px (280–440 resizable) | Preview Right's list column (§6.3). Sessions only. |
-| `--panel-w` | 400px (320–640) | Right side panel, docked. |
+| `--panel-w` | 400px (320–640) | Right side panel, docked; dragged no wider than the chat column's 480px allows (§4.9). |
 | `--chat-max` | 860px | Unchanged. |
 | `--bottom-bar-h` | 56px + safe area | Phone tab bar, labeled. |
 
@@ -872,7 +872,7 @@ Requests, Decision History, and Terminal once #2868 moves it) opens in one frame
   least. It is the `rp` container, so its content answers to the panel's width with `@container rp`
   rules, never the viewport's (§2.10). It docks or overlays by §15.2's 480px rule.
 - **Header.** `.rpanel-head` is a 48px bar (§4.4): the tool switcher as the title, the tool's action
-  slot, then Close Panel. The landmark is named "Side Panel". There is one close control in every
+  slot, Expand Panel, then Close Panel. The landmark is named "Side Panel". There is one close control in every
   tool and no back-to-list button; a request's detail keeps its own "All Requests" inside the body.
 - **Tool switcher.** The title is a button with the tool's 16px icon, its name in `--type-section`
   and a caret. It opens a §9.1 menu built from `SESSION_TOOLS` (`session-tools.ts`, the same list
@@ -892,12 +892,33 @@ Requests, Decision History, and Terminal once #2868 moves it) opens in one frame
 - **Resize handle.** An 8px strip centred on the leading edge that takes no room. On hover a 2px
   line and a grip in `--control-outline`, on keyboard focus the line in `--focus` (with a transparent
   outline for forced colors), and the width in a tooltip while dragging. Arrow keys, Home, End,
-  double-click reset and the `aria-value*` range resize it.
+  double-click reset and the `aria-value*` range resize it. Its ceiling is the room §15.2's rule
+  leaves (#2845): `min(640px, row − 480px − 10px)`, never under 320px, where the row is the one the
+  chat column and the panel share, so a drag never turns the panel into an overlay. `aria-valuemax`
+  reports that ceiling. A stored width above it renders clamped and stays stored. Dragging under
+  240px snaps the panel closed. Wider work uses Expand Panel, not a wider drag.
+- **Expand Panel.** An `.icon-btn` (`Maximize2Icon`, "Expand Panel") before Close Panel, on desktop
+  and in the overlay, never on a phone (#2845). Expanded, the panel fills the session's content area
+  beside the rail, under the session bar, in place of the chat column, which stays mounted
+  underneath at its docked width but hidden, so restoring reflows nothing. There is no scrim and no
+  resize handle, and the panel is the `rp` container still, at least 720px wide on any window 1100px
+  or wider. The action becomes Restore Panel (`Minimize2Icon`), which returns the panel to its docked
+  width or to the overlay. The state is stored per device in `wollipog.rightpanel.expanded` and
+  survives switching tools and sessions, a reload, and closing the panel, so the next open is
+  expanded again. Expanding ends dictation, as the phone sheet does, since the mic is hidden with the
+  composer. While expanded, the reader's keys are off, and whatever would land on the
+  transcript (F6, opening the session, Ctrl+Escape from the terminal) lands on the tool switcher, as
+  does focus left in the chat column. An action whose result shows in the chat column restores the
+  panel first: the Pinned Summary toggle, Attach to Prompt, Side Chat's Insert, Show in Transcript,
+  Reply from the Sessions list, and an attention link or the session bar's attention control that
+  opens a request on the dock. So does any failure the notice slot above the composer reports (Stop
+  Turn, Fork Conversation, every other session action), so it is never left unseen.
 - **Keyboard.** The Side Panel chord (Ctrl/⌘+\\) toggles the panel and reopens the last tool, with
   focus on the switcher, so the arrow keys reach every other tool.
   Escape closes it from any tool while focus is inside, once nothing above takes Escape (§16.2): a
-  menu, popover or dialog first, then a layer the tool draws on its body, which handles Escape and
-  calls `preventDefault`. A terminal keeps Escape for its shell. Focus returns to the control that
+  menu, popover or dialog first, then a layer the tool draws on its body (a selection, a pushed
+  page), which handles Escape and calls `preventDefault`, then Expanded, which Escape restores before
+  a second press closes. A terminal keeps Escape for its shell. Focus returns to the control that
   opened the panel, else the composer.
 - **Phone.** The open panel is a full-screen sheet that covers the session bar (which is not
   rendered) and ends at the tab bar. Its one 48px bar leads with Back to Session, then the switcher
@@ -2707,7 +2728,8 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
   the session body over a scrim on the chat column. The session bar stays outside the scrim, a press
   on the scrim closes the panel as Close Panel does, and the resize handle is hidden. The stored width
   is unchanged and returns when the panel docks again. Switching modes never changes the
-  presentation at a given width. Phones keep their full-screen panel.
+  presentation at a given width. Expand Panel fills the session body here too, with no scrim, and
+  Restore Panel returns to the overlay (§4.9). Phones keep their full-screen panel.
 
 ### 15.3 Touch on Any Width
 

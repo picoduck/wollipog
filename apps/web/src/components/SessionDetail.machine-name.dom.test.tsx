@@ -120,7 +120,7 @@ async function observe(runner: RunnerView, boxes: BoxView[]): Promise<Observed> 
   };
   const rightPanel = {
     open: false, mode: "launcher" as const, width: 360, dragging: false, subagentTarget: null,
-    toggle() {}, openMode() {}, show() {}, setMode() {}, setWidth() {}, setDragging() {},
+    toggle() {}, openMode() {}, show() {}, setMode() {}, setWidth() {}, expanded: false, setExpanded() {}, setDragging() {},
     close() {}, selectSubagent() {}, showSubagent() {}, consumeSubagentFocusRequest() {},
   };
   const feedback = {
