@@ -1,12 +1,13 @@
 /**
- * Pure sizing + mode logic for the right side panel ( a toggleable
- * column hosting Review / Browser / Files / Side chat). The React wiring
+ * Pure sizing + mode logic for the side panel (#2843: a docked, flush column hosting every session
+ * tool). The React wiring
  * (pointer capture, localStorage, shortcuts) lives in App.tsx / RightPanel.tsx;
  * everything that can be unit-tested without a DOM lives here.
  */
 
-export const RIGHT_PANEL_DEFAULT_WIDTH = 380;
-export const RIGHT_PANEL_MIN_WIDTH = 300;
+export const RIGHT_PANEL_DEFAULT_WIDTH = 400;
+/** A stored width under this is clamped up on load (#2843). */
+export const RIGHT_PANEL_MIN_WIDTH = 320;
 export const RIGHT_PANEL_MAX_WIDTH = 640;
 /** Dragging narrower than this snaps the panel closed instead of pinning it at the minimum. */
 export const RIGHT_PANEL_SNAP_CLOSE_WIDTH = 240;
@@ -25,17 +26,15 @@ export type RightPanelMode = (typeof RIGHT_PANEL_MODES)[number];
 /** The least room the chat column keeps beside a docked panel (§15.2); with less the panel overlays. */
 export const RIGHT_PANEL_CHAT_MIN_WIDTH = 480;
 
-/** The resize handle's share of the row: 7px wide, 5px before it and -2px after (styles.css). */
-export const RIGHT_PANEL_RESIZER_SPAN = 10;
-
 /**
  * Whether the panel opens over the transcript rather than docking beside it (§15.2; #2725): when
- * docking it, with its handle, would leave the chat column under 480px. `columnsWidth` is the row the
- * chat column and the panel share, so the rail (labelled or not) and the panel's own width both
- * count. Every mode answers the same way at the same width; phones keep their full-screen panel.
+ * docking it would leave the chat column under 480px. `columnsWidth` is the row the chat column and
+ * the panel share, so the rail (labelled or not) and the panel's own width both count. The resize
+ * handle straddles the panel's edge and takes no room of its own (#2843). Every mode answers the
+ * same way at the same width; phones keep their full-screen panel.
  */
 export function rightPanelOverlays(columnsWidth: number, panelWidth: number): boolean {
-  return columnsWidth - panelWidth - RIGHT_PANEL_RESIZER_SPAN < RIGHT_PANEL_CHAT_MIN_WIDTH;
+  return columnsWidth - panelWidth < RIGHT_PANEL_CHAT_MIN_WIDTH;
 }
 
 /** Clamp a panel width. `max` lets callers pass a viewport-aware ceiling (e.g. 40% of the

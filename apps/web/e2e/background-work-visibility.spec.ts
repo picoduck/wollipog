@@ -111,8 +111,8 @@ for (const width of [320, 390, 700, 1280]) {
       await expect(row.locator(".status")).toHaveText(label);
       await row.getByRole("button", { name: "Open Background Work" }).click();
       await expect(dialog).toHaveCount(0);
-      await expect(page.getByRole("complementary", { name: "Background Work", exact: true })).toBeVisible();
-      await page.getByRole("button", { name: "Close Panel", exact: true }).click();
+      await expect(page.locator('#right-panel[data-mode="background"]')).toBeVisible();
+      await page.getByRole("button", { name: /^(Close Panel|Back to Session)$/u }).click();
       await expect(header.locator('[aria-label^="Changes:"]')).toHaveCount(0);
       await expect(header.getByRole("button", { name: "Share", exact: true })).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
@@ -201,9 +201,9 @@ for (const width of [320, 1280]) {
         await expect(pinnedBadge).toHaveText(label);
         await expect(pinnedBadge).toHaveAccessibleName(`Background Work: ${label}. ${description}`);
         await pinnedBadge.click();
-        const pinnedPanel = page.getByRole("complementary", { name: "Background Work", exact: true });
+        const pinnedPanel = page.locator('#right-panel[data-mode="background"]');
         await expect(pinnedPanel.locator('[data-watchdog-highlighted="true"]')).toBeVisible();
-        await pinnedPanel.getByRole("button", { name: "Close Panel", exact: true }).click();
+        await pinnedPanel.getByRole("button", { name: /^(Close Panel|Back to Session)$/u }).click();
         await header.locator(".session-status-button").click();
       }
 
@@ -227,7 +227,7 @@ for (const width of [320, 1280]) {
       } else {
         await row.getByRole("button", { name: "Open Background Work" }).click();
       }
-      const panel = page.getByRole("complementary", { name: "Background Work", exact: true });
+      const panel = page.locator('#right-panel[data-mode="background"]');
       await expect(panel).toBeVisible();
       const highlighted = panel.locator(`[data-watchdog-state="${watchdogState}"]`);
       await expect(highlighted).toBeVisible();
@@ -254,7 +254,7 @@ for (const width of [320, 1280]) {
           .toContainText("Missing Result Acknowledged");
         await expect(acknowledge).toHaveCount(0);
       }
-      await panel.getByRole("button", { name: "Close Panel", exact: true }).click();
+      await panel.getByRole("button", { name: /^(Close Panel|Back to Session)$/u }).click();
     }
   });
 }
@@ -304,7 +304,7 @@ for (const width of [320, 1280]) {
         await page.keyboard.press("Escape");
         await openBackgroundWorkFromPinnedSummary(page);
       }
-      const panel = page.getByRole("complementary", { name: "Background Work", exact: true });
+      const panel = page.locator('#right-panel[data-mode="background"]');
       await expect(panel).toBeVisible();
       return panel;
     };
@@ -324,14 +324,14 @@ for (const width of [320, 1280]) {
     await expect(unavailable).toHaveAccessibleDescription(
       /^Stops Monitor Job \d\. Stop Job is unavailable: This machine needs a newer runner for stopping a background job\./,
     );
-    await panel.getByRole("button", { name: "Close Panel", exact: true }).click();
+    await panel.getByRole("button", { name: /^(Close Panel|Back to Session)$/u }).click();
 
     // A v190 runner offers Stop Job, but its restart still discards the result (#1779).
     await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(190));
     await resultBlocked();
     panel = await openPanel("Stop Job…");
     await expect(summary).toContainText("Restarting or stopping the session also ends it, but ends every other job and discards this result.");
-    await panel.getByRole("button", { name: "Close Panel", exact: true }).click();
+    await panel.getByRole("button", { name: /^(Close Panel|Back to Session)$/u }).click();
 
     // A current runner: Stop Job is offered on the unfinished job only, behind a confirmation, and
     // its restart reports the result to the new conversation instead of discarding it (#1779).

@@ -125,7 +125,7 @@ test("real shell preserves global shortcuts from the grid and F2 opens the selec
   await page.locator(".inbox-row-shell", { hasText: "Running Session" }).locator(".inbox-row").click();
   await grid.focus();
   await grid.press("F2");
-  const panel = page.getByRole("complementary", { name: "Agents", exact: true });
+  const panel = page.locator('#right-panel[data-mode="subagents"]');
   const heading = page.locator(".request-dock .request-card").getByRole("heading");
   await expect(heading).toHaveText("Primary Request");
   await expect(heading).toBeFocused();
@@ -195,14 +195,14 @@ for (const width of [390, 1280]) test(`an attention route to the session's own r
   const heading = page.locator(".request-dock .request-card").getByRole("heading");
   await expect(heading).toHaveText("Primary Request");
   await expect(heading).toBeFocused();
-  await expect(page.getByRole("complementary", { name: "Agents", exact: true })).toHaveCount(0);
+  await expect(page.locator('#right-panel[data-mode="subagents"]')).toHaveCount(0);
 });
 
 for (const width of [390, 1280]) test(`real shell threads an exact attention route through the panel at ${width}px`, async ({ page }) => {
   await page.setViewportSize({ width, height: 900 });
   // The list no longer offers a per-request target (#896); the exact child route is a deep link.
   await page.goto(fullShell(`/sessions/~${opaque("s-approval")}/attention/~${opaque("child-3")}?epoch=7`));
-  const panel = page.getByRole("complementary", { name: "Agents", exact: true });
+  const panel = page.locator('#right-panel[data-mode="subagents"]');
   await expect(panel).toBeVisible();
   const request = panel.getByRole("region", { name: "Selected Worker Request", exact: true });
   await expect(request).toBeFocused();

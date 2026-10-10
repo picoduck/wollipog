@@ -36,6 +36,8 @@ async function keyboardFocus(page: Page, separator: Locator) {
   await page.keyboard.press("Tab");
   await expect(separator).toBeFocused();
   expect(await separator.evaluate((element) => element.matches(":focus-visible"))).toBe(true);
+  // The focus line fades in (§2.9); capture it settled.
+  await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished)));
 }
 
 /**
@@ -113,7 +115,7 @@ for (const theme of ["dark", "light"] as const) {
     // The fill still marks focus, as it always has…
     expect((await comparePixels(page, rest, focused)).changed).toBeGreaterThan(40);
     // …and the outline adds nothing visible: the capture matches one with the outline switched off.
-    await page.addStyleTag({ content: ".right-panel-resizer:focus-visible { outline: none !important; }" });
+    await page.addStyleTag({ content: ".rpanel-resizer:focus-visible { outline: none !important; }" });
     expect((await comparePixels(page, focused, await capture(page, separator))).changed).toBe(0);
   });
 }

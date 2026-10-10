@@ -118,15 +118,15 @@ function layerOf(selector: string): string {
  * complete set, so a new rule touching a guarded surface has to be acknowledged here.
  */
 const GUARDED = [".modal-backdrop", ".menu-backdrop", ".palette-backdrop", ".toast-region",
-  ".instance-selector", ".picker", ".right-panel"];
+  ".instance-selector", ".picker", ".rpanel"];
 
 test("no unacknowledged rule sets a layer on a guarded surface", () => {
   const EXPECTED = new Set([
     ".modal-backdrop", ".menu-backdrop", ".palette-backdrop", ".toast-region",
-    ".picker", ".right-panel", ".instance-selector",
+    ".picker", ".rpanel", ".instance-selector",
     // The panel's sheet over the transcript where docking would squeeze the chat (#2206, #2725), on
     // the panel's own layer.
-    '.detail-columns > .right-panel[data-presentation="overlay"]',
+    '.detail-columns > .rpanel[data-presentation="overlay"]',
   ]);
   const touching = new Set<string>();
   for (const decl of zIndexDecls) {
@@ -168,8 +168,8 @@ test("the composer pickers stay below the mobile right panel", () => {
   // receiving clicks through it. Both surfaces are bound to tokens so the comparison is real:
   // asserting only the picker left the panel free to drift to a lower layer.
   assert.equal(layerOf(".picker"), "var(--z-sticky)");
-  assert.equal(layerOf(".right-panel"), "var(--z-panel)");
-  assert.equal(layerOf('.detail-columns > .right-panel[data-presentation="overlay"]'), "var(--z-panel)");
+  assert.equal(layerOf(".rpanel"), "var(--z-panel)");
+  assert.equal(layerOf('.detail-columns > .rpanel[data-presentation="overlay"]'), "var(--z-panel)");
   assert.ok(tokenValue("--z-sticky") < tokenValue("--z-panel"));
 });
 

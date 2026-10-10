@@ -465,3 +465,31 @@ test("every listener of one keydown shares a single layer query (#2840)", () => 
   assert.equal(shortcutLayerActive(document), false);
   assert.equal(queries, 5);
 });
+
+/** Chords a browser acts on itself in Chrome, Edge, Firefox or Safari, on either platform. */
+const BROWSER_RESERVED = new Set([
+  "Ctrl+B", "Ctrl+Shift+B", "Ctrl+Alt+B", "Ctrl+D", "Ctrl+H", "Ctrl+J", "Ctrl+L", "Ctrl+N", "Ctrl+Shift+N",
+  "Ctrl+O", "Ctrl+S", "Ctrl+T", "Ctrl+Shift+T", "Ctrl+U", "Ctrl+W", "Ctrl+Shift+W", "Ctrl+Shift+I",
+  "Ctrl+Shift+J", "Ctrl+Shift+E", "Ctrl+Shift+Delete", "Ctrl+Shift+O", "Ctrl+Shift+A",
+  "⌘B", "⌘⇧B", "⌘⌥B", "⌘D", "⌘J", "⌘L", "⌘N", "⌘⇧N", "⌘O", "⌘S", "⌘T", "⌘⇧T", "⌘W", "⌘⇧W", "⌘⌥I",
+  "⌘⌥J", "⌘⌥L", "⌘⇧\\", "⌘Y", "⌘⇧L", "⌘.",
+]);
+
+test("the Side Panel chord toggles from a session, is in the reference, and no browser claims it (#2843)", () => {
+  const definition = shortcut("toggle-side-panel");
+  assert.equal(definition.label, "Side Panel");
+  assert.equal(definition.scope, "Session");
+  for (const mac of [false, true]) {
+    const keys = shortcutDisplay("toggle-side-panel", mac);
+    assert.equal(BROWSER_RESERVED.has(keys), false, `${keys} is a browser's own chord`);
+  }
+  assert.equal(shortcutDisplay("toggle-side-panel", false), "Ctrl+\\");
+  assert.equal(shortcutDisplay("toggle-side-panel", true), "⌘\\");
+  const press = { key: "\\", ctrlKey: true, metaKey: false, shiftKey: false, altKey: false };
+  assert.equal(matchesShortcut(press, "toggle-side-panel"), true);
+  assert.equal(matchesShortcut({ ...press, ctrlKey: false }, "toggle-side-panel"), false);
+  const session = shortcutReferenceGroups({ scope: "Session", availability: AVAILABLE, keys: referenceKeys })
+    .find((group) => group.group === "Session")!;
+  assert.deepEqual(session.rows.filter((row) => row.id === "toggle-side-panel").map((row) => [row.label, row.keys, row.reason]),
+    [["Side Panel", "Ctrl+\\", null]]);
+});

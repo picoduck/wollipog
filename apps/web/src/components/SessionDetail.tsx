@@ -6417,7 +6417,7 @@ function SessionDetailLoaded({
     get current(): HTMLElement | null {
       if (focusPanelAfterSheetRef.current) {
         focusPanelAfterSheetRef.current = false;
-        const panelControl = document.querySelector<HTMLElement>("#right-panel .rp-head button");
+        const panelControl = document.querySelector<HTMLElement>("#right-panel .rpanel-switcher");
         if (panelControl) return panelControl;
       }
       return summaryToggleRef?.current ?? null;
@@ -6951,7 +6951,10 @@ function SessionDetailLoaded({
           )}
           </div>
 
-          {mode === "expanded" && (
+          {/* A phone's side panel is a full-screen sheet; while it is open the composer is not
+              rendered, so nothing covers a field the panel is editing (#2843). Its draft lives in
+              state and comes back with it. */}
+          {mode === "expanded" && !(isMobile && rightPanel.open) && (
             <div
               className="composer"
               onFocusCapture={() => setActivePane("composer")}

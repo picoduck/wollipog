@@ -24,7 +24,7 @@ for (const theme of ["dark", "light"] as const) {
 
     test("lists every decision newest first under day headers, and filters to You and Policies", async ({ page }) => {
       await page.goto(`/decision-history-e2e.html?theme=${theme}`);
-      await expect(page.locator(".rp-title")).toHaveText("Decision History");
+      await expect(page.locator(".rpanel-switcher-name")).toHaveText("Decision History");
       await expect(rows(page)).toHaveCount(10);
       expect(await outcomes(page)).toEqual([
         "Blocked", "Blocked", "Allowed", "Answered", "Rejected", "Allowed", "Allowed", "Allowed", "Dismissed", "Allowed",

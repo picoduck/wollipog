@@ -166,7 +166,7 @@ test("the transcript's lower edge has one floating tail control, and context and
   // to the composer column, and context, cost and the Reply hint moved into the composer.
   // #2179: the reading column then ends with the request dock, the notice slot's lead, directly
   // above the composer.
-  assert.match(detail, /<div className="detail-reader">[\s\S]*<TranscriptTailControl[\s\S]*role="status" data-transcript-recovery-status>\{recoveryAnnouncement\}<\/span>\s*<\/div>\s*\{\/\*[\s\S]*?\*\/\}\s*\{mode === "expanded" && requestDockLead && \(\s*<SessionNoticeSlot[\s\S]*?lead=\{requestDockLead\}[\s\S]*?\/>\s*\)\}\s*<\/div>\s*\{mode === "expanded" && \(\s*<div\s+className="composer"/,
+  assert.match(detail, /<div className="detail-reader">[\s\S]*<TranscriptTailControl[\s\S]*role="status" data-transcript-recovery-status>\{recoveryAnnouncement\}<\/span>\s*<\/div>\s*\{\/\*[\s\S]*?\*\/\}\s*\{mode === "expanded" && requestDockLead && \(\s*<SessionNoticeSlot[\s\S]*?lead=\{requestDockLead\}[\s\S]*?\/>\s*\)\}\s*<\/div>\s*\{\/\*[\s\S]*?\*\/\}\s*\{mode === "expanded" && !\(isMobile && rightPanel\.open\) && \(\s*<div\s+className="composer"/,
     "the anchor and the one recovery live region end the reader, and the request dock alone sits between it and the composer");
   // #2210: a preview has no composer, so its dock heads the chat column instead.
   assert.match(detail, /<div className="detail-chat" ref=\{detailChatRef\}>\s*\{\/\*[\s\S]*?\*\/\}\s*\{mode === "preview" && requestDockLead && \(\s*<SessionNoticeSlot/,
@@ -320,7 +320,7 @@ test("Inbox project tabs stay balanced, hide overflow chrome, and reveal context
   assert.match(css, /--bottom-bar-h:\s*calc\(56px \+ env\(safe-area-inset-bottom, 0px\)\);/,
     "the labelled tab bar is 56px plus the bottom safe area (§2.7)");
   assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.app-rail\s*\{[^}]*height:\s*var\(--bottom-bar-h\);/);
-  assert.match(css, /\.right-panel\s*\{[^}]*bottom:\s*var\(--bottom-bar-h\)/,
+  assert.match(css, /\.rpanel\s*\{[^}]*bottom:\s*var\(--bottom-bar-h\)/,
     "mobile overlays must stop above the bottom tab bar");
 });
 
@@ -518,7 +518,7 @@ test("the phone Session topbar owns Back and the live Session title without Open
   assert.match(app, /view\.name === "session" \? \([\s\S]*?className="icon-btn sm mobile-session-back"[\s\S]*?aria-label=\{backLabel\("inbox"\)\}[\s\S]*?<h1 id="page-title"[^>]*>\{sessionTitle \?\? title\}<\/h1>/,
     "the mobile app bar must replace its generic Session heading with Back and the live title");
   // Only the phone Session route mounts the app-level bar now; destinations draw a page header (#1801).
-  assert.match(app, /\{view\.name === "session" && isMobile && \(\s*<Header[\s\S]*?sessionTitle=\{activeSession\s*\? sessionDisplayTitle\(activeSession\.title\) \|\| "Session"\s*: routedSessionPlaceholder\(view\.id, routedSessionLookup, conn, snapshotLoaded\)\.title\}/,
+  assert.match(app, /\{view\.name === "session" && isMobile && !\(rightPanel\.open && activeSession\) && \(\s*<Header[\s\S]*?sessionTitle=\{activeSession\s*\? sessionDisplayTitle\(activeSession\.title\) \|\| "Session"\s*: routedSessionPlaceholder\(view\.id, routedSessionLookup, conn, snapshotLoaded\)\.title\}/,
     "the shell must pass the routed Session's one-line title, or its placeholder's title (#2202), into the app bar");
   assert.match(app, /\{!isMobile && \(\s*<>\s*<EditorSelect key=\{view\.id\} sessionId=\{view\.id\} \/>/,
     "Open destinations must not be mounted on the mobile Session route");

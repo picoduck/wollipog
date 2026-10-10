@@ -120,7 +120,7 @@ function Fixture() {
     <ApiProvider client={client}>
       <FeedbackProvider>
         <main className="app" style={{ minHeight: "100vh", background: "var(--bg)", padding: 24 }}>
-          <section className="right-panel" style={{ maxWidth: 820, margin: "0 auto" }}>
+          <section className="rpanel" style={{ width: "100%", maxWidth: 820, margin: "0 auto" }}>
             <ReviewPanel
               session={session}
               runnerOnline

@@ -46,6 +46,14 @@ test("parseStoredRightPanelWidth: numeric strings parse and clamp", () => {
   assert.equal(parseStoredRightPanelWidth("9999"), RIGHT_PANEL_MAX_WIDTH);
 });
 
+test("the panel opens 400px wide by default and never narrower than 320px (#2843)", () => {
+  assert.equal(RIGHT_PANEL_DEFAULT_WIDTH, 400);
+  assert.equal(RIGHT_PANEL_MIN_WIDTH, 320);
+  // A width stored by an older build under the new minimum is clamped up on load.
+  assert.equal(parseStoredRightPanelWidth("300"), 320);
+  assert.equal(parseStoredRightPanelWidth("380"), 380);
+});
+
 test("parseStoredRightPanelMode: valid modes pass through", () => {
   for (const m of ["launcher", "review", "files", "browser", "sidechat", "subagents", "background", "decisions"] as const) {
     assert.equal(parseStoredRightPanelMode(m), m);
@@ -91,13 +99,13 @@ test("resolveRightPanelDrag: dragging below the snap threshold collapses", () =>
 });
 
 test("rightPanelOverlays: the panel overlays exactly when docking would leave the chat column under 480px (#2725)", () => {
-  // The row less the panel and its 10px handle is the chat column.
-  assert.equal(rightPanelOverlays(380 + 10 + 480, 380), false, "480px left: docks");
-  assert.equal(rightPanelOverlays(380 + 10 + 479, 380), true, "479px left: overlays");
-  // A 940px window with the 64px rail and a 376px panel (40% of the window) keeps 490px; with the
-  // 208px labelled rail it keeps about 346px.
+  // The row less the panel is the chat column; the handle straddles the panel's edge (#2843).
+  assert.equal(rightPanelOverlays(400 + 480, 400), false, "480px left: docks");
+  assert.equal(rightPanelOverlays(400 + 479, 400), true, "479px left: overlays");
+  // A 940px window with the 64px rail and a 376px panel (40% of the window) keeps 500px; with the
+  // 208px labelled rail it keeps 356px.
   assert.equal(rightPanelOverlays(940 - 64, 376), false);
   assert.equal(rightPanelOverlays(940 - 208, 376), true);
   // The same width answers the same way whichever mode the panel shows: the rule has no mode.
-  assert.equal(rightPanelOverlays(761 - 64, 304), true);
+  assert.equal(rightPanelOverlays(761 - 64, 320), true);
 });

@@ -3362,7 +3362,8 @@ function FixtureSurface() {
     setTerminalSessionId(model.sessions.at(-1)?.id ?? null);
   }, []);
   useNewSessionShortcut(true, openShortcutSession);
-  const mobileSessionShell = INCLUDE_SESSION_SHELL && isMobile && view.name === "session" ? (
+  // As in the Shell, an open side panel covers the phone's session app bar, which is not rendered (#2843).
+  const mobileSessionShell = INCLUDE_SESSION_SHELL && isMobile && view.name === "session" && !rightPanel.open ? (
     <Header
       view={view}
       sessionActions={(

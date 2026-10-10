@@ -332,7 +332,7 @@ test("a recognized campaign on a server without campaign work shows why, visibly
     assert.equal(panel.state.mode, "launcher", "an unavailable entry does not open");
     // Reaching the mode another way still explains instead of rendering an empty body.
     await act(async () => panel.state.show("campaign"));
-    assert.match(panel.container.querySelector(".rp-body")?.textContent ?? "", /Campaign Status Unavailable/);
+    assert.match(panel.container.querySelector(".rpanel-body")?.textContent ?? "", /Campaign Status Unavailable/);
     assert.deepEqual(calls.list, [], "nothing is fetched from a server that cannot answer");
   } finally {
     await panel.dispose();
@@ -710,7 +710,7 @@ test("Campaign Status controls carry Title Case accessible names", async () => {
     const names = (scope: Element) => [...scope.querySelectorAll("button:not(.campaign-work-row), h3:not(.campaign-detail-title), h4, dt")]
       .map((node) => node.getAttribute("aria-label")?.split(":")[0] ?? node.textContent ?? "")
       .filter(Boolean);
-    const body = panel.container.querySelector(".rp-body")!;
+    const body = panel.container.querySelector(".rpanel-body")!;
     for (const name of names(body)) assert.equal(titleCaseLabel(name), name, name);
     await click(body.querySelector(".campaign-work-row")!);
     for (const name of names(body)) assert.equal(titleCaseLabel(name), name, name);
@@ -1366,7 +1366,7 @@ test("a cost re-read gathered behind a slow one never starts after the panel clo
 test("detail outcomes apply in the order their reads were issued, whichever path issued them", async () => {
   const server = costServer(1);
   const panel = await mount({ initial: rootSession, client: server.client });
-  const text = () => panel.container.querySelector(".rp-body")?.textContent ?? panel.container.textContent ?? "";
+  const text = () => panel.container.querySelector(".rpanel-body")?.textContent ?? panel.container.textContent ?? "";
   try {
     await act(async () => panel.state.show("campaign"));
     await settle();

@@ -71,8 +71,9 @@ export function SessionPanelToggles({
         type="button"
         className={className}
         onClick={onSidePanel}
-        title="Side Panel"
+        title={coarsePointer ? "Side Panel" : `Side Panel (${shortcutDisplay("toggle-side-panel")})`}
         aria-label="Side Panel"
+        aria-keyshortcuts={shortcutAriaKeys("toggle-side-panel")}
         aria-pressed={sidePanelOpen}
       >
         <PanelRightIcon size={16} />

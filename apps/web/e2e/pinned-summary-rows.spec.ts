@@ -255,15 +255,17 @@ test.describe("with a coarse pointer at 390px", () => {
       await expect(page.getByRole("dialog", { name: "Pinned Summary" })).toHaveCount(0);
       const panel = page.locator("#right-panel");
       await expect(panel).toBeVisible();
-      await expect(panel).toHaveAccessibleName(target.panel);
-      await expect(toggle(page)).toHaveAttribute("aria-pressed", "false");
+      await expect(panel.locator(".rpanel-switcher")).toHaveText(target.panel);
+      // The panel covers the session app bar, toggles included (#2843).
+      await expect(toggle(page)).toHaveCount(0);
       // Only one overlay is open. The row that held focus closed with the sheet, so focus moves
       // into the panel it opened rather than back to the toggle.
       await page.evaluate(() => new Promise((resolve) => setTimeout(() =>
         requestAnimationFrame(() => requestAnimationFrame(resolve)), 0)));
-      await expect(panel.locator(".rp-head button").first()).toBeFocused();
-      await panel.getByRole("button", { name: "Close Panel" }).tap();
+      await expect(panel.locator(".rpanel-switcher")).toBeFocused();
+      await panel.getByRole("button", { name: "Back to Session" }).tap();
       await expect(panel).toHaveCount(0);
+      await expect(toggle(page)).toHaveAttribute("aria-pressed", "false");
     });
   }
 });

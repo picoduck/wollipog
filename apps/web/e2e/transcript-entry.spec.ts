@@ -5,7 +5,7 @@ const sessionPath = (id: string) => `/sessions/~${opaque(id)}`;
 const shell = (path: string) => `/sessions-board-e2e.html?full-shell=1&path=${encodeURIComponent(path)}`;
 const entryShell = (path: string) => `${shell(path)}&entry-regressions=1`;
 const attentionPath = (id: string, requestId?: string) => `${sessionPath(id)}/attention${requestId ? `/~${opaque(requestId)}` : ""}?epoch=7`;
-const agents = (page: Page) => page.getByRole("complementary", { name: "Agents", exact: true });
+const agents = (page: Page) => page.locator('#right-panel[data-mode="subagents"]');
 const navigateWithinShell = async (page: Page, path: string) => {
   await page.evaluate((path) => {
     const url = new URL(location.href);
@@ -16,9 +16,16 @@ const navigateWithinShell = async (page: Page, path: string) => {
 };
 const openPanelMode = async (page: Page, mode: string) => {
   if (!await page.locator("#right-panel").count()) await page.getByRole("button", { name: "Side Panel", exact: true }).click();
-  const back = page.getByRole("button", { name: "Back to Panel List", exact: true });
-  if (await back.count()) await back.click();
-  await page.getByRole("button", { name: mode, exact: true }).click();
+  // Every tool is in the header's tool switcher (#2843).
+  await page.locator("#right-panel .rpanel-switcher").click();
+  await page.getByRole("menuitemradio", { name: mode, exact: true }).click();
+};
+/** Leaves the session for the list: its bar's Back, or on a phone whose open panel covers that bar
+ * (#2843), the Sessions tab. */
+const leaveSession = async (page: Page) => {
+  const back = page.getByRole("button", { name: "Back to Sessions", exact: true });
+  if (await back.isVisible()) await back.click();
+  else await page.getByRole("link", { name: "Sessions", exact: true }).click();
 };
 const expandFromList = async (page: Page, title: string) => {
   const row = page.locator(".inbox-row-shell", { hasText: title }).locator(".inbox-row");
@@ -85,7 +92,7 @@ for (const width of [390, 1440]) {
     await page.setViewportSize({ width, height: 900 });
     await page.goto(shell(sessionPath("s-approval")));
     await expect(page.locator(".session-detail.expanded .composer-input")).toBeVisible();
-    await expect(page.getByRole("complementary", { name: "Agents", exact: true })).toHaveCount(0);
+    await expect(page.locator('#right-panel[data-mode="subagents"]')).toHaveCount(0);
   });
 
   test(`Orchestrator-to-Standard and repeated entry discard Agents visibility at ${width}px`, async ({ page }) => {
@@ -95,15 +102,15 @@ for (const width of [390, 1440]) {
     await expect(agents(page)).toHaveCount(0);
     await openPanelMode(page, "Agents");
     await expect(agents(page)).toBeVisible();
-    await page.getByRole("button", { name: "Back to Sessions", exact: true }).click();
+    await leaveSession(page);
     await expandFromList(page, "Running Session");
     await expect(agents(page)).toHaveCount(0);
-    await page.getByRole("button", { name: "Back to Sessions", exact: true }).click();
+    await leaveSession(page);
     await expandFromList(page, "Approval Session");
     await expect(agents(page)).toHaveCount(0);
     await openPanelMode(page, "Agents");
     await expect(agents(page)).toBeVisible();
-    await page.getByRole("button", { name: "Close Panel", exact: true }).click();
+    await page.getByRole("button", { name: /^(Close Panel|Back to Session)$/u }).click();
     await page.evaluate(() => {
       window.__updateEntrySession({ eventEpoch: 8 });
       window.__replayProviderLoginSnapshot();
@@ -152,12 +159,12 @@ for (const width of [390, 1440]) {
     await openPanelMode(page, "Side Chat");
     await page.getByRole("textbox", { name: "Side Chat Message", exact: true }).fill("Keep this unsent panel draft");
     await openPanelMode(page, "Agents");
-    await page.getByRole("button", { name: "Back to Sessions", exact: true }).click();
+    await leaveSession(page);
     await expandFromList(page, "Running Session");
     await openPanelMode(page, "Side Chat");
     await expect(page.getByRole("textbox", { name: "Side Chat Message", exact: true })).toHaveValue("");
     await openPanelMode(page, "Agents");
-    await page.getByRole("button", { name: "Back to Sessions", exact: true }).click();
+    await leaveSession(page);
     await expandFromList(page, "Approval Session");
     await openPanelMode(page, "Side Chat");
     await expect(page.getByRole("textbox", { name: "Side Chat Message", exact: true })).toHaveValue("Keep this unsent panel draft");
@@ -180,7 +187,7 @@ for (const width of [390, 1440]) {
         await expect(surface.getByRole("region", { name: "Selected Worker Request" })).toBeFocused();
         await surface.getByRole("radio", { name: "Unit Tests", exact: true }).check();
         await expect(surface.getByRole("radio", { name: "Unit Tests", exact: true })).toBeChecked();
-        await page.getByRole("button", { name: "Close Panel", exact: true }).click();
+        await page.getByRole("button", { name: /^(Close Panel|Back to Session)$/u }).click();
         await page.evaluate(() => window.__replayProviderLoginSnapshot());
         await expect(agents(page)).toHaveCount(0);
       }

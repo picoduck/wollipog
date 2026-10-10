@@ -21,6 +21,7 @@ export type ShortcutId =
   | "open-files"
   | "open-review"
   | "toggle-terminal"
+  | "toggle-side-panel"
   | "submit-run"
   | "relay-pod-note"
   | "shortcut-reference"
@@ -192,6 +193,16 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     label: "Toggle Terminal",
     scope: "Session",
     binding: { key: "`", primary: true },
+  },
+  // Toggles the side panel and reopens its last tool (#2843, #1260). Ctrl/⌘+\ is free in the
+  // supported browsers on both platforms; Ctrl/⌘+B (bold, bookmarks) and ⌘⌥B (Chrome's bookmark
+  // manager on macOS) are not.
+  {
+    id: "toggle-side-panel",
+    group: "Session",
+    label: "Side Panel",
+    scope: "Session",
+    binding: { key: "\\", primary: true },
   },
   {
     id: "submit-run",

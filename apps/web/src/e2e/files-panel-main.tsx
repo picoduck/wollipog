@@ -109,7 +109,7 @@ function Fixture() {
       <FeedbackProvider>
         <StoreProvider connection={connection} navigation={navigation}>
         <main className="app" style={{ minHeight: "100vh", background: "var(--bg)", padding: 24 }}>
-          <section className="right-panel" style={{ maxWidth: 480, margin: "0 auto" }}>
+          <section className="rpanel" style={{ width: "100%", maxWidth: 480, margin: "0 auto" }}>
             {params.get("panel") === "browser" ? <BrowserPanel session={session} /> : <FilesHost />}
           </section>
         </main>
