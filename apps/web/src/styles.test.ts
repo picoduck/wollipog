@@ -570,9 +570,8 @@ test("mobile Session chrome keeps its coupled offsets and compact action icons",
   const phoneRule = mediaBlocks(css).find((block) =>
     block.maxWidths.includes(760) &&
     block.containsSelector(".topbar") &&
-    block.containsSelector(".right-panel") &&
-    block.containsSelector(".topbar:has(.mobile-session-back)") &&
-    block.containsSelector(".app:has(.mobile-session-back) .right-panel"));
+    block.containsSelector(".rpanel") &&
+    block.containsSelector(".topbar:has(.mobile-session-back)"));
   assert.ok(phoneRule, "the phone layout must define both default and Session chrome geometry");
 
   const sharedTokens = soleRuleProps(":root");
@@ -595,20 +594,20 @@ test("mobile Session chrome keeps its coupled offsets and compact action icons",
   assert.deepEqual(sessionActions.get("gap"), ["var(--mobile-session-action-gap)"]);
 
   const defaultTopbarHeight = phoneRule.declarationsForSelector(".topbar").get("height");
-  const defaultPanelTop = phoneRule.declarationsForSelector(".right-panel").get("top");
   assert.deepEqual(defaultTopbarHeight,
     ["calc(50px + env(safe-area-inset-top, 0px))"]);
-  assert.deepEqual(defaultPanelTop, defaultTopbarHeight,
-    "the default right panel must begin at the default topbar's bottom edge");
 
   const sessionTopbarHeight = phoneRule
     .declarationsForSelector(".topbar:has(.mobile-session-back)").get("height");
-  const sessionPanelTop = phoneRule
-    .declarationsForSelector(".app:has(.mobile-session-back) .right-panel").get("top");
   assert.deepEqual(sessionTopbarHeight,
     ["calc(var(--bar-h) + env(safe-area-inset-top, 0px))"]);
-  assert.deepEqual(sessionPanelTop, sessionTopbarHeight,
-    "the Session right panel must begin at the compact Session topbar's bottom edge");
+  // The side panel covers the Session app bar (which is not rendered while it is open) with its
+  // own 48px bar, below the same top safe-area inset (#2843).
+  const panel = phoneRule.declarationsForSelector(".rpanel");
+  assert.deepEqual(panel.get("top"), ["0"]);
+  assert.deepEqual(panel.get("padding-top"), ["env(safe-area-inset-top, 0px)"]);
+  assert.equal(phoneRule.declarationsForSelector(".app:has(.mobile-session-back) .rpanel").get("top"), undefined,
+    "no rule places the panel under a Session app bar");
 
   const actionIcon = phoneRule.declarationsForSelector(".session-bar .session-header-action svg");
   assert.deepEqual(actionIcon.get("width"), ["var(--icon)"]);
@@ -788,5 +787,40 @@ test("small-text consumers reference a token that clears AA on their surface", (
       assert.ok(ratio >= 4.5,
         `${theme}: ${selector} uses ${used} on ${surface} at ${ratio.toFixed(2)}:1, below AA 4.5`);
     }
+  }
+});
+
+test("the side panel docks flush: no margin, no radius, one leading hairline and its own container (#2843)", () => {
+  const body = soleRuleBody(".rpanel");
+  assert.doesNotMatch(body, /^margin/m, "no margin");
+  assert.doesNotMatch(body, /border-radius/, "no radius (§2.5)");
+  assert.match(body, /^border-left: 1px solid var\(--border\);$/m, "one hairline on the leading edge");
+  assert.doesNotMatch(body, /^border(-top|-right|-bottom)?:/m, "and no other edge");
+  assert.match(body, /^background: var\(--bg\);$/m);
+  assert.match(body, /^container: rp \/ inline-size;$/m, "the content answers to the panel's own width (§2.10)");
+  assert.match(soleRuleBody(".rpanel-head"), /^height: var\(--bar-h\);$/m, "a 48px header (§4.4)");
+});
+
+test("no viewport rule at 600px or 640px styles diff, finding, review or browser content (#2843)", () => {
+  const offenders: string[] = [];
+  postcss.parse(css).walkAtRules("media", (block) => {
+    if (!/max-width:\s*6[04]0px/.test(block.params)) return;
+    block.walkRules((rule) => {
+      if (/\.(diff|git-diff|hunk|review|browser)[\w-]*/.test(rule.selector)) offenders.push(`${block.params} ${rule.selector}`);
+    });
+  });
+  assert.deepEqual(offenders, []);
+  // They answer to the panel instead: a finding row in a 400px panel is single-column.
+  const moved: Record<string, string[]> = {};
+  postcss.parse(css).walkAtRules("container", (block) => {
+    if (!/^rp\s/.test(block.params)) return;
+    block.walkRules((rule) => {
+      moved[rule.selector] = rule.nodes.flatMap((node) => (node.type === "decl" ? [`${node.prop}: ${node.value}`] : []));
+    });
+  });
+  assert.deepEqual(moved[".review-finding-row"], ["grid-template-columns: 22px minmax(0, 1fr)"]);
+  for (const selector of [".git-diff-view-controls", ".diff-file-head-row", ".diff-hunk-header", ".hunk-actions",
+    ".diff-comment-editor,\n  .diff-inline-finding", ".review-findings-head", ".browser-address"]) {
+    assert.ok(moved[selector], `${selector} answers to the rp container`);
   }
 });

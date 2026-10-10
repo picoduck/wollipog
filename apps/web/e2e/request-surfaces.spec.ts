@@ -62,7 +62,7 @@ for (const viewport of [
     const geometry = await dockGeometry(page);
     // Directly above the composer: nothing but the composer's divider between them.
     expect(Math.abs(geometry.composerTop - geometry.dockBottom)).toBeLessThanOrEqual(1);
-    await expect(page.getByRole("complementary", { name: "Requests" })).toHaveCount(0);
+    await expect(page.locator('#right-panel[data-mode="requests"]')).toHaveCount(0);
     // The transcript keeps no Review Request and no "awaiting decision…" for the row.
     await expect(page.locator(".tl-perm")).toContainText("Run pnpm deploy?");
     await expect(page.getByRole("button", { name: "Review Request" })).toHaveCount(0);
@@ -77,7 +77,7 @@ for (const viewport of [
 
     await footButton(page, "Allow").click();
     await expect(card(page)).toHaveCount(0);
-    await expect(page.getByRole("complementary", { name: "Requests" })).toHaveCount(0);
+    await expect(page.locator('#right-panel[data-mode="requests"]')).toHaveCount(0);
     await expect.poll(() => submissions(page)).toEqual([{ requestId: "permission-deploy", optionId: "allow" }]);
     await expect(page.getByRole("textbox", { name: "Composer" })).toBeFocused();
   });
@@ -405,7 +405,7 @@ for (const viewport of [
     const geometry = await dockGeometry(page);
     // The transcript keeps half of the reading column, or 40% of a column under 480px (#2828).
     expect(geometry.transcript).toBeGreaterThanOrEqual(geometry.reading * (geometry.reading <= 480 ? 0.4 : 0.5) - 1);
-    await expect(page.getByRole("complementary", { name: "Requests" })).toHaveCount(0);
+    await expect(page.locator('#right-panel[data-mode="requests"]')).toHaveCount(0);
     await expect(card(page).locator(".ev-progress")).toHaveText("0 of 8 reviewed");
     const approve = card(page).locator(".request-card-foot").getByRole("button", { name: /^Approve/u });
     await expect(approve).toBeDisabled();
@@ -603,7 +603,7 @@ for (const viewport of [
     await page.getByRole("button", { name: "All Requests" }).click();
     await expect(panelRows(page).nth(8)).toBeFocused();
     expect(await list.evaluate((element) => element.scrollTop)).toBe(scrolled);
-    const close = page.getByRole("button", { name: "Close Panel" });
+    const close = page.getByRole("button", { name: /^(Close Panel|Back to Session)$/u });
     await expect(close).toHaveText("");
     await expect(close.locator("svg")).toHaveCount(1);
     await close.click();
@@ -611,7 +611,7 @@ for (const viewport of [
     await openRequests(page);
     await expect(panelRows(page)).toHaveCount(12);
     await page.keyboard.press("Escape");
-    await expect(page.getByRole("complementary", { name: "Requests" })).toHaveCount(0);
+    await expect(page.locator('#right-panel[data-mode="requests"]')).toHaveCount(0);
   });
 }
 
@@ -628,18 +628,20 @@ test.describe("on a phone's touch screen", () => {
     await panelRows(page).nth(1).tap();
     await expect(page.locator(".request-panel-list")).toHaveCount(0);
     await expect(page.locator(".request-panel-detail .question-card")).toBeVisible();
-    // One back control out of a request: All Requests, not also the panel list's.
+    // One way back to the list: All Requests. The phone bar's Back to Session leaves the panel (#2843).
     await expect(page.getByRole("button", { name: "Back to Panel List" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Back to Session" })).toBeVisible();
     await page.getByRole("button", { name: "All Requests" }).tap();
     await expect(panelRows(page)).toHaveCount(12);
     await expect(page.locator(".request-panel-row.is-selected, .request-panel-row[aria-current]")).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Back to Panel List" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Back to Session" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Close Panel" })).toHaveCount(0);
   });
 });
 
 test("where docking would leave the chat under 480px the Requests panel opens over the transcript from the right, with a scrim that closes it (#2206, #2725)", async ({ page }) => {
-  // This fixture has no rail: at 800px a 320px panel (40% of the window) and its handle leave 470px.
-  await page.setViewportSize({ width: 800, height: 800 });
+  // This fixture has no rail: at 790px the 320px minimum panel leaves 470px.
+  await page.setViewportSize({ width: 790, height: 800 });
   await page.goto("/request-surfaces-e2e.html?scenario=descendants");
   const chatBefore = (await page.locator(".detail-chat").boundingBox())!;
   await openRequests(page);
@@ -648,10 +650,10 @@ test("where docking would leave the chat under 480px the Requests panel opens ov
   expect(chat.width).toBe(chatBefore.width);
   expect(panel.x + panel.width).toBeCloseTo(chat.x + chat.width, 0);
   expect(panel.x).toBeLessThan(chat.x + chat.width - 200);
-  const scrim = page.locator(".rp-scrim");
+  const scrim = page.locator(".rpanel-scrim");
   await expect(scrim).toBeVisible();
   await page.mouse.click(chat.x + 40, chat.y + 200);
-  await expect(page.getByRole("complementary", { name: "Requests" })).toHaveCount(0);
+  await expect(page.locator('#right-panel[data-mode="requests"]')).toHaveCount(0);
   // Wider, the panel docks beside the transcript and there is no scrim.
   await page.setViewportSize({ width: 1440, height: 900 });
   await openRequests(page);
@@ -674,7 +676,7 @@ test("with nothing pending the launcher's Requests row opens Nothing Waiting, wh
   await expect(state.locator(".state-title")).toHaveText("Nothing Waiting");
   await expect(state).toContainText("Requests from this session and its child sessions appear here.");
   await state.getByRole("button", { name: "Decision History" }).click();
-  await expect(page.locator(".rp-title")).toHaveText("Decision History");
+  await expect(page.locator(".rpanel-switcher-name")).toHaveText("Decision History");
 });
 
 for (const viewport of [
@@ -710,7 +712,7 @@ for (const viewport of [
     await openRequests(page);
     await expect(panelRows(page)).toHaveCount(12);
     await expect(page.locator(".request-panel-row", { hasText: /Fix #165[01]/u })).toHaveCount(0);
-    await page.getByRole("button", { name: "Close Panel" }).click();
+    await page.getByRole("button", { name: /^(Close Panel|Back to Session)$/u }).click();
 
     await link.click();
     await expect.poll(() => page.evaluate(() =>

@@ -93,12 +93,14 @@ test("the panel toggles keep one name in both states and report the state throug
   }
 });
 
-test("each tooltip repeats the name, and the Terminal's names its chord on a fine pointer only (§11.5)", async () => {
+test("each tooltip repeats the name, and the Terminal's and Side Panel's name their chords on a fine pointer only (§11.5)", async () => {
   coarsePointer = false;
   const fine = await mount(<Toggles />);
   try {
     assert.equal(fine.button("Pinned Summary").title, "Pinned Summary");
-    assert.equal(fine.button("Side Panel").title, "Side Panel");
+    // The Side Panel toggle shows its chord (#2843, #1260).
+    assert.equal(fine.button("Side Panel").title, `Side Panel (${shortcutDisplay("toggle-side-panel")})`);
+    assert.ok(fine.button("Side Panel").getAttribute("aria-keyshortcuts"));
     assert.equal(fine.button("Terminal").title, `Terminal (${shortcutDisplay("toggle-terminal")})`);
     assert.match(fine.button("Terminal").title, /`/, "the chord is Ctrl+` (⌘` on a Mac)");
     assert.ok(fine.button("Terminal").getAttribute("aria-keyshortcuts"));
@@ -110,6 +112,7 @@ test("each tooltip repeats the name, and the Terminal's names its chord on a fin
   const coarse = await mount(<Toggles />);
   try {
     assert.equal(coarse.button("Terminal").title, "Terminal", "a coarse pointer shows no keycap");
+    assert.equal(coarse.button("Side Panel").title, "Side Panel");
   } finally {
     await coarse.cleanup();
   }

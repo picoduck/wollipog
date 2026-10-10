@@ -137,8 +137,13 @@ for (const viewport of [
     await page.waitForTimeout(200);
 
     await expect(page.locator("#right-panel")).toBeVisible();
-    await expect(page.locator("#right-panel")).toHaveAccessibleName("Panel");
-    await expect(page.getByRole("button", { name: "Side Panel", exact: true, pressed: true })).toBeFocused();
+    await expect(page.locator("#right-panel")).toHaveAccessibleName("Side Panel");
+    if (viewport.name === "mobile") {
+      // A phone's panel covers the session app bar, toggle included, so focus moves into its bar (#2843).
+      await expect(page.locator("#right-panel .rpanel-switcher")).toBeFocused();
+    } else {
+      await expect(page.getByRole("button", { name: "Side Panel", exact: true, pressed: true })).toBeFocused();
+    }
     const persisted = await page.evaluate(() => ({
       open: localStorage.getItem("wollipog.rightpanel.open"),
       mode: localStorage.getItem("wollipog.rightpanel.mode"),
@@ -174,7 +179,7 @@ test("the Requests panel follows descendant polling, and says Nothing Waiting on
   await expect(trigger).toHaveAccessibleName("Session Status: 1 Child Request");
   await trigger.click();
   await page.getByRole("dialog", { name: "Session Status" }).getByRole("button", { name: "Open Requests" }).click();
-  const panel = page.getByRole("complementary", { name: "Requests" });
+  const panel = page.locator('#right-panel[data-mode="requests"]');
   await expect(panel).toBeVisible();
   // Loading is skeleton rows, never "Nothing Waiting" (§12.3).
   await expect(panel.locator(".request-panel-skeleton")).toBeVisible();
@@ -247,7 +252,7 @@ test("a request answered on the dock never opens the Requests panel, and the gen
   await page.getByRole("button", { name: "Open Session", exact: true }).click();
   const toggle = page.getByRole("button", { name: "Side Panel", exact: true, pressed: false });
   await toggle.click();
-  await expect(page.locator("#right-panel")).toHaveAccessibleName("Panel");
+  await expect(page.locator("#right-panel")).toHaveAccessibleName("Side Panel");
   await expect(page.getByRole("button", { name: "Side Panel", exact: true, pressed: true })).toBeFocused();
 });
 
@@ -518,7 +523,7 @@ test("managed background indicators open a responsive inspectable inventory and 
   await header.locator(".session-status-button").click();
   await page.getByRole("dialog", { name: "Session Status" }).getByRole("button", { name: "Open Background Work" }).click();
   const panel = page.locator("#right-panel");
-  await expect(panel).toHaveAccessibleName("Background Work");
+  await expect(panel.locator(".rpanel-switcher")).toHaveText("Background Work");
   await expect(panel.getByText("Shell Job 1", { exact: true })).toBeVisible();
   await expect(panel.getByText("Running", { exact: true })).toBeVisible();
   await expect(panel.getByText("Not Started", { exact: true })).toBeVisible();
@@ -811,8 +816,8 @@ for (const viewport of [
       await capture(page, `narrow-${viewport.width}-status-popover`);
       if (viewport.width === 390) {
         await rows.filter({ hasText: "Waiting on External Job" }).getByRole("button", { name: "Open Background Work" }).click();
-        await expect(page.locator("#right-panel")).toHaveAccessibleName("Background Work");
-        await page.getByRole("button", { name: "Close Panel" }).click();
+        await expect(page.locator("#right-panel .rpanel-switcher")).toHaveText("Background Work");
+        await page.getByRole("button", { name: "Back to Session" }).click();
       } else {
         await page.keyboard.press("Escape");
         await expect(status).toBeFocused();

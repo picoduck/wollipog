@@ -151,9 +151,9 @@ async function setScheme(page: Page, scheme: (typeof SCHEMES)[number]) {
 
 async function openSession(page: Page, sessionId: string) {
   await page.goto(`${stack.base}${viewPath({ name: "session", id: sessionId })}`);
-  const toggle = page.getByRole("button", { name: "Side Panel" }).first();
-  await expect(toggle).toBeVisible();
-  if (await toggle.getAttribute("aria-pressed") !== "true") await toggle.click();
+  // A remembered open panel covers a phone's session bar, toggle included (#2843).
+  await expect(page.getByRole("button", { name: "Side Panel" }).first().or(page.locator("#right-panel")).first()).toBeVisible();
+  if (!await page.locator("#right-panel").isVisible()) await page.getByRole("button", { name: "Side Panel" }).first().click();
 }
 
 async function openCampaignStatus(page: Page, sessionId: string) {

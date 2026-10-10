@@ -3375,9 +3375,12 @@ function SessionDetailLoaded({
     if (!el) return;
     resizeComposerToContent(el);
   };
+  // A phone's side panel sheet hides the composer (#2843). A draft that changed while it was hidden
+  // had no width to measure, so revealing it grows it again.
+  const phonePanelOpen = isMobile && rightPanel.open;
   useLayoutEffect(() => {
     autoGrowComposerRef.current();
-  }, [mode]);
+  }, [mode, phonePanelOpen]);
   // A changed draft commits in the textarea alone, so what followed the draft here runs from the
   // textarea's layout phase instead: a pending focus restore, then the auto-grow, in the order their
   // effects above run.
@@ -5430,6 +5433,10 @@ function SessionDetailLoaded({
   // other one.
   const queuedEditPromptId = queuedEdit?.promptId ?? null;
   useEffect(() => cancelDictation, [queuedEditPromptId, cancelDictation]);
+  // A phone's side panel sheet hides the composer, mic included (#2843), so it ends dictation too.
+  useEffect(() => {
+    if (phonePanelOpen) cancelDictation();
+  }, [phonePanelOpen, cancelDictation]);
   // Live context and cost sit in the composer bar's trailing cluster, or in Model Settings when the
   // bar has no room for them (#2166).
   const [composerBoxRef, composerColumnNarrow] = useNarrowerThanRem<HTMLDivElement>(COMPOSER_USAGE_MIN_COLUMN_REM);
@@ -6417,7 +6424,7 @@ function SessionDetailLoaded({
     get current(): HTMLElement | null {
       if (focusPanelAfterSheetRef.current) {
         focusPanelAfterSheetRef.current = false;
-        const panelControl = document.querySelector<HTMLElement>("#right-panel .rp-head button");
+        const panelControl = document.querySelector<HTMLElement>("#right-panel .rpanel-switcher");
         if (panelControl) return panelControl;
       }
       return summaryToggleRef?.current ?? null;
@@ -6951,9 +6958,13 @@ function SessionDetailLoaded({
           )}
           </div>
 
+          {/* A phone's side panel is a full-screen sheet; while it is open the composer is hidden
+              (no box, out of the accessibility tree), so nothing covers a field the panel is editing
+              (#2843). It stays mounted: Answer Mode keeps a secret answer only in its own state. */}
           {mode === "expanded" && (
             <div
               className="composer"
+              hidden={phonePanelOpen}
               onFocusCapture={() => setActivePane("composer")}
               onPointerDownCapture={() => setActivePane("composer")}
             >

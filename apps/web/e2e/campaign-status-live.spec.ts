@@ -214,9 +214,9 @@ async function openCampaignStatus(page: Page, sessionId: string) {
 }
 
 async function showCampaignStatus(page: Page) {
-  const toggle = page.getByRole("button", { name: "Side Panel" }).first();
-  await expect(toggle).toBeVisible();
-  if (await toggle.getAttribute("aria-pressed") !== "true") await toggle.click();
+  // A remembered open panel covers a phone's session bar, toggle included (#2843).
+  await expect(page.getByRole("button", { name: "Side Panel" }).first().or(page.locator("#right-panel")).first()).toBeVisible();
+  if (!await page.locator("#right-panel").isVisible()) await page.getByRole("button", { name: "Side Panel" }).first().click();
   const row = launcherRow(page);
   // A remembered mode opens straight into Campaign Status; otherwise pick it from the launcher.
   if (await row.isVisible().catch(() => false)) {
@@ -447,7 +447,7 @@ test("labels and accessible names are Title Case, the list is keyboard operable,
     expect(box!.x + box!.width).toBeLessThanOrEqual(391);
 
     // Every label the panel writes is Title Case; item titles are user content and are skipped.
-    const body = page.locator(".rp-body");
+    const body = page.locator(".rpanel-body");
     const labels = await body.locator("button:not(.campaign-work-row), h3:not(.campaign-detail-title), h4, dt")
       .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("aria-label")?.split(":")[0] ?? node.textContent ?? "")
         .map((text) => text.trim()).filter(Boolean));

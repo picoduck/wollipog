@@ -672,6 +672,18 @@ export function Shell() {
         if (terminalSupported) setDockVisible((v) => !v);
         else rightPanel.show("launcher");
       }
+      // The Side Panel toggle's chord: closing keeps the tool, so it reopens on the last one (#1260).
+      // Opening lands on the tool switcher, so the arrow keys reach every other tool (#2843).
+      if (matchesShortcut(e, "toggle-side-panel") && activeSession) {
+        e.preventDefault();
+        const opening = !rightPanel.open;
+        rightPanel.toggle();
+        if (opening) {
+          window.requestAnimationFrame(() => {
+            document.querySelector<HTMLElement>("#right-panel .rpanel-switcher")?.focus();
+          });
+        }
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -747,8 +759,9 @@ export function Shell() {
       <main className="main">
         {/* Only the phone Session route keeps the app-level bar: destinations draw their own page
             header and entity pages their own detail bar (docs/design-system.md §4.2, §4.3), and
-            the desktop Session bar lives in SessionDetail. */}
-        {view.name === "session" && isMobile && (
+            the desktop Session bar lives in SessionDetail. While a phone's side panel is open it
+            covers this bar with its own, which leads with Back to Session (#2843). */}
+        {view.name === "session" && isMobile && !(rightPanel.open && activeSession) && (
           <Header
             view={view}
             sessionActions={sessionPanelControls}

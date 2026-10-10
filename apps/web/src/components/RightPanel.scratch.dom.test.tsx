@@ -319,7 +319,7 @@ test("Review drafts and view choices survive a mode switch and a panel close", a
     assert.equal(choice(panel, "Diff Layout", "Side by Side").getAttribute("aria-checked"), "true");
 
     await act(async () => panel.state.close());
-    assertNoDomNode(panel.container.querySelector(".right-panel"), "a closed panel renders nothing");
+    assertNoDomNode(panel.container.querySelector(".rpanel"), "a closed panel renders nothing");
     await panel.show("review");
     assert.equal(field(panel, "PR Description")!.value, "Round-tripping the whole body.",
       "closing and reopening the panel is the same unmount");

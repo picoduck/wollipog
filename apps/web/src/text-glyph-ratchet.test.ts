@@ -33,37 +33,35 @@ export const TEXT_GLYPHS = ["×", "✕", "✓", "▸", "▾", "↻", "←", "→
 // named by area and gain a number when filed.
 const COMPOSER = "Composer epic (not yet filed)";
 const SESSION_FRAME = "Session Page Frame and Header epic (not yet filed)";
-const REVIEW = "Review Panel epic (not yet filed)";
-const SIDE_PANEL = "Side Panel epic (not yet filed)";
+const RIGHT_PANEL = "Right Panel and Code Review epic (#2870)";
 const APPROVALS = "Approvals, Questions and Governance epic (#2226)";
 const AUTOMATIONS = "Automations epic (not yet filed)";
 const CONNECTIONS = "Connections epic (not yet filed)";
 const PODS = "Pods epic (not yet filed)";
-const RUNS = "Runs epic (not yet filed)";
 const TERMINAL = "Terminal epic (not yet filed)";
 
 /** The inventory, exact: [file, glyph, the enclosing literal's text, the owning area epic]. */
 const RECORDED: readonly (readonly [string, string, string, string])[] = [
   ["components/AutomationsView.tsx", "▸", "▸", AUTOMATIONS],
   ["components/AutomationsView.tsx", "×", "×", AUTOMATIONS],
-  ["components/FilesPanel.tsx", "↻", "↻ Refresh", SIDE_PANEL],
-  ["components/GitDiffViewer.tsx", "▾", "▾", REVIEW],
-  ["components/GitDiffViewer.tsx", "▸", "▸", REVIEW],
-  ["components/GitDiffViewer.tsx", "→", "→", REVIEW],
-  ["components/GitDiffViewer.tsx", "✓", "Staged ✓", REVIEW],
+  ["components/FilesPanel.tsx", "↻", "↻ Refresh", RIGHT_PANEL],
+  ["components/GitDiffViewer.tsx", "▾", "▾", RIGHT_PANEL],
+  ["components/GitDiffViewer.tsx", "▸", "▸", RIGHT_PANEL],
+  ["components/GitDiffViewer.tsx", "→", "→", RIGHT_PANEL],
+  ["components/GitDiffViewer.tsx", "✓", "Staged ✓", RIGHT_PANEL],
   ["components/OnboardRunnerDialog.tsx", "✓", "✓", CONNECTIONS],
   ["components/OnboardRunnerDialog.tsx", "△", "△", CONNECTIONS],
   ["components/OnboardRunnerDialog.tsx", "✓", "✓", CONNECTIONS],
   ["components/OnboardRunnerDialog.tsx", "↻", "↻ Retry", CONNECTIONS],
   ["components/PodsView.tsx", "→", "→", PODS],
   ["components/PodsView.tsx", "→", "→", PODS],
-  ["components/ReviewPanel.tsx", "↻", "↻ Refresh", REVIEW],
-  ["components/ReviewPanel.tsx", "↻", "↻ Refresh Diff", REVIEW],
-  ["components/ReviewPanel.tsx", "↻", "↻ Refresh", REVIEW],
-  ["components/ReviewPanel.tsx", "✓", "✓", REVIEW],
-  ["components/ReviewPanel.tsx", "✓", "✓ Committed", REVIEW],
-  ["components/ReviewPanel.tsx", "✓", "✓", REVIEW],
-  ["components/RunsView.tsx", "×", "×", RUNS],
+  ["components/ReviewPanel.tsx", "↻", "↻ Refresh", RIGHT_PANEL],
+  ["components/ReviewPanel.tsx", "↻", "↻ Refresh Diff", RIGHT_PANEL],
+  ["components/ReviewPanel.tsx", "↻", "↻ Refresh", RIGHT_PANEL],
+  ["components/ReviewPanel.tsx", "✓", "✓", RIGHT_PANEL],
+  ["components/ReviewPanel.tsx", "✓", "✓ Committed", RIGHT_PANEL],
+  ["components/ReviewPanel.tsx", "✓", "✓", RIGHT_PANEL],
+  ["components/RunsView.tsx", "×", "×", RIGHT_PANEL], // the artifact preview in Run detail (#2855)
   ["components/ShellDock.tsx", "×", "×", TERMINAL],
   ["components/ShellDock.tsx", "×", "×", TERMINAL],
 ];

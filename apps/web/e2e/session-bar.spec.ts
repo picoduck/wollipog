@@ -503,7 +503,7 @@ for (const theme of ["dark", "light"] as const) {
         .find((glyph) => button.querySelector("svg")?.classList.contains(glyph)),
     })));
     expect(names.map(({ name }) => name)).toEqual(["Pinned Summary", "Terminal", "Side Panel"]);
-    expect(names.map(({ title }) => title)).toEqual(["Pinned Summary", "Terminal (Ctrl+`)", "Side Panel"]);
+    expect(names.map(({ title }) => title)).toEqual(["Pinned Summary", "Terminal (Ctrl+`)", "Side Panel (Ctrl+\\)"]);
     expect(names.map(({ glyph }) => glyph)).toEqual([
       "lucide-info", "lucide-square-terminal", "lucide-panel-right",
     ]);

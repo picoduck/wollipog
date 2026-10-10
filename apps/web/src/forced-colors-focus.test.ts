@@ -225,11 +225,11 @@ test("every reviewed entry says why focus stays visible", () => {
 test("the Resize Panel separator's focus rule keeps a transparent outline", () => {
   const rules: string[] = [];
   postcss.parse(css).walkRules((rule) => {
-    if (!selectorMembers(rule.selector).some((member) => member.startsWith(".right-panel-resizer"))) return;
+    if (!selectorMembers(rule.selector).some((member) => member.startsWith(".rpanel-resizer"))) return;
     const outline = rule.nodes.filter((node): node is Declaration => node.type === "decl" && setsOutline(node));
     if (outline.length) rules.push(`${contextOf(rule)}${selectorMembers(rule.selector).join(", ")} { ${outline.map(normalise).join("; ")} }`);
   });
-  assert.deepEqual(rules, [".right-panel-resizer:hover, .right-panel-resizer:focus-visible { outline: 2px solid transparent; outline-offset: -2px }"]);
+  assert.deepEqual(rules, [".rpanel-resizer:hover, .rpanel-resizer:focus-visible { outline: 2px solid transparent; outline-offset: -2px }"]);
 });
 
 test("outlineInventory records every outline that is not a known-good ring", () => {

@@ -1,1 +1,0 @@
-|.rp-back,.rp-close|font-size|16

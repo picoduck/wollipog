@@ -1,5 +1,6 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
-import { CampaignIcon, ChevronLeftIcon, CloseIcon, CommandLineIcon, DiffIcon, FolderIcon, GlobeIcon, QuestionIcon, InboxIcon, JobsIcon, LockIcon, TeamIcon } from "./Icons.js";
+import { createContext, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { createPortal } from "react-dom";
+import { CampaignIcon, ChevronDownIcon, ChevronLeftIcon, CloseIcon, CommandLineIcon, DiffIcon, FolderIcon, GlobeIcon, GridIcon, QuestionIcon, InboxIcon, JobsIcon, LockIcon, TeamIcon } from "./Icons.js";
 import {
   pendingRequests,
   runnerCapabilityRequirement,
@@ -39,8 +40,19 @@ import { BackgroundWorkPanel } from "./BackgroundWorkPanel.js";
 import { loadBrowserStorageValue, saveBrowserStorageValue } from "../instance-storage.js";
 import { SessionRequestPanel, sessionRequestPanelKey, type DescendantRequestStatus } from "./SessionRequestPanel.js";
 import { CampaignStatusPanel } from "./CampaignStatusPanel.js";
-import { useIsMobile } from "./useIsMobile.js";
+import { useIsCoarsePointer, useIsMobile } from "./useIsMobile.js";
 import type { CampaignStatusAvailability } from "../campaign-status.js";
+import { useAccessibleMenu } from "./interactions.js";
+import { MenuItem, MenuLabel, MenuSeparator, MenuSurface } from "./Menu.js";
+import {
+  BACKGROUND_WORK_UNAVAILABLE,
+  SESSION_TOOL_GROUPS,
+  SESSION_TOOLS,
+  sessionTool,
+  sessionToolAvailability,
+  type SessionToolContext,
+  type SessionToolId,
+} from "../session-tools.js";
 
 /** Viewport-aware width ceiling: the panel may take at most ~40% of the window, so the
  * transcript + composer always keep a usable share on narrow/split-screen windows. */
@@ -52,15 +64,48 @@ const EMPTY_PARENT_TURN_EVENTS: ReadonlyMap<string, number> = new Map();
 const EMPTY_GOVERNANCE_DECISIONS: readonly GovernanceDecision[] = [];
 const HIDDEN_CAMPAIGN: CampaignStatusAvailability = { kind: "hidden" };
 
+/**
+ * Where focus goes when the panel closes: the control that opened it, else the session's composer.
+ * A phone's panel replaces its session app bar, toggle included, and the composer (#2843), so when
+ * the opener is gone it returns to the conversation itself, where focusing the composer would raise
+ * the software keyboard nobody asked for.
+ */
 export function panelReturnFocusTarget(
   captured: HTMLElement | null,
   sessionId: string,
   root: ParentNode = document,
+  phone = false,
 ): HTMLElement | null {
   if (captured?.isConnected) return captured;
   const surface = [...root.querySelectorAll<HTMLElement>("[data-session-surface-id]")]
     .find((candidate) => candidate.dataset.sessionSurfaceId === sessionId);
-  return surface?.querySelector<HTMLElement>(".composer-input") ?? null;
+  return surface?.querySelector<HTMLElement>(phone ? ".detail-scroll" : ".composer-input") ?? null;
+}
+
+/**
+ * Whether a layer above the panel owns Escape: a modal dialog, or an open menu or popover, which
+ * the shell closes through its backdrop (§16.2).
+ */
+function escapeTakenAbovePanel(): boolean {
+  return Boolean(document.querySelector('[role="dialog"][aria-modal="true"], .menu-backdrop'));
+}
+
+/** The header's action slot, once it is mounted. Only RightPanel provides it (and tests). */
+export const PanelActionSlotContext = createContext<HTMLElement | null>(null);
+
+/**
+ * The side panel header's action slot (#2843): the one extension point through which a tool puts
+ * its own actions in the 48px header, between the tool switcher and Close Panel (on a phone, after
+ * the switcher). A tool renders this anywhere inside its body; its children are portalled into the
+ * header, in order, and leave with the tool. Use `.icon-btn` buttons (32px, 44px on touch) with a
+ * Title Case `aria-label` and the same `title`; a pushed page's Back, an About popover and similar
+ * per-tool controls (#2856) belong here rather than in a second bar inside the body.
+ *
+ * Outside the side panel it renders nothing.
+ */
+export function PanelHeaderActions({ children }: { children: ReactNode }) {
+  const slot = useContext(PanelActionSlotContext);
+  return slot ? createPortal(children, slot) : null;
 }
 
 /**
@@ -184,18 +229,115 @@ export function useRightPanelState(navigationScope: string | null = null, attent
   };
 }
 
-const MODE_TITLES: Record<RightPanelMode, string> = {
-  launcher: "Panel",
-  requests: "Requests",
-  campaign: "Campaign Status",
-  review: "Review",
-  files: "Files",
-  browser: "Browser",
-  sidechat: "Side Chat",
-  subagents: "Agents",
-  background: "Background Work",
-  decisions: "Decision History",
+/** Each tool's 16px glyph, shared by the switcher and the Session Tools list. */
+export const SESSION_TOOL_ICONS: Record<SessionToolId, (props: { size?: number }) => ReactNode> = {
+  launcher: GridIcon,
+  review: DiffIcon,
+  files: FolderIcon,
+  browser: GlobeIcon,
+  terminal: CommandLineIcon,
+  subagents: TeamIcon,
+  sidechat: QuestionIcon,
+  background: JobsIcon,
+  campaign: CampaignIcon,
+  requests: InboxIcon,
+  decisions: LockIcon,
 };
+
+function SessionToolIcon({ id, size = 16 }: { id: SessionToolId; size?: number }) {
+  const Icon = SESSION_TOOL_ICONS[id];
+  return <Icon size={size} />;
+}
+
+/**
+ * The header's title: the current tool's icon and name and a caret, opening a menu of every tool
+ * (§9.1): Session Tools first, then the Code, Work and Decisions groups, the current tool checked.
+ * An unavailable tool stays focusable, with its reason as its description, so it is announced.
+ * Terminal opens the bottom dock rather than becoming the panel's tool, so it is a plain item.
+ */
+function ToolSwitcher({
+  current,
+  context,
+  triggerRef,
+  onChoose,
+}: {
+  current: RightPanelMode;
+  context: SessionToolContext;
+  triggerRef: { current: HTMLButtonElement | null };
+  onChoose: (tool: SessionToolId) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const menu = useAccessibleMenu(open, setOpen, "session-tool-switcher", "item", { reachUnavailable: true });
+  const coarsePointer = useIsCoarsePointer();
+  const tool = sessionTool(current);
+  const setTrigger = (element: HTMLButtonElement | null) => {
+    menu.triggerRef.current = element;
+    triggerRef.current = element;
+  };
+  const item = (id: SessionToolId) => {
+    const availability = sessionToolAvailability(id, context);
+    if (!availability.listed) return null;
+    const entry = sessionTool(id);
+    const reason = availability.unavailableReason;
+    return (
+      <MenuItem
+        key={id}
+        role={id === "terminal" ? "menuitem" : "menuitemradio"}
+        checked={id === "terminal" ? undefined : id === current}
+        icon={<SessionToolIcon id={id} />}
+        aria-disabled={reason ? "true" : undefined}
+        description={reason ?? undefined}
+        trail={entry.shortcut && !coarsePointer ? <kbd>{shortcutDisplay(entry.shortcut)}</kbd> : undefined}
+        onClick={() => {
+          if (reason) return;
+          menu.close(true);
+          if (id !== current) onChoose(id);
+        }}
+      >
+        {entry.name}
+      </MenuItem>
+    );
+  };
+  return (
+    <h2 className="rpanel-title">
+      <button
+        ref={setTrigger}
+        type="button"
+        className="rpanel-switcher"
+        title="Switch Tool"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? menu.menuId : undefined}
+        onClick={menu.toggle}
+        onKeyDown={menu.onTriggerKeyDown}
+      >
+        <span className="rpanel-switcher-icon" aria-hidden="true"><SessionToolIcon id={current} /></span>
+        <span className="rpanel-switcher-name">{tool.name}</span>
+        <span className="rpanel-switcher-caret" aria-hidden="true"><ChevronDownIcon size={16} /></span>
+      </button>
+      {open && (
+        <MenuSurface
+          surfaceRef={menu.menuRef}
+          anchor={{ trigger: menu.triggerRef }}
+          id={menu.menuId}
+          label="Switch Tool"
+          tabIndex={-1}
+          onDismiss={() => menu.close(true)}
+          onKeyDown={menu.onMenuKeyDown}
+        >
+          {item("launcher")}
+          {SESSION_TOOL_GROUPS.map((group) => (
+            <div key={group} role="group" aria-label={group}>
+              <MenuSeparator />
+              <MenuLabel>{group}</MenuLabel>
+              {SESSION_TOOLS.filter((candidate) => candidate.group === group).map((candidate) => item(candidate.id))}
+            </div>
+          ))}
+        </MenuSurface>
+      )}
+    </h2>
+  );
+}
 
 /**
  * Desktop-style right side panel: a toggleable, resizable column beside the chat.
@@ -299,16 +441,24 @@ export function RightPanel({
   const terminalSupported = runnerSupportsProtocol(runnerProtocolVersion, "sessionShells");
   const filesHint = runnerCapabilityRequirement(runnerProtocolVersion, "sessionFiles", "session file browsing");
   const terminalHint = runnerCapabilityRequirement(runnerProtocolVersion, "sessionShells", "session terminal access");
+  const phone = useIsMobile();
+  const switcherRef = useRef<HTMLButtonElement | null>(null);
+  // The element the current tool's PanelHeaderActions portal into.
+  const [actionSlot, setActionSlot] = useState<HTMLDivElement | null>(null);
 
   useLayoutEffect(() => {
     const wasOpen = previouslyOpenRef.current;
     previouslyOpenRef.current = state.open;
     if (!wasOpen && state.open) {
-      returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      const active = document.activeElement;
+      returnFocusRef.current = active instanceof HTMLElement && active !== document.body ? active : null;
+      // A phone's panel covers the session bar whose toggle opened it, so focus moves into the
+      // panel's own bar unless the tool already took it (#2843).
+      if (phone && !asideRef.current?.contains(document.activeElement)) switcherRef.current?.focus();
       return;
     }
     if (!wasOpen || state.open) return;
-    const target = panelReturnFocusTarget(returnFocusRef.current, session.id);
+    const target = panelReturnFocusTarget(returnFocusRef.current, session.id, document, phone);
     returnFocusRef.current = null;
     window.requestAnimationFrame(() => {
       // An overlay that replaced the panel (the phone's Pinned Summary sheet, #2147) owns focus by
@@ -319,7 +469,19 @@ export function RightPanel({
       if (document.activeElement?.closest("[data-session-request-focus]")) return;
       if (target?.isConnected) target.focus();
     });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.id, state.open]);
+
+  // Crossing the phone breakpoint with the panel open swaps Close Panel for Back to Session (and on
+  // a phone the session bar is not rendered), so focus that fell with a removed control lands on the
+  // switcher before the shell's own rescue looks for a page title that is not there.
+  const previousPhoneRef = useRef(phone);
+  useLayoutEffect(() => {
+    if (previousPhoneRef.current === phone) return;
+    previousPhoneRef.current = phone;
+    const active = document.activeElement;
+    if (state.open && (!active || active === document.body)) switcherRef.current?.focus();
+  }, [phone, state.open]);
 
   // Viewport-aware ceiling as STATE (the rendered width and the separator's ARIA range both
   // re-derive from it) — the stored width PREFERENCE is left untouched, so a temporary window
@@ -351,7 +513,6 @@ export function RightPanel({
     observer.observe(columns);
     return () => observer.disconnect();
   }, [state.open]);
-  const phone = useIsMobile();
   // Every mode docks or overlays by the same rule; a phone's panel is full-screen (styles.css).
   const overlay = state.open && !phone && columnsWidth !== null &&
     rightPanelOverlays(columnsWidth, clampRightPanelWidth(state.width, viewportMax));
@@ -383,14 +544,17 @@ export function RightPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.open]);
 
+  // Requests also closes on Escape with focus outside the panel, as it always has (#2206); every tool
+  // closes on Escape from inside the panel (onPanelKeyDown below).
   useEffect(() => {
     if (!state.open || state.mode !== "requests") return;
     const closeOnEscape = (event: globalThis.KeyboardEvent) => {
       if (event.defaultPrevented || event.key !== "Escape" || event.metaKey || event.ctrlKey || event.altKey) return;
-      // A modal opened from inside this panel (the enlarged evidence image) owns Escape. Both
-      // listeners sit on window and this one registered first, so without yielding here it would
-      // close the panel out from under the dialog and mark the event handled before the dialog saw it.
-      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+      // A modal opened from inside this panel (the enlarged evidence image) owns Escape, and an open
+      // menu or popover closes first. Both listeners sit on window and this one registered first, so
+      // without yielding here it would close the panel out from under the layer and mark the event
+      // handled before the layer saw it.
+      if (escapeTakenAbovePanel()) return;
       event.preventDefault();
       state.close();
     };
@@ -474,11 +638,25 @@ export function RightPanel({
     e.preventDefault();
   };
 
+  /**
+   * Escape closes the panel from any tool while focus is inside it (§16.2; #1260), once nothing
+   * above the panel takes it: an open menu, popover or dialog, then whatever the tool itself layers
+   * on its body (a selection, a pushed page, an expanded state). Such a tool layer handles Escape
+   * first and calls `preventDefault()`, which this respects. A terminal keeps Escape for its shell;
+   * Ctrl+Esc leaves it first. React delivers this before the shell's window listener, so the session
+   * never reads the press as "leave the session".
+   */
+  const onPanelKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
+    if (event.key !== "Escape" || event.defaultPrevented || event.nativeEvent.isComposing) return;
+    if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+    if (event.target instanceof Element && event.target.closest(".xterm")) return;
+    if (escapeTakenAbovePanel()) return;
+    event.preventDefault();
+    state.close();
+  };
+
   // The session's own requests are on its request dock (#2179); this panel lists its descendants'.
-  // A request's detail has its own "‹ All Requests" (#2206), so the head's back control leaves while
-  // one is shown; a selection the list no longer holds (unavailable, or still loading) shows none.
-  const requestDetailShown = state.mode === "requests" && selectedRequestKey !== null &&
-    descendantRequests.some((request) => sessionRequestPanelKey(request.sessionId, request.occurrenceId) === selectedRequestKey);
+  // A request's detail has its own "‹ All Requests" inside the body (#2206).
   const ownRequests = dockRequests(pendingRequests(session.pendingApproval));
   const ownRequestKey = (request: (typeof ownRequests)[number]) =>
     sessionRequestPanelKey(session.id, request.occurrenceId ?? request.requestId);
@@ -636,11 +814,29 @@ export function RightPanel({
     }
   };
 
+  const backgroundAvailable = (session.backgroundJobs?.length ?? 0) > 0 ||
+    session.backgroundJobsAvailable === true ||
+    session.backgroundWorkTracking != null || session.backgroundWorkState != null;
+  const toolContext: SessionToolContext = {
+    filesSupported, filesHint, terminalSupported, terminalHint, backgroundAvailable, campaignAvailability,
+  };
+  const chooseTool = (tool: SessionToolId) => {
+    if (tool === "terminal") {
+      onOpenTerminal();
+      return;
+    }
+    // Requests opens the list, never a request left open from an earlier visit.
+    if (tool === "requests") onSelectedRequestKeyChange(null);
+    state.setMode(tool);
+  };
+
   return (
     <>
-      {/* An overlaying panel has no handle: it keeps the width chosen while docked (#2725). */}
+      {/* An overlaying panel has no handle: it keeps the width chosen while docked (#2725). The
+          handle is an 8px strip centred on the panel's edge that takes no room of its own; a line
+          shows on hover and focus, and the width shows beside it while dragging (#2843). */}
       {!overlay && <div
-        className="right-panel-resizer"
+        className="rpanel-resizer"
         role="separator"
         aria-orientation="vertical"
         aria-label="Resize Panel"
@@ -649,7 +845,7 @@ export function RightPanel({
         aria-valuemax={clampRightPanelWidth(Number.MAX_SAFE_INTEGER, viewportMax)}
         aria-valuenow={effectiveWidth}
         aria-valuetext={`${effectiveWidth} pixels`}
-        title="Drag to resize · double-click to reset"
+        data-dragging={state.dragging ? "true" : undefined}
         tabIndex={0}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
@@ -660,64 +856,62 @@ export function RightPanel({
         onDoubleClick={() => state.setWidth(() => RIGHT_PANEL_DEFAULT_WIDTH)}
         onFocus={() => { resizerFocused.current = true; }}
         onBlur={(event) => { if (event.currentTarget.isConnected) resizerFocused.current = false; }}
-      />}
+      >
+        {state.dragging && <span className="rpanel-resize-tip" aria-hidden="true">{effectiveWidth}px</span>}
+      </div>}
       {/* Where docking would leave the chat column under 480px, every mode opens over the transcript
           from the right, over a scrim a press on which closes the panel as Close Panel does (§15.2;
           #2206, #2725). */}
-      {overlay && <div className="rp-scrim" aria-hidden="true" onClick={state.close} />}
+      {overlay && <div className="rpanel-scrim" aria-hidden="true" onClick={state.close} />}
       <aside
         ref={asideRef}
         id="right-panel"
-        className="right-panel"
+        className="rpanel"
         data-mode={state.mode}
         data-presentation={overlay ? "overlay" : "docked"}
         style={{ width: effectiveWidth }}
-        aria-label={MODE_TITLES[state.mode]}
+        aria-label="Side Panel"
+        onKeyDown={onPanelKeyDown}
       >
-        <div className="rp-head">
-          {state.mode !== "launcher" && !requestDetailShown && (
+        {/* One 48px bar in every tool (§4.4): the tool switcher as the title, the tool's actions,
+            then Close Panel. A phone's panel covers the session bar, so its bar leads with Back to
+            Session instead and has no Close (#2843). */}
+        <div className="rpanel-head">
+          {phone && (
             <button
               type="button"
-              className="icon-btn rp-back"
-              onClick={() => state.setMode("launcher")}
-              title="Back to Panel List"
-              aria-label="Back to Panel List"
+              className="icon-btn"
+              onClick={state.close}
+              title="Back to Session"
+              aria-label="Back to Session"
             >
               <ChevronLeftIcon />
             </button>
           )}
-          <span className="rp-title">
-            {MODE_TITLES[state.mode]}
-            {state.mode === "review" && git.status && (
-              <span className="rp-subtitle">
-                {git.status.branch} · {git.status.files.length} Change{git.status.files.length === 1 ? "" : "s"}
-              </span>
-            )}
-          </span>
-          <button ref={closeRef} type="button" className="icon-btn rp-close" onClick={state.close} title="Close Panel" aria-label="Close Panel">
-            <CloseIcon />
-          </button>
+          <ToolSwitcher current={state.mode} context={toolContext} triggerRef={switcherRef} onChoose={chooseTool} />
+          <div className="rpanel-actions" ref={setActionSlot} />
+          {!phone && (
+            <button ref={closeRef} type="button" className="icon-btn" onClick={state.close} title="Close Panel" aria-label="Close Panel">
+              <CloseIcon />
+            </button>
+          )}
         </div>
-        {state.mode === "launcher" ? (
-          <Launcher
-            onPick={(m) => {
-              // The Requests row opens the list, never a request left open from an earlier visit.
-              if (m === "requests") onSelectedRequestKeyChange(null);
-              state.setMode(m);
-            }}
-            onOpenTerminal={onOpenTerminal}
-            filesSupported={filesSupported}
-            filesHint={filesHint}
-            terminalSupported={terminalSupported}
-            terminalHint={terminalHint}
-            backgroundAvailable={(session.backgroundJobs?.length ?? 0) > 0 ||
-              session.backgroundJobsAvailable === true ||
-              session.backgroundWorkTracking != null || session.backgroundWorkState != null}
-            campaignAvailability={campaignAvailability}
-          />
-        ) : (
-          <div className="rp-body">{modeBody(state.mode)}</div>
-        )}
+        <PanelActionSlotContext.Provider value={actionSlot}>
+          {state.mode === "launcher" ? (
+            <Launcher
+              onPick={chooseTool}
+              onOpenTerminal={onOpenTerminal}
+              filesSupported={filesSupported}
+              filesHint={filesHint}
+              terminalSupported={terminalSupported}
+              terminalHint={terminalHint}
+              backgroundAvailable={backgroundAvailable}
+              campaignAvailability={campaignAvailability}
+            />
+          ) : (
+            <div className="rpanel-body">{modeBody(state.mode)}</div>
+          )}
+        </PanelActionSlotContext.Provider>
       </aside>
     </>
   );
@@ -814,7 +1008,7 @@ function Launcher({
       <LauncherRow
         label="Background Work"
         disabled={!backgroundAvailable}
-        hint="No background-work capability or history is available for this session."
+        hint={BACKGROUND_WORK_UNAVAILABLE}
         onClick={() => onPick("background")}
         icon={<JobsIcon size={14} />}
       />

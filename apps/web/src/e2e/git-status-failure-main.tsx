@@ -35,7 +35,7 @@ createRoot(document.getElementById("root")!).render(
   <ApiProvider client={client}>
     <FeedbackProvider>
       <main className="app" style={{ minHeight: "100vh", background: "var(--bg)", padding: 16 }}>
-        <section className="right-panel" style={{ maxWidth: 820, margin: "0 auto" }}><Panel /></section>
+        <section className="rpanel" style={{ width: "100%", maxWidth: 820, margin: "0 auto" }}><Panel /></section>
       </main>
     </FeedbackProvider>
   </ApiProvider>,

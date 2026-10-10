@@ -6,8 +6,6 @@ import { expect, test, type Page } from "@playwright/test";
  * Every mode answers the same way at the same width, in the real Shell with its rail.
  */
 const CHAT_MIN = 480;
-/** The resize handle with its margins (right-panel.ts `RIGHT_PANEL_RESIZER_SPAN`). */
-const HANDLE = 10;
 
 async function openSession(page: Page, width: number, labelled: boolean) {
   await page.setViewportSize({ width, height: 860 });
@@ -36,8 +34,8 @@ async function measure(page: Page) {
       body: rect(".detail-body")!,
       panel: rect("#right-panel")!,
       bar: rect("header.session-bar")!,
-      scrim: rect(".rp-scrim"),
-      handle: rect(".right-panel-resizer"),
+      scrim: rect(".rpanel-scrim"),
+      handle: rect(".rpanel-resizer"),
       presentation: (document.querySelector("#right-panel") as HTMLElement | null)?.dataset.presentation,
     };
   });
@@ -46,7 +44,8 @@ async function measure(page: Page) {
 /** Checks one open mode's geometry and returns whether it overlays. */
 async function expectPresentation(page: Page, label: string): Promise<boolean> {
   const at = await measure(page);
-  const overlays = at.columns.width - at.panel.width - HANDLE < CHAT_MIN;
+  // The resize handle straddles the panel's edge and takes no room (#2843).
+  const overlays = at.columns.width - at.panel.width < CHAT_MIN;
   expect(at.presentation, label).toBe(overlays ? "overlay" : "docked");
   if (overlays) {
     // Over the transcript from the right edge of the session body, over a scrim on the chat column.
@@ -67,12 +66,15 @@ async function expectPresentation(page: Page, label: string): Promise<boolean> {
 }
 
 const CASES = [
-  // The 64px rail at 940px leaves the chat about 490px beside a 376px panel; the 208px labelled rail
-  // leaves about 346px. At 1099px both keep 480px.
+  // The 64px rail at 940px leaves the chat 500px beside a 376px panel; the 208px labelled rail
+  // leaves 356px. At 1099px both keep 480px beside the 400px default.
   { width: 940, labelled: false, overlays: false },
   { width: 940, labelled: true, overlays: true },
   { width: 1099, labelled: false, overlays: false },
   { width: 1099, labelled: true, overlays: false },
+  // #2843's widths: a 400px panel docks at 1100px; at 834px (an iPad) a 333px one leaves 437px.
+  { width: 1100, labelled: false, overlays: false },
+  { width: 834, labelled: false, overlays: true },
   // At the tier's narrowest width even the default rail leaves too little.
   { width: 800, labelled: false, overlays: true },
 ] as const;
@@ -82,7 +84,7 @@ for (const { width, labelled, overlays } of CASES) {
     await openSession(page, width, labelled);
     await page.getByRole("button", { name: "Side Panel", exact: true }).click();
     await expect(page.locator(".rp-launcher")).toBeVisible();
-    expect(await expectPresentation(page, "Panel")).toBe(overlays);
+    expect(await expectPresentation(page, "Session Tools")).toBe(overlays);
     // Every enabled row but Terminal, which opens the bottom dock rather than a panel mode.
     const rows = page.locator(".rp-launcher .rp-row:not([disabled]):not([aria-disabled='true'])")
       .filter({ hasNotText: /^Terminal/ });
@@ -94,7 +96,9 @@ for (const { width, labelled, overlays } of CASES) {
       await expect(page.locator(".rp-launcher")).toHaveCount(0);
       // Switching modes keeps the same presentation at the same width.
       expect(await expectPresentation(page, name), name).toBe(overlays);
-      await page.getByRole("button", { name: "Back to Panel List" }).click();
+      // Session Tools is the switcher's first item (#2843).
+      await page.locator("#right-panel .rpanel-switcher").click();
+      await page.getByRole("menuitemradio", { name: "Session Tools", exact: true }).click();
       await expect(page.locator(".rp-launcher")).toBeVisible();
     }
   });
@@ -105,7 +109,7 @@ test("a press on the scrim closes an overlaid panel and returns focus to the con
   const toggle = page.getByRole("button", { name: "Side Panel", exact: true });
   await toggle.click();
   await expect(page.locator("#right-panel")).toHaveAttribute("data-presentation", "overlay");
-  const scrim = (await page.locator(".rp-scrim").boundingBox())!;
+  const scrim = (await page.locator(".rpanel-scrim").boundingBox())!;
   await page.mouse.click(scrim.x + 40, scrim.y + 200);
   await expect(page.locator("#right-panel")).toHaveCount(0);
   await expect(toggle).toBeFocused();

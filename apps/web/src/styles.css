@@ -3727,16 +3727,18 @@ textarea {
   display: flex;
   flex-direction: column;
 }
-.right-panel {
+/* The side panel (#2843; docs/design-system.md §2.5, §2.10): a docked column, flush with the frame,
+   the full height under the session bar, with one hairline on its leading edge. Its content answers
+   to the panel's own width through the `rp` container, never to the viewport. */
+.rpanel {
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  margin: 14px 0 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg-elev);
+  border-left: 1px solid var(--border);
+  background: var(--bg);
   overflow: hidden;
+  container: rp / inline-size;
 }
 
 /* Shared Transcript (#2173, docs/design-system.md §4.4, §12, §13.2): the page a share link opens,
@@ -3837,75 +3839,154 @@ textarea {
    transcript from the right, as a sheet over a scrim on the chat column (#2206, #2725); a press on
    the scrim closes it. RightPanel.tsx measures the row and draws the scrim only then, without a
    resize handle. The session bar stays outside it. A phone's panel is full-screen instead. */
-.detail-columns:has(> .right-panel[data-presentation="overlay"]) { position: relative; }
-.detail-columns > .rp-scrim {
+.detail-columns:has(> .rpanel[data-presentation="overlay"]) { position: relative; }
+.detail-columns > .rpanel-scrim {
   position: absolute;
   inset: 0;
   z-index: var(--z-panel);
   background: var(--modal-backdrop);
   animation: modal-fade-in var(--dur-base) var(--ease-out);
 }
-.detail-columns > .right-panel[data-presentation="overlay"] {
+.detail-columns > .rpanel[data-presentation="overlay"] {
   position: absolute;
   top: 0;
   right: 0;
   bottom: 0;
   z-index: var(--z-panel);
-  margin: 0;
-  border-top: none;
-  border-right: none;
-  border-bottom: none;
   box-shadow: var(--elev-2);
 }
-.right-panel-resizer {
-  width: 7px;
-  flex-shrink: 0;
-  margin: 14px -2px 10px 5px;
+/* The resize handle (#2843): an 8px hit strip centred on the panel's edge that takes no room of its
+   own, above the content on either side of it. A 2px line and a grip in --control-outline show on
+   hover, the line in the neutral --focus on keyboard focus, and the width in a tooltip while
+   dragging (§9.3). */
+.rpanel-resizer {
+  position: relative;
+  z-index: var(--z-sticky);
+  flex: none;
+  width: var(--space-2);
+  margin: 0 calc(-1 * var(--space-1));
   cursor: col-resize;
-  border-radius: 4px;
   touch-action: none; /* keep touch/pen drags from being claimed by browser panning */
 }
+.rpanel-resizer::before,
+.rpanel-resizer::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+.rpanel-resizer::before {
+  top: 0;
+  bottom: 0;
+  width: 2px;
+}
+.rpanel-resizer::after {
+  top: calc(50% - var(--space-3));
+  width: var(--space-1);
+  height: var(--space-6);
+  border-radius: var(--radius-xs);
+}
+@media (hover: hover) {
+  .rpanel-resizer:hover::before,
+  .rpanel-resizer:hover::after { background: var(--control-outline); }
+}
+.rpanel-resizer[data-dragging]::before,
+.rpanel-resizer[data-dragging]::after { background: var(--control-outline); }
 /* A transparent outline, not `none`: it paints nothing here, but forced colors drops the fill and
    repaints the outline in a system colour, so keyboard focus stays visible in a contrast theme. */
-.right-panel-resizer:hover,
-.right-panel-resizer:focus-visible {
-  background: var(--bg-elev-2);
+.rpanel-resizer:hover,
+.rpanel-resizer:focus-visible {
   outline: 2px solid transparent;
   outline-offset: -2px;
 }
-.rp-head {
+.rpanel-resizer:focus-visible::before,
+.rpanel-resizer:focus-visible::after { background: var(--focus); }
+.rpanel-resize-tip {
+  position: absolute;
+  top: 50%;
+  right: calc(100% + var(--space-1));
+  transform: translateY(-50%);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-xs);
+  background: var(--bg-elev-3);
+  color: var(--text);
+  font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+}
+/* The 48px header (§4.4): the tool switcher as the title, the tool's action slot, then Close Panel;
+   on a phone, Back to Session first and no Close. Its controls are the shared 32px icon buttons,
+   44px on touch (§2.8). */
+.rpanel-head {
   display: flex;
+  flex: none;
   align-items: center;
-  gap: 6px;
-  padding: 6px 8px 6px 12px;
+  gap: var(--space-1);
+  height: var(--bar-h);
+  padding-inline: var(--space-2);
   border-bottom: 1px solid var(--border);
 }
-.rp-title {
-  flex: 1;
-  font-size: 12.5px;
-  font-weight: 600;
+.rpanel-title {
+  display: flex;
+  min-width: 0;
+  margin: 0 auto 0 0;
+  font: inherit;
+}
+.rpanel-switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  height: var(--control-h);
+  padding-inline: var(--space-2);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font: var(--type-section);
+  cursor: pointer;
+}
+@media (hover: hover) {
+  .rpanel-switcher:hover { background: var(--bg-elev-2); }
+}
+.rpanel-switcher[aria-expanded="true"] { background: var(--bg-elev-2); }
+.rpanel-switcher-icon {
+  display: inline-flex;
+  flex: none;
   color: var(--text-dim);
 }
-.rp-back,
-.rp-close {
-  padding: 2px 8px;
-  font-size: 16px;
-  line-height: 1.2;
+.rpanel-switcher-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.rp-back {
-  margin-left: -6px;
+.rpanel-switcher-caret {
+  display: inline-flex;
+  flex: none;
+  color: var(--text-dim);
 }
-.rp-body {
+.rpanel-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+}
+.rpanel-actions:empty { display: none; }
+/* A tool's body, which scrolls as one. */
+.rpanel-body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 12px 14px;
+  padding: var(--space-3) var(--space-4);
   display: flex;
   flex-direction: column;
 }
 /* The Requests panel (#2206; docs/design-system.md §6, §6.2): a list that opens each child request in
    a detail in its place, at every width. Each view is one scroller below the panel head. */
-.rp-body:has(> .request-panel) {
+.rpanel-body:has(> .request-panel) {
   overflow: hidden;
   padding: 0;
 }
@@ -4676,11 +4757,6 @@ textarea {
 .rp-kbd {
   margin-left: auto;
 }
-.rp-subtitle {
-  margin-left: 8px;
-  font-weight: 400;
-  color: var(--text-faint);
-}
 /* A launcher row whose unavailability reason is visible text (Campaign Status, #2417; #1261). */
 .rp-row-text {
   display: grid;
@@ -4700,7 +4776,7 @@ textarea {
 }
 /* Campaign Status (#2417): summary facts over a filterable work list; an item's details replace it. */
 /* The panel owns its scroll so the list position it restores is the one the person sees. */
-.rp-body:has(> .campaign-status) {
+.rpanel-body:has(> .campaign-status) {
   overflow: hidden;
   padding: 0;
 }
@@ -5028,12 +5104,15 @@ textarea {
 .sidechat-shortcut { text-align: right; }
 
 @media (max-width: 600px) {
-  .browser-address { flex-wrap: wrap; }
-  .browser-address input { flex-basis: 100%; }
-  .browser-web-frame,
   .artifact-preview-frame { min-height: 55vh; }
   .sidechat-composer { flex-wrap: wrap; }
   .sidechat-composer textarea { flex-basis: 100%; min-height: 88px; }
+}
+/* The Browser tool answers to the panel's width, not the window's (§2.10; #2843). */
+@container rp (max-width: 600px) {
+  .browser-address { flex-wrap: wrap; }
+  .browser-address input { flex-basis: 100%; }
+  .browser-web-frame { min-height: 55vh; }
 }
 
 .detail-main {
@@ -5368,6 +5447,7 @@ textarea {
 }
 /* Phase 7: cost-budget ceiling input in the session-controls row */
 
+.composer[hidden] { display: none; }
 .composer {
   border-top: 1px solid var(--border);
   padding-top: 12px;
@@ -12789,8 +12869,8 @@ body.shell-dock-dragging * {
   container: session-preview / size;
 }
 .sessions-md[data-layout="right"] .session-detail.preview { --preview-inset: var(--space-6); }
-.session-detail.preview .right-panel,
-.session-detail.preview .right-panel-resizer,
+.session-detail.preview .rpanel,
+.session-detail.preview .rpanel-resizer,
 .session-detail.preview .composer { display: none; }
 .session-detail.preview .detail-columns,
 .session-detail.preview .detail-chat,
@@ -14318,6 +14398,19 @@ body.shell-dock-dragging * {
     ) .app-rail {
       display: none;
     }
+    /* The side panel's sheet follows the same rule (§15.1, #2843): with the tab bar gone it reaches
+       the keyboard, rather than leaving a gap where the bar was. --keyboard-inset is set only where
+       the keyboard covers the layout viewport instead of shrinking it. */
+    .app:has(
+      textarea:focus:not([readonly]),
+      [contenteditable=""]:focus,
+      [contenteditable="true"]:focus,
+      input:focus:not([readonly], [type="button"], [type="checkbox"], [type="color"],
+        [type="file"], [type="image"], [type="radio"], [type="range"], [type="reset"],
+        [type="submit"])
+    ) .rpanel {
+      bottom: var(--keyboard-inset, 0px);
+    }
     /* The same signal caps the request dock at 40% while typing (#2179), where no visual-viewport
        gap is published for `useSoftwareKeyboardOpen` to read. */
     .detail-chat:has(
@@ -14410,7 +14503,7 @@ body.shell-dock-dragging * {
   .rail-more-sheet.two-column > :is(.sheet-grabber, .menu-head, .menu-sep) { grid-column: 1 / -1; }
 
   /* Controls sit below the top safe-area inset (notch / Dynamic Island): 50px by default and
-     40px on Session routes. Each right-panel anchor below must mirror its corresponding calc. */
+     40px on Session routes. The side panel covers the Session bar instead of sitting under it. */
   .topbar {
     height: calc(50px + env(safe-area-inset-top, 0px));
     padding: env(safe-area-inset-top, 0px) calc(10px + env(safe-area-inset-right, 0px)) 0
@@ -14575,33 +14668,28 @@ body.shell-dock-dragging * {
     gap: var(--mobile-session-action-gap);
   }
 
-  /* Right panel: a full-width overlay under the topbar instead of a side column.
-     !important beats the inline desktop width RightPanel.tsx sets. Its edges are viewport
-     coordinates, which holds because a phone's `.main` is not the `app` container (§2.10): as one
-     at the build floor, it would end the panel --bottom-bar-h above the tab bar. */
-  .right-panel {
+  /* The side panel (#2843): a full-screen sheet that covers the session bar, which is not rendered
+     while it is open, and ends at the tab bar. Its own 48px bar sits below the top safe-area inset
+     and leads with Back to Session. !important beats the inline desktop width RightPanel.tsx sets.
+     Its edges are viewport coordinates, which holds because a phone's `.main` is not the `app`
+     container (§2.10): as one at the build floor, it would end the panel --bottom-bar-h above the
+     tab bar. */
+  .rpanel {
     position: fixed;
-    top: calc(50px + env(safe-area-inset-top, 0px)); /* the mobile topbar height above */
+    top: 0;
     left: 0;
     right: 0;
     bottom: var(--bottom-bar-h);
     width: auto !important;
-    margin: 0;
-    border-radius: 0;
     border-left: none;
-    border-right: none;
-    border-bottom: none;
     z-index: var(--z-panel);
     /* Full-bleed background, but content stays out of the notch/home-indicator zones
-       (landscape lateral insets + bottom inset). */
+       (landscape lateral insets + top inset). */
+    padding-top: env(safe-area-inset-top, 0px);
     padding-left: env(safe-area-inset-left, 0px);
     padding-right: env(safe-area-inset-right, 0px);
-    padding-bottom: 0;
   }
-  .app:has(.mobile-session-back) .right-panel {
-    top: calc(var(--bar-h) + env(safe-area-inset-top, 0px));
-  }
-  .right-panel-resizer {
+  .rpanel-resizer {
     display: none;
   }
   .background-work-group-head { align-items: center; }
@@ -14771,20 +14859,29 @@ body.shell-dock-dragging * {
   .workflow-role-bindings label { grid-template-columns: 1fr; gap: 4px; }
   .workflow-inspector { margin: 8px; padding: 10px; }
   .workflow-node-grid { grid-template-columns: 1fr; }
-  .diff-comment-add { opacity: 1; }
+}
+/* The diff and the findings answer to the side panel's width, not the window's (§2.10; #2843): a
+   400px panel on a desktop gets the narrow layout, and a single-column finding row. */
+@container rp (max-width: 640px) {
   .git-diff-view-controls { align-items: flex-start; flex-direction: column; }
   .git-diff-view-controls .seg { overflow-x: auto; }
   .diff-file-head-row { align-items: stretch; }
-  .diff-discard { min-height: 36px; }
   .diff-hunk-header { align-items: flex-start; flex-direction: column; }
   .hunk-actions { width: 100%; flex-wrap: wrap; }
-  .hunk-act { min-height: 32px; }
   .diff-comment-editor,
   .diff-inline-finding { margin-left: 10px; }
   .review-findings-head { align-items: flex-start; flex-direction: column; }
   .review-findings-actions { width: 100%; }
   .review-finding-row { grid-template-columns: 22px minmax(0, 1fr); }
   .review-finding-row-actions { grid-column: 2; }
+}
+/* The diff's touch affordances, which the narrow window stood in for: a comment button with no
+   hover to reveal it, and taller Discard and hunk actions. In a 400px desktop panel they keep their
+   hover reveal and mouse sizes (#2843). */
+@media (pointer: coarse) {
+  .diff-comment-add { opacity: 1; }
+  .diff-discard { min-height: 36px; }
+  .hunk-act { min-height: 32px; }
 }
 
 /* ------------------------------ Agent skills ------------------------------ */

@@ -86,8 +86,8 @@ test("details separate reported stages from observations and never show missing 
   await expect(details.locator("dd", { hasText: "This server does not record it yet." })).toContainText("Unavailable");
   await expect(details).toContainText("At least 9m");
   await expect(details).toContainText("Superseded, session deleted, $1.10 (estimated API cost)");
-  // Two back controls, two destinations: the panel header leaves the mode, the detail returns to the list.
-  await expect(page.getByRole("button", { name: "Back to Panel List" })).toHaveCount(1);
+  // One back control: the detail returns to the list; the panel header has only the tool switcher (#2843).
+  await expect(page.getByRole("button", { name: "Back to Panel List" })).toHaveCount(0);
   await page.getByRole("button", { name: "Back to Work Items" }).click();
 
   await workRows(page).filter({ hasText: "Ledger Read API" }).click();
@@ -95,7 +95,7 @@ test("details separate reported stages from observations and never show missing 
   await expect(details).toContainText("The next turn waits while the provider account switches.");
   await expect(page.getByRole("button", { name: "Open Requests" })).toBeVisible();
   await page.getByRole("button", { name: "Open Requests" }).click();
-  await expect(page.locator(".rp-title")).toHaveText("Requests");
+  await expect(page.locator(".rpanel-switcher-name")).toHaveText("Requests");
   expect(await page.evaluate(() => window.__WOLLIPOG_CAMPAIGN_STATUS_E2E__.selectedRequestKey()))
     .toBe(JSON.stringify(["s_child_3", "occ_1"]));
 });

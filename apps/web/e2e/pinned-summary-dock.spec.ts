@@ -108,7 +108,7 @@ test("a wide right panel turns the summary into a drawer, and the reader never d
     "wollipog.rightpanel.open": "1",
     "wollipog.rightpanel.width": "640",
   });
-  await expect(page.locator(".right-panel")).toBeVisible();
+  await expect(page.locator(".rpanel")).toBeVisible();
   await expect(toggle(page)).toHaveAttribute("aria-pressed", "false");
   await expect(summary(page)).toHaveCount(0);
   await toggle(page).click();
@@ -117,7 +117,7 @@ test("a wide right panel turns the summary into a drawer, and the reader never d
   await expect(page.locator(".ps-scrim")).toBeVisible();
   await expect(summary(page)).toBeFocused();
   const drawer = await box(summary(page));
-  const panel = await box(page.locator(".right-panel"));
+  const panel = await box(page.locator(".rpanel"));
   expect(drawer.right, "the drawer opens from the reader's right edge").toBeLessThanOrEqual(panel.x + 0.5);
   await toggle(page).click();
   await expect(summary(page)).toHaveCount(0);
@@ -230,15 +230,19 @@ test("at 390px the summary starts closed and opens as a bottom sheet with Close"
   expect(await page.evaluate(() => localStorage.getItem("wollipog.pinned.open")), "the sheet is not persisted").toBe("1");
 });
 
-test("at 390px the sheet replaces the full-screen right panel and keeps focus", async ({ page }) => {
+test("at 390px the open panel covers the summary's toggle; after Back to Session the sheet opens and keeps focus", async ({ page }) => {
   await openSession(page, 390, { "wollipog.pinned.open": "1" });
   await page.getByRole("button", { name: "Side Panel", exact: true, pressed: false }).click();
-  await expect(page.locator(".right-panel")).toBeVisible();
+  await expect(page.locator(".rpanel")).toBeVisible();
+  // The panel's sheet covers the session app bar and its toggles (#2843): one overlay at a time.
+  await expect(toggle(page)).toHaveCount(0);
+  await page.getByRole("button", { name: "Back to Session" }).click();
+  await expect(page.locator(".rpanel")).toHaveCount(0);
 
   await toggle(page).click();
   const sheet = page.getByRole("dialog", { name: "Pinned Summary" });
   await expect(sheet).toBeVisible();
-  await expect(page.locator(".right-panel")).toHaveCount(0);
+  await expect(page.locator(".rpanel")).toHaveCount(0);
   // The closed panel's deferred focus restore runs on the next frames; it must not pull focus out
   // of the sheet behind its scrim.
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));

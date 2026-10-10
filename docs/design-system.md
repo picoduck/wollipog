@@ -861,6 +861,46 @@ A path trail, such as the Files panel's folder path.
 - Separators are `.crumb-sep` (`/`, `--text-faint`, `aria-hidden`).
 - Replaces `.files-crumbs` and `.files-crumb`.
 
+### 4.9 Side Panel Frame
+
+Every session tool (Review, Files, Browser, Agents, Side Chat, Background Work, Campaign Status,
+Requests, Decision History, and Terminal once #2868 moves it) opens in one frame (#2843,
+`RightPanel.tsx`):
+
+- **Column.** `.rpanel` is docked and flush: no margin or radius (§2.5), one 1px `--border` hairline
+  on its leading edge, `--bg`, the full height under the session bar, 400px by default and 320px at
+  least. It is the `rp` container, so its content answers to the panel's width with `@container rp`
+  rules, never the viewport's (§2.10). It docks or overlays by §15.2's 480px rule.
+- **Header.** `.rpanel-head` is a 48px bar (§4.4): the tool switcher as the title, the tool's action
+  slot, then Close Panel. The landmark is named "Side Panel". There is one close control in every
+  tool and no back-to-list button; a request's detail keeps its own "All Requests" inside the body.
+- **Tool switcher.** The title is a button with the tool's 16px icon, its name in `--type-section`
+  and a caret. It opens a §9.1 menu built from `SESSION_TOOLS` (`session-tools.ts`, the same list
+  the Session Tools list renders): Session Tools first, then the Code, Work and Decisions groups
+  under section labels, the current tool checked, keycaps on fine pointers only. An unavailable tool
+  stays focusable with its reason as its second line.
+- **Action slot.** A tool puts its own header actions in the slot by rendering `PanelHeaderActions`
+  anywhere in its body: `.icon-btn` buttons (32px, 44px on touch) with Title Case names. It is the
+  one extension point for per-tool header controls (a pushed page's Back, an About popover), so a
+  tool never adds a second bar inside its body.
+- **Resize handle.** An 8px strip centred on the leading edge that takes no room. On hover a 2px
+  line and a grip in `--control-outline`, on keyboard focus the line in `--focus` (with a transparent
+  outline for forced colors), and the width in a tooltip while dragging. Arrow keys, Home, End,
+  double-click reset and the `aria-value*` range resize it.
+- **Keyboard.** The Side Panel chord (Ctrl/⌘+\\) toggles the panel and reopens the last tool, with
+  focus on the switcher, so the arrow keys reach every other tool.
+  Escape closes it from any tool while focus is inside, once nothing above takes Escape (§16.2): a
+  menu, popover or dialog first, then a layer the tool draws on its body, which handles Escape and
+  calls `preventDefault`. A terminal keeps Escape for its shell. Focus returns to the control that
+  opened the panel, else the composer.
+- **Phone.** The open panel is a full-screen sheet that covers the session bar (which is not
+  rendered) and ends at the tab bar. Its one 48px bar leads with Back to Session, then the switcher
+  and the tool's actions; there is no Close. The session composer is hidden while it is open (no
+  box, out of the accessibility tree, dictation ended), but stays mounted so an unsent secret answer
+  survives, and while a focused field hides the tab bar the sheet reaches the keyboard inset (§15.1). Back
+  returns focus to the control that opened the panel if it is still on screen, else to the
+  conversation (the app bar's toggle went with the bar).
+
 ---
 
 ## 5. Lists, Rows and Cards
@@ -2654,7 +2694,8 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
 - Right panel docks at 320px or overlays as a sheet from the right with a scrim when the chat column
   would drop below 480px. Every mode follows this one rule (#2725), measured from the row the chat
   column and the panel share, so the labelled rail and the panel's own width count: the row less the
-  panel and its 10px handle is the chat column's room. Overlaid, the panel sits on the right edge of
+  panel is the chat column's room (the resize handle straddles the panel's edge and takes no room of
+  its own, §4.9). Overlaid, the panel sits on the right edge of
   the session body over a scrim on the chat column. The session bar stays outside the scrim, a press
   on the scrim closes the panel as Close Panel does, and the resize handle is hidden. The stored width
   is unchanged and returns when the panel docks again. Switching modes never changes the
