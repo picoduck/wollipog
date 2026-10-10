@@ -13,12 +13,17 @@ import { isTimelineSessionActive, useTimelineClock } from "../timeline-clock.js"
 import { EventTimeline } from "./EventTimeline.js";
 import { subagentStatusContext, subagentWorkerStatus, workerStatusMeta, type SubagentStatusContextValue } from "../worker-roster.js";
 
-/** A subagent's one worker word, as its roster row and transcript row read it (#2857). */
+/**
+ * A subagent's one worker word, as its roster row and transcript row read it (#2857). Unverified means
+ * the runner is offline, so it follows the runner, not this panel's recorded-output availability: an
+ * unfinished agent of a failed session on an online runner is Lost on every surface.
+ */
 export function subagentStatusLabel(
-  descriptor: Pick<SubagentDescriptor, "id" | "lifecycle" | "availability">,
-  context: Pick<SubagentStatusContextValue, "attention">,
+  descriptor: Pick<SubagentDescriptor, "id" | "lifecycle">,
+  context: Pick<SubagentStatusContextValue, "attention" | "runnerOnline">,
 ): string {
-  return workerStatusMeta(subagentWorkerStatus(descriptor, context.attention.get(descriptor.id))).label;
+  return workerStatusMeta(subagentWorkerStatus({ lifecycle: descriptor.lifecycle,
+    availability: context.runnerOnline ? "live" : "recorded" }, context.attention.get(descriptor.id))).label;
 }
 
 function elapsed(descriptor: SubagentDescriptor, now: number): string {
@@ -91,9 +96,9 @@ export function SubagentsPanel({
     availability: runnerOnline && isTimelineSessionActive(session.status) ? "live" : "recorded",
   }), [items, runnerOnline, session.status]);
   const descriptors = projection.descriptors;
-  const statusContext = useMemo(() => subagentStatusContext(session, runnerOnline),
+  const statusContext = useMemo(() => subagentStatusContext(session, runnerOnline, projection.ambiguousIds),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [session.status, session.pendingApproval, runnerOnline]);
+    [session.status, session.pendingApproval, session.attentionOwners, runnerOnline, projection.ambiguousIds]);
   const selectionScope = `${session.id}:${session.eventEpoch ?? 0}`;
   const automaticSelection = useRef<{ scope: string; id: string | null }>({ scope: selectionScope, id: null });
   if (automaticSelection.current.scope !== selectionScope) {

@@ -16,6 +16,7 @@ import { assertNoDomNode } from "../dom-test-assertions.js";
 import { subagentStatusContext, type WorkerRow } from "../worker-roster.js";
 import { AgentsPanel, groupWorkerRows, memberMetadata } from "./AgentsPanel.js";
 import { subagentStatusMeta } from "./EventTimeline.js";
+import { SubagentsPanel } from "./SubagentsPanel.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 const globals: Record<string, unknown> = {
@@ -203,6 +204,40 @@ test("a nested worker indents once under its parent, and the roster and transcri
   } finally {
     await panel.unmount();
   }
+});
+
+test("an unfinished agent of a failed session on an online runner is Lost in the roster, the transcript and its page", async () => {
+  const failed = { ...session, status: "failed" } as SessionView;
+  const items = [agent("stuck", 1)];
+  const panel = await mount(items, { session: failed });
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const detail = createRoot(happyContainer);
+  try {
+    // Lost is settled, so it sits in History.
+    await act(async () => panel.container.querySelector<HTMLButtonElement>('[role="radio"][aria-label="History, 1"]')!.click());
+    assert.equal(text(panel.container.querySelector(".worker-row .status")), "Lost");
+    assert.equal(subagentStatusMeta(items[0] as Extract<TimelineItem, { kind: "tool_call" }>, subagentStatusContext(failed, true)).label, "Lost");
+    await act(async () => detail.render(<SubagentsPanel session={failed} items={items} runnerOnline requestedId="stuck"
+      onSelect={() => {}} detailOnly titled={false} />));
+    assert.match(text(happyContainer.querySelector(".subagent-detail-meta")), /^Lost · /);
+  } finally {
+    await act(async () => detail.unmount());
+    happyContainer.remove();
+    await panel.unmount();
+  }
+});
+
+test("a request is never attributed to an owner that is unresolved or ambiguous", () => {
+  const asking = { ...session, status: "input_required",
+    pendingApproval: { requestId: "ask", ownerToolUseId: "reused", title: "Pick", kind: "question", options: [], questions: [],
+      additionalRequests: [{ requestId: "edit", ownerToolUseId: "twice", title: "Edit: a.ts", options: [] }] },
+    attentionOwners: [{ requestId: "ask", toolCallId: "reused", resolved: false }] } as unknown as SessionView;
+  assert.deepEqual([...subagentStatusContext(asking, true).attention.keys()], ["twice"]);
+  assert.deepEqual([...subagentStatusContext(asking, true, new Set(["twice"])).attention.keys()], []);
+  const reused = { kind: "tool_call", id: 1, toolCallId: "reused", title: "Agent: Reused", text: "", toolKind: "agent",
+    status: "in_progress" } as Extract<TimelineItem, { kind: "tool_call" }>;
+  assert.equal(subagentStatusMeta(reused, subagentStatusContext(asking, true)).label, "Running");
 });
 
 test("members sit under their pod's or run's title, workflow members under Workflow when the run is not loaded", () => {

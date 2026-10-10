@@ -103,12 +103,21 @@ export interface SubagentStatusContextValue {
   attention: ReadonlyMap<string, SessionAttentionKind>;
 }
 
+/**
+ * A request is attributed to an agent row only when its owner names exactly one agent: never to an
+ * owner the control plane reports unresolved (a reused provider tool-call id), nor to one the local
+ * projection found ambiguous, since the roster cannot list that worker either.
+ */
 export function subagentStatusContext(
-  session: Pick<SessionView, "status" | "pendingApproval">,
+  session: Pick<SessionView, "status" | "pendingApproval" | "attentionOwners">,
   runnerOnline: boolean,
+  ambiguousIds: ReadonlySet<string> = new Set(),
 ): SubagentStatusContextValue {
+  const unresolved = new Set((session.attentionOwners ?? []).filter((owner) => !owner.resolved).map((owner) => owner.toolCallId));
   const attention = new Map<string, SessionAttentionKind>();
-  for (const [owner, request] of pendingRequestsByOwner(session.pendingApproval)) attention.set(owner, requestAttentionKind(request));
+  for (const [owner, request] of pendingRequestsByOwner(session.pendingApproval)) {
+    if (!unresolved.has(owner) && !ambiguousIds.has(owner)) attention.set(owner, requestAttentionKind(request));
+  }
   return { sessionStatus: session.status, runnerOnline, attention };
 }
 
