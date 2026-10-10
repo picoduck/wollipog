@@ -111,7 +111,10 @@ test("variant rates require their request coordinates even when pricing context 
         const reported = priceUsage(table, model, buckets, cost, context);
         assert.equal(reported.costUsd, cost);
         assert.equal(reported.costSource, "providerReported");
+        assert.equal(reported.cacheSavingsUsd, context === undefined || model === "tier-only" ? 9 : 0,
+          "supplied costs retain the existing savings behavior even without variant coordinates");
         assert.equal(priceUsage(table, model, buckets, cost, context, true).costSource, "modelPriced");
+        assert.equal(priceUsage(table, model, buckets, cost, context, true).cacheSavingsUsd, reported.cacheSavingsUsd);
       }
     }
   }
@@ -125,6 +128,19 @@ test("variant rates require their request coordinates even when pricing context 
   assert.equal(base.costSource, "modelPriced");
   assert.equal(base.costUsd, 300003);
   assert.deepEqual(priceUsage(table, "base-only", buckets, null, {}), base);
+});
+
+test("supplied Claude cost estimates keep base cache savings when request context is absent", () => {
+  const table = parseRateTable({ example: {
+    input_cost_per_token: 3e-6, output_cost_per_token: 15e-6, cache_read_input_token_cost: 3e-7,
+    input_cost_per_token_above_200k_tokens: 6e-6, output_cost_per_token_above_200k_tokens: 22.5e-6,
+  } });
+  const buckets = { uncachedInputTokens: 0, cachedInputTokens: 1000, cacheCreationTokens: 0, outputTokens: 0 };
+  const reported = priceUsage(table, "example", buckets, 0.01, undefined, true);
+  assert.equal(reported.costUsd, 0.01);
+  assert.equal(reported.costSource, "modelPriced");
+  assert.ok(Math.abs(reported.cacheSavingsUsd - 0.0027) < 1e-12);
+  assert.equal(priceUsage(table, "example", buckets, undefined).costSource, "unpriced");
 });
 
 test("request tier and long-context rates apply to every billable bucket and cache savings", () => {

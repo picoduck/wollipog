@@ -101,6 +101,7 @@ missing, including when the entire context object is absent. Turn input totals c
 request's context tier. Base-only models still use their base rate, and provider-reported costs
 still take precedence. Unpriced tokens remain in totals with incomplete provenance and a cost
 lower bound; budgeted sessions with entirely unpriced usage use the existing `cost_unpriced` gate.
+Supplied costs without request context retain the existing base-rate cache-savings calculation.
 
 Primary contracts: [Claude cost and usage](https://code.claude.com/docs/en/agent-sdk/cost-tracking), [SDK changelog](https://github.com/anthropics/claude-agent-sdk-typescript/blob/main/CHANGELOG.md), [Codex 0.160.0 thread usage](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/core/src/session/mod.rs), and [OpenAI API pricing](https://developers.openai.com/api/docs/pricing). The ccusage loader and pricing implementations were cross-checked for cumulative deltas, cache splitting, deduplication, and request tiers. Its precomputed-cost display mode does not turn SDK estimates into authoritative billing.
 
