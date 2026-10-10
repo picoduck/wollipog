@@ -400,9 +400,9 @@ test("Background Work counts only jobs the Background Work panel shows as runnin
     assert.equal(fact(panel.container, "background"), "1 of 2 jobs running");
     // Without the runner's aggregate running state the job is unverified, never running.
     await panel.setProps({ session: { ...session, backgroundJobs: [job, done], backgroundWorkState: undefined } });
-    assert.equal(fact(panel.container, "background"), "0 of 2 jobs running");
+    assert.equal(fact(panel.container, "background"), "0 of 2 jobs running, 1 unverified");
     await panel.setProps({ session: { ...session, backgroundJobs: [job, done], backgroundWorkState: "orphaned" } });
-    assert.equal(fact(panel.container, "background"), "0 of 2 jobs running");
+    assert.equal(fact(panel.container, "background"), "0 of 2 jobs running, 1 lost");
   } finally {
     await panel.dispose();
   }
@@ -417,6 +417,9 @@ test("Background Work never reads as empty history when a server omits the inven
     assert.equal(fact(panel.container, "background"), "Background work was lost");
     await panel.setProps({ session: { ...session, backgroundWorkTracking: "managed" } });
     assert.equal(fact(panel.container, "background"), "This server doesn't say whether jobs have run");
+    // A provider whose detached work the runner cannot observe proves nothing by an empty list.
+    await panel.setProps({ session: { ...session, backgroundWorkTracking: "untracked", backgroundJobs: [], backgroundJobsAvailable: false } });
+    assert.equal(fact(panel.container, "background"), "This agent's background work isn't tracked");
     // Known empty history is the one case that says nothing has run.
     await panel.setProps({
       session: { ...session, backgroundWorkTracking: "managed", backgroundJobsAvailable: false, backgroundJobs: [] },

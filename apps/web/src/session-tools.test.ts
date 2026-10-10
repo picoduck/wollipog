@@ -99,7 +99,8 @@ test("the other tools' facts read in sentence case (#2844)", () => {
   assert.equal(backgroundFact(["running", "completed", "failed"]), "1 of 3 jobs running");
   assert.equal(backgroundFact(["running"]), "1 of 1 job running");
   // Only a verified running job counts: unverified, lost and stalled ones are not running.
-  assert.equal(backgroundFact(["unverified", "lost", "stalled"]), "0 of 3 jobs running");
+  assert.equal(backgroundFact(["unverified", "lost", "stalled"]), "0 of 3 jobs running, 1 stalled, 1 unverified, 1 lost");
+  assert.equal(backgroundFact(["running", "completed"], true), "1 of 2+ jobs running");
   // Known history whose inventory is not loaded yet is never "nothing has run".
   assert.equal(backgroundFact("loading"), "Checking background jobs…");
   assert.equal(backgroundFact("error"), "Background jobs can't be loaded right now");
@@ -125,6 +126,12 @@ test("with no jobs to count, Background Work takes the Background Work panel's o
   assert.equal(backgroundInventoryGap({ backgroundJobs: [], backgroundDeliveries: [delivery] }, null), "delivered");
   assert.equal(backgroundInventoryGap({ backgroundJobsAvailable: true, backgroundDeliveries: [delivery], backgroundWorkState: "resumed" }, null), "delivered");
   assert.equal(backgroundFact("delivered"), "No jobs listed; earlier results are recorded");
+  // A provider whose detached work is not observed: an empty or omitted list proves nothing, while
+  // delivery receipts still come first.
+  assert.equal(backgroundInventoryGap({ backgroundWorkTracking: "untracked" }, null), "untracked");
+  assert.equal(backgroundInventoryGap({ backgroundWorkTracking: "untracked", backgroundJobs: [], backgroundJobsAvailable: false }, null), "untracked");
+  assert.equal(backgroundInventoryGap({ backgroundWorkTracking: "untracked", backgroundDeliveries: [delivery] }, null), "delivered");
+  assert.equal(backgroundFact("untracked"), "This agent's background work isn't tracked");
   // Truly nothing: known empty history, or resumed work with nothing listed.
   assert.equal(backgroundInventoryGap({ backgroundJobs: [], backgroundJobsAvailable: false }, null), null);
   assert.equal(backgroundInventoryGap({ backgroundJobs: [], backgroundWorkState: "resumed", backgroundJobsAvailable: false }, null), null);

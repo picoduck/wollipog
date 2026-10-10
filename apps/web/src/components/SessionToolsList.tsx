@@ -261,7 +261,7 @@ function SessionToolsListView({
         const inventorySupported = runnerSupportsProtocol(runnerProtocolVersion, "managedBackgroundInventory");
         const states = (session.backgroundJobs ?? []).map((job) => backgroundJobCurrentState(
           job, session.backgroundWorkState, runnerOnline, inventorySupported, Date.now()));
-        return { text: backgroundFact(states) };
+        return { text: backgroundFact(states, session.backgroundJobsTruncated === true) };
       }
       case "campaign": return { text: campaignFact(campaignWork) };
       case "requests": return {

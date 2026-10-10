@@ -139,7 +139,7 @@ export function agentsFact(subagents: number, more = false): string {
 }
 
 /** Why Background Work has no jobs to count, in the Background Work panel's terms. */
-export type BackgroundInventoryGap = "delivered" | "loading" | "error" | "unverified" | "reported" | "lost";
+export type BackgroundInventoryGap = "delivered" | "loading" | "error" | "unverified" | "reported" | "lost" | "untracked";
 
 /**
  * With no jobs listed, which of the Background Work panel's states the session is in (null when it
@@ -160,14 +160,16 @@ export function backgroundInventoryGap(
     return "unverified";
   }
   if (aggregate === "orphaned") return "lost";
-  return aggregate ? "reported" : null;
+  if (aggregate) return "reported";
+  // A provider whose detached work the runner cannot observe: its empty list proves nothing.
+  return session.backgroundWorkTracking === "untracked" ? "untracked" : null;
 }
 
 /**
  * Background Work: of the jobs the session lists, those the Background Work panel shows as Running
  * (`backgroundJobCurrentState`), so an unverified, lost or stalled job is never counted as running.
  */
-export function backgroundFact(states: readonly string[] | BackgroundInventoryGap): string {
+export function backgroundFact(states: readonly string[] | BackgroundInventoryGap, truncated = false): string {
   switch (states) {
     // A compact session view says job history exists without carrying it until it is loaded.
     case "loading": return "Checking background jobs…";
@@ -177,10 +179,18 @@ export function backgroundFact(states: readonly string[] | BackgroundInventoryGa
     case "unverified": return "This server doesn't say whether jobs have run";
     case "reported": return "The runner reports background work";
     case "lost": return "Background work was lost";
+    case "untracked": return "This agent's background work isn't tracked";
   }
   if (states.length === 0) return "Nothing has run in the background";
-  const running = states.filter((state) => state === "running").length;
-  return `${running} of ${count(states.length, "job", "jobs")} running`;
+  const tally = (state: string) => states.filter((candidate) => candidate === state).length;
+  // A capped list (the panel shows only the most relevant jobs) reads "50+".
+  const total = truncated ? `${states.length}+ jobs` : count(states.length, "job", "jobs");
+  // Current jobs the panel cannot call running are named, so none of them reads as finished.
+  const others = (["stalled", "unverified", "lost"] as const)
+    .map((state) => [state, tally(state)] as const)
+    .filter(([, n]) => n > 0)
+    .map(([state, n]) => `${n} ${state}`);
+  return [`${tally("running")} of ${total} running`, ...others].join(", ");
 }
 
 /** Campaign Status: delivered of committed work, when this browser holds the campaign's summary. */
