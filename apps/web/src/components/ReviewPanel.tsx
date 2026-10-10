@@ -195,19 +195,26 @@ export function ReviewPanel({
   const [scopeRemembered] = useState(
     () => session.useWorktree !== true || readPanelScratch(panelScratch, DIFF_SCOPE_KEY) !== undefined,
   );
+  // A scope the reviewer picks before the first status read lands decides it too: their choice
+  // loads at once, and the opening rule never overrides it afterwards.
+  const [scopePicked, setScopePicked] = useState(false);
   const [openingScope, setOpeningScope] = useState<GitDiffScope | null>(null);
   useLayoutEffect(() => {
-    if (scopeRemembered || openingScope !== null) return;
+    if (scopeRemembered || scopePicked || openingScope !== null) return;
     if (!status && !git.settled) return;
     setOpeningScope(status && status.files.length === 0 && status.ahead > 0 ? "all_branch" : "uncommitted");
-  }, [git.settled, openingScope, scopeRemembered, status]);
-  const scopeDecided = scopeRemembered || openingScope !== null;
-  const [scope, setScope] = usePanelScratchChoice<GitDiffScope>(
+  }, [git.settled, openingScope, scopePicked, scopeRemembered, status]);
+  const scopeDecided = scopeRemembered || scopePicked || openingScope !== null;
+  const [scope, setStoredScope] = usePanelScratchChoice<GitDiffScope>(
     panelScratch,
     DIFF_SCOPE_KEY,
     openingScope ?? "uncommitted",
     (raw) => raw === "uncommitted" || (session.useWorktree === true && (raw === "all_branch" || raw === "last_turn")),
   );
+  const setScope = (next: GitDiffScope) => {
+    setScopePicked(true);
+    setStoredScope(next);
+  };
   const [pane, setPane] = usePanelScratchChoice<DiffPane>(
     panelScratch, "review.indexPane", "combined",
     (raw) => raw === "combined" || raw === "unstaged" || raw === "staged",

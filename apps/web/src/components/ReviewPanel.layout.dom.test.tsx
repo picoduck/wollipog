@@ -172,6 +172,8 @@ interface Options {
   diffs: Partial<Record<GitDiffScope, GitDiffInfo>>;
   forgeFacts: { pr: GitPrSummary | null; checks: GitChecksSummary | null } | null;
   focus: DiffFileFocus | null;
+  /** Whether the shared status reader has finished its first read. */
+  settled: boolean;
 }
 
 async function mountReview(initial: Partial<Options> = {}): Promise<Harness> {
@@ -183,6 +185,7 @@ async function mountReview(initial: Partial<Options> = {}): Promise<Harness> {
     diffs: { uncommitted: diffOf("uncommitted", [file]), all_branch: diffOf("all_branch", [file]), last_turn: diffOf("last_turn", [file]) },
     forgeFacts: null,
     focus: null,
+    settled: true,
     ...initial,
   };
   const host = domWindow.document.createElement("div");
@@ -218,7 +221,7 @@ async function mountReview(initial: Partial<Options> = {}): Promise<Harness> {
       status: options.status,
       observation: 1,
       observedAt: Date.UTC(2026, 9, 9, 9, 30),
-      settled: true,
+      settled: options.settled,
       busy: false,
       error: null,
       errorCode: null,
@@ -672,5 +675,22 @@ test("choosing Uncommitted after Review opened on Branch is remembered", async (
     assert.deepEqual(again.calls.diff, ["uncommitted"]);
   } finally {
     await again.unmount();
+  }
+});
+
+test("a scope picked before the first status read loads at once, and the opening rule does not override it", async () => {
+  const harness = await mountReview({ status: null, settled: false });
+  try {
+    assert.deepEqual(harness.calls.diff, [], "nothing loads before the opening scope is known");
+    await act(async () => { fireDomEvent.click(scopeOption(harness.container, "Last Turn")!); });
+    assert.deepEqual(harness.calls.diff, ["last_turn"], "the reviewer's pick loads immediately");
+    // The first status then says the branch has only committed work, which would open on Branch.
+    await harness.render({ status: statusOf({ files: [], hasChanges: false, ahead: 1 }), settled: true });
+    assert.equal(scopeOption(harness.container, "Last Turn")?.getAttribute("aria-checked"), "true");
+    // The first status read is an observation the diff predates, so it is re-read once (#1204), but
+    // only ever for the scope the reviewer picked.
+    assert.ok(harness.calls.diff.every((scope) => scope === "last_turn"), `no other scope is read: ${harness.calls.diff.join(", ")}`);
+  } finally {
+    await harness.unmount();
   }
 });
