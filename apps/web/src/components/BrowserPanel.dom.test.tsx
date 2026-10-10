@@ -401,10 +401,10 @@ describe("an open artifact in the Browser (#2855)", () => {
         await waitForPreviewToSettle(container);
         const back = buttonNamed(container, "Back to Artifacts")!;
         // Booleans, not nodes: a failed comparison of two happy-dom elements inspects their graphs.
-        assert.ok(domWindow.document.activeElement === back, "focus lands on Back as the row goes away");
+        assert.ok(Object.is(domWindow.document.activeElement, back), "focus lands on Back as the row goes away");
         await act(async () => back.click());
         assert.equal(rows().length, 2);
-        assert.ok(domWindow.document.activeElement === rows()[1], "focus returns to the second row");
+        assert.ok(Object.is(domWindow.document.activeElement, rows()[1]), "focus returns to the second row");
       });
     } finally {
       api.artifactExport = priorExport;

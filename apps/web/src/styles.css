@@ -10941,6 +10941,13 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
     border-radius: 0;
   }
   .modal.sheet-full .modal-head { padding-top: max(2px, env(safe-area-inset-top)); }
+  /* Enlarge pushed onto another dialog's sheet (Run detail's preview, #2855) takes the sheet to full
+     height while it shows, as it opens everywhere else: a fit-height sheet would leave its media the
+     stage's minimum. */
+  .modal:has(> .modal-panel-host > .art-enlarged:not([hidden])) {
+    height: calc(100dvh - var(--keyboard-inset, 0px));
+    max-height: calc(100dvh - var(--keyboard-inset, 0px));
+  }
   /* A dialog opened from a sheet takes over its content, sliding in from the right (§7.1). */
   .modal-panel.pushed,
   .model-settings-detail { animation: sheet-push var(--dur-slow) var(--ease-out); }

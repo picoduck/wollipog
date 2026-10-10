@@ -1159,6 +1159,8 @@ const activeRun: RunView = {
  * always have.
  */
 const RUN_ARTIFACTS = FIXTURE_QUERY.get("runArtifacts") === "1";
+/** `&artifactPreview=loading` never answers a preview; `mismatch` answers with bytes that fail their checksum. */
+const RUN_ARTIFACT_PREVIEW = FIXTURE_QUERY.get("artifactPreview");
 const runArtifactText = new TextEncoder();
 
 function runArtifactScreenshot(): Promise<Uint8Array> {
@@ -2056,7 +2058,14 @@ const client = {
     const runArtifact = artifactId.startsWith("run-art-")
       ? (await runArtifacts()).find((candidate) => candidate.view.artifactId === artifactId)
       : undefined;
-    if (runArtifact) return new Blob([runArtifact.bytes as BlobPart], { type: runArtifact.view.mimeType });
+    if (runArtifact && RUN_ARTIFACT_PREVIEW === "loading") return new Promise<Blob>(() => undefined);
+    if (runArtifact) {
+      // The same length and type, one byte different: only the checksum can tell.
+      const bytes = RUN_ARTIFACT_PREVIEW === "mismatch"
+        ? runArtifact.bytes.map((byte, index) => (index === 0 ? byte ^ 1 : byte))
+        : runArtifact.bytes;
+      return new Blob([bytes as BlobPart], { type: runArtifact.view.mimeType });
+    }
     const encoded = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
     const binary = atob(encoded);
     const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));

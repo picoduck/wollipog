@@ -65,5 +65,25 @@ for (const [label, width, touch] of [["on a desktop", 1440, false], ["on a phone
       await expect(dialog).toHaveCount(0);
       await expect(row).toBeFocused();
     });
+
+    test("Enlarge from the preview dialog shows the screenshot at full size and returns to the preview", async ({ page }) => {
+      await openRun(page, width);
+      await rows(page).filter({ hasText: "Checkout at 1440px.png" }).click();
+      const preview = page.getByRole("dialog", { name: "Checkout at 1440px.png" });
+      const enlarge = preview.getByRole("button", { name: "Enlarge" });
+      await enlarge.click();
+      const stage = page.locator(".art-enlarged .art-stage");
+      await expect(stage.locator("img")).toBeVisible();
+      // Over another dialog's sheet on a phone, the sheet still takes the whole height (§7.5).
+      await expect.poll(async () => Math.round((await stage.boundingBox())!.height)).toBeGreaterThan(width === 390 ? 600 : 500);
+      if (width === 390) {
+        const sheet = page.locator(".modal:has(> .modal-panel-host > .art-enlarged)");
+        await expect.poll(async () => Math.round((await sheet.boundingBox())!.height)).toBe(900);
+      }
+      await page.locator(".art-enlarged").getByRole("button", { name: "Done" }).click();
+      await expect(page.locator(".art-enlarged")).toHaveCount(0);
+      await expect(preview.locator(".art-checker img")).toBeVisible();
+      await expect(enlarge).toBeFocused();
+    });
   });
 }

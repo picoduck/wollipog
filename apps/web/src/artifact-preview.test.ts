@@ -75,6 +75,10 @@ test("a report's leading H1 is dropped only when it repeats the artifact's title
   assert.equal(markdownWithoutTitle("Intro\n# Browser Review\n", "Browser Review"), "Intro\n# Browser Review\n", "only a leading H1");
   assert.equal(markdownWithoutTitle("## Browser Review\nBody", "Browser Review"), "## Browser Review\nBody", "only an H1");
   assert.equal(markdownWithoutTitle("#Browser Review\nBody", "Browser Review"), "#Browser Review\nBody", "not a heading without its space");
+  assert.equal(markdownWithoutTitle("   # Browser Review\nBody", "Browser Review"), "Body", "three spaces still make a heading");
+  for (const code of ["\t# Browser Review\n\tkeep this code\n\nBody", "    # Browser Review\n    keep this code\n"]) {
+    assert.equal(markdownWithoutTitle(code, "Browser Review"), code, "a tab or four spaces make indented code, which stays");
+  }
 });
 
 test("bytes that are not the artifact's fail with a verification error a preview can name (#2855)", async () => {

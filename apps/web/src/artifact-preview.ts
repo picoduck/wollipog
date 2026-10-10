@@ -81,7 +81,8 @@ export async function verifyArtifactPreviewBlob(artifact: WorkflowArtifactView, 
  * which the preview's header already shows (#2855). Any other first heading stays.
  */
 export function markdownWithoutTitle(text: string, title: string): string {
-  const match = /^(?:[ \t]*\r?\n)*[ \t]{0,3}#[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*(?:\r?\n|$)/.exec(text);
+  // Up to three spaces before the `#` (CommonMark); a tab or a fourth space makes it indented code.
+  const match = /^(?:[ \t]*\r?\n)*[ ]{0,3}#[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*(?:\r?\n|$)/.exec(text);
   if (!match || match[1]!.trim() !== title.trim()) return text;
   return text.slice(match[0].length).replace(/^(?:[ \t]*\r?\n)+/, "");
 }
