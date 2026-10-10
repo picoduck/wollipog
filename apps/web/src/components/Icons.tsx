@@ -128,6 +128,7 @@ import {
   SquareTerminal as LucideSquareTerminal,
   Tag as LucideTag,
   Terminal as LucideTerminal,
+  TextSelection as LucideTextSelection,
   TimerOff as LucideTimerOff,
   Trash2 as LucideTrash2,
   TriangleAlert as LucideTriangleAlert,
@@ -427,6 +428,10 @@ export function CopyIcon(props: IconProps) {
 
 export function CheckIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideCheck} {...props} />;
+}
+
+export function SelectLinesIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideTextSelection} {...props} />;
 }
 
 export function WrapLinesIcon(props: IconProps) {

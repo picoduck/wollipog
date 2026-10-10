@@ -287,15 +287,22 @@ async function discardItem(container: HTMLElement): Promise<HTMLElement> {
   return item;
 }
 
-/** The Git actions on the Unstaged pane: line staging and the selection boxes that feed it. */
-function lineControls(container: HTMLElement): Array<[string, HTMLButtonElement | HTMLInputElement]> {
-  const boxes = [...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"][aria-label^="Select "]')]
-    .filter((box) => /^Select (Added|Removed) Line /u.test(box.getAttribute("aria-label")!));
-  assert.equal(boxes.length, 2, "each changed line can be selected");
-  return [
-    ["Stage Hunk", onlyButton(container, "Stage Hunk")],
-    ...boxes.map((box) => [box.getAttribute("aria-label")!, box] as [string, HTMLInputElement]),
-  ];
+/**
+ * The Git actions on the Unstaged pane: Stage Hunk, and the selection bar's Stage Lines once Select
+ * Lines has picked both changed lines (#2849). Picking lines is not a Git action, so it stays open.
+ */
+async function lineControls(container: HTMLElement): Promise<Array<[string, HTMLButtonElement]>> {
+  const toggle = container.querySelector<HTMLButtonElement>('button[aria-label="Select Lines"]');
+  assert.ok(toggle, "Review offers Select Lines");
+  if (toggle.getAttribute("aria-pressed") !== "true") await act(async () => { fireDomEvent.click(toggle); });
+  for (const label of ["Select Removed Line 2", "Select Line 2"]) {
+    const line = container.querySelector<HTMLButtonElement>(`button.diff-num[aria-label="${label}"]`);
+    assert.ok(line, `${label} can be picked`);
+    if (line.getAttribute("aria-pressed") !== "true") await act(async () => { fireDomEvent.click(line); });
+  }
+  const bar = container.querySelector<HTMLElement>('section[aria-label="Selected Lines"]');
+  assert.ok(bar, "the selection bar replaces the commit bar");
+  return [["Stage Hunk", onlyButton(container, "Stage Hunk")], ["Stage Lines", onlyButton(bar, "Stage Lines")]];
 }
 
 function refusalId(container: HTMLElement): string {
@@ -307,7 +314,8 @@ function refusalId(container: HTMLElement): string {
 }
 
 function assertRefused(container: HTMLElement, name: string, control: HTMLButtonElement | HTMLInputElement) {
-  assert.equal(control.disabled, true, `${name} is disabled`);
+  // The selection bar's actions stay focusable to say why (`aria-disabled`); the rest are disabled.
+  assert.ok(control.disabled || control.getAttribute("aria-disabled") === "true", `${name} is disabled`);
   assert.equal(control.getAttribute("title"), VIEWER, `${name} carries the reason as its title`);
   const ids = (control.getAttribute("aria-describedby") ?? "").split(/\s+/u).filter(Boolean);
   assert.ok(ids.includes(refusalId(container)), `${name} is described by the refusal`);
@@ -333,17 +341,17 @@ test("a refused person sees every Git action disabled with the reason, and nothi
     assert.equal(harness.confirmations.length, 0, "Discard opens no confirmation");
 
     await chooseViewOption(harness.container, "Unstaged Only");
-    const lines = lineControls(harness.container);
+    const lines = await lineControls(harness.container);
     for (const [name, control] of lines) assertRefused(harness.container, name, control);
     for (const [, control] of lines) {
       await act(async () => { fireDomEvent.click(control); await Promise.resolve(); });
     }
-    assert.equal(harness.container.textContent?.includes("Stage Selected"), false, "no line could be selected");
+    assert.ok(harness.container.querySelector('section[aria-label="Selected Lines"]'), "the refused Stage Lines kept the selection");
 
-    // The side-by-side layout renders its own line selection boxes.
+    // The side-by-side layout picks lines in its own columns.
     await chooseViewOption(harness.container, "Side by Side");
     assert.ok(harness.container.querySelector(".dsplit"), "the diff is side by side");
-    for (const [name, control] of lineControls(harness.container)) assertRefused(harness.container, `split ${name}`, control);
+    for (const [name, control] of await lineControls(harness.container)) assertRefused(harness.container, `split ${name}`, control);
 
     assert.deepEqual(harness.calls, []);
     assert.equal(harness.container.querySelector<HTMLButtonElement>('button[aria-label="Refresh Review"]')?.disabled, false,
@@ -397,8 +405,9 @@ test("an allowed or absent verdict leaves every Git action as it was (#1870)", a
       const dialog = domWindow.document.querySelector('[role="dialog"]') as unknown as HTMLElement;
       await act(async () => { fireDomEvent.click(onlyButton(dialog, "Open Pull Request")); });
       await chooseViewOption(harness.container, "Unstaged Only");
-      for (const [name, control] of lineControls(harness.container)) {
+      for (const [name, control] of await lineControls(harness.container)) {
         assert.equal(control.disabled, false, `${name} is enabled`);
+        assert.equal(control.getAttribute("aria-disabled"), null, `${name} is available`);
         assert.equal(control.getAttribute("aria-describedby"), null, `${name} has no refusal description`);
       }
       await act(async () => { fireDomEvent.click(onlyButton(harness.container, "Stage Hunk")); });

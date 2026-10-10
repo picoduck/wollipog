@@ -4998,8 +4998,16 @@ textarea {
 }
 /* The toolbar row (§4.7): Scope at its content width, View Options at the row's end. The viewer
    gate's reason, when there is one, sits under the row. */
-.review-toolbar > .seg { min-width: 0; }
+/* Scope starts from its content's width and grows to its equal columns as room allows, so Select
+   Lines and View Options join it on the row rather than wrapping under it (#2849). */
+.review-toolbar > .seg {
+  flex: 1 1 min-content;
+  min-width: 0;
+  max-width: max-content;
+}
+.review-select-lines,
 .review-view-options { margin-left: auto; }
+.review-select-lines + .review-view-options { margin-left: 0; }
 /* A runner too old for any diff disables every Scope option, and the segmented control prints that
    one reason after the group: it takes a line of its own under the row rather than a column in it. */
 .review-toolbar { flex-wrap: wrap; }
@@ -13209,6 +13217,37 @@ body.shell-dock-dragging * {
 .commit-bar-detail {
   margin: 0;
 }
+/* The selection bar (#2849): in the foot in place of the commit bar while lines are selected. The
+   count leads and the actions keep the row's end, wrapping under the count in a narrow panel; a
+   disabled action's reason is a line of its own below. */
+.selbar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.selbar-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.selbar-count {
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.selbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+.selbar-reason {
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
 
 /* Phase 2: diff viewer. Each changed file is a flush section (#2848): a top hairline, a sticky
    head, then its hunks. The sections span the scroller's side padding, so code starts near the
@@ -13399,17 +13438,74 @@ body.shell-dock-dragging * {
   align-items: baseline;
   white-space: pre;
 }
-/* Centred on the row, not on the text baseline: a 16px box standing on the baseline rose above the
-   18px line and made every row with a box taller than a row without one. */
-.diff-line-select {
+/* The line number is the line's button (#2849): at rest it opens the line menu, and while Select
+   Lines is on it toggles the line. It keeps the gutter's look, its numbers underlined on hover, and
+   its focus ring inset, since the lines scroll sideways inside a clipped box. */
+.diff-num {
   display: inline-flex;
+  flex: none;
+  align-items: baseline;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: inherit;
+  cursor: pointer;
+}
+.diff-num:focus-visible { outline-offset: calc(-1 * var(--focus-width)); }
+@media (hover: hover) {
+  .diff-num:hover > .diff-gutter { text-decoration: underline; }
+}
+/* Add Finding on hover (#2849): a slot between the numbers and the change marker that is there on
+   every row with a mouse, so the "+" shows over the gutter and never over the code. Centred on the
+   row, not on the text baseline, so a row with it is as tall as a row without. */
+.diff-add-slot {
+  display: inline-flex;
+  flex: none;
   align-self: center;
-  width: auto;
-  min-width: 24px;
-  gap: 3px;
   align-items: center;
   justify-content: center;
+  width: var(--space-4);
+}
+.diff-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--space-4);
+  height: var(--space-4);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim-on-tint);
+  cursor: pointer;
+  opacity: 0;
+}
+:is(.diff-line, .diff-split-cell):hover .diff-add,
+.diff-add:focus-visible { opacity: 1; }
+.diff-add:focus-visible { outline-offset: calc(-1 * var(--focus-width)); }
+@media (hover: hover) {
+  .diff-add:hover {
+    background: var(--accent);
+    color: var(--on-accent);
+  }
+}
+/* Select Lines (#2849): a click anywhere on a line picks it, so the row reads as one target and its
+   text is not selected by the click. A selected line takes the selected fill. */
+.diff-view.is-selecting :is(.diff-line, .diff-split-cell):not(.diff-split-empty, .diff-nonl) {
+  cursor: pointer;
   user-select: none;
+}
+/* The fill alone sits too close to an added line's green wash, so a selected line also carries the
+   2px accent bar on its leading edge, as a selected question marker does. */
+:is(.diff-line, .diff-split-cell).is-selected { box-shadow: inset 2px 0 0 var(--accent); }
+:is(.diff-line, .diff-split-cell).is-selected { background: var(--surface-selected); }
+@media (forced-colors: active) {
+  :is(.diff-line, .diff-split-cell).is-selected {
+    outline: var(--focus-width) solid Highlight;
+    outline-offset: calc(-1 * var(--focus-width));
+  }
 }
 .diff-split-row {
   display: grid;
@@ -13437,7 +13533,7 @@ body.shell-dock-dragging * {
   overflow-x: auto;
 }
 .dsplit > .side + .side { border-left: 1px solid var(--border); }
-/* One line high: the 22px of the comment button every row carries (`.diff-comment-add`). */
+/* One line high, which keeps the two columns level. */
 .dsplit > .side > .diff-split-cell {
   height: 22px;
   align-items: center;
@@ -13458,32 +13554,12 @@ body.shell-dock-dragging * {
   flex: 1 1 auto;
   min-width: 0;
 }
-/* The row's boxes stay on its first line, beside its number. */
-.diff-view.is-wrapped .diff-line-select {
+/* The "+" stays on the row's first line, beside its number. */
+.diff-view.is-wrapped .diff-add-slot {
   align-self: flex-start;
   height: 1.5em;
 }
 .diff-split-empty { background: color-mix(in srgb, var(--bg-elev) 55%, transparent); }
-.diff-split-cell .diff-comment-add {
-  position: static;
-  margin-left: auto;
-}
-.diff-comment-add {
-  position: sticky;
-  right: 4px;
-  flex: 0 0 auto;
-  width: 22px;
-  height: 22px;
-  margin: 0 4px 0 auto;
-  border: 1px solid var(--border-strong);
-  border-radius: 5px;
-  background: var(--bg-elev);
-  color: var(--accent);
-  cursor: pointer;
-  opacity: 0;
-}
-.diff-line:hover .diff-comment-add,
-.diff-comment-add:focus-visible { opacity: 1; }
 .diff-comment-editor,
 .diff-inline-finding {
   min-width: 0;
@@ -13697,18 +13773,6 @@ button.review-finding-location {
   color: var(--text-dim-on-tint);
   user-select: none;
   flex: 0 0 auto;
-}
-.diff-source-gutter {
-  border: 0;
-  background: transparent;
-  font: inherit;
-  line-height: inherit;
-  cursor: pointer;
-}
-.diff-source-gutter:hover,
-.diff-source-gutter:focus-visible {
-  color: var(--accent);
-  text-decoration: underline;
 }
 .diff-sign {
   display: inline-block;
@@ -15194,8 +15258,8 @@ button.review-finding-location {
 /* A narrow panel has room for one line-number column (#2848): the new number, or the old one on a
    deletion. */
 @container rp (max-width: 479px) {
-  .diff-line:not(.diff-line-del) > .diff-gutter-old,
-  .diff-line-del > .diff-gutter-old + .diff-gutter { display: none; }
+  .diff-line:not(.diff-line-del) > .diff-num > .diff-gutter-old,
+  .diff-line-del > .diff-num > .diff-gutter-new { display: none; }
 }
 /* At the panel's narrowest the file name needs the head; each hunk still says it is staged. */
 @container rp (max-width: 379px) {
@@ -15204,11 +15268,6 @@ button.review-finding-location {
 /* In forced colors the file head's chevron follows its words. */
 @media (forced-colors: active) {
   .dfile-toggle > .disclosure-chevron { color: inherit; }
-}
-/* The diff's touch affordance, which the narrow window stood in for: a comment button with no hover
-   to reveal it. In a 400px desktop panel it keeps its hover reveal (#2843). */
-@media (pointer: coarse) {
-  .diff-comment-add { opacity: 1; }
 }
 
 /* ------------------------------ Agent skills ------------------------------ */

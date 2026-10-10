@@ -628,7 +628,7 @@ test("an unsent comment draft survives a visit to an empty pane", async () => {
   const harness = await mountReview();
   try {
     await act(async () => {
-      fireDomEvent.click(harness.container.querySelector<HTMLElement>('button[aria-label="Comment on src/checkout.ts right line 2"]')!);
+      fireDomEvent.click(harness.container.querySelector<HTMLElement>('.dfile[data-path="src/checkout.ts"] button[aria-label="Add Finding on Line 2"]')!);
     });
     await act(async () => {
       const body = harness.container.querySelector<HTMLTextAreaElement>(".diff-comment-editor textarea")!;

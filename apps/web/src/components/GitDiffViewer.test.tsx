@@ -7,7 +7,7 @@ import { GitDiffViewer, type DiffPane, type StagingControls } from "./GitDiffVie
 
 (globalThis as typeof globalThis & { React: typeof React }).React = React;
 
-test("diff source links expose right-side line coordinates only", () => {
+test("every line number is its line's menu button, and no line renders a checkbox (#2849)", () => {
   const diff: GitDiffInfo = {
     scope: "uncommitted",
     diffHash: "a".repeat(64),
@@ -45,14 +45,16 @@ test("diff source links expose right-side line coordinates only", () => {
     diff,
     onOpenSourceLocation: () => undefined,
   }));
-  // The file itself opens from its actions menu (GitDiffViewer.sections.dom.test.tsx), not a head link.
-  assert.doesNotMatch(html, /aria-label="Open src\/app\.ts"/);
-  assert.match(html, /aria-label="Open src\/app\.ts line 20"/);
-  assert.doesNotMatch(html, /aria-label="Open src\/app\.ts line 10"/);
-  assert.doesNotMatch(html, /aria-label="Open src\/deleted\.ts/);
+  // The file itself opens from its actions menu (GitDiffViewer.sections.dom.test.tsx), not a head link,
+  // and a line opens in Files from its own menu (GitDiffViewer.lines.dom.test.tsx), not a gutter link.
+  assert.doesNotMatch(html, /aria-label="Open src\/app\.ts/);
+  assert.match(html, /<button type="button" class="diff-num" aria-label="Line 20 Actions" aria-haspopup="menu"/);
+  assert.match(html, /<button type="button" class="diff-num" aria-label="Removed Line 10 Actions" aria-haspopup="menu"/);
+  assert.match(html, /aria-label="Removed Line 1 Actions"/);
+  assert.doesNotMatch(html, /type="checkbox"/);
 });
 
-test("diff source links fail closed for noncanonical paths", () => {
+test("a noncanonical path renders no link to Files", () => {
   const diff: GitDiffInfo = {
     scope: "uncommitted",
     diffHash: "b".repeat(64),
@@ -264,7 +266,7 @@ function hunkActions(html: string): string[] {
 
 test("line staging names a hunk's one button in Title Case on both index panes (#2096, #2848)", () => {
   const file: GitDiffFile = { path: "src/app.ts", status: "modified", binary: false, hunks: [TEXT_HUNK] };
-  // Stage Selected appears once there is a selection, so the header is one line at rest.
+  // Single lines are staged from the selection bar (#2849), so the header is one line.
   assert.deepEqual(hunkActions(renderDiff(file, { ...STAGING, pane: "unstaged" })), ["Stage Hunk"]);
   assert.deepEqual(hunkActions(renderDiff(file, { ...STAGING, pane: "staged" })), ["Unstage Hunk"]);
 });

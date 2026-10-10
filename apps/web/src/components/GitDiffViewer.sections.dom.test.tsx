@@ -297,7 +297,7 @@ test("Side by Side is two columns that break around an open editor, and each pai
   assertNoDomNode(container.querySelector(".diff-split-row"));
 
   // Open an editor on the new side of line 3 ("three"): the columns break under that row.
-  const comment = container.querySelector<HTMLButtonElement>('button[aria-label="Comment on src/a.ts right line 3"]')!;
+  const comment = container.querySelector<HTMLButtonElement>('button[aria-label="Add Finding on Line 3"]')!;
   await act(async () => { comment.click(); });
   assert.deepEqual(runs(), [[3, 3], [1, 1]]);
   const editor = container.querySelector(".diff-comment-editor");

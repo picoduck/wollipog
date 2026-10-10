@@ -4,6 +4,12 @@ import { useLayoutEffect, useState } from "react";
 export const SPLIT_MIN_PANEL_PX = 720;
 
 /**
+ * Review's toolbar holds Scope, Select Lines and View Options on one row from this panel width
+ * (#2849). Narrower, Select Lines is a View Options item, so the row stays one line (#2846).
+ */
+export const SELECT_LINES_TOOLBAR_MIN_PANEL_PX = 360;
+
+/**
  * Whether the side panel holding `element` (the `rp` container, docs/design-system.md §2.10) is at least
  * `min` pixels wide, followed with a ResizeObserver as the panel is dragged, expanded or restored.
  *

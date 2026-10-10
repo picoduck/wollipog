@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useState, type Ref, type RefObject } from "react";
 import type { GitDiffScope } from "@wollipog/protocol";
 import type { DiffLayout, DiffPane } from "./GitDiffViewer.js";
-import { TuningIcon } from "./Icons.js";
+import { SelectLinesIcon, TuningIcon } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuLabel, MenuSeparator, MenuSurface } from "./Menu.js";
 import { SegmentedControl } from "./ui/ChoiceControls.js";
@@ -25,9 +25,30 @@ export interface ReviewFileCollapse {
 }
 
 /**
+ * The Select Lines toggle (#2849): offered while the diff has lines to select. An icon button in the
+ * row where the panel holds it, else a View Options item.
+ */
+export interface ReviewSelectLines {
+  on: boolean;
+  onChange: (on: boolean) => void;
+  placement: "toolbar" | "menu";
+  /** The icon button, while it is in the row. */
+  buttonRef?: RefObject<HTMLButtonElement | null>;
+}
+
+/** Points both refs at the same button. */
+function bothRefs(first: RefObject<HTMLButtonElement | null>, second?: Ref<HTMLButtonElement>) {
+  return (element: HTMLButtonElement | null) => {
+    first.current = element;
+    if (typeof second === "function") second(element);
+    else if (second) second.current = element;
+  };
+}
+
+/**
  * Review's one toolbar row (#2846; docs/design-system.md §4.7): the Scope segmented control (§10.2)
- * and the View Options menu button (§9.1), which holds every choice about how the same diff is
- * shown. It sits in the panel's fixed `.rpanel-toolbar` slot, above the scroller.
+ * then Select Lines (#2849) and the View Options menu button (§9.1), which holds every choice about
+ * how the same diff is shown. It sits in the panel's fixed `.rpanel-toolbar` slot, above the scroller.
  *
  * The viewer gate (#1870) is rendered under the row as the toolbar's disabled reason: the Git
  * actions further down point at it with `aria-describedby`.
@@ -45,6 +66,8 @@ export function ReviewToolbar({
   wrap = false,
   onWrapChange,
   files = null,
+  selectLines = null,
+  viewOptionsRef,
   refusal,
 }: {
   scope: GitDiffScope;
@@ -63,6 +86,9 @@ export function ReviewToolbar({
   wrap?: boolean;
   onWrapChange?: (wrap: boolean) => void;
   files?: ReviewFileCollapse | null;
+  selectLines?: ReviewSelectLines | null;
+  /** The View Options button, which the host focuses when nothing nearer is left (#2849). */
+  viewOptionsRef?: Ref<HTMLButtonElement>;
   refusal: { reason: string; id: string } | null;
 }) {
   const disabled = unavailableReason !== null;
@@ -82,6 +108,19 @@ export function ReviewToolbar({
           ]}
           onChange={onScopeChange}
         />
+        {selectLines?.placement === "toolbar" && (
+          <button
+            ref={selectLines.buttonRef}
+            type="button"
+            className="icon-btn sm review-select-lines"
+            aria-label="Select Lines"
+            title="Select Lines"
+            aria-pressed={selectLines.on}
+            onClick={() => selectLines.onChange(!selectLines.on)}
+          >
+            <SelectLinesIcon size={16} aria-hidden="true" />
+          </button>
+        )}
         <ViewOptionsMenu
           pane={pane}
           onPaneChange={onPaneChange}
@@ -91,6 +130,8 @@ export function ReviewToolbar({
           wrap={wrap}
           onWrapChange={onWrapChange}
           files={files}
+          selectLines={selectLines?.placement === "menu" ? selectLines : null}
+          buttonRef={viewOptionsRef}
         />
       </div>
       {refusal && <p id={refusal.id} className="review-toolbar-reason">{refusal.reason}</p>}
@@ -100,11 +141,12 @@ export function ReviewToolbar({
 
 /**
  * Show and Layout as `menuitemradio` groups with trailing checks (§9.1), then Wrap Long Lines as a
- * checkbox item and Collapse All Files or Expand All Files (#2848). Side by Side stays listed while
+ * checkbox item, Select Lines in a panel too narrow for its toolbar button (#2849), and Collapse All
+ * Files or Expand All Files (#2848). Side by Side stays listed while
  * the panel is too narrow for it, unavailable with its reason, and Unified is checked: it is what
  * renders. The stored choice is kept, so widening the panel brings Side by Side back.
  */
-function ViewOptionsMenu({ pane, onPaneChange, layout, onLayoutChange, splitUnavailableReason, wrap, onWrapChange, files }: {
+function ViewOptionsMenu({ pane, onPaneChange, layout, onLayoutChange, splitUnavailableReason, wrap, onWrapChange, files, selectLines, buttonRef }: {
   pane: DiffPane | null;
   onPaneChange: (pane: DiffPane) => void;
   layout: DiffLayout;
@@ -113,6 +155,8 @@ function ViewOptionsMenu({ pane, onPaneChange, layout, onLayoutChange, splitUnav
   wrap: boolean;
   onWrapChange?: (wrap: boolean) => void;
   files: ReviewFileCollapse | null;
+  selectLines: ReviewSelectLines | null;
+  buttonRef?: Ref<HTMLButtonElement>;
 }) {
   const [open, setOpen] = useState(false);
   // An unavailable option is aria-disabled and still reached by the arrow keys, so its reason is heard.
@@ -125,7 +169,7 @@ function ViewOptionsMenu({ pane, onPaneChange, layout, onLayoutChange, splitUnav
   return (
     <>
       <button
-        ref={menu.triggerRef}
+        ref={bothRefs(menu.triggerRef, buttonRef)}
         type="button"
         className="icon-btn sm review-view-options"
         aria-label="View Options"
@@ -183,7 +227,7 @@ function ViewOptionsMenu({ pane, onPaneChange, layout, onLayoutChange, splitUnav
               );
             })}
           </div>
-          {(onWrapChange || files) && <MenuSeparator />}
+          {(onWrapChange || files || selectLines) && <MenuSeparator />}
           {onWrapChange && (
             <MenuItem
               role="menuitemcheckbox"
@@ -192,6 +236,16 @@ function ViewOptionsMenu({ pane, onPaneChange, layout, onLayoutChange, splitUnav
               onClick={() => choose(() => onWrapChange(!wrap))}
             >
               Wrap Long Lines
+            </MenuItem>
+          )}
+          {selectLines && (
+            <MenuItem
+              role="menuitemcheckbox"
+              checked={selectLines.on}
+              data-menu-label="Select Lines"
+              onClick={() => choose(() => selectLines.onChange(!selectLines.on))}
+            >
+              Select Lines
             </MenuItem>
           )}
           {files && (

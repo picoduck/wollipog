@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { normalizeSourcePath, REVIEW_ANCHOR_TEXT_MAX_LENGTH } from "@wollipog/protocol";
 import { StatusBadge } from "./StatusBadge.js";
 import { FindingSeverityBadge } from "./ReviewFindings.js";
@@ -24,12 +24,16 @@ import {
   type SplitDiffRow,
 } from "../diff-view.js";
 import { diffAnchorKey, diffHunkContentKey, type DiffAnchor } from "../review-anchors.js";
+import { diffLineLabel, diffLineRef, type DiffLineRef } from "../diff-line-selection.js";
 import { titleCaseLabel } from "../format.js";
 import { Spinner } from "./common.js";
 import { DiffFileActions, type DiffFileAction } from "./DiffFileActions.js";
-import { CheckIcon, ChevronRightIcon } from "./Icons.js";
+import { CheckIcon, ChevronRightIcon, PlusIcon } from "./Icons.js";
+import { useAccessibleMenu } from "./interactions.js";
+import { MenuItem, MenuSurface } from "./Menu.js";
 import { Notice } from "./Notice.js";
 import { Checkbox } from "./ui/ChoiceControls.js";
+import { useIsCoarsePointer } from "./useIsMobile.js";
 
 export type DiffLayout = "unified" | "split";
 export type DiffPane = "combined" | "unstaged" | "staged";
@@ -82,6 +86,20 @@ export interface DiffReviewControls {
   /** Why the signed-in person may not add or change findings (#1864), and the id of the element
    * that states it; every finding control is then disabled and described by it. */
   refusal?: { reason: string; id: string } | null;
+}
+
+/**
+ * Select Lines (#2849): which lines are selected, and the two ways to pick one. The selection itself
+ * belongs to the host (Review), whose selection bar acts on it.
+ */
+export interface DiffLineSelectionControls {
+  selecting: boolean;
+  /** {@link DiffLineRef} keys of the selected lines. */
+  selected: ReadonlySet<string>;
+  /** A click on a line while selecting: toggle it, or with Shift extend the range to it. */
+  onLine: (line: DiffLineRef, extend: boolean) => void;
+  /** The line menu's Select Line: turn Select Lines on with this one line. */
+  onSelectLine: (line: DiffLineRef) => void;
 }
 
 /** The fields of one unsent inline finding. */
@@ -143,6 +161,10 @@ interface DraftStore {
   rememberSelection: (key: string, selection: DraftSelection) => void;
   /** The + control: open the editor for this anchor, or close it if already open. */
   toggle: (key: string, anchorText: string) => void;
+  /** The line menu's Add Finding…: open the editor for this anchor, or focus the one already open. */
+  show: (key: string, anchorText: string) => void;
+  /** Whether this anchor's editor was asked to take focus since it last did: once per ask. */
+  takeFocus: (key: string) => boolean;
   /** Cancel — closes the editor but keeps the text, so a mis-click cannot destroy it. */
   dismiss: (key: string) => void;
   /** Submitted successfully — the draft is now a finding, so drop it. */
@@ -206,6 +228,8 @@ export function GitDiffViewer({
   diff,
   staging,
   review,
+  selection,
+  focusFallback,
   onOpenSourceLocation,
   onAttachWorkspaceReference,
   layout = "unified",
@@ -221,6 +245,9 @@ export function GitDiffViewer({
   diff: GitDiffInfo;
   staging?: StagingControls;
   review?: DiffReviewControls;
+  selection?: DiffLineSelectionControls;
+  /** Where focus goes when an open line menu's line, and every file, left the diff. */
+  focusFallback?: () => HTMLElement | null;
   onOpenSourceLocation?: (location: SourceLocation) => void;
   onAttachWorkspaceReference?: (target: CreateWorkspaceReferenceRequest) => Promise<void>;
   layout?: DiffLayout;
@@ -287,6 +314,45 @@ export function GitDiffViewer({
   // state that predates the current caret — from stamping a stale offset over a live one.
   const draftSelections = useRef(new Map<string, DraftSelection>());
   const [openDrafts, setOpenDrafts] = useState<ReadonlySet<string>>(() => new Set<string>());
+  // Never conditional: the hook keeps its own subscription (see useIsMobile).
+  const coarse = useIsCoarsePointer();
+  const [lineMenu, setLineMenu] = useState<LineMenuTarget | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  // Add Finding… on an editor that is already open focuses it: a mounted editor's autoFocus has run.
+  const draftFocus = useRef<string | null>(null);
+  const [, setDraftFocusAsks] = useState(0);
+  const focusFallbackRef = useRef(focusFallback);
+  focusFallbackRef.current = focusFallback;
+  /**
+   * A refresh that rewrote the line's hunk rebuilt its number button, or took its file or every file
+   * away: the menu was about a line that is no longer there, so it closes rather than float over
+   * nothing. Here at the root, so it also runs when the diff became empty and the menu went with it.
+   * Focus that was in the menu, or dropped to the page with it, goes to the same line's new number,
+   * else its file's head, else the first file's head, else the host's fallback, so it never stays on
+   * the page, where Escape would no longer reach the panel.
+   */
+  useLayoutEffect(() => {
+    if (!lineMenu || lineMenu.trigger.isConnected) return;
+    const active = document.activeElement;
+    if (!active || active === document.body || !active.isConnected || active.closest(".menu")) {
+      const label = `${diffLineLabel(lineMenu.ref)} Actions`;
+      const sections = [...(rootRef.current?.querySelectorAll<HTMLElement>(".dfile") ?? [])];
+      const section = sections.find((candidate) => candidate.dataset.path === lineMenu.ref.filePath);
+      const number = [...(section?.querySelectorAll<HTMLButtonElement>("button.diff-num") ?? [])]
+        .find((candidate) => candidate.getAttribute("aria-label") === label);
+      const target = number ?? section?.querySelector<HTMLElement>(".dfile-toggle")
+        ?? sections[0]?.querySelector<HTMLElement>(".dfile-toggle") ?? focusFallbackRef.current?.();
+      target?.focus({ preventScroll: true });
+    }
+    setLineMenu(null);
+  });
+  const lines: LineControls = {
+    selection,
+    menuKey: lineMenu?.ref.key ?? null,
+    onOpenMenu: setLineMenu,
+    hoverAdd: !coarse,
+    wrap,
+  };
   const drafts: DraftStore = {
     open: openDrafts,
     keyFor: (anchor) => `${lineage}\u0000${diffAnchorKey(anchor)}`,
@@ -308,6 +374,17 @@ export function GitDiffViewer({
         if (next.has(key)) next.delete(key); else next.add(key);
         return next;
       });
+    },
+    show: (key, anchorText) => {
+      if (!draftValues.current.has(key)) draftValues.current.set(key, { ...EMPTY_DRAFT, anchorText });
+      draftFocus.current = key;
+      setOpenDrafts((prior) => prior.has(key) ? prior : new Set(prior).add(key));
+      setDraftFocusAsks((asks) => asks + 1);
+    },
+    takeFocus: (key) => {
+      if (draftFocus.current !== key) return false;
+      draftFocus.current = null;
+      return true;
     },
     dismiss: (key) => setOpenDrafts((prior) => {
       if (!prior.has(key)) return prior;
@@ -344,7 +421,7 @@ export function GitDiffViewer({
   // A notice whose file is no longer in this diff still has to be read: it goes above the sections.
   const orphanNotice = fileNotice && !files.some((display) => display.file.path === fileNotice.path) ? fileNotice : null;
   return (
-    <div className={wrap ? "diff-view is-wrapped" : "diff-view"}>
+    <div ref={rootRef} className={`diff-view${wrap ? " is-wrapped" : ""}${selection?.selecting ? " is-selecting" : ""}`}>
       {orphanNotice && <StageRaceNotice notice={orphanNotice} flush />}
       {files.map((display) => (
         // Key on the path alone, not the whole-change-set `diffHash`: a section must keep its
@@ -362,16 +439,28 @@ export function GitDiffViewer({
           review={review}
           findingsByAnchor={findingsByAnchor}
           drafts={drafts}
+          lines={lines}
           onOpenSourceLocation={onOpenSourceLocation}
           onAttachWorkspaceReference={onAttachWorkspaceReference}
           diffHash={diff.diffHash}
           scope={diff.scope}
           layout={layout}
-          wrap={wrap}
           focusRequest={display.file.path === focusedPath ? focus?.request : undefined}
           onFocusHandled={onFocusHandled}
         />
       ))}
+      {lineMenu && (
+        <DiffLineMenu
+          // One menu per opening, so a menu opened on another line starts from its first item.
+          key={lineMenu.ref.key}
+          target={lineMenu}
+          onClose={() => setLineMenu(null)}
+          review={review}
+          drafts={drafts}
+          selection={selection}
+          onOpenSourceLocation={onOpenSourceLocation}
+        />
+      )}
     </div>
   );
 }
@@ -418,12 +507,12 @@ function DiffFileSection({
   review,
   findingsByAnchor,
   drafts,
+  lines,
   onOpenSourceLocation,
   onAttachWorkspaceReference,
   diffHash,
   scope,
   layout,
-  wrap,
   focusRequest,
   onFocusHandled,
 }: {
@@ -435,12 +524,12 @@ function DiffFileSection({
   review?: DiffReviewControls;
   findingsByAnchor: ReadonlyMap<string, ReviewFinding[]>;
   drafts: DraftStore;
+  lines: LineControls;
   onOpenSourceLocation?: (location: SourceLocation) => void;
   onAttachWorkspaceReference?: (target: CreateWorkspaceReferenceRequest) => Promise<void>;
   diffHash: string;
   scope: GitDiffInfo["scope"];
   layout: DiffLayout;
-  wrap: boolean;
   focusRequest?: number;
   onFocusHandled?: () => void;
 }) {
@@ -552,12 +641,12 @@ function DiffFileSection({
                 .filter((h) => !h.isCollapsed || showAll)
                 .map((h) => (
                   <HunkView
-                    // Lineage first: a pane switch is a different change set, so per-hunk line and
-                    // reference selections made against one pane must not survive into the other,
-                    // even where that file happens to be byte-identical in both. Then the file's
-                    // change kind (it decides whether line staging is offered at all) and the hunk's
-                    // own content, so a hunk the refresh did not touch is never rebuilt — that is
-                    // what keeps an open draft editor's focus and caret.
+                    // Lineage first: a pane switch is a different change set, so nothing a hunk holds
+                    // for one pane survives into the other, even where that file happens to be
+                    // byte-identical in both. Then the file's change kind (it decides whether line
+                    // staging is offered at all) and the hunk's own content, so a hunk the refresh did
+                    // not touch is never rebuilt — that is what keeps an open draft editor's focus and
+                    // caret.
                     key={`${review?.lineage ?? ""}|${file.status}|${diffHunkContentKey(h.hunk)}`}
                     hunk={h.hunk}
                     filePath={file.path}
@@ -567,12 +656,10 @@ function DiffFileSection({
                     review={review}
                     findingsByAnchor={findingsByAnchor}
                     drafts={drafts}
-                    onOpenSourceLocation={onOpenSourceLocation}
-                    onAttachWorkspaceReference={onAttachWorkspaceReference}
+                    lines={lines}
                     diffHash={diffHash}
                     scope={scope}
                     layout={layout}
-                    wrap={wrap}
                   />
                 ))}
               {hiddenCount > 0 && !showAll && (
@@ -652,6 +739,10 @@ function DiffCommentEditor({
     // Mount and teardown only: `anchorKey` is this editor's identity, and `drafts` is rebuilt on
     // every render of the viewer root while reading and writing nothing but refs.
   }, [anchorKey]);
+  // The line menu's Add Finding… on this open editor: it takes focus, as a new one does on mount.
+  useLayoutEffect(() => {
+    if (drafts.takeFocus(anchorKey)) bodyRef.current?.focus();
+  });
   // The draft survived a refresh that rewrote the very line it targets. Keeping the text is the
   // point (#1203), but submitting it silently would attach a comment written about content that is
   // no longer on that line, so say so and let the reviewer decide.
@@ -732,12 +823,10 @@ function HunkView({
   review,
   findingsByAnchor,
   drafts,
-  onOpenSourceLocation,
-  onAttachWorkspaceReference,
+  lines,
   diffHash,
   scope,
   layout,
-  wrap,
 }: {
   hunk: GitHunk;
   filePath: string;
@@ -747,22 +836,18 @@ function HunkView({
   review?: DiffReviewControls;
   findingsByAnchor: ReadonlyMap<string, ReviewFinding[]>;
   drafts: DraftStore;
-  onOpenSourceLocation?: (location: SourceLocation) => void;
-  onAttachWorkspaceReference?: (target: CreateWorkspaceReferenceRequest) => Promise<void>;
+  lines: LineControls;
   diffHash: string;
   scope: GitDiffInfo["scope"];
   layout: DiffLayout;
-  wrap: boolean;
 }) {
   const rows = buildDiffHunkRows(hunk);
+  const hunkKey = diffHunkContentKey(hunk);
   const key = `${filePath}#${index}`;
   const inFlight = staging?.busyKey === key || staging?.busyKey === `${key}:lines`;
   // One mutation at a time — every hunk button disables while any one is in flight.
   const refusal = staging?.refusal ?? null;
   const disabled = staging?.busyKey != null || refusal !== null;
-  const [selectedLines, setSelectedLines] = useState<Set<number>>(new Set());
-  const [selectedReferenceLines, setSelectedReferenceLines] = useState<{ side: "left" | "right"; lines: Set<number> } | null>(null);
-  const [attachBusy, setAttachBusy] = useState(false);
   const lineDirection = staging?.fineGrained && staging.pane !== "combined" && fileStatus === "modified"
     ? (staging.pane === "unstaged" ? "stage" : "unstage")
     : null;
@@ -773,60 +858,8 @@ function HunkView({
   const mutateLines = (lineIndices: number[]) => {
     if (!staging || !lineDirection || lineIndices.length === 0) return;
     staging.onLines(lineDirection, filePath, index, lineIndices);
-    setSelectedLines(new Set());
   };
-  const toggleLine = (sourceIndex: number) => setSelectedLines((prior) => {
-    const next = new Set(prior);
-    if (next.has(sourceIndex)) next.delete(sourceIndex); else next.add(sourceIndex);
-    return next;
-  });
-  const toggleReferenceLine = (row: DiffHunkRow) => setSelectedReferenceLines((prior) => {
-    const lines = prior?.side === row.anchor.side ? new Set(prior.lines) : new Set<number>();
-    if (lines.has(row.anchor.line)) lines.delete(row.anchor.line); else lines.add(row.anchor.line);
-    return lines.size ? { side: row.anchor.side, lines } : null;
-  });
-  const referenceLineList = selectedReferenceLines ? [...selectedReferenceLines.lines].sort((a, b) => a - b) : [];
-  const referenceSelectionContiguous = referenceLineList.every((line, position) =>
-    position === 0 || line === referenceLineList[position - 1]! + 1);
-  const attachSelectedLines = async () => {
-    if (!onAttachWorkspaceReference || !selectedReferenceLines || !referenceLineList.length || !referenceSelectionContiguous) return;
-    setAttachBusy(true);
-    try {
-      await onAttachWorkspaceReference({
-        path: filePath,
-        kind: "diff",
-        startLine: referenceLineList[0],
-        endLine: referenceLineList[referenceLineList.length - 1],
-        side: selectedReferenceLines.side,
-        diffHash,
-        diffScope: scope,
-      });
-      setSelectedReferenceLines(null);
-    } finally {
-      setAttachBusy(false);
-    }
-  };
-  const referenceCheckbox = (row: DiffHunkRow) => onAttachWorkspaceReference ? (
-    <Checkbox
-      labelHidden
-      checked={selectedReferenceLines?.side === row.anchor.side && selectedReferenceLines.lines.has(row.anchor.line)}
-      disabled={attachBusy}
-      label={`Select ${row.anchor.side === "left" ? "Base" : "Worktree"} Line ${row.anchor.line} for Prompt`}
-      onChange={() => toggleReferenceLine(row)}
-    />
-  ) : null;
-  /** The box that picks one changed line for Stage Selected; a refusal disables it and says why. */
-  const lineCheckbox = (row: DiffHunkRow) => lineDirection && row.status !== " " ? (
-    <Checkbox
-      labelHidden
-      checked={selectedLines.has(row.sourceIndex)}
-      disabled={disabled}
-      title={refusal?.reason}
-      describedBy={refusal?.id}
-      label={row.status === "+" ? `Select Added Line ${row.anchor.line}` : `Select Removed Line ${row.anchor.line}`}
-      onChange={() => toggleLine(row.sourceIndex)}
-    />
-  ) : null;
+  const selecting = lines.selection?.selecting === true;
 
   const syntax = (text: string) => highlightDiffLine(filePath, text).map((segment, segmentIndex) => (
     <span className={`diff-syntax-${segment.kind}`} key={segmentIndex}>{segment.text}</span>
@@ -895,58 +928,85 @@ function HunkView({
     );
   };
 
-  const commentButton = (row: DiffHunkRow) => !review ? null : review.refusal ? (
-    <button
-      type="button"
-      className="diff-comment-add"
-      aria-label={`Comment on ${filePath} ${row.anchor.side} line ${row.anchor.line}`}
-      title={review.refusal.reason}
-      aria-describedby={review.refusal.id}
-      disabled
-    >
-      +
-    </button>
-  ) : (
-    <button
-      type="button"
-      className="diff-comment-add"
-      aria-label={`Comment on ${filePath} ${row.anchor.side} line ${row.anchor.line}`}
-      title="Add inline review finding"
-      onClick={() => drafts.toggle(drafts.keyFor({ filePath, ...row.anchor }), row.text)}
-    >
-      +
-    </button>
-  );
-  const sourcePath = normalizeSourcePath(filePath);
-  const sourceGutter = (row: DiffHunkRow, value: string, className: string) =>
-    onOpenSourceLocation && sourcePath && fileStatus !== "deleted" && row.anchor.side === "right" && value ? (
+  /**
+   * The line number is the line's one button (#2849). At rest it opens the line menu (a sheet on
+   * phones), which is how touch acts on a line; while Select Lines is on it toggles the line, and is
+   * where a click on the row leaves focus, so Escape still reaches the panel.
+   */
+  const lineNumber = (ref: DiffLineRef, numbers: ReactNode) => {
+    const label = diffLineLabel(ref);
+    const selected = lines.selection?.selected.has(ref.key) === true;
+    return selecting ? (
       <button
         type="button"
-        className={`${className} diff-source-gutter`}
-        title={`Open ${filePath}:${row.anchor.line}`}
-        aria-label={`Open ${filePath} line ${row.anchor.line}`}
-        onClick={() => onOpenSourceLocation({ path: sourcePath, line: row.anchor.line })}
+        className="diff-num"
+        aria-label={`Select ${label}`}
+        aria-pressed={selected}
+        onClick={(event) => lines.selection?.onLine(ref, event.shiftKey)}
       >
-        {value}
+        {numbers}
       </button>
-    ) : <span className={className}>{value}</span>;
+    ) : (
+      <button
+        type="button"
+        className="diff-num"
+        aria-label={`${label} Actions`}
+        aria-haspopup="menu"
+        aria-expanded={lines.menuKey === ref.key}
+        onClick={(event) => lines.onOpenMenu({ ref, fileStatus, addFinding: findable(ref), trigger: event.currentTarget })}
+      >
+        {numbers}
+      </button>
+    );
+  };
+  // Side by Side's old-side copy of an unchanged line takes no new finding: its new side does.
+  const findable = (ref: DiffLineRef) => ref.column !== "left" || ref.status !== " ";
+  /**
+   * Add Finding on hover (#2849): a mouse's shortcut to the line menu's Add Finding…, in the gutter
+   * between the numbers and the change marker, never over the code. Its slot is always there, so
+   * revealing it moves nothing. Touch has no hover, and uses the line menu instead.
+   */
+  const addSlot = (ref: DiffLineRef) => !lines.hoverAdd || !review ? null : (
+    <span className="diff-add-slot">
+      {!selecting && !review.refusal && findable(ref) && (
+        <button
+          type="button"
+          className="diff-add"
+          aria-label={`Add Finding on ${diffLineLabel(ref)}`}
+          title="Add a finding on this line"
+          onClick={() => drafts.toggle(drafts.keyFor({ filePath, side: ref.side, line: ref.line }), ref.text)}
+        >
+          <PlusIcon size={14} aria-hidden="true" />
+        </button>
+      )}
+    </span>
+  );
+  /** While selecting, a click anywhere on the row picks it, and leaves focus on its number. */
+  const selectRow = (ref: DiffLineRef) => selecting ? {
+    onClick: (event: ReactMouseEvent<HTMLDivElement>) => {
+      if (event.target instanceof Element && event.target.closest("button, a, input, textarea, select")) return;
+      lines.selection?.onLine(ref, event.shiftKey);
+      event.currentTarget.querySelector<HTMLButtonElement>(".diff-num")?.focus({ preventScroll: true });
+    },
+  } : {};
+  const selectedClass = (ref: DiffLineRef) => lines.selection?.selected.has(ref.key) ? " is-selected" : "";
 
   const rowKind = (row: DiffHunkRow) => row.status === "+" ? "add" : row.status === "-" ? "del" : "ctx";
   // Whether an anchor carries a finding or an open editor, which renders full width under its row.
   const hasExtras = (target: { side: "left" | "right"; line: number }) =>
     findingsByAnchor.has(diffAnchorKey({ filePath, ...target })) || drafts.open.has(drafts.keyFor({ filePath, ...target }));
-  const splitCell = (row: DiffHunkRow | null, sideIndex: 0 | 1, key: number) => row ? (
-    <div className={`diff-split-cell diff-line-${rowKind(row)}`} key={key}>
-      <span className="diff-line-select">
-        {referenceCheckbox(row)}
-        {lineCheckbox(row)}
-      </span>
-      {sourceGutter(row, sideIndex === 0 ? row.oldNo : row.newNo, "diff-gutter")}
-      <span className="diff-sign">{row.status === " " ? "" : row.status}</span>
-      <span className="diff-text">{lineText(row)}</span>
-      {(row.status !== " " || sideIndex === 1) && commentButton(row)}
-    </div>
-  ) : <div className="diff-split-cell diff-split-empty" key={key} />;
+  const splitCell = (row: DiffHunkRow | null, sideIndex: 0 | 1, key: number) => {
+    if (!row) return <div className="diff-split-cell diff-split-empty" key={key} />;
+    const ref = diffLineRef(filePath, hunkKey, sideIndex === 0 ? "left" : "right", row);
+    return (
+      <div className={`diff-split-cell diff-line-${rowKind(row)}${selectedClass(ref)}`} key={key} {...selectRow(ref)}>
+        {lineNumber(ref, <span className="diff-gutter">{sideIndex === 0 ? row.oldNo : row.newNo}</span>)}
+        {addSlot(ref)}
+        <span className="diff-sign">{row.status === " " ? "" : row.status}</span>
+        <span className="diff-text">{lineText(row)}</span>
+      </div>
+    );
+  };
   /* No `status !== " "` guard: `buildSplitDiffRows` gives a context row a left anchor at its old line
      number, and that anchor can hold a carried finding or draft. */
   const pairExtras = (pair: SplitDiffRow, pairIndex: number) => (
@@ -965,7 +1025,7 @@ function HunkView({
    */
   const splitRuns = () => {
     const pairs = buildSplitDiffRows(hunk);
-    if (wrap) {
+    if (lines.wrap) {
       return (
         <div className="dsplit is-wrapped">
           {pairs.map((pair, pairIndex) => (
@@ -1005,22 +1065,11 @@ function HunkView({
     <div className="diff-hunk">
       <div className="diff-hunk-header">
         <span className="diff-hunk-header-text" title={hunk.header}>{hunk.header}</span>
-        {(staging || (onAttachWorkspaceReference && referenceLineList.length > 0)) && (
+        {staging && (
           <span className="hunk-actions">
-            {/* Attach Selected and Stage Selected appear once there is a selection: at rest the header
-                is the range and one action, on one line at every panel width (#2848). */}
-            {onAttachWorkspaceReference && referenceLineList.length > 0 && (
-              <button
-                className="btn sm ghost"
-                type="button"
-                disabled={attachBusy || !referenceSelectionContiguous}
-                title={!referenceSelectionContiguous ? "Select a contiguous range on one diff side" : "Attach Selected Lines to Prompt"}
-                onClick={() => void attachSelectedLines()}
-              >
-                {attachBusy ? <Spinner /> : `Attach Selected (${referenceLineList.length})`}
-              </button>
-            )}
-            {staging?.pane === "combined" ? (
+            {/* At rest the header is the range and one action, on one line at every panel width
+                (#2848); single lines are staged from the selection bar (#2849). */}
+            {staging.pane === "combined" ? (
               <>
                 {hunk.staged && (
                   <span className="hunk-staged"><CheckIcon size={14} aria-hidden="true" />Staged</span>
@@ -1037,46 +1086,136 @@ function HunkView({
                   {inFlight ? <Spinner /> : hunk.staged ? "Unstage Hunk" : "Stage Hunk"}
                 </button>
               </>
-            ) : staging && lineDirection && (
-              <>
-                {selectedLines.size > 0 && (
-                  <button className="btn sm ghost" type="button" disabled={disabled} title={refusal?.reason}
-                    aria-describedby={refusal?.id} onClick={() => mutateLines([...selectedLines].sort((a, b) => a - b))}>
-                    {lineDirection === "stage" ? "Stage" : "Unstage"} Selected ({selectedLines.size})
-                  </button>
-                )}
-                <button className="btn sm ghost hunk-stage" type="button" disabled={disabled} title={refusal?.reason}
-                  aria-busy={inFlight || undefined}
-                  aria-describedby={refusal?.id} onClick={() => mutateLines(changeIndices)}>
-                  {inFlight ? <Spinner /> : `${lineDirection === "stage" ? "Stage" : "Unstage"} Hunk`}
-                </button>
-              </>
+            ) : lineDirection && (
+              <button className="btn sm ghost hunk-stage" type="button" disabled={disabled} title={refusal?.reason}
+                aria-busy={inFlight || undefined}
+                aria-describedby={refusal?.id} onClick={() => mutateLines(changeIndices)}>
+                {inFlight ? <Spinner /> : `${lineDirection === "stage" ? "Stage" : "Unstage"} Hunk`}
+              </button>
             )}
           </span>
         )}
       </div>
       <div className={`diff-hunk-lines diff-layout-${layout}`}>
-        {layout === "unified" ? rows.map((row, i) => (
-          <Fragment key={i}>
-            <div className={`diff-line diff-line-${rowKind(row)}`}>
-              <span className="diff-line-select">
-                {referenceCheckbox(row)}
-                {lineCheckbox(row)}
-              </span>
-              <span className="diff-gutter diff-gutter-old">{row.oldNo}</span>
-              {sourceGutter(row, row.newNo, "diff-gutter diff-gutter-new")}
-              <span className="diff-sign">{row.status === " " ? "" : row.status}</span>
-              <span className="diff-text">{lineText(row)}</span>
-              {commentButton(row)}
-            </div>
-            {reviewExtras(row.anchor, row.text, `unified-${i}`)}
-            {/* A context row is anchorable from the old side too, and a carried finding or draft can
-                sit there — see `buildDiffAnchorIndex`, which indexes exactly this anchor. */}
-            {row.status === " " && reviewExtras({ side: "left", line: Number(row.oldNo) }, row.text, `unified-${i}-left`)}
-          </Fragment>
-        )) : splitRuns()}
+        {layout === "unified" ? rows.map((row, i) => {
+          const ref = diffLineRef(filePath, hunkKey, "unified", row);
+          return (
+            <Fragment key={i}>
+              <div className={`diff-line diff-line-${rowKind(row)}${selectedClass(ref)}`} {...selectRow(ref)}>
+                {lineNumber(ref, (
+                  <>
+                    <span className="diff-gutter diff-gutter-old">{row.oldNo}</span>
+                    <span className="diff-gutter diff-gutter-new">{row.newNo}</span>
+                  </>
+                ))}
+                {addSlot(ref)}
+                <span className="diff-sign">{row.status === " " ? "" : row.status}</span>
+                <span className="diff-text">{lineText(row)}</span>
+              </div>
+              {reviewExtras(row.anchor, row.text, `unified-${i}`)}
+              {/* A context row is anchorable from the old side too, and a carried finding or draft can
+                  sit there — see `buildDiffAnchorIndex`, which indexes exactly this anchor. */}
+              {row.status === " " && reviewExtras({ side: "left", line: Number(row.oldNo) }, row.text, `unified-${i}-left`)}
+            </Fragment>
+          );
+        }) : splitRuns()}
         {hunk.noNewlineAtEof && <div className="diff-line diff-nonl muted">\ No newline at end of file</div>}
       </div>
     </div>
+  );
+}
+
+/** The line a line menu is open for, and the number button that opened it. */
+interface LineMenuTarget {
+  ref: DiffLineRef;
+  fileStatus: GitDiffFile["status"];
+  /** Whether this line takes a new finding (not Side by Side's old-side copy of an unchanged line). */
+  addFinding: boolean;
+  trigger: HTMLButtonElement;
+}
+
+/** What every hunk shares for acting on one line: Select Lines, the line menu and the hover "+". */
+interface LineControls {
+  selection?: DiffLineSelectionControls;
+  /** The key of the line whose menu is open, for its trigger's `aria-expanded`. */
+  menuKey: string | null;
+  onOpenMenu: (target: LineMenuTarget) => void;
+  /** A fine pointer: the gutter "+" is offered. */
+  hoverAdd: boolean;
+  wrap: boolean;
+}
+
+/**
+ * The line menu (#2849; docs/design-system.md §9.1), one for the whole diff: Add Finding…, Select
+ * Line and Open in Files at Line, a bottom sheet on phones. An action this line cannot take stays
+ * listed with its reason. It replaced the line number's hidden link to Files.
+ */
+function DiffLineMenu({ target, onClose, review, drafts, selection, onOpenSourceLocation }: {
+  target: LineMenuTarget;
+  onClose: () => void;
+  review?: DiffReviewControls;
+  drafts: DraftStore;
+  selection?: DiffLineSelectionControls;
+  onOpenSourceLocation?: (location: SourceLocation) => void;
+}) {
+  const [open, setOpen] = useState(true);
+  const menu = useAccessibleMenu(open, setOpen, "diff-line-menu", "item", { reachUnavailable: true });
+  // The menu belongs to the number button that opened it: focus goes back there as it closes.
+  menu.triggerRef.current = target.trigger;
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useEffect(() => {
+    if (!open) closeRef.current();
+  }, [open]);
+  const { ref, fileStatus } = target;
+  const label = `${diffLineLabel(ref)} Actions`;
+  const sourcePath = normalizeSourcePath(ref.filePath);
+  const filesReason = fileStatus === "deleted"
+    ? "The file was deleted."
+    : ref.side === "left"
+      ? ref.status === "-" ? "This line was removed, so Files can't show it." : "Open the line from its new side."
+      : undefined;
+  const choose = (run: () => void, focusTrigger = true) => {
+    if (focusTrigger) target.trigger.focus();
+    menu.close(false);
+    run();
+  };
+  return (
+    <MenuSurface
+      surfaceRef={menu.menuRef}
+      anchor={{ trigger: menu.triggerRef }}
+      id={menu.menuId}
+      label={label}
+      tabIndex={-1}
+      onDismiss={() => menu.close(true)}
+      onKeyDown={menu.onMenuKeyDown}
+    >
+      {review && target.addFinding && (
+        <MenuItem
+          data-menu-label="Add Finding…"
+          aria-disabled={review.refusal ? true : undefined}
+          description={review.refusal?.reason}
+          // The editor opens under the line and takes focus itself.
+          onClick={() => { if (!review.refusal) choose(() => drafts.show(drafts.keyFor({ filePath: ref.filePath, side: ref.side, line: ref.line }), ref.text), false); }}
+        >
+          Add Finding…
+        </MenuItem>
+      )}
+      {selection && (
+        <MenuItem data-menu-label="Select Line" onClick={() => choose(() => selection.onSelectLine(ref))}>
+          Select Line
+        </MenuItem>
+      )}
+      {onOpenSourceLocation && sourcePath && (
+        <MenuItem
+          data-menu-label="Open in Files at Line"
+          aria-disabled={filesReason ? true : undefined}
+          description={filesReason}
+          onClick={() => { if (!filesReason) choose(() => onOpenSourceLocation({ path: sourcePath, line: ref.line })); }}
+        >
+          Open in Files at Line
+        </MenuItem>
+      )}
+    </MenuSurface>
   );
 }

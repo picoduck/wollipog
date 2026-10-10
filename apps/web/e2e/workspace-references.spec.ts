@@ -6,9 +6,13 @@ test("workspace paths and exact diff lines become inspectable prompt attachments
   await expect(page.getByRole("listbox", { name: "Workspace Paths" })).toBeVisible();
   await page.getByRole("option", { name: /src\/session\.ts/ }).click();
   await expect(page.getByRole("button", { name: /Inspect Reference src\/session\.ts$/ })).toBeVisible();
-  await page.getByRole("checkbox", { name: "Select Worktree Line 19 for Prompt" }).check();
-  await page.getByRole("checkbox", { name: "Select Worktree Line 20 for Prompt" }).check();
-  await page.getByRole("button", { name: "Attach Selected (2)" }).click();
+  // Select Lines (#2849): a line number's menu picks the first line, Shift-click takes the range.
+  await page.getByRole("button", { name: "Line 19 Actions", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Select Line" }).click();
+  await page.getByRole("button", { name: "Select Line 20", exact: true }).click({ modifiers: ["Shift"] });
+  const bar = page.getByRole("region", { name: "Selected Lines" });
+  await expect(bar).toContainText("2 lines selected");
+  await bar.getByRole("button", { name: "Attach to Prompt" }).click();
   await expect(page.getByRole("button", { name: /Inspect Reference src\/session\.ts:19-20 · Worktree/ })).toBeVisible();
 });
 

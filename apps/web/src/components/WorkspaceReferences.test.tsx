@@ -168,11 +168,15 @@ test("Review exposes selectable added, removed, and both context sides with immu
       }],
     }],
   };
-  const html = renderToStaticMarkup(<GitDiffViewer diff={diff} layout="split" onAttachWorkspaceReference={async () => {}} />);
-  assert.match(html, /Select Base Line 10 for Prompt/);
-  assert.match(html, /Select Worktree Line 10 for Prompt/);
-  assert.match(html, /Select Base Line 11 for Prompt/);
-  assert.match(html, /Select Worktree Line 11 for Prompt/);
-  // Attach Selected appears once lines are chosen (#2848), so an unselected hunk header stays one line.
+  // Select Lines (#2849): every line in either column is one pickable number, and none is a checkbox.
+  const selection = { selecting: true, selected: new Set<string>(), onLine: () => {}, onSelectLine: () => {} };
+  const html = renderToStaticMarkup(
+    <GitDiffViewer diff={diff} layout="split" selection={selection} onAttachWorkspaceReference={async () => {}} />,
+  );
+  for (const name of ["Select Base Line 10", "Select Line 10", "Select Removed Line 11", "Select Line 11"]) {
+    assert.match(html, new RegExp(`aria-label="${name}" aria-pressed="false"`), name);
+  }
+  assert.doesNotMatch(html, /type="checkbox"/);
+  // Attaching lives in the selection bar, so the hunk header carries no per-hunk Attach.
   assert.doesNotMatch(html, /Attach Selected/);
 });
