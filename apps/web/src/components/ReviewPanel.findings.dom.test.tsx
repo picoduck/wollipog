@@ -212,6 +212,8 @@ interface Harness {
   opened: SourceLocation[];
   render: (over?: Partial<Options>) => Promise<void>;
   reloadFindings: (findings: ReviewFinding[]) => Promise<void>;
+  /** Hold the next Sync or Send open; the returned function settles it, after installing `findings`. */
+  hold: (kind: "sync" | "bundle") => (findings?: ReviewFinding[]) => Promise<void>;
   unmount: () => Promise<void>;
 }
 
@@ -231,6 +233,7 @@ async function mountReview(initial: Partial<Options> = {}): Promise<Harness> {
   const root = createRoot(body as unknown as Element);
   const bundles: BundleReviewFindingsRequest[] = [];
   const opened: SourceLocation[] = [];
+  const gates: Partial<Record<"sync" | "bundle", Promise<void>>> = {};
   const response = () => ({
     findings: options.findings,
     summary: { total: 0, unresolved: 0, requiredUnresolved: 0, sent: 0, resolved: 0, dismissed: 0, completion: "complete" as const },
@@ -239,7 +242,17 @@ async function mountReview(initial: Partial<Options> = {}): Promise<Harness> {
     ...api,
     gitDiff: async (_id: string, scope: GitDiffScope) => ({ diff: diffOf(scope) }),
     reviewFindings: async () => response(),
+    git: async (_id: string, request: { action: string }) => {
+      if (request.action !== "forge_review_sync" && request.action !== "github_review_sync") return {};
+      await gates.sync;
+      return {
+        reviewFindings: response(),
+        reviewReconciliation: { imported: 0, updated: 1, dismissedMissing: 0 },
+        forgeReview: { provider: "github", changeRequestNumber: 42, threads: [] },
+      };
+    },
     bundleReviewFindings: async (_id: string, request: BundleReviewFindingsRequest) => {
+      await gates.bundle;
       bundles.push(request);
       const sent = new Set(request.findings.map((entry) => entry.findingId));
       options = {
@@ -293,6 +306,15 @@ async function mountReview(initial: Partial<Options> = {}): Promise<Harness> {
       const refresh = (head as unknown as HTMLElement).querySelector<HTMLButtonElement>('button[aria-label="Refresh Review"]');
       assert.ok(refresh, "the header Refresh is rendered");
       await act(async () => { fireDomEvent.click(refresh); });
+    },
+    hold: (kind) => {
+      let release!: () => void;
+      gates[kind] = new Promise<void>((resolve) => { release = resolve; });
+      return async (findings) => {
+        if (findings) options = { ...options, findings };
+        delete gates[kind];
+        await act(async () => { release(); });
+      };
     },
     unmount: async () => {
       await act(async () => { root.unmount(); });
@@ -553,5 +575,50 @@ test("with no findings the section says how to add one, and settled findings sta
     assert.equal(trigger.getAttribute("aria-expanded"), "false");
   } finally {
     await settled.unmount();
+  }
+});
+
+test("a Sync that settles the selected findings while Send runs keeps the busy bar and the focus (#2850)", async () => {
+  const harness = await mountReview({ status: statusOf({ remoteUrl: "https://github.com/acme/shop.git" }) });
+  try {
+    const finishSync = harness.hold("sync");
+    await act(async () => { fireDomEvent.click(onlyButton(section(harness.container), "Sync GitHub")); });
+    await select(rows(harness.container)[0]!);
+    const finishSend = harness.hold("bundle");
+    const send = onlyButton(harness.container.querySelector(".finding-selection-bar")!, "Send to Agent");
+    send.focus();
+    await act(async () => { fireDomEvent.click(send); });
+    assert.equal(send.getAttribute("aria-busy"), "true", "the send is running");
+
+    // The forge reports the selected finding resolved while the send is still out.
+    await finishSync([{ ...mine, status: "resolved" }]);
+    const bar = harness.container.querySelector<HTMLElement>(".finding-selection-bar");
+    assert.ok(bar, "the bar stays while its send runs");
+    assert.equal(send.isConnected, true, "the busy Send to Agent is not taken away");
+    assert.equal(send.getAttribute("aria-busy"), "true");
+    assert.equal(bar.querySelector(".finding-selection-count")?.textContent, "1 finding selected", "it still says what is being sent");
+    assert.equal(domWindow.document.activeElement, send, "focus stays on the running action");
+    assertNoDomNode(harness.container.querySelector(".commit-bar"), "the commit bar waits for the send");
+
+    await finishSend();
+    assert.match(harness.container.querySelector(".finding-selection-bar .notice")?.textContent ?? "", /Sent 1 finding to Claude\./u);
+    assert.notEqual(domWindow.document.activeElement, domWindow.document.body, "focus moves to the result, not the page");
+  } finally {
+    await harness.unmount();
+  }
+});
+
+test("a reload that settles every selected finding gives the foot back and focus to the findings (#2850)", async () => {
+  const harness = await mountReview();
+  try {
+    await select(rows(harness.container)[0]!);
+    onlyButton(harness.container.querySelector(".finding-selection-bar")!, "Clear").focus();
+    await harness.reloadFindings([{ ...mine, status: "resolved" }]);
+    assertNoDomNode(harness.container.querySelector(".finding-selection-bar"));
+    assert.ok(harness.container.querySelector(".commit-bar"));
+    assert.equal(domWindow.document.activeElement?.textContent?.startsWith("Findings"), true,
+      "focus returns to the findings rather than the page");
+  } finally {
+    await harness.unmount();
   }
 });

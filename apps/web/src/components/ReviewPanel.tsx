@@ -338,6 +338,9 @@ export function ReviewPanel({
   const [findingBusyId, setFindingBusyId] = useState<string | null>(null);
   const [creatingFinding, setCreatingFinding] = useState(false);
   const [bundlingFindings, setBundlingFindings] = useState(false);
+  // How many findings the running send carries, which the bar keeps showing even if a reload
+  // settles some of them meanwhile.
+  const [sendingCount, setSendingCount] = useState(0);
   const [syncingGitHub, setSyncingGitHub] = useState(false);
   const [findingError, setFindingError] = useState<string | null>(null);
   const [findingNotice, setFindingNotice] = useState<string | null>(null);
@@ -345,7 +348,7 @@ export function ReviewPanel({
   const [sentNotice, setSentNotice] = useState<string | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
   const findingsTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const returnFocusToFindings = useRef(false);
+  const selectionBarWasShown = useRef(false);
   const findingReqRef = useRef(0);
   // Monotonic request token: switching scope fires overlapping loadDiff() calls, and their
   // responses can resolve out of order. Only the latest request may write state, so a slow
@@ -578,6 +581,7 @@ export function ReviewPanel({
     const selected = findings.filter((finding) => selectedFindings.has(finding.findingId) && isOpenFinding(finding));
     if (!selected.length || findingRefusal !== null || sendUnavailable !== null) return;
     setBundlingFindings(true);
+    setSendingCount(selected.length);
     setSendError(null);
     setSentNotice(null);
     const startedFor = session.id;
@@ -608,18 +612,18 @@ export function ReviewPanel({
       return next;
     });
   };
-  // The selection bar replaces the commit bar while findings are selected, and while it holds the
-  // result of the last send.
-  const selectionBarShown = selectedFindings.size > 0 || sentNotice !== null || sendError !== null;
-  const leaveSelectionBar = (leave: () => void) => {
-    returnFocusToFindings.current = true;
-    leave();
-  };
-  // Clear and the notices' Dismiss take the bar away under the focus they hold; it goes back to the
-  // findings it was about, not to the page.
+  // The selection bar replaces the commit bar while findings are selected, while a send runs (a
+  // Sync or Refresh that settles the selected findings meanwhile must not take the busy button
+  // away), and while it holds the result of the last send.
+  const selectionBarShown = selectedFindings.size > 0 || bundlingFindings || sentNotice !== null || sendError !== null;
+  // Clear, a notice's Dismiss, or a reload that settles every selected finding takes the bar away
+  // under the focus it may hold; focus then goes back to the findings it was about, not to the page.
   useLayoutEffect(() => {
-    if (!returnFocusToFindings.current || selectionBarShown) return;
-    returnFocusToFindings.current = false;
+    const wasShown = selectionBarWasShown.current;
+    selectionBarWasShown.current = selectionBarShown;
+    if (!wasShown || selectionBarShown) return;
+    const active = document.activeElement;
+    if (active && active !== document.body && active.isConnected) return;
     findingsTriggerRef.current?.focus({ preventScroll: true });
   });
 
@@ -1141,16 +1145,16 @@ export function ReviewPanel({
         // there when it comes back.
         foot={selectionBarShown ? (
           <FindingSelectionBar
-            count={selectedFindings.size}
+            count={bundlingFindings ? sendingCount : selectedFindings.size}
             busy={bundlingFindings}
             unavailable={sendUnavailable}
             refusal={findingRefusal === null ? null : { reason: findingRefusal, id: findingRefusalId }}
             notice={sentNotice}
             error={sendError}
-            onClear={() => leaveSelectionBar(() => setSelectedFindings(new Set()))}
+            onClear={() => setSelectedFindings(new Set())}
             onSend={() => void bundleFindings()}
-            onDismissNotice={() => leaveSelectionBar(() => setSentNotice(null))}
-            onDismissError={() => leaveSelectionBar(() => setSendError(null))}
+            onDismissNotice={() => setSentNotice(null)}
+            onDismissError={() => setSendError(null)}
           />
         ) : (
           <CommitBar
