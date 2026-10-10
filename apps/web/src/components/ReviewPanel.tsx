@@ -778,7 +778,9 @@ export function ReviewPanel({
     setRequestFailure(null);
     const startedFor = session.id;
     const current = () => sessionIdRef.current === startedFor;
-    const title = mode === "push" ? summaryPr?.title || prTitle : prTitle;
+    // The request a push goes to, as it stood when the push was sent.
+    const pushTarget = mode === "push" ? summaryPr : null;
+    const title = pushTarget?.title || prTitle;
     // The commit message goes with both: `open_pr` commits any pending changes with it. Pushing to an
     // open request sends none of the dialog's fields, so they stay the reviewer's drafts.
     const submitted = captureSubmitted(panelScratch, mode === "open"
@@ -796,18 +798,24 @@ export function ReviewPanel({
         ? { action: "open_pr", title, body: prBody, branch, message: commitMsg }
         : { action: "open_pr", title, body: "", branch: "", message: commitMsg });
       const pr = d.pr;
+      const created = pr?.created ?? pr?.createdWithGh;
       // Only a request that was actually opened holds the text. The fallback link GitHub gets when
       // forge tooling is unavailable carries neither title nor description, so the reviewer still
-      // needs both to paste into the page it opens. The drafts are released even after a session
-      // switch: the captured scope and revisions keep that from touching anything newer.
-      if (pr?.created ?? pr?.createdWithGh) releaseSubmitted(submitted);
+      // needs both to paste into the page it opens. A push to an open request succeeded once the
+      // runner answers, even when forge tooling could not confirm the request: the message it
+      // committed with is spent either way. Drafts are released even after a session switch: the
+      // captured scope and revisions keep that from touching anything newer.
+      if (mode === "push" ? !!pr : created) releaseSubmitted(submitted);
       if (pr && current()) {
-        const link = requestLink(pr, linkProvider);
-        if (pr.created ?? pr.createdWithGh) {
-          if (mode === "open") setOpenedRequest(openedRequestSummary(pr, title));
-          setBarNotice({ kind: mode === "open" ? "opened" : "pushed", link });
+        if (mode === "push") {
+          // Without forge tooling the runner returns a creation page; the request already exists.
+          const url = created ? pr.url : pushTarget?.url ?? pr.url;
+          setBarNotice({ kind: "pushed", link: requestLink({ ...pr, url }, linkProvider) });
+        } else if (created) {
+          setOpenedRequest(openedRequestSummary(pr, title));
+          setBarNotice({ kind: "opened", link: requestLink(pr, linkProvider) });
         } else {
-          setBarNotice({ kind: "finish", link, ...(pr.notice ? { detail: pr.notice } : {}) });
+          setBarNotice({ kind: "finish", link: requestLink(pr, linkProvider), ...(pr.notice ? { detail: pr.notice } : {}) });
         }
       }
       if (current()) setRequestDialogOpen(false);

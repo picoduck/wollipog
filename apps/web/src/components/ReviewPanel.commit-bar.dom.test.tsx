@@ -703,3 +703,30 @@ test("pushing to an open request releases the commit message it committed with, 
     await harness.unmount();
   }
 });
+
+/* Cross-model review round 3 (#2893) */
+
+test("a push to an open request that forge tooling couldn't confirm still reads as pushed, to that request", async () => {
+  const harness = await mountReview({ forgeFacts: { pr: openPr, checks: null } });
+  try {
+    const input = () => bar(harness.container).querySelector("input")!;
+    await typeInto(input(), "fix: totals use quantity");
+    harness.reply({ pr: {
+      url: "https://github.com/acme/shop/compare/main...agent/commit-bar?expand=1", branch: "agent/commit-bar", pushed: true,
+      createdWithGh: false, created: false, provider: "github", kind: "pull_request",
+      notice: "Only the branch was pushed. Authenticate the GitHub CLI to create the pull request here.",
+    } });
+    await click(only(bar(harness.container), "Push to Pull Request"));
+
+    const notice = bar(harness.container).querySelector<HTMLElement>(".notice")!;
+    assert.ok(notice.classList.contains("t-success"), "not a Finish warning: the request already exists");
+    assert.equal(notice.querySelector(".notice-body")?.textContent, "Pushed to the pull request.");
+    assert.equal(only(notice, "Open on GitHub").getAttribute("href"), openPr.url, "the link is the open request's");
+
+    await harness.render({ session: { ...baseSession, id: "session-other" } });
+    await harness.render({ session: baseSession });
+    assert.equal(input().value, "Speed Up Checkout", "the message the push committed with is released");
+  } finally {
+    await harness.unmount();
+  }
+});
