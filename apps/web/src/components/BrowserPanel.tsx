@@ -16,6 +16,7 @@ import { handleRovingChoiceKeyDown } from "./interactions.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import { ArtifactPreviewBody, ArtifactPreviewHeader, ArtifactPreviewMeta, ArtifactRow, useArtifactPreview } from "./ArtifactPreview.js";
 import { usePanelScratchChoice, usePanelScratchScope, usePanelScratchText } from "../right-panel-scratch.js";
+import { usePanelBack } from "./RightPanel.js";
 
 type BrowserMode = "artifacts" | "web";
 
@@ -205,18 +206,25 @@ export function BrowserPanel({ session }: { session: SessionView }) {
 
 /**
  * An open artifact (#2855): its header in the toolbar slot, so the title, Enlarge and Download stay
- * put while the meta line and the body scroll under them. Back to Artifacts is the only back control.
- * It takes focus as the preview opens, since the row that opened it is gone.
+ * put while the meta line and the body scroll under them. Back to Artifacts is the only back control:
+ * the header's own on a desktop panel, and the panel's Back on a phone, whose header already leads
+ * with one (`usePanelBack`). Back takes focus as the preview opens, since the row that opened it is
+ * gone; on a phone that is the panel's Back.
  */
 function ArtifactDetail({ artifact, onBack }: { artifact: WorkflowArtifactView; onBack: () => void }) {
   const model = useArtifactPreview(artifact);
   const backRef = useRef<HTMLButtonElement>(null);
+  const panelBack = usePanelBack({ label: "Back to Artifacts", onBack });
   useLayoutEffect(() => {
     const focused = document.activeElement;
-    if (!focused || focused === document.body) backRef.current?.focus();
+    if (focused && focused !== document.body) return;
+    if (backRef.current) backRef.current.focus();
+    else panelBack.focus();
+    // Once, as the preview opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   return (
-    <PanelToolLayout toolbar={<ArtifactPreviewHeader model={model} onBack={onBack} backRef={backRef} />}>
+    <PanelToolLayout toolbar={<ArtifactPreviewHeader model={model} onBack={panelBack.carried ? undefined : onBack} backRef={backRef} />}>
       <div id="browser-artifacts-panel" role="tabpanel" aria-labelledby="browser-artifacts-tab" className="browser-artifacts">
         <ArtifactPreviewMeta model={model} />
         <ArtifactPreviewBody model={model} />
@@ -225,7 +233,7 @@ function ArtifactDetail({ artifact, onBack }: { artifact: WorkflowArtifactView; 
   );
 }
 
-/** The rows; back from a preview, focus returns to the row that opened it. */
+/** The rows; back from a preview, focus moves to the row that opened it. */
 function ArtifactList({ artifacts, returnTo, onOpen }: {
   artifacts: readonly WorkflowArtifactView[];
   returnTo: { current: string };
@@ -236,9 +244,9 @@ function ArtifactList({ artifacts, returnTo, onOpen }: {
   useLayoutEffect(() => {
     const artifactId = returnTo.current;
     returnTo.current = "";
+    // Set only by Back to Artifacts, which the person just chose: on a phone it is the panel's Back,
+    // which stays in place and so still holds focus here.
     if (!artifactId) return;
-    const focused = document.activeElement;
-    if (focused && focused !== document.body) return;
     const row = [...listRef.current?.querySelectorAll<HTMLElement>("li[data-artifact-id]") ?? []]
       .find((item) => item.dataset.artifactId === artifactId);
     row?.querySelector<HTMLButtonElement>("button")?.focus();

@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { CampaignIcon, ChevronDownIcon, ChevronLeftIcon, CloseIcon, CommandLineIcon, DiffIcon, FolderIcon, GlobeIcon, GridIcon, QuestionIcon, InboxIcon, JobsIcon, LockIcon, TeamIcon } from "./Icons.js";
 import { Maximize2Icon, Minimize2Icon } from "./Icons.js";
@@ -129,6 +129,45 @@ export function usePanelEscapeLayer(onEscape: (() => void) | null): void {
       if (layer.current === take) layer.current = null;
     };
   }, [layer, active]);
+}
+
+/** What a tool's Back does from the phone panel's header, and its Title Case name. */
+export interface PanelBack {
+  label: string;
+  onBack: () => void;
+}
+
+interface PanelBackSlot {
+  /** The panel is a phone sheet, whose header leads with a Back (#2843). */
+  phone: boolean;
+  set: Dispatch<SetStateAction<{ label: string; run: () => void } | null>>;
+  /** Focus the header's Back. */
+  focus: () => void;
+}
+
+/** Where a tool registers its own Back (`usePanelBack`). */
+const PanelBackContext = createContext<PanelBackSlot | null>(null);
+
+/**
+ * A tool's own Back in the phone panel's header (#2855), so a page inside a tool, such as an open
+ * artifact, has one back control: while `back` is set on a phone, the header's Back takes its name
+ * and runs it instead of Back to Session. `carried` says the header carries it, when the tool must
+ * not draw a back of its own; on a desktop panel, whose header has no Back, it is false. #2856's page
+ * stack is meant to absorb this. Outside the side panel it does nothing.
+ */
+export function usePanelBack(back: PanelBack | null): { carried: boolean; focus: () => void } {
+  const slot = useContext(PanelBackContext);
+  const handlerRef = useRef(back?.onBack);
+  handlerRef.current = back?.onBack;
+  const label = back?.label ?? null;
+  const carried = Boolean(slot?.phone && label !== null);
+  useLayoutEffect(() => {
+    if (!slot?.phone || label === null) return;
+    const entry = { label, run: () => handlerRef.current?.() };
+    slot.set(entry);
+    return () => slot.set((current) => (current === entry ? null : current));
+  }, [slot, label]);
+  return { carried, focus: () => slot?.focus() };
 }
 
 /**
@@ -615,6 +654,14 @@ export function RightPanel({
 
   // The tool's own Escape layer, when it has one (`usePanelEscapeLayer`).
   const escapeLayerRef = useRef<(() => void) | null>(null);
+  // The tool's own Back on a phone, when it has one (`usePanelBack`).
+  const [toolBack, setToolBack] = useState<{ label: string; run: () => void } | null>(null);
+  const phoneBackRef = useRef<HTMLButtonElement>(null);
+  const backSlot = useMemo<PanelBackSlot>(
+    () => ({ phone, set: setToolBack, focus: () => phoneBackRef.current?.focus() }),
+    [phone],
+  );
+  const phoneBack = phone ? toolBack : null;
   /** Escape's step for the panel itself: Restore Panel while expanded, then Close Panel (#2845). */
   const dismiss = expanded ? () => state.setExpanded(false) : state.close;
 
@@ -966,11 +1013,12 @@ export function RightPanel({
         <div className="rpanel-head">
           {phone && (
             <button
+              ref={phoneBackRef}
               type="button"
               className="icon-btn"
-              onClick={state.close}
-              title="Back to Session"
-              aria-label="Back to Session"
+              onClick={phoneBack?.run ?? state.close}
+              title={phoneBack?.label ?? "Back to Session"}
+              aria-label={phoneBack?.label ?? "Back to Session"}
             >
               <ChevronLeftIcon />
             </button>
@@ -1008,7 +1056,9 @@ export function RightPanel({
             />
           ) : (
             <PanelEscapeLayerContext.Provider value={escapeLayerRef}>
-              <div className="rpanel-body">{modeBody(state.mode)}</div>
+              <PanelBackContext.Provider value={backSlot}>
+                <div className="rpanel-body">{modeBody(state.mode)}</div>
+              </PanelBackContext.Provider>
             </PanelEscapeLayerContext.Provider>
           )}
         </PanelActionSlotContext.Provider>
