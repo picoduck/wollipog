@@ -6,7 +6,6 @@ import React, {
   useContext,
   useEffect,
   useId,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -29,6 +28,7 @@ import {
 } from "../markdown-highlight.js";
 import { CopyButton } from "./common.js";
 import { markdownBlockStarts } from "./markdown-blocks.js";
+import { MarkdownContentCache, type MarkdownContentProfile } from "./markdown-content-cache.js";
 import { CheckIcon, ImageIcon, ImageOffIcon, WrapLinesIcon } from "./Icons.js";
 
 type MarkdownComponents = NonNullable<ComponentProps<typeof ReactMarkdown>["components"]>;
@@ -178,31 +178,40 @@ function MarkdownCode({ children, node: _node, ...props }: ComponentProps<"code"
 
 function MarkdownTable({ children, node: _node, ...props }: ComponentProps<"table"> & { node?: unknown }) {
   const wrapRef = useRef<HTMLDivElement>(null);
-  const [scrollable, setScrollable] = useState(false);
-  const [fadeEnd, setFadeEnd] = useState(false);
-  useLayoutEffect(() => {
+  const [edges, setEdges] = useState({ scrollable: false, fadeEnd: false });
+  const measuredEdges = useRef(edges);
+  useEffect(() => {
     const wrap = wrapRef.current;
     if (!wrap) return;
     const update = () => {
-      const overflow = wrap.scrollWidth - wrap.clientWidth > 1;
-      setScrollable(overflow);
-      setFadeEnd(overflow && wrap.scrollLeft + wrap.clientWidth < wrap.scrollWidth - 1);
+      const width = wrap.clientWidth;
+      const contentWidth = wrap.scrollWidth;
+      const scrollable = contentWidth - width > 1;
+      const fadeEnd = scrollable && wrap.scrollLeft + width < contentWidth - 1;
+      if (measuredEdges.current.scrollable === scrollable && measuredEdges.current.fadeEnd === fadeEnd) return;
+      measuredEdges.current = { scrollable, fadeEnd };
+      setEdges(measuredEdges.current);
     };
-    update();
     wrap.addEventListener("scroll", update, { passive: true });
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(update);
     observer?.observe(wrap);
     if (wrap.firstElementChild) observer?.observe(wrap.firstElementChild);
+    // ResizeObserver's initial delivery measures after layout, avoiding a forced mount layout.
+    // Older environments still measure from a deferred task and respond to window resizing.
+    const fallback = observer ? undefined : setTimeout(update, 0);
+    if (!observer) window.addEventListener("resize", update);
     return () => {
       wrap.removeEventListener("scroll", update);
       observer?.disconnect();
+      if (fallback !== undefined) clearTimeout(fallback);
+      if (!observer) window.removeEventListener("resize", update);
     };
   }, []);
   // A wide table scrolls sideways inside its bordered wrapper rather than squeezing its cells, and
   // the trailing edge fades while columns lie beyond it. A scrolling wrapper takes focus so the
   // keyboard can scroll it too.
   return (
-    <div ref={wrapRef} className="md-table-wrap" data-fade-end={fadeEnd || undefined} tabIndex={scrollable ? 0 : undefined}>
+    <div ref={wrapRef} className="md-table-wrap" data-fade-end={edges.fadeEnd || undefined} tabIndex={edges.scrollable ? 0 : undefined}>
       <table {...props}>{children}</table>
     </div>
   );
@@ -632,7 +641,52 @@ function remarkInlineProfile(this: { data(): Record<string, unknown> }) {
 const DOCUMENT_PLUGINS: RemarkPlugins = [remarkGfm, remarkBreaks];
 const INLINE_PLUGINS: RemarkPlugins = [remarkGfm, remarkBreaks, remarkInlineProfile as unknown as RemarkPlugins[number]];
 
-export type MarkdownProfile = "document" | "inline";
+export type MarkdownProfile = MarkdownContentProfile;
+
+export const markdownContentCache = new MarkdownContentCache<unknown>();
+
+interface CachedParseOptions {
+  source: string;
+  profile: MarkdownProfile;
+  admit: boolean;
+  tree?: unknown;
+}
+
+function remarkCachedParser(this: { parser: (source: string, file: unknown) => unknown }, options: CachedParseOptions) {
+  options.tree = markdownContentCache.get(options.profile, options.source);
+  // On a hit the canonical HAST is restored by the final rehype plugin below. The intervening
+  // GFM/breaks/rehype passes see an empty root, avoiding a second parse of the unchanged source.
+  if (options.tree !== undefined) this.parser = () => ({ type: "root", children: [] });
+}
+
+function rehypeCachedTree(options: CachedParseOptions) {
+  return (tree: unknown) => {
+    if (options.tree !== undefined) return structuredClone(options.tree);
+    // react-markdown's final pass mutates URLs and raw nodes. Retain a private clone before that
+    // pass, then let the original go through exactly the same security policy as before.
+    markdownContentCache.render(options.profile, options.source,
+      () => markdownContentCache.canAdmit(options.profile, options.source, options.admit) ? structuredClone(tree) : tree,
+      options.admit);
+    return tree;
+  };
+}
+
+/**
+ * Cache canonical parsed HAST, never React elements or their rendering owners. Cold misses use
+ * the original parser/plugins; hits skip parsing and clone the cached tree. react-markdown still
+ * applies its unchanged URL/raw-HTML security policy and constructs fresh elements on every render.
+ */
+const ParsedMarkdown = memo(function ParsedMarkdown({ source, profile, admit }: {
+  source: string; profile: MarkdownProfile; admit: boolean;
+}) {
+  const options: CachedParseOptions = { source, profile, admit };
+  const plugins: RemarkPlugins = [...(profile === "inline" ? INLINE_PLUGINS : DOCUMENT_PLUGINS),
+    [remarkCachedParser as unknown as RemarkPlugins[number], options] as RemarkPlugins[number]];
+  return <ReactMarkdown remarkPlugins={plugins}
+    rehypePlugins={[[rehypeCachedTree, options]]} components={MARKDOWN_COMPONENTS}>{source}</ReactMarkdown>;
+// Admission is a resource policy, not rendered content. A tail becoming stable must not parse
+// identical text again just to populate the LRU; its next natural render/remount may admit it.
+}, (previous, next) => previous.source === next.source && previous.profile === next.profile);
 
 /**
  * Markdown renderer for agent messages, reasoning, user messages and markdown previews. GFM
@@ -714,7 +768,6 @@ export const Markdown = memo(function Markdown({
     highlight: eligible && settled,
     highlighter,
   }), [activeMedia.enabled, compactUrls, eligible, highlighter, inline, inlineMedia, settled]);
-  const plugins = inline ? INLINE_PLUGINS : DOCUMENT_PLUGINS;
   return (
     <div className="md">
       <MarkdownContext.Provider value={context}>
@@ -723,13 +776,11 @@ export const Markdown = memo(function Markdown({
             // A whole document separates its top-level blocks with a newline text node; keep it.
             <Fragment key={start}>
               {index > 0 ? "\n" : null}
-              <MarkdownBlock plugins={plugins}>{children.slice(start, starts[index + 1])}</MarkdownBlock>
+              <MarkdownBlock profile={profile} settled={settled || index < starts.length - 1}>{children.slice(start, starts[index + 1])}</MarkdownBlock>
             </Fragment>
           ))
         ) : (
-          <ReactMarkdown remarkPlugins={plugins} components={MARKDOWN_COMPONENTS}>
-            {children}
-          </ReactMarkdown>
+          <ParsedMarkdown source={children} profile={profile} admit={settled} />
         )}
       </MarkdownContext.Provider>
     </div>
@@ -737,6 +788,6 @@ export const Markdown = memo(function Markdown({
 });
 
 /** One block of a blockwise document, parsed again only when its own text changes. */
-const MarkdownBlock = memo(function MarkdownBlock({ children, plugins }: { children: string; plugins: RemarkPlugins }) {
-  return <ReactMarkdown remarkPlugins={plugins} components={MARKDOWN_COMPONENTS}>{children}</ReactMarkdown>;
+const MarkdownBlock = memo(function MarkdownBlock({ children, profile, settled }: { children: string; profile: MarkdownProfile; settled: boolean }) {
+  return <ParsedMarkdown source={children} profile={profile} admit={settled} />;
 });

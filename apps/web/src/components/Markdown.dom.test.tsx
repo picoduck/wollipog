@@ -3,7 +3,7 @@ import { test } from "node:test";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
-import { Markdown } from "./Markdown.js";
+import { Markdown, markdownContentCache } from "./Markdown.js";
 import { codeHighlighterRuns, loadCodeHighlighter } from "../markdown-highlight.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
@@ -21,15 +21,15 @@ async function renderMarkdown(
   markdown: string,
   inlineMedia = false,
   mediaSettled = true,
+  onRender?: React.ProfilerProps["onRender"],
 ): Promise<{ container: HTMLDivElement; root: Root }> {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
   const container = happyContainer as unknown as HTMLDivElement;
   const root = createRoot(container);
   await act(async () => {
-    root.render(
-      <Markdown highlightEligible={false} inlineMedia={inlineMedia} settled={mediaSettled}>{markdown}</Markdown>,
-    );
+    const content = <Markdown highlightEligible={false} inlineMedia={inlineMedia} settled={mediaSettled}>{markdown}</Markdown>;
+    root.render(onRender ? <React.Profiler id="markdown" onRender={onRender}>{content}</React.Profiler> : content);
   });
   return { container, root };
 }
@@ -48,6 +48,115 @@ function wrapToggle(container: HTMLDivElement): HTMLButtonElement {
 const pressed = (button: HTMLButtonElement) => button.getAttribute("aria-pressed");
 
 const LONG_CODE_LINE = "export const configuration = mergeDeep(baseConfiguration, overrides, { verbose: true });";
+
+test("a remounted markdown row reuses parsed content but owns fresh code and media state", async () => {
+  const source = ["Unique remount cache fixture.", "", "```ts", "const cached = 2771;", "```", "",
+    "![synthetic](https://example.test/cache-remount.png)"].join("\n");
+  const before = markdownContentCache.snapshot();
+  const first = await renderMarkdown(source);
+  await act(async () => { wrapToggle(first.container).click(); });
+  assert.equal(pressed(wrapToggle(first.container)), "true");
+  await cleanup(first.container, first.root);
+  const parsed = markdownContentCache.snapshot();
+  assert.equal(parsed.parses, before.parses + 1);
+  const second = await renderMarkdown(source, true);
+  try {
+    assert.equal(markdownContentCache.snapshot().parses, parsed.parses, "remount does not parse again");
+    assert.equal(pressed(wrapToggle(second.container)), "false", "mounted toggle state is not cached");
+    assert.ok(second.container.querySelector(".md-media-image"), "media permission comes from this mount's context");
+  } finally { await cleanup(second.container, second.root); }
+});
+
+test("streaming tails avoid discarded clones and do not reparse only to change admission", async () => {
+  const originalClone = structuredClone;
+  let clones = 0;
+  globalThis.structuredClone = ((value: unknown, options?: StructuredSerializeOptions) => {
+    clones++;
+    return originalClone(value, options);
+  }) as typeof structuredClone;
+  const prefix = "Unique streaming admission fixture 2771.\n\n";
+  let mounted: Awaited<ReturnType<typeof renderMarkdown>> | undefined;
+  try {
+    const before = markdownContentCache.snapshot();
+    mounted = await renderMarkdown(prefix, false, false);
+    assert.equal(clones, 0, "an unadmitted tail has no retained tree to clone");
+    assert.equal(markdownContentCache.snapshot().parses, before.parses + 1);
+    const content = `${prefix}New streaming tail 2771.`;
+    await act(async () => { mounted!.root.render(<Markdown highlightEligible={false} settled={false}>{content}</Markdown>); });
+    assert.equal(markdownContentCache.snapshot().parses, before.parses + 2,
+      "only the new tail parses when the identical previous block becomes stable");
+    await act(async () => { mounted!.root.render(<Markdown highlightEligible={false} settled>{content}</Markdown>); });
+    assert.equal(markdownContentCache.snapshot().parses, before.parses + 2, "settling identical text does not parse again");
+    assert.equal(clones, 0);
+  } finally {
+    if (mounted) await cleanup(mounted.container, mounted.root);
+    globalThis.structuredClone = originalClone;
+  }
+});
+
+test("table geometry is first read on observer delivery and responds to scrolling and resizing", async () => {
+  const descriptors = new Map<string, PropertyDescriptor | undefined>();
+  let reads = 0;
+  let width = 100;
+  let contentWidth = 300;
+  let scrollLeft = 0;
+  const observers: Array<{ callback: () => void; targets: Element[]; disconnected: boolean }> = [];
+  const previousObserver = Object.getOwnPropertyDescriptor(globalThis, "ResizeObserver");
+  class Observer {
+    record: typeof observers[number];
+    constructor(callback: () => void) {
+      this.record = { callback, targets: [], disconnected: false };
+      observers.push(this.record);
+    }
+    observe(target: Element) { this.record.targets.push(target); }
+    disconnect() { this.record.disconnected = true; }
+  }
+  Object.defineProperty(globalThis, "ResizeObserver", { configurable: true, value: Observer });
+  for (const [property, get] of Object.entries({
+    clientWidth: () => { reads++; return width; },
+    scrollWidth: () => { reads++; return contentWidth; },
+    scrollLeft: () => scrollLeft,
+  })) {
+    descriptors.set(property, Object.getOwnPropertyDescriptor(domWindow.HTMLElement.prototype, property));
+    Object.defineProperty(domWindow.HTMLElement.prototype, property, { configurable: true, get });
+  }
+  let mounted: Awaited<ReturnType<typeof renderMarkdown>> | undefined;
+  try {
+    let commits = 0;
+    mounted = await renderMarkdown("| Deferred Table | Result |\n| --- | --- |\n| synthetic | preserved |", false, true, () => { commits++; });
+    const wrap = mounted.container.querySelector<HTMLElement>(".md-table-wrap")!;
+    assert.equal(reads, 0, "mount and effect registration do not force geometry reads");
+    assert.equal(observers.length, 1);
+    assert.deepEqual(observers[0]!.targets, [wrap, wrap.firstElementChild]);
+    await act(async () => { observers[0]!.callback(); });
+    assert.equal(wrap.tabIndex, 0);
+    assert.equal(wrap.dataset.fadeEnd, "true");
+    const measuredCommits = commits;
+    const changes: MutationRecord[] = [];
+    const mutations = new domWindow.MutationObserver(records => changes.push(...records as unknown as MutationRecord[]));
+    mutations.observe(wrap as never, { attributes: true });
+    await act(async () => { observers[0]!.callback(); });
+    await domWindow.happyDOM.waitUntilComplete();
+    assert.equal(changes.length, 0, "unchanged geometry does not update attributes");
+    assert.equal(commits, measuredCommits, "unchanged geometry does not schedule another React commit");
+    scrollLeft = 200;
+    await act(async () => { wrap.dispatchEvent(new domWindow.Event("scroll") as unknown as Event); });
+    assert.equal(wrap.dataset.fadeEnd, undefined);
+    width = contentWidth = 400;
+    await act(async () => { observers[0]!.callback(); });
+    assert.equal(wrap.hasAttribute("tabindex"), false, "resize removes unnecessary keyboard stop");
+    mutations.disconnect();
+  } finally {
+    if (mounted) await cleanup(mounted.container, mounted.root);
+    assert.ok(observers.every(observer => observer.disconnected));
+    for (const [property, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(domWindow.HTMLElement.prototype, property, descriptor);
+      else Reflect.deleteProperty(domWindow.HTMLElement.prototype, property);
+    }
+    if (previousObserver) Object.defineProperty(globalThis, "ResizeObserver", previousObserver);
+    else Reflect.deleteProperty(globalThis, "ResizeObserver");
+  }
+});
 
 test("Wrap Lines toggles a source-code block on and off", async () => {
   const { container, root } = await renderMarkdown(["```ts", LONG_CODE_LINE, "```"].join("\n"));
