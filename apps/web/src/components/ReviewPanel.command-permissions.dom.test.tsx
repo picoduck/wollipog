@@ -314,8 +314,10 @@ function sendSelected(container: HTMLElement): HTMLButtonElement {
 }
 
 function inlineFinding(container: HTMLElement, body: string): HTMLElement {
-  const found = [...container.querySelectorAll<HTMLElement>(".diff-inline-finding")]
-    .find((node) => node.querySelector(".diff-inline-finding-body")?.textContent === body);
+  const found = [...container.querySelectorAll<HTMLElement>(".dfinding")]
+    // A resolved or dismissed one is a single line until opened (#2851): its body is the line's words.
+    .find((node) => node.querySelector(".dfinding-body")?.textContent === body
+      || node.querySelector(".dfinding-summary")?.textContent?.endsWith(`: ${body}`));
   assert.ok(found, `the inline finding "${body}" is rendered`);
   return found;
 }
@@ -334,7 +336,7 @@ function commentOnB11(container: HTMLElement): HTMLButtonElement {
 }
 
 function editor(container: HTMLElement): HTMLElement {
-  const found = container.querySelector<HTMLElement>(".diff-comment-editor");
+  const found = container.querySelector<HTMLElement>(".dedit");
   assert.ok(found, "a draft editor is open");
   return found;
 }
@@ -380,7 +382,7 @@ test("a refused person sees every finding control disabled with the reason, and 
     for (const [, button] of controls) {
       await act(async () => { fireDomEvent.click(button); await Promise.resolve(); });
     }
-    assertNoDomNode(harness.container.querySelector(".diff-comment-editor"), "no draft editor opened");
+    assertNoDomNode(harness.container.querySelector(".dedit"), "no draft editor opened");
     assert.deepEqual(harness.calls, []);
   } finally {
     await harness.unmount();
@@ -456,7 +458,7 @@ test("a refused person gets no +, and the line menu lists Add Finding… unavail
     assert.equal(item.getAttribute("aria-disabled"), "true", "Add Finding… is unavailable");
     assert.equal(item.querySelector(".menu-desc")?.textContent, VIEWER, "and says why");
     await act(async () => { fireDomEvent.click(item); await Promise.resolve(); });
-    assertNoDomNode(harness.container.querySelector(".diff-comment-editor"), "no draft editor opened");
+    assertNoDomNode(harness.container.querySelector(".dedit"), "no draft editor opened");
     assert.deepEqual(harness.calls, []);
   } finally {
     await harness.unmount();

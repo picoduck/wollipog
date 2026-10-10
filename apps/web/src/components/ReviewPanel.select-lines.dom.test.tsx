@@ -534,7 +534,7 @@ test("on a coarse pointer no + renders, and the line number's menu adds a findin
       ["Add Finding…", "Select Line", "Open in Files at Line"]);
     await click(menuItems()[0]!);
     assertNoDomNode(doc().querySelector('[role="menu"]'), "the menu closes");
-    const editor = harness.container.querySelector<HTMLElement>(".diff-comment-editor");
+    const editor = harness.container.querySelector<HTMLElement>(".dedit");
     assert.ok(editor, "Add Finding… opens the editor");
     assert.ok(editor.previousElementSibling?.contains(number), "under line 2");
     await act(async () => {
@@ -575,7 +575,7 @@ test("with a mouse, each line's gutter offers Add Finding, hidden while selectin
     assert.deepEqual(order.slice(0, 3), ["diff-num", "diff-add-slot", "diff-sign"], "between the numbers and the change marker");
     assert.ok(button(harness.container, "Add Finding on Removed Line 2"));
     await click(add);
-    assert.ok(harness.container.querySelector(".diff-comment-editor"), "the + opens the editor");
+    assert.ok(harness.container.querySelector(".dedit"), "the + opens the editor");
     await selectLines(harness);
     assert.equal(harness.container.querySelectorAll(".diff-add").length, 0, "no + while Select Lines is on");
     assert.ok(harness.container.querySelectorAll(".diff-add-slot").length > 0, "its slot stays, so the code does not move");
@@ -675,11 +675,11 @@ test("Add Finding… on a line whose editor is open focuses that editor (#2849)"
       await click(menuItems().find((item) => item.getAttribute("data-menu-label") === "Add Finding…")!);
     };
     await choose();
-    const body = harness.container.querySelector<HTMLTextAreaElement>(".diff-comment-editor textarea")!;
+    const body = harness.container.querySelector<HTMLTextAreaElement>(".dedit textarea")!;
     assert.ok(body);
     button(harness.container, "Line 2 Actions").focus();
     await choose();
-    assert.equal(harness.container.querySelectorAll(".diff-comment-editor").length, 1, "the same editor stays");
+    assert.equal(harness.container.querySelectorAll(".dedit").length, 1, "the same editor stays");
     assert.ok((doc().activeElement as unknown as Element | null) === body, "and takes focus");
   } finally {
     await harness.unmount();

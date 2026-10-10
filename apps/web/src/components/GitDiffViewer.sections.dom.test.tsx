@@ -300,7 +300,7 @@ test("Side by Side is two columns that break around an open editor, and each pai
   const comment = container.querySelector<HTMLButtonElement>('button[aria-label="Add Finding on Line 3"]')!;
   await act(async () => { comment.click(); });
   assert.deepEqual(runs(), [[3, 3], [1, 1]]);
-  const editor = container.querySelector(".diff-comment-editor");
+  const editor = container.querySelector(".dedit");
   assert.ok(editor);
   assert.equal(editor.previousElementSibling?.classList.contains("dsplit"), true, "the editor spans both columns, between the runs");
 

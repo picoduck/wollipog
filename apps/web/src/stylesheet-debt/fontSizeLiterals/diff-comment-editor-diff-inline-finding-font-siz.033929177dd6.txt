@@ -1,1 +1,0 @@
-|.diff-comment-editor,.diff-inline-finding|font-size|12

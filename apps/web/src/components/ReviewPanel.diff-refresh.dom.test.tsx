@@ -468,7 +468,7 @@ function commentButton(container: HTMLElement, path: string, label: string): HTM
 }
 
 function editorIn(container: HTMLElement, path: string): HTMLElement | null {
-  return card(container, path).querySelector<HTMLElement>(".diff-comment-editor");
+  return card(container, path).querySelector<HTMLElement>(".dedit");
 }
 
 function requiredEditor(container: HTMLElement, path: string): HTMLElement {
@@ -483,6 +483,19 @@ function field<T extends HTMLElement>(scope: HTMLElement, selector: string): T {
   return found;
 }
 
+/** One of the editor's Severity radios (#2851), by its label. */
+function severityOption(editor: HTMLElement, label: string): HTMLElement {
+  const found = [...editor.querySelectorAll<HTMLElement>('[role="radiogroup"][aria-label="Severity"] [role="radio"]')]
+    .find((radio) => radio.textContent === label);
+  if (!found) throw new Error(`no ${label} severity`);
+  return found;
+}
+
+/** The label of the editor's checked Severity radio. */
+function chosenSeverity(editor: HTMLElement): string | null {
+  return editor.querySelector('[role="radiogroup"][aria-label="Severity"] [role="radio"][aria-checked="true"]')?.textContent ?? null;
+}
+
 /** A control inside an open draft editor, matched on its label rather than its class list. */
 function editorButton(container: HTMLElement, path: string, label: string): HTMLElement {
   const found = [...requiredEditor(container, path).querySelectorAll<HTMLElement>("button")]
@@ -492,7 +505,7 @@ function editorButton(container: HTMLElement, path: string, label: string): HTML
 }
 
 function inlineFindingBodies(container: HTMLElement): string[] {
-  return [...container.querySelectorAll(".diff-inline-finding-body")].map((node) => node.textContent ?? "");
+  return [...container.querySelectorAll(".dfinding-body")].map((node) => node.textContent ?? "");
 }
 
 function staleMarkers(container: HTMLElement): number {
@@ -561,9 +574,7 @@ test("staging a hunk in one file leaves an unsent draft in another intact", asyn
       fireDomEvent.change(body);
     });
     await act(async () => {
-      const severity = field<HTMLSelectElement>(requiredEditor(harness.container, "src/b.ts"), "select");
-      severity.value = "blocker";
-      fireDomEvent.change(severity);
+      fireDomEvent.click(severityOption(requiredEditor(harness.container, "src/b.ts"), "Blocker"));
     });
     await act(async () => {
       const required = field<HTMLInputElement>(
@@ -581,7 +592,7 @@ test("staging a hunk in one file leaves an unsent draft in another intact", asyn
     const after = requiredEditor(harness.container, "src/b.ts");
     assert.equal(field<HTMLTextAreaElement>(after, "textarea").value, "half-written finding",
       "the typed text must survive the reinstalled diff");
-    assert.equal(field<HTMLSelectElement>(after, "select").value, "blocker", "severity too");
+    assert.equal(chosenSeverity(after), "Blocker", "severity too");
     assert.equal(field<HTMLInputElement>(after, ".review-required-toggle input").checked, false,
       "and the required flag");
   } finally {
@@ -764,7 +775,7 @@ test("Cancel keeps the whole draft for the next open, while submitting it starts
     const editor = requiredEditor(harness.container, "src/b.ts");
     return {
       body: field<HTMLTextAreaElement>(editor, "textarea").value,
-      severity: field<HTMLSelectElement>(editor, "select").value,
+      severity: chosenSeverity(editor),
       required: field<HTMLInputElement>(editor, ".review-required-toggle input").checked,
     };
   };
@@ -781,9 +792,7 @@ test("Cancel keeps the whole draft for the next open, while submitting it starts
       fireDomEvent.change(body);
     });
     await act(async () => {
-      const severity = field<HTMLSelectElement>(requiredEditor(harness.container, "src/b.ts"), "select");
-      severity.value = "nit";
-      fireDomEvent.change(severity);
+      fireDomEvent.click(severityOption(requiredEditor(harness.container, "src/b.ts"), "Nit"));
     });
     await act(async () => {
       fireDomEvent.change(
@@ -797,7 +806,7 @@ test("Cancel keeps the whole draft for the next open, while submitting it starts
     });
     assertNoDomNode(editorIn(harness.container, "src/b.ts"), "cancel closed the editor");
     await open();
-    assert.deepEqual(editorState(), { body: "not finished yet", severity: "nit", required: false },
+    assert.deepEqual(editorState(), { body: "not finished yet", severity: "Nit", required: false },
       "cancel only closed the editor; the draft was still there to reopen");
 
     await act(async () => {
@@ -805,7 +814,7 @@ test("Cancel keeps the whole draft for the next open, while submitting it starts
     });
     assertNoDomNode(editorIn(harness.container, "src/b.ts"), "submitting closed the editor");
     await open();
-    assert.deepEqual(editorState(), { body: "", severity: "major", required: true },
+    assert.deepEqual(editorState(), { body: "", severity: "Major", required: true },
       "the submitted draft became a finding, so the next one on this line starts from the defaults");
   } finally {
     await harness.unmount();

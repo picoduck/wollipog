@@ -1,7 +1,5 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { normalizeSourcePath, REVIEW_ANCHOR_TEXT_MAX_LENGTH } from "@wollipog/protocol";
-import { StatusBadge } from "./StatusBadge.js";
-import { FindingSeverityBadge } from "./ReviewFindings.js";
 import type {
   CreateReviewFindingRequest,
   CreateWorkspaceReferenceRequest,
@@ -25,14 +23,18 @@ import {
 } from "../diff-view.js";
 import { diffAnchorKey, diffHunkContentKey, type DiffAnchor } from "../review-anchors.js";
 import { diffLineLabel, diffLineRef, type DiffLineRef } from "../diff-line-selection.js";
-import { titleCaseLabel } from "../format.js";
+import { FINDING_SEVERITY } from "../review-finding-copy.js";
 import { Spinner } from "./common.js";
 import { DiffFileActions, type DiffFileAction } from "./DiffFileActions.js";
 import { CheckIcon, ChevronRightIcon, PlusIcon } from "./Icons.js";
+import { DiffInlineFinding } from "./DiffInlineFinding.js";
+import { FieldError } from "./FieldError.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuSurface } from "./Menu.js";
 import { Notice } from "./Notice.js";
-import { Checkbox } from "./ui/ChoiceControls.js";
+import { BusyButton } from "./ui/BusyButton.js";
+import { Checkbox, SegmentedControl, type SegmentedOption } from "./ui/ChoiceControls.js";
+import { useAutoGrowTextarea } from "./useAutoGrowTextarea.js";
 import { useIsCoarsePointer } from "./useIsMobile.js";
 
 export type DiffLayout = "unified" | "split";
@@ -86,6 +88,8 @@ export interface DiffReviewControls {
   /** Why the signed-in person may not add or change findings (#1864), and the id of the element
    * that states it; every finding control is then disabled and described by it. */
   refusal?: { reason: string; id: string } | null;
+  /** The session's agent, for an inline finding's "Sent to Claude". */
+  agentLabel?: string;
 }
 
 /**
@@ -747,13 +751,32 @@ function DiffCommentEditor({
   // point (#1203), but submitting it silently would attach a comment written about content that is
   // no longer on that line, so say so and let the reviewer decide.
   const anchorMoved = draft.anchorText !== anchorText;
+  // §8.5: Add Finding stays enabled, and pressing it with nothing written says what is missing. The
+  // error clears as soon as the body holds something.
+  const [empty, setEmpty] = useState(false);
+  const ids = useId().replace(/:/g, "");
+  const errorId = `${ids}-error`;
+  const helperId = `${ids}-required`;
+  const growRef = useAutoGrowTextarea(draft.body);
+  const setBody = useCallback((field: HTMLTextAreaElement | null) => {
+    bodyRef.current = field;
+    growRef(field);
+  }, [growRef]);
   const update = (changes: Partial<DiffDraft>) => {
     const next = { ...draft, ...changes };
     setDraft(next);
     drafts.write(anchorKey, next);
+    if (next.body.trim()) setEmpty(false);
   };
+  // `review.creating` is the panel's: only the editor that is submitting shows it running.
+  const [submitting, setSubmitting] = useState(false);
   const submit = async () => {
-    if (!draft.body.trim()) return;
+    if (!draft.body.trim()) {
+      setEmpty(true);
+      bodyRef.current?.focus();
+      return;
+    }
+    setSubmitting(true);
     const created = await review.onCreate({
       scope,
       diffHash,
@@ -771,48 +794,86 @@ function DiffCommentEditor({
       required: draft.required,
     });
     if (created) drafts.clear(anchorKey);
+    else setSubmitting(false);
   };
 
+  // On a phone the panel sheet ends at the keyboard's top edge (#2843), so the keyboard opening
+  // shrinks the panel's scroller and can push the card's foot out of view. While the person is
+  // writing in this card, Add Finding is kept in view whenever that scroller changes size.
+  const cardRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const card = cardRef.current;
+    const actions = card?.querySelector<HTMLElement>(".dedit-actions");
+    if (!card || !actions) return;
+    const reveal = () => {
+      if (card.contains(card.ownerDocument.activeElement)) actions.scrollIntoView?.({ block: "nearest" });
+    };
+    reveal();
+    const scroller = card.closest(".rpanel-scroll");
+    const Observer = card.ownerDocument.defaultView?.ResizeObserver;
+    if (!scroller || !Observer) return;
+    const observer = new Observer(reveal);
+    observer.observe(scroller);
+    return () => observer.disconnect();
+  }, []);
+
   return (
-    <div className="diff-comment-editor">
+    <div ref={cardRef} className="dedit" role="group" aria-label="New Finding">
       {anchorMoved && (
-        <div className="hint warn" role="status">
-          This line changed after you started writing — check that the comment still applies.
-        </div>
+        <Notice tone="warning" compact role="status">
+          This line changed after you started writing. Check that the finding still applies.
+        </Notice>
       )}
-      <textarea
-        ref={bodyRef}
-        value={draft.body}
-        onChange={(event) => update({ body: event.target.value })}
-        rows={3}
-        maxLength={4000}
-        placeholder="Describe the concrete issue and expected fix"
-        autoFocus
-      />
-      <div className="diff-comment-editor-controls">
-        <label>
-          Severity
-          <select
-            value={draft.severity}
-            onChange={(event) => update({ severity: event.target.value as ReviewFindingSeverity })}
-          >
-            <option value="blocker">Blocker</option>
-            <option value="major">Major</option>
-            <option value="minor">Minor</option>
-            <option value="nit">Nit</option>
-          </select>
-        </label>
-        <Checkbox className="review-required-toggle" label="Must Resolve Before Publish" checked={draft.required}
+      <div className="field">
+        <textarea
+          ref={setBody}
+          value={draft.body}
+          onChange={(event) => update({ body: event.target.value })}
+          rows={3}
+          maxLength={4000}
+          aria-label="Finding"
+          aria-invalid={empty || undefined}
+          aria-describedby={empty ? errorId : undefined}
+          placeholder="Describe the issue and the fix you expect"
+          autoFocus
+        />
+        {empty && <FieldError id={errorId}>Describe the issue before adding it.</FieldError>}
+      </div>
+      <div className="dedit-options">
+        <SegmentedControl
+          className="sm"
+          label="Severity"
+          options={SEVERITY_OPTIONS}
+          value={draft.severity}
+          onChange={(severity) => update({ severity })}
+        />
+        <Checkbox className="review-required-toggle" label="Required" checked={draft.required} describedBy={helperId}
           onChange={(required) => update({ required })} />
-        <button className="btn sm" disabled={review.creating || !draft.body.trim() || Boolean(review.refusal)}
-          title={review.refusal?.reason} aria-describedby={review.refusal?.id} onClick={() => void submit()}>
-          {review.creating ? "Adding…" : "Add Finding"}
+      </div>
+      <p className="dedit-helper" id={helperId}>Required findings must be resolved before publishing.</p>
+      <div className="dedit-actions">
+        <button type="button" className="btn sm" disabled={submitting} onClick={() => drafts.dismiss(anchorKey)}>
+          Cancel
         </button>
-        <button className="btn ghost sm" disabled={review.creating} onClick={() => drafts.dismiss(anchorKey)}>Cancel</button>
+        <BusyButton
+          className="btn sm primary"
+          busy={submitting}
+          progress="Adding the finding…"
+          disabled={Boolean(review.refusal) || (review.creating && !submitting)}
+          title={review.refusal?.reason}
+          aria-describedby={review.refusal?.id}
+          onClick={() => void submit()}
+        >
+          Add Finding
+        </BusyButton>
       </div>
     </div>
   );
 }
+
+/** The editor's Severity choices, in the badges' words and order (§11.1). */
+const SEVERITY_OPTIONS: readonly SegmentedOption<ReviewFindingSeverity>[] = (["blocker", "major", "minor", "nit"] as const)
+  .map((value) => ({ value, label: FINDING_SEVERITY[value].label }));
 
 function HunkView({
   hunk,
@@ -885,31 +946,15 @@ function HunkView({
     const anchorKey = drafts.keyFor({ filePath, ...target });
     return (
       <Fragment key={`${prefix}-extras`}>
-        {anchored.map((finding) => (
-          <div className={`diff-inline-finding diff-inline-finding-${finding.status}`} key={finding.findingId}>
-            <div className="diff-inline-finding-head">
-              <FindingSeverityBadge severity={finding.severity} />
-              {finding.required && <StatusBadge tone="neutral" noDot label="Required" />}
-              <span>{titleCaseLabel(finding.source)} · {finding.author.id ?? titleCaseLabel(finding.author.kind)} · {titleCaseLabel(finding.status)}</span>
-            </div>
-            <div className="diff-inline-finding-body">{finding.body}</div>
-            <div className="diff-inline-finding-actions">
-              {(finding.status === "open" || finding.status === "sent") ? (
-                <>
-                  <button className="btn ghost sm" disabled={review?.busyFindingId === finding.findingId || Boolean(review?.refusal)}
-                    title={review?.refusal?.reason} aria-describedby={review?.refusal?.id}
-                    onClick={() => void review?.onStatus(finding, "resolved")}>Resolve</button>
-                  <button className="btn ghost sm" disabled={review?.busyFindingId === finding.findingId || Boolean(review?.refusal)}
-                    title={review?.refusal?.reason} aria-describedby={review?.refusal?.id}
-                    onClick={() => void review?.onStatus(finding, "dismissed")}>Dismiss</button>
-                </>
-              ) : (
-                <button className="btn ghost sm" disabled={review?.busyFindingId === finding.findingId || Boolean(review?.refusal)}
-                    title={review?.refusal?.reason} aria-describedby={review?.refusal?.id}
-                    onClick={() => void review?.onStatus(finding, "open")}>Reopen</button>
-              )}
-            </div>
-          </div>
+        {review && anchored.map((finding) => (
+          <DiffInlineFinding
+            key={finding.findingId}
+            finding={finding}
+            busy={review.busyFindingId === finding.findingId}
+            refusal={review.refusal ?? null}
+            agentLabel={review.agentLabel}
+            onStatus={review.onStatus}
+          />
         ))}
         {drafts.open.has(anchorKey) && review && (
           <DiffCommentEditor

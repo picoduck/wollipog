@@ -13,7 +13,7 @@ const BODY = "This recurses without a delay — back off before retrying.";
 
 test("a finding whose line is unchanged stays anchored after a reload", async ({ page }) => {
   await page.goto("/review-anchor-reload-e2e.html?theme=dark");
-  await expect(page.locator(".diff-inline-finding-body")).toHaveText(BODY);
+  await expect(page.locator(".dfinding-body")).toHaveText(BODY);
   await expect(page.locator(".review-finding-outdated")).toHaveCount(0);
 });
 
@@ -22,6 +22,6 @@ test("a finding written before the anchored line was recorded keeps the old fall
   // It must keep working — degraded, never broken — which is what this contrast pins.
   await page.goto("/review-anchor-reload-e2e.html?theme=dark&stored=0");
   await expect(page.locator(".review-finding-outdated")).toHaveText("Outdated: the line changed after this was written.");
-  await expect(page.locator(".diff-inline-finding-body")).toHaveCount(0);
+  await expect(page.locator(".dfinding-body")).toHaveCount(0);
   await expect(page.locator(".review-finding-row")).toContainText(BODY);
 });

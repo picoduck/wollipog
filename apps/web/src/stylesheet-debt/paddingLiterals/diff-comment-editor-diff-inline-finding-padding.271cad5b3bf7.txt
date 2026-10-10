@@ -1,1 +1,0 @@
-|.diff-comment-editor,.diff-inline-finding|padding|9px

@@ -819,7 +819,7 @@ test("no viewport rule at 600px or 640px styles diff, finding, review or browser
     });
   });
   for (const selector of [".diff-line:not(.diff-line-del) > .diff-num > .diff-gutter-old,\n  .diff-line-del > .diff-num > .diff-gutter-new",
-    ".dfile-staged", ".diff-comment-editor,\n  .diff-inline-finding"]) {
+    ".dfile-staged", ".dedit,\n  .dfinding"]) {
     assert.ok(moved[selector], `${selector} answers to the rp container`);
   }
 });
