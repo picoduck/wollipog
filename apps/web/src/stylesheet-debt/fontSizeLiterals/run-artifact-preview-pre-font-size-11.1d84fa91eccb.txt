@@ -1,1 +1,0 @@
-|.run-artifact-preview pre|font-size|11

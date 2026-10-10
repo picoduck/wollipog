@@ -163,7 +163,7 @@ const EXEMPTIONS: Exemption[] = [
       && declaration.selectors.every((selector) => (new Map([
         [".attach-thumb > .attach-remove", "color"],
         // These frame an iframe carrying its own theme; tinting them shows through it.
-        [".artifact-preview-frame", "background"],
+        [".art-frame", "background"],
         [".browser-web-frame", "background"],
         [".access-pairing-qr-frame", "background"],
       ]).get(selector)) === normalisedProp(declaration.prop)),

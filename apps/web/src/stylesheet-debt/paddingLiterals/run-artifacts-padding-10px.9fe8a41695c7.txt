@@ -1,1 +1,0 @@
-|.run-artifacts|padding|10px

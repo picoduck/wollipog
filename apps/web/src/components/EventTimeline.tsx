@@ -68,7 +68,7 @@ import { statusMeta, toolStatusMeta } from "../status-meta.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { ReadonlyReferenceChip } from "./images.js";
 import { PromptImageView } from "./PromptImageView.js";
-import { ArtifactPreview } from "./ArtifactPreview.js";
+import { ArtifactInlinePreview } from "./ArtifactPreview.js";
 import { TranscriptImageCacheProvider } from "./TranscriptImageCache.js";
 import { EventPayloadContent } from "./EventPayloadContent.js";
 import { useTimelineClock } from "../timeline-clock.js";
@@ -98,7 +98,7 @@ function TranscriptArtifact({ artifact }: { artifact: WorkflowArtifactView }) {
     <div className="tl-artifact" ref={ref}>
       <div className="tl-artifact-head"><strong>{artifact.name}</strong><span>{artifact.kind === "video" ? "Video" : "Image"} · {artifact.sizeBytes.toLocaleString()} Bytes</span></div>
       {artifact.kind === "video" && !load && <button className="btn ghost sm" type="button" onClick={() => setLoad(true)}>Load Video</button>}
-      {load && <ArtifactPreview artifact={artifact} />}
+      {load && <ArtifactInlinePreview artifact={artifact} />}
     </div>
   );
 }

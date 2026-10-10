@@ -18,10 +18,12 @@ import { recoverSessionHistories, sessionHistoryEpochKey } from "../history-reco
 import { detailPlaceholder, listPlaceholder } from "../detail-placeholder.js";
 import { selectComparisonEvents, selectComparisonHistory, selectComparisonSession } from "../comparison-selectors.js";
 import { transcriptPresentation } from "../transcript-presentation.js";
-import { ArtifactPreview } from "./ArtifactPreview.js";
+import { ArtifactPreviewDialog, ArtifactRow } from "./ArtifactPreview.js";
+import { ListFoot } from "./ListFoot.js";
+import { BusyButton } from "./ui/BusyButton.js";
 import { DetailBar, PageHeader } from "./PageHeader.js";
 import { backLabel, destination, viewTitle } from "../navigation.js";
-import { isTimelineSessionActive } from "../timeline-clock.js";
+import { isTimelineSessionActive, useTimelineClock } from "../timeline-clock.js";
 
 const EMPTY_SESSION_IDS: string[] = [];
 const sameSessionIds = (left: readonly string[], right: readonly string[]) =>
@@ -375,35 +377,16 @@ function RunDetailContent({ runId }: { runId: string }) {
       )}
 
       {(artifacts.length > 0 || artifactError) && (
-        <section className="run-artifacts" aria-label="Workflow Artifacts">
-          <div className="run-artifacts-head">Artifacts <span className="count">{artifacts.length}</span></div>
-          {artifactError && <Notice tone="danger" compact>{artifactError}</Notice>}
-          <div className="run-artifact-list">
-            {artifacts.map((artifact) => (
-              <button key={artifact.artifactId} className="run-artifact-card" onClick={() => setSelectedArtifact(artifact)}>
-                <span className="run-artifact-name">{artifact.name}</span>
-                <span>{titleCaseLabel(artifact.kind.replace("_", " "))} · {formatBytes(artifact.sizeBytes)}</span>
-                <span>By {artifact.createdBy.id ?? artifact.createdBy.kind} · {artifact.sha256.slice(0, 12)}</span>
-              </button>
-            ))}
-            {artifactCursor && (
-              <button className="run-artifact-card" disabled={artifactPageBusy} onClick={() => void loadMoreArtifacts()}>
-                <span className="run-artifact-name">{artifactPageBusy ? "Loading…" : "Load More Artifacts"}</span>
-                <span>Lists are paginated in batches of 50</span>
-              </button>
-            )}
-          </div>
-          {selectedArtifact && (
-            <div className="run-artifact-preview">
-              <div className="run-artifacts-head">
-                <span>{selectedArtifact.name}</span>
-                <button className="icon-btn" onClick={() => setSelectedArtifact(null)} aria-label="Close Artifact Preview">×</button>
-              </div>
-              <ArtifactPreview artifact={selectedArtifact} />
-            </div>
-          )}
-        </section>
+        <RunArtifacts
+          artifacts={artifacts}
+          more={Boolean(artifactCursor)}
+          error={artifactError}
+          pageBusy={artifactPageBusy}
+          onLoadMore={() => void loadMoreArtifacts()}
+          onOpen={setSelectedArtifact}
+        />
       )}
+      {selectedArtifact && <ArtifactPreviewDialog artifact={selectedArtifact} onClose={() => setSelectedArtifact(null)} />}
 
       <div className="compare-grid" style={{ gridTemplateColumns: `repeat(${Math.max(run.sessionIds.length, 1)}, minmax(320px, 1fr))` }}>
         {run.sessionIds.map((sessionId) => <MemberColumn key={sessionId} sessionId={sessionId} />)}
@@ -412,8 +395,39 @@ function RunDetailContent({ runId }: { runId: string }) {
   );
 }
 
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+/**
+ * The run's artifacts (#2855): full-width two-line rows in one surface, each naming its kind, who
+ * saved it, when and its size, with Show More for the next page. A row opens the preview dialog.
+ */
+function RunArtifacts({ artifacts, more, error, pageBusy, onLoadMore, onOpen }: {
+  artifacts: readonly WorkflowArtifactView[];
+  more: boolean;
+  error: string | null;
+  pageBusy: boolean;
+  onLoadMore: () => void;
+  onOpen: (artifact: WorkflowArtifactView) => void;
+}) {
+  const now = useTimelineClock(artifacts.length > 0);
+  return (
+    <section className="run-artifacts" aria-label="Workflow Artifacts">
+      <h2 className="run-artifacts-head">Artifacts <span className="count">{artifacts.length}{more ? "+" : ""}</span></h2>
+      {error && <Notice tone="danger" compact>{error}</Notice>}
+      {artifacts.length > 0 && (
+        <ul className="surface run-artifact-list">
+          {artifacts.map((artifact) => (
+            <li key={artifact.artifactId}>
+              <ArtifactRow artifact={artifact} now={now} showAuthor onOpen={() => onOpen(artifact)} />
+            </li>
+          ))}
+        </ul>
+      )}
+      {more && (
+        <ListFoot>
+          <BusyButton className="btn ghost sm" busy={pageBusy} progress="Loading more artifacts…" onClick={onLoadMore}>
+            Show More
+          </BusyButton>
+        </ListFoot>
+      )}
+    </section>
+  );
 }

@@ -114,6 +114,8 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   // one by one or as a range, never one of N options.
   ["components/ReviewToolbar.tsx", "aria-pressed", 1],
   ["components/GitDiffViewer.tsx", "aria-pressed", 1],
+  // An artifact preview's code well (#2855): the same one on/off Wrap Lines toggle as a fenced block's.
+  ["components/ArtifactPreview.tsx", "aria-pressed", 1],
   /* Raw choice markup, found only once the inventory started counting semantics rather than
      class names. These are bespoke controls phase 6 has not reached yet.
      SettingsView used to be the one exception — a hand-rolled radiogroup wrapping RadioRow

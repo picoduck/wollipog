@@ -3,7 +3,9 @@ import { createHash, webcrypto } from "node:crypto";
 import test from "node:test";
 import type { WorkflowArtifactView } from "@wollipog/protocol";
 import {
+  ArtifactVerificationError,
   classifyArtifactPreview,
+  markdownWithoutTitle,
   normalizeBrowserUrl,
   sandboxHtmlDocument,
   verifyArtifactPreviewBlob,
@@ -64,4 +66,29 @@ test("HTML artifact wrapper installs a no-network policy before untrusted markup
   assert.match(wrapped, /default-src 'none'/);
   assert.match(wrapped, /form-action 'none'/);
   assert.doesNotMatch(wrapped, /allow-scripts/);
+});
+
+test("a report's leading H1 is dropped only when it repeats the artifact's title (#2855)", () => {
+  assert.equal(markdownWithoutTitle("# Browser Review\n\n## Findings\n", "Browser Review"), "## Findings\n");
+  assert.equal(markdownWithoutTitle("\n  # Browser Review #\r\n\r\nBody", " Browser Review "), "Body");
+  assert.equal(markdownWithoutTitle("# Another Title\n\nBody", "Browser Review"), "# Another Title\n\nBody");
+  assert.equal(markdownWithoutTitle("Intro\n# Browser Review\n", "Browser Review"), "Intro\n# Browser Review\n", "only a leading H1");
+  assert.equal(markdownWithoutTitle("## Browser Review\nBody", "Browser Review"), "## Browser Review\nBody", "only an H1");
+  assert.equal(markdownWithoutTitle("#Browser Review\nBody", "Browser Review"), "#Browser Review\nBody", "not a heading without its space");
+  assert.equal(markdownWithoutTitle("   # Browser Review\nBody", "Browser Review"), "Body", "three spaces still make a heading");
+  for (const code of ["\t# Browser Review\n\tkeep this code\n\nBody", "    # Browser Review\n    keep this code\n"]) {
+    assert.equal(markdownWithoutTitle(code, "Browser Review"), code, "a tab or four spaces make indented code, which stays");
+  }
+});
+
+test("bytes that are not the artifact's fail with a verification error a preview can name (#2855)", async () => {
+  const bytes = new TextEncoder().encode("expected");
+  const artifact = {
+    artifactId: "a", kind: "test_log", name: "log", mimeType: "text/plain", encoding: "utf8",
+    sizeBytes: bytes.byteLength, sha256: createHash("sha256").update(bytes).digest("hex"),
+    createdBy: { kind: "system" }, createdAt: 1,
+  } as WorkflowArtifactView;
+  await assert.rejects(verifyArtifactPreviewBlob(artifact, new Blob(["tampered"], { type: "text/plain" })), ArtifactVerificationError);
+  await assert.rejects(verifyArtifactPreviewBlob(artifact, new Blob(["expected"], { type: "text/html" })), ArtifactVerificationError);
+  await assert.rejects(verifyArtifactPreviewBlob(artifact, new Blob(["expectee"], { type: "text/plain" })), ArtifactVerificationError);
 });

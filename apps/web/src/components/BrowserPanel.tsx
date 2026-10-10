@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import { ArtifactUploadNotice } from "./ArtifactUploadNotice.js";
 import { Notice } from "./Notice.js";
 import { TabList } from "./Tabs.js";
@@ -8,35 +8,21 @@ import { PanelToolLayout } from "./PanelToolLayout.js";
 import { FieldError } from "./FieldError.js";
 import { Skeleton } from "./common.js";
 import { BusyButton } from "./ui/BusyButton.js";
-import {
-  DiffIcon, ExternalLinkIcon, GlobeIcon, HtmlIcon, ImageIcon, JsonIcon, LogIcon, RefreshIcon, ReportIcon, VideoIcon,
-} from "./Icons.js";
-import type { SessionView, WorkflowArtifactKind, WorkflowArtifactView } from "@wollipog/protocol";
+import { ExternalLinkIcon, GlobeIcon, RefreshIcon, ReportIcon } from "./Icons.js";
+import type { SessionView, WorkflowArtifactView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { normalizeBrowserUrl } from "../artifact-preview.js";
-import { labelFor } from "../artifact-kind.js";
-import { formatBytes } from "../files-panel.js";
-import { formatRecordedRelativeTime, formatRecordedTimestamp } from "../format.js";
 import { handleRovingChoiceKeyDown } from "./interactions.js";
 import { useTimelineClock } from "../timeline-clock.js";
-import { ArtifactPreview } from "./ArtifactPreview.js";
+import { ArtifactPreviewBody, ArtifactPreviewHeader, ArtifactPreviewMeta, ArtifactRow, useArtifactPreview } from "./ArtifactPreview.js";
 import { usePanelScratchChoice, usePanelScratchScope, usePanelScratchText } from "../right-panel-scratch.js";
+import { usePanelBack } from "./RightPanel.js";
 
 type BrowserMode = "artifacts" | "web";
 
 /** How long a page may take to fire `load` before the frame says it can't be shown (#2854). A page
  * that refuses to be framed often never loads at all, and a blank white rectangle says nothing. */
 export const PAGE_BLOCKED_AFTER_MS = 8_000;
-
-const KIND_ICONS: Readonly<Record<WorkflowArtifactKind, (props: { size?: number }) => ReactNode>> = {
-  html_preview: HtmlIcon,
-  patch: DiffIcon,
-  review_report: ReportIcon,
-  screenshot: ImageIcon,
-  test_log: LogIcon,
-  verdict: JsonIcon,
-  video: VideoIcon,
-};
 
 export function BrowserPanel({ session }: { session: SessionView }) {
   const api = useApi();
@@ -69,6 +55,8 @@ export function BrowserPanel({ session }: { session: SessionView }) {
   // reloaded pages no longer carry simply returns the list, never a stale preview.
   const [selectedId, setSelectedId] = usePanelScratchText(panelScratch, "browser.artifactId");
   const selected = artifacts.find((artifact) => artifact.artifactId === selectedId) ?? null;
+  // The artifact a preview was just left from, so the list puts focus back on its row.
+  const returnToRef = useRef("");
   const generationRef = useRef(0);
 
   useEffect(() => {
@@ -153,63 +141,59 @@ export function BrowserPanel({ session }: { session: SessionView }) {
           url={openUrl || null}
           setUrl={setOpenUrl}
         />
+      ) : selected ? (
+        <ArtifactDetail
+          key={selected.artifactId}
+          artifact={selected}
+          onBack={() => {
+            returnToRef.current = selected.artifactId;
+            setSelectedId("");
+          }}
+        />
       ) : (
         <PanelToolLayout>
           <div id="browser-artifacts-panel" role="tabpanel" aria-labelledby="browser-artifacts-tab" className="browser-artifacts">
-            {selected ? (
-              <div className="browser-artifact-detail">
-                {/* #2855 replaces this head with the shared artifact preview header. */}
-                <div className="browser-artifact-head">
-                  <button className="icon-btn" type="button" aria-label="Back to Artifact List" onClick={() => setSelectedId("")}>‹</button>
-                  <strong>{selected.name}</strong>
-                </div>
-                <ArtifactPreview artifact={selected} />
-              </div>
+            <ArtifactUploadNotice />
+            {listBusy && artifacts.length === 0 ? (
+              <Skeleton rows={3} announce="Loading artifacts…" />
+            ) : listError && artifacts.length === 0 ? (
+              <State
+                variant="error"
+                compact
+                title="Couldn't Load Artifacts"
+                actions={<button type="button" className="btn" onClick={() => setListAttempt((attempt) => attempt + 1)}>Retry</button>}
+                details={listError}
+              >
+                The session's artifact list didn't load. Retry to ask for it again.
+              </State>
+            ) : artifacts.length === 0 ? (
+              <State
+                compact
+                icon={<ReportIcon size={24} />}
+                title="No Artifacts Yet"
+                actions={<button type="button" className="btn" onClick={() => setMode("web")}>Open Web Preview</button>}
+              >
+                Reports, screenshots and logs the agent saves appear here.
+              </State>
             ) : (
               <>
-                <ArtifactUploadNotice />
-                {listBusy && artifacts.length === 0 ? (
-                  <Skeleton rows={3} announce="Loading artifacts…" />
-                ) : listError && artifacts.length === 0 ? (
-                  <State
-                    variant="error"
+                <ArtifactList artifacts={artifacts} returnTo={returnToRef} onOpen={setSelectedId} />
+                {listError && (
+                  <Notice
+                    tone="danger"
                     compact
-                    title="Couldn't Load Artifacts"
-                    actions={<button type="button" className="btn" onClick={() => setListAttempt((attempt) => attempt + 1)}>Retry</button>}
+                    role="alert"
+                    title="Couldn't Load More Artifacts"
+                    actions={<button type="button" className="btn sm" onClick={() => void loadMore()}>Retry</button>}
                     details={listError}
-                  >
-                    The session's artifact list didn't load. Retry to ask for it again.
-                  </State>
-                ) : artifacts.length === 0 ? (
-                  <State
-                    compact
-                    icon={<ReportIcon size={24} />}
-                    title="No Artifacts Yet"
-                    actions={<button type="button" className="btn" onClick={() => setMode("web")}>Open Web Preview</button>}
-                  >
-                    Reports, screenshots and logs the agent saves appear here.
-                  </State>
-                ) : (
-                  <>
-                    <ArtifactList artifacts={artifacts} onOpen={setSelectedId} />
-                    {listError && (
-                      <Notice
-                        tone="danger"
-                        compact
-                        role="alert"
-                        title="Couldn't Load More Artifacts"
-                        actions={<button type="button" className="btn sm" onClick={() => void loadMore()}>Retry</button>}
-                        details={listError}
-                      />
-                    )}
-                    {cursor && !listError && (
-                      <ListFoot>
-                        <BusyButton className="btn ghost sm" busy={listBusy} progress="Loading more artifacts…" onClick={() => void loadMore()}>
-                          Show More
-                        </BusyButton>
-                      </ListFoot>
-                    )}
-                  </>
+                  />
+                )}
+                {cursor && !listError && (
+                  <ListFoot>
+                    <BusyButton className="btn ghost sm" busy={listBusy} progress="Loading more artifacts…" onClick={() => void loadMore()}>
+                      Show More
+                    </BusyButton>
+                  </ListFoot>
                 )}
               </>
             )}
@@ -220,29 +204,60 @@ export function BrowserPanel({ session }: { session: SessionView }) {
   );
 }
 
-function ArtifactList({ artifacts, onOpen }: { artifacts: readonly WorkflowArtifactView[]; onOpen: (artifactId: string) => void }) {
-  const now = useTimelineClock(artifacts.length > 0);
+/**
+ * An open artifact (#2855): its header in the toolbar slot, so the title, Enlarge and Download stay
+ * put while the meta line and the body scroll under them. Back to Artifacts is the only back control:
+ * the header's own on a desktop panel, and the panel's Back on a phone, whose header already leads
+ * with one (`usePanelBack`). Back takes focus as the preview opens, since the row that opened it is
+ * gone; on a phone that is the panel's Back.
+ */
+function ArtifactDetail({ artifact, onBack }: { artifact: WorkflowArtifactView; onBack: () => void }) {
+  const model = useArtifactPreview(artifact);
+  const backRef = useRef<HTMLButtonElement>(null);
+  const panelBack = usePanelBack({ label: "Back to Artifacts", onBack });
+  useLayoutEffect(() => {
+    const focused = document.activeElement;
+    if (focused && focused !== document.body) return;
+    if (backRef.current) backRef.current.focus();
+    else panelBack.focus();
+    // Once, as the preview opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   return (
-    <ul className="browser-artifact-list">
-      {artifacts.map((artifact) => {
-        const KindIcon = KIND_ICONS[artifact.kind] ?? ReportIcon;
-        const created = formatRecordedTimestamp(artifact.createdAt);
-        return (
-          <li key={artifact.artifactId}>
-            <button type="button" className="row row-2" onClick={() => onOpen(artifact.artifactId)}>
-              <span className="browser-artifact-kind" aria-hidden="true"><KindIcon size={16} /></span>
-              <span className="row-body">
-                <span className="row-title" title={artifact.name}>{artifact.name}</span>
-                <span className="row-sub browser-artifact-meta">
-                  <span>{labelFor(artifact.kind)}</span>
-                  {created && <time dateTime={created.dateTime} title={created.title}>{formatRecordedRelativeTime(artifact.createdAt, now)}</time>}
-                </span>
-              </span>
-              <span className="row-trail browser-artifact-size">{formatBytes(artifact.sizeBytes)}</span>
-            </button>
-          </li>
-        );
-      })}
+    <PanelToolLayout toolbar={<ArtifactPreviewHeader model={model} onBack={panelBack.carried ? undefined : onBack} backRef={backRef} />}>
+      <div id="browser-artifacts-panel" role="tabpanel" aria-labelledby="browser-artifacts-tab" className="browser-artifacts">
+        <ArtifactPreviewMeta model={model} />
+        <ArtifactPreviewBody model={model} />
+      </div>
+    </PanelToolLayout>
+  );
+}
+
+/** The rows; back from a preview, focus moves to the row that opened it. */
+function ArtifactList({ artifacts, returnTo, onOpen }: {
+  artifacts: readonly WorkflowArtifactView[];
+  returnTo: { current: string };
+  onOpen: (artifactId: string) => void;
+}) {
+  const now = useTimelineClock(artifacts.length > 0);
+  const listRef = useRef<HTMLUListElement>(null);
+  useLayoutEffect(() => {
+    const artifactId = returnTo.current;
+    returnTo.current = "";
+    // Set only by Back to Artifacts, which the person just chose: on a phone it is the panel's Back,
+    // which stays in place and so still holds focus here.
+    if (!artifactId) return;
+    const row = [...listRef.current?.querySelectorAll<HTMLElement>("li[data-artifact-id]") ?? []]
+      .find((item) => item.dataset.artifactId === artifactId);
+    row?.querySelector<HTMLButtonElement>("button")?.focus();
+  }, [returnTo]);
+  return (
+    <ul className="browser-artifact-list" ref={listRef}>
+      {artifacts.map((artifact) => (
+        <li key={artifact.artifactId} data-artifact-id={artifact.artifactId}>
+          <ArtifactRow artifact={artifact} now={now} onOpen={() => onOpen(artifact.artifactId)} />
+        </li>
+      ))}
     </ul>
   );
 }

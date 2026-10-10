@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { describe } from "node:test";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { RunView, UiSnapshotMessage, WorkflowArtifactView, WorkflowInstanceDetail } from "@wollipog/protocol";
+import type { RunView, SessionView, UiSnapshotMessage, WorkflowArtifactView, WorkflowInstanceDetail } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { viewTitle, type View, type ViewNavigation } from "../navigation.js";
@@ -11,6 +11,7 @@ import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { RunDetail, RunsView } from "./RunsView.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -180,7 +181,7 @@ test("a direct run-to-run route change while offline drops the previous run's wo
       button.textContent?.includes(artifactA.name));
     assert.ok(artifactCard, "run A's artifact is listed");
     await act(async () => artifactCard.click());
-    assert.ok(fixture.container.querySelector(".run-artifact-preview"), "run A's artifact preview is open");
+    assert.ok(domWindow.document.querySelector('[role="dialog"]'), "run A's artifact preview is open");
 
     await act(async () => fixture.socket.onclose?.({ code: 1006 }));
     await fixture.jumpTo(runB.id);
@@ -189,7 +190,7 @@ test("a direct run-to-run route change while offline drops the previous run's wo
     assert.deepEqual(workflowRequests, [runA.id], "offline, run B's workflow is never requested");
     assert.equal(Boolean(section(fixture.container, "Workflow Progress")), false, "Workflow Progress is not shown");
     assert.equal(Boolean(section(fixture.container, "Workflow Artifacts")), false, "Workflow Artifacts is not shown");
-    assert.equal(Boolean(fixture.container.querySelector(".run-artifact-preview")), false, "no artifact preview is open");
+    assert.equal(Boolean(domWindow.document.querySelector('[role="dialog"]')), false, "no artifact preview is open");
     assert.doesNotMatch(fixture.container.textContent ?? "", /Run A|run-a-notes/u);
   } finally {
     await unmount(fixture);
@@ -288,4 +289,92 @@ test("a canceled workflow attempt reads Canceled, while its wire status stays ca
   } finally {
     await unmount(fixture);
   }
+});
+
+describe("Run detail's artifacts (#2855)", () => {
+  const member = {
+    id: "s_member_7c1d", runnerId: "runner-1", agentId: "claude", agentName: "Claude", driver: "claude-code",
+    title: "Builder", status: "idle", runId: runA.id,
+  } as unknown as SessionView;
+  const byAgent = {
+    ...artifactA, artifactId: "artifact-agent", name: "Build log with a long name that the row truncates",
+    mimeType: "text/plain", sha256: "b".repeat(64), createdBy: { kind: "agent", id: member.id }, createdAt: Date.now() - 120_000,
+  } as WorkflowArtifactView;
+  const byPerson = {
+    ...artifactA, artifactId: "artifact-person", name: "review.md", kind: "review_report", mimeType: "text/markdown",
+    sha256: "c".repeat(64), createdBy: { kind: "human", id: "usr_51e0a9" }, createdAt: Date.now() - 60_000,
+  } as WorkflowArtifactView;
+  const later = { ...artifactA, artifactId: "artifact-later", name: "later.txt", sha256: "d".repeat(64) } as WorkflowArtifactView;
+
+  const rowsOf = (container: HTMLDivElement) => [...container.querySelectorAll<HTMLButtonElement>(".run-artifacts .surface .row.row-2")];
+
+  test("artifacts are full-width two-line rows naming kind, agent, time and size, with no ids or hashes", async () => {
+    const fixture = await mountRunDetail({
+      workflowInstances: async () => [],
+      runWorkflowArtifacts: async () => ({ artifacts: [byAgent, byPerson] }),
+    } as Partial<ApiClient>);
+    try {
+      await act(async () => fixture.socket.push({
+        type: "snapshot",
+        capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+        runners: [], boxes: [], projects: [], sessions: [member], runs: [runA, runB], pods: [],
+      }));
+      const rows = rowsOf(fixture.container);
+      assert.equal(rows.length, 2);
+      assert.equal(rows[0]!.querySelector(".row-title")?.textContent, byAgent.name);
+      assert.deepEqual([...rows[0]!.querySelectorAll(".art-row-meta > span")].map((span) => span.textContent), ["Test log", "Claude"]);
+      assert.ok(rows[0]!.querySelector(".art-row-meta > time"), "when it was saved");
+      assert.equal(rows[0]!.querySelector(".art-size")?.textContent, "12 B");
+      assert.ok(rows[0]!.querySelector(".art-kind svg"), "the kind's icon leads the row");
+      assert.equal(fixture.container.querySelector(".run-artifacts-head")?.textContent, "Artifacts 2");
+      const text = fixture.container.querySelector(".run-artifacts")?.textContent ?? "";
+      for (const forbidden of [member.id, "usr_", "text/plain", "text/markdown", "bbbbbbbbbbbb", "cccccccccccc"]) {
+        assert.ok(!text.includes(forbidden), `the list never shows ${forbidden}`);
+      }
+      assertNoDomNode(fixture.container.querySelector(".run-artifact-card"), "no card grid");
+    } finally {
+      await unmount(fixture);
+    }
+  });
+
+  test("choosing a row opens the preview in a large dialog with Done, and no × renders", async () => {
+    const fixture = await mountRunDetail({
+      workflowInstances: async () => [],
+      runWorkflowArtifacts: async () => ({ artifacts: [byAgent] }),
+    } as Partial<ApiClient>);
+    try {
+      await act(async () => rowsOf(fixture.container)[0]!.click());
+      const dialog = document.querySelector('[role="dialog"]');
+      assert.ok(dialog?.closest(".modal.lg"), "a large dialog (§7.1)");
+      assert.equal(dialog!.querySelector(".modal-title")?.textContent, byAgent.name);
+      assert.doesNotMatch(document.body.textContent ?? "", /×/u);
+      const done = [...dialog!.querySelectorAll<HTMLButtonElement>(".modal-foot button")].find((button) => button.textContent === "Done")!;
+      await act(async () => done.click());
+      assertNoDomNode(document.querySelector('[role="dialog"]'), "Done closes the preview");
+    } finally {
+      await unmount(fixture);
+    }
+  });
+
+  test("a list foot's Show More loads the next page", async () => {
+    const cursors: Array<string | undefined> = [];
+    const fixture = await mountRunDetail({
+      workflowInstances: async () => [],
+      runWorkflowArtifacts: async (_runId: string, cursor?: string) => {
+        cursors.push(cursor);
+        return cursor ? { artifacts: [later] } : { artifacts: [byAgent], nextCursor: "page-2" };
+      },
+    } as Partial<ApiClient>);
+    try {
+      assert.equal(fixture.container.querySelector(".run-artifacts-head")?.textContent, "Artifacts 1+");
+      const more = fixture.container.querySelector<HTMLButtonElement>(".run-artifacts .list-foot button")!;
+      assert.equal(more.textContent?.trim(), "Show More");
+      await act(async () => { more.click(); await new Promise((resolve) => setTimeout(resolve, 0)); });
+      assert.equal(cursors.at(-1), "page-2");
+      assert.equal(rowsOf(fixture.container).length, 2);
+      assertNoDomNode(fixture.container.querySelector(".run-artifacts .list-foot"), "the last page has no Show More");
+    } finally {
+      await unmount(fixture);
+    }
+  });
 });

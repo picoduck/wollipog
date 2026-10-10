@@ -68,12 +68,12 @@ test.describe("on a desktop", () => {
       expect(height).toBe(56);
     }
     const html = rows.filter({ hasText: "Dashboard preview" });
-    await expect(html.locator(".browser-artifact-meta > span")).toHaveText("HTML preview");
-    const size = html.locator(".browser-artifact-size");
+    await expect(html.locator(".art-row-meta > span")).toHaveText("HTML preview");
+    const size = html.locator(".art-size");
     await expect(size).toHaveText("1.7 KB");
     const lineHeight = await size.evaluate((element) => Number.parseFloat(getComputedStyle(element).lineHeight));
     expect((await size.boundingBox())!.height).toBeLessThanOrEqual(lineHeight + 1);
-    expect(await rows.first().locator(".browser-artifact-kind").evaluate((tile) => {
+    expect(await rows.first().locator(".art-kind").evaluate((tile) => {
       const box = tile.getBoundingClientRect();
       return [box.width, box.height];
     })).toEqual([32, 32]);
@@ -190,3 +190,95 @@ test.describe("on a phone", () => {
     expect(await addressRowIsOneLine(page)).toEqual(["Reload", expect.anything(), "Open in New Tab"]);
   });
 });
+
+/**
+ * An opened artifact (#2855; docs/design-system.md §11.9): one 48px header with the title from its
+ * leading edge and one back control, a plain meta line, Download's menu carrying the warning, the
+ * bodies and their states, at the panel's 400px and on a 390px phone.
+ */
+async function openArtifact(page: Page, name: string) {
+  await page.locator(".browser-artifact-list .row").filter({ hasText: name }).click();
+  await expect(page.locator(".art-bar .art-title")).toHaveText(name);
+}
+
+for (const [label, width, touch] of [["a 400px panel", 1440, false], ["a 390px phone", 390, true]] as const) {
+  test.describe(`an artifact preview in ${label}`, () => {
+    test.use({ hasTouch: touch, isMobile: touch });
+
+    test("the title is left-aligned in a 48px header with one back control", async ({ page }) => {
+      await openBrowser(page, width);
+      await openArtifact(page, "Review of the Browser panel rebuild");
+      const bar = page.locator(".rpanel-toolbar > .art-bar");
+      expect((await bar.boundingBox())!.height).toBe(48);
+      const back = bar.getByRole("button", { name: "Back to Artifacts" });
+      await expect(back).toBeFocused();
+      await expect(page.getByRole("button", { name: /^Back/u })).toHaveCount(1);
+      const title = (await bar.locator(".art-title").boundingBox())!;
+      const backBox = (await back.boundingBox())!;
+      expect(title.x - (backBox.x + backBox.width), "the title starts right after Back").toBeLessThanOrEqual(8);
+      await expect(page.locator(".art-meta")).toContainText("Review report");
+      await expect(page.locator(".art-meta .art-verified")).toHaveText("Verified");
+      await expect(page.locator(".art-meta")).not.toContainText("text/markdown");
+      await expect(page.locator(".art-markdown h1")).toHaveCount(0);
+      await back.click();
+      await expect(page.locator(".browser-artifact-list .row").first()).toBeFocused();
+    });
+
+    test("Download's menu carries the warning, and a JSON verdict reads in a code well", async ({ page }) => {
+      await openBrowser(page, width);
+      await openArtifact(page, "verdict.json");
+      await expect(page.getByText("Not redacted.", { exact: false })).toHaveCount(0);
+      await page.locator(".art-bar").getByRole("button", { name: "Download" }).click();
+      const original = page.getByRole("menuitem", { name: "Download Original File" });
+      await expect(original).toHaveAccessibleDescription("Not redacted. It may contain secrets or personal data.");
+      await expect(page.getByRole("menuitem", { name: "Copy Checksum" })).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(page.locator(".art-code .diff-syntax-string").first()).toBeVisible();
+      expect(await page.locator(".art-code pre").evaluate((element) => getComputedStyle(element).fontFamily)).toMatch(/Cascadia|Consolas|mono/iu);
+    });
+
+    test("Enlarge opens the screenshot in a full dialog and returns focus to Enlarge", async ({ page }) => {
+      await openBrowser(page, width);
+      await openArtifact(page, "Settings at 390px, dark theme.png");
+      await expect(page.locator(".art-checker img")).toBeVisible();
+      const enlarge = page.locator(".art-bar").getByRole("button", { name: "Enlarge" });
+      await enlarge.click();
+      const dialog = page.getByRole("dialog", { name: "Settings at 390px, dark theme.png" });
+      await expect(dialog.locator(".art-stage img")).toBeVisible();
+      const box = (await dialog.boundingBox())!;
+      expect(box.width).toBeGreaterThan(width === 390 ? 380 : 1000);
+      await dialog.getByRole("button", { name: "Done" }).click();
+      await expect(dialog).toHaveCount(0);
+      await expect(enlarge).toBeFocused();
+    });
+
+    test("a long log grows the panel's one scroller rather than scrolling inside its well", async ({ page }) => {
+      await openBrowser(page, width);
+      await openArtifact(page, "web unit suite.log");
+      const pre = page.locator(".art-code pre");
+      const sizes = async () => pre.evaluate((element) => ({ client: element.clientHeight, scroll: element.scrollHeight }));
+      for (const wrapped of [true, false]) {
+        const { client, scroll } = await sizes();
+        expect(scroll - client, `no vertical scroll inside the well (wrapped: ${wrapped})`).toBeLessThanOrEqual(1);
+        if (wrapped) await page.getByRole("button", { name: "Wrap Lines" }).click();
+      }
+      const scroller = page.locator(".rpanel-scroll");
+      expect(await scroller.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+    });
+
+    test("loading and a failed checksum show their states", async ({ page }) => {
+      await openBrowser(page, width, "?preview=loading");
+      await openArtifact(page, "web unit suite.log");
+      await expect(page.locator(".art-skeleton")).toContainText("Loading and checking the preview…");
+
+      await openBrowser(page, width, "?preview=mismatch");
+      await openArtifact(page, "Dashboard preview");
+      const alert = page.getByRole("alert");
+      await expect(alert).toContainText("Couldn't Verify This Artifact");
+      await expect(alert.getByRole("button", { name: "Retry" })).toBeVisible();
+      await alert.getByRole("button", { name: "Show Details" }).click();
+      await expect(alert).toContainText("digest does not match");
+      await expect(page.locator("iframe")).toHaveCount(0);
+    });
+  });
+}
