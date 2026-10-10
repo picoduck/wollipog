@@ -12162,6 +12162,8 @@ body.shell-dock-dragging * {
 }
 @media (pointer: coarse) {
   .shell-tab:not(.is-active) > .shell-tab-close { display: none; }
+  /* With no Close room between them, tabs keep §10.1's 24px apart. */
+  .shell-dock-head > .shell-tabs { gap: var(--space-6); }
 }
 .shell-dock-tools {
   display: flex;
