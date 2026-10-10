@@ -934,6 +934,31 @@ Requests, Decision History, and Terminal once #2868 moves it) opens in one frame
   Reply from the Sessions list, and an attention link or the session bar's attention control that
   opens a request on the dock. So does any failure the notice slot above the composer reports (Stop
   Turn, Fork Conversation, every other session action), so it is never left unseen.
+- **Arrivals While Hidden.** Expanded on desktop and the sheet on a phone both hide the chat column,
+  which silences its own live regions, so what arrives there with session data follows one rule
+  (#2894):
+  - A failure brings the column back. Expanded restores, keeping the tool, and focus stays where
+    it is, since the panel is still in view. The sheet closes, and focus moves to the failure.
+    Failures are:
+    - a queued message whose delivery ended failed or uncertain, both terminal for that message,
+      whatever the notice's tone;
+    - a campaign continuation whose automatic retries stopped ("Couldn't Resume the
+      Orchestrator");
+    - a new danger entry of the notice slot. An action's own failure is not counted here; it
+      restores the panel where the action runs, as above.
+
+    The slot shows the failure ahead of the request dock.
+  - A request keeps the layout. On desktop the session bar's status control is its indicator, and
+    its Answer action restores the panel. On a phone the sheet's bar ends with a button: the lead
+    request's kind icon with the count badge (§11.4), named "Answer Request" or "Review 2 Requests".
+    It never pushes the title off the bar, and it closes the sheet onto the dock card's heading.
+  - Both are announced politely from outside the hidden column.
+  - Only arrivals count. What the session already has when it is shown is seen, and each failure
+    brings the column back once. A failure that clears and returns does not move the layout
+    again, and none moves it while a modal dialog is open; it waits for the dialog to close.
+    Leaving the session drops it.
+  - Warning and info notices of the slot never change the layout. These include offline states,
+    an account switch, and a continuation that is still retrying.
 - **Keyboard.** The Side Panel chord (Ctrl/⌘+\\) toggles the panel and reopens the last tool, with
   focus on the switcher, so the arrow keys reach every other tool.
   Escape closes it from any tool while focus is inside, once nothing above takes Escape (§16.2): a
@@ -943,7 +968,8 @@ Requests, Decision History, and Terminal once #2868 moves it) opens in one frame
   opened the panel, else the composer.
 - **Phone.** The open panel is a full-screen sheet that covers the session bar (which is not
   rendered) and ends at the tab bar. Its one 48px bar leads with Back to Session, then the switcher
-  and the tool's actions; there is no Close. While a page is pushed that one Back is Back to <Tool>,
+  and the tool's actions, and ends with the session's waiting requests, if any (Arrivals While
+  Hidden); there is no Close. While a page is pushed that one Back is Back to <Tool>,
   so the first Back pops the page and the next returns to the session; no second bar or Back is drawn. The session composer is hidden while it is open (no
   box, out of the accessibility tree, dictation ended), but stays mounted so an unsent secret answer
   survives, and while a focused field hides the tab bar the sheet reaches the keyboard inset (§15.1). Back

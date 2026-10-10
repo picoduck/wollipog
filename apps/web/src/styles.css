@@ -3990,6 +3990,13 @@ textarea {
   gap: var(--space-1);
 }
 .rpanel-actions:empty { display: none; }
+/* A phone's sheet covers the dock, so its bar ends with the waiting requests (#2894): the lead
+   request's kind icon with the count on its shoulder (§11.4), ringed in the bar's own fill. */
+.rpanel-request { --count-badge-ring: var(--bg); }
+.rpanel-request-icon {
+  position: relative;
+  display: inline-flex;
+}
 /* A tool's body, which scrolls as one. */
 .rpanel-body {
   flex: 1;

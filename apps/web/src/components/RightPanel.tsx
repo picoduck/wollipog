@@ -4,6 +4,7 @@ import { CampaignIcon, ChevronDownIcon, ChevronLeftIcon, CloseIcon, CommandLineI
 import { Maximize2Icon, Minimize2Icon } from "./Icons.js";
 import {
   pendingRequests,
+  prioritizedPendingRequests,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   type GitForgeInfo,
@@ -44,6 +45,8 @@ import { DecisionHistoryPanel } from "./DecisionHistoryPanel.js";
 import { AgentsPanel } from "./AgentsPanel.js";
 import { focusSessionRequest } from "./SessionApproval.js";
 import { dockRequests } from "./requests/RequestDock.js";
+import { RequestKindIcon } from "./requests/request-meta.js";
+import { CountBadge } from "./CountBadge.js";
 import { BackgroundWorkPanel } from "./BackgroundWorkPanel.js";
 import { loadBrowserStorageValue, saveBrowserStorageValue } from "../instance-storage.js";
 import { SessionRequestPanel, sessionRequestPanelKey, type DescendantRequestStatus } from "./SessionRequestPanel.js";
@@ -593,8 +596,9 @@ export function RightPanel({
       // now; pulling it back to the opener behind that dialog's scrim would escape its focus trap.
       if (document.activeElement?.closest('[aria-modal="true"]')) return;
       // Attention navigation can dismiss a phone panel and focus the exact docked request in the
-      // same frame. That completed focus transfer takes precedence over returning to the opener.
-      if (document.activeElement?.closest("[data-session-request-focus]")) return;
+      // same frame, and a failure that arrived under the sheet closes it and focuses its notice
+      // (#2894). That completed focus transfer takes precedence over returning to the opener.
+      if (document.activeElement?.closest("[data-session-request-focus], [data-session-condition-focus]")) return;
       if (target?.isConnected) target.focus();
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -903,6 +907,10 @@ export function RightPanel({
   const ownRequests = dockRequests(pendingRequests(session.pendingApproval));
   const ownRequestKey = (request: (typeof ownRequests)[number]) =>
     sessionRequestPanelKey(session.id, request.occurrenceId ?? request.requestId);
+  // A phone's sheet covers the session bar and the dock, so its own bar says when the session has a
+  // request waiting, and opens the one the dock leads with (#2894). Desktop has the session bar's.
+  const phoneRequests = phone ? dockRequests(prioritizedPendingRequests(session.pendingApproval)) : [];
+  const phoneRequestLabel = phoneRequests.length === 1 ? "Answer Request" : `Review ${phoneRequests.length} Requests`;
 
   /**
    * Every non-launcher mode owns a body. The switch is exhaustive on purpose: adding a mode to
@@ -1129,9 +1137,10 @@ export function RightPanel({
       >
         {/* One 48px bar in every tool (§4.4): the tool switcher as the title, the tool's actions,
             Expand Panel, then Close Panel. A phone's panel covers the session bar, so its bar leads
-            with Back to Session instead and has neither Expand nor Close (#2843, #2845). While a
-            page is pushed, Back to <Tool> and the page's title take the switcher's place, and on a
-            phone that Back is the bar's one Back (#2856). */}
+            with Back to Session instead and has neither Expand nor Close (#2843, #2845); it ends
+            with the session's waiting requests, if any (#2894). While a page is pushed, Back to
+            <Tool> and the page's title take the switcher's place, and on a phone that Back is the
+            bar's one Back (#2856). */}
         <div className="rpanel-head">
           {page && (
             <button
@@ -1161,6 +1170,25 @@ export function RightPanel({
           </h2>
           {!page && <ToolSwitcher current={state.mode} context={toolContext} triggerRef={switcherRef} onChoose={chooseTool} />}
           <div className="rpanel-actions" ref={setActionSlot} />
+          {phoneRequests[0] && (
+            <button
+              type="button"
+              className="icon-btn rpanel-request"
+              onClick={() => {
+                // As Open Request in Session: the sheet closes, then the dock's card takes focus.
+                const requestId = phoneRequests[0]!.requestId;
+                state.close();
+                window.requestAnimationFrame(() => focusSessionRequest(session.id, requestId));
+              }}
+              title={phoneRequestLabel}
+              aria-label={phoneRequestLabel}
+            >
+              <span className="rpanel-request-icon">
+                <RequestKindIcon request={phoneRequests[0]} />
+                <CountBadge count={phoneRequests.length} onIcon />
+              </span>
+            </button>
+          )}
           {!phone && (
             <button
               type="button"

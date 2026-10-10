@@ -72,6 +72,13 @@ import {
   type SessionNoticeEntry,
   type SessionNoticeLead,
 } from "./SessionNoticeSlot.js";
+import { revealSessionNotice } from "./SessionNoticeSlot.js";
+import {
+  hiddenColumnFailures,
+  useHiddenColumnConditions,
+  type ColumnHiddenBy,
+  type HiddenColumnFailure,
+} from "./hidden-column-conditions.js";
 import { sessionAccountSwitchApplicable, SwitchAccountDialog } from "./SwitchAccountDialog.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { SessionPlaceholder } from "./SessionPlaceholder.js";
@@ -5477,6 +5484,34 @@ function SessionDetailLoaded({
       ),
     });
   });
+  // A failure that arrives while the side panel hides the chat column brings the column back, and
+  // a request only its indicator; both are announced from outside the hidden column (§4.9; #2894).
+  const columnHiddenBy: ColumnHiddenBy | null = mode !== "expanded" || !rightPanel.open ? null
+    : isMobile ? "sheet" : rightPanel.expanded ? "expanded" : null;
+  const showHiddenColumnFailure = useCallback((failure: HiddenColumnFailure, hiddenBy: ColumnHiddenBy) => {
+    // Desktop restores and leaves focus in the panel, which stays in view; the phone's sheet goes,
+    // focus with it, so focus moves to the failure.
+    const focus = hiddenBy === "sheet";
+    if (focus) flushSync(() => rightPanelRef.current.close());
+    else restoreExpandedPanel();
+    const revealed = failure.target.kind === "notice" && revealSessionNotice(session.id, failure.target.noticeKey, focus);
+    if (!focus || revealed) return;
+    const campaignNotice = failure.target.kind === "campaign"
+      ? detailChatRef.current?.querySelector<HTMLElement>('.campaign-notices .notice[data-state="failed"]') : null;
+    if (campaignNotice) campaignNotice.focus();
+    else scrollRef.current?.focus({ preventScroll: true });
+  }, [restoreExpandedPanel, session.id]);
+  const hiddenColumnAnnouncement = useHiddenColumnConditions({
+    sessionId: session.id,
+    hiddenBy: columnHiddenBy,
+    failures: hiddenColumnFailures({
+      queued: queuedPromptControls,
+      continuation: session.orchestratorCampaign?.continuation,
+      notices: sessionNotices,
+    }),
+    requestKeys: dockedRequests.map((request) => `${request.requestId}:${request.occurrenceId ?? ""}`),
+    onFailure: showHiddenColumnFailure,
+  });
   const composerIdleCollapsed = isMobile && !composerExpanded && !composerMultiline &&
     images.length === 0 && session.pendingApproval == null &&
     !historyQuarantine && !queuedEdit && composerErrorEntries.length === 0 && !retitleFeedback && !dictation.recording &&
@@ -6715,6 +6750,13 @@ function SessionDetailLoaded({
       {/* Reports each render of this view itself, never one of the transcript alone (#2763). */}
       <Profiler id={SESSION_DETAIL_PROBE} onRender={reportRenderProbe} />
       {mode === "expanded" && <MarkSessionSeen sessionId={sessionId} instanceScope={instanceScope} />}
+      {/* Outside the session bar and the chat column, which an expanded panel hides and a phone's
+          sheet makes inert, silencing their own live regions (#2894). */}
+      {mode === "expanded" && (
+        <span className="sr-only" role="status" aria-live="polite" aria-atomic="true" data-hidden-column-announcement>
+          {hiddenColumnAnnouncement}
+        </span>
+      )}
       {mode === "expanded" ? (
         <>
         <SessionHeader
@@ -6833,7 +6875,7 @@ function SessionDetailLoaded({
               under the session bar, in this order, on its edges (#2157), rather than in the notice
               slot above the composer. */}
           {mode === "expanded" && (session.orchestratorCampaign?.continuation || heldChildren.length > 0) && (
-            <div className="campaign-notices">
+            <div className="campaign-notices" data-session-condition-focus>
               {session.orchestratorCampaign?.continuation && (
                 <CampaignContinuationNotice
                   continuation={session.orchestratorCampaign.continuation}
@@ -8105,6 +8147,8 @@ export function CampaignContinuationNotice({
       tone={copy.tone}
       compact={!copy.title}
       dataState={continuation.state}
+      // Where focus lands when this failure closes a phone's side panel sheet (#2894).
+      tabIndex={copy.tone === "danger" ? -1 : undefined}
       role="status"
       ariaLabel={copy.title}
       title={copy.title}
