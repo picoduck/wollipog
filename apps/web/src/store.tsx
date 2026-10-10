@@ -2817,7 +2817,9 @@ export function StoreProvider({
       const state = store.getState();
       const msg: UiToControlPlane | null = subscriptionSync.nextMessage(
         state,
-        state.streamSubscriptions.mode === "targeted",
+        // A paged header and partial rows are not an authoritative selection. Sending each
+        // growing inventory wastes the principal's shared admission window on every connect.
+        state.streamSubscriptions.mode === "targeted" && state.snapshotLoaded,
       );
       if (!msg || msg.type !== "session_subscriptions") return;
       // Freeze the durable recovery cursor before the server can apply this replacement. A live
