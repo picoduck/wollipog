@@ -456,6 +456,8 @@
   --page-max: 960px;
   --page-max-wide: 1200px;
   --page-max-form: 760px;
+  /* The reading measure for prose (§2): Files' rendered Markdown (#2853). */
+  --measure: 68ch;
   /* The side-by-side master-detail list pane (§6); the compact tier narrows it to 280px. */
   --list-pane-w: 320px;
   --rail-w: 64px;
@@ -5099,7 +5101,7 @@ textarea {
 }
 /* Files (#2852, §4.9): Go to File is the panel's toolbar, and the scroller holds the notices, then the
    path row over the folder's dense rows (§5.2) or the viewer, or, while the field has text, the
-   matching files. Nothing in it scrolls on its own but the viewer's source (#2853). */
+   matching files. Nothing in it scrolls vertically on its own, the open file included (#2853). */
 .files-browser {
   display: flex;
   flex-direction: column;
@@ -5179,6 +5181,101 @@ textarea {
   width: 12%;
   margin-left: auto;
 }
+/* The open file's toolbar row (#2853, §4.7), under Go to File in the toolbar slot. It never wraps:
+   Go to Symbol takes what is left and the icon actions keep their size at the row's end. */
+.files-viewer-field { margin-top: var(--space-2); }
+.files-symbol { flex: 1; }
+/* Clear Target is a target inside the field's edge, so setting or clearing a target moves nothing. */
+.input-affix-text.files-symbol-clear {
+  inset-inline-end: var(--space-1);
+  pointer-events: auto;
+}
+.files-viewer-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+  margin-inline-start: auto;
+}
+.files-viewer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+/* Language, lines, size and git state (§11.3). */
+.files-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--space-3);
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+/* Source as lines: a sticky number column and the text, in a grid so every number takes the widest
+   one's width. The view scrolls sideways only; the panel's scroller is the one vertical scroller. */
+.codeview {
+  margin: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+}
+.codeview-lines {
+  display: grid;
+  grid-template-columns: max-content minmax(max-content, 1fr);
+  padding: var(--space-2) 0;
+  font: var(--type-small);
+  font-family: var(--font-mono);
+}
+.cl { display: contents; }
+.ln {
+  position: sticky;
+  left: 0;
+  padding: 0 var(--space-3) 0 var(--space-2);
+  background: var(--bg);
+  color: var(--text-dim);
+  text-align: right;
+  user-select: none;
+}
+.ln::before { content: attr(data-line-number); }
+.tx {
+  padding-inline-end: var(--space-3);
+  white-space: pre;
+}
+/* The target line (§3.1's selected surface), with the accent edge on the number column. */
+.cl.is-target > .ln,
+.cl.is-target > .tx {
+  background: var(--surface-selected);
+}
+.cl.is-target > .ln { box-shadow: inset 2px 0 var(--accent); }
+.cl mark {
+  border-radius: var(--radius-xs);
+  /* 22%, not 42%, and `--warning-on-tint` rather than `--text`.
+     A 42% wash lands the fill in the mid-tones, and a mid-tone carries NOTHING at 4.5:1 — neither
+     black nor white clears it, so no ink exists for that highlight in a dark palette. It only ever
+     looked fine because Wollipog's foreground is bright enough to survive its own amber. A search
+     highlight has to stay legible in every scheme, so the fill is weakened to a strength an ink
+     can actually carry. The ink stays `--text`: switching it to `--warning-on-tint` fixed the
+     schemes and broke the DEFAULT, because that token is a fixed 70% mix in the base block and is
+     not derived for this fill. Weakening the fill is the change that helps every palette.
+     14% since #2853: a mark only shows on the target line, where the fill composites over the
+     selected surface rather than the ground, and 22% measured 4.19:1 in One Dark there. The ring
+     keeps the weaker fill findable; it carries no text. */
+  background: color-mix(in srgb, var(--warning) 14%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--warning) 55%, transparent);
+  color: var(--text);
+}
+/* Rendered Markdown at the reading measure, on the panel's ground. */
+.files-md { max-width: var(--measure); }
+/* Code-line bars while a file is read (§12.3). */
+.skeleton.files-code-skeleton {
+  min-height: 0;
+  padding: var(--space-2) 0;
+}
+.files-code-skeleton > .skeleton-bar:nth-child(3n) { width: 64%; }
+.files-code-skeleton > .skeleton-bar:nth-child(3n + 1) { width: 28%; }
 
 /* Browser and authenticated artifact previews. Both iframe surfaces are sandboxed in markup; the
    application chrome remains outside the untrusted browsing context. */
@@ -11889,111 +11986,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   margin-left: 0;
 }
 
-/* ------------------------- Files panel (session browser) ------------------------ */
-.files-viewer {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-width: 0;
-}
-.files-viewer-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-.source-location-bar {
-  justify-content: flex-start;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-.source-symbol-form {
-  display: flex;
-  min-width: 0;
-  gap: 4px;
-}
-.source-symbol-form input,
-.source-editor-select {
-  min-width: 0;
-  max-width: 150px;
-  height: var(--control-h);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-  color: var(--text);
-  padding: 3px 7px;
-  font: inherit;
-  font-size: 12px;
-}
-.source-file-size {
-  margin-left: auto;
-}
-.files-text {
-  margin: 0;
-  padding: 10px 12px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  font-size: 12px;
-  line-height: 1.5;
-  max-height: 480px;
-  overflow: auto;
-  white-space: pre;
-}
-.files-text code {
-  display: block;
-  min-width: max-content;
-}
-.files-source-line {
-  display: block;
-  position: relative;
-  min-height: 1.5em;
-  padding: 0 6px 0 4.25em;
-  margin: 0 -6px;
-}
-.files-source-line::before {
-  content: attr(data-line-number);
-  position: absolute;
-  left: 0;
-  width: 3.5em;
-  color: var(--text-dim);
-  text-align: right;
-  user-select: none;
-}
-.files-source-line.is-target {
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  box-shadow: inset 2px 0 var(--accent);
-}
-/* The line NUMBER on that tint. Retiring `--text-muted` moved this from a weaker tier to
-   `--text-dim`, which is an improvement and still not enough: on One Dark's 16% accent wash it
-   measures 4.21:1. A uniform substitution cannot be right for a consumer whose ground is tinted,
-   and this is the one that was not. */
-.files-source-line.is-target::before {
-  color: var(--text-dim-on-tint);
-}
-.files-source-line mark {
-  border-radius: 2px;
-  /* 22%, not 42%, and `--warning-on-tint` rather than `--text`.
-     A 42% wash lands the fill in the mid-tones, and a mid-tone carries NOTHING at 4.5:1 — neither
-     black nor white clears it, so no ink exists for that highlight in a dark palette. It only ever
-     looked fine because Wollipog's foreground is bright enough to survive its own amber. A search
-     highlight has to stay legible in every scheme, so the fill is weakened to a strength an ink
-     can actually carry. The ink stays `--text`: switching it to `--warning-on-tint` fixed the
-     schemes and broke the DEFAULT, because that token is a fixed 70% mix in the base block and is
-     not derived for this fill. Weakening the fill is the change that helps every palette. */
-  background: color-mix(in srgb, var(--warning) 22%, transparent);
-  color: var(--text);
-}
-.files-md {
-  padding: 10px 14px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  max-height: 480px;
-  overflow: auto;
-  font-size: 13px;
-}
-
 /* ------------------------- Shells panel (session console) ------------------------ */
 .shell-tabs {
   display: flex;
@@ -17187,11 +17179,24 @@ button.review-finding-location {
    Every rule here paints, or sits inside, a 16% wash. The tiers below it (`--text-dim-on-tint`,
    `--text-faint-on-tint`) are derived to sit under this value on those grounds, so the row reads
    in the intended order instead of the line number outshouting the line. */
-.files-source-line.is-target,
 .diff-line-add,
 .diff-line-del {
   color: var(--text-on-tint);
 }
+/* Files' target line (#2853) on the selected surface: its text, number, tokens and mark take the
+   tint inks. The plain hues measured 4.09:1 (a keyword) and 3.93:1 (the mark) in One Dark. */
+.cl.is-target > .tx,
+.cl.is-target mark {
+  color: var(--text-on-tint);
+}
+.cl.is-target > .ln { color: var(--text-dim-on-tint); }
+.cl.is-target .diff-syntax-keyword { color: var(--purple-on-tint); }
+.cl.is-target .diff-syntax-string { color: var(--green-on-tint); }
+.cl.is-target .diff-syntax-number { color: var(--amber-on-tint); }
+.cl.is-target .diff-syntax-literal { color: var(--blue-on-tint); }
+/* A marked token takes the mark's ink, ahead of the token inks above: a keyword's purple on the
+   amber fill measured 4.11:1 in One Dark. */
+.cl.is-target mark > span[class] { color: inherit; }
 
 /* REMOVED, deliberately.
    These three promoted a faint label to the dim tier because faint was unreadable on a tinted row.

@@ -7632,6 +7632,7 @@ function SessionDetailLoaded({
           onAttachWorkspaceReference={workspaceReferencesSupported ? attachWorkspaceTargetFromPanel : undefined}
           reviewFocus={reviewFocus}
           onReviewFocusHandled={clearReviewFocus}
+          onOpenInReview={openInReview}
           items={items}
           decisionHistory={governanceAudit.history}
           decisionHistoryStatus={governanceAudit.status}

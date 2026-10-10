@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { Notice } from "./Notice.js";
 import { SegmentedControl } from "./ui/ChoiceControls.js";
 import {
   parseSourceLocation,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
+  type EditorInfo,
   type EditorSourceLocation,
   type CreateWorkspaceReferenceRequest,
   type SessionFileEntry,
@@ -13,18 +14,24 @@ import {
   type WorkspaceReferenceCandidate,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
+import { writeClipboardText } from "../clipboard.js";
+import { highlightDiffLine } from "../diff-view.js";
 import {
   GIT_MARKER_LABEL,
   baseName,
   crumbsFor,
   editorSupportsSourceLocation,
   fileIconKind,
+  fileLanguage,
   formatBytes,
   gitMarkers,
   isMarkdownPath,
+  lineCountLabel,
+  markSegments,
   parentPath,
   rankGoToFileResults,
   resolveSourceTarget,
+  sourceLines,
   workspaceFolderName,
   type GitMarker,
   type GoToFileMatch,
@@ -38,7 +45,25 @@ import { shortcutDisplay } from "../shortcuts.js";
 import { useOptionalStoreSelector, useStoreSelector } from "../store.js";
 import { Markdown } from "./Markdown.js";
 import { Spinner } from "./common.js";
-import { CloseIcon, FileCodeIcon, FileIcon, FolderIcon, FolderUpIcon, ImageIcon, RefreshIcon, SearchIcon, SearchOffIcon } from "./Icons.js";
+import { useFeedback } from "./FeedbackProvider.js";
+import { FieldError } from "./FieldError.js";
+import {
+  CloseIcon,
+  FileCodeIcon,
+  FileIcon,
+  FolderIcon,
+  FolderUpIcon,
+  ImageIcon,
+  LinkIcon,
+  LocateIcon,
+  MoreHorizontalIcon,
+  PaperclipIcon,
+  RefreshIcon,
+  SearchIcon,
+  SearchOffIcon,
+} from "./Icons.js";
+import { useAccessibleMenu } from "./interactions.js";
+import { MenuItem, MenuSurface } from "./Menu.js";
 import { PanelToolLayout } from "./PanelToolLayout.js";
 import { PanelHeaderActions } from "./RightPanel.js";
 import { StaleContent } from "./StaleContent.js";
@@ -101,17 +126,133 @@ function takeGoToFileFocusRequest(): boolean {
   return requestedAt !== null && Date.now() - requestedAt <= GO_TO_FILE_FOCUS_WINDOW_MS;
 }
 
-function SourceLine({ text, line, target }: { text: string; line: number; target: ResolvedSourceTarget | null }) {
+/**
+ * One source line (#2853): its number, sticky while the code scrolls sideways, and its text through
+ * the diff's highlighter, so a file reads the same in Files and in Review. The number is drawn from
+ * `data-line-number`, so copying lines copies only the code.
+ */
+function SourceLine({ path, text, line, target }: { path: string; text: string; line: number; target: ResolvedSourceTarget | null }) {
   const selected = !target?.error && target?.line === line;
-  if (!selected || target.column === undefined || target.matchLength === undefined) {
-    return <span className={`files-source-line${selected ? " is-target" : ""}`} data-source-line={line} data-line-number={line}>{text || "​"}</span>;
-  }
-  const start = Math.max(0, Math.min(text.length, target.column - 1));
-  const end = Math.max(start, Math.min(text.length, start + target.matchLength));
+  const segments = highlightDiffLine(path, text);
+  const start = selected && target.column !== undefined && target.matchLength !== undefined
+    ? Math.max(0, Math.min(text.length, target.column - 1))
+    : null;
+  const parts = start === null
+    ? segments.map((segment) => ({ ...segment, marked: false }))
+    : markSegments(segments, start, Math.min(text.length, start + target!.matchLength!));
+  const tokens = parts.filter((part) => part.text !== "");
   return (
-    <span className="files-source-line is-target" data-source-line={line} data-line-number={line}>
-      {text.slice(0, start)}<mark>{text.slice(start, end) || "​"}</mark>{text.slice(end)}
+    <span className={`cl${selected ? " is-target" : ""}`} data-source-line={line}>
+      <span className="ln" data-line-number={line} aria-hidden="true" />
+      <span className="tx">
+        {tokens.map((part, index) => {
+          const token = <span className={`diff-syntax-${part.kind}`} key={index}>{part.text}</span>;
+          return part.marked ? <mark key={index}>{token}</mark> : token;
+        })}
+        {/* A column at the end of the line still shows where it is; an empty line keeps its height. */}
+        {start !== null && start >= text.length ? <mark>{"​"}</mark> : tokens.length === 0 && "​"}
+      </span>
     </span>
+  );
+}
+
+/**
+ * A text file as lines in `.codeview`, which scrolls sideways only: the panel's scroller is the one
+ * vertical scroller (§4.9). Memoized, so a toast or a busy button does not re-highlight a long file.
+ */
+const SourceCode = memo(function SourceCode({ path, content, target }: {
+  path: string;
+  content: string;
+  target: ResolvedSourceTarget | null;
+}) {
+  const lines = useMemo(() => sourceLines(content), [content]);
+  return (
+    // Focusable, so the keyboard can scroll a long line into view. Inside a `pre`, the code is not
+    // drawn as the inline code chip.
+    <pre className="codeview" role="region" aria-label={`Source of ${baseName(path)}`} tabIndex={0}>
+      <code className="codeview-lines">
+        {lines.map((text, index) => (
+          <SourceLine key={index} path={path} text={text} line={index + 1} target={target?.line === index + 1 ? target : null} />
+        ))}
+      </code>
+    </pre>
+  );
+});
+
+/** Code-line skeleton bars while a file is read (§12.3). */
+function CodeSkeleton() {
+  return (
+    <div className="skeleton files-code-skeleton" role="status" aria-live="polite">
+      <span className="sr-only">Opening the file.</span>
+      {[0, 1, 2, 3, 4, 5, 6, 7].map((index) => <span className="skeleton-bar" key={index} aria-hidden="true" />)}
+    </div>
+  );
+}
+
+/** One File Actions item. An unavailable one stays listed with its reason as its second line (§9.1). */
+interface FileAction {
+  label: string;
+  run: () => void;
+  unavailableReason?: string;
+}
+
+/**
+ * The open file's ⋯ File Actions (#2853, §9.1): Open in each editor found, or Open in Editor… with
+ * the reason it is unavailable; Copy Path; and, for a changed file, Show Changes in Review. A bottom
+ * sheet on phones. It replaced the viewer bar's editor select and its Open in button.
+ */
+function FileActionsMenu({ actions }: { actions: FileAction[] }) {
+  const [open, setOpen] = useState(false);
+  // Unavailable items are aria-disabled rather than disabled, so the keyboard reaches each one and
+  // hears why; `choose` refuses to run one.
+  const menu = useAccessibleMenu(open, setOpen, "files-file-actions", "item", { reachUnavailable: true });
+  const choose = (action: FileAction) => {
+    if (action.unavailableReason !== undefined) return;
+    menu.triggerRef.current?.focus();
+    menu.close(false);
+    action.run();
+  };
+  return (
+    <>
+      <button
+        ref={menu.triggerRef}
+        type="button"
+        className="icon-btn sm"
+        onClick={menu.toggle}
+        onKeyDown={menu.onTriggerKeyDown}
+        title="File Actions"
+        aria-label="File Actions"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? menu.menuId : undefined}
+      >
+        <MoreHorizontalIcon size={16} aria-hidden="true" />
+      </button>
+      {open && (
+        <MenuSurface
+          surfaceRef={menu.menuRef}
+          anchor={{ trigger: menu.triggerRef }}
+          id={menu.menuId}
+          label="File Actions"
+          align="end"
+          tabIndex={-1}
+          onDismiss={() => menu.close(true)}
+          onKeyDown={menu.onMenuKeyDown}
+        >
+          {actions.map((action, index) => (
+            <MenuItem
+              key={`${index}:${action.label}`}
+              data-menu-label={action.label}
+              aria-disabled={action.unavailableReason === undefined ? undefined : true}
+              description={action.unavailableReason}
+              onClick={() => choose(action)}
+            >
+              {action.label}
+            </MenuItem>
+          ))}
+        </MenuSurface>
+      )}
+    </>
   );
 }
 
@@ -172,6 +313,7 @@ export function FilesBrowser({
   onOpenLocation,
   onClearLocation,
   onAttachWorkspaceReference,
+  onShowInReview,
 }: {
   session: SessionView;
   runnerOnline: boolean;
@@ -182,9 +324,12 @@ export function FilesBrowser({
   onOpenLocation: (location: SourceLocation) => void;
   onClearLocation: () => void;
   onAttachWorkspaceReference?: (target: CreateWorkspaceReferenceRequest) => Promise<void>;
+  /** Opens Review on a changed file: File Actions' Show Changes in Review. */
+  onShowInReview?: (path: string) => void;
 }) {
   const api = useApi();
   const instances = useInstances();
+  const { showToast } = useFeedback();
   // Current directory, root-relative ("" = root). Remembered per session so switching the panel to
   // another mode and back resumes where the browsing left off instead of at the root (#1202).
   const panelScratch = usePanelScratchScope(session.id);
@@ -198,21 +343,25 @@ export function FilesBrowser({
   const [error, setError] = useState<string | null>(null);
   const [file, setFile] = useState<FileView | null>(null);
   const [fileBusy, setFileBusy] = useState<string | null>(null);
-  const [rendered, setRendered] = useState(true); // markdown: rendered vs source
+  const [rendered, setRendered] = useState(true); // markdown: Preview vs Source
   const [symbolDraft, setSymbolDraft] = useState(location?.symbol ?? "");
-  const [note, setNote] = useState<string | null>(null);
-  const [editorBusy, setEditorBusy] = useState(false);
+  // A Go to Symbol entry the route cannot hold; a symbol the file lacks comes from the target.
+  const [symbolInputError, setSymbolInputError] = useState<string | null>(null);
   const [attachBusy, setAttachBusy] = useState(false);
-  const [selectedEditor, setSelectedEditor] = useState<string | null>(() => {
-    return loadBrowserStorageValue("wollipog.editor.lastUsed");
-  });
-  const symbolInputId = `source-symbol-${useId().replace(/:/g, "")}`;
+  const [lastEditor, setLastEditor] = useState<string | null>(() => loadBrowserStorageValue("wollipog.editor.lastUsed"));
+  const symbolInputId = `go-to-symbol-${useId().replace(/:/g, "")}`;
   const goToFileId = `go-to-file-${useId().replace(/:/g, "")}`;
   // Monotonic token: fast navigation fires overlapping loads; only the latest writes state
   // (same race stance as GitPanel's diff loader).
   const reqRef = useRef(0);
   const viewerRef = useRef<HTMLDivElement>(null);
   const fieldRef = useRef<HTMLInputElement>(null);
+  const symbolRef = useRef<HTMLInputElement>(null);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
   const pendingDirectoryRef = useRef<string | null>(null);
   // The directory this mount resumes into, retired by the first listing that actually resolves —
   // NOT by the first pass of the effect below, which React runs twice under StrictMode. Once a
@@ -221,11 +370,12 @@ export function FilesBrowser({
   const resumeDirectoryRef = useRef<string | null>(path || null);
   const runner = useStoreSelector((state) => state.runners.get(session.runnerId));
   const isRemote = useStoreSelector((state) => [...state.boxes.values()].some((box) => box.runnerId === session.runnerId));
-  const machineName = useOptionalStoreSelector((state) => runnerDisplay(
+  const runnerName = useOptionalStoreSelector((state) => runnerDisplay(
     state.runners.get(session.runnerId),
     [...state.boxes.values()].find((box) => box.runnerId === session.runnerId),
     session.runnerId,
-  ).name) || "The machine";
+  ).name);
+  const machineName = runnerName || "The machine";
   const rootName = workspaceFolderName(session.worktreePath, session.workspaceName);
 
   // Go to File (#2852): the query, the runner's last answer for it, and the active result.
@@ -284,6 +434,7 @@ export function FilesBrowser({
       rememberOpened(session.id, d.path || p);
       setRendered(!(requested?.line !== undefined || requested?.symbol !== undefined));
       setSymbolDraft(requested?.symbol ?? "");
+      setSymbolInputError(null);
     } catch (e) {
       if (reqRef.current !== reqId) return;
       setError((e as Error).message);
@@ -298,8 +449,10 @@ export function FilesBrowser({
     const resumeDirectory = resumeDirectoryRef.current;
     if (location) {
       if (file?.path === location.path) {
-        setRendered(!(location.line !== undefined || location.symbol !== undefined));
+        // A target shows in the source. Clearing one keeps the view, so Go to Symbol stays put.
+        if (location.line !== undefined || location.symbol !== undefined) setRendered(false);
         setSymbolDraft(location.symbol ?? "");
+        setSymbolInputError(null);
       } else {
         void openFile(location.path, location);
       }
@@ -421,7 +574,9 @@ export function FilesBrowser({
   useEffect(() => {
     if (!target || target.error || rendered) return;
     const frame = window.requestAnimationFrame(() => {
-      viewerRef.current?.querySelector<HTMLElement>(`[data-source-line="${target.line}"]`)?.scrollIntoView({ block: "center" });
+      // The line's number: the line itself is `display: contents` in the code grid and has no box,
+      // and the number is sticky at the start, so bringing it into view never scrolls the code sideways.
+      viewerRef.current?.querySelector<HTMLElement>(`[data-source-line="${target.line}"] > .ln`)?.scrollIntoView({ block: "center" });
     });
     return () => window.cancelAnimationFrame(frame);
   }, [file?.path, rendered, target]);
@@ -435,54 +590,80 @@ export function FilesBrowser({
       ...(target.column === undefined ? {} : { column: target.column }),
     };
   }, [file, target]);
-  const locationEditors = runnerSupportsProtocol(runnerProtocolVersion, "editorLocations") && !isRemote && editorLocation
+  const editorLocationsSupported = runnerSupportsProtocol(runnerProtocolVersion, "editorLocations");
+  const locationEditors = editorLocationsSupported && !isRemote && editorLocation
     ? (runner?.editors ?? []).filter((editor) => editorSupportsSourceLocation(editor, editorLocation))
     : [];
-  const chosenEditor = locationEditors.find((editor) => editor.id === selectedEditor) ?? locationEditors[0];
+  // The editor used last leads File Actions' editors.
+  const editors = [...locationEditors].sort((a, b) => Number(b.id === lastEditor) - Number(a.id === lastEditor));
 
-  const flashNote = (message: string) => {
-    setNote(message);
-    window.setTimeout(() => setNote((current) => current === message ? null : current), 5000);
+  /**
+   * Copies text and confirms it with a toast. A refused write falls back to a hidden field only while
+   * focus is still where the copy left it (see `writeClipboardText`).
+   */
+  const copyText = async (text: string, what: string) => {
+    const from = document.activeElement;
+    const current = () => mountedRef.current && (document.activeElement === null ||
+      document.activeElement === document.body || document.activeElement === from);
+    const result = await writeClipboardText(text, current);
+    if (result === null) return;
+    if (from instanceof HTMLElement && (document.activeElement === document.body || document.activeElement === null)) from.focus();
+    if (result) showToast(`Copied the ${what}.`, { tone: "success" });
+    else showToast(`Couldn't copy the ${what}.`, { tone: "error" });
   };
-  const copyLink = async () => {
+  const copyLink = () => {
     if (!file) return;
     const publicOrigin = instancePublicOrigin(instances);
     if (!publicOrigin) {
-      flashNote("Open this dashboard through a reachable address before copying a source link.");
+      showToast("Open this dashboard through a reachable address before copying a source link.", { tone: "error" });
       return;
     }
     const targetLocation = location?.path === file.path ? location : { path: file.path };
-    try {
-      await navigator.clipboard.writeText(absoluteViewUrl(publicOrigin, {
-        name: "session", id: session.id, location: targetLocation,
-      }));
-      flashNote("Source link copied.");
-    } catch (cause) {
-      flashNote(`Could not copy source link: ${(cause as Error).message}`);
-    }
+    void copyText(absoluteViewUrl(publicOrigin, { name: "session", id: session.id, location: targetLocation }), "link");
   };
-  const openInEditor = async () => {
-    if (!chosenEditor || !editorLocation) return;
-    setEditorBusy(true);
-    setSelectedEditor(chosenEditor.id);
-    saveBrowserStorageValue("wollipog.editor.lastUsed", chosenEditor.id);
-    saveBrowserStorageValue("wollipog.openDestination.lastUsed", `editor:${chosenEditor.id}`);
+  const openInEditor = async (editor: EditorInfo) => {
+    if (!editorLocation) return;
+    setLastEditor(editor.id);
+    saveBrowserStorageValue("wollipog.editor.lastUsed", editor.id);
+    saveBrowserStorageValue("wollipog.openDestination.lastUsed", `editor:${editor.id}`);
     try {
       await api.hostAction(session.id, {
-        kind: "open_editor_location", editorId: chosenEditor.id, location: editorLocation,
+        kind: "open_editor_location", editorId: editor.id, location: editorLocation,
       });
-      flashNote(`Opened in ${chosenEditor.name}.`);
+      showToast(`Opened in ${editor.name}.`, { tone: "success" });
     } catch (cause) {
-      flashNote((cause as Error).message);
-    } finally {
-      setEditorBusy(false);
+      showToast((cause as Error).message, { tone: "error" });
     }
   };
   const jumpToSymbol = () => {
-    if (!file) return;
+    if (!file || !symbolDraft.trim()) return;
     const next = parseSourceLocation({ path: file.path, symbol: symbolDraft });
-    if (!next) return flashNote("Enter a symbol of 1-256 printable characters.");
+    if (!next) {
+      setSymbolInputError("Use 1 to 256 printable characters.");
+      return;
+    }
+    setSymbolInputError(null);
     onOpenLocation(next);
+  };
+  const clearTarget = () => {
+    if (!file) return;
+    setSymbolDraft("");
+    setSymbolInputError(null);
+    onOpenLocation({ path: file.path });
+    symbolRef.current?.focus();
+  };
+  const onSymbolKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (event.nativeEvent.isComposing) return;
+    if (event.key === "Enter") {
+      event.preventDefault();
+      jumpToSymbol();
+    } else if (event.key === "Escape" && symbolDraft !== "") {
+      // As Go to File: Escape empties the field first, then follows the panel's ladder.
+      if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+      event.preventDefault();
+      setSymbolDraft("");
+      setSymbolInputError(null);
+    }
   };
   const attachCurrentTarget = async () => {
     if (!file || file.binary || !onAttachWorkspaceReference) return;
@@ -511,10 +692,15 @@ export function FilesBrowser({
     }
   };
 
-  const folder = file ? parentPath(file.path) : path;
+  // A file being read for the first time (not a refresh of the one on screen) shows a code skeleton
+  // under its own path, in place of the folder or the previous file.
+  const opening = fileBusy !== null && file?.path !== fileBusy ? fileBusy : null;
+  const shownFile = opening === null ? file : null;
+  const shownPath = opening ?? shownFile?.path ?? null;
+  const folder = shownPath !== null ? parentPath(shownPath) : path;
   const crumbs = crumbsFor(folder, rootName);
   const disabled = !runnerOnline || busy;
-  const atRoot = !file && path === "";
+  const atRoot = shownPath === null && path === "";
 
   /** Shows a folder: from the viewer, through the route (the route owns the open file). */
   const showFolder = (dir: string) => {
@@ -662,8 +848,8 @@ export function FilesBrowser({
         className="icon-btn sm"
         aria-label="Up One Folder"
         title="Up One Folder"
-        disabled={atRoot || (disabled && !file)}
-        onClick={() => showFolder(file ? folder : parentPath(path))}
+        disabled={atRoot || (disabled && shownPath === null)}
+        onClick={() => showFolder(shownPath !== null ? folder : parentPath(path))}
       >
         <FolderUpIcon />
       </button>
@@ -671,19 +857,19 @@ export function FilesBrowser({
         {crumbs.map((c, i) => (
           <span key={c.path}>
             {i > 0 && <span className="crumb-sep" aria-hidden="true">/</span>}
-            {!file && i === crumbs.length - 1 ? (
+            {shownPath === null && i === crumbs.length - 1 ? (
               <span className="crumb is-current" aria-current="location">{c.name}</span>
             ) : (
-              <button className="crumb" type="button" disabled={disabled && !file} onClick={() => showFolder(c.path)}>
+              <button className="crumb" type="button" disabled={disabled && shownPath === null} onClick={() => showFolder(c.path)}>
                 {c.name}
               </button>
             )}
           </span>
         ))}
-        {file && (
+        {shownPath !== null && (
           <span>
             <span className="crumb-sep" aria-hidden="true">/</span>
-            <span className="crumb is-current" aria-current="page">{baseName(file.path)}</span>
+            <span className="crumb is-current" aria-current="page">{baseName(shownPath)}</span>
           </span>
         )}
       </nav>
@@ -722,13 +908,146 @@ export function FilesBrowser({
                 <EntryIcon name={e.name} isDir={e.isDir} />
                 <span className="row-title">{e.name}</span>
                 {marker && <GitMarkerBadge marker={marker} />}
-                {!e.isDir && <span className="row-trail">{fileBusy === e.path ? <Spinner /> : formatBytes(e.size)}</span>}
+                {!e.isDir && <span className="row-trail">{formatBytes(e.size)}</span>}
               </button>
             </li>
           );
         })}
       </ul>
     );
+
+  // The open file (#2853): one toolbar row over a meta line and the source, the rendered Markdown or
+  // a state. Nothing in it scrolls vertically: the panel's scroller is the only one (§4.9).
+  const viewed = searching ? null : shownFile;
+  const markdown = viewed !== null && !viewed.binary && isMarkdownPath(viewed.path);
+  const symbolShown = viewed !== null && !viewed.binary && !(markdown && rendered);
+  const targetSet = viewed !== null && location?.path === viewed.path && (location.line !== undefined || location.symbol !== undefined);
+  // A missing symbol's error clears as soon as the field no longer holds that symbol (§8.5).
+  const symbolError = symbolInputError ?? (target?.missingSymbol && symbolDraft === location?.symbol ? target.error! : null);
+  const symbolErrorId = `${symbolInputId}-error`;
+  const marker = viewed ? markers.get(viewed.path) : undefined;
+
+  const editorReason = !editorLocationsSupported
+    ? runnerCapabilityRequirement(runnerProtocolVersion, "editorLocations", "opening files in an editor")
+    : !runnerOnline ? `${machineName} is offline.` : `No editor found on ${runnerName || "this machine"}.`;
+  const fileActions: FileAction[] = viewed === null ? [] : [
+    ...(editors.length > 0
+      ? editors.map((editor) => ({
+        label: `Open in ${editor.name}`,
+        run: () => void openInEditor(editor),
+        unavailableReason: runnerOnline ? undefined : `${machineName} is offline.`,
+      }))
+      : [{ label: "Open in Editor…", run: () => undefined, unavailableReason: editorReason }]),
+    { label: "Copy Path", run: () => void copyText(viewed.path, "path") },
+    ...(marker && onShowInReview ? [{ label: "Show Changes in Review", run: () => onShowInReview(viewed.path) }] : []),
+  ];
+
+  const viewerToolbar = viewed && (
+    <div className="toolbar">
+      {markdown && (
+        <SegmentedControl
+          className="sm"
+          label="Markdown View"
+          value={rendered ? "preview" : "source"}
+          options={[{ value: "preview", label: "Preview" }, { value: "source", label: "Source" }]}
+          onChange={(view) => setRendered(view === "preview")}
+        />
+      )}
+      {symbolShown && (
+        <div className="input-affix files-symbol">
+          <span className="input-affix-text" aria-hidden="true"><LocateIcon size={14} /></span>
+          <input
+            ref={symbolRef}
+            id={symbolInputId}
+            type="text"
+            aria-label="Go to Symbol"
+            title="Finds the first place this text appears in the file."
+            placeholder="Go to symbol"
+            value={symbolDraft}
+            maxLength={256}
+            autoComplete="off"
+            spellCheck={false}
+            aria-invalid={symbolError ? true : undefined}
+            aria-describedby={symbolError ? symbolErrorId : undefined}
+            onChange={(event) => {
+              setSymbolDraft(event.target.value);
+              setSymbolInputError(null);
+            }}
+            onKeyDown={onSymbolKeyDown}
+          />
+          {targetSet && (
+            <span className="input-affix-text files-symbol-clear">
+              <button type="button" className="icon-btn sm" aria-label="Clear Target" title="Clear Target" onClick={clearTarget}>
+                <CloseIcon size={14} />
+              </button>
+            </span>
+          )}
+        </div>
+      )}
+      <span className="files-viewer-actions">
+        {onAttachWorkspaceReference && !viewed.binary && (
+          <button
+            type="button"
+            className="icon-btn sm"
+            aria-label="Attach to Prompt"
+            title="Attach to Prompt"
+            aria-busy={attachBusy || undefined}
+            disabled={attachBusy || !runnerOnline}
+            onClick={() => void attachCurrentTarget()}
+          >
+            {attachBusy ? <Spinner decorative /> : <PaperclipIcon size={16} />}
+          </button>
+        )}
+        <button type="button" className="icon-btn sm" aria-label="Copy Link" title="Copy Link" onClick={copyLink}>
+          <LinkIcon size={16} />
+        </button>
+        <FileActionsMenu actions={fileActions} />
+      </span>
+    </div>
+  );
+
+  const toolbar = (
+    <>
+      {goToFileField}
+      {viewerToolbar && (
+        // A field (§8.5): Go to Symbol's error sits under the row, and its invalid edge is the field's.
+        <div className="field files-viewer-field">
+          {viewerToolbar}
+          {symbolShown && symbolError && <FieldError id={symbolErrorId}>{symbolError}</FieldError>}
+        </div>
+      )}
+    </>
+  );
+
+  const lineCount = viewed && !viewed.binary && !viewed.truncated && viewed.content !== undefined
+    ? (viewed.content === "" ? 0 : sourceLines(viewed.content).length)
+    : null;
+  const viewer = viewed && (
+    <div className="files-viewer" ref={viewerRef}>
+      <p className="files-meta">
+        {!viewed.binary && <span>{fileLanguage(viewed.path)}</span>}
+        {lineCount !== null && <span>{lineCountLabel(lineCount)}</span>}
+        {formatBytes(viewed.size) && <span>{formatBytes(viewed.size)}</span>}
+        {marker && <span>{GIT_MARKER_LABEL[marker]}</span>}
+      </p>
+      {viewed.binary ? (
+        <State
+          compact
+          icon={<FileIcon size={24} />}
+          title="No Preview for This File"
+          actions={<button type="button" className="btn sm" onClick={() => void copyText(viewed.path, "path")}>Copy Path</button>}
+        >
+          {baseName(viewed.path)} isn't text, so it can't be shown here.
+        </State>
+      ) : markdown && rendered ? (
+        <div className="files-md">
+          <Markdown>{viewed.content ?? ""}</Markdown>
+        </div>
+      ) : (
+        <SourceCode path={viewed.path} content={viewed.content ?? ""} target={target} />
+      )}
+    </div>
+  );
 
   return (
     <>
@@ -745,7 +1064,7 @@ export function FilesBrowser({
           {refreshing ? <Spinner decorative /> : <RefreshIcon />}
         </button>
       </PanelHeaderActions>
-      <PanelToolLayout toolbar={goToFileField}>
+      <PanelToolLayout toolbar={toolbar}>
         <div className="files-browser">
           {/* Notices first, at the top of the scroller (§13.2): each is one compact line. */}
           {!runnerOnline && (
@@ -756,83 +1075,19 @@ export function FilesBrowser({
             </Notice>
           )}
           {error && <Notice tone="danger" compact>{error}</Notice>}
+          {viewed?.truncated && (
+            <Notice tone="warning" compact>
+              {`Showing the first 512 KB of ${formatBytes(viewed.size) || "this file"}.`}
+            </Notice>
+          )}
+          {/* A line or column the file does not have; a missing symbol is Go to Symbol's field error. */}
+          {viewed && target?.error && !target.missingSymbol && <Notice tone="warning" compact role="status">{target.error}</Notice>}
 
           {searching ? results : (
             // While the runner is offline the last-known folder stays readable, dimmed (§12.5).
             <StaleContent stale={!runnerOnline} className="files-content">
               {pathRow}
-              {file ? (
-                <div className="files-viewer" ref={viewerRef}>
-                  <div className="files-viewer-bar source-location-bar">
-                    {isMarkdownPath(file.path) && !file.binary && (
-                      <SegmentedControl
-                        className="sm"
-                        label="Markdown View"
-                        value={rendered ? "rendered" : "source"}
-                        options={[{ value: "rendered", label: "Rendered" }, { value: "source", label: "Source" }]}
-                        onChange={(view) => setRendered(view === "rendered")}
-                      />
-                    )}
-                    {!file.binary && (
-                      <form className="source-symbol-form" onSubmit={(event) => { event.preventDefault(); jumpToSymbol(); }}>
-                        <label className="sr-only" htmlFor={symbolInputId}>Symbol</label>
-                        <input
-                          id={symbolInputId}
-                          value={symbolDraft}
-                          maxLength={256}
-                          onChange={(event) => setSymbolDraft(event.target.value)}
-                          placeholder="Symbol"
-                          aria-label="Symbol to Locate"
-                        />
-                        <button className="btn ghost sm" type="submit" disabled={!symbolDraft.trim()}>Go</button>
-                      </form>
-                    )}
-                    {location?.path === file.path && (location.line !== undefined || location.symbol !== undefined) && (
-                      <button className="btn ghost sm" type="button" onClick={() => onOpenLocation({ path: file.path })}>Clear Target</button>
-                    )}
-                    {locationEditors.length > 1 && (
-                      <select
-                        className="source-editor-select"
-                        aria-label="Editor for Source Location"
-                        value={chosenEditor?.id ?? ""}
-                        onChange={(event) => setSelectedEditor(event.target.value)}
-                      >
-                        {locationEditors.map((editor) => <option key={editor.id} value={editor.id}>{editor.name}</option>)}
-                      </select>
-                    )}
-                    {chosenEditor && (
-                      <button className="btn ghost sm" type="button" disabled={editorBusy || !runnerOnline} onClick={() => void openInEditor()}>
-                        {editorBusy ? "Opening…" : `Open in ${chosenEditor.name}`}
-                      </button>
-                    )}
-                    <button className="btn ghost sm" type="button" onClick={() => void copyLink()}>Copy Link</button>
-                    {onAttachWorkspaceReference && !file.binary && (
-                      <button className="btn ghost sm" type="button" disabled={attachBusy || !runnerOnline} onClick={() => void attachCurrentTarget()}>
-                        {attachBusy ? "Attaching…" : "Attach to Prompt"}
-                      </button>
-                    )}
-                    <span className="muted source-file-size">{formatBytes(file.size)}</span>
-                  </div>
-                  {note && <div className="hint" role="status">{note}</div>}
-                  {target?.error && <div className="hint warn" role="status">{target.error}</div>}
-                  {file.binary ? (
-                    <div className="hint">Binary file ({formatBytes(file.size)}) — no preview.</div>
-                  ) : isMarkdownPath(file.path) && rendered ? (
-                    <div className="files-md">
-                      <Markdown>{file.content ?? ""}</Markdown>
-                    </div>
-                  ) : (
-                    <pre className="files-text">
-                      <code>{(file.content ?? "").split("\n").map((line, index) => (
-                        <SourceLine key={index} text={line.endsWith("\r") ? line.slice(0, -1) : line} line={index + 1} target={target} />
-                      ))}</code>
-                    </pre>
-                  )}
-                  {file.truncated && (
-                    <div className="hint warn">Truncated preview — showing the first 512 KB of {formatBytes(file.size)}.</div>
-                  )}
-                </div>
-              ) : listing}
+              {opening !== null ? <CodeSkeleton /> : viewer ?? listing}
             </StaleContent>
           )}
         </div>
