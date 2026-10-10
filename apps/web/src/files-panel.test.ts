@@ -136,6 +136,8 @@ test("git markers: untracked U, added or renamed A, everything else changed M, d
   assert.equal(unquotePorcelainPath("\"bad\\q\""), "\"bad\\q\"", "an unknown escape leaves the path as written");
   // With `core.quotePath` off, git keeps literal non-ASCII inside a path it still quotes.
   assert.equal(unquotePorcelainPath("\"emoji\u{1F600}\\\".ts\""), "emoji\u{1F600}\".ts");
+  // A name that starts with U+FEFF keeps it: the bytes are the name, not a byte order mark.
+  assert.equal(unquotePorcelainPath("\"\\357\\273\\277check.ts\""), "\u{FEFF}check.ts");
 });
 
 test("Go to File: files only, changed or recent first, then name matches before path matches", () => {

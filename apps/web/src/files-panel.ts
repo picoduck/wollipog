@@ -125,7 +125,8 @@ export function unquotePorcelainPath(path: string): string {
     bytes.push(escaped);
     index += 1;
   }
-  return new TextDecoder().decode(new Uint8Array(bytes));
+  // The bytes are the whole name, so a leading U+FEFF is part of it, not a byte order mark.
+  return new TextDecoder("utf-8", { ignoreBOM: true }).decode(new Uint8Array(bytes));
 }
 
 /** One Go to File result, ranked and split for display. */

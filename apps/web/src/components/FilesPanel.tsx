@@ -591,7 +591,7 @@ export function FilesBrowser({
   if (searching) {
     const matchCount = `${matches.length} ${matches.length === 1 ? "match" : "matches"} in ${rootName}`;
     results = !searchSupported ? (
-      <Notice tone="neutral" compact role="status">{runnerCapabilityRequirement(runnerProtocolVersion, "workspaceReferences", "Go to File")}</Notice>
+      <Notice tone="neutral" compact role="status">{runnerCapabilityRequirement(runnerProtocolVersion, "workspaceReferences", "file search")}</Notice>
     ) : searchError ? (
       <Notice tone="danger" compact>{searchError}</Notice>
     ) : !search ? (
