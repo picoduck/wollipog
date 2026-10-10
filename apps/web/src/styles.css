@@ -12707,7 +12707,9 @@ body.shell-dock-dragging * {
 @container list (max-width: 599px) {
   :not(.card-status) > .inbox-thread-family { gap: var(--space-1); padding-inline: var(--space-1); }
   :not(.card-status) > .inbox-thread-family > .inbox-thread-family-text { display: none; }
-  :not(.card-status) > .inbox-thread-family > .inbox-thread-working { display: inline; }
+  :not(.card-status) > .inbox-thread-family > .inbox-thread-working { display: inline; flex: none; }
+  .inbox-row-copy .inbox-thread-dots { min-width: 0; overflow: hidden; flex-shrink: 1; }
+  .inbox-row-copy .inbox-thread-dot { flex: none; }
 }
 .inbox-thread-dots { display: inline-flex; flex: none; gap: 3px; }
 .inbox-thread-dot { display: inline-block; width: 7px; height: 7px; border-radius: var(--radius-pill); background: var(--border-strong); }
@@ -12913,6 +12915,7 @@ body.shell-dock-dragging * {
   .inbox-row-action:not(.inbox-row-more) { display: none; }
   .icon-btn.inbox-row-more { width: var(--control-h); height: var(--control-h); }
   .inbox-row-shell .inbox-row { padding-right: var(--control-h); }
+  .inbox-row-shell.stacked .inbox-row { padding-right: calc(var(--control-h) + var(--space-2)); }
 }
 /* What the session wants, after the title (#2218): only a list wide enough for it shows it. */
 .inbox-row-snippet { display: none; }
