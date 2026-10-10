@@ -377,8 +377,7 @@ test("the Decision History launcher row is enabled with no decisions and opens t
   const panel = await mountPanel(<PanelHarness decisionHistory={[]} onState={(next) => { state = next; }} />);
   try {
     await act(async () => state.show("launcher"));
-    const row = [...panel.container.querySelectorAll<HTMLButtonElement>(".rp-launcher .rp-row")]
-      .find((candidate) => candidate.textContent === "Decision History");
+    const row = panel.container.querySelector<HTMLButtonElement>('.session-tools [data-tool="decisions"]');
     assert.ok(row, "the launcher lists Decision History");
     assert.equal(row.disabled, false);
     assert.equal(row.getAttribute("aria-disabled"), null);
@@ -396,8 +395,7 @@ test("the Requests launcher row is enabled with nothing pending and opens Nothin
   const panel = await mountPanel(<PanelHarness onState={(next) => { state = next; }} />);
   try {
     await act(async () => state.show("launcher"));
-    const row = [...panel.container.querySelectorAll<HTMLButtonElement>(".rp-launcher .rp-row")]
-      .find((candidate) => candidate.textContent === "Requests");
+    const row = panel.container.querySelector<HTMLButtonElement>('.session-tools [data-tool="requests"]');
     assert.ok(row, "the launcher lists Requests");
     assert.equal(row.disabled, false);
     assert.equal(row.getAttribute("aria-disabled"), null);
@@ -602,7 +600,7 @@ test("a persisted terminal mode restores the launcher instead of an empty panel"
   const panel = await mountPanel(<PanelHarness onState={(next) => { state = next; }} />);
   try {
     assert.equal(state.mode, "launcher");
-    assert.equal(panel.container.querySelector(".rp-launcher") != null, true, "the launcher list is restored");
+    assert.equal(panel.container.querySelector(".session-tools") != null, true, "the launcher list is restored");
     assertNoDomNode(panel.container.querySelector(".rpanel-body"), "no mode body renders for a retired mode");
     assert.doesNotMatch(panel.container.querySelector(".rpanel")?.textContent ?? "", /Coming soon/);
     assert.equal(panel.container.querySelector(".rpanel-switcher-name")?.textContent, "Session Tools");
@@ -617,11 +615,11 @@ test("every launcher row carries a distinct icon", async () => {
   const panel = await mountPanel(<PanelHarness onState={(next) => { state = next; }} />);
   try {
     await act(async () => state.show("launcher"));
-    const rows = [...panel.container.querySelectorAll<HTMLElement>(".rp-launcher .rp-row")];
+    const rows = [...panel.container.querySelectorAll<HTMLElement>(".session-tools .session-tool")];
     assert.ok(rows.length >= 9, `expected every launcher destination, saw ${rows.length}`);
     const glyphs = rows.map((row) => {
-      const label = row.querySelector("span:nth-of-type(2)")?.textContent ?? "";
-      const svg = row.querySelector(".rp-row-icon svg");
+      const label = row.querySelector(".row-title")?.textContent ?? "";
+      const svg = row.querySelector(".session-tool-tile svg");
       assert.ok(svg, `${label} must render an icon`);
       return [label, svg!.innerHTML] as const;
     });
@@ -764,7 +762,7 @@ test("Escape closes the panel from any tool while focus is inside it (#2843, #12
     for (const mode of ["files", "browser", "subagents", "decisions", "review", "launcher"] as const) {
       await act(async () => state.show(mode));
       const aside = panel.container.querySelector("#right-panel")!;
-      const target = aside.querySelector<HTMLElement>(".rpanel-body button:not([disabled]), .rpanel-body input, .rp-launcher button") ??
+      const target = aside.querySelector<HTMLElement>(".rpanel-body button:not([disabled]), .rpanel-body input, .session-tools button") ??
         aside.querySelector<HTMLElement>(".rpanel-switcher")!;
       target.focus();
       await keydown(target, "Escape");

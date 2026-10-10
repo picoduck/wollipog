@@ -340,6 +340,9 @@ import { holdRecoveryActionFor, sessionArchiveActionRefusal, sessionCommandRefus
 import { sessionReadingTarget } from "../focus-zones.js";
 
 const NO_IMAGE_MIME_TYPES: readonly string[] = [];
+/** The side panel tools that show the job inventory a compact session view omits; Session Tools
+ * counts its running jobs (#2844). */
+const BACKGROUND_INVENTORY_MODES: readonly string[] = ["background", "subagents", "launcher"];
 const STOP_TURN_RETRY_MS = 8_000;
 /** WebKit may synthesize a touch click in a later task. Keep the pointer transfer alive long
  * enough for that click; if no click arrives, finish the collapse instead of leaving a blurred
@@ -1603,7 +1606,8 @@ function SessionDetailLoaded({
     });
     return () => window.cancelAnimationFrame(frame);
   }, [mode, attentionTarget, attentionRequest, session.id, closeRequestOverlay]);
-  const backgroundInventoryRequestRef = useRef<string | null>(null);
+  const backgroundInventoryRequestRef = useRef<{ key: string } | null>(null);
+  useEffect(() => () => { backgroundInventoryRequestRef.current = null; }, []);
   const [backgroundInventoryError, setBackgroundInventoryError] = useState<string | null>(null);
   const [backgroundInventoryAttempt, setBackgroundInventoryAttempt] = useState(0);
   const retryBackgroundInventory = useCallback(() => {
@@ -1612,28 +1616,33 @@ function SessionDetailLoaded({
     setBackgroundInventoryAttempt((attempt) => attempt + 1);
   }, []);
   useEffect(() => {
-    if (mode !== "expanded" || !rightPanel.open || !["background", "subagents"].includes(rightPanel.mode) ||
+    if (mode !== "expanded" || !rightPanel.open || !BACKGROUND_INVENTORY_MODES.includes(rightPanel.mode) ||
         session.backgroundJobsAvailable !== true || session.backgroundJobs !== undefined) {
       if (session.backgroundJobs !== undefined || mode !== "expanded" ||
-          !rightPanel.open || !["background", "subagents"].includes(rightPanel.mode)) {
+          !rightPanel.open || !BACKGROUND_INVENTORY_MODES.includes(rightPanel.mode)) {
         backgroundInventoryRequestRef.current = null;
         setBackgroundInventoryError(null);
       }
       return;
     }
     const requestKey = `${session.id}:${recoveryGeneration}`;
-    if (backgroundInventoryRequestRef.current === requestKey) return;
-    backgroundInventoryRequestRef.current = requestKey;
+    if (backgroundInventoryRequestRef.current?.key === requestKey) return;
+    // The load belongs to this request, not to this run of the effect: moving between the tools that
+    // show the inventory (Session Tools to Background Work, #2844) re-runs the effect for the same
+    // request, which must not discard the answer. Leaving them, another session or recovery
+    // generation, Retry and unmounting all drop the request, and a later one is a new request even
+    // under the same key, so a late answer never replaces fresher session data.
+    const request = { key: requestKey };
+    backgroundInventoryRequestRef.current = request;
     setBackgroundInventoryError(null);
-    let current = true;
+    const current = () => backgroundInventoryRequestRef.current === request;
     void api.session(session.id)
       .then(({ session: loaded }) => {
-        if (current) loadSession(loaded);
+        if (current()) loadSession(loaded);
       })
       .catch((cause: unknown) => {
-        if (current) setBackgroundInventoryError((cause as Error).message);
+        if (current()) setBackgroundInventoryError((cause as Error).message);
       });
-    return () => { current = false; };
   }, [api, backgroundInventoryAttempt, loadSession, mode, recoveryGeneration,
     rightPanel.mode, rightPanel.open, session.backgroundJobs, session.backgroundJobsAvailable, session.id]);
   const composerComposingRef = useRef(false);

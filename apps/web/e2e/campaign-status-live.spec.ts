@@ -234,7 +234,7 @@ async function navigateInApp(page: Page, sessionId: string) {
   }, viewPath({ name: "session", id: sessionId }));
 }
 
-const launcherRow = (page: Page) => page.locator(".rp-launcher .rp-row", { hasText: "Campaign Status" });
+const launcherRow = (page: Page) => page.locator('.session-tools [data-tool="campaign"]');
 const workRows = (page: Page) => page.locator(".campaign-work-row");
 const summaryBox = (page: Page) => page.locator(".campaign-status-summary");
 
@@ -420,7 +420,7 @@ test("parent/child navigation follows the campaign through a member and a nested
 
   // Leaving the campaign returns the open panel to the launcher, with no Campaign Status entry.
   await navigateInApp(page, seeded.unrelatedId);
-  await expect(page.locator(".rp-launcher")).toBeVisible();
+  await expect(page.locator(".session-tools")).toBeVisible();
   await expect(launcherRow(page)).toHaveCount(0);
   await expect(page.locator(".campaign-status-summary")).toHaveCount(0);
 

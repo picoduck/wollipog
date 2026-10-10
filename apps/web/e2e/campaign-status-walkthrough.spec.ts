@@ -136,7 +136,7 @@ test.afterEach(async ({}, testInfo) => {
 const panel = (page: Page) => page.locator(".campaign-status");
 const summaryBox = (page: Page) => page.locator(".campaign-status-summary");
 const workRows = (page: Page) => page.locator(".campaign-work-row");
-const launcherRow = (page: Page) => page.locator(".rp-launcher .rp-row", { hasText: "Campaign Status" });
+const launcherRow = (page: Page) => page.locator('.session-tools [data-tool="campaign"]');
 const forgePr = (page: Page, number: number) => page.locator(".campaign-forge-pr", { hasText: `PR #${number}` });
 
 async function signIn(page: Page, token: string, title: string) {
@@ -261,7 +261,7 @@ test("a member and a nested Orchestrator read the root campaign; a session outsi
   });
   await everyVariant(page, "06-non-campaign", async () => {
     await openSession(page, stack.seeded.unrelatedId);
-    await expect(page.locator(".rp-launcher")).toBeVisible();
+    await expect(page.locator(".session-tools")).toBeVisible();
     await expect(launcherRow(page)).toHaveCount(0);
   });
 });

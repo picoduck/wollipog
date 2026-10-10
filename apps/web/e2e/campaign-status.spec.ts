@@ -10,7 +10,7 @@ async function assertNoHorizontalOverflow(page: Page, selector: string) {
   expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1);
 }
 
-const campaignRow = (page: Page) => page.locator(".rp-launcher .rp-row", { hasText: "Campaign Status" });
+const campaignRow = (page: Page) => page.locator('.session-tools [data-tool="campaign"]');
 const workRows = (page: Page) => page.locator(".campaign-work-row");
 const queries = (page: Page) => page.evaluate(() => window.__WOLLIPOG_CAMPAIGN_STATUS_E2E__.queries());
 
@@ -27,10 +27,10 @@ test("the launcher offers Campaign Status on a campaign, explains an unsupported
   await legacy.focus();
   await expect(legacy).toBeFocused();
   await page.keyboard.press("Enter");
-  await expect(page.locator(".rp-launcher")).toBeVisible();
+  await expect(page.locator(".session-tools")).toBeVisible();
 
   await page.goto("/campaign-status-e2e.html?scenario=unrelated&open=launcher");
-  await expect(page.locator(".rp-launcher")).toBeVisible();
+  await expect(page.locator(".session-tools")).toBeVisible();
   await expect(campaignRow(page)).toHaveCount(0);
 });
 
@@ -175,7 +175,7 @@ test("a member sees its assignment, and leaving the campaign returns the open pa
 
   await page.evaluate(() => window.__WOLLIPOG_CAMPAIGN_STATUS_E2E__.navigate("s_other"));
   await expect(page.locator("#right-panel")).toBeVisible();
-  await expect(page.locator(".rp-launcher")).toBeVisible();
+  await expect(page.locator(".session-tools")).toBeVisible();
   await expect(campaignRow(page)).toHaveCount(0);
 });
 

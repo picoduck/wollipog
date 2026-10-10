@@ -222,8 +222,7 @@ test("Session Tools shows Side Chat's keycap", async () => {
   try {
     await act(async () => mounted.state.show("launcher"));
     await settle();
-    const row = [...mounted.container.querySelectorAll<HTMLElement>(".rp-row")]
-      .find((candidate) => candidate.textContent?.startsWith("Side Chat"));
+    const row = mounted.container.querySelector<HTMLElement>('.session-tools [data-tool="sidechat"]');
     assert.equal(row?.querySelector("kbd")?.textContent, shortcutDisplay("open-side-chat"));
   } finally {
     await mounted.dispose();

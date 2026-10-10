@@ -84,23 +84,22 @@ for (const { width, labelled, overlays } of CASES) {
   test(`at ${width}px with the labelled rail ${labelled ? "on" : "off"}, every panel mode ${overlays ? "overlays the chat" : "docks beside the chat"} (#2725)`, async ({ page }) => {
     await openSession(page, width, labelled);
     await page.getByRole("button", { name: "Side Panel", exact: true }).click();
-    await expect(page.locator(".rp-launcher")).toBeVisible();
+    await expect(page.locator(".session-tools")).toBeVisible();
     expect(await expectPresentation(page, "Session Tools")).toBe(overlays);
     // Every enabled row but Terminal, which opens the bottom dock rather than a panel mode.
-    const rows = page.locator(".rp-launcher .rp-row:not([disabled]):not([aria-disabled='true'])")
-      .filter({ hasNotText: /^Terminal/ });
+    const rows = page.locator(".session-tools .session-tool:not([aria-disabled='true']):not([data-tool='terminal'])");
     const count = await rows.count();
     expect(count, "the launcher offers modes").toBeGreaterThan(3);
     for (let index = 0; index < count; index += 1) {
-      const name = (await rows.nth(index).innerText()).split("\n")[0]!.trim();
+      const name = (await rows.nth(index).locator(".row-title").innerText()).trim();
       await rows.nth(index).click();
-      await expect(page.locator(".rp-launcher")).toHaveCount(0);
+      await expect(page.locator(".session-tools")).toHaveCount(0);
       // Switching modes keeps the same presentation at the same width.
       expect(await expectPresentation(page, name), name).toBe(overlays);
       // Session Tools is the switcher's first item (#2843).
       await page.locator("#right-panel .rpanel-switcher").click();
       await page.getByRole("menuitemradio", { name: "Session Tools", exact: true }).click();
-      await expect(page.locator(".rp-launcher")).toBeVisible();
+      await expect(page.locator(".session-tools")).toBeVisible();
     }
   });
 }

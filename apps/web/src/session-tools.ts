@@ -1,3 +1,4 @@
+import type { DescendantRequestView, PendingApproval, SessionView } from "@wollipog/protocol";
 import type { CampaignStatusAvailability } from "./campaign-status.js";
 import type { RightPanelMode } from "./right-panel.js";
 import type { ShortcutId } from "./shortcuts.js";
@@ -6,6 +7,7 @@ import type { ShortcutId } from "./shortcuts.js";
  * The side panel's tools, in the one order the tool switcher (#2843) and the Session Tools list
  * (#2844) both render: Session Tools first, then the Code, Work and Decisions groups. Each tool is
  * a panel mode except Terminal, which opens the bottom dock until it becomes a panel tool (#2868).
+ * Each tool's one glyph is `SESSION_TOOL_ICONS` (SessionToolsList.tsx), keyed by the same ids.
  */
 export type SessionToolId = RightPanelMode | "terminal";
 
@@ -14,7 +16,7 @@ export type SessionToolGroup = "Code" | "Work" | "Decisions";
 
 export interface SessionTool {
   id: SessionToolId;
-  /** The tool's one name: the switcher's title and item, and the panel's heading. */
+  /** The tool's one name: the switcher's title and item, the list's row, and the panel's heading. */
   name: string;
   group: SessionToolGroup | null;
   /** The chord that opens it, shown as a keycap on fine pointers. */
@@ -80,4 +82,175 @@ export function sessionToolAvailability(
     default:
       return { listed: true, unavailableReason: null };
   }
+}
+
+/* ------------------------------------------------------------------------------------------------
+ * Facts: each row's second line in the Session Tools list (#2844, #1261), in sentence case. Each is
+ * a pure function of data the panel already holds, so the list follows it while open.
+ * ---------------------------------------------------------------------------------------------- */
+
+function count(n: number, one: string, many: string): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+function sentence(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+export const TERMINAL_FACT = "Opens in the dock below the conversation";
+export const SIDE_CHAT_FACT = "Ask a question without interrupting the agent";
+
+/**
+ * Review: the uncommitted change count from the session's one git status reader, as Review's own
+ * summary counts it (a capped list reads "50+", and staging reads "1 of 9 changes staged"), and the
+ * required findings still open, the number Review's findings section shows in its "N Required" badge.
+ */
+export function reviewFact(
+  changes: { files: number; truncated: boolean; staged: number } | "checking" | "unknown",
+  requiredFindings: number,
+): string {
+  let first: string;
+  if (changes === "checking") first = "Checking for changes…";
+  else if (changes === "unknown") first = "See what this session changed";
+  else if (changes.files === 0) first = "No changes yet";
+  else {
+    const total = `${changes.files}${changes.truncated ? "+" : ""}`;
+    const noun = changes.files === 1 && !changes.truncated ? "change" : "changes";
+    first = changes.staged > 0 ? `${changes.staged} of ${total} ${noun} staged` : `${total} uncommitted ${noun}`;
+  }
+  return requiredFindings > 0 ? `${first}, ${count(requiredFindings, "required finding", "required findings")}` : first;
+}
+
+export function filesFact(folderName: string): string {
+  return `Browse ${folderName}`;
+}
+
+/** Browser: the artifacts the session attached; a first page that has more reads "50+". */
+export function browserFact(artifacts: { count: number; more: boolean } | null): string {
+  if (!artifacts || artifacts.count === 0) return "Preview a web page";
+  const shown = artifacts.more ? `${artifacts.count}+ artifacts` : count(artifacts.count, "artifact", "artifacts");
+  return `${shown}, or preview a web page`;
+}
+
+/** Agents: the subagents the Agents panel lists; a registry with more pages reads "50+". */
+export function agentsFact(subagents: number, more = false): string {
+  if (more) return `${subagents}+ subagents in this session`;
+  return subagents === 0 ? "No subagents in this session" : `${count(subagents, "subagent", "subagents")} in this session`;
+}
+
+/** Why Background Work has no jobs to count, in the Background Work panel's terms. */
+export type BackgroundInventoryGap = "delivered" | "loading" | "error" | "unverified" | "reported" | "lost" | "untracked";
+
+/**
+ * With no jobs listed, which of the Background Work panel's states the session is in (null when it
+ * has truly run nothing): the inventory loading or failed to load, a server that does not say whether
+ * per-job history exists, or only the runner's aggregate state. Mirrors BackgroundWorkPanel.tsx.
+ */
+export function backgroundInventoryGap(
+  session: Pick<SessionView,
+    "backgroundJobs" | "backgroundJobsAvailable" | "backgroundWorkState" | "backgroundWorkTracking" | "backgroundDeliveries">,
+  inventoryError: string | null,
+): BackgroundInventoryGap | null {
+  if ((session.backgroundJobs?.length ?? 0) > 0) return null;
+  // The panel lists retained delivery receipts as history even when no job is listed.
+  if ((session.backgroundDeliveries?.length ?? 0) > 0) return "delivered";
+  if (session.backgroundJobsAvailable === true && session.backgroundJobs === undefined) return inventoryError ? "error" : "loading";
+  const aggregate = session.backgroundWorkState === "resumed" ? undefined : session.backgroundWorkState;
+  if (session.backgroundJobsAvailable === undefined && session.backgroundWorkTracking === "managed" && aggregate === undefined) {
+    return "unverified";
+  }
+  if (aggregate === "orphaned") return "lost";
+  if (aggregate) return "reported";
+  // A provider whose detached work the runner cannot observe: its empty list proves nothing.
+  return session.backgroundWorkTracking === "untracked" ? "untracked" : null;
+}
+
+/**
+ * Background Work: of the jobs the session lists, those the Background Work panel shows as Running
+ * (`backgroundJobCurrentState`), so an unverified, lost or stalled job is never counted as running.
+ */
+export function backgroundFact(states: readonly string[] | BackgroundInventoryGap, truncated = false): string {
+  switch (states) {
+    // A compact session view says job history exists without carrying it until it is loaded.
+    case "loading": return "Checking background jobs…";
+    case "error": return "Background jobs can't be loaded right now";
+    // The Background Work panel's own states when it has no jobs to list.
+    case "delivered": return "No jobs listed; earlier results are recorded";
+    case "unverified": return "This server doesn't say whether jobs have run";
+    case "reported": return "The runner reports background work";
+    case "lost": return "Background work was lost";
+    case "untracked": return "This agent's background work isn't tracked";
+  }
+  if (states.length === 0) return "Nothing has run in the background";
+  const tally = (state: string) => states.filter((candidate) => candidate === state).length;
+  // A capped list (the panel shows only the most relevant jobs) reads "50+".
+  const total = truncated ? `${states.length}+ jobs` : count(states.length, "job", "jobs");
+  // Current jobs the panel cannot call running are named, so none of them reads as finished.
+  const others = (["stalled", "unverified", "lost"] as const)
+    .map((state) => [state, tally(state)] as const)
+    .filter(([, n]) => n > 0)
+    .map(([state, n]) => `${n} ${state}`);
+  return [`${tally("running")} of ${total} running`, ...others].join(", ");
+}
+
+/** Campaign Status: delivered of committed work, when this browser holds the campaign's summary. */
+export function campaignFact(work: { counts: { delivered: number; committed: number } } | null | undefined): string {
+  return work ? `${work.counts.delivered} of ${work.counts.committed} delivered` : "Progress of this session's campaign";
+}
+
+/** What kind of request it is, as a phrase inside a sentence ("a question", "a PR merge"). */
+export function requestKindPhrase(request: Pick<PendingApproval, "kind" | "workflowDecision">): string {
+  if (request.kind === "question") return "a question";
+  if (request.kind === "authentication") return "a sign-in";
+  if (request.kind === "workflow_decision") {
+    switch (request.workflowDecision?.category) {
+      case "ui_evidence_approval": return "a UI evidence review";
+      case "pr_merge": return "a PR merge";
+      case "merged_branch_deletion": return "a branch deletion";
+      case "issue_closure": return "an issue closure";
+      case "campaign_issue_scope": return "a campaign scope change";
+      case "follow_up_issue_publication": return "an issue publication";
+      case "implementation_question": return "an implementation decision";
+      default: return "a workflow decision";
+    }
+  }
+  return "an approval";
+}
+
+export const NO_REQUESTS_FACT = "No requests are waiting for you";
+
+/**
+ * Requests: what waits for you among the child sessions' requests, the panel's "Waiting for You"
+ * group, which is also the row's count badge. "A PR merge from Fix login, and a question from
+ * Docs"; three or more name the first and count the rest.
+ */
+export function requestsFact(
+  requests: readonly Pick<DescendantRequestView, "responseOwner" | "sessionTitle" | "request">[],
+  status: "idle" | "loading" | "ready" | "unavailable",
+): string {
+  const waiting = requests.filter((request) => request.responseOwner === "human");
+  if (waiting.length === 0) {
+    if (status === "unavailable") return "Requests from child sessions can't be checked right now";
+    if (status === "loading" && requests.length === 0) return "Checking for requests…";
+    const handling = requests.length;
+    return handling > 0
+      ? `${NO_REQUESTS_FACT}; the Orchestrator is handling ${handling}`
+      : NO_REQUESTS_FACT;
+  }
+  const phrase = (request: (typeof waiting)[number]) => {
+    const title = request.sessionTitle.trim();
+    return title ? `${requestKindPhrase(request.request)} from ${title}` : requestKindPhrase(request.request);
+  };
+  if (waiting.length === 1) return sentence(phrase(waiting[0]!));
+  if (waiting.length === 2) return sentence(`${phrase(waiting[0]!)}, and ${phrase(waiting[1]!)}`);
+  return sentence(`${phrase(waiting[0]!)}, and ${waiting.length - 1} more`);
+}
+
+export function decisionsFact(decisions: number, more: boolean, status: "loading" | "error" | "ready"): string {
+  if (decisions === 0) {
+    if (status === "loading") return "Loading decisions…";
+    if (status === "error") return "Decisions can't be loaded right now";
+    return more ? "Older decisions are recorded" : "No decisions recorded yet";
+  }
+  return more ? `${decisions}+ decisions recorded` : `${count(decisions, "decision", "decisions")} recorded`;
 }

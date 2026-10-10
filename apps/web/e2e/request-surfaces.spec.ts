@@ -668,7 +668,7 @@ test("with nothing pending the launcher's Requests row opens Nothing Waiting, wh
   await page.goto("/request-surfaces-e2e.html?scenario=empty&panel=launcher");
   // No child-request condition when nothing waits for the person.
   await expect(page.locator("header.session-bar .status")).not.toContainText(/Child Request/u);
-  const row = page.locator(".rp-launcher .rp-row", { hasText: /^Requests$/u });
+  const row = page.locator('.session-tools [data-tool="requests"]');
   await expect(row).toBeEnabled();
   await expect(row).not.toHaveAttribute("title", /.+/u);
   await row.click();

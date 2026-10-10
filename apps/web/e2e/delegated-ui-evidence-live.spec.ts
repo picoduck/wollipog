@@ -115,7 +115,7 @@ test("a browser sees delegated image review complete through live scoped routes 
     const toggle = page.getByRole("button", { name: "Side Panel" }).first();
     await expect(toggle).toBeVisible({ timeout: 30_000 });
     if (await toggle.getAttribute("aria-pressed") !== "true") await toggle.click();
-    await page.locator(".rp-launcher .rp-row", { hasText: /^Requests$/u }).click();
+    await page.locator('.session-tools [data-tool="requests"]').click();
     const handling = page.locator(".request-panel-group", { hasText: "Orchestrator Is Handling" });
     await expect(handling.locator(".request-panel-row")).toHaveCount(1, { timeout: 30_000 });
     await expect(handling.locator(".request-panel-row")).toContainText("Evidence Child");

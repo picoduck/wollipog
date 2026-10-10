@@ -1,6 +1,6 @@
-import { createContext, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { CampaignIcon, ChevronDownIcon, ChevronLeftIcon, CloseIcon, CommandLineIcon, DiffIcon, FolderIcon, GlobeIcon, GridIcon, QuestionIcon, InboxIcon, JobsIcon, LockIcon, TeamIcon } from "./Icons.js";
+import { ChevronDownIcon, ChevronLeftIcon, CloseIcon } from "./Icons.js";
 import { Maximize2Icon, Minimize2Icon } from "./Icons.js";
 import {
   pendingRequests,
@@ -51,9 +51,11 @@ import { CampaignStatusPanel } from "./CampaignStatusPanel.js";
 import { useIsCoarsePointer, useIsMobile } from "./useIsMobile.js";
 import type { CampaignStatusAvailability } from "../campaign-status.js";
 import { useAccessibleMenu } from "./interactions.js";
+import { SessionToolIcon, SessionToolsList } from "./SessionToolsList.js";
+
+export { SESSION_TOOL_ICONS } from "./SessionToolsList.js";
 import { MenuItem, MenuLabel, MenuSeparator, MenuSurface } from "./Menu.js";
 import {
-  BACKGROUND_WORK_UNAVAILABLE,
   SESSION_TOOL_GROUPS,
   SESSION_TOOLS,
   sessionTool,
@@ -342,26 +344,6 @@ export function useRightPanelState(navigationScope: string | null = null, attent
       });
     },
   };
-}
-
-/** Each tool's 16px glyph, shared by the switcher and the Session Tools list. */
-export const SESSION_TOOL_ICONS: Record<SessionToolId, (props: { size?: number }) => ReactNode> = {
-  launcher: GridIcon,
-  review: DiffIcon,
-  files: FolderIcon,
-  browser: GlobeIcon,
-  terminal: CommandLineIcon,
-  subagents: TeamIcon,
-  sidechat: QuestionIcon,
-  background: JobsIcon,
-  campaign: CampaignIcon,
-  requests: InboxIcon,
-  decisions: LockIcon,
-};
-
-function SessionToolIcon({ id, size = 16 }: { id: SessionToolId; size?: number }) {
-  const Icon = SESSION_TOOL_ICONS[id];
-  return <Icon size={size} />;
 }
 
 /**
@@ -1181,15 +1163,20 @@ export function RightPanel({
         <div className="rpanel-notices" ref={setNoticeRegion} />
         <PanelActionSlotContext.Provider value={actionSlot}>
           {state.mode === "launcher" ? (
-            <Launcher
-              onPick={chooseTool}
-              onOpenTerminal={onOpenTerminal}
-              filesSupported={filesSupported}
-              filesHint={filesHint}
-              terminalSupported={terminalSupported}
-              terminalHint={terminalHint}
-              backgroundAvailable={backgroundAvailable}
-              campaignAvailability={campaignAvailability}
+            <SessionToolsList
+              session={session}
+              runnerOnline={runnerOnline}
+              runnerProtocolVersion={runnerProtocolVersion}
+              backgroundInventoryError={backgroundInventoryError}
+              git={git}
+              items={items}
+              context={toolContext}
+              decisionCount={decisionHistory.length}
+              decisionsHaveMore={decisionHistoryHasMore}
+              decisionStatus={decisionHistoryStatus}
+              descendantRequests={descendantRequests}
+              descendantRequestStatus={descendantRequestStatus}
+              onChoose={chooseTool}
             />
           ) : (
             <PanelEscapeLayerContext.Provider value={escapeLayerRef}>
@@ -1205,159 +1192,5 @@ export function RightPanel({
         </PanelActionSlotContext.Provider>
       </aside>
     </>
-  );
-}
-
-/** One launcher row: icon, label, right-aligned shortcut hint — the Codex empty state. */
-function LauncherRow({
-  icon,
-  label,
-  kbd,
-  disabled,
-  hint,
-  onClick,
-}: {
-  icon: ReactNode;
-  label: string;
-  kbd?: string;
-  disabled?: boolean;
-  hint?: string;
-  onClick?: () => void;
-}) {
-  return (
-    <button type="button" className="rp-row" disabled={disabled} title={disabled ? hint : undefined} onClick={onClick}>
-      <span className="rp-row-icon">{icon}</span>
-      <span>{label}</span>
-      {kbd && <kbd className="rp-kbd">{kbd}</kbd>}
-    </button>
-  );
-}
-
-/**
- * The Campaign Status row. Unlike the older rows, its unavailability reason is visible text and the
- * row's accessible description (the direction of #1261), and it stays focusable through
- * `aria-disabled` so a keyboard user reaches the reason too.
- */
-function CampaignStatusLauncherRow({ unavailableReason, onClick }: { unavailableReason: string | null; onClick: () => void }) {
-  const reasonId = useId();
-  return (
-    <button
-      type="button"
-      className="rp-row"
-      aria-disabled={unavailableReason ? "true" : undefined}
-      aria-describedby={unavailableReason ? reasonId : undefined}
-      onClick={unavailableReason ? undefined : onClick}
-    >
-      <span className="rp-row-icon"><CampaignIcon size={14} /></span>
-      <span className="rp-row-text">
-        <span>Campaign Status</span>
-        {unavailableReason && <span className="rp-row-reason" id={reasonId}>{unavailableReason}</span>}
-      </span>
-    </button>
-  );
-}
-
-function Launcher({
-  onPick,
-  onOpenTerminal,
-  filesSupported,
-  filesHint,
-  terminalSupported,
-  terminalHint,
-  backgroundAvailable,
-  campaignAvailability,
-}: {
-  onPick: (mode: RightPanelMode) => void;
-  onOpenTerminal: () => void;
-  filesSupported: boolean;
-  filesHint: string;
-  terminalSupported: boolean;
-  terminalHint: string;
-  backgroundAvailable: boolean;
-  campaignAvailability: CampaignStatusAvailability;
-}) {
-  return (
-    <div className="rp-launcher">
-      {(!filesSupported || !terminalSupported) && (
-        <div className="hint warn" role="status">
-          {!filesSupported && <div>{filesHint}</div>}
-          {!terminalSupported && <div>{terminalHint}</div>}
-        </div>
-      )}
-      {/* Always available: with nothing pending it opens "Nothing Waiting" (#2206). */}
-      <LauncherRow
-        label="Requests"
-        onClick={() => onPick("requests")}
-        icon={<InboxIcon size={14} />}
-      />
-      {campaignAvailability.kind !== "hidden" && (
-        <CampaignStatusLauncherRow
-          unavailableReason={campaignAvailability.kind === "unavailable" ? campaignAvailability.reason : null}
-          onClick={() => onPick("campaign")}
-        />
-      )}
-      <LauncherRow
-        label="Background Work"
-        disabled={!backgroundAvailable}
-        hint={BACKGROUND_WORK_UNAVAILABLE}
-        onClick={() => onPick("background")}
-        icon={<JobsIcon size={14} />}
-      />
-      <LauncherRow
-        label="Review"
-        kbd={shortcutDisplay("open-review")}
-        onClick={() => onPick("review")}
-        icon={
-          <DiffIcon size={14} />
-        }
-      />
-      <LauncherRow
-        label="Terminal"
-        kbd={shortcutDisplay("toggle-terminal")}
-        disabled={!terminalSupported}
-        hint={terminalHint}
-        onClick={onOpenTerminal}
-        icon={
-          <CommandLineIcon size={14} />
-        }
-      />
-      <LauncherRow
-        label="Browser"
-        onClick={() => onPick("browser")}
-        icon={
-          <GlobeIcon size={14} />
-        }
-      />
-      <LauncherRow
-        label="Files"
-        kbd={shortcutDisplay("open-files")}
-        disabled={!filesSupported}
-        hint={filesHint}
-        onClick={() => onPick("files")}
-        icon={
-          <FolderIcon size={14} />
-        }
-      />
-      <LauncherRow
-        label="Agents"
-        onClick={() => onPick("subagents")}
-        icon={
-          <TeamIcon size={14} />
-        }
-      />
-      <LauncherRow
-        label="Decision History"
-        onClick={() => onPick("decisions")}
-        icon={<LockIcon size={14} />}
-      />
-      <LauncherRow
-        label="Side Chat"
-        kbd={shortcutDisplay("open-side-chat")}
-        onClick={() => onPick("sidechat")}
-        icon={
-          <QuestionIcon size={14} />
-        }
-      />
-    </div>
   );
 }

@@ -882,6 +882,16 @@ Requests, Decision History, and Terminal once #2868 moves it) opens in one frame
   the Session Tools list renders): Session Tools first, then the Code, Work and Decisions groups
   under section labels, the current tool checked, keycaps on fine pointers only. An unavailable tool
   stays focusable with its reason as its second line.
+- **Session Tools.** The landing list (#2844, `SessionToolsList.tsx`) renders the same
+  `SESSION_TOOLS`, top-aligned under the header and scrolling on its own: the Code, Work and
+  Decisions groups under `.group-label` headers (§5.2), each tool a `.row.row-2` with a 32px icon
+  tile (`--bg-elev-2`, `--radius-sm`), its name, and a live sentence-case fact on line two (Review's
+  uncommitted changes and required findings, Agents' one status badge, Requests' count badge of what
+  waits for you, and so on). No card borders; hover fills on fine pointers. A tool that cannot open
+  stays focusable (`aria-disabled`), its reason the second line in `--text-faint` and its
+  description, its tile hollow (an inset 1px `--border`), never an opacity. On an older runner one
+  neutral compact Notice above the list names the machine to update, and Files and Terminal say
+  "Needs a newer runner to …". Keycaps trail the name's line on fine pointers only.
 - **Action slot.** A tool puts its own header actions in the slot by rendering `PanelHeaderActions`
   anywhere in its body: `.icon-btn` buttons (32px, 44px on touch) with Title Case names. It is the
   one extension point for per-tool header controls (an About popover), so a tool never adds a second

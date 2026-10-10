@@ -110,6 +110,46 @@ export function mergeRefreshedRegistryPages(
   return [...merged].sort((a, b) => a.sourceSeq - b.sourceSeq);
 }
 
+/**
+ * The durable child-session registry's agents as subagent descriptors, the form the transcript
+ * projection uses, so `mergeDurableAgents` can join them. Shared with the Session Tools list (#2844).
+ */
+export function durableAgentDescriptors(
+  registry: readonly ChildSessionRegistryEntry[],
+  sessionStatus: SessionView["status"],
+  runnerOnline: boolean,
+): SubagentDescriptor[] {
+  const byId = new Map(registry.map((child) => [child.toolCallId, child]));
+  const childIds = new Map<string, string[]>();
+  for (const child of registry) if (child.parentToolUseId && byId.has(child.parentToolUseId)) {
+    childIds.set(child.parentToolUseId, [...(childIds.get(child.parentToolUseId) ?? []), child.toolCallId]);
+  }
+  const depth = (child: ChildSessionRegistryEntry): number => {
+    let value = 0;
+    let parent = child.parentToolUseId;
+    const seen = new Set([child.toolCallId]);
+    while (parent && byId.has(parent) && !seen.has(parent)) { seen.add(parent); value += 1; parent = byId.get(parent)?.parentToolUseId; }
+    return value;
+  };
+  return registry.map((child) => ({
+    id: child.toolCallId,
+    ...(child.parentToolUseId && byId.has(child.parentToolUseId) ? { parentId: child.parentToolUseId } : {}),
+    childIds: childIds.get(child.toolCallId) ?? [],
+    title: child.name,
+    ...(child.role ? { role: child.role } : {}),
+    depth: depth(child),
+    sourceIndex: child.sourceSeq,
+    lifecycle: deriveSubagentLifecycle(child.status, sessionStatus, runnerOnline, child.lifecycle),
+    toolStatus: child.status,
+    availability: runnerOnline ? "live" : "recorded",
+    startedAt: child.startedAt,
+    lastActivityAt: child.lastActivityAt,
+    ...(child.completedAt == null ? {} : { completedAt: child.completedAt }),
+    toolCount: child.toolCount,
+    ...(child.latestTool ? { latestTool: child.latestTool } : {}),
+  }));
+}
+
 export function mergeCompactAttentionOwners(
   registryOwners: readonly ChildSessionAttentionOwner[],
   sessionOwners: readonly ChildSessionAttentionOwner[],
@@ -542,38 +582,9 @@ export function AgentsPanel(props: Props) {
   ), [attentionOwners, session.attentionOwners]);
   const unresolvedOwnerIds = useMemo(() => new Set(compactAttentionOwners
     .filter((owner) => !owner.resolved).map((owner) => owner.toolCallId)), [compactAttentionOwners]);
-  const durableAgents = useMemo((): SubagentDescriptor[] => {
-    if (!registry) return [];
-    const byId = new Map(registry.map((child) => [child.toolCallId, child]));
-    const childIds = new Map<string, string[]>();
-    for (const child of registry) if (child.parentToolUseId && byId.has(child.parentToolUseId)) {
-      childIds.set(child.parentToolUseId, [...(childIds.get(child.parentToolUseId) ?? []), child.toolCallId]);
-    }
-    const depth = (child: ChildSessionRegistryEntry): number => {
-      let value = 0;
-      let parent = child.parentToolUseId;
-      const seen = new Set([child.toolCallId]);
-      while (parent && byId.has(parent) && !seen.has(parent)) { seen.add(parent); value += 1; parent = byId.get(parent)?.parentToolUseId; }
-      return value;
-    };
-    return registry.map((child) => ({
-      id: child.toolCallId,
-      ...(child.parentToolUseId && byId.has(child.parentToolUseId) ? { parentId: child.parentToolUseId } : {}),
-      childIds: childIds.get(child.toolCallId) ?? [],
-      title: child.name,
-      ...(child.role ? { role: child.role } : {}),
-      depth: depth(child),
-      sourceIndex: child.sourceSeq,
-      lifecycle: deriveSubagentLifecycle(child.status, session.status, runnerOnline, child.lifecycle),
-      toolStatus: child.status,
-      availability: runnerOnline ? "live" : "recorded",
-      startedAt: child.startedAt,
-      lastActivityAt: child.lastActivityAt,
-      ...(child.completedAt == null ? {} : { completedAt: child.completedAt }),
-      toolCount: child.toolCount,
-      ...(child.latestTool ? { latestTool: child.latestTool } : {}),
-    }));
-  }, [registry, runnerOnline, session.status]);
+  const durableAgents = useMemo((): SubagentDescriptor[] =>
+    registry ? durableAgentDescriptors(registry, session.status, runnerOnline) : [],
+  [registry, runnerOnline, session.status]);
   const agents = useMemo(() => {
     if (!registry) return projection.descriptors.filter((agent) => !unresolvedOwnerIds.has(agent.id));
     return mergeDurableAgents(durableAgents, projection.descriptors, unresolvedOwnerIds);
