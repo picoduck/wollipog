@@ -311,6 +311,28 @@ test("a valid address shows the load bar until load, then Reload and Open in New
   });
 });
 
+test("returning to a page that loaded before starts a fresh load and can still be blocked", async () => {
+  await withPanel(async () => ({ artifacts: [] }), async (container) => {
+    await openWebPreview(container);
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      await submitAddress(container, "http://localhost:3000/a");
+      await fireFrameLoad(container);
+      assert.ok(buttonNamed(container, "Reload"), "page A loaded");
+      await submitAddress(container, "http://localhost:3000/b");
+      assert.ok(container.querySelector(".browser-load-bar"), "page B is loading");
+
+      await submitAddress(container, "http://localhost:3000/a");
+      assert.ok(container.querySelector(".browser-load-bar"), "A's fresh frame loads again rather than reusing its old load");
+      assertNoDomNode(buttonNamed(container, "Reload"));
+      await act(async () => { mock.timers.tick(PAGE_BLOCKED_AFTER_MS); });
+      assert.ok(container.querySelector(".browser-web-view .notice"), "and it can still be blocked");
+    } finally {
+      mock.timers.reset();
+    }
+  });
+});
+
 test("a page that never fires load within 8 seconds shows Page Blocked with Open in New Tab", async () => {
   await withPanel(async () => ({ artifacts: [] }), async (container) => {
     await openWebPreview(container);

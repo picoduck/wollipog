@@ -273,8 +273,8 @@ function WebPreview({ urlInput, setUrlInput, url, setUrl }: {
   setUrl: (value: string) => void;
 }) {
   const [urlError, setUrlError] = useState<string | null>(null);
-  // Bumped by Reload, and by opening the address already open: the frame is keyed by it, so the
-  // same URL is set again on a fresh frame.
+  // Bumped by every Open and Reload: the frame is keyed by it, so each navigation is a fresh frame
+  // with a load of its own, even back to an address that loaded before (or the one already open).
   const [loads, setLoads] = useState(0);
   const frameKey = `${loads}\n${url ?? ""}`;
   // Keyed by the frame it describes, so a new address starts loading without a render that still
@@ -301,8 +301,8 @@ function WebPreview({ urlInput, setUrlInput, url, setUrl }: {
     }
     setUrlError(null);
     setUrlInput(normalized.url);
-    if (normalized.url === url) setLoads((count) => count + 1);
-    else setUrl(normalized.url);
+    setUrl(normalized.url);
+    setLoads((count) => count + 1);
   };
 
   const loaded = url !== null && phase === "loaded";
