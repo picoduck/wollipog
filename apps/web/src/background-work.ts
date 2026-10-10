@@ -136,8 +136,12 @@ export function deliveryReceiptStatus(
 export function backgroundJobGroupCounts(group: BackgroundJobGroup, inventoryTruncated: boolean) {
   const recordedJobCount = group.deliveries.reduce((total, delivery) => total + delivery.jobCount, 0);
   const recordedFinishedCount = group.deliveries.reduce((total, delivery) => total + delivery.terminalCount, 0);
-  const total = Math.max(group.jobs.length, recordedJobCount);
-  const finished = Math.min(total, Math.max(group.jobs.filter((job) => job.terminalStatus).length, recordedFinishedCount));
+  const counted = Math.max(group.jobs.length, recordedJobCount);
+  const finished = Math.min(counted, Math.max(group.jobs.filter((job) => job.terminalStatus).length, recordedFinishedCount));
+  // A blocked result's receipt counts the turn's unfinished jobs itself, including any the bounded
+  // list leaves out, so a running sibling outside the list still holds the turn's result.
+  const reportedUnfinished = Math.max(0, ...group.deliveries.map((delivery) => delivery.unfinishedSiblingJobs ?? 0));
+  const total = Math.max(counted, finished + reportedUnfinished);
   // Some of the group's jobs are outside the bounded list, or could be.
   const partial = !group.parentTurnKnown || total > group.jobs.length ||
     (inventoryTruncated && recordedJobCount <= group.jobs.length);
