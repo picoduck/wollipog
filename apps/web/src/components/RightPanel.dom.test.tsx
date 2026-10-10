@@ -160,6 +160,7 @@ function PanelHarness({
   selectedRequestKey,
   git: harnessGit = git,
   onState,
+  onOpenTerminal = () => {},
 }: {
   initialSession?: SessionView;
   initialRunnerOnline?: boolean;
@@ -171,6 +172,7 @@ function PanelHarness({
   selectedRequestKey?: string | null;
   git?: GitStatus;
   onState: (state: RightPanelState) => void;
+  onOpenTerminal?: () => void;
 }) {
   const state = useRightPanelState();
   const [session, setSession] = useState(initialSession);
@@ -215,7 +217,7 @@ function PanelHarness({
         onLoadOlderDecisions={() => {}}
         onOpenSourceLocation={() => {}}
         onClearSourceLocation={() => {}}
-        onOpenTerminal={() => {}}
+        onOpenTerminal={onOpenTerminal}
         onInsertSideChatDraft={() => {}}
       /></StoreProvider></ApiProvider>
     </>
@@ -970,6 +972,78 @@ test("a row opens its page in the switcher's place, and Back and Escape return t
     await keydown(last, "Escape");
     assert.equal(state.open, false);
   } finally {
+    await panel.dispose();
+  }
+});
+
+test("a Background Work job opens its Job Detail page with Back to Background Work, and About holds the privacy text (#2858)", async () => {
+  let state!: RightPanelState;
+  const now = Date.now();
+  const withJobs = {
+    ...liveSession,
+    backgroundWorkTracking: "managed",
+    backgroundWorkState: "running",
+    backgroundJobsAvailable: true,
+    backgroundJobs: [{ id: "job-shell-a1f3c9", parentTurnId: "turn-4", launchType: "shell", registeredAt: now - 60_000,
+      lastObservedAt: now, sourcePresent: true }],
+    backgroundDeliveries: [],
+  } as unknown as SessionView;
+  const panel = await mountPanel(<PanelHarness initialSession={withJobs} onState={(next) => { state = next; }} />);
+  const focused = () => domWindow.document.activeElement as unknown as Element | null;
+  try {
+    await act(async () => state.show("background"));
+    const aside = panel.container.querySelector<HTMLElement>("#right-panel")!;
+    const head = aside.querySelector(".rpanel-head")!;
+    const about = head.querySelector<HTMLButtonElement>('.rpanel-actions [aria-label="About Background Work"]');
+    assert.ok(about, "About Background Work is in the header's action slot");
+    await act(async () => about!.click());
+    const popover = domWindow.document.querySelector('[role="dialog"][aria-label="About Background Work"]');
+    assert.match(popover?.textContent ?? "", /Commands, file paths, credentials and output stay on this machine\./u);
+    await keydown(popover as unknown as Element, "Escape");
+
+    const row = aside.querySelector<HTMLButtonElement>("button.background-job-row")!;
+    row.focus();
+    await act(async () => row.click());
+    assert.deepEqual(headParts(head), ["Back to Background Work", "rpanel-page-title", "rpanel-actions", "Expand Panel", "Close Panel"]);
+    const title = head.querySelector<HTMLElement>(".rpanel-page-title")!;
+    assert.equal(title.textContent, "Shell Job a1f3c9");
+    assert.ok(focused() === (title as unknown as Element), "the page's title takes focus");
+    assert.ok(aside.querySelector<HTMLElement>(".background-work-panel")!.hidden);
+    assert.ok(aside.querySelector('.background-work-page .job-detail[aria-label="Shell Job a1f3c9"]'));
+    assert.ok(head.querySelector('.rpanel-actions [aria-label="About Background Work"]'), "About stays while a page is pushed");
+
+    await act(async () => head.querySelector<HTMLButtonElement>('[aria-label="Back to Background Work"]')!.click());
+    assert.ok(!aside.querySelector<HTMLElement>(".background-work-panel")!.hidden);
+    assert.ok(focused() === (row as unknown as Element), "Back returns focus to the job's row");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("Background Work's Open Terminal closes a phone's panel, which would cover the terminal, and restores an expanded one (#2858)", async () => {
+  let state!: RightPanelState;
+  let terminals = 0;
+  const untracked = { ...liveSession, driver: "codex", backgroundWorkTracking: "untracked" } as unknown as SessionView;
+  const panel = await mountPanel(<PanelHarness initialSession={untracked} onState={(next) => { state = next; }}
+    onOpenTerminal={() => { terminals += 1; }} />);
+  const openTerminal = () => [...panel.container.querySelectorAll<HTMLButtonElement>("#right-panel button")]
+    .find((button) => button.textContent === "Open Terminal")!;
+  try {
+    phoneViewport = true;
+    await act(async () => state.show("background"));
+    await act(async () => openTerminal().click());
+    assert.equal(terminals, 1);
+    assert.equal(state.open, false, "the phone's panel closes so the terminal is on screen");
+
+    phoneViewport = false;
+    await act(async () => state.show("background"));
+    await act(async () => state.setExpanded(true));
+    await act(async () => openTerminal().click());
+    assert.equal(terminals, 2);
+    assert.equal(state.open, true, "a desktop panel stays open");
+    assert.equal(state.expanded, false, "but an expanded one restores, so the chat column and its dock show");
+  } finally {
+    phoneViewport = false;
     await panel.dispose();
   }
 });

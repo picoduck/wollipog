@@ -4086,6 +4086,112 @@ textarea {
   font: var(--type-body);
 }
 .info-popover-text + .facts { margin-top: var(--space-3); }
+.info-popover-text > p { margin: 0; }
+.info-popover-text > p + p { margin-top: var(--space-2); }
+
+/* Background Work (#2858): one group per turn under a §5.2 group header (the turn, its status as the
+   inline badge, View Turn), then its two-line job rows, each opening the job's page. The list stays
+   mounted, hidden, under a page. */
+.background-work-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.background-work-panel[hidden] { display: none; }
+.background-work-turns {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.background-work-turn {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+/* View Turn never wraps under the label: the label gives way first. On touch the header grows to
+   hold View Turn's target. */
+.background-work-turn-head {
+  gap: var(--space-2);
+  height: auto;
+  min-height: 32px;
+}
+.background-work-turn-title {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.background-work-turn-head > .status { flex: none; }
+.background-work-view-turn {
+  flex: none;
+  margin-left: auto;
+}
+@media (pointer: coarse) {
+  .background-work-turn-head { min-height: var(--control-h); }
+}
+.background-work-rows {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.background-job-row .row-title { flex: 1; }
+.background-job-row .status { flex: none; }
+.background-job-id {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-weight: 400;
+}
+.background-job-chevron {
+  flex: none;
+  color: var(--text-faint);
+}
+@media (forced-colors: active) {
+  .background-job-chevron { color: inherit; }
+}
+.skeleton.background-work-skeleton {
+  gap: 0;
+  min-height: 0;
+  padding: 0;
+}
+.background-work-page {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* Job Detail (#2858, `JobDetail`; Background Work's and the Agents tab's job page): the job's badge,
+   a `.facts` list whose values wrap anywhere, then Stop Job… with its reason or its outcome under it. */
+.job-detail {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.job-detail-facts { align-self: stretch; }
+.job-detail-turn {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.job-detail-stop {
+  display: flex;
+  flex-direction: column;
+  align-self: stretch;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+.job-detail-stop-note {
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
 
 /* The Requests panel (#2206; docs/design-system.md §6, §6.2): a list that opens each child request in
    a detail in its place, at every width. Each view is one scroller below the panel head. */
@@ -4575,37 +4681,13 @@ textarea {
 .agents-panel > .subagents-panel {
   min-height: 0;
 }
-.background-work-panel {
-  display: flex;
-  min-height: 100%;
-  flex-direction: column;
-  gap: 12px;
-}
-.background-work-groups {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-.background-work-group {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elev-1);
-  overflow: hidden;
-}
-.background-work-group-watchdog {
-  border-color: color-mix(in srgb, var(--amber) 55%, var(--border));
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--amber) 18%, transparent);
-}
-.background-work-group-watchdog[data-watchdog-state="accepted_without_result"] {
-  border-color: color-mix(in srgb, var(--red) 55%, var(--border));
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--red) 18%, transparent);
-}
+/* A turn's recovery delivery (#1793, #2275): kept as it is until the recovery notices replace it (#2859). */
 .background-delivery-summary {
   padding: 11px 12px;
   border-top: 1px solid var(--border);
   background: color-mix(in srgb, var(--amber) 8%, var(--bg-elev-1));
 }
-.background-work-group[data-watchdog-state="accepted_without_result"] .background-delivery-summary {
+.background-delivery-summary[data-recovery-state="accepted_without_result"] {
   background: color-mix(in srgb, var(--red) 8%, var(--bg-elev-1));
 }
 .background-delivery-summary > strong { font-size: var(--text-sm); }
@@ -4636,91 +4718,6 @@ textarea {
   cursor: pointer;
   font-size: var(--text-xs);
   font-weight: 600;
-}
-.background-work-group-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 11px 12px;
-}
-.background-work-group-head h3 {
-  margin: 0;
-  font-size: var(--text-sm);
-}
-.background-work-group-head p {
-  margin: 3px 0 0;
-  color: var(--text-dim);
-  font-size: var(--text-xs);
-}
-.background-work-link-unavailable {
-  max-width: 120px;
-  color: var(--text-faint);
-  font-size: var(--text-xs);
-  text-align: right;
-}
-.background-work-barrier {
-  padding: 7px 12px;
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
-  color: var(--text-dim);
-  background: var(--bg-elev-2);
-  font-size: var(--text-xs);
-}
-.background-work-barrier > span:first-child { margin-right: 6px; font-weight: 600; }
-.background-work-jobs {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.background-work-job,
-.background-work-delivery {
-  padding: 11px 12px;
-}
-.background-work-job + .background-work-job,
-.background-work-delivery + .background-work-delivery { border-top: 1px solid var(--border); }
-.background-work-job-title {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: var(--text-sm);
-}
-.background-work-job-actions {
-  display: grid;
-  gap: 6px;
-  justify-items: start;
-  margin-top: 10px;
-}
-.background-work-job-actions .hint { margin: 0; }
-.background-work-job-confirm {
-  display: grid;
-  gap: 8px;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-}
-.background-work-job-confirm p {
-  margin: 0;
-  color: var(--text-dim);
-  font-size: var(--text-xs);
-}
-.background-work-job > .facts,
-.background-work-delivery > .facts {
-  margin-top: var(--space-2);
-  font: var(--type-small);
-}
-.background-work-job-confirm-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.background-work-privacy {
-  margin: auto 0 0;
-  padding-top: 4px;
-  color: var(--text-faint);
-  font-size: var(--text-xs);
-  line-height: var(--leading-normal);
 }
 .subagents-panel {
   display: flex;
@@ -15256,7 +15253,6 @@ button.review-finding-location {
   .rpanel-resizer {
     display: none;
   }
-  .background-work-group-head { align-items: center; }
 
   /* Composer: six lines at most, above the software keyboard. */
   .composer-input { max-height: calc(6 * 22px); }

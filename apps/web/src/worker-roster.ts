@@ -1,6 +1,7 @@
 import type { ManagedBackgroundJobView, SessionView } from "@wollipog/protocol";
 import { pendingRequests } from "@wollipog/protocol";
 import type { SubagentDescriptor } from "./subagents.js";
+import { backgroundJobLabel } from "./background-job-stop.js";
 
 export type WorkerState = "working" | "waiting" | "input_required" | "completed" | "failed" | "stopped" | "unverified";
 export type WorkerTarget = { kind: "subagent"; id: string } | { kind: "background"; id: string } | { kind: "session"; id: string };
@@ -78,7 +79,7 @@ export function workerRoster(
   }));
   for (const job of session.backgroundJobs ?? []) rows.push({
     id: `background:${job.id}`,
-    name: `Background ${job.launchType === "unknown" ? "Job" : job.launchType.charAt(0).toUpperCase() + job.launchType.slice(1)}`,
+    name: backgroundJobLabel(job),
     type: "Managed Background Job",
     state: backgroundWorkerState(job, session, online(session.runnerId)),
     target: { kind: "background", id: job.id },

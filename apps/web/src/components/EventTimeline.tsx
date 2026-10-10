@@ -410,6 +410,27 @@ export function summarizeTimelineTurns(
   return { segments, segmentOf };
 }
 
+/**
+ * Each loaded turn a prompt opened, by its runner turn id (#2858): the prompt to scroll to and the
+ * number its footer shows. Only the prompt counts: a steering message carries its turn's id too, but
+ * a turn whose prompt is not loaded is not loaded, so View Turn keeps loading until the prompt is.
+ */
+export function transcriptTurnsById(
+  items: readonly TimelineItem[],
+): Map<string, { eventId: number; turn?: number; startedAt?: number }> {
+  const turns = new Map<string, { eventId: number; turn?: number; startedAt?: number }>();
+  for (const segment of summarizeTimelineTurns(items, new Map()).segments) {
+    const prompt = segment.prompt;
+    if (!prompt?.turnId || turns.has(prompt.turnId)) continue;
+    turns.set(prompt.turnId, {
+      eventId: prompt.id,
+      ...(segment.turn !== undefined ? { turn: segment.turn } : {}),
+      ...(Number.isFinite(prompt.createdAt) ? { startedAt: prompt.createdAt } : {}),
+    });
+  }
+  return turns;
+}
+
 /** The item that places a row in a turn. A nested subagent row follows its parent, wherever its own
  * event landed. */
 function rowItemId(row: TimelineRenderRow): number | undefined {

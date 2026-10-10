@@ -173,9 +173,9 @@ for (const viewport of [
     await page.getByRole("radio", { name: "History (1)", exact: true }).click();
     await expect(roster.getByText("Review Documentation", { exact: true })).toBeVisible();
     await page.getByRole("radio", { name: "Active (3)", exact: true }).click();
-    await roster.getByRole("button", { name: /Background Monitor/ }).click();
-    // The job opens as a page in the roster's place (#2856).
-    await expect(page.locator(".agents-page").getByText("Monitor Job 1", { exact: true })).toBeVisible();
+    await roster.getByRole("button", { name: /Monitor Job 7be210/ }).click();
+    // The job opens as a page in the roster's place (#2856), the shared Job Detail page (#2858).
+    await expect(page.locator('.agents-page .job-detail[aria-label="Monitor Job 7be210"]')).toBeVisible();
     await expect(roster).toBeHidden();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: `.agents/tmp/wave2-evidence/agents-${viewport.name}-${theme}.png`, fullPage: true });

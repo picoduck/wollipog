@@ -250,7 +250,7 @@ test("Result Blocked is the bar's status and its row offers Stop Job… for the 
     const confirmation = harness.confirmations[0]!;
     assert.equal(confirmation.title, "Stop Job");
     assert.equal(confirmation.message, STOP_JOB_OUTCOME);
-    assert.deepEqual(confirmation.detailRows, [{ label: "Monitor Job 2" }]);
+    assert.deepEqual(confirmation.detailRows, [{ label: "Monitor Job onitor" }]);
     assert.equal(confirmation.confirmLabel, "Stop Job");
     assert.equal(confirmation.cancelLabel, "Keep Running");
     assert.equal(confirmation.tone, "danger");
@@ -269,7 +269,7 @@ test("Result Blocked is the bar's status and its row offers Stop Job… for the 
 
     harness.stops[0]!.reply.resolve({ sessionId: "delivery", jobId: "monitor", outcome: "stopped" } as BackgroundJobStopResponse);
     await settle();
-    assert.deepEqual(harness.toasts, [{ message: "Monitor Job 2 was stopped.", tone: "success" }]);
+    assert.deepEqual(harness.toasts, [{ message: "Monitor Job onitor was stopped.", tone: "success" }]);
     // Until the session update arrives, the stopped job is not offered again.
     await openPopover();
     assert.equal(rowAction("Result Blocked").name, "Open Background Work");

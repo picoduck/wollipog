@@ -259,37 +259,40 @@ for (const width of [320, 1280]) {
   });
 }
 
+/** A Result Blocked turn: a monitor that never fires beside a finished review subagent (#1780). */
+const resultBlocked = (page: Page) => page.evaluate(() => {
+  const now = Date.now();
+  window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+    status: "idle",
+    driver: "claude-code",
+    backgroundWorkState: "running",
+    backgroundWorkTracking: "managed",
+    backgroundJobsAvailable: true,
+    backgroundJobs: [
+      {
+        id: "bg-monitor-7be210", parentTurnId: "blocked-parent", launchType: "monitor",
+        registeredAt: now - 50 * 60_000, lastObservedAt: now - 60_000, sourcePresent: true,
+      },
+      {
+        id: "bg-agent-04d2e1", parentTurnId: "blocked-parent", launchType: "agent",
+        registeredAt: now - 50 * 60_000, lastObservedAt: now - 20 * 60_000, sourcePresent: true,
+        terminalStatus: "completed", terminalObservedAt: now - 20 * 60_000, continuationRequired: true,
+      },
+    ],
+    backgroundDeliveries: [{
+      parentTurnId: "blocked-parent", jobCount: 2, terminalCount: 1,
+      watchdogState: "continuation_blocked", unfinishedSiblingJobs: 1,
+    }],
+  });
+});
+
 for (const width of [320, 1280]) {
-  test(`Result Blocked offers Stop Job for the unfinished job and shows it unavailable on older runners at ${width}px (#1780)`, async ({ page }) => {
+  test(`Stop Job is on the job's page, behind a confirmation that names it, and unavailable with a visible reason at ${width}px (#1780, #2858)`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/command-inbox-projects-e2e.html?scenario=git-visibility&sessionShell=1");
     await page.getByRole("button", { name: /Alpha Session/ }).click();
     const expand = page.getByRole("button", { name: "Open Session", exact: true });
     if (await expand.isVisible()) await expand.click();
-    const resultBlocked = () => page.evaluate(() => {
-      const now = Date.now();
-      window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
-        driver: "claude-code",
-        backgroundWorkState: "running",
-        backgroundWorkTracking: "managed",
-        backgroundJobsAvailable: true,
-        backgroundJobs: [
-          {
-            id: "monitor-never-fires", parentTurnId: "blocked-parent", launchType: "monitor",
-            registeredAt: now - 50 * 60_000, lastObservedAt: now - 60_000, sourcePresent: true,
-          },
-          {
-            id: "review-subagent", parentTurnId: "blocked-parent", launchType: "agent",
-            registeredAt: now - 50 * 60_000, lastObservedAt: now - 20 * 60_000, sourcePresent: true,
-            terminalStatus: "completed", terminalObservedAt: now - 20 * 60_000, continuationRequired: true,
-          },
-        ],
-        backgroundDeliveries: [{
-          parentTurnId: "blocked-parent", jobCount: 2, terminalCount: 1,
-          watchdogState: "continuation_blocked", unfinishedSiblingJobs: 1,
-        }],
-      });
-    });
     // #2275: where Stop Job is available for the one running job, the status row offers it itself,
     // so the panel is opened from the Pinned Summary instead.
     const openPanel = async (rowAction: "Open Background Work" | "Stop Job…" = "Open Background Work") => {
@@ -308,62 +311,83 @@ for (const width of [320, 1280]) {
       await expect(panel).toBeVisible();
       return panel;
     };
+    const closePanel = async (panel: Locator) => {
+      const back = panel.getByRole("button", { name: "Back to Background Work" });
+      if (await back.count()) await back.click();
+      await panel.getByRole("button", { name: /^(Close Panel|Back to Session)$/u }).click();
+    };
+    const openJob = async (panel: Locator, name: string) => {
+      await panel.locator("button.background-job-row").filter({ hasText: name }).click();
+      await expect(panel.locator(".rpanel-page-title")).toHaveText(name);
+      await expect(panel.getByRole("button", { name: "Back to Background Work" })).toBeVisible();
+      return panel.locator(`.job-detail[aria-label="${name}"]`);
+    };
 
-    // An older runner: the action is visible but unavailable, and the guidance says why.
+    // An older runner: the action is visible but unavailable, its reason on screen, and the guidance
+    // says why.
     await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(189));
-    await resultBlocked();
+    await resultBlocked(page);
     let panel = await openPanel();
     const summary = panel.locator('[data-watchdog-state="continuation_blocked"] .background-delivery-summary');
     await expect(summary).toContainText(
       "Stop Job is unavailable: This machine needs a newer runner for stopping a background job. Update and restart the runner.",
     );
     await expect(summary).toContainText("Ask the session to stop the unfinished job");
-    const monitorRow = panel.locator(".background-work-job").filter({ hasText: "Monitor Job" });
-    const unavailable = monitorRow.getByRole("button", { name: "Stop Job", exact: true });
+    let detail = await openJob(panel, "Monitor Job 7be210");
+    const unavailable = detail.getByRole("button", { name: "Stop Job…" });
     await expect(unavailable).toBeDisabled();
     await expect(unavailable).toHaveAccessibleDescription(
-      /^Stops Monitor Job \d\. Stop Job is unavailable: This machine needs a newer runner for stopping a background job\./,
-    );
-    await panel.getByRole("button", { name: /^(Close Panel|Back to Session)$/u }).click();
+      "This machine needs a newer runner for stopping a background job. Update and restart the runner.");
+    await expect(detail.locator(".job-detail-stop-note")).toBeVisible();
+    await expect(unavailable).not.toHaveAttribute("title", /.+/u);
+    await closePanel(panel);
 
     // A v190 runner offers Stop Job, but its restart still discards the result (#1779).
     await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(190));
-    await resultBlocked();
+    await resultBlocked(page);
     panel = await openPanel("Stop Job…");
     await expect(summary).toContainText("Restarting or stopping the session also ends it, but ends every other job and discards this result.");
-    await panel.getByRole("button", { name: /^(Close Panel|Back to Session)$/u }).click();
+    await closePanel(panel);
 
-    // A current runner: Stop Job is offered on the unfinished job only, behind a confirmation, and
-    // its restart reports the result to the new conversation instead of discarding it (#1779).
+    // A current runner: Stop Job is on the unfinished job's page only, behind a confirmation titled
+    // with its name, and its restart reports the result to the new conversation instead (#1779).
     await page.evaluate((version) => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(version), PROTOCOL_VERSION);
-    await resultBlocked();
+    await resultBlocked(page);
     panel = await openPanel("Stop Job…");
-    await expect(summary).toContainText("Use Stop Job on the unfinished job below: only that job ends");
+    await expect(summary).toContainText("Open the unfinished job below and use Stop Job: only that job ends");
     await expect(summary).toContainText("Stopping the session also ends it but discards this result; restarting the " +
       "session ends every job and reports this result to the new conversation instead.");
-    await expect(panel.getByRole("button", { name: "Stop Job", exact: true })).toHaveCount(1);
-    const stop = panel.locator(".background-work-job").filter({ hasText: "Monitor Job" })
-      .getByRole("button", { name: "Stop Job", exact: true });
+    await expect(panel.getByRole("button", { name: /Stop Job/u })).toHaveCount(0);
+    detail = await openJob(panel, "Agent Job 04d2e1");
+    await expect(detail.getByRole("button", { name: "Stop Job…" })).toHaveCount(0);
+    await expect(detail).toContainText("Returns to this conversation when the other job finishes");
+    await panel.getByRole("button", { name: "Back to Background Work" }).click();
+    detail = await openJob(panel, "Monitor Job 7be210");
+    // Long values wrap inside their column rather than run past the panel.
+    expect(await detail.locator(".facts dd").evaluateAll((values) =>
+      values.every((value) => value.scrollWidth <= value.clientWidth + 0.5))).toBe(true);
+    const stop = detail.getByRole("button", { name: "Stop Job…" });
     await expect(stop).toBeEnabled();
-    await expect(stop).toHaveAccessibleDescription(/^Stops Monitor Job \d\.$/);
     await stop.click();
-    const confirm = panel.getByRole("group", { name: /^Confirm Stopping Monitor Job \d$/ });
-    await expect(confirm).toContainText("Only this job ends, and it is recorded as killed.");
-    const confirmBox = await confirm.boundingBox();
-    const panelBox = await panel.boundingBox();
-    expect(confirmBox && panelBox && confirmBox.x >= panelBox.x - 0.5 &&
-      confirmBox.x + confirmBox.width <= panelBox.x + panelBox.width + 0.5).toBe(true);
-    await confirm.getByRole("button", { name: "Confirm Stop" }).click();
+    const confirmation = page.getByRole("alertdialog").or(page.getByRole("dialog", { name: "Stop Monitor Job 7be210" }));
+    await expect(confirmation).toContainText("Stop Monitor Job 7be210");
+    await expect(confirmation).toContainText("Only this job ends, and it is recorded as killed.");
+    await expect(confirmation.getByRole("button", { name: "Cancel" })).toBeFocused();
+    await confirmation.getByRole("button", { name: "Cancel" }).click();
+    await expect(confirmation).toHaveCount(0);
+    await expect(detail.locator(".status").first()).toHaveText("Running");
+    await stop.click();
+    await confirmation.getByRole("button", { name: "Stop Job", exact: true }).click();
 
+    await expect(detail).toContainText("Stopped. Its status updates here shortly.");
+    await expect(detail.locator(".status").first()).toHaveText("Killed");
+    // #1849: the job names who stopped it, by role, and why.
+    await expect(detail.locator(".facts > div").filter({ hasText: "Ended By" }).locator("dd")).toHaveText("Session Owner");
+    await expect(detail.locator(".facts > div").filter({ hasText: "Reason" }).locator("dd")).toHaveText("Stop Job Request");
+    await expect(detail.getByRole("button", { name: "Stop Job…" })).toHaveCount(0);
+    await panel.getByRole("button", { name: "Back to Background Work" }).click();
     await expect(panel.locator('[data-watchdog-state="continuation_blocked"]')).toHaveCount(0);
-    const stopped = panel.locator(".background-work-job").filter({ hasText: "Monitor Job" });
-    await expect(stopped).toContainText("Killed");
-    // #1849: the killed row names who stopped it, by role, and why.
-    await expect(stopped.locator("dl > div").filter({ hasText: "Ended By" }).locator("dd")).toHaveText("Session Owner");
-    await expect(stopped.locator("dl > div").filter({ hasText: "Reason" }).locator("dd")).toHaveText("Stop Job Request");
-    await expect(panel.locator(".background-work-job").filter({ hasText: "Agent Job" })).not.toContainText("Ended By");
-    await expect(panel.locator(".background-work-job").filter({ hasText: "Agent Job" })).toContainText("Result Delivered");
-    await expect(panel.getByRole("button", { name: "Stop Job", exact: true })).toHaveCount(0);
+    await expect(panel.locator("button.background-job-row").filter({ hasText: "Agent Job 04d2e1" })).toContainText("Result returned");
   });
 }
 
@@ -375,31 +399,7 @@ for (const width of [390, 1440]) {
     const expand = page.getByRole("button", { name: "Open Session", exact: true });
     if (await expand.isVisible()) await expand.click();
     await page.evaluate((version) => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(version), PROTOCOL_VERSION);
-    await page.evaluate(() => {
-      const now = Date.now();
-      window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
-        status: "idle",
-        driver: "claude-code",
-        backgroundWorkState: "running",
-        backgroundWorkTracking: "managed",
-        backgroundJobsAvailable: true,
-        backgroundJobs: [
-          {
-            id: "monitor-never-fires", parentTurnId: "blocked-parent", launchType: "monitor",
-            registeredAt: now - 50 * 60_000, lastObservedAt: now - 60_000, sourcePresent: true,
-          },
-          {
-            id: "review-subagent", parentTurnId: "blocked-parent", launchType: "agent",
-            registeredAt: now - 50 * 60_000, lastObservedAt: now - 20 * 60_000, sourcePresent: true,
-            terminalStatus: "completed", terminalObservedAt: now - 20 * 60_000, continuationRequired: true,
-          },
-        ],
-        backgroundDeliveries: [{
-          parentTurnId: "blocked-parent", jobCount: 2, terminalCount: 1,
-          watchdogState: "continuation_blocked", unfinishedSiblingJobs: 1,
-        }],
-      });
-    });
+    await resultBlocked(page);
     const status = page.locator(".session-bar .session-status-button");
     await expect(status).toHaveAccessibleName("Session Status: Result Blocked");
     await expectButtonUnclipped(status);
@@ -412,10 +412,53 @@ for (const width of [390, 1440]) {
 
     const confirmation = page.getByRole("alertdialog").or(page.getByRole("dialog", { name: "Stop Job" }));
     await expect(confirmation).toContainText("Only this job ends, and it is recorded as killed.");
-    await expect(confirmation).toContainText("Monitor Job 1");
+    await expect(confirmation).toContainText("Monitor Job 7be210");
     await confirmation.getByRole("button", { name: "Stop Job", exact: true }).click();
-    await expect(page.getByText("Monitor Job 1 was stopped.")).toBeVisible();
+    await expect(page.getByText("Monitor Job 7be210 was stopped.")).toBeVisible();
     await expect(status).not.toHaveAccessibleName(/Result Blocked/);
     await expect(status).toBeFocused();
   });
 }
+
+test.describe("on touch", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("every Background Work action is at least 44px to hit, and a turn's heading keeps View Turn on its line (#2858)", async ({ page }) => {
+    await page.goto("/command-inbox-projects-e2e.html?scenario=git-visibility&sessionShell=1");
+    await page.getByRole("button", { name: /Alpha Session/ }).click();
+    const expand = page.getByRole("button", { name: "Open Session", exact: true });
+    if (await expand.isVisible()) await expand.click();
+    await page.evaluate((version) => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(version), PROTOCOL_VERSION);
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitUserMessage(
+      "session-alpha", "Watch the deploy and the long-running integration suite.", "blocked-parent"));
+    await resultBlocked(page);
+    await page.locator(".session-bar .session-status-button").click();
+    await page.getByRole("dialog", { name: "Session Status" }).getByRole("button", { name: "Stop Job…" }).waitFor();
+    await page.keyboard.press("Escape");
+    await openBackgroundWorkFromPinnedSummary(page);
+    const panel = page.locator('#right-panel[data-mode="background"]');
+    await expect(panel).toBeVisible();
+    /** The tallest hit area a control has: its own box, or the ::after a small control borrows. */
+    const hitHeights = (locator: Locator) => locator.evaluateAll((elements) => elements.map((element) => {
+      const after = getComputedStyle(element, "::after");
+      const own = element.getBoundingClientRect().height;
+      if (after.content === "none" || after.position !== "absolute") return own;
+      const top = Number.parseFloat(after.top) || 0;
+      const bottom = Number.parseFloat(after.bottom) || 0;
+      return own - top - bottom;
+    }));
+    const heading = panel.locator(".background-work-turn-head").first();
+    const viewTurn = heading.getByRole("button", { name: "View Turn" });
+    await expect(viewTurn).toBeVisible();
+    const [headingBox, titleBox, buttonBox] = await Promise.all([
+      heading.boundingBox(), heading.locator("h3").boundingBox(), viewTurn.boundingBox()]);
+    expect(Math.abs((buttonBox!.y + buttonBox!.height / 2) - (titleBox!.y + titleBox!.height / 2)) < 2,
+      "View Turn sits on the heading's line").toBe(true);
+    expect(buttonBox!.x + buttonBox!.width <= headingBox!.x + headingBox!.width + 0.5).toBe(true);
+    for (const height of await hitHeights(panel.locator("button:visible"))) expect(height).toBeGreaterThanOrEqual(44);
+
+    await panel.locator("button.background-job-row").filter({ hasText: "Monitor Job 7be210" }).click();
+    await expect(panel.locator(".job-detail")).toBeVisible();
+    for (const height of await hitHeights(page.locator("#right-panel button:visible"))) expect(height).toBeGreaterThanOrEqual(44);
+  });
+});

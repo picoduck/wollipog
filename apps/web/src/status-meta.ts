@@ -151,6 +151,20 @@ const VOCABULARY = {
     result_missing: warning("Result Missing"),
     unknown: neutral("Unknown"),
   },
+  /**
+   * A Background Work turn group (#2858): where the result of the jobs one turn started stands.
+   * Waiting and Finished carry their counts in the label ("Waiting for 2 Jobs", "1 of 2 Finished";
+   * `backgroundJobGroupBadge`). Rendered as the inline badge on the group's heading.
+   */
+  jobGroup: {
+    waiting: info("Waiting for Jobs"),
+    finished: neutral("Finished"),
+    returning: info("Returning Result"),
+    returned: success("Result Returned"),
+    result_missing: warning("Result Missing"),
+    missing_acknowledged: neutral("Missing Result Acknowledged"),
+    unverified: neutral("Unverified", { hollow: true }),
+  },
   /** A session's aggregate background work, as its header shows it. */
   background_work: {
     running: info("Waiting on External Job", { pulse: true }),
