@@ -131,14 +131,13 @@ const VOCABULARY = {
     awaiting_input: warning("Awaiting Input"),
     idle: neutral("Idle"),
   },
-  /** A subagent, worker or managed background job. */
+  /** A subagent, worker or managed background job. A worker that waits on the user takes the
+   * attention word and an idle member session the session word (`workerStatusMeta`, #2857), so this
+   * domain has no Working, Waiting or Input Required. */
   job: {
     queued: neutral("Queued"),
     starting: info("Starting", { pulse: true }),
     running: info("Running", { pulse: true }),
-    working: info("Working", { pulse: true }),
-    waiting: neutral("Waiting"),
-    input_required: warning("Input Required"),
     stalled: warning("Stalled"),
     completed: success("Completed"),
     failed: danger("Failed"),

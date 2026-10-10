@@ -4078,6 +4078,48 @@ textarea {
   min-height: 0;
 }
 
+/* The Agents roster (#2857; §5.2, §5.6): headed groups of two-line rows, exactly --row-h-2 whatever
+   they carry. Line 1 is the name and the one status badge; line 2 is what the worker is doing, with
+   its elapsed time trailing. A trailing chevron opens a page here; an arrow opens another session. */
+.agents-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.group-label > .count { margin-left: var(--space-1); }
+/* The badge and the elapsed time keep their width; the name and the activity give way first. */
+.worker-row > .row-body > .row-line > :is(.status, .row-trail) {
+  flex: none;
+  max-width: none;
+  margin-left: auto;
+}
+/* A nested worker indents once (20px) under a 2px spine with a tick into its row, as a thread's
+   children do; the last of a run stops the spine at its tick. Depth is capped at one level. */
+.worker-row-item { position: relative; }
+.worker-row-item.nested { margin-left: var(--space-5); }
+.worker-row-item.nested::before,
+.worker-row-item.nested::after {
+  position: absolute;
+  left: calc(-1 * var(--space-3));
+  background: var(--border-strong);
+  content: "";
+  pointer-events: none;
+}
+.worker-row-item.nested::before { top: 0; bottom: 0; width: 2px; }
+.worker-row-item.nested.nested-last::before { bottom: 50%; }
+.worker-row-item.nested::after { top: calc(50% - 1px); width: var(--space-2); height: 2px; }
+/* Forced colors drops fills, so the spine and its ticks take a system colour, as a thread's do. */
+@media (forced-colors: active) {
+  .worker-row-item.nested::before,
+  .worker-row-item.nested::after { background: GrayText; }
+}
+.worker-list-count {
+  flex: 1;
+  min-width: 0;
+  font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+}
+
 /* The panel notice slot (#2856, `PanelNoticeSlot`): one notice directly under the header, above the
    tool and above a pushed page alike, the rest behind "+N More" (§13.2). Empty, it takes no room. */
 .rpanel-notices {
@@ -4559,12 +4601,8 @@ textarea {
 .agents-panel {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-3);
   min-width: 0;
-}
-.agents-list button[aria-current="true"] {
-  background: var(--bg-elev-2);
-  outline: 1px solid var(--border);
 }
 .agents-attention {
   display: flex;
@@ -4577,14 +4615,6 @@ textarea {
   max-width: 100%;
   overflow: hidden;
   text-align: left;
-}
-.agents-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.agents-list .subagent-list-meta {
-  flex-wrap: wrap;
 }
 .agents-panel > .subagents-panel {
   min-height: 0;

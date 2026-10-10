@@ -72,7 +72,7 @@ test.describe("with a mouse", () => {
     await expect(row(page, "requests").locator(".count-badge")).toHaveText("2");
     await expect(row(page, "requests").locator(".row-sub"))
       .toHaveText("An approval from Deploy Pipeline, and a question from Docs Subagent");
-    await expect(row(page, "subagents").locator(".status")).toHaveText("1 Working");
+    await expect(row(page, "subagents").locator(".status")).toHaveText("1 Running");
     await expect(row(page, "background").locator(".row-sub")).toHaveText("1 of 3 jobs running");
     for (const id of ["review", "files", "terminal", "sidechat"]) await expect(row(page, id).locator("kbd")).toBeVisible();
     await expect(tools(page).locator("kbd")).toHaveCount(4);

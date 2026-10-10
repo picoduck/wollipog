@@ -288,8 +288,19 @@ test("Agents shows one status badge for the most urgent worker state and counts 
     const agents = row(panel.container, "subagents")!;
     assert.equal(fact(panel.container, "subagents"), "1 subagent in this session");
     assert.equal(agents.querySelectorAll(".status").length, 1, "one status badge");
-    assert.match(agents.querySelector(".status")?.textContent ?? "", /^1 Working$/);
-    assert.match(description(panel.container, agents), /1 Working 1 subagent in this session/);
+    assert.match(agents.querySelector(".status")?.textContent ?? "", /^1 Running$/);
+    assert.match(description(panel.container, agents), /1 Running 1 subagent in this session/);
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("an agent waiting on the user takes the Agents badge with the roster's attention word (#2857)", async () => {
+  const asking = { ...session, status: "input_required",
+    pendingApproval: { requestId: "edit", ownerToolUseId: "agent", title: "Edit: src/a.ts", options: [] } } as SessionView;
+  const panel = await mount({ git: gitWith(0), items: runningAgent, session: asking });
+  try {
+    assert.match(row(panel.container, "subagents")?.querySelector(".status")?.textContent ?? "", /^1 Approval Required$/);
   } finally {
     await panel.dispose();
   }
@@ -390,7 +401,7 @@ test("Agents counts the durable registry's subagents, as the Agents panel does, 
   const panel = await mount({ git: gitWith(0), items: [] });
   try {
     assert.equal(fact(panel.container, "subagents"), "1 subagent in this session");
-    assert.match(row(panel.container, "subagents")?.querySelector(".status")?.textContent ?? "", /^1 Working$/);
+    assert.match(row(panel.container, "subagents")?.querySelector(".status")?.textContent ?? "", /^1 Running$/);
   } finally {
     await panel.dispose();
   }
@@ -407,7 +418,7 @@ test("a subagent launched while the list is open reads the registry again and is
     await panel.setProps({ items: runningAgent });
     assert.ok(registryReads > reads, "the new identity reads the registry again");
     assert.equal(fact(panel.container, "subagents"), "1 subagent in this session");
-    assert.match(row(panel.container, "subagents")?.querySelector(".status")?.textContent ?? "", /^1 Working$/);
+    assert.match(row(panel.container, "subagents")?.querySelector(".status")?.textContent ?? "", /^1 Running$/);
   } finally {
     await panel.dispose();
   }

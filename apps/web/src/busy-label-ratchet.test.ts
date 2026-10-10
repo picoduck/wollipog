@@ -38,7 +38,6 @@ const BASELINE: Readonly<Record<string, number>> = {
   "components/AccessScopeControls.tsx": 1,
   "components/AddBoxDialog.tsx": 1,
   "components/AgentSessionDiscoveryDialog.tsx": 3,
-  "components/AgentsPanel.tsx": 1,
   "components/AutomationsView.tsx": 2,
   "components/BackgroundWorkPanel.tsx": 2,
   "components/Board.tsx": 1,

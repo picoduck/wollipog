@@ -289,17 +289,15 @@ test("RightPanel drops unmounted-generation focus intent and renders honest offl
       "a request is consumed when its session generation is not the mounted panel");
     assertNoDomNode(container.querySelector(".subagent-detail"),
       "a stale target does not select a different session's worker");
-    await act(async () => {
-      const history = [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Worker Filter"] button')]
-        .find((button) => button.textContent?.startsWith("History"))!;
-      history.click();
-    });
+    // An offline worker stays in Active, as Unverified, rather than moving to History (#2857).
+    assert.equal(container.querySelector('[aria-label="Worker Filter"] [aria-checked="true"]')?.getAttribute("aria-label"), "Active, 1");
+    assert.equal(container.querySelector(".agents-list .worker-row .status")?.textContent, "Unverified");
     await act(async () => container.querySelector<HTMLButtonElement>(".agents-list button")!.click());
     assert.match(container.querySelector(".subagent-detail-meta")?.textContent ?? "", /Recorded Activity/,
       "offline active state is explicitly recorded rather than current");
 
     await act(async () => container.querySelector<HTMLButtonElement>("#recorded")!.click());
-    assert.match(container.querySelector(".subagent-detail-meta")?.textContent ?? "", /Interrupted · Recorded Activity/,
+    assert.match(container.querySelector(".subagent-detail-meta")?.textContent ?? "", /Stopped · Recorded Activity/,
       "recorded state preserves the observed nonterminal tool lifecycle without claiming reachability");
   } finally {
     await act(async () => root.unmount());
