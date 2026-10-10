@@ -1582,6 +1582,72 @@ test.describe("a control reached from the keyboard is never left under the card'
   });
 });
 
+test.describe("Show Where Asked clears the collapsed card's top band on Shift+Tab (#2885)", () => {
+  for (const viewport of [{ width: 667, height: 375 }, { width: 844, height: 390 }]) {
+    for (const more of [false, true]) {
+      for (const theme of ["dark", "light"]) {
+        test(`${viewport.width}×${viewport.height}, ${more ? "two requests" : "one request"}, ${theme}`, async ({ page }) => {
+          await page.setViewportSize(viewport);
+          await page.goto(`/agent-questions-e2e.html?set=long-text&theme=${theme}${more ? "&more=1" : ""}`);
+          const card = dockedCard(page);
+          await expect(card).toHaveAttribute("data-card-scrolls", "");
+          await card.locator(".question-text").evaluate((title) => (title as HTMLElement).focus({ preventScroll: true }));
+          await page.keyboard.press("Tab");
+          await expect(showFullQuestion(card)).toBeFocused();
+          expect(await card.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+          // #2874 added Expand Question in the head between the inline toggle and Show Where Asked.
+          await page.keyboard.press("Shift+Tab");
+          await expect(card.getByRole("button", { name: "Expand Question", exact: true })).toBeFocused();
+          await page.keyboard.press("Shift+Tab");
+          const where = card.getByRole("button", { name: "Show Where Asked", exact: true });
+          await expect(where).toBeFocused();
+          await expect.poll(() => where.evaluate((element) => {
+            const card = element.closest<HTMLElement>(".question-card")!;
+            const box = element.getBoundingClientRect();
+            const style = getComputedStyle(element);
+            const outline = Math.max(0, parseFloat(style.outlineWidth) + parseFloat(style.outlineOffset));
+            const top = card.getBoundingClientRect().top + card.clientTop + parseFloat(getComputedStyle(card).paddingTop);
+            const bottom = card.querySelector(":scope > .request-card-foot")!.getBoundingClientRect().top;
+            return Math.min(box.top - outline - top, bottom - box.bottom - outline);
+          }), "the whole button and its focus outline clear both sticky edges").toBeGreaterThanOrEqual(-0.5);
+        });
+      }
+      test(`expanded header and pointer scrolling at ${viewport.width}×${viewport.height}, ${more ? "two requests" : "one request"}`, async ({ page }) => {
+        await page.setViewportSize(viewport);
+        await page.goto(`/agent-questions-e2e.html?set=long-text${more ? "&more=1" : ""}`);
+        const card = dockedCard(page);
+        const where = card.getByRole("button", { name: "Show Where Asked", exact: true });
+        // A pointer may scroll the collapsed head under its padding band. Pressing the still-visible
+        // part of the button must not reposition it between pointer down and the eventual click.
+        await card.evaluate((element) => { element.scrollTop = 12; });
+        const beforePointer = await card.evaluate((element) => element.scrollTop);
+        const box = await geometry(where);
+        await page.mouse.move((box.left + box.right) / 2, box.bottom - 2);
+        await page.mouse.down();
+        await expect(where).toBeFocused();
+        expect(await where.evaluate((element) => element.matches(":focus-visible"))).toBe(false);
+        expect(await card.evaluate((element) => element.scrollTop)).toBe(beforePointer);
+        await page.mouse.move(2, 2);
+        await page.mouse.up();
+        // The expanded head stays sticky; moving backward from Collapse Question to Show Where
+        // Asked must keep the reader's scroll position while the question is expanded.
+        await card.getByRole("button", { name: "Expand Question", exact: true }).click();
+        await expect(card).toHaveAttribute("data-question-expanded", "");
+        await card.evaluate((element) => { element.scrollTop = 80; });
+        const beforeKeyboard = await card.evaluate((element) => element.scrollTop);
+        expect(beforeKeyboard).toBeGreaterThan(0);
+        await page.keyboard.press("Shift+Tab");
+        await expect(where).toBeFocused();
+        expect(await card.evaluate((element) => element.scrollTop)).toBe(beforeKeyboard);
+        const [control, head, foot] = [await geometry(where), await geometry(card.locator(".request-card-head")), await geometry(card.locator(".request-card-foot"))];
+        expect(control.top).toBeGreaterThanOrEqual(head.top);
+        expect(control.bottom).toBeLessThanOrEqual(head.bottom);
+        expect(control.bottom).toBeLessThanOrEqual(foot.top);
+      });
+    }
+  }
+});
+
 test.describe("a collapsed question shows its first lines in a short reading column (#2828)", () => {
   /**
    * The collapsed card as a reader sees it without scrolling it: how many whole lines of the
