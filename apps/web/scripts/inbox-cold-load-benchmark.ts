@@ -75,7 +75,7 @@ try {
       totalScriptDurationMs: sample.totalScriptDurationMs, maxLongTaskMs: sample.maxLongTaskMs,
       firstContentfulPaintMs: sample.firstContentfulPaintMs }));
     if (evidence && run === 0) {
-      if (width > 760) await expect(page.locator(".detail-bar-title")).toBeVisible();
+      if (width > 760) await expect(page.getByText("Start the Conversation", { exact: true })).toBeVisible();
       await page.screenshot({ path: resolve(evidence, `inbox-${width}.png`) });
     }
     await context.close();
