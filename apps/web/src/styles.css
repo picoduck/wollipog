@@ -5366,13 +5366,10 @@ textarea {
   font: var(--type-small);
 }
 /* Text and JSON (§11.7): 12/20 mono, wrapped until Wrap Lines turns it off, when the well scrolls
-   sideways instead. */
-.art-code > pre {
-  max-height: 70vh;
-  overflow: auto;
-  font: 400 var(--text-sm)/20px var(--font-mono);
-}
+   sideways instead. Never up and down: a long log grows the panel's one scroller (§4.9). */
+.art-code > pre { font: 400 var(--text-sm)/20px var(--font-mono); }
 .art-code:not(.is-wrapped) > pre {
+  overflow-x: auto;
   white-space: pre;
   overflow-wrap: normal;
 }

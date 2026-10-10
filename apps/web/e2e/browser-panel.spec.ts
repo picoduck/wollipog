@@ -252,6 +252,20 @@ for (const [label, width, touch] of [["a 400px panel", 1440, false], ["a 390px p
       await expect(enlarge).toBeFocused();
     });
 
+    test("a long log grows the panel's one scroller rather than scrolling inside its well", async ({ page }) => {
+      await openBrowser(page, width);
+      await openArtifact(page, "web unit suite.log");
+      const pre = page.locator(".art-code pre");
+      const sizes = async () => pre.evaluate((element) => ({ client: element.clientHeight, scroll: element.scrollHeight }));
+      for (const wrapped of [true, false]) {
+        const { client, scroll } = await sizes();
+        expect(scroll - client, `no vertical scroll inside the well (wrapped: ${wrapped})`).toBeLessThanOrEqual(1);
+        if (wrapped) await page.getByRole("button", { name: "Wrap Lines" }).click();
+      }
+      const scroller = page.locator(".rpanel-scroll");
+      expect(await scroller.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+    });
+
     test("loading and a failed checksum show their states", async ({ page }) => {
       await openBrowser(page, width, "?preview=loading");
       await openArtifact(page, "web unit suite.log");
