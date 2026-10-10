@@ -1,7 +1,9 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
-import { ShellTerminal } from "../components/ShellTerminal.js";
+import { ShellTerminal, type ShellTerminalHandle } from "../components/ShellTerminal.js";
+import { TerminalSearch } from "../components/TerminalHead.js";
+import type { TerminalSearchResults } from "../shells-panel.js";
 import { installTerminalExitBoundary } from "../terminal-focus.js";
 import { useNewSessionShortcut } from "../useNewSessionShortcut.js";
 import "../styles.css";
@@ -79,6 +81,9 @@ function Fixture() {
     total: INITIAL_READONLY_OUTPUT.length,
   });
   const [searchTerm, setSearchTerm] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchResults, setSearchResults] = useState<TerminalSearchResults | null>(null);
+  const terminalRef = useRef<ShellTerminalHandle | null>(null);
   const [size, setSize] = useState({ width: 640, height: 180 });
 
   const openNewSession = useCallback(() => {
@@ -108,12 +113,33 @@ function Fixture() {
 
   return (
     <main className="main-body" style={{ display: "grid", gap: 16, padding: 20 }}>
+      {/* The dock head's search controls, driving the interactive terminal as the dock does (#2864). */}
+      <div className="shell-dock-head">
+        <div className="shell-dock-tools">
+          <TerminalSearch
+            open={searchOpen}
+            term={searchTerm}
+            results={searchResults}
+            onOpen={() => setSearchOpen(true)}
+            onTermChange={setSearchTerm}
+            onNext={() => terminalRef.current?.findNext(searchTerm)}
+            onPrevious={() => terminalRef.current?.findPrevious(searchTerm)}
+            onClose={() => {
+              setSearchOpen(false);
+              setSearchTerm("");
+              terminalRef.current?.focus();
+            }}
+          />
+        </div>
+      </div>
       <section className="xterm-e2e-sized" aria-label="Interactive Terminal Fixture" style={size}>
         <ShellTerminal
           text={interactive.text}
           total={interactive.total}
           interactive
           searchTerm={searchTerm}
+          onSearchResults={setSearchResults}
+          handleRef={terminalRef}
           theme="dark"
           scheme="wollipog"
           onData={(data) => interactiveTransport.receiveInput(data)}

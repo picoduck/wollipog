@@ -45,8 +45,6 @@ const REVIEWED: ReadonlyMap<string, string> = new Map([
   [".palette-input { outline: none }", "a text field: forced colors keeps the caret, which marks focus"],
   [".project-manager-search input { outline: 0 }", "a text field: forced colors keeps the caret, which marks focus"],
   [".archive-search input { outline: 0 }", "a text field: forced colors keeps the caret, which marks focus"],
-  [".shell-search:focus { outline: none; border-color: var(--focus) }", "a text input: forced colors keeps the caret, which marks focus"],
-  [".shell-input:focus { outline: none; border-color: var(--focus) }", "a text input: forced colors keeps the caret, which marks focus"],
   [":where( input:not([type=\"checkbox\"], [type=\"radio\"], [type=\"range\"], [type=\"file\"], [type=\"color\"]), textarea, select, .ui-select-trigger, .ui-searchable-combobox-input ):focus-visible { border-color: var(--focus); outline: 1px solid var(--focus); outline-offset: 0 }",
     "a 1px outline, which forced colors repaints in a system colour; text fields also keep the caret"],
   // Programmatic targets and rings drawn elsewhere.

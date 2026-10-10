@@ -38,7 +38,6 @@ const APPROVALS = "Approvals, Questions and Governance epic (#2226)";
 const AUTOMATIONS = "Automations epic (not yet filed)";
 const CONNECTIONS = "Connections epic (not yet filed)";
 const PODS = "Pods epic (not yet filed)";
-const TERMINAL = "Terminal epic (not yet filed)";
 
 /** The inventory, exact: [file, glyph, the enclosing literal's text, the owning area epic]. */
 const RECORDED: readonly (readonly [string, string, string, string])[] = [
@@ -50,8 +49,6 @@ const RECORDED: readonly (readonly [string, string, string, string])[] = [
   ["components/OnboardRunnerDialog.tsx", "↻", "↻ Retry", CONNECTIONS],
   ["components/PodsView.tsx", "→", "→", PODS],
   ["components/PodsView.tsx", "→", "→", PODS],
-  ["components/ShellDock.tsx", "×", "×", TERMINAL],
-  ["components/ShellDock.tsx", "×", "×", TERMINAL],
 ];
 
 /**

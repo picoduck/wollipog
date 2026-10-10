@@ -141,6 +141,9 @@ const TABLE: readonly Row[] = [
   ["provider_account", "sign_in_required", "Sign-In Required", "warning"],
   ["provider_account", "signed_out", "Signed Out", "neutral"],
   ["provider_account", "status_unknown", "Status Unknown", "neutral"],
+  // Terminal tab
+  ["shell", "exited", "Exited", "neutral"],
+  ["shell", "reconnecting", "Reconnecting", "info"],
   // Transcript share link
   ["share", "active", "Active", "success"],
   ["share", "expired", "Expired", "neutral"],
@@ -182,7 +185,7 @@ test("an unknown value reads Status Unavailable, never its raw enum or a prototy
 test("every label is Title Case copy, with no glyph and no CSS transform needed", () => {
   for (const domain of ["attention", "session", "machine", "project_location", "skill", "automation", "tool", "family",
     "job", "background_work", "queuedMessage", "messageReceipt", "delivery", "notification", "workflow", "pod", "member", "provider_account",
-    "share", "usage"] as const) {
+    "shell", "share", "usage"] as const) {
     for (const value of statusValues(domain)) {
       const { label } = statusMeta(domain, value);
       for (const text of [label]) {

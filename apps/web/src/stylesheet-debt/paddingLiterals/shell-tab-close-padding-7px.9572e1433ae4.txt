@@ -1,1 +1,0 @@
-|.shell-tab-close|padding|7px

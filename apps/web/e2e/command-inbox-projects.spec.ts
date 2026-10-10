@@ -1189,7 +1189,14 @@ test("Native TUI launch sends the harness intent and opens Terminal only after c
     if (!created) throw new Error("created session missing");
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot(created.id, { costBudgetUsd: 5 });
   });
-  await expect(page.getByRole("button", { name: "+ Agent TUI" })).toBeDisabled();
+  // The reason is New Agent TUI's second line in the New Tab menu, not only a tooltip (#2864).
+  await page.getByRole("region", { name: "Terminal" }).getByRole("button", { name: "New Tab" }).click();
+  const newAgentTui = page.getByRole("menu", { name: "New Tab" }).getByRole("menuitem", { name: "New Agent TUI" });
+  await expect(newAgentTui).toHaveAttribute("aria-disabled", "true");
+  await expect(newAgentTui).toHaveAccessibleDescription(
+    "Unavailable while this session has a cost budget, cost checkpoint or tool-call limit.",
+  );
+  await page.keyboard.press("Escape");
   await expect(page.getByRole("status").filter({ hasText: "Agent TUI is unavailable" })).toContainText(
     "Clear those guardrails or use Direct",
   );

@@ -11,16 +11,22 @@ import {
   resolveDockDrag,
 } from "../dock.js";
 import {
+  agentTuiUnavailableReason,
   exitedShellsWithoutTabs,
+  shellTabView,
   shellsRemovedAfterReconnect,
   shellsVisibleAfterClose,
   splitShellInput,
   supportsSessionAgentTui,
   sessionHasHookGovernance,
+  type TerminalSearchResults,
 } from "../shells-panel.js";
-import { ShellTerminal } from "./ShellTerminal.js";
-import { handleRovingChoiceKeyDown } from "./interactions.js";
-import { shortcutDisplay } from "../shortcuts.js";
+import { runnerDisplay } from "../runners.js";
+import { ShellTerminal, type ShellTerminalHandle } from "./ShellTerminal.js";
+import { TerminalNewTab, TerminalSearch, TerminalTabs, terminalTabId, type TerminalTabKind } from "./TerminalHead.js";
+import { ChevronDownIcon } from "./Icons.js";
+import { useIsCoarsePointer } from "./useIsMobile.js";
+import { shortcutAriaKeys, shortcutDisplay } from "../shortcuts.js";
 import type { ResolvedTheme } from "../theme.js";
 import { loadBrowserStorageValue, saveBrowserStorageValue } from "../instance-storage.js";
 
@@ -39,7 +45,11 @@ function viewportDockMax(): number {
  * boxes.
  *
  * POSIX/WSL shells are real PTYs (xterm pane IS the input); Windows-native shells are
- * pipe-based with a line-input row. Hiding detaches the dock; explicit tab close kills/forgets.
+ * pipe-based with a line-input row. Hide Terminal unmounts the dock and the shells keep running;
+ * explicit tab close kills/forgets.
+ *
+ * Its one 40px head (#2864; docs/design-system.md §4.6) is the tabs, then Search Output, New Tab and
+ * Hide Terminal. The tabs, search and New Tab are TerminalHead's, which any terminal host renders.
  */
 export function ShellDock({
   sessionId,
@@ -63,6 +73,10 @@ export function ShellDock({
   const shellRegistryRevision = useStoreSelector((s) => s.shellRegistryRevision.get(sessionId) ?? 0);
   const session = sessions.get(sessionId);
   const runner = session ? runners.get(session.runnerId) : undefined;
+  const box = useStoreSelector((s) => session
+    ? [...s.boxes.values()].find((candidate) => candidate.runnerId === session.runnerId)
+    : undefined);
+  const coarsePointer = useIsCoarsePointer();
   const runnerOnline = runner?.status === "online";
   const sessionAgent = runner?.agents.find((agent) => agent.id === session?.agentId);
   const sessionAgentContextKind = sessionAgent
@@ -99,7 +113,11 @@ export function ShellDock({
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
+  const [searchResults, setSearchResults] = useState<TerminalSearchResults | null>(null);
+  const terminalRef = useRef<ShellTerminalHandle | null>(null);
+  const pipeInputRef = useRef<HTMLInputElement | null>(null);
   const keyQueue = useRef<{ shellId: string; data: string } | null>(null);
   const keyTimer = useRef<number | null>(null);
   const resizeQueue = useRef<{ shellId: string; cols: number; rows: number } | null>(null);
@@ -272,6 +290,9 @@ export function ShellDock({
     }
   }, [shellOutput, shells, sessionId, removeShellOutput]);
 
+  // Another tab's terminal counts its own matches when it mounts; the last tab's count is not its.
+  useEffect(() => setSearchResults(null), [active]);
+
   const activeShell = shells?.find((s) => s.shellId === active) ?? null;
   const hookGovernanceActive = sessionHasHookGovernance(session?.agentCapabilities);
   const scrollback = active ? shellOutput.get(active) : undefined;
@@ -311,12 +332,10 @@ export function ShellDock({
     if (active === shellId) setInput("");
     if (restoreTabFocus) {
       window.setTimeout(() => {
-        const nextTab = nextActive
-          ? document.getElementById(`${tabsetId}-tab-${encodeURIComponent(nextActive)}`)
-          : null;
-        const newShellButton = document.getElementById(`${tabsetId}-new`) as HTMLButtonElement | null;
-        const dockClose = document.getElementById(`${tabsetId}-close`);
-        (nextTab ?? (newShellButton && !newShellButton.disabled ? newShellButton : dockClose))?.focus();
+        const nextTab = nextActive ? document.getElementById(terminalTabId(tabsetId, nextActive)) : null;
+        const newTabButton = document.getElementById(`${tabsetId}-new`) as HTMLButtonElement | null;
+        const hideButton = document.getElementById(`${tabsetId}-hide`);
+        (nextTab ?? (newTabButton && !newTabButton.disabled ? newTabButton : hideButton))?.focus();
       }, 0);
     }
     removeShellOutput(shellId);
@@ -450,10 +469,44 @@ export function ShellDock({
     setDragging(false);
   };
 
+  const folderPath = session?.worktreePath ??
+    runner?.workspaces?.find((workspace) => workspace.id === session?.workspaceId)?.path ??
+    null;
+  const tabs = (shells ?? []).map((shell) => shellTabView(shell, {
+    exited: Boolean(shellOutput.get(shell.shellId)?.exited),
+    folderPath,
+  }));
+  const machineName = runnerDisplay(runner, box, session?.runnerId).name || "This machine";
+  const machineOffline = `${machineName} is offline.`;
+  const agentName = sessionAgent?.name || session?.agentName || "The agent";
+  const newTabKinds: TerminalTabKind[] = [
+    { label: "New Shell", unavailableReason: runnerOnline ? null : machineOffline, open: () => void newShell() },
+    ...(tuiSupported ? [{
+      label: "New Agent TUI",
+      description: `${agentName}'s own terminal interface, outside Wollipog's tracking.`,
+      unavailableReason: agentTuiUnavailableReason({
+        machineOnline: runnerOnline,
+        machineName,
+        tuiOpen: tuiRunning,
+        guardrailBlocked: tuiGuardrailBlocked,
+      }),
+      open: () => void newShell("agent_tui"),
+    }] : []),
+  ];
+
+  /** Escape or Close Search: the term goes, and focus returns to what types into the shell. */
+  const closeSearch = () => {
+    setSearchOpen(false);
+    setSearchTerm("");
+    setSearchResults(null);
+    if (pipeInputRef.current) pipeInputRef.current.focus();
+    else terminalRef.current?.focus();
+  };
+
   if (!session) return null;
 
   return (
-    <div className={`shell-dock${dragging ? " is-dragging" : ""}`}>
+    <div className={`shell-dock${dragging ? " is-dragging" : ""}`} role="region" aria-label="Terminal">
       <div
         className="shell-dock-grip"
         role="separator"
@@ -479,69 +532,44 @@ export function ShellDock({
         onDoubleClick={() => setHeight(clampDockHeight(DOCK_DEFAULT_HEIGHT, viewportMax))}
       />
       <div className="shell-dock-head">
-        <span className="shell-dock-label">❯_ Shells</span>
-        <div className="shell-tabs" role="tablist" aria-label="Shells" onKeyDown={(event) => handleRovingChoiceKeyDown(event, "tab")}>
-          {(shells ?? []).map((s) => {
-            const dead = s.status === "exited" || shellOutput.get(s.shellId)?.exited;
-            return (
-              <span key={s.shellId} className={`shell-tab${active === s.shellId ? " is-active" : ""}`}>
-                <button
-                  id={`${tabsetId}-tab-${encodeURIComponent(s.shellId)}`}
-                  role="tab"
-                  aria-selected={active === s.shellId}
-                  aria-controls={`${tabsetId}-panel`}
-                  tabIndex={active === s.shellId ? 0 : -1}
-                  onClick={() => setActive(s.shellId)}
-                >
-                  {s.kind === "agent_tui" ? "Agent TUI" : s.name}
-                  {dead ? " (Exited)" : ""}
-                </button>
-                <button
-                  className="shell-tab-close"
-                  title="Close shell"
-                  aria-label={`Close Shell ${s.name}`}
-                  onClick={() => void closeShell(s.shellId)}
-                >
-                  ×
-                </button>
-              </span>
-            );
-          })}
-        </div>
-        <input
-          className="shell-search"
-          type="search"
-          value={searchTerm}
-          onChange={(event) => setSearchTerm(event.target.value)}
-          placeholder="Search output"
-          aria-label="Search Terminal Output"
+        <TerminalTabs
+          tabsetId={tabsetId}
+          panelId={`${tabsetId}-panel`}
+          tabs={tabs}
+          activeId={active}
+          onSelect={setActive}
+          onClose={(shellId) => void closeShell(shellId)}
         />
-        <button id={`${tabsetId}-new`} className="btn ghost sm" onClick={() => void newShell()} disabled={!runnerOnline || busy}>
-          {busy ? "Opening…" : "+ New Shell"}
-        </button>
-        {tuiSupported && (
+        <div className="shell-dock-tools">
+          <TerminalSearch
+            open={searchOpen}
+            term={searchTerm}
+            results={searchResults}
+            disabled={!active}
+            onOpen={() => setSearchOpen(true)}
+            onTermChange={setSearchTerm}
+            onNext={() => terminalRef.current?.findNext(searchTerm)}
+            onPrevious={() => terminalRef.current?.findPrevious(searchTerm)}
+            onClose={closeSearch}
+          />
+          <TerminalNewTab
+            id={`${tabsetId}-new`}
+            kinds={newTabKinds}
+            busy={busy}
+            disabledReason={runnerOnline ? null : machineOffline}
+          />
           <button
-            id={`${tabsetId}-new-tui`}
-            className="btn ghost sm"
-            onClick={() => void newShell("agent_tui")}
-            disabled={!runnerOnline || busy || tuiRunning || tuiGuardrailBlocked}
-            title={tuiGuardrailBlocked
-              ? "Tracked usage guardrails require Direct"
-              : "Open the provider's interactive TUI as a separate process from structured agent control"}
+            id={`${tabsetId}-hide`}
+            type="button"
+            className="icon-btn sm"
+            onClick={onClose}
+            title={`${coarsePointer ? "Hide Terminal" : `Hide Terminal (${shortcutDisplay("toggle-terminal")})`}\nShells keep running.`}
+            aria-label="Hide Terminal"
+            aria-keyshortcuts={shortcutAriaKeys("toggle-terminal")}
           >
-            + Agent TUI
+            <ChevronDownIcon size={14} />
           </button>
-        )}
-        <button
-          id={`${tabsetId}-close`}
-          type="button"
-          className="icon-btn shell-dock-close"
-          onClick={onClose}
-          title={`Detach Terminal Panel; Shells Keep Running (${shortcutDisplay("toggle-terminal")})`}
-          aria-label="Detach Terminal Panel; Shells Keep Running"
-        >
-          ×
-        </button>
+        </div>
       </div>
 
       <div
@@ -574,7 +602,9 @@ export function ShellDock({
                 text={scrollback?.text ?? ""}
                 total={scrollback?.total ?? 0}
                 interactive={interactive}
-                searchTerm={searchTerm}
+                searchTerm={searchOpen ? searchTerm : ""}
+                onSearchResults={setSearchResults}
+                handleRef={terminalRef}
                 onData={(d) => sendKeys(active, d)}
                 onResize={(cols, rows) => sendResize(active, cols, rows)}
               />
@@ -598,6 +628,7 @@ export function ShellDock({
                 <div className="shell-input-row">
                   <span className="shell-prompt">❯</span>
                   <input
+                    ref={pipeInputRef}
                     className="shell-input"
                     value={input}
                     placeholder="Type a command and press Enter… (pipe mode: no TTY on Windows-native sessions)"

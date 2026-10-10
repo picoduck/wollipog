@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   SHELL_INPUT_CHUNK_UNITS,
+  agentTuiUnavailableReason,
   appendOrderedShellChunk,
   exitedShellsWithoutTabs,
   markShellScrollbacksIncomplete,
@@ -9,8 +10,10 @@ import {
   shellStreamMayBeIncomplete,
   shellsRemovedAfterReconnect,
   shellsVisibleAfterClose,
+  shellTabView,
   splitShellInput,
   supportsAgentTui,
+  terminalSearchCountLabel,
   supportsSessionAgentTui,
   sessionHasHookGovernance,
   type ShellScrollback,
@@ -175,4 +178,50 @@ test("an Orchestrator with independent provider permissions has no Agent TUI aff
   assert.equal(supportsSessionAgentTui("claude-code", 200, "linux", "acceptEdits", "native", "normal"), true);
   assert.equal(supportsSessionAgentTui("claude-code", 200, "linux", "acceptEdits", "native"), true,
     "older control planes omit the role and keep the legacy rule");
+});
+
+test("shellTabView: a shell tab is its name and folder, an Agent TUI only its name (#2864)", () => {
+  const shell = { shellId: "s1", name: "Shell 1", kind: "shell" as const, status: "running" as const };
+  assert.deepEqual(shellTabView(shell, { exited: false, folderPath: "/home/dev/acme-storefront" }), {
+    id: "s1",
+    label: "Shell 1",
+    folder: "acme-storefront",
+    folderPath: "/home/dev/acme-storefront",
+    status: null,
+  });
+  // Windows paths and a trailing separator name the same last segment.
+  assert.equal(shellTabView(shell, { exited: false, folderPath: "C:\\work\\acme-storefront\\" }).folder, "acme-storefront");
+  assert.deepEqual(shellTabView(shell, { exited: false, folderPath: null }), {
+    id: "s1", label: "Shell 1", folder: null, folderPath: null, status: null,
+  });
+  const tui = shellTabView({ ...shell, kind: "agent_tui", name: "Shell 2" }, { exited: false, folderPath: "/w/acme" });
+  assert.equal(tui.label, "Agent TUI");
+  assert.equal(tui.folder, null);
+  assert.equal(tui.folderPath, null);
+});
+
+test("shellTabView: Exited comes from the registry or the exit echo; Reconnecting from the registry", () => {
+  const shell = { shellId: "s1", name: "Shell 1" };
+  assert.equal(shellTabView({ ...shell, status: "exited" }, { exited: false, folderPath: null }).status, "exited");
+  assert.equal(shellTabView({ ...shell, status: "running" }, { exited: true, folderPath: null }).status, "exited");
+  assert.equal(shellTabView({ ...shell, status: "reconnecting" }, { exited: false, folderPath: null }).status, "reconnecting");
+  assert.equal(shellTabView(shell, { exited: false, folderPath: null }).status, null);
+});
+
+test("agentTuiUnavailableReason: offline, then guardrails, then an open TUI", () => {
+  const base = { machineOnline: true, machineName: "Build Box", tuiOpen: false, guardrailBlocked: false };
+  assert.equal(agentTuiUnavailableReason(base), null);
+  assert.equal(agentTuiUnavailableReason({ ...base, tuiOpen: true }), "An Agent TUI is already open for this session.");
+  assert.equal(agentTuiUnavailableReason({ ...base, tuiOpen: true, guardrailBlocked: true }),
+    "Unavailable while this session has a cost budget, cost checkpoint or tool-call limit.");
+  assert.equal(agentTuiUnavailableReason({ ...base, machineOnline: false, guardrailBlocked: true }), "Build Box is offline.");
+});
+
+test("terminalSearchCountLabel: the match count beside the search field", () => {
+  assert.equal(terminalSearchCountLabel({ index: 0, count: 5 }), "1 of 5");
+  assert.equal(terminalSearchCountLabel({ index: 4, count: 5 }), "5 of 5");
+  assert.equal(terminalSearchCountLabel({ index: -1, count: 0 }), "No matches");
+  assert.equal(terminalSearchCountLabel({ index: -1, count: 3 }), "3 matches");
+  assert.equal(terminalSearchCountLabel({ index: -1, count: 1 }), "1 match");
+  assert.equal(terminalSearchCountLabel({ index: 0, count: 1000 }), "1 of 1,000+");
 });

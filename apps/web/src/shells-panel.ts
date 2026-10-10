@@ -15,6 +15,7 @@ import {
   type SessionCapabilities,
   type SessionRole,
   type ShellOutputChunk,
+  type ShellView,
 } from "@wollipog/protocol";
 
 export const SHELL_SCROLLBACK_CAP = 200_000;
@@ -190,4 +191,64 @@ export function exitedShellsWithoutTabs(
     .filter(([shellId, scrollback]) =>
       scrollback.sessionId === sessionId && scrollback.exited && !tabIds.has(shellId))
     .map(([shellId]) => shellId);
+}
+
+/** What one terminal tab shows (#2864): "Shell 1" and the working folder's name, or "Agent TUI". */
+export interface ShellTabView {
+  id: string;
+  label: string;
+  /** The last segment of the folder the shell runs in; null for an Agent TUI or an unknown folder. */
+  folder: string | null;
+  /** The full directory, for the tab's tooltip. */
+  folderPath: string | null;
+  /** A running shell has no status; an exited or reconnecting one says so after its label. */
+  status: "exited" | "reconnecting" | null;
+}
+
+export function shellTabView(
+  shell: Pick<ShellView, "shellId" | "name" | "kind" | "status">,
+  { exited, folderPath }: { exited: boolean; folderPath: string | null },
+): ShellTabView {
+  const tui = shell.kind === "agent_tui";
+  const folder = tui ? null : (folderPath ?? "").split(/[\\/]+/).filter(Boolean).pop() ?? null;
+  return {
+    id: shell.shellId,
+    label: tui ? "Agent TUI" : shell.name,
+    folder,
+    folderPath: folder ? folderPath : null,
+    status: exited || shell.status === "exited" ? "exited" : shell.status === "reconnecting" ? "reconnecting" : null,
+  };
+}
+
+/** Why New Agent TUI cannot open, as its menu item's second line (§9.1); null when it can. */
+export function agentTuiUnavailableReason({ machineOnline, machineName, tuiOpen, guardrailBlocked }: {
+  machineOnline: boolean;
+  machineName: string;
+  tuiOpen: boolean;
+  guardrailBlocked: boolean;
+}): string | null {
+  if (!machineOnline) return `${machineName} is offline.`;
+  // A guardrail outranks the open TUI: closing that one would not make another available.
+  if (guardrailBlocked) return "Unavailable while this session has a cost budget, cost checkpoint or tool-call limit.";
+  if (tuiOpen) return "An Agent TUI is already open for this session.";
+  return null;
+}
+
+/** The search addon's result counts; `index` is -1 when no match is selected. */
+export interface TerminalSearchResults {
+  index: number;
+  count: number;
+}
+
+/** Search stops counting here (the addon's highlight limit), so a common term reads "1 of 1,000+". */
+export const TERMINAL_SEARCH_LIMIT = 1000;
+
+/** The match count beside the search field: "2 of 5", "No matches". */
+export function terminalSearchCountLabel(results: TerminalSearchResults): string {
+  if (results.count <= 0) return "No matches";
+  const total = results.count >= TERMINAL_SEARCH_LIMIT
+    ? `${TERMINAL_SEARCH_LIMIT.toLocaleString("en-US")}+`
+    : String(results.count);
+  if (results.index < 0) return results.count === 1 ? "1 match" : `${total} matches`;
+  return `${results.index + 1} of ${total}`;
 }

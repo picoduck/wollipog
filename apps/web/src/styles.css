@@ -12084,43 +12084,14 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   margin-left: 0;
 }
 
-/* ------------------------- Shells panel (session console) ------------------------ */
-.shell-tabs {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  min-width: 0;
-  flex: 1;
-}
-.shell-tab {
-  display: inline-flex;
-  align-items: center;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-  font-size: 12px;
-}
-.shell-tab.is-active {
-  border-color: var(--accent);
-}
-.shell-tab > button {
-  min-height: var(--control-h);
-  border: 0;
-  background: transparent;
-  color: var(--text);
-  padding: 3px 4px 3px 8px;
-  cursor: pointer;
-  font-size: 12px;
-}
-.shell-tab-close {
-  color: var(--text-faint) !important;
-  padding: 3px 7px 3px 2px !important;
-}
-.shell-tab-close:hover {
-  color: var(--text) !important;
-}
-/* Bottom shell dock terminal panel. */
+/* ------------------------------ Session Companions ------------------------------
+   docs/design-system.md, epic #2871: the session's companions (Agents, Background Work, Side Chat and
+   Terminal), one block per component. */
+
+/* --- Terminal dock (§4.6). One head, --control-h-lg tall (40px, 48px on touch) over its hairline:
+   the shell tabs (§10.1), then Search Output, New Tab and Hide Terminal as small icon buttons (28px,
+   36px with a 44px hit area on touch). The head never wraps; tabs that do not fit scroll sideways
+   (#2864). --- */
 .shell-dock {
   flex: none;
   display: flex;
@@ -12154,37 +12125,72 @@ body.shell-dock-dragging * {
 }
 .shell-dock-head {
   display: flex;
+  flex: none;
   align-items: center;
-  gap: 10px;
-  padding: 5px 12px;
-  min-height: 34px;
+  gap: var(--space-2);
+  height: var(--control-h-lg);
+  padding: 0 var(--space-2) 0 var(--space-3);
+  box-shadow: inset 0 -1px 0 var(--border);
 }
-.shell-dock-label {
-  font-size: 13px;
-  font-weight: 600;
+/* Every tab keeps its Close's room, so tabs sit closer than §10.1's 24px: that room already parts them. */
+.shell-dock-head > .shell-tabs {
+  flex: 0 1 auto;
+  align-self: stretch;
+  gap: var(--space-2);
+}
+/* A tab and its Close: the underline stays under the tab, and Close sits just after it. */
+.shell-tab {
+  display: flex;
   flex: none;
-  padding: 2px 4px;
+  align-items: center;
+  gap: var(--space-1);
 }
+.shell-tab-folder {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-dim);
+  font-weight: var(--weight-normal);
+}
+/* Close shows on hover, on focus and on the selected tab with a fine pointer, keeping its room so
+   nothing moves; on touch only the selected tab has one. */
+@media (pointer: fine) {
+  .shell-tab:not(:hover, :focus-within, .is-active) > .shell-tab-close { visibility: hidden; }
+}
+@media (pointer: coarse) {
+  .shell-tab:not(.is-active) > .shell-tab-close { display: none; }
+}
+.shell-dock-tools {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  min-width: 0;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+/* Search Output, open: the field, its count, Previous and Next Match and Close Search. */
 .shell-search {
-  width: 150px;
-  min-width: 90px;
-  flex: 0 1 150px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--text);
-  padding: 4px 8px;
-  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
 }
-.shell-search:focus {
-  outline: none;
-  border-color: var(--focus);
+/* The field is 28px (36px on touch) inside a label one control tall, so on touch the label's 44px is
+   the field's target, as a small button borrows its hit area (§2.8). */
+.shell-search-field {
+  display: flex;
+  flex: 0 1 200px;
+  align-items: center;
+  min-width: 6em;
+  height: var(--control-h);
 }
-.shell-dock-close {
-  padding: 2px 8px;
-  font-size: 16px;
-  line-height: 1.2;
-  flex: none;
+.shell-search-field > input { height: var(--control-h-sm); }
+.shell-search-count {
+  min-width: 4.5em;
+  color: var(--text-dim);
+  font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 .shell-dock-body {
   display: flex;
@@ -12232,17 +12238,6 @@ body.shell-dock-dragging * {
   padding: 7px 10px;
   font-family: var(--font-terminal);
   font-size: 12.5px;
-}
-.shell-input:focus {
-  outline: none;
-  border-color: var(--focus);
-}
-
-@media (max-width: 700px) {
-  .shell-dock-head {
-    flex-wrap: wrap;
-    gap: 6px;
-  }
 }
 
 /* Project management --------------------------------------------------- */

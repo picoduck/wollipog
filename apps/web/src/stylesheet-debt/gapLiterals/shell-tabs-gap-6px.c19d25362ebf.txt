@@ -1,1 +1,0 @@
-|.shell-tabs|gap|6px

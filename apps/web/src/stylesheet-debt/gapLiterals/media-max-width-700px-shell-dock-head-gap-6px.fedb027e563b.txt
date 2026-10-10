@@ -1,1 +1,0 @@
-@media (max-width: 700px)|.shell-dock-head|gap|6px
