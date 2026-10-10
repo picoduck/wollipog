@@ -349,8 +349,9 @@ export function ShellDock({
     loadSeq.current++;
     closingShellIds.current.add(shellId);
     cancelRemovedShellWork(new Set([shellId]));
+    // A tab's Close and the exited shell's Close Tab both leave with the shell they close.
     const restoreTabFocus = document.activeElement instanceof HTMLElement
-      && document.activeElement.closest(".shell-tab") != null;
+      && document.activeElement.closest(".shell-tab, .term-status") != null;
     const remaining = (shellsRef.current ?? []).filter((shell) => shell.shellId !== shellId);
     const nextActive = active === shellId ? remaining[0]?.shellId ?? null : active;
     setShells(remaining);

@@ -313,7 +313,8 @@ export function ShellTerminal({
   }, [theme, scheme]);
 
   // A shell becomes interactive when it reconnects and read-only when it exits or its machine goes
-  // offline. The same terminal follows, and reports its size once it can take input again.
+  // offline. The same terminal follows, and reports its size once it can take input again, even an
+  // unchanged one: a report sent while the shell was going away may never have reached it.
   useEffect(() => {
     const term = termRef.current;
     if (!term) return;
@@ -321,6 +322,7 @@ export function ShellTerminal({
     term.options.cursorBlink = interactive;
     term.options.cursorInactiveStyle = interactive ? "outline" : "none";
     if (interactive) reportSize(term.cols, term.rows);
+    else reportedSizeRef.current = null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [interactive]);
 
@@ -333,6 +335,10 @@ export function ShellTerminal({
     if (!term) return;
     if (replayedHistoryRef.current !== historyKey) {
       replay(term, true);
+      // History is reloaded after a reconnect, which may have restored the shell at its opening size;
+      // the terminal reports its own again, as a remount used to.
+      reportedSizeRef.current = null;
+      reportSize(term.cols, term.rows);
       return;
     }
     const unseen = total - consumedRef.current;

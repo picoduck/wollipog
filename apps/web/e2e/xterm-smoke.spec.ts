@@ -233,6 +233,20 @@ test("a history revision replaces the scrollback after output still being parsed
   await expect(terminalRows(terminal).locator("span").filter({ hasText: "restored" })).not.toHaveClass(/xterm-fg-1/);
 });
 
+test("a shell that takes input again reports its size again, unchanged or after a history reload (#2865)", async ({ page }) => {
+  const logs = () => page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.logs().interactive.resizes);
+  await expect.poll(async () => (await logs()).length).toBe(1);
+  const [size] = await logs();
+  await page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.clearLogs());
+
+  await page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.setInteractiveMode(false));
+  await page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.setInteractiveMode(true));
+  await expect.poll(logs, { message: "a report that may not have arrived is sent again" }).toEqual([size]);
+
+  await page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.replaceInteractive("restored after reconnect\r\n"));
+  await expect.poll(logs, { message: "a history reload reports the size, as a remount did" }).toEqual([size, size]);
+});
+
 test("a manual selection over the active match takes the active wash with it (#2865)", async ({ page }) => {
   const terminal = page.getByRole("region", { name: "Interactive Terminal Fixture" });
   await page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.appendInteractive("test one\r\ntest two\r\n"));

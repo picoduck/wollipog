@@ -134,9 +134,12 @@ test.describe("at 1440px with a fine pointer", () => {
     const status = dock.locator(".term-status");
     await expect(status).toContainText("Shell exited with code 0.");
     await expect(status.getByRole("button", { name: "Start New Shell" })).toBeEnabled();
-    await status.getByRole("button", { name: "Close Tab" }).click();
+    await status.getByRole("button", { name: "Close Tab" }).focus();
+    await page.keyboard.press("Enter");
     await expect(dock.getByRole("tab", { name: /Shell 3/ })).toHaveCount(0);
     await expect(dock.locator(".term-status")).toHaveCount(0);
+    // The control is gone with its shell, so focus goes to the tab that is now selected.
+    await expect(dock.getByRole("tab", { name: /Shell 1/ })).toBeFocused();
   });
 
   test("an empty dock says what a shell is for and opens one", async ({ page }) => {

@@ -69,6 +69,8 @@ declare global {
       resizeInteractive(width: number, height: number): void;
       /** A history load: the interactive terminal's scrollback becomes `text` under a new revision. */
       replaceInteractive(text: string): void;
+      /** The interactive terminal's shell stops or starts taking input (a disconnect and back). */
+      setInteractiveMode(on: boolean): void;
       setSearchTerm(value: string): void;
       setTheme(theme: "dark" | "light"): void;
     };
@@ -99,6 +101,7 @@ function Fixture() {
   const [size, setSize] = useState({ width: 640, height: 180 });
   const [tab, setTab] = useState<"a" | "b">("a");
   const [theme, setTheme] = useState<"dark" | "light">(initialTheme);
+  const [takesInput, setTakesInput] = useState(true);
 
   const openNewSession = useCallback(() => {
     appShortcutCount += 1;
@@ -124,6 +127,7 @@ function Fixture() {
       replaceInteractive: (text) => flushSync(() => {
         setInteractive((current) => ({ text, total: text.length, revision: (current.revision ?? 0) + 1 }));
       }),
+      setInteractiveMode: (on) => flushSync(() => setTakesInput(on)),
       setSearchTerm,
       setTheme: (next) => {
         document.documentElement.dataset.theme = next;
@@ -158,7 +162,8 @@ function Fixture() {
           text={interactive.text}
           total={interactive.total}
           revision={interactive.revision}
-          interactive
+          interactive={takesInput}
+          pty
           searchTerm={searchTerm}
           onSearchResults={setSearchResults}
           handleRef={terminalRef}
