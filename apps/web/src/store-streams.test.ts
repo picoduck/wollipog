@@ -83,6 +83,35 @@ test("turn-start openings reject stale generations, sparse payloads and foreign 
   assert.equal(store.getState().eventWindows.has("s1"), false);
 });
 
+test("jumping from a turn-start opening preserves live rows after the HTTP tail", () => {
+  const store = new Store({ name: "session", id: "s1" });
+  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [] });
+  store.beginEventHistoryLoad("s1", 0, -1);
+  store.loadTurnStartWindow("s1", { events: [userEvent("s1", 10)], eventEpoch: 0,
+    turnStartSeq: 10, nextAfter: 10, tailSeq: 1_000, hasMoreLater: true, hasMoreOlder: true, cacheComplete: true }, -1);
+  for (let seq = 1_001; seq <= 1_003; seq++) message(store, { type: "session_event", event: event("s1", seq) });
+  const fence = store.getState().eventWindows.get("s1")!.laterGap!.fence;
+  assert.equal(store.deferEventTail(fence, Array.from({ length: 200 }, (_, i) => event("s1", 802 + i)), true, true), true);
+  assert.equal(store.promoteDeferredEventTail(fence), true);
+  assert.deepEqual(store.getState().events.get("s1")!.slice(-3).map(row => row.seq), [1_001, 1_002, 1_003]);
+});
+
+test("an overlapping jump tail completes a short turn without a stale gap", () => {
+  const store = new Store({ name: "session", id: "s1" });
+  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [] });
+  store.beginEventHistoryLoad("s1", 0, -1);
+  store.loadTurnStartWindow("s1", { events: Array.from({ length: 200 }, (_, i) => event("s1", 10 + i)),
+    eventEpoch: 0, turnStartSeq: 10, nextAfter: 209, tailSeq: 309, hasMoreLater: true,
+    hasMoreOlder: true, cacheComplete: true }, -1);
+  const fence = store.getState().eventWindows.get("s1")!.laterGap!.fence;
+  assert.equal(store.deferEventTail(fence, Array.from({ length: 200 }, (_, i) => event("s1", 110 + i)), true, true), true);
+  assert.equal(store.getState().events.get("s1")!.at(-1)!.seq, 309);
+  assert.equal(store.getState().eventWindows.get("s1")!.laterGap, undefined);
+  assert.equal(store.getState().eventWindows.get("s1")!.complete, true);
+  assert.equal(store.getState().eventHistory.get("s1")!.error, null);
+  assert.equal(store.isEventGapRecoveryCurrent(fence), false);
+});
+
 test("an incomplete turn-start cache needs an authoritative terminal page", () => {
   const store = new Store({ name: "session", id: "s1" });
   message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [] });

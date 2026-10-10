@@ -197,6 +197,13 @@ test("paced evidence of opening and loading later activity", async ({ browser })
     await expect(later).toBeEnabled();
     await expect(page.getByText(LONG_TURN_PROMPT, { exact: true })).toBeInViewport();
     await delay(4_000);
+    const jump = page.getByRole("button", { name: "Jump to Latest", exact: true });
+    await jump.focus();
+    await delay(1_500);
+    await jump.click();
+    await expect(page.locator("[data-later-activity-gap]")).toHaveCount(0);
+    await expect(page.locator(".detail-scroll")).toHaveAttribute("data-follow-tail-state", "following");
+    await delay(4_000);
   } finally {
     await context.close();
   }

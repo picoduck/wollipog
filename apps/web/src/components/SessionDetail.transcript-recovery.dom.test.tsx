@@ -174,6 +174,85 @@ test("a very long turn first renders its start and shares the opening across soc
   } finally { await unmountFixture(fixture); }
 });
 
+for (const count of [300, 1_000]) test(`Jump from a ${count}-event opening retires the gap and retains racing live rows`, async () => {
+  const pages = pageController();
+  const rows = (id: string, first: number, last: number): SessionEvent[] => Array.from({ length: last - first + 1 }, (_, i) => ({
+    id: first + i, seq: first + i, sessionId: id, ts: i,
+    payload: first + i === 1 ? { kind: "user_message", text: "Current prompt" }
+      : { kind: "agent_message", text: `Step ${first + i}`, final: true },
+  }));
+  const fixture = await mountFixture(pages, 0, { acknowledgeSubscription: false,
+    client: { getSessionTurnStartPage: async id => ({ events: rows(id, 1, 200), eventEpoch: 0,
+      turnStartSeq: 1, nextAfter: 200, tailSeq: count, hasMoreLater: true, hasMoreOlder: false, cacheComplete: true }) } });
+  try {
+    await flushAsyncWork();
+    const jump = [...fixture.container.querySelectorAll<HTMLButtonElement>("[data-later-activity-gap] button")]
+      .find(button => button.textContent === "Jump to Latest");
+    assert.ok(jump);
+    await act(async () => jump.click());
+    await flushAsyncWork();
+    assert.equal(pages.tailCalls.length, 1);
+    if (count > 300) for (let seq = count + 1; seq <= count + 3; seq++) {
+      await act(async () => fixture.socket.push({ type: "session_event", event: rows(fixture.sessionId, seq, seq)[0]! }));
+    }
+    await act(async () => pages.releaseTail({ events: rows(fixture.sessionId, count - 199, count),
+      eventEpoch: 0, cacheComplete: true, hasMoreOlder: count > 200 }));
+    await flushAsyncWork();
+    assert.equal(Boolean(fixture.container.querySelector("[data-later-activity-gap]")), false);
+    assert.equal(fixture.container.textContent!.includes("Could not load the latest activity"), false);
+    assert.equal(fixture.readLoadedEvents()!.at(-1)!.seq, count > 300 ? count + 3 : count);
+  } finally { await unmountFixture(fixture); }
+});
+
+test("a rejected turn-start response never exposes a racing tail as initial content", async () => {
+  const pages = pageController();
+  let reject!: (error: Error) => void;
+  const fixture = await mountFixture(pages, 0, { acknowledgeSubscription: false,
+    client: { getSessionTurnStartPage: () => new Promise((_, fail) => { reject = fail; }) } });
+  try {
+    await act(async () => fixture.socket.push({ type: "session_event", event: {
+      id: 999, seq: 999, sessionId: fixture.sessionId, ts: 1,
+      payload: { kind: "agent_message", text: "Must not be first", final: true },
+    } }));
+    await act(async () => reject(new Error("read failed")));
+    await flushAsyncWork();
+    assert.equal(fixture.container.textContent!.includes("Must not be first"), false);
+    assert.ok(fixture.container.querySelector(".transcript-history-notice"));
+  } finally { await unmountFixture(fixture); }
+});
+
+test("reconnecting a paused turn-start reader preserves its slice when a new prompt exists", async () => {
+  const pages = pageController();
+  let calls = 0;
+  const fixture = await mountFixture(pages, 0, { acknowledgeSubscription: false,
+    client: { getSessionTurnStartPage: async id => {
+      calls++;
+      const start = calls === 1 ? 10 : 1_001;
+      return { events: [{ id: start, seq: start, sessionId: id, ts: 1,
+        payload: { kind: "user_message", text: calls === 1 ? "Saved prompt" : "New prompt" } }],
+        eventEpoch: 0, turnStartSeq: start, nextAfter: start, tailSeq: start + 1_000,
+        hasMoreLater: true, hasMoreOlder: true, cacheComplete: true };
+    } } });
+  try {
+    await flushAsyncWork();
+    const saved = fixture.readLoadedEvents()!.map(event => event.seq);
+    await act(async () => fixture.socket.push({ type: "snapshot",
+      capabilities: { sessionSubscriptions: true, currentTurnOpening: true }, runners: [runner], boxes: [],
+      sessions: [fixture.readSession()!], runs: [], pods: [] }));
+    await act(async () => fixture.socket.push({ type: "session_upsert",
+      session: { ...session(`${fixture.sessionId}-busy`), status: "running" } }));
+    await flushAsyncWork();
+    const revision = fixture.socket.sent.filter(message => message.type === "session_subscriptions").at(-1)!.revision!;
+    await act(async () => fixture.socket.push({ type: "session_subscriptions_applied", revision,
+      sessionIds: [fixture.sessionId], podIds: [] }));
+    await flushAsyncWork();
+    assert.equal(calls, 1, "a new generation must not reopen over a paused reader");
+    assert.deepEqual(fixture.readLoadedEvents()!.map(event => event.seq), saved);
+    assert.equal(followState(fixture), "paused");
+    assert.equal(pages.forwardCalls(), 1, "the reader uses ordinary fenced reconnect recovery");
+  } finally { await unmountFixture(fixture); }
+});
+
 function EventSeeder({ sessionId, events }: { sessionId: string; events: SessionEvent[] }) {
   const ready = useStoreSelector((state) => state.sessions.has(sessionId));
   const { dispatch } = useStoreActions();

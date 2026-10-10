@@ -261,6 +261,8 @@ export function useFollowTail({
     if (stateRef.current === "following" && anchorRef.current === null) {
       stateRef.current = "paused";
       anchorRef.current = openingAnchor;
+      setState("paused");
+      storeSnapshot(currentKey, { state: "paused", anchor: openingAnchor }, snapshotGenerationRef.current);
     }
   }
   const snapshotGeneration = snapshotGenerationRef.current;

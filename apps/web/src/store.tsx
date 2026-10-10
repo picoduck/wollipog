@@ -2481,9 +2481,13 @@ export class Store {
     const ordered = mergeEvents(undefined, incoming);
     if (contiguousEventHighWater(ordered, ordered[0]!.seq - 1) !== ordered.at(-1)!.seq) return false;
     const pending = this.pendingGapLive.get(fence.sessionId);
-    const buffered = pending?.fence === fence ? pending.events.filter(event => event.seq >= ordered[0]!.seq) : [];
+    const previous = this.deferredTails.get(fence.sessionId);
+    const buffered = mergeEvents(pending?.fence === fence
+      ? pending.events.filter(event => event.seq >= ordered[0]!.seq) : [],
+      previous?.fence === fence ? previous.events.filter(event => event.seq >= ordered[0]!.seq) : []);
     const combined = mergeEvents(ordered, buffered);
-    const observedTailSeq = Math.max(combined.at(-1)!.seq, pending?.fence === fence ? pending.observedTailSeq : 0);
+    const observedTailSeq = Math.max(combined.at(-1)!.seq, pending?.fence === fence ? pending.observedTailSeq : 0,
+      previous?.fence === fence ? previous.observedTailSeq : 0);
     const bounded = this.boundedDeferredEvents(combined, fence.sessionId);
     if (!bounded) return false;
     const window = this.state.eventWindows.get(fence.sessionId) ?? {
@@ -2499,8 +2503,11 @@ export class Store {
       retainedReading = merged.filter(event => event.seq <= readingEnd);
       if (readingEnd >= observedTailSeq) {
         this.pendingGapLive.delete(fence.sessionId);
-        this.dispatch({ type: "event_gap_state", fence, events: retainedReading, window,
+        this.deferredTails.delete(fence.sessionId);
+        const { laterGap: _gap, ...completed } = window;
+        this.dispatch({ type: "event_gap_state", fence, events: retainedReading, window: { ...completed, complete: true },
           settled: true, complete: true, advanceCursor: true });
+        this.finishEventGapRecovery(fence);
         return true;
       }
       const remaining = retainedTail.filter(event => event.seq > readingEnd);
@@ -2566,8 +2573,7 @@ export class Store {
       reading = mergeEvents(reading, tail.events.filter(event => event.seq <= connected));
       end = connected;
     }
-    const done = page.cacheComplete === true && page.hasMoreCached !== true &&
-      end >= gap.tailSeq && end >= tail.httpTailSeq;
+    const done = page.cacheComplete === true && end >= gap.tailSeq && end >= tail.httpTailSeq;
     const { laterGap: _gap, ...baseWindow } = window!;
     if (done) this.deferredTails.delete(id);
     else {
