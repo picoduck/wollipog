@@ -87,6 +87,7 @@ import { SessionsNoMatches, SessionsSearchField } from "./SessionsSearch.js";
 import { SessionsListSkeleton, SessionsPreviewSkeleton, SessionsSituationState } from "./SessionsStates.js";
 import { SessionsArrivalFailed, useSessionsArrivalWait } from "./SessionsStates.js";
 import { SessionPlaceholder } from "./SessionPlaceholder.js";
+import { LazySessionBoundary } from "./LazySessionBoundary.js";
 import { sessionsSituation, sessionsSituationOffersNewSession, sessionsSyncingCount } from "../sessions-states.js";
 import { sessionsToRestore } from "../sessions-states.js";
 import { useOpenSearchPalette } from "./search-palette-context.js";
@@ -1891,6 +1892,8 @@ export function InboxView({
           {split && !stacked && <SessionsListWidthDivider grid={viewRef} width={listWidth} onWidthChange={changeListWidth} />}
           <div className="inbox-preview-pane" ref={previewPaneRef} data-focus-zone="main">
             {surfaceSessionId && !listSkeleton ? (
+              <LazySessionBoundary sessionId={surfaceSessionId} preview={!expanded} isMobile={isMobile}
+                containerRef={previewPaneRef} onBack={onCollapse ?? (() => navigate({ name: "inbox" }))}>
               <Suspense fallback={expanded
                 ? <SessionPlaceholder sessionId={surfaceSessionId} preview={false} isMobile={isMobile}
                     placeholder={{ title: "Loading Session…", hint: null, variant: "loading", actions: [] }}
@@ -1898,6 +1901,7 @@ export function InboxView({
                 : <SessionsPreviewSkeleton />}>
                 <InboxSessionDetail key={surfaceSessionId} {...surfaceProps} />
               </Suspense>
+              </LazySessionBoundary>
             ) : (
               // Rows always select their first (inbox.ts repairInboxSelection), so the preview is
               // empty only while the list loads.
