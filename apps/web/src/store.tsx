@@ -332,6 +332,7 @@ export interface State {
   authRequired: boolean;
   /** True after an authoritative UI snapshot has populated the resource maps. */
   snapshotLoaded: boolean;
+  sessionSummarySnapshots: boolean;
   /** Monotonic reconnect generation used to revalidate REST-only routed resources. */
   snapshotRevision: number;
   /** Session ids received in this connection's incomplete initial inventory. */
@@ -1240,6 +1241,7 @@ function reducer(state: State, action: Action): State {
             pendingStreamRecovery: null,
             snapshotLoaded: msg.sessionsComplete !== false,
             currentTurnOpeningSupported: msg.capabilities?.currentTurnOpening === true,
+            sessionSummarySnapshots: msg.sessionsComplete !== undefined,
             snapshotRevision: state.snapshotRevision + 1,
             pendingSnapshotSessionIds: msg.sessionsComplete === false ? new Set(msg.sessions.map((session) => session.id)) : undefined,
             projectsSupported: msg.capabilities?.projects === true || msg.projects !== undefined,
@@ -1359,8 +1361,8 @@ function reducer(state: State, action: Action): State {
                 agentCapabilities: previous.agentCapabilities,
                 executionTarget: previous.executionTarget,executionHandoff: previous.executionHandoff,
                 backgroundJobs: previous.backgroundJobs,backgroundJobsTruncated: previous.backgroundJobsTruncated,
-                queued: previous.queued,pendingPrompts: previous.pendingPrompts,queueHeld: previous.queueHeld,
-                activeTurnId: previous.activeTurnId,steeringAttempts: previous.steeringAttempts,
+                queued: previous.queued,pendingPrompts: previous.pendingPrompts,
+                steeringAttempts: previous.steeringAttempts,
                 commandInvocations: previous.commandInvocations,threadType: previous.threadType }
               : session);
             state.activity.set(session.id,reconcileSessionActivity(state.activity.get(session.id),previous,session));
@@ -1699,6 +1701,7 @@ function initialState(
     authRequired: false,
     snapshotLoaded: false,
     currentTurnOpeningSupported: false,
+    sessionSummarySnapshots: false,
     snapshotRevision: 0,
     projectsSupported: false,
     projectLocationCreationSupported: false,
@@ -1774,6 +1777,7 @@ interface StoreValue extends State {
   failOlderEventsLoad: (sessionId: string, error: string, requestedBase: number, eventEpoch?: number) => void;
   eventWindowBase: (sessionId: string) => number;
   loadSession: (session: SessionView) => void;
+  beginSessionDetailLoad: Store["beginSessionDetailLoad"];
   getSession: (sessionId: string) => SessionView | undefined;
   beginEventHistoryLoad: (
     sessionId: string,
@@ -2380,6 +2384,27 @@ export class Store {
   getSession = (sessionId: string): SessionView | undefined => this.state.sessions.get(sessionId);
   loadSession = (session: SessionView): void =>
     this.dispatch({ type: "msg", msg: { type: "session_upsert", session } });
+  /** Fence detail hydration against live changes, removal, and newer snapshot generations. */
+  beginSessionDetailLoad = (sessionId: string) => {
+    const previous=this.state.sessions.get(sessionId);
+    const revision=this.state.snapshotRevision;
+    let active=true;
+    const isCurrent=() => active && this.state.snapshotRevision === revision && this.state.sessions.get(sessionId) === previous;
+    return {
+      isCurrent,
+      cancel: () => { active=false; },
+      apply: (detail: SessionView): boolean => {
+        if (detail.id !== sessionId || !isCurrent()) return false;
+        active=false;
+        // Older lookup endpoints omit Hub-only state. Keep the live snapshot's queue until a
+        // current server explicitly reports queueHeld (including false) or the epoch changes.
+        const preserveLive=previous && sessionEventEpoch(previous) === sessionEventEpoch(detail) && detail.queueHeld === undefined;
+        this.loadSession(preserveLive ? { ...detail,queued: previous.queued ?? detail.queued,
+          queueHeld: previous.queueHeld,activeTurnId: previous.activeTurnId } : detail);
+        return true;
+      },
+    };
+  };
   /**
    * Fences a session list read outside the live stream (#2803). The returned `apply` adds only the
    * sessions the stream has not spoken for since the read began: none this client holds, none that
@@ -3025,7 +3050,7 @@ export function useHasStore(): boolean {
 }
 
 /** Stable action handles (never cause re-renders). */
-export function useStoreActions(): Pick<Store, "dispatch" | "navigate" | "setInboxPersistenceEnabled" | "setInboxSelection" | "setInboxSplit" | "setInboxRatio" | "setFilters" | "loadEvents" | "loadTurnStartWindow" | "loadOlderEvents" | "beginOlderEventsLoad" | "failOlderEventsLoad" | "eventWindowBase" | "loadSession" | "getSession" | "beginSessionsBackfill" | "beginEventHistoryLoad" | "failEventHistoryLoad" | "isEventGapRecoveryCurrent" | "beginEventGapRecovery" | "cancelEventGapRecovery" | "finishEventGapRecovery" | "loadEventGapWindow" | "deferEventTail" | "beginLaterEventsLoad" | "loadLaterEvents" | "failLaterEventsLoad" | "promoteDeferredEventTail" | "loadPodContext" | "eventHighWater" | "recoveryAfter" | "recoveryReadAfter" | "eventEpoch" | "reconcileShellOutputs" | "loadShellHistory" | "removeShellOutput" | "reconnectNow"> {
+export function useStoreActions(): Pick<Store, "dispatch" | "navigate" | "setInboxPersistenceEnabled" | "setInboxSelection" | "setInboxSplit" | "setInboxRatio" | "setFilters" | "loadEvents" | "loadTurnStartWindow" | "loadOlderEvents" | "beginOlderEventsLoad" | "failOlderEventsLoad" | "eventWindowBase" | "loadSession" | "beginSessionDetailLoad" | "getSession" | "beginSessionsBackfill" | "beginEventHistoryLoad" | "failEventHistoryLoad" | "isEventGapRecoveryCurrent" | "beginEventGapRecovery" | "cancelEventGapRecovery" | "finishEventGapRecovery" | "loadEventGapWindow" | "deferEventTail" | "beginLaterEventsLoad" | "loadLaterEvents" | "failLaterEventsLoad" | "promoteDeferredEventTail" | "loadPodContext" | "eventHighWater" | "recoveryAfter" | "recoveryReadAfter" | "eventEpoch" | "reconcileShellOutputs" | "loadShellHistory" | "removeShellOutput" | "reconnectNow"> {
   return useStoreHandle();
 }
 
@@ -3158,6 +3183,7 @@ export function useStore(): StoreValue {
     failOlderEventsLoad: store.failOlderEventsLoad,
     eventWindowBase: store.eventWindowBase,
     loadSession: store.loadSession,
+    beginSessionDetailLoad: store.beginSessionDetailLoad,
     getSession: store.getSession,
     beginEventHistoryLoad: store.beginEventHistoryLoad,
     failEventHistoryLoad: store.failEventHistoryLoad,

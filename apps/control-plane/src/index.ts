@@ -3865,7 +3865,7 @@ app.get("/api/sessions/archive-page", async (req, reply) => {
   };
 });
 
-registerSessionLookupRoute(app, { db, requestPrincipal });
+registerSessionLookupRoute(app, { db, requestPrincipal,withQueue: (session) => hub.withQueue(session,true) });
 
 app.get("/api/sessions/:id", async (req, reply) => {
   const id = (req.params as { id: string }).id;

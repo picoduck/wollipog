@@ -227,6 +227,7 @@ export function InboxView({
   const {
     navigate,
     loadSession,
+    beginSessionDetailLoad,
     beginSessionsBackfill,
     setInboxPersistenceEnabled,
     setInboxSelection,
@@ -1321,8 +1322,11 @@ export function InboxView({
   const decide = useCallback(async (sessionId: string, intent: InboxApprovalIntent) => {
     let targetSession = sessions.get(sessionId);
     if (targetSession?.projection === "summary") {
-      targetSession = (await api.session(sessionId)).session;
-      loadSession(targetSession);
+      const detailLoad=beginSessionDetailLoad(sessionId);
+      try {
+        targetSession = (await api.session(sessionId)).session;
+        if (!detailLoad.apply(targetSession)) return;
+      } finally { detailLoad.cancel(); }
     }
     const approval = targetSession ? prioritizedPendingRequests(targetSession.pendingApproval)[0] : undefined;
     if (!targetSession || !approval) return;
@@ -1364,7 +1368,7 @@ export function InboxView({
     } finally {
       endBusy(targetSession.id);
     }
-  }, [api, beginBusy, endBusy, loadSession, openRequest, sessions, showToast]);
+  }, [api, beginBusy, endBusy, loadSession, beginSessionDetailLoad, openRequest, sessions, showToast]);
 
   const hopExpanded = useCallback((direction: "next" | "previous") => {
     if (!expandedSessionId) return;

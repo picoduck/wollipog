@@ -47,6 +47,38 @@ test("summary SQL count stays constant and heavy fields remain on detail", () =>
   } finally { db.close(); }
 });
 
+test("summary snapshots retain live hold and turn state while detail retains heavy queued prompts", async () => {
+  const db=ControlPlaneDb.open(":memory:");
+  try {
+    seedSessionList(db,1);
+    const hub=new Hub(db);
+    const runner={ send() {} };
+    hub.attachRunner("r",runner);
+    hub.setSessionQueue("s-0",[{ id: "queued",text: "x".repeat(1_000_000) }],true,"turn-1");
+    const read=async () => {
+      const frames: string[]=[];
+      let complete=false;
+      hub.addUiClient({ send(data) { frames.push(data); if (JSON.parse(data).complete) complete=true; } },{
+        principal: sessionListPrincipal,deviceId: null,uiProtocolVersion: PROTOCOL_VERSION,close() { assert.fail("closed"); },
+      });
+      while (!complete) await new Promise<void>((resolve) => setImmediate(resolve));
+      return frames.flatMap((frame) => JSON.parse(frame).sessions)[0];
+    };
+    const summary=await read();
+    assert.equal(summary.activeTurnId,"turn-1");
+    assert.equal(summary.queueHeld,true);
+    assert.equal(summary.queued,undefined,"prompt bodies remain detail-only");
+    const detail=hub.withQueue(db.getSession("s-0")!);
+    assert.equal(detail.activeTurnId,"turn-1");
+    assert.equal(detail.queueHeld,true);
+    assert.equal(detail.queued![0]!.text.length,1_000_000);
+    hub.detachRunner("r",runner);
+    const offline=await read();
+    assert.equal(offline.queueHeld,false,"runner detach invalidates the cached live overlay");
+    assert.equal(offline.activeTurnId,undefined);
+  } finally { db.close(); }
+});
+
 test("team membership changes invalidate cached REST JSON, including other SQLite connections", () => {
   const directory = mkdtempSync(join(tmpdir(), "session-summary-access-"));
   const path = join(directory, "sessions.db");

@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { AuthPrincipal } from "./identity.js";
 import type { ControlPlaneDb } from "./db.js";
+import type { SessionView } from "@wollipog/protocol";
 import { withSessionCommandPermissions } from "./session-command-permissions.js";
 
 export function registerSessionLookupRoute(
@@ -9,6 +10,7 @@ export function registerSessionLookupRoute(
     db: Pick<ControlPlaneDb, "canAccessSession" | "getSession" | "isSessionOwner" | "isSessionDescendant" |
       "sessionHoldRecords">;
     requestPrincipal: (req: FastifyRequest) => AuthPrincipal | null;
+    withQueue?: (session: SessionView) => SessionView;
   },
 ): void {
   // Opaque ids may legally be ".", "..", or contain slash-plus-dot segments. A path parameter is
@@ -24,6 +26,6 @@ export function registerSessionLookupRoute(
       return reply.code(404).send({ error: "session not found" });
     }
     const session = deps.db.getSession(id);
-    return session ? { session: withSessionCommandPermissions(deps.db, principal, session) } : reply.code(404).send({ error: "session not found" });
+    return session ? { session: withSessionCommandPermissions(deps.db, principal, deps.withQueue?.(session) ?? session) } : reply.code(404).send({ error: "session not found" });
   });
 }

@@ -42,8 +42,13 @@ test("session lookup validates ids and fails closed outside the authorized scope
     localBootstrap: false,
   };
   const app = Fastify();
+  let overlays=0;
   registerSessionLookupRoute(app, {
     db,
+    withQueue: (session) => {
+      overlays++;
+      return { ...session,activeTurnId: "live-turn",queueHeld: true,queued: [{ id: "queued",text: "Live Prompt" }] };
+    },
     requestPrincipal: (req) => req.headers.authorization === "Bearer owner"
       ? owner
       : req.headers.authorization === "Bearer foreign" ? foreign : null,
@@ -74,4 +79,8 @@ test("session lookup validates ids and fails closed outside the authorized scope
   assert.equal(authorized.statusCode, 200);
   assert.equal(authorized.json().session.id, "archived/session");
   assert.equal(authorized.json().session.archived, true);
+  assert.equal(overlays,1,"the live overlay runs only after successful authorization");
+  assert.equal(authorized.json().session.activeTurnId,"live-turn");
+  assert.equal(authorized.json().session.queueHeld,true);
+  assert.equal(authorized.json().session.queued[0].text,"Live Prompt");
 });

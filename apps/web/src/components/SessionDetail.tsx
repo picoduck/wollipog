@@ -720,7 +720,7 @@ function messageNotSent(cause: unknown, machineName: string | undefined, retry?:
 export function SessionDetail(props: SessionDetailProps) {
   const api = useApi();
   const { sessionId } = props;
-  const { dispatch, loadSession, navigate } = useStoreActions();
+  const { dispatch, loadSession, beginSessionDetailLoad, navigate } = useStoreActions();
   // A paced upsert that moves only streaming fields (live usage, activity time, the message count
   // and the preview) keeps the version this view rendered, so it renders neither the view nor its
   // children four times a second while an agent streams (#2872). The parts that show one of those
@@ -730,6 +730,7 @@ export function SessionDetail(props: SessionDetailProps) {
   const detailEpoch = session?.eventEpoch ?? 0;
   const conn = useStoreSelector((s) => s.conn);
   const snapshotRevision = useStoreSelector((s) => s.snapshotRevision);
+  const summarySnapshot = useStoreSelector((s) => s.sessionSummarySnapshots);
   const snapshotLoaded = useStoreSelector((s) => s.snapshotLoaded);
   const isMobile = useIsMobile();
   const lastLookupKeyRef = useRef<string | null>(null);
@@ -742,23 +743,31 @@ export function SessionDetail(props: SessionDetailProps) {
   // Revalidate mounted detail once per snapshot generation. Paged reconnects keep the rendered
   // row (and its local UI) while this exact authorized read refreshes omitted detail fields.
   useEffect(() => {
-    if (!shouldHydrateRoutedSession(session, snapshotRevision, conn)) return;
+    if (!shouldHydrateRoutedSession(session, snapshotRevision, conn, summarySnapshot)) return;
     const lookupKey = JSON.stringify([sessionId, snapshotRevision, conn, lookupAttempt, detailEpoch]);
     if (lastLookupKeyRef.current === lookupKey) return;
     lastLookupKeyRef.current = lookupKey;
     let current = true;
     let complete = false;
+    const detailLoad=beginSessionDetailLoad(sessionId);
     setRoutedSessionLookup({ sessionId, complete: false, error: null });
     void api.session(sessionId)
       .then(({ session: loaded }) => {
         if (!current) return;
         complete = true;
-        loadSession(loaded);
+        if (!detailLoad.apply(loaded)) {
+          setLookupAttempt((attempt) => attempt+1);
+          return;
+        }
         setRoutedSessionLookup({ sessionId, complete: true, error: null });
       })
       .catch((cause: unknown) => {
         if (!current) return;
         complete = true;
+        if (!detailLoad.isCurrent()) {
+          setLookupAttempt((attempt) => attempt+1);
+          return;
+        }
         const notFound = cause instanceof ApiError && cause.status === 404;
         if (notFound) {
           dispatch({ type: "msg", msg: { type: "session_removed", sessionId } });
@@ -767,11 +776,12 @@ export function SessionDetail(props: SessionDetailProps) {
       });
     return () => {
       current = false;
+      detailLoad.cancel();
       if (!complete && lastLookupKeyRef.current === lookupKey) lastLookupKeyRef.current = null;
     };
   // Summary pages and live list updates can replace a row during its lookup. They must not cancel
   // that in-flight detail read unless whether the row needs hydration actually changed.
-  }, [api, sessionId, needsDetail, detailEpoch, loadSession, dispatch, conn, snapshotRevision, lookupAttempt]);
+  }, [api, sessionId, needsDetail, detailEpoch, beginSessionDetailLoad, dispatch, conn, snapshotRevision, summarySnapshot, lookupAttempt]);
 
   if (!session || session.projection === "summary") {
     return (

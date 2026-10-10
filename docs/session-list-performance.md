@@ -42,3 +42,9 @@ session detail endpoint. One compact active-worktree identity retains the list's
 metadata. Web previews, visible Board request cards and Session pages hydrate detail before rendering controls;
 runner tools use the existing `get_session` surface for full metadata. Native clients use the same
 web store and API contract. No history query or history recovery algorithm is changed here.
+
+Summary snapshots include the Hub's compact live queue hold and active-turn coordinates; prompt
+bodies remain detail-only. The authorized lookup overlays the live queue after authorization.
+Hydration fences late responses against newer live rows, removal, and snapshot generations, and
+preserves same-epoch live state from older lookup endpoints. Full-snapshot peers retain their
+existing refresh behavior; mounted detail revalidation runs once per summary snapshot generation.

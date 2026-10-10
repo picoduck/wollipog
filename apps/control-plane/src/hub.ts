@@ -487,6 +487,7 @@ export class Hub {
    * the runner. It is kept for the life of this socket, so per-event capability checks need not
    * reload the runner record (#2761). */
   attachRunner(runnerId: string, socket: Socket, protocolVersion?: number | null): void {
+    this.snapshotQueueRevision++;
     const previous = this.runnerSockets.get(runnerId);
     this.runnerSockets.set(runnerId, socket);
     if (protocolVersion !== undefined) this.runnerProtocolVersions.set(socket, protocolVersion);
@@ -524,6 +525,7 @@ export class Hub {
    */
   detachRunner(runnerId: string, socket: Socket): boolean {
     if (this.runnerSockets.get(runnerId) !== socket) return false;
+    this.snapshotQueueRevision++;
     this.runnerSockets.delete(runnerId);
     // Fail any in-flight requests waiting on this runner instead of letting them hang
     // until their timeout fires.
@@ -898,7 +900,7 @@ export class Hub {
       : allReminders.filter((reminder) => reminder.scheduleKind !== "someday");
     const worktreeSetupNoticeDismissals = reminderUserId === null
       ? [] : this.db.worktreeSetupNoticeDismissals(reminderUserId);
-    const snapshotSessions = sessions.map((s) => s.projection === "summary" ? s :
+    const snapshotSessions = sessions.map((s) => s.projection === "summary" ? this.withQueue(s,true) :
       withSessionCommandPermissions(this.db, info.principal, this.withQueue(s)));
     const snapshot: UiSnapshotMessage = {
       type: "snapshot",
@@ -1434,17 +1436,17 @@ export class Hub {
   /** Overlay a session's ephemeral prompt queue onto its DB-built view. Suppressed when the runner
    * is offline — a queue left over from a since-disconnected runner is meaningless (its in-memory
    * turns are gone). */
-  private withQueue(session: SessionView): SessionView {
+  withQueue(session: SessionView, authoritative = false): SessionView {
     const state = this.queuedBySession.get(session.id);
     if (state && this.isRunnerOnline(session.runnerId)) {
       return {
         ...session,
-        ...(state.queue.length ? { queued: overlayLiveQueue(session.queued, state.queue) } : {}),
-        ...(state.held ? { queueHeld: true } : {}),
-        ...(state.activeTurnId ? { activeTurnId: state.activeTurnId } : {}),
+        ...(session.projection !== "summary" && state.queue.length ? { queued: overlayLiveQueue(session.queued, state.queue) } : {}),
+        ...(authoritative ? { queueHeld: state.held,activeTurnId: state.activeTurnId }
+          : { ...(state.held ? { queueHeld: true } : {}),...(state.activeTurnId ? { activeTurnId: state.activeTurnId } : {}) }),
       };
     }
-    return session;
+    return authoritative ? { ...session,queueHeld: false,activeTurnId: undefined } : session;
   }
 
   /** Runner reported a session's not-yet-started prompt queue (ephemeral); relay to dashboards. */
