@@ -1,4 +1,4 @@
-import { useId, useState, type ReactNode } from "react";
+import { useId, useLayoutEffect, useRef, useState, type FocusEvent, type ReactNode } from "react";
 import type { GitCommitInfo } from "@wollipog/protocol";
 import type { GitFailure } from "../git-failure.js";
 import { CopyButton } from "./common.js";
@@ -192,21 +192,49 @@ export function CommitBar({
   // The bar's own visible reason; a refusal's is the toolbar's.
   const reason = offline ? "Reconnect to commit." : nothingToCommit && !refusal ? "Nothing to commit." : null;
   const anyBusy = busy !== null;
-  // A held action is disabled; the running one stays focusable and refuses presses (BusyButton).
-  const held = (kind: CommitBarBusy[]) => disabled || offline || refusal !== null || (anyBusy && !kind.includes(busy!));
-  const commitDisabled = held(["commit", "commit_all"]) || nothingToCommit;
-  const requestDisabled = held(["open", "push"]);
-  /** A disabled action names why: the refusal, else the bar's own reason (§3.1, §13.2). */
-  const gate = (blocked: boolean, ownReason: boolean) => ({
-    disabled: blocked,
-    ...(blocked && refusal
+  // Two kinds of unavailable. Blocked (offline, refused, nothing to commit) is `disabled` with its
+  // reason. Held — a read, a hunk stage or another of the bar's actions is running — passes in a
+  // moment, so it is `aria-disabled` and refuses presses, as BusyButton is while its own action
+  // runs: a held button keeps the focus a keyboard user left on it (§3.1).
+  const blocked = offline || refusal !== null;
+  const commitBlocked = blocked || nothingToCommit;
+  const commitHeld = disabled || (anyBusy && busy !== "commit" && busy !== "commit_all");
+  const requestHeld = disabled || (anyBusy && busy !== "open" && busy !== "push");
+  /** A blocked action names why: the refusal, else the bar's own reason (§3.1, §13.2). */
+  const gate = (isBlocked: boolean, isHeld: boolean, ownReason: boolean) => ({
+    disabled: isBlocked,
+    ...(!isBlocked && isHeld ? { "aria-disabled": true } : {}),
+    ...(isBlocked && refusal
       ? { title: refusal.reason, "aria-describedby": refusal.id }
-      : blocked && ownReason ? { "aria-describedby": reasonId } : {}),
+      : isBlocked && ownReason ? { "aria-describedby": reasonId } : {}),
   });
-  const commitGate = gate(commitDisabled, offline || nothingToCommit);
-  const requestGate = gate(requestDisabled, offline);
+  const commitGate = gate(commitBlocked, commitHeld, offline || nothingToCommit);
+  const requestGate = gate(blocked, requestHeld, offline);
+
+  // Some of the bar's controls go away under the focus they hold: Try Again and Dismiss take their
+  // notice with them, and a commit that leaves nothing to commit replaces Commit Staged with a
+  // disabled Commit. Focus then moves to the action now running, else the request action, rather
+  // than dropping to the page.
+  const barRef = useRef<HTMLElement>(null);
+  const focusedControl = useRef<HTMLElement | null>(null);
+  const trackFocus = (event: FocusEvent<HTMLElement>) => { focusedControl.current = event.target; };
+  const releaseFocus = (event: FocusEvent<HTMLElement>) => {
+    const left = event.target;
+    // Focus that moved on, or a click elsewhere, is the person's own; a removed control is not.
+    queueMicrotask(() => { if (left.isConnected && focusedControl.current === left) focusedControl.current = null; });
+  };
+  useLayoutEffect(() => {
+    const lost = focusedControl.current;
+    if (!lost || lost.isConnected) return;
+    focusedControl.current = null;
+    const active = document.activeElement;
+    if (active && active !== document.body && active.isConnected) return;
+    const running = barRef.current?.querySelector<HTMLElement>('.commit-bar-actions [aria-busy="true"]');
+    (running ?? openRequestRef?.current)?.focus();
+  });
 
   const commit = (all: boolean) => {
+    if (commitHeld || commitBlocked) return;
     if (!message.trim()) {
       setMessageError("Enter a commit message.");
       document.getElementById(inputId)?.focus();
@@ -219,14 +247,15 @@ export function CommitBar({
   const requestAction = requestOpen
     ? { label: `Push to ${requestName}`, busyKind: "push" as const, progress: `Pushing to the ${requestName.toLowerCase()}…`, run: onPushToRequest }
     : { label: `Open ${requestName}…`, busyKind: "open" as const, progress: `Opening the ${requestName.toLowerCase()}…`, run: onOpenRequest };
-  const requestButton = (primary: boolean) => (
+  // One element in every state, so it is never remounted under the focus it holds.
+  const requestButton = (
     <BusyButton
       ref={openRequestRef}
-      className={primary ? "btn primary sm" : "btn sm"}
+      className={nothingToCommit ? "btn primary sm" : "btn sm"}
       busy={busy === requestAction.busyKind}
       progress={requestAction.progress}
       {...requestGate}
-      onClick={requestAction.run}
+      onClick={() => { if (!requestHeld) requestAction.run(); }}
     >
       {requestAction.label}
     </BusyButton>
@@ -236,7 +265,8 @@ export function CommitBar({
   let commitControl: ReactNode;
   if (nothingToCommit) {
     commitControl = (
-      <button type="button" className="btn sm" {...commitGate}>Commit</button>
+      // Shown first, by `order`, so the primary stays last while the DOM order never changes.
+      <button type="button" className="btn sm commit-bar-idle-commit" {...commitGate}>Commit</button>
     );
   } else if (!staged) {
     commitControl = (
@@ -271,10 +301,9 @@ export function CommitBar({
           aria-haspopup="menu"
           aria-expanded={menuOpen}
           aria-controls={menu.menuId}
-          {...commitGate}
-          disabled={commitDisabled || anyBusy}
-          onClick={menu.toggle}
-          onKeyDown={menu.onTriggerKeyDown}
+          {...gate(commitBlocked, commitHeld || anyBusy, offline)}
+          onClick={() => { if (!commitHeld && !anyBusy) menu.toggle(); }}
+          onKeyDown={(event) => { if (!commitHeld && !anyBusy) menu.onTriggerKeyDown(event); }}
         >
           <ChevronDownIcon size={14} aria-hidden="true" />
         </button>
@@ -309,7 +338,7 @@ export function CommitBar({
     : hasChanges && fileCount.count > 0 ? `${fileCount.label} uncommitted ${files}` : null;
 
   return (
-    <section className="commit-bar" aria-label="Commit">
+    <section className="commit-bar" aria-label="Commit" ref={barRef} onFocus={trackFocus} onBlur={releaseFocus}>
       {notice && (
         <BarNotice
           notice={notice}
@@ -340,17 +369,8 @@ export function CommitBar({
       </div>
       {reason && <p className="commit-bar-reason" id={reasonId}>{reason}</p>}
       <div className="commit-bar-actions">
-        {nothingToCommit ? (
-          <>
-            {commitControl}
-            {requestButton(true)}
-          </>
-        ) : (
-          <>
-            {requestButton(false)}
-            {commitControl}
-          </>
-        )}
+        {requestButton}
+        {commitControl}
       </div>
     </section>
   );

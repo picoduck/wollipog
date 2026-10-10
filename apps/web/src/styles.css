@@ -13107,6 +13107,11 @@ body.shell-dock-dragging * {
   justify-content: flex-end;
   gap: var(--space-2);
 }
+/* With nothing to commit the request action is the primary, so the disabled Commit is drawn before
+   it. Only the drawing moves: the request button keeps its place in the DOM, and with it its focus. */
+.commit-bar-idle-commit {
+  order: -1;
+}
 /* Git's raw output, behind Show Details: capped, so a long rejection never pushes the field and its
    buttons out of the foot. */
 .commit-bar-output {

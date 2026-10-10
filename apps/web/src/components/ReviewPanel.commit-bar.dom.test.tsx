@@ -361,8 +361,10 @@ test("with nothing staged the primary is Commit, without a menu", async () => {
 test("with nothing to commit, Open Pull Request… is the primary and Commit says why it can't run", async () => {
   const harness = await mountReview({ status: CLEAN });
   try {
-    assert.deepEqual(actionRow(harness.container), ["Commit", "Open Pull Request… (primary)"]);
+    // The DOM keeps the request button first in every state; the disabled Commit is drawn before it.
+    assert.deepEqual(actionRow(harness.container), ["Open Pull Request… (primary)", "Commit"]);
     const commit = only(bar(harness.container), "Commit");
+    assert.ok(commit.classList.contains("commit-bar-idle-commit"), "Commit is drawn first, so the primary stays last");
     assert.equal(commit.disabled, true);
     const reason = domWindow.document.getElementById(commit.getAttribute("aria-describedby")!);
     assert.equal(reason?.textContent, "Nothing to commit.", "the reason is visible text the button points to");
@@ -776,9 +778,72 @@ test("a request opened while the status refresh holds the bar keeps keyboard pos
     await release();
     await settleFocus();
     assertNoDomNode(dialog(), "the dialog closed");
-    assert.equal(only(bar(harness.container), "Push to Pull Request").disabled, true, "the opener is held");
-    assert.equal(focusedName(), `input:  #${bar(harness.container).querySelector("input")!.id}`,
-      "focus rests on the commit message, not the page");
+    const pushButton = only(bar(harness.container), "Push to Pull Request");
+    assert.equal(pushButton.disabled, false, "a hold is not disabled, which would drop the focus");
+    assert.equal(pushButton.getAttribute("aria-disabled"), "true", "it is held: aria-disabled");
+    assert.equal(focusedName(), "button: Push to Pull Request", "focus returns to the opener, not the page");
+    await click(pushButton);
+    assert.equal(harness.sent.length, 1, "a held button refuses presses");
+  } finally {
+    await harness.unmount();
+  }
+});
+
+/* Cross-model review epoch 2 round 2 (#2893) */
+
+test("a dialog dismissed while its request runs leaves focus on the request button through a clean status", async () => {
+  const harness = await mountReview({ status: statusOf({ stagedCount: 3 }) });
+  try {
+    const opener = only(bar(harness.container), "Open Pull Request…");
+    opener.focus();
+    await click(opener);
+    harness.reply({ pr: { url: "https://github.com/acme/shop/pull/77", branch: "agent/commit-bar", pushed: true, createdWithGh: true, created: true, provider: "github", kind: "pull_request" } });
+    const release = harness.hold();
+    await act(async () => {
+      fireDomEvent.submit(dialog()!.querySelector("form")!);
+      await Promise.resolve();
+    });
+    await act(async () => { fireDomEvent.keyDown(dialog()!, { key: "Escape" }); });
+    await settleFocus();
+    assertNoDomNode(dialog(), "Escape closed the dialog while the request ran");
+    assert.equal(focusedName(), "button: Open Pull Request…", "focus is back on the running opener");
+
+    await release();
+    await harness.render({ status: CLEAN });
+    await settleFocus();
+    assert.equal(focusedName(), "button: Push to Pull Request", "the same button, relabelled, still has focus");
+  } finally {
+    await harness.unmount();
+  }
+});
+
+test("a commit that leaves nothing to commit hands focus to the request action", async () => {
+  const harness = await mountReview({ status: statusOf({ stagedCount: 3 }) });
+  try {
+    const commit = only(bar(harness.container), "Commit Staged");
+    commit.focus();
+    await click(commit);
+    await harness.render({ status: CLEAN });
+    await settleFocus();
+    assert.equal(focusedName(), "button: Open Pull Request…", "not the page");
+  } finally {
+    await harness.unmount();
+  }
+});
+
+test("Try Again takes its notice away and leaves focus on the action it started", async () => {
+  const harness = await mountReview();
+  try {
+    harness.reply({ error: "fatal: unable to write new index file" });
+    await click(only(bar(harness.container), "Commit Staged"));
+    const retry = only(bar(harness.container), "Try Again");
+    retry.focus();
+    const release = harness.hold();
+    await click(retry);
+    await settleFocus();
+    assertNoDomNode(bar(harness.container).querySelector(".notice"), "the notice went as the action started");
+    assert.equal(focusedName(), "button: Commit Staged", "focus is on the running Commit Staged");
+    await release();
   } finally {
     await harness.unmount();
   }
