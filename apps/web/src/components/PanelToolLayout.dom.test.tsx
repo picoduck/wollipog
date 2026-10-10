@@ -119,3 +119,33 @@ test("removing the focused field brings the foot back", async () => {
   assert.equal(foot().classList.contains("is-yielded"), false);
   await act(async () => root.unmount());
 });
+
+/** An editor that closes itself, as the diff viewer's Cancel does: the layout above never rerenders. */
+function SelfClosingEditor() {
+  const [open, setOpen] = useState(true);
+  return open ? (
+    <div>
+      <textarea aria-label="Own Finding" />
+      <button type="button" onClick={() => setOpen(false)}>Cancel</button>
+    </div>
+  ) : null;
+}
+
+test("an editor removing itself with focus still brings the foot back", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  await act(async () => root.render(
+    <PanelToolLayout foot={<input aria-label="Commit Message" />}><SelfClosingEditor /></PanelToolLayout>,
+  ));
+  const field = container.querySelector<HTMLTextAreaElement>('[aria-label="Own Finding"]')!;
+  await act(async () => field.focus());
+  const foot = () => container.querySelector(".rpanel-foot")!;
+  assert.equal(foot().classList.contains("is-yielded"), true);
+  // A tap on Cancel moves no focus on iOS: the textarea is still focused when its card goes.
+  const cancel = [...container.querySelectorAll("button")].find((button) => button.textContent === "Cancel")!;
+  await act(async () => cancel.click());
+  assert.equal(field.isConnected, false);
+  assert.equal(foot().classList.contains("is-yielded"), false);
+  await act(async () => root.unmount());
+});
