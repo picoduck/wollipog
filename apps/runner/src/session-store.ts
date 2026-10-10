@@ -630,6 +630,32 @@ function processStartTime(pid: number): string | null {
 }
 const OWN_PROCESS_START = processStartTime(process.pid);
 
+/** Temp files the meta, lock, history index and reset-intent writers rename or link into place
+ * (`<file>.<pid>.<uuid>.tmp`), and guards a break moved aside. Each is removed by its writer, so one
+ * left behind names a writer that died in between. */
+const WRITER_TEMP_FILE =
+  /^(?:meta\.json|lock|lock\.guard|events\.idx|events\.reset\.json)\.([1-9]\d*)\.[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\.tmp$|^lock\.guard\.([1-9]\d*)\.[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\.broken$/;
+
+/** Names of the writer temp files this process may still rename after an await (the background meta
+ * flush), across every store. Every other writer writes and renames without yielding, and no worker
+ * thread opens a store, so the sweep, which never yields either, finds this process between a write
+ * and its rename only for a name in this set. */
+const writerTempsInFlight = new Set<string>();
+
+/** True when the process named in a writer temp file can no longer rename or link it: its pid has
+ * exited, or it is this process and the file is not in flight. A live pid keeps its file, even one
+ * a later process reused (EPERM counts as alive), so a stalled writer's file is never taken from it.
+ * Each name holds a fresh uuid, so no later writer ever reuses a removed path. */
+function writerTempOrphaned(name: string, pid: number): boolean {
+  if (pid === process.pid) return !writerTempsInFlight.has(name);
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ESRCH";
+  }
+}
+
 type LockGuardRecord = { pid?: unknown; start?: unknown; token?: unknown };
 
 function parseLockGuard(raw: string): LockGuardRecord | null {
@@ -1919,6 +1945,7 @@ export class SessionStore {
       }
       const tmp = `${p}.${process.pid}.${randomUUID()}.tmp`;
       let renamed = false;
+      writerTempsInFlight.add(basename(tmp));
       try {
         await this.writeSyncedFileInBackground(tmp, JSON.stringify(next, null, 2));
         if (this.pending.get(id)?.batch !== entry.batch) return; // consumed or dropped meanwhile
@@ -1927,6 +1954,7 @@ export class SessionStore {
         renamed = true;
       } finally {
         if (!renamed) rmSync(tmp, { force: true });
+        writerTempsInFlight.delete(basename(tmp));
       }
       // Deltas recorded during the write are a superset of this snapshot and stay pending.
       if (this.pending.get(id) === entry) this.pending.delete(id);
@@ -2583,6 +2611,28 @@ export class SessionStore {
     return removed;
   }
 
+  /** Remove meta, lock, history index and reset-intent temp files whose writer died between writing
+   * and renaming (or linking) them. A file goes only once it is past the orphan grace period and its
+   * writer is gone, so a stalled live writer still finds its temp file when it resumes. */
+  private cleanupWriterTemps(id: string, now = Date.now(), limit = 32): number {
+    let removed = 0;
+    try {
+      for (const entry of readdirSync(this.dir(id), { withFileTypes: true })) {
+        if (removed >= limit) break;
+        const match = entry.isFile() ? WRITER_TEMP_FILE.exec(entry.name) : null;
+        if (!match) continue;
+        const path = join(this.dir(id), entry.name);
+        try {
+          if (now - statSync(path).mtimeMs < this.historyCompactionPolicy.orphanGraceMs) continue;
+          if (!writerTempOrphaned(entry.name, Number(match[1] ?? match[2]))) continue;
+          rmSync(path, { force: true });
+          removed += 1;
+        } catch { /* removed concurrently, or open on Windows; retry next pass */ }
+      }
+    } catch { /* session removed concurrently */ }
+    return removed;
+  }
+
   /** Bounded idle maintenance. It never steals a fresh writer lock and processes only `limit`
    * sessions per pass, keeping fleet startup and command completion independent of archive work.
    * The lock is released while a compaction copies, so a turn may start at any point. */
@@ -2613,6 +2663,7 @@ export class SessionStore {
         result.bytesArchived += compacted.bytesArchived;
         if (this.ownsLock(meta.sessionId, owner)) {
           result.orphansRemoved += this.cleanupHistoryOrphans(meta.sessionId);
+          result.orphansRemoved += this.cleanupWriterTemps(meta.sessionId);
         }
       } catch {
         result.errors += 1;

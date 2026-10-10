@@ -57,6 +57,15 @@ session's lock then stays unavailable until that file is deleted by hand while n
 session. Pids and start times are host-local, so the data directory must not be shared across
 machines.
 
+`meta.json`, `lock`, `lock.guard`, `events.idx`, and `events.reset.json` are written through
+`<file>.<pid>.<uuid>.tmp` files that their writer renames or links into place and then removes; a
+break moves a guard aside to `lock.guard.<pid>.<uuid>.broken` before removing it. A process that dies
+in between leaves the file behind. Idle maintenance removes such a file once it is older than the
+orphan grace period (one hour) and its writer is gone: the pid in its name has exited, or it is the
+maintaining process and the file is not one of its background meta writes still in flight. A live
+pid keeps its file, even when a later process reused that pid, so a stalled writer always finds its
+temp file when it resumes.
+
 Compaction needs the normal per-session writer lock to plan and to publish. It keeps the event loop
 responsive: no single synchronous step is a bulk copy, a whole-range parse, or an fsync of a large
 file. It:
