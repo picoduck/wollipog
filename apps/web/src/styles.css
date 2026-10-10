@@ -5447,6 +5447,7 @@ textarea {
 }
 /* Phase 7: cost-budget ceiling input in the session-controls row */
 
+.composer[hidden] { display: none; }
 .composer {
   border-top: 1px solid var(--border);
   padding-top: 12px;

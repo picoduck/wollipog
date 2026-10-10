@@ -853,3 +853,36 @@ test("on a phone the panel's bar leads with Back to Session, has no Close, and B
     surface.remove();
   }
 });
+
+test("crossing the phone breakpoint with the panel open keeps focus on the panel's switcher (#2843)", async () => {
+  let state!: RightPanelState;
+  const panel = await mountPanel(<PanelHarness onState={(next) => { state = next; }} />);
+  const resize = () => act(async () => { domWindow.dispatchEvent(new domWindow.Event("resize")); });
+  const focused = () => domWindow.document.activeElement as unknown as Element | null;
+  try {
+    await act(async () => state.show("decisions"));
+    const close = panel.container.querySelector('[aria-label="Close Panel"]') as unknown as HTMLElement;
+    close.focus();
+    phoneViewport = true;
+    await resize();
+    assertNoDomNode(panel.container.querySelector('[aria-label="Close Panel"]'), "a phone's bar has no Close");
+    assert.ok(focused() === (panel.container.querySelector(".rpanel-switcher") as unknown as Element),
+      "focus that fell with Close Panel lands on the switcher");
+
+    (panel.container.querySelector('[aria-label="Back to Session"]') as unknown as HTMLElement).focus();
+    phoneViewport = false;
+    await resize();
+    assert.ok(focused() === (panel.container.querySelector(".rpanel-switcher") as unknown as Element),
+      "and focus that fell with Back to Session does too");
+
+    // Focus somewhere else that survives the crossing stays where it is.
+    const outside = panel.container.querySelector("#recorded") as unknown as HTMLElement;
+    outside.focus();
+    phoneViewport = true;
+    await resize();
+    assert.ok(focused() === (outside as unknown as Element));
+  } finally {
+    phoneViewport = false;
+    await panel.dispose();
+  }
+});

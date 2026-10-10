@@ -472,6 +472,17 @@ export function RightPanel({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.id, state.open]);
 
+  // Crossing the phone breakpoint with the panel open swaps Close Panel for Back to Session (and on
+  // a phone the session bar is not rendered), so focus that fell with a removed control lands on the
+  // switcher before the shell's own rescue looks for a page title that is not there.
+  const previousPhoneRef = useRef(phone);
+  useLayoutEffect(() => {
+    if (previousPhoneRef.current === phone) return;
+    previousPhoneRef.current = phone;
+    const active = document.activeElement;
+    if (state.open && (!active || active === document.body)) switcherRef.current?.focus();
+  }, [phone, state.open]);
+
   // Viewport-aware ceiling as STATE (the rendered width and the separator's ARIA range both
   // re-derive from it) — the stored width PREFERENCE is left untouched, so a temporary window
   // shrink never clobbers the size the user chose. Same stance as the shell dock's height.

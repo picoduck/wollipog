@@ -133,11 +133,14 @@ test.describe("on a phone with a coarse pointer", () => {
 
   test("one 48px bar covers the session bar, starts with Back to Session, has no Close, and the composer leaves (#2843)", async ({ page }) => {
     await openSession(page, 390, 844);
+    // Mark the composer, to show it is the same one, with its private state, after Back.
+    await page.locator(".composer").evaluate((element) => { element.dataset.evidenceMark = "kept"; });
     await page.getByRole("button", { name: "Side Panel", exact: true }).click();
     await expect(panel(page)).toBeVisible();
-    // The session's app bar is not rendered, and neither is the composer.
+    // The session's app bar is not rendered, and the composer has no box and leaves the
+    // accessibility tree; it stays mounted so Answer Mode's secret answers survive (#2843).
     await expect(page.locator("header.topbar")).toHaveCount(0);
-    await expect(page.locator(".composer")).toHaveCount(0);
+    await expect(page.locator(".composer")).toBeHidden();
     const head = panel(page).locator(".rpanel-head");
     const bar = (await head.boundingBox())!;
     expect(bar.y).toBe(0);
@@ -157,6 +160,8 @@ test.describe("on a phone with a coarse pointer", () => {
     await expect(panel(page)).toHaveCount(0);
     await expect(page.locator("header.topbar")).toBeVisible();
     await expect(page.locator(".detail-scroll")).toBeFocused();
+    await expect(page.locator(".composer")).toBeVisible();
+    await expect(page.locator(".composer")).toHaveAttribute("data-evidence-mark", "kept");
   });
 
   test("a focused field in the panel takes the tab bar's place, so the sheet reaches the keyboard (#2843)", async ({ page }) => {

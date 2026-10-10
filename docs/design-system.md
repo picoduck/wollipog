@@ -895,8 +895,9 @@ Requests, Decision History, and Terminal once #2868 moves it) opens in one frame
   opened the panel, else the composer.
 - **Phone.** The open panel is a full-screen sheet that covers the session bar (which is not
   rendered) and ends at the tab bar. Its one 48px bar leads with Back to Session, then the switcher
-  and the tool's actions; there is no Close. The session composer is not rendered while it is open,
-  and while a focused field hides the tab bar the sheet reaches the keyboard inset (§15.1). Back
+  and the tool's actions; there is no Close. The session composer is hidden while it is open (no
+  box, out of the accessibility tree, dictation ended), but stays mounted so an unsent secret answer
+  survives, and while a focused field hides the tab bar the sheet reaches the keyboard inset (§15.1). Back
   returns focus to the control that opened the panel if it is still on screen, else to the
   conversation (the app bar's toggle went with the bar).
 

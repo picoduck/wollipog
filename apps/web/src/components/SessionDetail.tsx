@@ -5430,6 +5430,11 @@ function SessionDetailLoaded({
   // other one.
   const queuedEditPromptId = queuedEdit?.promptId ?? null;
   useEffect(() => cancelDictation, [queuedEditPromptId, cancelDictation]);
+  // A phone's side panel sheet hides the composer, mic included (#2843), so it ends dictation too.
+  const phonePanelOpen = isMobile && rightPanel.open;
+  useEffect(() => {
+    if (phonePanelOpen) cancelDictation();
+  }, [phonePanelOpen, cancelDictation]);
   // Live context and cost sit in the composer bar's trailing cluster, or in Model Settings when the
   // bar has no room for them (#2166).
   const [composerBoxRef, composerColumnNarrow] = useNarrowerThanRem<HTMLDivElement>(COMPOSER_USAGE_MIN_COLUMN_REM);
@@ -6951,12 +6956,13 @@ function SessionDetailLoaded({
           )}
           </div>
 
-          {/* A phone's side panel is a full-screen sheet; while it is open the composer is not
-              rendered, so nothing covers a field the panel is editing (#2843). Its draft lives in
-              state and comes back with it. */}
-          {mode === "expanded" && !(isMobile && rightPanel.open) && (
+          {/* A phone's side panel is a full-screen sheet; while it is open the composer is hidden
+              (no box, out of the accessibility tree), so nothing covers a field the panel is editing
+              (#2843). It stays mounted: Answer Mode keeps a secret answer only in its own state. */}
+          {mode === "expanded" && (
             <div
               className="composer"
+              hidden={phonePanelOpen}
               onFocusCapture={() => setActivePane("composer")}
               onPointerDownCapture={() => setActivePane("composer")}
             >
