@@ -320,10 +320,8 @@ export function ReviewPanel({
   /** The header Refresh's own reload of status, diff and findings together. */
   const [refreshing, setRefreshing] = useState(false);
   const [diffError, setDiffError] = useState<string | null>(null);
-  // Per-hunk staging (PR-B): the in-flight mutation's `${path}#${index}` key, and the amber
-  // non-fatal notice shown when a commit raced the index (GIT_STALE).
+  // Per-hunk staging (PR-B): the in-flight mutation's `${path}#${index}` key.
   const [hunkBusy, setHunkBusy] = useState<string | null>(null);
-  const [stageNotice, setStageNotice] = useState<string | null>(null);
   // The newest stage race, at the top of its file's section (#2848): one at a time, the newest wins.
   const [fileNotice, setFileNotice] = useState<{ sessionId: string; path: string; message: string } | null>(null);
   // An automatic reload (#1204) never hijacks the error surface — but it must not fail silently
@@ -1128,7 +1126,6 @@ export function ReviewPanel({
             </Notice>
           )}
           {diffError && <Notice tone="danger" compact>{diffError}</Notice>}
-          {stageNotice && <Notice tone="warning" compact role="status">{stageNotice}</Notice>}
           {diffLagsStatus && (
             // Warning only for the failure: it persists until the reviewer acts, while a deferred
             // reload heals itself the moment the mutation settles and must not flash a warning.
