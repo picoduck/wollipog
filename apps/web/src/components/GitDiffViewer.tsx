@@ -379,7 +379,7 @@ export function GitDiffViewer({
  * A stage race, compact, with Refresh (#2848). An alert: the action the person just took failed.
  * `flush` places it among the flush sections, which span the scroller's side padding.
  */
-function StageRaceNotice({ notice, flush = false }: { notice: DiffFileNotice; flush?: boolean }) {
+export function StageRaceNotice({ notice, flush = false }: { notice: DiffFileNotice; flush?: boolean }) {
   return (
     <Notice
       tone="warning"

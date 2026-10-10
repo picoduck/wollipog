@@ -123,7 +123,7 @@ const noFindings: ReviewFindingsResponse = {
   summary: { total: 0, unresolved: 0, requiredUnresolved: 0, sent: 0, resolved: 0, dismissed: 0, completion: "complete" },
 };
 
-async function mountPanel({ race = false, panelWidth }: { race?: boolean; panelWidth?: number } = {}) {
+async function mountPanel({ race = false, panelWidth, failReads = false }: { race?: boolean; panelWidth?: number; failReads?: boolean } = {}) {
   const host = domWindow.document.createElement("div");
   domWindow.document.body.appendChild(host);
   // The panel's frame as RightPanel draws it: the `rp` container, its header slot and the body.
@@ -138,7 +138,12 @@ async function mountPanel({ race = false, panelWidth }: { race?: boolean; panelW
   const calls: string[] = [];
   const client = {
     ...api,
-    gitDiff: async () => { calls.push("diff"); return { diff }; },
+    gitDiff: async () => {
+      calls.push("diff");
+      // After the first read, every read fails: the re-read a race triggers among them.
+      if (failReads && calls.filter((call) => call === "diff").length > 1) throw new Error("runner went away");
+      return { diff };
+    },
     reviewFindings: async () => noFindings,
     gitStageHunk: async (_id: string, body: { filePath: string }) => {
       calls.push(`stage:${body.filePath}`);
@@ -284,6 +289,42 @@ test("a GIT_STALE Stage Hunk shows a warning at the top of that file, with Refre
     await act(async () => { refresh.click(); await Promise.resolve(); });
     assert.ok(harness.calls.filter((call) => call === "diff").length > reads, "Refresh reads the diff again");
     assertNoDomNode(harness.container.querySelector('[role="alert"]'), "and the notice goes");
+  } finally {
+    await harness.unmount();
+  }
+});
+
+test("a race whose re-read fails keeps its warning beside the read's error", async () => {
+  const harness = await mountPanel({ race: true, failReads: true });
+  try {
+    const stage = section(harness.container, tracked.path).querySelector<HTMLButtonElement>("button.hunk-stage")!;
+    await act(async () => { stage.click(); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    assertNoDomNode(harness.container.querySelector(".dfile"), "the failed re-read took the diff off screen");
+    const alert = harness.container.querySelector<HTMLElement>('[role="alert"]');
+    assert.ok(alert?.textContent?.includes("cart-store.ts changed after this diff loaded, so the hunk wasn't staged."),
+      "the warning outlives the viewer");
+    assert.ok([...alert!.querySelectorAll("button")].some((button) => button.textContent === "Refresh"));
+    assert.ok(harness.container.textContent?.includes("runner went away"), "and the read's own error is shown too");
+  } finally {
+    await harness.unmount();
+  }
+});
+
+test("a race's warning belongs to the Uncommitted changes, not to another scope's file at that path", async () => {
+  const harness = await mountPanel({ race: true });
+  try {
+    const stage = section(harness.container, tracked.path).querySelector<HTMLButtonElement>("button.hunk-stage")!;
+    await act(async () => { stage.click(); await Promise.resolve(); });
+    assert.ok(harness.container.querySelector('[role="alert"]'), "the warning is up");
+    const branch = [...harness.container.querySelectorAll<HTMLElement>('[role="radio"]')]
+      .find((option) => option.textContent === "Branch")!;
+    await act(async () => { fireDomEvent.click(branch); await Promise.resolve(); });
+    assertNoDomNode(harness.container.querySelector('[role="alert"]'), "not on the Branch scope");
+    const uncommitted = [...harness.container.querySelectorAll<HTMLElement>('[role="radio"]')]
+      .find((option) => option.textContent === "Uncommitted")!;
+    await act(async () => { fireDomEvent.click(uncommitted); await Promise.resolve(); });
+    assert.ok(harness.container.querySelector('[role="alert"]'), "and back with the Uncommitted changes");
   } finally {
     await harness.unmount();
   }

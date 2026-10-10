@@ -28,6 +28,7 @@ import { useApi } from "../api-context.js";
 import { formatClock, titleCaseLabel } from "../format.js";
 import {
   GitDiffViewer,
+  StageRaceNotice,
   type DiffFileFocus,
   type DiffFileNotice,
   type DiffLayout,
@@ -996,7 +997,9 @@ export function ReviewPanel({
   // An older runner limits Review in nested steps; only the most limiting one is worth saying.
   const runnerLimit = !diffSupported ? diffHint : !stagingSupported ? stagingHint : !fineDiffSupported ? fineDiffHint : null;
   const readAt = Math.max(diffReadAt ?? 0, git.observedAt ?? 0) || null;
-  const fileNoticeShown: DiffFileNotice | null = fileNotice?.sessionId !== session.id ? null : {
+  // A race is about the Uncommitted changes of this session: another scope's diff may hold a file at
+  // the same path, which the warning is not about.
+  const fileNoticeShown: DiffFileNotice | null = fileNotice?.sessionId !== session.id || scope !== "uncommitted" ? null : {
     path: fileNotice.path,
     message: fileNotice.message,
     refreshing: refreshBusy,
@@ -1188,7 +1191,14 @@ export function ReviewPanel({
                     }}
                   />
                 )
-                : !diffError && runnerOnline && diffSupported && <DiffSkeleton />}
+                : (
+                  <>
+                    {/* The viewer shows a race on its file. With no diff on screen (its re-read failed,
+                        so the diff error says why), the warning still stands on its own. */}
+                    {fileNoticeShown && <StageRaceNotice notice={fileNoticeShown} />}
+                    {!diffError && runnerOnline && diffSupported && <DiffSkeleton />}
+                  </>
+                )}
             </div>
           </StaleContent>
 
