@@ -6,9 +6,11 @@ const VIEWPORTS = [
   { name: "compact", width: 834, height: 1112, presentation: "overlay" },
   { name: "phone", width: 390, height: 844, presentation: undefined },
 ] as const;
-/** A capture once every opening animation (a popover's fade, a sheet's slide) has finished. */
+/** A capture once every opening animation (a popover's fade, a sheet's slide) has finished. A
+ * Running badge's pulse repeats forever (§11.1), so it never finishes and is not waited for. */
 async function shot(page: Page, name: string): Promise<void> {
-  await page.waitForFunction(() => document.getAnimations().every((animation) => animation.playState !== "running"));
+  await page.waitForFunction(() => document.getAnimations().every((animation) => animation.playState !== "running" ||
+    animation.effect?.getComputedTiming().iterations === Infinity));
   await page.screenshot({ path: `.agents/tmp/panel-pages/${name}.png` });
 }
 

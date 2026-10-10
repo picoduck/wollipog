@@ -43,6 +43,8 @@ import { QUESTION_CARD_COPY, questionStepLabel } from "./components/requests/Que
 import { SIGN_IN_COPY } from "./components/AuthenticationRecoveryPanel.js";
 import { REQUEST_PANEL_COPY, requestPanelPositionLabel } from "./components/SessionRequestPanel.js";
 import { childRequestsLabel } from "./status-meta.js";
+import { AGENTS_ROSTER_COPY, opensSessionLabel, workerListFootLabel } from "./components/AgentsPanel.js";
+import { BACKGROUND_GROUP, SUBAGENT_GROUP, stepActivity, workerStatusMeta, type WorkerState } from "./worker-roster.js";
 
 const SOURCE_ROOT = path.resolve("apps/web/src");
 const MINOR_WORDS = new Set([
@@ -1227,4 +1229,21 @@ test("the confirmation body reader treats copy it cannot see as unreadable, and 
   assert.deepEqual(read(`const fenced = "It is kept."; \`Gone. \${fenced}\``), ["Gone. It is kept."], "a local constant");
   assert.deepEqual(read(`const count = a ? b.length : c.length; \`All \${count} are removed.\``), ["All Name are removed."],
     "a constant holding a value is a name");
+});
+
+test("the Agents roster's labels, headings and badges are Title Case; its lines and empty-state bodies are sentences (#2857)", () => {
+  const sentences = new Set(["emptyActiveBody", "emptyHistoryBody", "emptyAllBody", "loadingMore"]);
+  for (const [key, value] of Object.entries(AGENTS_ROSTER_COPY)) {
+    if (sentences.has(key)) assert.ok(isSentenceCase(value) && !isTitleCase(value), `${key}: ${JSON.stringify(value)}`);
+    else assert.ok(isTitleCase(value) && !/[.!?…]$/.test(value), `${key}: ${JSON.stringify(value)}`);
+  }
+  for (const group of [SUBAGENT_GROUP, BACKGROUND_GROUP]) assert.ok(isTitleCase(group.name), group.name);
+  const states: WorkerState[] = ["running", "queued", "awaiting_prompt", "attention", "completed", "failed", "stopped", "unverified", "lost"];
+  for (const state of states) assert.ok(isTitleCase(workerStatusMeta({ state }).label), state);
+  for (const line of [stepActivity("$ npm test", "now"), stepActivity("Edit: src/a.ts", "wait"), stepActivity("Read: src/a.ts", "done"),
+    workerListFootLabel(7, 23, true)]) {
+    assert.ok(isSentenceCase(line) && !isTitleCase(line), JSON.stringify(line));
+  }
+  // A tooltip is a sentence (§9.3) that names the session as its title is written.
+  assert.equal(opensSessionLabel("Fix the Parser"), "Opens Fix the Parser");
 });

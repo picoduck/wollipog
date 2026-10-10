@@ -316,7 +316,7 @@ import {
 } from "../composer-placeholder.js";
 import { IncrementalActiveTurnProgress } from "../turn-progress.js";
 import { IncrementalSubagentProjector } from "../subagents.js";
-import { workerRoster, isCurrentWorker } from "../worker-roster.js";
+import { workerRoster, isLiveWorker, subagentStatusContext } from "../worker-roster.js";
 import { WorkingIndicator } from "./WorkingIndicator.js";
 import {
   clearDurableQueuedEditRecoveriesForAccount,
@@ -3424,14 +3424,17 @@ function SessionDetailLoaded({
   }, [session.eventEpoch, session.id]);
   const headerSubagentProjector = useRef<IncrementalSubagentProjector | null>(null);
   headerSubagentProjector.current ??= new IncrementalSubagentProjector();
-  const activeSubagents = useMemo(() => headerSubagentProjector.current!.project(items, {
+  const headerSubagents = useMemo(() => headerSubagentProjector.current!.project(items, {
     sessionStatus: session.status,
     runnerOnline,
     availability: runnerOnline && isTimelineSessionActive(session.status) ? "live" : "recorded",
-  }).descriptors.filter((descriptor) =>
+  }), [items, runnerOnline, session.status]);
+  const activeSubagents = useMemo(() => headerSubagents.descriptors.filter((descriptor) =>
     descriptor.availability === "live" &&
-    ["starting", "running", "waiting"].includes(descriptor.lifecycle)),
-  [items, runnerOnline, session.status]);
+    ["starting", "running", "waiting"].includes(descriptor.lifecycle)), [headerSubagents]);
+  // The ambiguous tool-call ids as one string, so the transcript's status context moves only when they
+  // do, not on every projection of a streamed event (#2872).
+  const ambiguousSubagentKey = [...headerSubagents.ambiguousIds].sort().join("\n");
   // Only the count of current workers is read here, and a worker's state reads no streaming field (#2872).
   const rosterSessions = useStoreSelector((state) => state.sessions, sessionsEqualIgnoringStreaming);
   const rosterRuns = useStoreSelector((state) => state.runs);
@@ -3440,7 +3443,7 @@ function SessionDetailLoaded({
     (session.runId ? rosterRuns.get(session.runId)?.sessionIds ?? [] : []).flatMap((id) => {
       const member = rosterSessions.get(id);
       return member ? [member] : [];
-    }), (id) => rosterRunners.get(id)?.status === "online").filter(isCurrentWorker).length,
+    }), (id) => rosterRunners.get(id)?.status === "online").filter(isLiveWorker).length,
   [session, activeSubagents, rosterSessions, rosterRuns, rosterRunners]);
   const backgroundParentTurnEventIds = useMemo(() => new Map(items
     .filter((item): item is Extract<TimelineItem, { kind: "user_message" }> =>
@@ -4996,6 +4999,15 @@ function SessionDetailLoaded({
     onJumpToQuestion: reviewPendingRequest,
     selectedRequestId: selectedMarker,
   }), [pendingQuestionIds, reviewPendingRequest, selectedMarker]);
+  // An agent row reads the same worker word as the Agents roster (#2857); rebuilt only when the
+  // session's status, runner or requests move, never per streamed event (#2872).
+  const subagentStatusNow = subagentStatusContext(session, runnerOnline,
+    new Set(ambiguousSubagentKey ? ambiguousSubagentKey.split("\n") : []));
+  const subagentStatusKey = JSON.stringify([subagentStatusNow.sessionStatus, subagentStatusNow.runnerOnline,
+    [...subagentStatusNow.attention]]);
+  // Keyed by value, so a new session object with the same requests keeps the context's identity.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const timelineSubagentStatus = useMemo(() => subagentStatusNow, [subagentStatusKey]);
   // A question whose request carries none of its questions (an older control plane) reads them from
   // its transcript event.
   const dockQuestions = useCallback((request: PendingApproval): AgentQuestion[] => {
@@ -7062,6 +7074,7 @@ function SessionDetailLoaded({
                         revealRequest={timelineRevealRequest}
                         onRevealHandled={handleTimelineReveal}
                         questionContext={timelineQuestionContext}
+                        subagentStatus={timelineSubagentStatus}
                       />
                     </Profiler>
                   )}

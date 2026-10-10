@@ -1,21 +1,26 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ComponentProps } from "react";
 import { pendingRequests, sessionAttentionStatus, type ChildSessionAttentionOwner,
-  type ChildSessionRegistryEntry, type ChildSessionRegistryPage, type SessionView,
+  type ChildSessionRegistryEntry, type ChildSessionRegistryPage, type PodView, type RunView, type SessionView,
   type WorkflowInstanceView } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
-import { formatDuration, formatRecordedRelativeTime, titleCaseLabel } from "../format.js";
+import { formatDuration, titleCaseLabel } from "../format.js";
 import { deriveSubagentLifecycle, IncrementalSubagentProjector, type SubagentDescriptor } from "../subagents.js";
 import { useLiveSession, useStoreActions, useStoreSelector } from "../store.js";
 import { useTimelineClock } from "../timeline-clock.js";
-import { isCurrentWorker, workerRoster, type WorkerMemberMetadata } from "../worker-roster.js";
-import { statusMeta } from "../status-meta.js";
+import { isCurrentWorker, isLiveWorker, workerRoster, workerStatusMeta, type WorkerGroup, type WorkerMemberMetadata,
+  type WorkerRow } from "../worker-roster.js";
 import { SubagentsPanel } from "./SubagentsPanel.js";
 import { BackgroundWorkPanel } from "./BackgroundWorkPanel.js";
 import { SessionQuestionBanner } from "./SessionApproval.js";
 import { RequestCard } from "./requests/RequestCard.js";
 import { PanelPageTitle, usePanelPages } from "./PanelPages.js";
 import { SegmentedControl } from "./ui/ChoiceControls.js";
+import { BusyButton } from "./ui/BusyButton.js";
+import { ArrowUpRightIcon, BotIcon, ChevronRightIcon } from "./Icons.js";
+import { ListFoot } from "./ListFoot.js";
+import { State } from "./State.js";
+import { StatusBadge } from "./StatusBadge.js";
 
 const PAGE_SIZE = 50;
 const REGISTRY_AUTO_RETRY_LIMIT = 2;
@@ -347,6 +352,112 @@ export function childRegistryRefreshDelay(rosterChanged: boolean, sinceLastRefre
   const floor = rosterChanged ? REGISTRY_ACTIVE_REFRESH_MS : REGISTRY_IDLE_REFRESH_MS;
   return Math.max(0, floor - Math.max(0, sinceLastRefresh));
 }
+/** The roster's fixed words (#2857): labels Title Case, sentences sentence case (§17.1). */
+export const AGENTS_ROSTER_COPY = {
+  filter: "Worker Filter",
+  active: "Active",
+  history: "History",
+  all: "All",
+  showMore: `Show ${PAGE_SIZE} More`,
+  showHistory: "Show History",
+  emptyActiveTitle: "No Active Workers",
+  emptyActiveBody: "Workers this session starts appear here.",
+  emptyHistoryTitle: "No Worker History",
+  emptyHistoryBody: "Workers that finish, fail or stop move here.",
+  emptyAllTitle: "No Workers",
+  emptyAllBody: "Workers this session starts appear here.",
+  loadingMore: "Loading more workers…",
+} as const;
+
+/** The list foot's count: "Showing 7 of 23", "23+" while the registry has more pages to read. */
+export function workerListFootLabel(shown: number, total: number, more: boolean): string {
+  return `Showing ${shown} of ${total}${more ? "+" : ""}`;
+}
+
+/** The tooltip on a row that opens another session. */
+export function opensSessionLabel(title: string): string {
+  return `Opens ${title}`;
+}
+
+export interface WorkerGroupView {
+  group: WorkerGroup;
+  /** Every row the filter keeps in this group, shown or not. */
+  count: number;
+  rows: { row: WorkerRow; nested: boolean; lastNested: boolean }[];
+}
+
+/**
+ * The filtered roster as headed groups (§5.2), in order of each group's first row, with a nested
+ * worker directly under the worker that spawned it. Children indent once whatever their depth, as
+ * threaded families do; a child whose parent the filter hides stands on its own. Only the first
+ * `limit` rows show, counted across groups, so the list foot's count is the reader's.
+ */
+export function groupWorkerRows(rows: readonly WorkerRow[], limit: number): { groups: WorkerGroupView[]; shown: number } {
+  const byGroup = new Map<string, WorkerRow[]>();
+  const groupOf = new Map<string, WorkerGroup>();
+  for (const row of rows) {
+    if (!byGroup.has(row.group.id)) { byGroup.set(row.group.id, []); groupOf.set(row.group.id, row.group); }
+    byGroup.get(row.group.id)!.push(row);
+  }
+  const groups: WorkerGroupView[] = [];
+  let remaining = limit;
+  for (const [id, members] of byGroup) {
+    const present = new Set(members.map((row) => row.id));
+    const children = new Map<string, WorkerRow[]>();
+    for (const row of members) if (row.parentId && present.has(row.parentId)) {
+      children.set(row.parentId, [...(children.get(row.parentId) ?? []), row]);
+    }
+    const ordered: { row: WorkerRow; nested: boolean }[] = [];
+    const placed = new Set<string>();
+    const place = (row: WorkerRow, nested: boolean) => {
+      if (placed.has(row.id)) return;
+      placed.add(row.id);
+      ordered.push({ row, nested });
+      for (const child of children.get(row.id) ?? []) place(child, true);
+    };
+    for (const row of members) if (!row.parentId || !present.has(row.parentId)) place(row, false);
+    // A parent cycle has no root; its rows still show, unnested.
+    for (const row of members) place(row, false);
+    const visible = ordered.slice(0, Math.max(0, remaining));
+    remaining -= visible.length;
+    if (visible.length === 0) continue;
+    groups.push({ group: groupOf.get(id)!, count: members.length,
+      rows: visible.map((entry, index) => ({ ...entry, lastNested: entry.nested && !visible[index + 1]?.nested })) });
+  }
+  return { groups, shown: Math.min(limit, rows.length) };
+}
+
+/**
+ * The facts the roster knows about this session's member sessions: the heading each sits under (its
+ * run's title, or its pod's; "Workflow" while a workflow's run is not loaded), the run title its own
+ * title repeats, and its workflow phase.
+ */
+export function memberMetadata(
+  session: Pick<SessionView, "runId">,
+  run: Pick<RunView, "title" | "sessionIds"> | undefined,
+  pod: Pick<PodView, "id" | "title" | "members"> | undefined,
+  workflows: readonly Pick<WorkflowInstanceView, "nodeStates">[],
+): Map<string, WorkerMemberMetadata> {
+  const metadata = new Map<string, WorkerMemberMetadata>();
+  // A member sits under its run's title, or its pod's; a workflow member's run may not be loaded.
+  const runGroup: WorkerGroup | undefined = session.runId
+    ? { id: `run:${session.runId}`, name: run?.title ?? "Workflow" } : undefined;
+  const runFacts = runGroup ? { group: runGroup, ...(run?.title ? { runTitle: run.title } : {}) } : {};
+  for (const member of pod?.members ?? []) metadata.set(member.sessionId, { role: member.role,
+    group: { id: `pod:${pod!.id}`, name: pod!.title } });
+  for (const id of run?.sessionIds ?? []) metadata.set(id, { ...metadata.get(id), ...runFacts });
+  for (const workflow of workflows) for (const node of workflow.nodeStates) {
+    if (node.sessionId) metadata.set(node.sessionId, {
+      ...metadata.get(node.sessionId), ...runFacts, phase: node.nodeId, activations: node.attemptCount,
+      ...(node.status === "succeeded" || node.status === "skipped" ? { terminalState: "completed" as const }
+        : node.status === "failed" ? { terminalState: "failed" as const }
+        : node.status === "stopped" ? { terminalState: "stopped" as const } : {}),
+      completedAt: node.completedAt,
+    });
+  }
+  return metadata;
+}
+
 type Props = ComponentProps<typeof SubagentsPanel> & Pick<ComponentProps<typeof BackgroundWorkPanel>,
   "runnerProtocolVersion" | "parentTurnEventIds" | "onOpenParentTurn" | "inventoryError" | "onRetryInventory"> & {
     onOpenPrimaryRequest?: (requestId: string) => void;
@@ -361,6 +472,7 @@ export function AgentsPanel(props: Props) {
   const api = useApi();
   const { items, runnerOnline, requestedId, focusRequest, onFocusRequestHandled } = props;
   const pages = usePanelPages();
+  const rosterId = `worker-roster-${useId().replace(/:/g, "")}`;
   // The registry refreshes as the session's message count and activity move, which the session view
   // does not render for (#2872).
   const session = useLiveSession(props.session);
@@ -592,17 +704,7 @@ export function AgentsPanel(props: Props) {
   const rows = useMemo(() => {
     const run = session.runId ? runs.get(session.runId) : undefined;
     const pod = [...pods.values()].find((value) => value.members.some((member) => member.sessionId === session.id));
-    const metadata = new Map<string, WorkerMemberMetadata>();
-    for (const member of pod?.members ?? []) metadata.set(member.sessionId, { role: member.role, type: "Pod Member" });
-    for (const workflow of workflows) for (const node of workflow.nodeStates) {
-      if (node.sessionId) metadata.set(node.sessionId, {
-        ...metadata.get(node.sessionId), type: "Workflow Member", phase: node.nodeId, activations: node.attemptCount,
-        ...(node.status === "succeeded" || node.status === "skipped" ? { terminalState: "completed" as const }
-          : node.status === "failed" ? { terminalState: "failed" as const }
-          : node.status === "stopped" ? { terminalState: "stopped" as const } : {}),
-        completedAt: node.completedAt,
-      });
-    }
+    const metadata = memberMetadata(session, run, pod, workflows);
     const members = [...new Set([...(run?.sessionIds ?? []), ...metadata.keys()])].flatMap((id) => {
       const member = sessions.get(id);
       return member ? [member] : [];
@@ -693,9 +795,21 @@ export function AgentsPanel(props: Props) {
   })();
   const selectedKey = requestedId ? `subagent:${requestedId}` : chosen;
   const selected = rows.find((row) => row.id === selectedKey);
-  const filtered = rows.filter((row) => filter === "all" || (filter === "active" ? isCurrentWorker(row) : !isCurrentWorker(row)));
+  const inFilter = (row: WorkerRow, value: typeof filter) =>
+    value === "all" || (value === "active" ? isCurrentWorker(row) : !isCurrentWorker(row));
+  const filtered = rows.filter((row) => inFilter(row, filter));
+  const filterCounts = { active: rows.filter((row) => inFilter(row, "active")).length,
+    history: rows.filter((row) => inFilter(row, "history")).length, all: rows.length };
+  const listed = groupWorkerRows(filtered, limit);
+  const registryHasMore = registryAfter !== null && registry !== null;
   const now = useTimelineClock(rows.length > 0);
   const selectFilter = (value: typeof filter) => { setFilter(value); setLimit(PAGE_SIZE); };
+  // Show More first reveals the rows already loaded, then reads the registry's next page.
+  const revealsLoadedRows = filtered.length > limit;
+  const showMore = () => {
+    if (!revealsLoadedRows && registryAfter !== null) loadRegistry(registryAfter);
+    setLimit((value) => value + PAGE_SIZE);
+  };
   // The worker whose request is selected in Worker Attention, when it can be named safely: its
   // activity stays beside the request while pages open and close over the roster.
   const attentionOwnerId = (() => {
@@ -768,13 +882,13 @@ export function AgentsPanel(props: Props) {
               owner={selectedRequestOwner} onSessionUpdate={loadSession} />}
         </div>}
       </section>}
-      <SegmentedControl label="Worker Filter" value={filter} onChange={selectFilter}
+      <SegmentedControl className="block" label={AGENTS_ROSTER_COPY.filter} value={filter} onChange={selectFilter}
         options={(["active", "history", "all"] as const).map((value) => ({
           value,
-          label: `${value === "active" ? "Active" : value === "history" ? "History" : "All"} (${rows.filter((row) => value === "all" || (value === "active" ? isCurrentWorker(row) : !isCurrentWorker(row))).length}${registryAfter !== null && registry !== null ? " Loaded" : ""})`,
+          label: <>{AGENTS_ROSTER_COPY[value]}<span className="count">{filterCounts[value]}</span></>,
+          ariaLabel: `${AGENTS_ROSTER_COPY[value]}, ${filterCounts[value]}`,
         }))} />
       {props.earlierActivityUnloaded && (registryUnavailable || registry?.length === 0 || unidentifiedChildren > 0) && <p className="hint" role="status">Earlier transcript activity is not loaded. Workers recorded only in those turns may be missing.</p>}
-      {registryAfter !== null && registry !== null && <p className="hint" role="status">More recorded workers are available.</p>}
       {unidentifiedChildren > 0 && <p className="hint" role="status">{unidentifiedChildren} {unidentifiedChildren === 1 ? "worker has" : "workers have"} an ambiguous provider identity and cannot be listed safely.</p>}
       {registryLoading && registry === null && <p className="hint" role="status">Loading recorded workers…</p>}
       {registryRetry && !registryRetryExhausted && <p className="hint" role="status">Recorded worker inventory changed while loading. Retrying…</p>}
@@ -791,47 +905,66 @@ export function AgentsPanel(props: Props) {
       </p>}
       {session.backgroundWorkTracking === "untracked" && <p className="hint">This provider does not expose a managed background-job inventory. Detached work cannot be verified.</p>}
       {session.backgroundJobsTruncated && <p className="hint">Older background-job history is outside the loaded inventory.</p>}
-      {filtered.length === 0 && <p role="status">No {filter === "active" ? "active" : filter === "history" ? "historical" : "recorded"} workers in the available evidence.</p>}
-      <div role="list" aria-label="Agents" className="agents-list">
-        {filtered.slice(0, limit).map((row) => {
-          const end = row.completedAt ?? (isCurrentWorker(row) ? now : row.lastActivityAt);
-          return <div key={row.id} role="listitem">
-            <button type="button" className="subagent-list-row" aria-current={selected?.id === row.id ? "true" : undefined}
-              style={{ paddingLeft: 12 + Math.min(row.depth, 2) * 14 }}
-              data-panel-page-key={row.target.kind === "session" ? undefined : row.id}
-              onClick={() => {
-                setChosen(row.id);
-                if (row.target.kind === "subagent") openSubagentPage(row.target.id);
-                else if (row.target.kind === "session") navigate({ name: "session", id: row.target.id });
-                else {
-                  props.onSelect("");
-                  pages.push(row.id);
-                }
-              }}>
-              <span className="subagent-list-copy">
-                <span className="subagent-list-title">{row.name}</span>
-                <span className="subagent-list-meta">
-                  <span>{row.type}</span><span>{statusMeta("job", row.state).label}</span>
-                  {row.startedAt != null && end != null && <span>{formatDuration(Math.max(0, end - row.startedAt))}</span>}
-                  {row.lastActivityAt != null && <span>Last Activity {formatRecordedRelativeTime(row.lastActivityAt, now)}</span>}
-                  {row.model && <span>{row.model}</span>}{row.effort && <span>{row.effort}</span>}
-                  {row.role && <span>{titleCaseLabel(row.role)}</span>}
-                  {row.phase && <span>Phase: {row.phase}</span>}
-                  {row.activations != null && <span>{row.activations} Activations</span>}
-                  {row.toolCount != null && <span>{row.toolCount} {row.toolCount === 1 ? "Tool Use" : "Tool Uses"}</span>}
-                  {row.latestTool && <span>{row.latestTool.active ? "Current Activity" : "Last Tool"}: {row.latestTool.title}</span>}
-                  {row.tokens != null && <span>{row.tokens.toLocaleString()} {row.target.kind === "subagent" ? "Direct Tokens" : "Tokens"}</span>}
-                  {row.inclusiveTokens != null && <span>{row.inclusiveTokens.toLocaleString()} Inclusive Tokens</span>}
-                  {row.depth > 2 && <span>Depth {row.depth + 1}</span>}
-                </span>
-              </span>
-            </button>
-          </div>;
+      {filtered.length === 0 && !(registryLoading && registry === null) && (filter === "active"
+        ? <State compact icon={<BotIcon size={24} />} title={AGENTS_ROSTER_COPY.emptyActiveTitle}
+          actions={filterCounts.history > 0 ? <button type="button" className="btn sm ghost"
+            onClick={() => selectFilter("history")}>{AGENTS_ROSTER_COPY.showHistory}</button> : undefined}>
+          {AGENTS_ROSTER_COPY.emptyActiveBody}
+        </State>
+        : filter === "history"
+          ? <State compact icon={<BotIcon size={24} />} title={AGENTS_ROSTER_COPY.emptyHistoryTitle}>{AGENTS_ROSTER_COPY.emptyHistoryBody}</State>
+          : <State compact icon={<BotIcon size={24} />} title={AGENTS_ROSTER_COPY.emptyAllTitle}>{AGENTS_ROSTER_COPY.emptyAllBody}</State>)}
+      {listed.groups.length > 0 && <div className="agents-list">
+        {listed.groups.map(({ group, count, rows: groupRows }) => {
+          const headingId = `${rosterId}-${group.id}`;
+          return <section key={group.id} aria-labelledby={headingId}>
+            <h3 className="group-label" id={headingId}>{group.name}<span className="count">{count}</span></h3>
+            <div role="list" aria-label={group.name}>
+              {groupRows.map(({ row, nested, lastNested }) => {
+                const end = row.completedAt ?? (isLiveWorker(row) ? now : row.lastActivityAt);
+                const elapsed = row.startedAt != null && end != null ? formatDuration(Math.max(0, end - row.startedAt)) : "";
+                const opensSession = row.target.kind === "session";
+                return <div key={row.id} role="listitem"
+                  className={`worker-row-item${nested ? " nested" : ""}${lastNested ? " nested-last" : ""}`}>
+                  <button type="button" className={`row row-2 worker-row${selected?.id === row.id ? " is-selected" : ""}`}
+                    aria-current={selected?.id === row.id ? "true" : undefined}
+                    title={row.target.kind === "session"
+                      ? opensSessionLabel(sessions.get(row.target.id)?.title ?? row.name) : undefined}
+                    data-panel-page-key={opensSession ? undefined : row.id}
+                    onClick={() => {
+                      setChosen(row.id);
+                      if (row.target.kind === "subagent") openSubagentPage(row.target.id);
+                      else if (row.target.kind === "session") navigate({ name: "session", id: row.target.id });
+                      else {
+                        props.onSelect("");
+                        pages.push(row.id);
+                      }
+                    }}>
+                    <span className="row-body">
+                      <span className="row-line">
+                        <span className="row-title">{row.name}</span>
+                        <StatusBadge meta={workerStatusMeta(row)} />
+                      </span>
+                      <span className="row-line">
+                        <span className="row-sub">{row.activity}</span>
+                        {elapsed && <span className="row-trail">{elapsed}</span>}
+                      </span>
+                    </span>
+                    <span className="row-icon" aria-hidden="true">
+                      {opensSession ? <ArrowUpRightIcon size={16} /> : <ChevronRightIcon size={16} />}
+                    </span>
+                  </button>
+                </div>;
+              })}
+            </div>
+          </section>;
         })}
-      </div>
-      {filtered.length > limit && <button type="button" className="btn ghost sm" onClick={() => setLimit((value) => value + PAGE_SIZE)}>Show More Workers</button>}
-      {registryAfter !== null && registry !== null && <button type="button" className="btn ghost sm" disabled={registryLoading}
-        onClick={() => loadRegistry(registryAfter)}>{registryLoading ? "Loading More Workers…" : "Load More Recorded Workers"}</button>}
+      </div>}
+      {(revealsLoadedRows || registryHasMore) && <ListFoot>
+        <span className="worker-list-count">{workerListFootLabel(listed.shown, filtered.length, registryHasMore)}</span>
+        <BusyButton className="btn sm ghost" busy={!revealsLoadedRows && registryLoading}
+          progress={AGENTS_ROSTER_COPY.loadingMore} onClick={showMore}>{AGENTS_ROSTER_COPY.showMore}</BusyButton>
+      </ListFoot>}
       {/* A worker's request is answered in Worker Attention, with that worker's activity beside it
           for context, until the worker page carries its request (#2860). */}
       {attentionOwnerId && <SubagentsPanel {...props} detailOnly requestedId={attentionOwnerId}
