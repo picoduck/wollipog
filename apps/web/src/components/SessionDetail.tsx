@@ -3375,9 +3375,12 @@ function SessionDetailLoaded({
     if (!el) return;
     resizeComposerToContent(el);
   };
+  // A phone's side panel sheet hides the composer (#2843). A draft that changed while it was hidden
+  // had no width to measure, so revealing it grows it again.
+  const phonePanelOpen = isMobile && rightPanel.open;
   useLayoutEffect(() => {
     autoGrowComposerRef.current();
-  }, [mode]);
+  }, [mode, phonePanelOpen]);
   // A changed draft commits in the textarea alone, so what followed the draft here runs from the
   // textarea's layout phase instead: a pending focus restore, then the auto-grow, in the order their
   // effects above run.
@@ -5431,7 +5434,6 @@ function SessionDetailLoaded({
   const queuedEditPromptId = queuedEdit?.promptId ?? null;
   useEffect(() => cancelDictation, [queuedEditPromptId, cancelDictation]);
   // A phone's side panel sheet hides the composer, mic included (#2843), so it ends dictation too.
-  const phonePanelOpen = isMobile && rightPanel.open;
   useEffect(() => {
     if (phonePanelOpen) cancelDictation();
   }, [phonePanelOpen, cancelDictation]);

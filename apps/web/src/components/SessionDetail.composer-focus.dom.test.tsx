@@ -195,6 +195,8 @@ interface Fixture {
   mountPoint: HTMLDivElement;
   root: Root;
   rerenderWithDraftLoader: (loader: ComposerDraftLoader) => Promise<void>;
+  /** Opens or closes the stub side panel and renders again. */
+  setRightPanelOpen: (open: boolean) => Promise<void>;
   rerenderSessionWithDraftLoader: (sessionId: string, loader: ComposerDraftLoader) => Promise<void>;
   remountWithDraftLoader: (loader: ComposerDraftLoader) => Promise<HTMLTextAreaElement>;
   fullReloadWithDraftLoader: (loader: ComposerDraftLoader) => Promise<HTMLTextAreaElement>;
@@ -421,6 +423,10 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
     mountPoint,
     root,
     rerenderWithDraftLoader,
+    setRightPanelOpen: async (open) => {
+      rightPanel.open = open;
+      await act(async () => renderWithDraftLoader(currentLoader));
+    },
     rerenderSessionWithDraftLoader,
     remountWithDraftLoader,
     fullReloadWithDraftLoader,
@@ -6842,4 +6848,48 @@ test("a tap that starts dictation from a focused left-group control moves focus 
       await unmountFixture(fixture);
     }
   });
+});
+
+test("a draft that changed under a phone's side panel sheet is grown to fit when the sheet closes (#2843)", { timeout: 5_000 }, async () => {
+  // The sheet hides the composer rather than unmounting it, so a hidden textarea has no width to
+  // measure, in browsers without `field-sizing: content`; revealing it has to grow it again.
+  const priorMatchMedia = domWindow.matchMedia;
+  domWindow.matchMedia = ((query: string) => ({
+    matches: query.includes("max-width: 760px"), media: query, onchange: null,
+    addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
+    dispatchEvent: () => false,
+  })) as never;
+  const prototype = domWindow.HTMLTextAreaElement.prototype;
+  const descriptors = ["clientWidth", "scrollHeight"].map((name) =>
+    [name, Object.getOwnPropertyDescriptor(prototype, name)] as const);
+  Object.defineProperty(prototype, "clientWidth", {
+    configurable: true,
+    get(this: HTMLTextAreaElement) { return this.closest<HTMLElement>(".composer")?.hidden ? 0 : 800; },
+  });
+  Object.defineProperty(prototype, "scrollHeight", {
+    configurable: true,
+    get(this: HTMLTextAreaElement) { return this.value.split("\n").length * 40; },
+  });
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, { rightPanelMode: "launcher" });
+  try {
+    const composer = () => fixture.container.querySelector<HTMLTextAreaElement>(".composer-input")!;
+    assert.equal(composer().closest<HTMLElement>(".composer")?.hidden, true, "the sheet hides the composer");
+    await resolveDraft(draft, "line one\nline two\nline three\nline four");
+    await act(async () => { flushFrames(); });
+    assert.equal(composer().value, "line one\nline two\nline three\nline four");
+    assert.notEqual(composer().style.height, "160px", "a hidden composer cannot be measured");
+
+    await fixture.setRightPanelOpen(false);
+    await act(async () => { flushFrames(); });
+    assert.equal(composer().closest<HTMLElement>(".composer")?.hidden, false);
+    assert.equal(composer().style.height, "160px", "revealed, the draft is shown at its full height");
+  } finally {
+    await unmountFixture(fixture);
+    domWindow.matchMedia = priorMatchMedia;
+    for (const [name, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(prototype, name, descriptor);
+      else delete (prototype as unknown as Record<string, unknown>)[name];
+    }
+  }
 });
