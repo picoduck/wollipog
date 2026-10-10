@@ -10,6 +10,7 @@ const TITLE_ERROR_ID = "open-request-title-error";
 const BODY_ID = "open-request-body";
 const BRANCH_ID = "open-request-branch";
 const BRANCH_HELPER_ID = "open-request-branch-helper";
+const REASON_ID = "open-request-reason";
 
 /**
  * Open Pull Request (#2847; docs/design-system.md §7.2–§7.5, §8.1, §8.5): pushes the branch and
@@ -30,6 +31,8 @@ export function OpenRequestDialog({
   onBranchChange,
   partialStage,
   busy,
+  held,
+  unavailable,
   failure,
   onSubmit,
   onClose,
@@ -45,6 +48,10 @@ export function OpenRequestDialog({
   /** Some changes are staged and some aren't, which the runner refuses to push. */
   partialStage: boolean;
   busy: boolean;
+  /** A read or another Git action is running, so the request waits for it. */
+  held: boolean;
+  /** Why the request can't be opened now (offline, or a Viewer's refusal), shown in the footer. */
+  unavailable: string | null;
   failure: GitFailure | null;
   onSubmit: () => void;
   onClose: () => void;
@@ -58,7 +65,7 @@ export function OpenRequestDialog({
   const validate = (value: string) => value.trim() ? null : `Enter a title for the ${request}.`;
 
   const submit = () => {
-    if (busy) return;
+    if (busy || held || unavailable) return;
     const problem = validate(title);
     setTitleError(problem);
     setEdited(true);
@@ -76,8 +83,11 @@ export function OpenRequestDialog({
       {...(returnFocusRef ? { returnFocusRef } : {})}
       footer={(
         <>
+          {unavailable && <p className="open-request-reason" id={REASON_ID}>{unavailable}</p>}
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
           <BusyButton className="btn primary" type="submit" form={formId} busy={busy}
+            disabled={!busy && (held || unavailable !== null)}
+            aria-describedby={unavailable && !busy ? REASON_ID : undefined}
             progress={`Opening the ${request}…`}>
             {`Open ${requestName}`}
           </BusyButton>

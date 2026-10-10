@@ -6470,8 +6470,9 @@ textarea {
    (§7.3): the footer's left slot, small and dim; its own row on a phone, above the two buttons.
    Guardrails (#2175) puts its one footer line here too: what empty means, or a Viewer's refusal.
    Hand Off (#2186) says why Create Handoff is disabled: "Choose a supported service tier." Snooze
-   (#2181) says why a reminder conflict refuses its primary: "Reload the reminder before saving." */
-.modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason) {
+   (#2181) says why a reminder conflict refuses its primary: "Reload the reminder before saving." Open
+   Pull Request (#2847) says why it can't open the request: offline, or a Viewer's refusal. */
+.modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason) {
   flex: 0 1 auto;
   min-width: 0;
   margin: 0 auto 0 0;
@@ -6482,7 +6483,7 @@ textarea {
    buttons and wraps there, rather than pushing the primary onto a second row. */
 .modal-foot > .snooze-blocked-reason { flex: 1 1 0; }
 @media (max-width: 760px) {
-  .modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason) { flex-basis: 100%; }
+  .modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason) { flex-basis: 100%; }
 }
 /* Switch Account (#2149): one dim sentence about what moves, then the Accounts head and its rows. */
 .switch-account-rule {

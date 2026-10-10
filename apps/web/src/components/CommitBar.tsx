@@ -60,9 +60,11 @@ function RequestLinkButton({ link, label }: { link: RequestLink; label: string }
   return <a className="btn sm" href={link.href} target="_blank" rel="noreferrer">{label}</a>;
 }
 
-function BarNotice({ notice, requestName, onDismiss }: {
+function BarNotice({ notice, requestName, retryDisabled, onDismiss }: {
   notice: CommitBarNotice;
   requestName: string;
+  /** Try Again waits on the same gates as the bar's own buttons. */
+  retryDisabled: boolean;
   onDismiss: () => void;
 }) {
   const request = requestName.toLowerCase();
@@ -112,7 +114,7 @@ function BarNotice({ notice, requestName, onDismiss }: {
           tone="danger"
           role="alert"
          
-          actions={<button type="button" className="btn sm" onClick={notice.onRetry}>Try Again</button>}
+          actions={<button type="button" className="btn sm" disabled={retryDisabled} onClick={notice.onRetry}>Try Again</button>}
           details={<div className="code-well commit-bar-output"><pre>{notice.failure.detail}</pre></div>}
           onDismiss={onDismiss}
         >
@@ -305,7 +307,14 @@ export function CommitBar({
 
   return (
     <section className="commit-bar" aria-label="Commit">
-      {notice && <BarNotice notice={notice} requestName={requestName} onDismiss={onDismissNotice} />}
+      {notice && (
+        <BarNotice
+          notice={notice}
+          requestName={requestName}
+          retryDisabled={disabled || offline || refusal !== null || anyBusy}
+          onDismiss={onDismissNotice}
+        />
+      )}
       <div className="field">
         <div className="field-head">
           <label htmlFor={inputId}>Commit Message</label>

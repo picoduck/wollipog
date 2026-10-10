@@ -211,13 +211,14 @@ export function ReviewPanel({
   const [requestFailure, setRequestFailure] = useState<GitFailure | null>(null);
   const [openedRequest, setOpenedRequest] = useState<GitPrSummary | null>(null);
   const openRequestButtonRef = useRef<HTMLButtonElement | null>(null);
-  // The branch's request: the forge's own, else the one this panel just opened.
-  const summaryPr = forgeFacts?.pr ?? openedRequest;
-  // Once the forge reports the branch's request, its row is the one to follow from then on.
-  const forgeHasRequest = !!forgeFacts?.pr;
+  // The branch's request: one this panel just opened, until the forge reports that same request, else
+  // the forge's own. The forge's may be an older, closed request on the same branch, which must not
+  // hide the new one.
+  const summaryPr = openedRequest ?? forgeFacts?.pr ?? null;
+  const forgeRequestNumber = forgeFacts?.pr?.number;
   useEffect(() => {
-    if (forgeHasRequest) setOpenedRequest(null);
-  }, [forgeHasRequest]);
+    if (forgeRequestNumber !== undefined && forgeRequestNumber === openedRequest?.number) setOpenedRequest(null);
+  }, [forgeRequestNumber, openedRequest?.number]);
   // The panel stays mounted across a session switch, so the bar's results belong to the session they
   // were for: switching clears them, and a result that lands after the switch is not shown.
   const sessionIdRef = useRef(session.id);
@@ -646,7 +647,7 @@ export function ReviewPanel({
 
   /** `all` forces commit-everything even with staged hunks — the escape hatch out of a partial stage. */
   const doCommit = async (all = false) => {
-    if (gitRefusal !== null) return;
+    if (barUnavailable()) return;
     setBusy(all ? "commit_all" : "commit");
     // The bar's last result goes as the next action starts, so a stale one never reads as this one's.
     setBarNotice(null);
@@ -771,7 +772,7 @@ export function ReviewPanel({
    * no branch, so it can never rename the branch under it.
    */
   const doPr = async (mode: "open" | "push") => {
-    if (gitRefusal !== null) return;
+    if (barUnavailable()) return;
     setBusy(mode);
     setBarNotice(null);
     setRequestFailure(null);
@@ -793,13 +794,14 @@ export function ReviewPanel({
         ? { action: "open_pr", title, body: prBody, branch, message: commitMsg }
         : { action: "open_pr", title, body: "", branch: "", message: commitMsg });
       const pr = d.pr;
+      // Only a request that was actually opened holds the text. The fallback link GitHub gets when
+      // forge tooling is unavailable carries neither title nor description, so the reviewer still
+      // needs both to paste into the page it opens. The drafts are released even after a session
+      // switch: the captured scope and revisions keep that from touching anything newer.
+      if (submitted && (pr?.created ?? pr?.createdWithGh)) releaseSubmitted(submitted);
       if (pr && current()) {
         const link = requestLink(pr, linkProvider);
-        // Only a request that was actually opened holds the text. The fallback link GitHub gets when
-        // forge tooling is unavailable carries neither title nor description, so the reviewer still
-        // needs both to paste into the page it opens.
         if (pr.created ?? pr.createdWithGh) {
-          if (submitted) releaseSubmitted(submitted);
           if (mode === "open") setOpenedRequest(openedRequestSummary(pr, title));
           setBarNotice({ kind: mode === "open" ? "opened" : "pushed", link });
         } else {
@@ -828,6 +830,13 @@ export function ReviewPanel({
   // silently become a staged-only commit under a plain "Commit" label. Its own running action is
   // `busy`, which the bar shows on the button that started it.
   const barHeld = git.busy || hunkBusy !== null;
+  // A retry or a dialog submit can arrive after the bar's own buttons were disabled, so the actions
+  // check the same gates themselves.
+  function barUnavailable(): boolean {
+    return gitRefusal !== null || !runnerOnline || barHeld || busy !== null;
+  }
+  // Why the dialog can't open the request right now, as the footer's visible reason (§7.3).
+  const requestUnavailable = gitRefusal ?? (runnerOnline ? null : `Reconnect to open the ${requestName.toLowerCase()}.`);
 
   // Never render a diff under the wrong tab: a scope switch keeps the previous response in state
   // until the new one lands, so gate the viewer on the response's own scope. A same-scope refresh
@@ -1226,6 +1235,8 @@ export function ReviewPanel({
           onBranchChange={setBranch}
           partialStage={stagedCount > 0 && stagedCount < fileCount}
           busy={busy === "open"}
+          held={barHeld || (busy !== null && busy !== "open")}
+          unavailable={requestUnavailable}
           failure={requestFailure}
           onSubmit={() => void doPr("open")}
           onClose={() => setRequestDialogOpen(false)}

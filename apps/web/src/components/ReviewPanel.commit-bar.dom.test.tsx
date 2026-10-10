@@ -161,6 +161,8 @@ interface Harness {
   sent: GitActionRequest[];
   /** Queue the replies for the next Git actions; an empty queue answers with a commit. */
   reply: (...replies: GitReply[]) => void;
+  /** Hold every later Git action (and hunk stage) open; the returned function releases them. */
+  hold: () => () => Promise<void>;
   render: (over?: Partial<Options>) => Promise<void>;
   unmount: () => Promise<void>;
 }
@@ -182,6 +184,9 @@ async function mountReview(initial: Partial<Options> = {}): Promise<Harness> {
   const root = createRoot(body as unknown as Element);
   const sent: GitActionRequest[] = [];
   const replies: GitReply[] = [];
+  let held = false;
+  let waiting: Array<() => void> = [];
+  const wait = async () => { if (held) await new Promise<void>((resolve) => waiting.push(resolve)); };
   const client = {
     ...api,
     gitDiff: async (_id: string, scope: GitDiffScope) => ({ diff: diffOf(scope, [file]) }),
@@ -189,8 +194,13 @@ async function mountReview(initial: Partial<Options> = {}): Promise<Harness> {
       findings: [],
       summary: { total: 0, unresolved: 0, requiredUnresolved: 0, sent: 0, resolved: 0, dismissed: 0, completion: "complete" },
     }),
+    gitStageHunk: async () => {
+      await wait();
+      return { status: options.status, diff: diffOf("uncommitted", [file]) };
+    },
     git: async (_id: string, request: GitActionRequest) => {
       sent.push(request);
+      await wait();
       const next = replies.shift() ?? { commit: { sha: "9d2a7da", message: "", filesChanged: 1, stagedOnly: true } };
       if ("error" in next) throw new ApiError(next.error, 500, next.code);
       return next;
@@ -230,6 +240,15 @@ async function mountReview(initial: Partial<Options> = {}): Promise<Harness> {
     container: host as unknown as HTMLElement,
     sent,
     reply: (...next) => { replies.push(...next); },
+    hold: () => {
+      held = true;
+      return async () => {
+        held = false;
+        const release = waiting;
+        waiting = [];
+        await act(async () => { for (const resolve of release) resolve(); });
+      };
+    },
     render: async (over = {}) => {
       options = { ...options, ...over };
       await act(async () => { root.render(tree()); });
@@ -570,6 +589,91 @@ test("a result belongs to its session: switching sessions clears the bar's notic
     assert.ok(bar(harness.container).querySelector(".notice"));
     await harness.render({ session: { ...baseSession, id: "session-other" } });
     assertNoDomNode(bar(harness.container).querySelector(".notice"));
+  } finally {
+    await harness.unmount();
+  }
+});
+
+/* Cross-model review round 1 (#2893) */
+
+test("Try Again waits on the same gates as the bar: not while a hunk stage is in flight", async () => {
+  const harness = await mountReview();
+  try {
+    harness.reply({ error: "fatal: unable to write new index file" });
+    await click(only(bar(harness.container), "Commit Staged"));
+    const retry = () => only(bar(harness.container), "Try Again");
+    assert.equal(retry().disabled, false);
+
+    const release = harness.hold();
+    await click(named(harness.container, "Stage")[0]);
+    assert.equal(retry().disabled, true, "a stage RPC holds Try Again, as it holds Commit Staged");
+    await click(retry());
+    assert.deepEqual(harness.sent.map((request) => request.action), ["commit"], "nothing more is sent");
+    await release();
+    assert.equal(retry().disabled, false);
+  } finally {
+    await harness.unmount();
+  }
+});
+
+test("the dialog can't open a request once the runner disconnects, and says why in its footer", async () => {
+  const harness = await mountReview();
+  try {
+    await click(only(bar(harness.container), "Open Pull Request…"));
+    await harness.render({ runnerOnline: false });
+    const primary = only(dialog()!, "Open Pull Request");
+    assert.equal(primary.disabled, true);
+    const reason = domWindow.document.getElementById(primary.getAttribute("aria-describedby")!);
+    assert.equal(reason?.textContent, "Reconnect to open the pull request.");
+    assert.ok(reason?.closest(".modal-foot"), "the reason is the footer's left slot");
+    await act(async () => {
+      fireDomEvent.submit(dialog()!.querySelector("form")!);
+      await Promise.resolve();
+    });
+    assert.deepEqual(harness.sent, [], "neither the button nor Enter sends anything");
+  } finally {
+    await harness.unmount();
+  }
+});
+
+test("a request opened after a session switch still releases the drafts it consumed", async () => {
+  const harness = await mountReview();
+  try {
+    await click(only(bar(harness.container), "Open Pull Request…"));
+    await typeInto(dialogField("Description (Optional)") as unknown as HTMLTextAreaElement, "Submitted once.");
+    const release = harness.hold();
+    harness.reply({ pr: { url: "https://github.com/acme/shop/pull/77", branch: "agent/commit-bar", pushed: true, createdWithGh: true, created: true, provider: "github", kind: "pull_request" } });
+    await click(only(dialog()!, "Open Pull Request"));
+
+    await harness.render({ session: { ...baseSession, id: "session-other" } });
+    await release();
+    assertNoDomNode(bar(harness.container).querySelector(".notice"), "the other session shows no result");
+
+    await harness.render({ session: baseSession });
+    await click(only(bar(harness.container), "Open Pull Request…"));
+    assert.equal(dialogField("Description (Optional)").value, "", "the submitted description was released");
+  } finally {
+    await harness.unmount();
+  }
+});
+
+test("a newly opened request is followed even while the forge still reports an older, closed one", async () => {
+  const closed: GitPrSummary = { ...openPr, number: 42, state: "CLOSED", title: "An older attempt" };
+  const harness = await mountReview({ forgeFacts: { pr: closed, checks: null } });
+  try {
+    assert.deepEqual(actionRow(harness.container).slice(0, 1), ["Open Pull Request…"], "a closed request is not pushed to");
+    await click(only(bar(harness.container), "Open Pull Request…"));
+    harness.reply({ pr: { url: "https://github.com/acme/shop/pull/99", branch: "agent/commit-bar", pushed: true, createdWithGh: true, created: true, provider: "github", kind: "pull_request" } });
+    await click(only(dialog()!, "Open Pull Request"));
+
+    const row = () => harness.container.querySelector('.review-summary [role="group"][aria-label="Pull Request"]');
+    assert.equal(row()?.querySelector("a")?.getAttribute("href"), "https://github.com/acme/shop/pull/99");
+    assert.deepEqual(actionRow(harness.container).slice(0, 1), ["Push to Pull Request"]);
+
+    // The forge catches up with the new request; its own row takes over.
+    const reported: GitPrSummary = { ...openPr, number: 99, url: "https://github.com/acme/shop/pull/99", title: "Reported by the forge" };
+    await harness.render({ forgeFacts: { pr: reported, checks: null } });
+    assert.match(row()?.textContent ?? "", /Reported by the forge/);
   } finally {
     await harness.unmount();
   }
