@@ -630,6 +630,26 @@ function processStartTime(pid: number): string | null {
 }
 const OWN_PROCESS_START = processStartTime(process.pid);
 
+/** Temp files the meta and lock writers rename or link into place (`<file>.<pid>.<uuid>.tmp`), and
+ * guards a break moved aside. Each is removed by its writer, so one left behind names a writer that
+ * died in between. */
+const WRITER_TEMP_FILE =
+  /^(?:meta\.json|lock|lock\.guard)\.([1-9]\d*)\.[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\.tmp$|^lock\.guard\.([1-9]\d*)\.[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\.broken$/;
+
+/** True when the process named in a writer temp file can no longer rename or link it: its pid has
+ * exited, or it is this process and the file is older than this process. A live pid keeps its file,
+ * even one a later process reused (EPERM counts as alive), so a stalled writer's file is never taken
+ * from it. Each name holds a fresh uuid, so no later writer ever reuses a removed path. */
+function writerTempOrphaned(pid: number, mtimeMs: number): boolean {
+  if (pid === process.pid) return mtimeMs < performance.timeOrigin;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ESRCH";
+  }
+}
+
 type LockGuardRecord = { pid?: unknown; start?: unknown; token?: unknown };
 
 function parseLockGuard(raw: string): LockGuardRecord | null {
@@ -2583,6 +2603,29 @@ export class SessionStore {
     return removed;
   }
 
+  /** Remove meta and lock temp files whose writer died between writing and renaming (or linking)
+   * them. A file goes only once it is past the orphan grace period and its writer is gone, so a
+   * stalled live writer still finds its temp file when it resumes. */
+  private cleanupWriterTemps(id: string, now = Date.now(), limit = 32): number {
+    let removed = 0;
+    try {
+      for (const entry of readdirSync(this.dir(id), { withFileTypes: true })) {
+        if (removed >= limit) break;
+        const match = entry.isFile() ? WRITER_TEMP_FILE.exec(entry.name) : null;
+        if (!match) continue;
+        const path = join(this.dir(id), entry.name);
+        try {
+          const { mtimeMs } = statSync(path);
+          if (now - mtimeMs < this.historyCompactionPolicy.orphanGraceMs) continue;
+          if (!writerTempOrphaned(Number(match[1] ?? match[2]), mtimeMs)) continue;
+          rmSync(path, { force: true });
+          removed += 1;
+        } catch { /* removed concurrently, or open on Windows; retry next pass */ }
+      }
+    } catch { /* session removed concurrently */ }
+    return removed;
+  }
+
   /** Bounded idle maintenance. It never steals a fresh writer lock and processes only `limit`
    * sessions per pass, keeping fleet startup and command completion independent of archive work.
    * The lock is released while a compaction copies, so a turn may start at any point. */
@@ -2613,6 +2656,7 @@ export class SessionStore {
         result.bytesArchived += compacted.bytesArchived;
         if (this.ownsLock(meta.sessionId, owner)) {
           result.orphansRemoved += this.cleanupHistoryOrphans(meta.sessionId);
+          result.orphansRemoved += this.cleanupWriterTemps(meta.sessionId);
         }
       } catch {
         result.errors += 1;
