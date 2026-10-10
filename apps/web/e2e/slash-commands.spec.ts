@@ -1,3 +1,4 @@
+import { waitForSessionPreview } from "./session-readiness.js";
 import { expect, test, type Page } from "@playwright/test";
 import { DECODABLE_PNG_BASE64 } from "./fixtures/prompt-image.js";
 
@@ -12,6 +13,7 @@ async function openSession(page: Page) {
   await page.reload();
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Open Session", exact: true });
+  await waitForSessionPreview(page);
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator(".composer-input")).toBeEnabled();
 }
@@ -308,6 +310,7 @@ test("an edit made during command delivery survives attachment preservation and 
   await page.reload();
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Open Session", exact: true });
+  await waitForSessionPreview(page);
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator(".composer-input")).toHaveValue("newer draft while command is in flight");
   await expect(page.getByRole("button", { name: "Remove Attached Image 1" })).toBeVisible();

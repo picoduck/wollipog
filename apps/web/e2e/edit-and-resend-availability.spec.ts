@@ -1,3 +1,4 @@
+import { waitForSessionPreview } from "./session-readiness.js";
 import { expect, test } from "@playwright/test";
 
 test("an Edit as a New Turn that is temporarily blocked stays listed and says why (#1876)", async ({ page }) => {
@@ -6,6 +7,7 @@ test("an Edit as a New Turn that is temporarily blocked stays listed and says wh
   await page.goto(url); await page.evaluate(() => localStorage.clear()); await page.goto(url);
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Open Session", exact: true });
+  await waitForSessionPreview(page);
   if (await expand.isVisible()) await expand.click();
 
   const edit = page.getByRole("button", { name: "Edit as a New Turn" });

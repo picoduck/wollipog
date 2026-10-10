@@ -70,7 +70,7 @@ const SESSION_ID = "missing-session";
 
 const snapshotSessions: SessionView[] = [];
 
-async function mount(lookup: (id: string) => Promise<{ session: SessionView }>) {
+async function mount(lookup: (id: string) => Promise<{ session: SessionView }>, lateStrictMount = false) {
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
     instanceId: "placeholder", runtimeKey: "placeholder:1", createSocket: () => socket, close() {},
@@ -98,25 +98,32 @@ async function mount(lookup: (id: string) => Promise<{ session: SessionView }>) 
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  await act(async () => root.render(
+  let showDetail = !lateStrictMount;
+  const render = () => root.render(
     <ApiProvider client={client}>
       <FeedbackContext.Provider value={{ confirm: async () => true, showToast: () => 0, showUndo: () => 0, dismissToast: () => {} } as never}>
         <SearchPaletteContext.Provider value={() => { searches += 1; }}>
           <StoreProvider connection={connection} navigation={navigation}>
-            <SessionDetail sessionId={SESSION_ID} mode="expanded" rightPanel={rightPanel}
+            {showDetail && <React.StrictMode><SessionDetail sessionId={SESSION_ID} mode="expanded" rightPanel={rightPanel}
               onBack={() => { backs += 1; }}
-              onOpenTerminal={() => {}} composerDraftLoader={async () => null} />
+              onOpenTerminal={() => {}} composerDraftLoader={async () => null} /></React.StrictMode>}
           </StoreProvider>
         </SearchPaletteContext.Provider>
       </FeedbackContext.Provider>
     </ApiProvider>,
-  ));
+  );
+  await act(async () => render());
   await act(async () => socket.push({
     type: "snapshot",
     capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
     runners: [], boxes: [], projects: [], sessions: snapshotSessions, runs: [], pods: [],
   }));
   await flush();
+  if (lateStrictMount) {
+    showDetail = true;
+    await act(async () => render());
+    await flush();
+  }
   const button = (name: string) => [...container.querySelectorAll("button")]
     .find((candidate) => candidate.textContent === name) as HTMLButtonElement | undefined;
   return {
@@ -144,6 +151,49 @@ function session(): SessionView {
     model: null, effort: null, permissionMode: null, tokensIn: 0, tokensOut: 0, costUsd: 0, adopted: false,
   } as SessionView;
 }
+
+test("a Session mounted after connection readiness restarts its cancelled StrictMode lookup", async () => {
+  const fixture = await mount(async () => { throw new ApiError("Not Found", 404); }, true);
+  try {
+    assert.equal(fixture.headings()[0]?.textContent, "Session Not Found");
+    assert.deepEqual(fixture.lookups, [SESSION_ID, SESSION_ID], "the cancelled setup cannot suppress the live lookup");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("a cancelled lookup's late success cannot replace the live missing-session result", async () => {
+  let resolveCancelled!: (value: { session: SessionView }) => void;
+  const cancelled = new Promise<{ session: SessionView }>((resolve) => { resolveCancelled = resolve; });
+  let attempt = 0;
+  const fixture = await mount(() => ++attempt === 1 ? cancelled : Promise.reject(new ApiError("Not Found", 404)), true);
+  try {
+    assert.equal(fixture.headings()[0]?.textContent, "Session Not Found");
+    await act(async () => resolveCancelled({ session: session() }));
+    await flush();
+    assert.equal(fixture.headings()[0]?.textContent, "Session Not Found", "cancelled success never enters the store");
+    assert.deepEqual(fixture.lookups, [SESSION_ID, SESSION_ID]);
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("a settled archived lookup keeps its dedup key and ignores the cancelled setup's late error", async () => {
+  let rejectCancelled!: (cause: Error) => void;
+  const cancelled = new Promise<{ session: SessionView }>((_resolve, reject) => { rejectCancelled = reject; });
+  let attempt = 0;
+  const fixture = await mount(() => ++attempt === 1 ? cancelled : Promise.resolve({ session: session() }), true);
+  try {
+    assertNoDomNode(fixture.container.querySelector("[data-placeholder]"), "the live lookup loads the archived session");
+    assert.deepEqual(fixture.lookups, [SESSION_ID, SESSION_ID], "loading the row must not refetch the settled key");
+    await act(async () => rejectCancelled(new ApiError("Not Found", 404)));
+    await flush();
+    assertNoDomNode(fixture.container.querySelector("[data-placeholder]"), "cancelled error cannot remove the loaded session");
+    assert.deepEqual(fixture.lookups, [SESSION_ID, SESSION_ID]);
+  } finally {
+    await fixture.unmount();
+  }
+});
 
 test("Not Found has exactly one h1, the page title, and offers Back to Sessions and Search Sessions", async () => {
   const fixture = await mount(async () => { throw new ApiError("Not Found", 404); });

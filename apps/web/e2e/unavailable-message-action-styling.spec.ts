@@ -1,3 +1,4 @@
+import { waitForSessionPreview } from "./session-readiness.js";
 import { expect, test, type Page } from "@playwright/test";
 
 async function openOfflineMessageMenu(page: Page, theme: "dark" | "light") {
@@ -7,6 +8,7 @@ async function openOfflineMessageMenu(page: Page, theme: "dark" | "light") {
   await page.evaluate((value) => document.documentElement.dataset.theme = value, theme);
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Open Session", exact: true });
+  await waitForSessionPreview(page);
   if (await expand.isVisible()) await expand.click();
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerStatus("offline"));
   // The second message is the one with an earlier checkpoint, so it lists Edit in a Fork.

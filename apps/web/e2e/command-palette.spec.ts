@@ -18,6 +18,7 @@ async function openShell(page: Page, { path = "/inbox", theme = "dark" }: { path
   }));
   await page.goto(shell(path));
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  await expect(page.locator("[data-route-loading]")).toBeHidden();
 }
 
 const palette = (page: Page) => page.getByRole("dialog", { name: "Search" });
@@ -25,6 +26,7 @@ const palette = (page: Page) => page.getByRole("dialog", { name: "Search" });
 async function openPalette(page: Page) {
   await page.keyboard.press("ControlOrMeta+k");
   await expect(palette(page)).toBeVisible();
+  await expect(page.locator(".palette-input")).toBeFocused();
 }
 
 /** A token resolved to the computed colour the browser paints, so it compares with getComputedStyle. */
@@ -123,6 +125,7 @@ test.describe("at 390×844 on a touch phone", () => {
     const trigger = page.locator(".page-header").getByRole("button", { name: "Search", exact: true });
     await trigger.tap();
     await expect(palette(page)).toBeVisible();
+    await expect(page.locator(".palette-input")).toBeFocused();
     const layout = await page.evaluate(() => {
       const card = document.querySelector(".palette")!.getBoundingClientRect();
       const input = document.querySelector<HTMLInputElement>(".palette-input")!;

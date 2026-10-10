@@ -25,6 +25,7 @@ async function openWithKey(page: Page, url: string): Promise<Locator> {
   await page.keyboard.press("Shift+Slash");
   const reference = page.getByRole("dialog", { name: "Keyboard Shortcuts" });
   await expect(reference).toBeVisible();
+  await expect(reference.locator(".shortcut-column").first()).toBeVisible();
   await settle(page);
   return reference;
 }
@@ -154,6 +155,7 @@ test.describe("at 1440×900", () => {
     await page.keyboard.press("Shift+Slash");
     const reference = page.getByRole("dialog", { name: "Keyboard Shortcuts" });
     await expect(reference).toBeVisible();
+    await expect(reference.locator(".shortcut-column").first()).toBeVisible();
     const footer = reference.locator(".modal-foot");
     await expect(footer.getByRole("button")).toHaveText(["Done"]);
     // The card takes no ring; with a mouse the filter holds focus.
@@ -172,6 +174,7 @@ test.describe("on a 390px phone", () => {
     await page.getByRole("button", { name: /Keyboard Shortcuts/ }).first().click();
     const reference = page.getByRole("dialog", { name: "Keyboard Shortcuts" });
     await expect(reference).toBeVisible();
+    await expect(reference.locator(".shortcut-column").first()).toBeVisible();
     await settle(page);
     await expect(reference.locator(".modal-desc")).toHaveText(/^These shortcuts need a hardware keyboard\./);
     // A touch screen opens on the sheet, not the filter: focusing the field would raise the
@@ -179,6 +182,11 @@ test.describe("on a 390px phone", () => {
     expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
     await expect(reference).toBeFocused();
     await expect(reference.getByRole("searchbox", { name: "Filter Shortcuts" })).not.toBeFocused();
+    // The loading modal can hand its phone sheet to the loaded reference in a later frame.
+    await expect.poll(async () => {
+      const sheet = (await page.locator(".modal", { has: reference }).boundingBox())!;
+      return Math.round(sheet.y + sheet.height);
+    }).toBe(844);
     const sheet = (await page.locator(".modal", { has: reference }).boundingBox())!;
     expect(sheet.width).toBe(390);
     expect(Math.round(sheet.y + sheet.height)).toBe(844);

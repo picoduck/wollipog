@@ -1,3 +1,4 @@
+import { waitForSessionPreview } from "./session-readiness.js";
 import { devices, expect, test, type Page } from "@playwright/test";
 import { dialogMotionSettled } from "./dialog-motion.js";
 
@@ -43,6 +44,7 @@ test.describe("on a phone", () => {
     await page.reload();
     await page.getByRole("button", { name: /Alpha Session/ }).click();
     const expand = page.getByRole("button", { name: "Open Session", exact: true });
+    await waitForSessionPreview(page);
     if (await expand.isVisible()) await expand.click();
     await expect(page.locator(".composer-input")).toBeEnabled();
   }

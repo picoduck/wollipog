@@ -67,6 +67,7 @@ test("at 390px a session deleted elsewhere hands focus from its panel toggle to 
 
 test("a load error says Couldn't Load Session, hides the raw error behind Show Details, and Retry looks again", async ({ page }) => {
   await open(page, 1440, ALPHA, "&lookup=error");
+  await expect(page.locator("header.session-bar .session-bar-title")).toHaveText("Alpha Session");
   // The fixture's sessions are in the snapshot; take this one out so the page looks it up by id.
   await page.evaluate(() => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", { archived: true, status: "stopped" });
