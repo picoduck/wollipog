@@ -34,6 +34,24 @@ test("anchored menus prefer an intact above placement when it fits", () => {
   );
 });
 
+test("a menu that prefers above opens there when it fits, and below when only that side does", () => {
+  const trigger = { top: 300, right: 310, bottom: 328, left: 282, width: 28 };
+  assert.deepEqual(
+    anchoredMenuPlacement({ trigger, viewportWidth: 1024, viewportHeight: 800, desiredWidth: 200, desiredHeight: 120, align: "end", gap: 4, prefer: "above" }),
+    { top: "auto", bottom: 504, left: 110, width: 200, maxHeight: 120 },
+  );
+  // The same menu without a preference opens below, where it also fits.
+  assert.equal(
+    anchoredMenuPlacement({ trigger, viewportWidth: 1024, viewportHeight: 800, desiredWidth: 200, desiredHeight: 120, align: "end", gap: 4 }).top,
+    332,
+  );
+  // Too little room above: it falls back to below.
+  assert.equal(
+    anchoredMenuPlacement({ trigger: { ...trigger, top: 60, bottom: 88 }, viewportWidth: 1024, viewportHeight: 800, desiredWidth: 200, desiredHeight: 120, align: "end", gap: 4, prefer: "above" }).top,
+    92,
+  );
+});
+
 test("above-flipped menus anchor their rendered bottom edge instead of their desired height", () => {
   const viewportHeight = 640;
   const triggerTop = 548;

@@ -201,8 +201,9 @@ export interface TerminalTabKind {
 
 /**
  * New Tab: one icon button. With more than one kind of tab (a shell and the agent's own TUI) it opens
- * a menu that flips upward near the bottom of the view, each item with its second line; with only a
- * shell it opens one directly. It is busy while a tab opens.
+ * a menu above the head, so it covers the content over a bottom dock rather than the output under it
+ * (below only when there is no room above), each item with its second line; with only a shell it
+ * opens one directly. It is busy while a tab opens.
  */
 export function TerminalNewTab({ id, kinds, busy, disabledReason }: {
   /** The button's id, so a host can return focus to it. */
@@ -268,6 +269,7 @@ export function TerminalNewTab({ id, kinds, busy, disabledReason }: {
           id={menu.menuId}
           label="New Tab"
           align="end"
+          prefer="above"
           tabIndex={-1}
           onDismiss={() => menu.close(true)}
           onKeyDown={menu.onMenuKeyDown}

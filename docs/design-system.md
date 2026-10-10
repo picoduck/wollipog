@@ -1625,7 +1625,9 @@ workflow step list is a different component and keeps a local name.
 - **Note** (`.menu-note`, `MenuNote`): one sentence of context at the end of a menu, `--type-small`
   in `--text-dim`, max 280px. It replaced `.menu-caution` (#1803).
 - **Opening upward.** A menu near the bottom of the view opens above its trigger. `Menu.tsx` places
-  every menu and flips it when the space below is short (#1803). An area design that draws
+  every menu and flips it when the space below is short (#1803). A menu from a bottom dock's head
+  (the terminal's New Tab, #2864) prefers above with `MenuSurface`'s `prefer`, falling back to below
+  only when the space above is short. An area design that draws
   `.menu.flip-up` or `.drop-up` means this placement, and there is no class for it: the placement is
   inline, and a class with a rule of its own would change what the menu draws.
 - **Flyout.** A menu opened from the rail (the instance menu, §4.1) opens 4px to the right of the

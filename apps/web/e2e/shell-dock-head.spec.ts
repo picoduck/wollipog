@@ -113,6 +113,13 @@ test.describe("at 1440px with a fine pointer", () => {
     const tuiItem = menu.getByRole("menuitem", { name: "New Agent TUI" });
     await expect(tuiItem).toHaveAccessibleDescription("Claude Code's own terminal interface, outside Wollipog's tracking.");
     await expect(tuiItem).not.toHaveAttribute("aria-disabled", "true");
+    // The dock sits at the bottom of the view, so its New Tab menu opens above the head, over the
+    // session rather than the shell output under it.
+    const menuBox = (await menu.boundingBox())!;
+    const triggerBox = (await newTab.boundingBox())!;
+    const dockBox = (await dock.boundingBox())!;
+    expect(dockBox.y + dockBox.height).toBe(900);
+    expect(menuBox.y + menuBox.height).toBeLessThanOrEqual(triggerBox.y);
     await menu.getByRole("menuitem", { name: "New Shell" }).click();
     await expect(newTab).toHaveAttribute("aria-busy", "true");
     await expect(dock.getByRole("tab", { name: /Shell 4/ })).toHaveAttribute("aria-selected", "true");
@@ -169,6 +176,32 @@ test.describe("at 1440px with a fine pointer", () => {
     expect((await dock.locator(".shell-search-field").boundingBox())!.width).toBe(200);
     const tabs = (await dock.locator(".shell-tabs").boundingBox())!;
     expect(tabs.x + tabs.width).toBeLessThanOrEqual(rects[0]!.left);
+  });
+
+  test("with search open at 834px, a tab pushed out of view is reached by scrolling and by the arrow keys", async ({ page }) => {
+    await page.setViewportSize({ width: 834, height: 1112 });
+    const dock = await openDock(page);
+    await dock.getByRole("button", { name: "Search Output" }).click();
+    const row = dock.locator(".shell-tabs");
+    const third = dock.getByRole("tab", { name: /Shell 3/ });
+    const visible = async () => {
+      const [rowBox, tabBox] = [(await row.boundingBox())!, (await third.boundingBox())!];
+      return tabBox.x >= rowBox.x - 0.5 && tabBox.x + tabBox.width <= rowBox.x + rowBox.width + 0.5;
+    };
+    expect(await visible(), "Shell 3 starts out of view").toBe(false);
+    await expect(row).toHaveAttribute("data-clip-end", "");
+
+    await row.evaluate((element) => { element.scrollLeft = element.scrollWidth; });
+    await expect.poll(visible, { message: "scrolling the row shows Shell 3" }).toBe(true);
+    await row.evaluate((element) => { element.scrollLeft = 0; });
+    await expect.poll(visible).toBe(false);
+
+    await dock.getByRole("tab", { name: /Shell 1/ }).focus();
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("ArrowRight");
+    await expect(third).toBeFocused();
+    await expect(third).toHaveAttribute("aria-selected", "true");
+    await expect.poll(visible, { message: "the selected tab scrolls into view" }).toBe(true);
   });
 
   test("without an Agent TUI, New Tab opens a shell directly", async ({ page }) => {
