@@ -1,4 +1,4 @@
-import { useId, useMemo, useSyncExternalStore, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useRef, useSyncExternalStore, type ReactNode } from "react";
 import { runnerSupportsProtocol, type SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import {
@@ -101,6 +101,14 @@ function StopJob({ sessionId, jobId, registeredAt, label, availability, stoppabl
   const reasonId = useId();
   const key = stopKey(sessionId, jobId, registeredAt);
   const feedback = useSyncExternalStore(subscribeStopFeedback, () => stopFeedback.get(key) ?? null);
+  // What this page shows now, read once the confirmation answers: it can stay open while the job
+  // ends, leaves the list, or is replaced by a new job under the same id after a restart (#1779).
+  const shown = useRef({ mounted: false, registeredAt, stoppable, available: availability.available });
+  shown.current = { ...shown.current, registeredAt, stoppable, available: availability.available };
+  useEffect(() => {
+    shown.current.mounted = true;
+    return () => { shown.current.mounted = false; };
+  }, []);
   const stop = async () => {
     if (stopFeedback.get(key)?.state === "pending") return;
     const confirmed = await confirm({
@@ -109,8 +117,13 @@ function StopJob({ sessionId, jobId, registeredAt, label, availability, stoppabl
       confirmLabel: "Stop Job",
       tone: "danger",
     });
+    if (!confirmed) return;
+    // The request names only the session and the job id, so it is sent only while this page still
+    // shows the very job that was confirmed, still stoppable.
+    const now = shown.current;
+    if (!now.mounted || now.registeredAt !== registeredAt || !now.stoppable || !now.available) return;
     // Another page of the same job may have sent it while this confirmation was open.
-    if (!confirmed || stopFeedback.get(key)?.state === "pending") return;
+    if (stopFeedback.get(key)?.state === "pending") return;
     setStopFeedback(key, { state: "pending" });
     setStopFeedback(key, await requestBackgroundJobStop(api, sessionId, jobId));
   };

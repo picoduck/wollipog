@@ -263,6 +263,53 @@ test("a new job reusing a stopped job's id after a restart is offered Stop Job a
   }
 });
 
+test("a confirmation answered after its job ended, left the list or was replaced under its id stops nothing (#2858, #1779)", async () => {
+  const now = Date.now();
+  const original = job({ registeredAt: now - 30 * MINUTE });
+  for (const [change, next] of [
+    ["the job left the list, then a new job took its id", [[], [job({ registeredAt: now - MINUTE })]]],
+    ["a new job took its id", [[job({ registeredAt: now - MINUTE })]]],
+    ["the job finished", [[job({ registeredAt: original.registeredAt, terminalStatus: "completed", terminalObservedAt: now })]]],
+  ] as const) {
+    sessionId = `${sessionId}-${change.length}`;
+    const calls: string[] = [];
+    let answer!: (confirmed: boolean) => void;
+    const happyContainer = domWindow.document.createElement("div");
+    domWindow.document.body.append(happyContainer);
+    const container = happyContainer as unknown as HTMLDivElement;
+    const root = createRoot(container);
+    const render = (jobs: ManagedBackgroundJobView[]) => act(async () => root.render(
+      <ApiProvider client={{
+        stopBackgroundJob: async (_sessionId: string, jobId: string) => {
+          calls.push(jobId);
+          return { sessionId, jobId, outcome: "stopped", terminalStatus: "killed" } as BackgroundJobStopResponse;
+        },
+      } as unknown as ApiClient}>
+        <FeedbackContext.Provider value={{
+          confirm: () => new Promise<boolean>((resolve) => { answer = resolve; }),
+          showToast: () => 1,
+          showUndo: () => 1,
+          dismissToast: () => undefined,
+        }}>
+          <JobDetail session={session(jobs)} jobId="job-shell-a1f3c9" runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
+            parentTurns={new Map()} />
+        </FeedbackContext.Provider>
+      </ApiProvider>,
+    ));
+    try {
+      await render([original]);
+      await act(async () => container.querySelector<HTMLButtonElement>(".job-detail-stop > button")!.click());
+      // While the confirmation is open, the session restarts or the job ends.
+      for (const jobs of next) await render([...jobs]);
+      await act(async () => { answer(true); await Promise.resolve(); await Promise.resolve(); });
+      assert.deepEqual(calls, [], `${change}: confirming stops nothing`);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  }
+});
+
 test("cancelling the confirmation sends nothing (#2858)", async () => {
   let called = false;
   const detail = await mountDetail({ session: session([job()]) },
