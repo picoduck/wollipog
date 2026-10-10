@@ -280,3 +280,33 @@ test.describe("a stalled child", () => {
     });
   }
 });
+
+
+for (const shape of [
+  { width: 390, touch: false, query: "" },
+  { width: 390, touch: true, query: "" },
+  { width: 1440, touch: false, query: "&listWidth=400" },
+] as const) {
+  test(`a large collapsed family keeps its working count readable at ${shape.width}px with touch ${shape.touch}`, async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: shape.width, height: 900 }, hasTouch: shape.touch });
+    const page = await context.newPage();
+    try {
+      await page.goto(`/session-rows-e2e.html?family=large&collapsed=1${shape.query}`);
+      await expect(parent(page).locator(".inbox-thread-toggle")).toHaveAttribute("aria-expanded", "false");
+      await expect(page.locator(".inbox-row-shell.thread-child")).toHaveCount(0);
+      await expect(chip(page).locator(".inbox-thread-dot")).toHaveCount(16);
+      await expect(chip(page)).toHaveAccessibleName("16 Children · Needs Your Input · 13 Working");
+      const working = chip(page).locator(".inbox-thread-working");
+      await expect(working).toHaveText("13 Working");
+      if (!shape.touch) await parent(page).hover();
+      await expect(working).toBeVisible();
+      expect(await working.evaluate((label) => label.scrollWidth <= label.clientWidth)).toBe(true);
+      const labelBox = (await working.boundingBox())!;
+      const actionsBox = (await parent(page).locator(".inbox-row-actions").boundingBox())!;
+      expect(labelBox.x + labelBox.width).toBeLessThanOrEqual(actionsBox.x);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    } finally {
+      await context.close();
+    }
+  });
+}
