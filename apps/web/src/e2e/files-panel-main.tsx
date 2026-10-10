@@ -25,6 +25,12 @@ import "../styles.css";
  * changed files. Go to File searches a fixed set of paths. `?theme=light` switches the theme;
  * `?listing=loading` holds every listing; `?offline=1` takes the machine offline once the first
  * listing has landed; `?truncated=1` makes every search report more matches than it returned.
+ *
+ * The viewer (#2853): `?open=<path>` opens a file, with `&line=` or `&symbol=` as its target;
+ * `?panel=<px>` sets the desktop panel's width; `?editors=1` gives the machine two editors;
+ * `?reading=hold` holds every file read. The files are a 74-line TypeScript file
+ * (apps/web/src/checklist.tsx), a 2,000-line one (apps/runner/src/checkout.ts), Markdown
+ * (README.md, AGENTS.md), a binary image (docs/logo.png) and a truncated lockfile (pnpm-lock.yaml).
  */
 const params = new URLSearchParams(window.location.search);
 document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
@@ -79,18 +85,61 @@ const git: GitStatus = {
   refresh: async () => {}, refreshStatusOnly: async () => {}, install: () => {}, mutationRevision: 0,
 };
 
+const CHECKLIST = [
+  "import { useMemo } from \"react\";",
+  "import type { CheckRun } from \"@wollipog/protocol\";",
+  "",
+  "// A checklist of the session's required checks, failing ones first.",
+  "export interface ChecklistItem {",
+  "  name: string;",
+  "  state: \"pending\" | \"passed\" | \"failed\";",
+  "  durationMs: number | null;",
+  "}",
+  "",
+  "const STATE_ORDER = { failed: 0, pending: 1, passed: 2 } as const;",
+  "export const SLOW_CHECK_MS = 20 * 60 * 1000;",
+  "",
+  "export function calculateTotal(items: ChecklistItem[]): number {",
+  "  let total = 0;",
+  "  for (const item of items) total += item.durationMs ?? 0;",
+  "  return total;",
+  "}",
+  "",
+  ...Array.from({ length: 52 }, (_, index) => index % 4 === 3
+    ? ""
+    : `export const check${index} = { name: "check-${index}", state: "passed", durationMs: ${1200 + index * 37} }; // fixture ${index}`),
+  "export function sortChecks(runs: CheckRun[]): ChecklistItem[] {",
+  "  return useMemo(() => runs.map(toItem).sort((a, b) => STATE_ORDER[a.state] - STATE_ORDER[b.state]), [runs]);",
+  "}",
+].join("\n");
+
+const LONG_SOURCE = Array.from({ length: 2000 }, (_, index) =>
+  `export const line${index + 1} = "row ${index + 1}"; // ${index % 50 === 0 ? "a much longer comment that runs past the panel's edge so the code scrolls sideways" : "short"}`).join("\n");
+
+const README = "# Wollipog\n\nRun coding agents on your machines and review what they did.\n\n- Sessions\n- Projects\n";
+
+/** The viewer's file reads, by path; any other path reads as a short Markdown file. */
+function readFixture(path: string): { path: string; content?: string; size: number; binary?: boolean; truncated?: boolean } {
+  if (path === "apps/web/src/checklist.tsx") return { path, content: `${CHECKLIST}\n`, size: CHECKLIST.length + 1 };
+  if (path === "apps/runner/src/checkout.ts") return { path, content: `${LONG_SOURCE}\n`, size: LONG_SOURCE.length + 1 };
+  if (path === "docs/logo.png") return { path, size: 24_015, binary: true };
+  if (path === "pnpm-lock.yaml") {
+    const head = Array.from({ length: 60 }, (_, index) => `  /pkg-${index}@1.${index}.0:\n    resolution: {integrity: sha512-${"a".repeat(24)}}`).join("\n");
+    return { path, content: `lockfileVersion: '9.0'\n${head}\n`, size: 2_202_009, truncated: true };
+  }
+  return { path, content: README, size: README.length };
+}
+
 const client: ApiClient = {
   ...api,
   listSessionFiles: async (_sessionId, path) => {
     if (params.get("listing") === "loading") return new Promise(() => undefined);
     return { path, entries: tree[path] ?? [] };
   },
-  // A Markdown file opens with the panel's Markdown View control.
-  readSessionFile: async (_sessionId, path) => ({
-    path,
-    content: "# Wollipog\n\nRun coding agents on your machines and review what they did.\n\n- Sessions\n- Projects\n",
-    size: 96,
-  }),
+  readSessionFile: async (_sessionId, path) => {
+    if (params.get("reading") === "hold") return new Promise(() => undefined);
+    return readFixture(path);
+  },
   searchWorkspaceReferences: async (_sessionId, query) => {
     const needle = query.toLocaleLowerCase();
     return {
@@ -119,7 +168,15 @@ class FixtureSocket implements UiSocket {
           sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false,
           projects: true, createProjectLocations: true,
         },
-        runners: [], boxes: [], projects: [], sessions: [], runs: [], pods: [],
+        runners: params.get("editors") === "1" ? [{
+          runnerId: "runner-1", displayName: "Studio Mac", hostname: "studio", os: "macos", version: "1",
+          status: "online", agents: [], workspaces: [], connectedAt: 1, lastSeen: 1, protocolVersion: PROTOCOL_VERSION,
+          editors: [
+            { id: "code", name: "VS Code", locations: { native: "column" } },
+            { id: "cursor", name: "Cursor", locations: { native: "column" } },
+          ],
+        }] : [],
+        boxes: [], projects: [], sessions: [], runs: [], pods: [],
       };
       this.onmessage?.({ data: JSON.stringify(snapshot) });
     }, 0);
@@ -144,8 +201,16 @@ const navigation: ViewNavigation = {
 const FilesIcon = SESSION_TOOL_ICONS.files;
 
 /** Opening a file hands its location back to the host, as the right panel does. */
+function initialLocation(): SourceLocation | undefined {
+  const path = params.get("open");
+  if (!path) return undefined;
+  const line = Number(params.get("line"));
+  const symbol = params.get("symbol");
+  return { path, ...(line > 0 ? { line } : {}), ...(symbol ? { symbol } : {}) };
+}
+
 function FilesHost() {
-  const [location, setLocation] = useState<SourceLocation | undefined>(undefined);
+  const [location, setLocation] = useState<SourceLocation | undefined>(initialLocation);
   const [online, setOnline] = useState(true);
   useEffect(() => {
     if (params.get("offline") !== "1") return;
@@ -161,6 +226,8 @@ function FilesHost() {
       git={git}
       onOpenLocation={setLocation}
       onClearLocation={() => setLocation(undefined)}
+      onAttachWorkspaceReference={async () => {}}
+      onShowInReview={() => {}}
     />
   );
 }
@@ -173,7 +240,7 @@ function Fixture() {
       <FeedbackProvider>
         <StoreProvider connection={connection} navigation={navigation}>
           <main className="app" style={{ height: "100vh", display: "flex", justifyContent: "flex-end", background: "var(--bg)" }}>
-            <aside id="right-panel" className="rpanel" aria-label="Side Panel" style={{ width: phone ? "100%" : 400, height: "100vh" }}>
+            <aside id="right-panel" className="rpanel" aria-label="Side Panel" style={{ width: phone ? "100%" : Number(params.get("panel")) || 400, height: "100vh" }}>
               <div className="rpanel-head">
                 <h2 className="rpanel-title">
                   <span className="rpanel-switcher">

@@ -1,1 +1,0 @@
-|.files-viewer-bar|gap|12px

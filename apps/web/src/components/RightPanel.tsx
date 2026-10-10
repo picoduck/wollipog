@@ -415,6 +415,7 @@ export function RightPanel({
   onAttachWorkspaceReference,
   reviewFocus,
   onReviewFocusHandled,
+  onOpenInReview,
   items,
   decisionHistory = EMPTY_GOVERNANCE_DECISIONS,
   decisionHistoryStatus = "ready",
@@ -459,6 +460,8 @@ export function RightPanel({
   /** The file a transcript edit's Open in Review asked the Review tab to show (#2187). */
   reviewFocus?: DiffFileFocus | null;
   onReviewFocusHandled?: () => void;
+  /** Opens Review on a changed file (Files' Show Changes in Review, #2853). */
+  onOpenInReview?: (path: string) => void;
   items: TimelineItem[];
   /** Every content-safe decision in this session, oldest-first (#2213). */
   decisionHistory?: readonly GovernanceDecision[];
@@ -757,6 +760,7 @@ export function RightPanel({
             onOpenLocation={onOpenSourceLocation}
             onClearLocation={onClearSourceLocation}
             onAttachWorkspaceReference={onAttachWorkspaceReference}
+            onShowInReview={onOpenInReview}
           />
         ) : (
           // An older runner: the reason the switcher gives the tool, as a compact neutral notice (#2852).

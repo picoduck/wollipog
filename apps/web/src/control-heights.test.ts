@@ -128,7 +128,6 @@ test("every core control is one control height, never sized by its padding", () 
   assert.ok(!ruleBody(".seg").has("flex-wrap"), "a segmented control never wraps its options (§10.2)");
 
   // Fields framed by a component take the same height as the controls beside them.
-  assert.equal(ruleBody(".source-symbol-form input, .source-editor-select").get("height"), "var(--control-h)");
   assert.equal(ruleBody(".archive-search > div").get("height"), "var(--control-h)");
   assert.equal(ruleBody(".project-manager-search").get("height"), "var(--control-h)");
   // Small buttons borrow 4px a side on touch, so a row of them keeps them at least 8px apart.

@@ -325,8 +325,15 @@ function Sample() {
           </div>
           <ul className="workspace-list"><li><span>A workspace row</span></li></ul>
           <div className="table-wrap"><table className="table"><tbody><tr><td>A usage cell</td></tr></tbody></table></div>
-          <div className="files-source-line">
-            <span>a line with a <mark>highlighted</mark> search hit</span>
+          <div className="codeview">
+            <code className="codeview-lines">
+              <span className="cl is-target">
+                <span className="ln">12</span>
+                <span className="tx">
+                  <span className="diff-syntax-keyword">const</span> a line with a <mark>highlighted</mark> search hit <span className="diff-syntax-comment">// note</span>
+                </span>
+              </span>
+            </code>
           </div>
         </div>
       </main>

@@ -182,11 +182,69 @@ export function crumbsFor(path: string, rootName: string): Crumb[] {
   return crumbs;
 }
 
+/**
+ * A text file's lines as the viewer numbers them: CRLF endings lose their CR, and the newline that
+ * ends the last line does not open an empty line after it, so a 74-line file is 74 rows.
+ */
+export function sourceLines(content: string): string[] {
+  const lines = content.split("\n").map((line) => line.endsWith("\r") ? line.slice(0, -1) : line);
+  if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+  return lines;
+}
+
+const LANGUAGE_NAMES: Record<string, string> = {
+  bash: "Shell", c: "C", cc: "C++", cjs: "JavaScript", cpp: "C++", cs: "C#", css: "CSS", cts: "TypeScript",
+  cxx: "C++", dart: "Dart", ex: "Elixir", exs: "Elixir", fish: "Fish", go: "Go", h: "C", hpp: "C++",
+  htm: "HTML", html: "HTML", java: "Java", js: "JavaScript", json: "JSON", jsonc: "JSON", jsx: "JSX",
+  kt: "Kotlin", kts: "Kotlin", less: "Less", lua: "Lua", markdown: "Markdown", md: "Markdown", mdx: "MDX",
+  mjs: "JavaScript", mts: "TypeScript", php: "PHP", pl: "Perl", py: "Python", rb: "Ruby", rs: "Rust",
+  sass: "Sass", scala: "Scala", scss: "SCSS", sh: "Shell", sql: "SQL", svelte: "Svelte", swift: "Swift",
+  toml: "TOML", ts: "TypeScript", tsx: "TSX", txt: "Plain Text", vue: "Vue", xml: "XML", yaml: "YAML",
+  yml: "YAML", zig: "Zig", zsh: "Shell",
+};
+
+/** The language the viewer's meta line names for a file (#2853), by extension or a known name. */
+export function fileLanguage(path: string): string {
+  const name = baseName(path);
+  if (name === "Dockerfile" || name === "Makefile") return name;
+  const dot = name.lastIndexOf(".");
+  const extension = dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+  return LANGUAGE_NAMES[extension] ?? "Plain Text";
+}
+
+/** "1 line", "2,000 lines". */
+export function lineCountLabel(count: number): string {
+  return `${count.toLocaleString("en-US")} ${count === 1 ? "line" : "lines"}`;
+}
+
+/**
+ * Splits highlighted segments so the characters in [start, end) are marked, for a target column or
+ * symbol inside a highlighted line. Segments keep their kind, so the mark never drops the colour.
+ */
+export function markSegments<T extends { text: string }>(segments: readonly T[], start: number, end: number): (T & { marked: boolean })[] {
+  const out: (T & { marked: boolean })[] = [];
+  let offset = 0;
+  for (const segment of segments) {
+    const from = offset;
+    const to = offset + segment.text.length;
+    offset = to;
+    const cuts = [from, Math.min(to, Math.max(from, start)), Math.min(to, Math.max(from, end)), to];
+    for (let index = 0; index < 3; index += 1) {
+      if (cuts[index + 1]! > cuts[index]!) {
+        out.push({ ...segment, text: segment.text.slice(cuts[index]! - from, cuts[index + 1]! - from), marked: index === 1 });
+      }
+    }
+  }
+  return out;
+}
+
 export interface ResolvedSourceTarget {
   line: number;
   column?: number;
   matchLength?: number;
   error?: string;
+  /** The error is a symbol the file does not contain: Go to Symbol shows it as its field error. */
+  missingSymbol?: true;
 }
 
 const PRECISION_RANK: Record<EditorLocationPrecision, number> = { file: 0, line: 1, column: 2 };
@@ -205,7 +263,7 @@ export function editorSupportsSourceLocation(editor: EditorInfo, location: Edito
  * one-based UTF-16 positions, matching browser strings and the supported editor CLI contracts. */
 export function resolveSourceTarget(content: string, location: SourceLocation): ResolvedSourceTarget | null {
   if (location.line === undefined && location.symbol === undefined) return null;
-  const lines = content.split("\n").map((line) => line.endsWith("\r") ? line.slice(0, -1) : line);
+  const lines = sourceLines(content);
   if (location.line !== undefined && location.line > lines.length) {
     return { line: location.line, error: `Line ${location.line} is outside this ${lines.length}-line preview.` };
   }
@@ -215,13 +273,16 @@ export function resolveSourceTarget(content: string, location: SourceLocation): 
       const start = Math.max(0, (location.column ?? 1) - 1);
       const found = text.indexOf(location.symbol, start);
       if (found >= 0) return { line: location.line, column: found + 1, matchLength: location.symbol.length };
-      return { line: location.line, column: location.column, error: `Symbol “${location.symbol}” was not found on line ${location.line}.` };
+      return {
+        line: location.line, column: location.column,
+        error: `No symbol named “${location.symbol}” on line ${location.line}.`, missingSymbol: true,
+      };
     }
     for (let index = 0; index < lines.length; index += 1) {
       const found = lines[index]!.indexOf(location.symbol);
       if (found >= 0) return { line: index + 1, column: found + 1, matchLength: location.symbol.length };
     }
-    return { line: 1, error: `Symbol “${location.symbol}” was not found in this preview.` };
+    return { line: 1, error: `No symbol named “${location.symbol}” in this file.`, missingSymbol: true };
   }
   const text = lines[location.line! - 1] ?? "";
   if (location.column !== undefined && location.column > text.length + 1) {

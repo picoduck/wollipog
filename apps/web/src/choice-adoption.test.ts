@@ -92,7 +92,6 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   ["components/AddBoxDialog.tsx", "native-select", 1],
   ["components/AgentSessionDiscoveryDialog.tsx", "agent-pick", 1],
   ["components/AutomationsView.tsx", "native-select", 12],
-  ["components/FilesPanel.tsx", "native-select", 1],
   ["components/NewRunDialog.tsx", "native-select", 6],
   ["components/PeopleDevicesPanel.tsx", "native-select", 4],
   ["components/PodsView.tsx", "native-select", 8],

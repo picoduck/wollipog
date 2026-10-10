@@ -5,12 +5,16 @@ import {
   crumbsFor,
   editorSupportsSourceLocation,
   fileIconKind,
+  fileLanguage,
   formatBytes,
   gitMarkers,
   isMarkdownPath,
+  lineCountLabel,
+  markSegments,
   parentPath,
   rankGoToFileResults,
   resolveSourceTarget,
+  sourceLines,
   unquotePorcelainPath,
   workspaceFolderName,
 } from "./files-panel.js";
@@ -70,8 +74,47 @@ test("source target failures stay explicit instead of clamping or fabricating a 
     line: 2, column: 9, error: "Column 9 is outside line 2.",
   });
   assert.deepEqual(resolveSourceTarget("one\ntwo", { path: "a", symbol: "missing" }), {
-    line: 1, error: "Symbol “missing” was not found in this preview.",
+    line: 1, error: "No symbol named “missing” in this file.", missingSymbol: true,
   });
+  assert.deepEqual(resolveSourceTarget("one\ntwo", { path: "a", line: 2, symbol: "missing" }), {
+    line: 2, column: undefined, error: "No symbol named “missing” on line 2.", missingSymbol: true,
+  });
+  // The newline that ends the last line opens no line after it.
+  assert.deepEqual(resolveSourceTarget("one\ntwo\n", { path: "a", line: 3 }), {
+    line: 3, error: "Line 3 is outside this 2-line preview.",
+  });
+});
+
+test("the viewer's lines: CR dropped, no empty row after the final newline, an empty file is one row (#2853)", () => {
+  assert.deepEqual(sourceLines("a\r\nb\n"), ["a", "b"]);
+  assert.deepEqual(sourceLines("a\n\n"), ["a", ""]);
+  assert.deepEqual(sourceLines("a"), ["a"]);
+  assert.deepEqual(sourceLines(""), [""]);
+});
+
+test("the meta line names the language and counts lines (#2853)", () => {
+  assert.equal(fileLanguage("src/app.ts"), "TypeScript");
+  assert.equal(fileLanguage("src/App.TSX"), "TSX");
+  assert.equal(fileLanguage("README.md"), "Markdown");
+  assert.equal(fileLanguage("ops/Dockerfile"), "Dockerfile");
+  assert.equal(fileLanguage("LICENSE"), "Plain Text");
+  assert.equal(fileLanguage(".env"), "Plain Text");
+  assert.equal(lineCountLabel(1), "1 line");
+  assert.equal(lineCountLabel(2000), "2,000 lines");
+});
+
+test("a mark splits highlighted segments without losing their kinds (#2853)", () => {
+  const segments = [{ text: "const", kind: "keyword" }, { text: " total = ", kind: "plain" }, { text: "42", kind: "number" }];
+  assert.deepEqual(markSegments(segments, 6, 11), [
+    { text: "const", kind: "keyword", marked: false },
+    { text: " ", kind: "plain", marked: false },
+    { text: "total", kind: "plain", marked: true },
+    { text: " = ", kind: "plain", marked: false },
+    { text: "42", kind: "number", marked: false },
+  ]);
+  assert.deepEqual(markSegments(segments, 3, 15).filter((segment) => segment.marked).map((segment) => segment.text),
+    ["st", " total = ", "4"]);
+  assert.deepEqual(markSegments(segments, 20, 21).filter((segment) => segment.marked), []);
 });
 
 test("editor source affordances require advertised precision", () => {
