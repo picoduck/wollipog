@@ -328,7 +328,7 @@ export function threadInboxRows<T extends { session: SessionView }>(
       ...(strongest && strongest.priority >= 2 ? { followUpLabel: strongest.group === "needs_input"
         ? "Needs Your Input" as const : "Result Available" as const } : {}),
       count: children.length,
-      working: members.filter((child) => inboxThreadChildState(child, stalledSessionIds.has(child.id)) === "running").length,
+      working: members.filter((child) => !stalledSessionIds.has(child.id) && inboxThreadChildState(child, false) === "running").length,
       waiting: children.filter((child) => isInboxBlocked(child)).length,
       children: children.map((child) => ({
         id: child.id,

@@ -710,6 +710,9 @@ test("collapsed families retain working descendants alongside an available human
   assert.equal(collapsed.length, 1);
   assert.equal(collapsed[0]!.thread.children?.working, 2);
   assert.match(inboxThreadChildrenLabel(collapsed[0]!.thread.children!), /Result Available.*2 Working/);
+  const stalled = threadInboxRows(rows, new Set(["parent"]), new Set(["grandchild"]));
+  assert.equal(stalled[0]!.thread.children?.working, 1, "a silent grandchild is not presented as working");
+  assert.match(inboxThreadChildrenLabel(stalled[0]!.thread.children!), /Result Available.*1 Working/);
   const stopped = threadInboxRows(rows.map((row) => ({ session: { ...row.session,
     status: "completed" as const } })), new Set(["parent"]));
   assert.equal(stopped[0]!.thread.children?.working, 0);
