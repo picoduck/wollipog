@@ -58,6 +58,7 @@ import { ProjectsView } from "../components/ProjectsView.js";
 import { RunDetail } from "../components/RunsView.js";
 import { SessionDetail } from "../components/SessionDetail.js";
 import { ShellDock } from "../components/ShellDock.js";
+import { SessionTerminalsProvider } from "../session-terminals.js";
 import { useRightPanelState } from "../components/RightPanel.js";
 import { useIsMobile } from "../components/useIsMobile.js";
 import { Header, Shell } from "../App.js";
@@ -3637,11 +3638,13 @@ function FixtureSurface() {
           providerCommandAttachmentPolicy={providerCommandAttachmentPolicy}
         />
         {terminalSessionId === view.id && (
-          <ShellDock
-            sessionId={view.id}
-            onClose={() => setTerminalSessionId(null)}
-            theme="dark" scheme="wollipog"
-          />
+          <SessionTerminalsProvider sessionId={view.id}>
+            <ShellDock
+              sessionId={view.id}
+              onClose={() => setTerminalSessionId(null)}
+              theme="dark" scheme="wollipog"
+            />
+          </SessionTerminalsProvider>
         )}
       </>
     );
@@ -3664,11 +3667,13 @@ function FixtureSurface() {
         />
       </div>
       {view.name === "session" && terminalSessionId === view.id && (
-        <ShellDock
-          sessionId={view.id}
-          onClose={() => setTerminalSessionId(null)}
-          theme="dark" scheme="wollipog"
-        />
+        <SessionTerminalsProvider sessionId={view.id}>
+          <ShellDock
+            sessionId={view.id}
+            onClose={() => setTerminalSessionId(null)}
+            theme="dark" scheme="wollipog"
+          />
+        </SessionTerminalsProvider>
       )}
       {newSession && (
         <NewSessionDialog

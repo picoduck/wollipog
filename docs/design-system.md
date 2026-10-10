@@ -836,6 +836,18 @@ or unreadable value means Bottom Dock.
   live. Moving never restarts a running shell; its tab and scrollback move with it.
 - The Terminal toggle and Ctrl+` open the terminal wherever it is placed.
 
+**One terminal state, any host (#2867).** The open session's terminals live above the places that
+show them: `useSessionTerminals(sessionId)` (`session-terminals.tsx`, provided above the app's main
+area) owns the shell list, the active tab, the search (open, term and match count), the pipe rows'
+drafts and history, and the key and resize queues. Each shell's xterm terminal is created once per
+session and attached to whichever host shows it (`ShellTerminal` with the store's `terminal(shellId)`);
+a host calls `openHost()` while mounted. Hiding a host detaches its terminals and keeps the rest, so
+reopening shows the same tab, search, scrollback and scroll position without fetching history again.
+Exactly one host shows a shell's terminal at a time, so each shell has one resize stream. Leaving the
+session disposes its terminals; the shells keep running. The placement is `terminal-placement.ts`:
+`terminalPlacement()`, `setTerminalPlacement()` and `useTerminalPlacement()` on the per-device key
+`wollipog.terminal.placement` (`"dock"` or `"panel"`), live across tabs.
+
 **The terminal's body (#2865).** The terminal is flush: no border, radius or padding of its own, on
 a body that is `--terminal-bg` edge to edge with `--space-2` `--space-3` padding. Each shell keeps one
 mounted terminal, the others hidden at the same size, so switching tabs keeps every tab's scroll

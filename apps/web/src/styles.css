@@ -4337,6 +4337,8 @@ body.shell-dock-dragging * {
   overflow: hidden;
   background: var(--terminal-bg);
 }
+/* What moves between hosts (#2867): xterm opens into it once, and it fills whichever host shows it. */
+.shell-term-surface,
 .shell-term .xterm {
   height: 100%;
 }

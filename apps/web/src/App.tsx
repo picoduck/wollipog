@@ -30,6 +30,7 @@ import { isInboxBlocked } from "./inbox.js";
 import { sessionVisibleForReminderMode } from "./session-reminders.js";
 import { InboxView } from "./components/InboxView.js";
 import { openGoToFile, openSideChat, useRightPanelState, type RightPanelState } from "./components/right-panel-state.js";
+import { SessionTerminalsProvider } from "./session-terminals.js";
 import { usePinnedSummaryState } from "./components/pinned-summary-state.js";
 import { EditorSelect } from "./components/EditorSelect.js";
 import { DesktopCloseGuard } from "./components/DesktopCloseGuard.js";
@@ -802,6 +803,8 @@ export function Shell() {
           onSearch: openPalette,
         })}
       />
+      {/* The open session's terminals live above every place that shows them (#2867). */}
+      <SessionTerminalsProvider sessionId={view.name === "session" && terminalSupported ? view.id : null}>
       <main className="main">
         {/* Only the phone Session route keeps the app-level bar: destinations draw their own page
             header and entity pages their own detail bar (docs/design-system.md §4.2, §4.3), and
@@ -975,6 +978,7 @@ export function Shell() {
           </ErrorBoundary>
         )}
       </main>
+      </SessionTerminalsProvider>
 
       {dialogKey !== "closed" && <LazyDialogBoundary key={dialogKey} title={dialogTitle}
         onClose={() => { setDialog(null); setPalette(null); if (shortcutReferenceOpen) closeShortcutReference(); }}>
