@@ -5267,8 +5267,6 @@ textarea {
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--warning) 55%, transparent);
   color: var(--text);
 }
-/* The marked text takes the mark's ink: a token colour on the amber fill is not measured. */
-.cl mark > span { color: inherit; }
 /* Rendered Markdown at the reading measure, on the panel's ground. */
 .files-md { max-width: var(--measure); }
 /* Code-line bars while a file is read (§12.3). */
@@ -17182,6 +17180,9 @@ button.review-finding-location {
 .cl.is-target .diff-syntax-string { color: var(--green-on-tint); }
 .cl.is-target .diff-syntax-number { color: var(--amber-on-tint); }
 .cl.is-target .diff-syntax-literal { color: var(--blue-on-tint); }
+/* A marked token takes the mark's ink, ahead of the token inks above: a keyword's purple on the
+   amber fill measured 4.11:1 in One Dark. */
+.cl.is-target mark > span[class] { color: inherit; }
 
 /* REMOVED, deliberately.
    These three promoted a faint label to the dim tier because faint was unreadable on a tinted row.

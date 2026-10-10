@@ -330,7 +330,7 @@ function Sample() {
               <span className="cl is-target">
                 <span className="ln">12</span>
                 <span className="tx">
-                  <span className="diff-syntax-keyword">const</span> a line with a <mark>highlighted</mark> search hit <span className="diff-syntax-comment">// note</span>
+                  <span className="diff-syntax-keyword">const</span> a line with a <mark>highlighted</mark> search hit, <mark><span className="diff-syntax-keyword">return</span></mark> <span className="diff-syntax-comment">// note</span>
                 </span>
               </span>
             </code>

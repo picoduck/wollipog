@@ -90,6 +90,7 @@ const files: Record<string, FileFixture> = {
   "README.md": { content: "# Wollipog\n\nRun coding agents.\n", size: 31 },
   "logo.png": { binary: true, size: 24_015 },
   "server.log": { content: "boot\nready\n", size: 2_202_009, truncated: true },
+  "empty.txt": { content: "", size: 0 },
 };
 
 const tree: Record<string, SessionFileEntry[]> = {
@@ -465,6 +466,10 @@ test("a binary file shows No Preview for This File with Copy Path; a truncated f
     const notice = mounted.container.querySelector(".notice.compact")!;
     assert.equal(notice.textContent, "Showing the first 512 KB of 2.1 MB.");
     assert.deepEqual(metaFacts(mounted), ["Plain Text", "2.1 MB"], "no line count for a partial read");
+
+    await go({ path: "empty.txt" });
+    assert.deepEqual(metaFacts(mounted), ["Plain Text", "0 lines", "0 B"]);
+    assert.equal(lines(mounted).length, 1, "an empty file still draws its first line");
   } finally {
     await mounted.dispose();
   }

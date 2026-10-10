@@ -239,9 +239,9 @@ function FileActionsMenu({ actions }: { actions: FileAction[] }) {
           onDismiss={() => menu.close(true)}
           onKeyDown={menu.onMenuKeyDown}
         >
-          {actions.map((action) => (
+          {actions.map((action, index) => (
             <MenuItem
-              key={action.label}
+              key={`${index}:${action.label}`}
               data-menu-label={action.label}
               aria-disabled={action.unavailableReason === undefined ? undefined : true}
               description={action.unavailableReason}
@@ -1020,7 +1020,7 @@ export function FilesBrowser({
   );
 
   const lineCount = viewed && !viewed.binary && !viewed.truncated && viewed.content !== undefined
-    ? sourceLines(viewed.content).length
+    ? (viewed.content === "" ? 0 : sourceLines(viewed.content).length)
     : null;
   const viewer = viewed && (
     <div className="files-viewer" ref={viewerRef}>
