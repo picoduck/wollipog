@@ -327,11 +327,16 @@ export function GitDiffViewer({
   };
 
   if (files.length === 0) {
-    if (empty !== undefined) return <>{empty}</>;
+    // A race whose re-read left nothing to show still has to be read, above the empty state.
     return (
-      <div className="diff-empty muted">
-        {diff.scope === "last_turn" ? "No changes in the last turn." : "No changes in this scope."}
-      </div>
+      <>
+        {fileNotice && <StageRaceNotice notice={fileNotice} />}
+        {empty !== undefined ? empty : (
+          <div className="diff-empty muted">
+            {diff.scope === "last_turn" ? "No changes in the last turn." : "No changes in this scope."}
+          </div>
+        )}
+      </>
     );
   }
 
@@ -339,7 +344,7 @@ export function GitDiffViewer({
   const orphanNotice = fileNotice && !files.some((display) => display.file.path === fileNotice.path) ? fileNotice : null;
   return (
     <div className={wrap ? "diff-view is-wrapped" : "diff-view"}>
-      {orphanNotice && <StageRaceNotice notice={orphanNotice} />}
+      {orphanNotice && <StageRaceNotice notice={orphanNotice} flush />}
       {files.map((display) => (
         // Key on the path alone, not the whole-change-set `diffHash`: a section must keep its
         // "show all hunks" toggle across a refresh it did not cause (#1203), and that does not
@@ -370,14 +375,17 @@ export function GitDiffViewer({
   );
 }
 
-/** A stage race, compact, with Refresh (#2848). An alert: the action the person just took failed. */
-function StageRaceNotice({ notice }: { notice: DiffFileNotice }) {
+/**
+ * A stage race, compact, with Refresh (#2848). An alert: the action the person just took failed.
+ * `flush` places it among the flush sections, which span the scroller's side padding.
+ */
+function StageRaceNotice({ notice, flush = false }: { notice: DiffFileNotice; flush?: boolean }) {
   return (
     <Notice
       tone="warning"
       compact
       role="alert"
-      className="dfile-notice"
+      className={flush ? "dfile-notice" : undefined}
       actions={(
         <button type="button" className="btn sm" disabled={notice.refreshing} onClick={notice.onRefresh}>
           Refresh
@@ -525,7 +533,7 @@ function DiffFileSection({
         </button>
         <DiffFileActions path={file.path} openInFiles={openInFiles} attach={attach} discard={discard} />
       </div>
-      {notice && <StageRaceNotice notice={notice} />}
+      {notice && <StageRaceNotice notice={notice} flush />}
 
       {expanded && (
         <div className="dfile-body">

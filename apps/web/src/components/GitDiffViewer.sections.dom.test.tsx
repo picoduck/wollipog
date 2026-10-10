@@ -258,6 +258,15 @@ test("a stage race shows at the top of its own file's section, with Refresh, as 
   const orphan = container.querySelector<HTMLElement>('[role="alert"]');
   assert.equal(orphan?.parentElement?.classList.contains("diff-view"), true);
   assertNoDomNode(orphan?.closest(".dfile"));
+
+  // And when the re-read left no files at all, the notice sits above the empty state.
+  await render(<GitDiffViewer diff={diffOf([])} fileNotice={notice} empty={<p className="empty-probe">Everything is committed.</p>} />);
+  const alone = container.querySelector<HTMLElement>('[role="alert"]');
+  assert.ok(alone?.textContent?.includes(notice.message), "the warning is still shown");
+  assert.equal(alone?.nextElementSibling?.classList.contains("empty-probe"), true, "above the empty state");
+  await render(<GitDiffViewer diff={diffOf([])} fileNotice={notice} />);
+  assert.ok(container.querySelector('[role="alert"]'), "and above the default empty line");
+  assert.ok(container.querySelector(".diff-empty"));
 });
 
 const review = (open: boolean): DiffReviewControls => ({
