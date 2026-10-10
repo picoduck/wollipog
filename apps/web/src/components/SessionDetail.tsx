@@ -7546,7 +7546,7 @@ function SessionDetailLoaded({
           runnerOnline={runnerOnline}
           runnerProtocolVersion={runner?.protocolVersion}
           git={git}
-          forge={gitSummary.summary?.forge}
+          forge={reviewForgeFacts.forge}
           forgeFacts={reviewForgeFacts}
           onOpenTerminal={onOpenTerminal}
           onInsertSideChatDraft={insertSideChatDraft}

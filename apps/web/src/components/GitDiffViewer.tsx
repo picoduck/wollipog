@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { normalizeSourcePath, REVIEW_ANCHOR_TEXT_MAX_LENGTH } from "@wollipog/protocol";
 import { StatusBadge } from "./StatusBadge.js";
+import { FindingSeverityBadge } from "./ReviewFindings.js";
 import type {
   CreateReviewFindingRequest,
   CreateWorkspaceReferenceRequest,
@@ -854,7 +855,7 @@ function HunkView({
         {anchored.map((finding) => (
           <div className={`diff-inline-finding diff-inline-finding-${finding.status}`} key={finding.findingId}>
             <div className="diff-inline-finding-head">
-              <span className={`review-severity review-severity-${finding.severity}`}>{titleCaseLabel(finding.severity)}</span>
+              <FindingSeverityBadge severity={finding.severity} />
               {finding.required && <StatusBadge tone="neutral" noDot label="Required" />}
               <span>{titleCaseLabel(finding.source)} · {finding.author.id ?? titleCaseLabel(finding.author.kind)} · {titleCaseLabel(finding.status)}</span>
             </div>

@@ -30,7 +30,7 @@ const finding: ReviewFinding = {
   findingId: "rf_gitlab_fixture", sessionId: session.id, scope: "all_branch", diffHash: "d".repeat(64),
   filePath: "src/gitlab.ts", side: "right", line: 42, body: "Preserve exact host matching.",
   severity: "major", required: true, status: "open", source: "gitlab",
-  author: { kind: "human", id: "reviewer" }, createdAt: 1_000, updatedAt: 1_100,
+  author: { kind: "human", id: "reviewer" }, createdAt: Date.now() - 61 * 60_000, updatedAt: Date.now() - 60 * 60_000,
   remote: {
     provider: "gitlab", repository: "team/sub/wollipog", pullRequestNumber: 19,
     threadId: "discussion-19", commentId: 119,

@@ -810,7 +810,7 @@ test("no viewport rule at 600px or 640px styles diff, finding, review or browser
     });
   });
   assert.deepEqual(offenders, []);
-  // They answer to the panel instead: a finding row in a 400px panel is single-column.
+  // They answer to the panel instead.
   const moved: Record<string, string[]> = {};
   postcss.parse(css).walkAtRules("container", (block) => {
     if (!/^rp\s/.test(block.params)) return;
@@ -818,9 +818,37 @@ test("no viewport rule at 600px or 640px styles diff, finding, review or browser
       moved[rule.selector] = rule.nodes.flatMap((node) => (node.type === "decl" ? [`${node.prop}: ${node.value}`] : []));
     });
   });
-  assert.deepEqual(moved[".review-finding-row"], ["grid-template-columns: 22px minmax(0, 1fr)"]);
   for (const selector of [".diff-line:not(.diff-line-del) > .diff-gutter-old,\n  .diff-line-del > .diff-gutter-old + .diff-gutter",
-    ".dfile-staged", ".diff-comment-editor,\n  .diff-inline-finding", ".review-findings-head"]) {
+    ".dfile-staged", ".diff-comment-editor,\n  .diff-inline-finding"]) {
     assert.ok(moved[selector], `${selector} answers to the rp container`);
+  }
+});
+
+test("finding rows are one column at every width and no finding badge is uppercased by CSS (#2850)", () => {
+  // Single-column everywhere, so no width rule has a layout to switch.
+  assert.match(soleRuleBody(".review-finding-row"), /^flex-direction: column;$/m);
+  const switched: string[] = [];
+  postcss.parse(css).walkAtRules(/^(container|media)$/, (block) => {
+    if (!/width/.test(block.params)) return;
+    block.walkRules((rule) => { if (/\.review-finding/.test(rule.selector)) switched.push(`${block.params} ${rule.selector}`); });
+  });
+  assert.deepEqual(switched, []);
+  // Rows are divided by hairlines, with no border or fill of their own (§5.1: no card in a card).
+  assert.doesNotMatch(soleRuleBody(".review-finding-row"), /^(border|background|border-radius):/m);
+  assert.doesNotMatch(soleRuleBody(".review-findings"), /^(border|border-top|border-left|border-right|background|border-radius):/m,
+    "the section is flush: a bottom hairline only");
+  assert.match(soleRuleBody(".review-findings"), /^border-bottom: 1px solid var\(--border\);$/m);
+  // The badges are the shared status badge in Title Case from copy (§11.1); nothing in the findings
+  // or the badge itself transforms case.
+  const transformed: string[] = [];
+  postcss.parse(css).walkDecls("text-transform", (decl) => {
+    const rule = decl.parent as postcss.Rule;
+    if (decl.value !== "none" && /\.(status|review-finding|review-findings|finding-selection)\b/.test(rule.selector ?? "")) {
+      transformed.push(`${rule.selector} ${decl.value}`);
+    }
+  });
+  assert.deepEqual(transformed, []);
+  for (const retired of [".review-severity", ".review-stale", ".review-state", ".review-findings-actions", ".source-path-link"]) {
+    assert.doesNotMatch(css, new RegExp(`${retired.replace(".", "\\.")}\\b`), `${retired} is deleted`);
   }
 });

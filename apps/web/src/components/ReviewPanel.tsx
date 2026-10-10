@@ -1,11 +1,8 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Notice } from "./Notice.js";
-import { Checkbox } from "./ui/ChoiceControls.js";
-import { StatusBadge } from "./StatusBadge.js";
 import {
   isPolicyApproval,
   isTerminal,
-  normalizeSourcePath,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   type CreateReviewFindingRequest,
@@ -18,14 +15,14 @@ import {
   type GitChecksSummary,
   type GitPrSummary,
   type ReviewFinding,
-  type ReviewFindingSummary,
+  type ReviewFindingsResponse,
   type SessionView,
   type SourceLocation,
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { describeGitFailure, type GitFailure } from "../git-failure.js";
 import { useApi } from "../api-context.js";
-import { formatClock, titleCaseLabel } from "../format.js";
+import { formatClock } from "../format.js";
 import {
   GitDiffViewer,
   StageRaceNotice,
@@ -57,6 +54,8 @@ import { DiffIcon, FolderIcon, RefreshIcon } from "./Icons.js";
 // RightPanel renders this module too; the slot is only read at render time, so the cycle is inert.
 import { PanelHeaderActions } from "./RightPanel.js";
 import { PanelToolLayout } from "./PanelToolLayout.js";
+import { FindingSelectionBar, ReviewFindings, type FindingSyncControl } from "./ReviewFindings.js";
+import { isOpenFinding } from "../review-finding-copy.js";
 import { ReviewSummary } from "./ReviewSummary.js";
 import { ReviewToolbar } from "./ReviewToolbar.js";
 import { StaleContent } from "./StaleContent.js";
@@ -332,14 +331,24 @@ export function ReviewPanel({
   // One slot per scope+pane, so leaving a lineage and coming back does not lose what it carried.
   const [anchors, setAnchors] = useState<FindingAnchorStore>(EMPTY_FINDING_ANCHOR_STORE);
   const [findings, setFindings] = useState<ReviewFinding[]>([]);
-  const [findingSummary, setFindingSummary] = useState<ReviewFindingSummary | null>(null);
+  const [findingsLoaded, setFindingsLoaded] = useState(false);
+  // Nothing is selected until the reviewer selects it (#2850): a selection hands the panel's foot to
+  // the selection bar, so a default selection would hide the commit bar whenever findings are open.
   const [selectedFindings, setSelectedFindings] = useState<Set<string>>(new Set());
   const [findingBusyId, setFindingBusyId] = useState<string | null>(null);
   const [creatingFinding, setCreatingFinding] = useState(false);
   const [bundlingFindings, setBundlingFindings] = useState(false);
+  // How many findings the running send carries, which the bar keeps showing even if a reload
+  // settles some of them meanwhile.
+  const [sendingCount, setSendingCount] = useState(0);
   const [syncingGitHub, setSyncingGitHub] = useState(false);
   const [findingError, setFindingError] = useState<string | null>(null);
   const [findingNotice, setFindingNotice] = useState<string | null>(null);
+  // Send to Agent's result and failure, shown in the selection bar beside the button (#2850).
+  const [sentNotice, setSentNotice] = useState<string | null>(null);
+  const [sendError, setSendError] = useState<string | null>(null);
+  const findingsTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const selectionBarWasShown = useRef(false);
   const findingReqRef = useRef(0);
   // Monotonic request token: switching scope fires overlapping loadDiff() calls, and their
   // responses can resolve out of order. Only the latest request may write state, so a slow
@@ -385,7 +394,11 @@ export function ReviewPanel({
   const requestName = mergeRequest ? "Merge Request" : "Pull Request";
   // Names a result's link for an older runner that doesn't say which forge it used.
   const linkProvider = forge?.provider ?? (remoteKind === "github" || remoteKind === "gitlab" ? remoteKind : null);
-  const reviewSyncSupported = forgeReviewSupported || (!mergeRequest && githubReviewSupported);
+  // Findings sync only with a forge this repository has a remote on (#2850): the forge facts the
+  // runner reports, else a github.com or gitlab.com remote URL. A plain Git remote has nothing to sync.
+  const syncForge = forge?.provider ?? (remoteKind === "github" || remoteKind === "gitlab" ? remoteKind : null);
+  // GitLab threads need the forge contract; GitHub ones also come through the older reconciliation.
+  const reviewSyncSupported = syncForge === "gitlab" ? forgeReviewSupported : forgeReviewSupported || githubReviewSupported;
   const diffHint = runnerCapabilityRequirement(runnerProtocolVersion, "richDiff", "rich diff loading");
   const stagingHint = runnerCapabilityRequirement(runnerProtocolVersion, "hunkStaging", "hunk staging");
   const fineDiffHint = runnerCapabilityRequirement(runnerProtocolVersion, "fineGrainedDiff", "staged panes, line staging, and discard");
@@ -481,22 +494,22 @@ export function ReviewPanel({
     setAutoReloadFailed(false);
   };
 
-  const installFindings = (next: { findings: ReviewFinding[]; summary: ReviewFindingSummary }) => {
+  const installFindings = (next: ReviewFindingsResponse) => {
     setFindings(next.findings);
-    setFindingSummary(next.summary);
-    const unresolved = new Set(next.findings.filter((finding) => finding.status === "open" || finding.status === "sent").map((finding) => finding.findingId));
-    setSelectedFindings((prior) => new Set([...prior].filter((findingId) => unresolved.has(findingId))));
+    setFindingsLoaded(true);
+    const unresolved = new Set(next.findings.filter(isOpenFinding).map((finding) => finding.findingId));
+    setSelectedFindings((prior) => {
+      const kept = [...prior].filter((findingId) => unresolved.has(findingId));
+      return kept.length === prior.size ? prior : new Set(kept);
+    });
   };
 
-  const loadFindings = async (selectAll = false) => {
+  const loadFindings = async () => {
     const request = ++findingReqRef.current;
     try {
       const next = await api.reviewFindings(session.id);
       if (request !== findingReqRef.current) return;
       installFindings(next);
-      if (selectAll) {
-        setSelectedFindings(new Set(next.findings.filter((finding) => finding.status === "open" || finding.status === "sent").map((finding) => finding.findingId)));
-      }
       setFindingError(null);
     } catch (cause) {
       if (request === findingReqRef.current) setFindingError((cause as Error).message);
@@ -505,10 +518,12 @@ export function ReviewPanel({
 
   useEffect(() => {
     setFindings([]);
-    setFindingSummary(null);
+    setFindingsLoaded(false);
     setSelectedFindings(new Set());
     setFindingNotice(null);
-    void loadFindings(true);
+    setSentNotice(null);
+    setSendError(null);
+    void loadFindings();
     return () => { findingReqRef.current += 1; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api, session.id]);
@@ -520,15 +535,10 @@ export function ReviewPanel({
     setCreatingFinding(true);
     setFindingError(null);
     setFindingNotice(null);
-    const before = new Set(findings.map((finding) => finding.findingId));
     try {
       const next = await api.createReviewFinding(session.id, input);
       findingReqRef.current += 1;
       installFindings(next);
-      setSelectedFindings((prior) => new Set([
-        ...prior,
-        ...next.findings.filter((finding) => !before.has(finding.findingId)).map((finding) => finding.findingId),
-      ]));
       return true;
     } catch (cause) {
       setFindingError((cause as Error).message);
@@ -558,30 +568,64 @@ export function ReviewPanel({
     }
   };
 
+  const agentLabel = session.agentName || session.agentId
+    ? sessionAgentLabel(session.agentName, session.driver, session.agentId)
+    : "the owning agent";
+  // Send to Agent posts into the session (#2850). With the panel expanded over the chat column
+  // (#2845) that message lands out of sight, so the selection bar says what was sent, to whom,
+  // in the panel itself; the panel stays expanded over the review the person is working through.
+  const sendUnavailable = !runnerOnline
+    ? "Reconnect to send findings to the agent."
+    : isTerminal(session.status) ? "This session has ended, so it can't take findings." : null;
   const bundleFindings = async () => {
-    const selected = findings.filter((finding) => selectedFindings.has(finding.findingId) && (finding.status === "open" || finding.status === "sent"));
-    if (!selected.length || findingRefusal !== null) return;
+    const selected = findings.filter((finding) => selectedFindings.has(finding.findingId) && isOpenFinding(finding));
+    if (!selected.length || findingRefusal !== null || sendUnavailable !== null) return;
     setBundlingFindings(true);
-    setFindingError(null);
-    setFindingNotice(null);
+    setSendingCount(selected.length);
+    setSendError(null);
+    setSentNotice(null);
+    const startedFor = session.id;
     try {
       const next = await api.bundleReviewFindings(session.id, {
         findings: selected.map((finding) => ({ findingId: finding.findingId, expectedUpdatedAt: finding.updatedAt })),
       });
+      if (sessionIdRef.current !== startedFor) return;
       findingReqRef.current += 1;
       installFindings(next);
       setSelectedFindings(new Set());
-      const agent = session.agentName || session.agentId
-        ? sessionAgentLabel(session.agentName, session.driver, session.agentId)
-        : "the owning agent";
-      setFindingNotice(`${selected.length} finding${selected.length === 1 ? "" : "s"} sent to ${agent}.`);
+      setSentNotice(`Sent ${selected.length} finding${selected.length === 1 ? "" : "s"} to ${agentLabel}.`);
     } catch (cause) {
-      setFindingError((cause as Error).message);
+      if (sessionIdRef.current !== startedFor) return;
+      setSendError((cause as Error).message);
       if (cause instanceof ApiError && cause.status === 409) void loadFindings();
     } finally {
       setBundlingFindings(false);
     }
   };
+  const selectFinding = (findingId: string, checked: boolean) => {
+    // A new selection is a new action: the last send's result goes.
+    setSentNotice(null);
+    setSendError(null);
+    setSelectedFindings((prior) => {
+      const next = new Set(prior);
+      if (checked) next.add(findingId); else next.delete(findingId);
+      return next;
+    });
+  };
+  // The selection bar replaces the commit bar while findings are selected, while a send runs (a
+  // Sync or Refresh that settles the selected findings meanwhile must not take the busy button
+  // away), and while it holds the result of the last send.
+  const selectionBarShown = selectedFindings.size > 0 || bundlingFindings || sentNotice !== null || sendError !== null;
+  // Clear, a notice's Dismiss, or a reload that settles every selected finding takes the bar away
+  // under the focus it may hold; focus then goes back to the findings it was about, not to the page.
+  useLayoutEffect(() => {
+    const wasShown = selectionBarWasShown.current;
+    selectionBarWasShown.current = selectionBarShown;
+    if (!wasShown || selectionBarShown) return;
+    const active = document.activeElement;
+    if (active && active !== document.body && active.isConnected) return;
+    findingsTriggerRef.current?.focus({ preventScroll: true });
+  });
 
   const syncForgeFindings = async () => {
     if (gitRefusal !== null) return;
@@ -1008,6 +1052,21 @@ export function ReviewPanel({
   };
   const paneShown: DiffPane = scope === "uncommitted" && fineDiffSupported ? pane : "combined";
 
+  const syncControl: FindingSyncControl | null = syncForge === null ? null : {
+    forge: syncForge,
+    busy: syncingGitHub,
+    disabled: bundlingFindings || !runnerOnline || gitRefusal !== null,
+    unavailable: reviewSyncSupported
+      ? null
+      : runnerCapabilityRequirement(
+        runnerProtocolVersion,
+        syncForge === "gitlab" ? "forgeIntegration" : "githubReviewReconciliation",
+        `${syncForge === "gitlab" ? "GitLab" : "GitHub"} review sync`,
+      ),
+    refusal: gitRefusal === null ? null : { reason: gitRefusal, id: gitRefusalId },
+    onSync: () => void syncForgeFindings(),
+  };
+
   // Review is meaningless without a working directory to diff (§12.1).
   if (!session.worktreePath) {
     return (
@@ -1080,7 +1139,24 @@ export function ReviewPanel({
             refusal={gitRefusal === null ? null : { reason: gitRefusal, id: gitRefusalId }}
           />
         )}
-        foot={(
+        // Selecting findings hands the foot to the selection bar (#2850). It replaces the commit bar
+        // rather than stacking on it, so the foot never takes two bars' height from the diff; the
+        // commit bar's message, notice and running action live in this panel and are all still
+        // there when it comes back.
+        foot={selectionBarShown ? (
+          <FindingSelectionBar
+            count={bundlingFindings ? sendingCount : selectedFindings.size}
+            busy={bundlingFindings}
+            unavailable={sendUnavailable}
+            refusal={findingRefusal === null ? null : { reason: findingRefusal, id: findingRefusalId }}
+            notice={sentNotice}
+            error={sendError}
+            onClear={() => setSelectedFindings(new Set())}
+            onSend={() => void bundleFindings()}
+            onDismissNotice={() => setSentNotice(null)}
+            onDismissError={() => setSendError(null)}
+          />
+        ) : (
           <CommitBar
             message={commitMsg}
             onMessageChange={setCommitMsg}
@@ -1154,6 +1230,29 @@ export function ReviewPanel({
               checks={summaryPr === forgeFacts?.pr ? forgeFacts?.checks ?? null : null}
               canPrompt={canPrompt}
             />
+            {/* The review's result, above the diff it is about (#2850). Keyed by session so a switch
+                starts from the new session's own default fold. */}
+            <ReviewFindings
+              key={session.id}
+              findings={findings}
+              loaded={findingsLoaded}
+              anchoredFindingIds={anchoredFindingIds}
+              anchorsKnown={shownDiff !== null}
+              scope={shownDiff ? scope : null}
+              selected={selectedFindings}
+              onSelect={selectFinding}
+              selectionDisabled={bundlingFindings}
+              busyFindingId={findingBusyId}
+              refusal={findingRefusal === null ? null : { reason: findingRefusal, id: findingRefusalId }}
+              onStatus={(finding, next) => void updateFinding(finding, next)}
+              onOpenSourceLocation={onOpenSourceLocation}
+              agentLabel={agentLabel}
+              sync={syncControl}
+              notice={findingNotice}
+              error={findingError}
+              onDismissNotice={() => setFindingNotice(null)}
+              triggerRef={findingsTriggerRef}
+            />
             <div className="git-diff-section" role="group" aria-label="Changes">
               {/* Keyed off !shownDiff (not diffBusy): after a scope switch there is one paint before
                   the load effect sets busy, and the pane must not flash blank in between. Nothing
@@ -1199,125 +1298,6 @@ export function ReviewPanel({
             </div>
           </StaleContent>
 
-          <section className="review-findings" aria-label="Inline Review Findings">
-            <div className="review-findings-head">
-              <div>
-                <strong>Review Findings</strong>
-                {findingSummary && (
-                  <span className={`review-state review-state-${findingSummary.completion}`}>
-                    {findingSummary.completion === "blocked"
-                      ? `${findingSummary.requiredUnresolved} required unresolved`
-                      : findingSummary.completion === "in_review"
-                        ? `${findingSummary.unresolved} optional unresolved`
-                        : "complete"}
-                  </span>
-                )}
-              </div>
-              <div className="review-findings-actions">
-                <button
-                  className="btn ghost sm"
-                  disabled={bundlingFindings || syncingGitHub || !runnerOnline || !session.worktreePath || !reviewSyncSupported ||
-                    gitRefusal !== null}
-                  title={gitRefusal ?? (reviewSyncSupported
-                    ? `Import the current ${requestName}'s ${mergeRequest ? "GitLab" : "GitHub"} review threads (read-only)`
-                    : runnerCapabilityRequirement(runnerProtocolVersion, mergeRequest ? "forgeIntegration" : "githubReviewReconciliation", `${mergeRequest ? "GitLab" : "GitHub"} review reconciliation`))}
-                  aria-describedby={gitRefusal !== null ? gitRefusalId : undefined}
-                  onClick={() => void syncForgeFindings()}
-                >
-                  {syncingGitHub ? `Syncing ${mergeRequest ? "GitLab" : "GitHub"}…` : `Sync ${mergeRequest ? "GitLab" : "GitHub"}`}
-                </button>
-                <button
-                  className="btn sm"
-                  disabled={bundlingFindings || selectedFindings.size === 0 || !runnerOnline || isTerminal(session.status) ||
-                    findingRefusal !== null}
-                  title={findingRefusal ?? undefined}
-                  aria-describedby={findingRefusal !== null ? findingRefusalId : undefined}
-                  onClick={() => void bundleFindings()}
-                >
-                  {bundlingFindings ? "Sending…" : `Send Selected (${selectedFindings.size})`}
-                </button>
-              </div>
-            </div>
-            {findingRefusal !== null && <p id={findingRefusalId} className="muted review-findings-refusal">{findingRefusal}</p>}
-            {findingError && <Notice tone="danger" compact>Review findings: {findingError}</Notice>}
-            {findingNotice && <Notice tone="success" compact role="status">{findingNotice}</Notice>}
-            {findings.filter((finding) => finding.status === "open" || finding.status === "sent").length === 0 ? (
-              <div className="muted review-findings-empty">Add a comment from any exact diff line to start a review.</div>
-            ) : (
-              <div className="review-findings-list">
-                {findings.filter((finding) => finding.status === "open" || finding.status === "sent").map((finding) => {
-                  // Stale means the anchored content actually moved — not merely that the change-set
-                  // hash advanced, which every unrelated stage and agent edit does (#1203).
-                  const stale = !anchoredFindingIds.has(finding.findingId);
-                  const remoteOnly = finding.remote?.subjectType === "remote";
-                  const sourcePath = remoteOnly ? null : normalizeSourcePath(finding.filePath);
-                  const sourceLocation = sourcePath ? {
-                    path: sourcePath,
-                    ...(finding.remote?.subjectType === "file" || finding.side !== "right" ? {} : { line: finding.line }),
-                  } : null;
-                  const findingLocation = remoteOnly
-                    ? "Remote Discussion"
-                    : `${finding.filePath}${finding.remote?.subjectType === "file" ? " (file comment)" : `:${finding.line}`}`;
-                  return (
-                    <article className="review-finding-row" key={finding.findingId}>
-                      <Checkbox
-                        labelHidden
-                        label={remoteOnly
-                          ? "Select Remote Discussion"
-                          : finding.remote?.subjectType === "file"
-                          ? `Select File-Level Finding on ${finding.filePath}`
-                          : `Select Finding on ${finding.filePath} Line ${finding.line}`}
-                        checked={selectedFindings.has(finding.findingId)}
-                        disabled={bundlingFindings}
-                        onChange={(checked) => setSelectedFindings((prior) => {
-                          const next = new Set(prior);
-                          if (checked) next.add(finding.findingId); else next.delete(finding.findingId);
-                          return next;
-                        })}
-                      />
-                      <div className="review-finding-main">
-                        <div className="review-finding-meta">
-                          {sourceLocation ? (
-                            <button type="button" className="source-path-link" onClick={() => onOpenSourceLocation(sourceLocation)}>
-                              <code>{findingLocation}</code>
-                            </button>
-                          ) : (
-                            <code>{findingLocation}</code>
-                          )}
-                          <span className={`review-severity review-severity-${finding.severity}`}>{titleCaseLabel(finding.severity)}</span>
-                          {finding.required && <StatusBadge tone="neutral" noDot label="Required" />}
-                          {finding.status === "sent" && <span>Sent</span>}
-                          {stale && <span className="review-stale">Stale Diff Anchor</span>}
-                        </div>
-                        <div>{finding.body}</div>
-                        <div className="review-finding-provenance">{finding.source === "gitlab" ? "GitLab" : titleCaseLabel(finding.source)} · {finding.author.id ?? titleCaseLabel(finding.author.kind)} · {titleCaseLabel(finding.scope.replaceAll("_", " "))} · {titleCaseLabel(finding.side)}</div>
-                        {finding.remote && (
-                          <div className="review-finding-provenance">
-                            {finding.remote.provider === "gitlab" ? "MR" : "PR"} #{finding.remote.pullRequestNumber}{finding.remote.outdated ? " · Outdated" : ""}{" · "}
-                            <a className="link" href={finding.remote.url} target="_blank" rel="noreferrer">Open on {finding.remote.provider === "gitlab" ? "GitLab" : "GitHub"}</a>
-                          </div>
-                        )}
-                      </div>
-                      <div className="review-finding-row-actions">
-                        {finding.remote ? (
-                          <span className="muted">Remote-Owned</span>
-                        ) : (
-                          <>
-                            <button className="btn ghost sm" disabled={findingBusyId === finding.findingId || findingRefusal !== null}
-                              title={findingRefusal ?? undefined} aria-describedby={findingRefusal !== null ? findingRefusalId : undefined}
-                              onClick={() => void updateFinding(finding, "resolved")}>Resolve</button>
-                            <button className="btn ghost sm" disabled={findingBusyId === finding.findingId || findingRefusal !== null}
-                              title={findingRefusal ?? undefined} aria-describedby={findingRefusal !== null ? findingRefusalId : undefined}
-                              onClick={() => void updateFinding(finding, "dismissed")}>Dismiss</button>
-                          </>
-                        )}
-                      </div>
-                    </article>
-                  );
-                })}
-              </div>
-            )}
-          </section>
         </div>
       </PanelToolLayout>
       {requestDialogOpen && (

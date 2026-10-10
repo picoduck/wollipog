@@ -704,10 +704,16 @@ let model = loadModel();
 let socket: FixtureSocket | null = null;
 type GitFixtureAction = "status" | "summary";
 const longGitBranch = "feature/session-alpha-with-a-deliberately-long-branch-name-for-narrow-layout-validation";
+/**
+ * Alpha's worktree has uncommitted changes, except when Review is ready with no file list: then the
+ * branch's work is all committed, and the counts agree with the empty list rather than reading
+ * "2 of 0 files staged" (#2850).
+ */
+const alphaDirty = (id: string) => id === "session-alpha" && (!REVIEW_READY || REVIEW_DIFF);
 const defaultGitStatus = (id: string): GitStatusInfo => ({
   branch: id === "session-no-project" ? "HEAD" : id === "session-alpha" ? longGitBranch : "main",
   files: id === "session-alpha" && REVIEW_DIFF ? DIFF_SECTIONS_STATUS_FILES : [],
-  hasChanges: id === "session-alpha",
+  hasChanges: alphaDirty(id),
   ahead: id === "session-alpha" && REVIEW_READY ? 2 : 0,
   remoteUrl: "https://github.com/example/wollipog.git",
   headSha: id === "session-no-project" ? "bbbbbbbbbbbb" : id === "session-alpha" ? "aaaaaaaaaaaa" : "cccccccccccc",
@@ -718,14 +724,14 @@ const defaultGitStatus = (id: string): GitStatusInfo => ({
   baseRef: "origin/main",
   worktreeKind: id === "session-alpha" ? "linked" : "primary",
   shallow: false,
-  stagedCount: id === "session-alpha" ? 2 : 0,
-  modifiedCount: id === "session-alpha" ? 1 : 0,
-  untrackedCount: id === "session-alpha" ? 1 : 0,
-  conflictedCount: id === "session-alpha" ? 1 : 0,
+  stagedCount: alphaDirty(id) ? 2 : 0,
+  modifiedCount: alphaDirty(id) ? 1 : 0,
+  untrackedCount: alphaDirty(id) ? 1 : 0,
+  conflictedCount: alphaDirty(id) ? 1 : 0,
   operation: id === "session-alpha" ? "rebase" : null,
   remoteRefsAt: Date.now() - 120_000,
-  addedLines: id === "session-alpha" ? 9 : 0,
-  deletedLines: id === "session-alpha" ? 3 : 0,
+  addedLines: alphaDirty(id) ? 9 : 0,
+  deletedLines: alphaDirty(id) ? 3 : 0,
 });
 const gitFixtures = new Map<string, { status: GitStatusInfo; summary: GitSummaryInfo }>();
 for (const value of model.sessions) {

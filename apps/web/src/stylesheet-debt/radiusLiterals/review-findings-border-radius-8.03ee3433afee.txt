@@ -1,1 +1,0 @@
-|.review-findings|border-radius|8

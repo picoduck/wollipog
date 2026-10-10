@@ -499,7 +499,7 @@ function inlineFindingBodies(container: HTMLElement): string[] {
 }
 
 function staleMarkers(container: HTMLElement): number {
-  return container.querySelectorAll(".review-stale").length;
+  return container.querySelectorAll(".review-finding-outdated").length;
 }
 
 /* -------------------------------------------------------------------------- */

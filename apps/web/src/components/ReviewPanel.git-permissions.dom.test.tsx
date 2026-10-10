@@ -114,7 +114,7 @@ const status: GitStatusInfo = {
   files: [{ status: "M", path: "src/a.ts" }],
   hasChanges: true,
   ahead: 0,
-  remoteUrl: null,
+  remoteUrl: "https://github.com/acme/app.git",
   headSha: "abc1234",
   stagedCount: 1,
   addedLines: 1,
