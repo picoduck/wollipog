@@ -6,6 +6,7 @@ import {
   compactMarkdownUrlLabel,
   formatTranscriptMediaDuration,
   Markdown,
+  markdownContentCache,
   markdownCodeBlockContinues,
   markdownCodeLanguage,
   markdownCodeText,
@@ -16,6 +17,26 @@ import {
 } from "./Markdown.js";
 
 (globalThis as typeof globalThis & { React: typeof React }).React = React;
+
+test("cache hits preserve GFM, raw HTML and URL security, and separate the inline profile", () => {
+  const source = ["# Cached Security 2771", "", "| Item | Result |", "| --- | --- |", "| **safe** | ~~old~~ |", "",
+    "[unsafe](javascript:alert%281%29) ![unsafe](javascript:alert%281%29)",
+    "", "<script>globalThis.cachedCompromise = true</script>"].join("\n");
+  const render = (profile: "document" | "inline") => renderToStaticMarkup(React.createElement(Markdown, {
+    profile, children: source, highlightEligible: false,
+  }));
+  const cold = render("document");
+  const first = markdownContentCache.snapshot();
+  assert.equal(render("document"), cold);
+  assert.equal(markdownContentCache.snapshot().parses, first.parses);
+  assert.match(cold, /<table>/);
+  assert.match(cold, /<h1>/);
+  assert.doesNotMatch(cold, /<script|<img|href="javascript:/i);
+  const inline = render("inline");
+  assert.doesNotMatch(inline, /<table|<h1|<script|<img|href="javascript:/i);
+  assert.equal(render("inline"), inline);
+  assert.equal(markdownContentCache.snapshot().parses, first.parses + 1);
+});
 
 test("block continuation is same-language prefix growth or shrinkage, never a replacement", () => {
   const seen = { language: "text", text: "draft body" };

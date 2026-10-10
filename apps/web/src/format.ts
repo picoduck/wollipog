@@ -105,6 +105,54 @@ export function formatRecordedRelativeTime(
   return `${Math.floor(diff / 86_400_000)}d ago`;
 }
 
+const TIMESTAMP_FORMATTER_LIMIT = 32;
+const DEFAULT_FORMAT_ENVIRONMENT_TTL_MS = 1_000;
+const timestampFormatters = new Map<string, Intl.DateTimeFormat>();
+let defaultFormatEnvironment: { locale: string; timeZone: string; fingerprint: string; refreshedAt: number } | undefined;
+
+/** Explicit invalidation for default-environment changes; retains no timestamp or transcript data. */
+export function clearTimestampFormatterCache() {
+  timestampFormatters.clear();
+  defaultFormatEnvironment = undefined;
+}
+
+export function timestampFormatterCacheSize() { return timestampFormatters.size; }
+
+function timestampFormatter(style: "clock" | "recorded" | "title", locale?: string, timeZone?: string) {
+  // The implicit locale/time zone can change while a long-lived tab is open. Use actual resolved
+  // defaults, refresh on a changed language/UTC offset, and recheck at least once per second of
+  // active formatting for zone changes sharing an offset. The refresh also drops old instances.
+  if (locale === undefined || !timeZone) {
+    const now = Date.now();
+    const languages = typeof navigator === "undefined" ? "" : navigator.languages?.join(",") ?? navigator.language;
+    const fingerprint = `${languages}:${new Date(now).getTimezoneOffset()}`;
+    if (!defaultFormatEnvironment || defaultFormatEnvironment.fingerprint !== fingerprint ||
+        now < defaultFormatEnvironment.refreshedAt || now - defaultFormatEnvironment.refreshedAt >= DEFAULT_FORMAT_ENVIRONMENT_TTL_MS) {
+      const resolved = new Intl.DateTimeFormat().resolvedOptions();
+      if (defaultFormatEnvironment && (defaultFormatEnvironment.locale !== resolved.locale || defaultFormatEnvironment.timeZone !== resolved.timeZone)) {
+        timestampFormatters.clear();
+      }
+      defaultFormatEnvironment = { locale: resolved.locale, timeZone: resolved.timeZone, fingerprint, refreshedAt: now };
+    }
+    locale ??= defaultFormatEnvironment.locale;
+    timeZone ||= defaultFormatEnvironment.timeZone;
+  }
+  const key = JSON.stringify([locale, timeZone, style]);
+  const cached = timestampFormatters.get(key);
+  if (cached) {
+    timestampFormatters.delete(key);
+    timestampFormatters.set(key, cached);
+    return cached;
+  }
+  const options: Intl.DateTimeFormatOptions = style === "title"
+    ? { dateStyle: "medium", timeStyle: "medium", timeZone }
+    : { hour: "numeric", minute: "2-digit", ...(style === "recorded" ? { second: "2-digit" } : {}), timeZone };
+  const formatter = new Intl.DateTimeFormat(locale, options);
+  if (timestampFormatters.size >= TIMESTAMP_FORMATTER_LIMIT) timestampFormatters.delete(timestampFormatters.keys().next().value!);
+  timestampFormatters.set(key, formatter);
+  return formatter;
+}
+
 /** Wall-clock time without seconds ("12:26 AM"), the transcript's one visible timestamp. */
 export function formatClock(
   timestamp: number | undefined,
@@ -114,11 +162,7 @@ export function formatClock(
   if (!Number.isFinite(timestamp)) return "";
   const date = new Date(timestamp!);
   if (Number.isNaN(date.getTime())) return "";
-  return new Intl.DateTimeFormat(locale, {
-    hour: "numeric",
-    minute: "2-digit",
-    ...(timeZone ? { timeZone } : {}),
-  }).format(date);
+  return timestampFormatter("clock", locale, timeZone).format(date);
 }
 
 /** Session event time means recorded by the runner; adopted history may not retain provider time. */
@@ -130,21 +174,10 @@ export function formatRecordedTimestamp(
   if (!Number.isFinite(timestamp)) return null;
   const date = new Date(timestamp!);
   if (Number.isNaN(date.getTime())) return null;
-  const timeOptions: Intl.DateTimeFormatOptions = {
-    hour: "numeric",
-    minute: "2-digit",
-    second: "2-digit",
-    ...(timeZone ? { timeZone } : {}),
-  };
-  const dateOptions: Intl.DateTimeFormatOptions = {
-    dateStyle: "medium",
-    timeStyle: "medium",
-    ...(timeZone ? { timeZone } : {}),
-  };
   return {
     dateTime: date.toISOString(),
-    label: new Intl.DateTimeFormat(locale, timeOptions).format(date),
-    title: `Recorded ${new Intl.DateTimeFormat(locale, dateOptions).format(date)}`,
+    label: timestampFormatter("recorded", locale, timeZone).format(date),
+    title: `Recorded ${timestampFormatter("title", locale, timeZone).format(date)}`,
   };
 }
 
