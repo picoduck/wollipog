@@ -310,6 +310,29 @@ test("a confirmation answered after its job ended, left the list or was replaced
   }
 });
 
+test("a finished job's Result waits for a running sibling the bounded list leaves out (#2858)", async () => {
+  const now = Date.now();
+  const listed = Array.from({ length: 128 }, (_, index) => job({
+    id: `job-listed-${String(index).padStart(6, "0")}`, terminalStatus: "completed", terminalObservedAt: now - MINUTE,
+    continuationRequired: true,
+  }));
+  const detail = await mountDetail({
+    jobId: listed[0]!.id,
+    session: session(listed, {
+      backgroundJobsTruncated: true,
+      backgroundDeliveries: [{ parentTurnId: "turn-4", jobCount: 128, terminalCount: 128,
+        watchdogState: "continuation_blocked", unfinishedSiblingJobs: 1 }],
+    } as Partial<SessionView>),
+  });
+  try {
+    const result = [...detail.container.querySelectorAll(".job-detail .facts > div")]
+      .find((entry) => entry.querySelector("dt")?.textContent === "Result")?.querySelector("dd")?.textContent;
+    assert.equal(result, "Returns to this conversation when the other job finishes");
+  } finally {
+    await detail.dispose();
+  }
+});
+
 test("cancelling the confirmation sends nothing (#2858)", async () => {
   let called = false;
   const detail = await mountDetail({ session: session([job()]) },

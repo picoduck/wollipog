@@ -4,6 +4,7 @@ import type { BackgroundDeliveryView, ManagedBackgroundJobView } from "@wollipog
 import { backgroundJobLabel, blockedDeliveryStopTarget } from "./background-job-stop.js";
 import {
   backgroundJobGroupBadge,
+  backgroundJobGroupCounts,
   backgroundJobGroupStatus,
   backgroundJobResultSentence,
   backgroundJobRowSentence,
@@ -110,4 +111,19 @@ test("the notification fact reads how far the push got (#2858)", () => {
   assert.equal(backgroundNotificationStage([delivery([{ ...receipt, serviceAcceptedAt: NOW }])]), "Sent");
   assert.equal(backgroundNotificationStage([delivery([{ ...receipt, shownAt: NOW }])]), "Shown");
   assert.equal(backgroundNotificationStage([delivery([{ ...receipt, clickedAt: NOW }])]), "Opened");
+});
+
+test("a blocked receipt's unfinished siblings hold the turn even when the bounded list leaves them out (#2858)", () => {
+  const listed = Array.from({ length: 3 }, (_, index) => finished({ id: `listed-${index}` }));
+  const blocked: BackgroundDeliveryView = {
+    parentTurnId: "turn-1", jobCount: 3, terminalCount: 3, watchdogState: "continuation_blocked", unfinishedSiblingJobs: 1,
+  };
+  const group = groupBackgroundHistory(listed, [blocked])[0]!;
+  const counts = backgroundJobGroupCounts(group, true);
+  assert.deepEqual(counts, { total: 4, finished: 3, partial: true });
+  assert.equal(backgroundJobGroupBadge(backgroundJobGroupStatus(group, true)).label, "3 of 4 Finished");
+  const unfinishedSiblings = counts.total - counts.finished;
+  assert.equal(backgroundJobRowSentence(listed[0]!, "completed", unfinishedSiblings, NOW), "Result waits for the other job");
+  assert.equal(backgroundJobResultSentence(listed[0]!, "completed", unfinishedSiblings, NOW),
+    "Returns to this conversation when the other job finishes");
 });
