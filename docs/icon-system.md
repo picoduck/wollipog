@@ -107,7 +107,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `SecureContextRequiredIcon` | Lucide | `LockKeyhole` | A page that must be HTTPS or localhost to check evidence: the HTTPS or Localhost Required notice and a UI evidence tile that is Not Shown. |
 | `PlayIcon` | Lucide | `Play` | A recording: the mark over a UI evidence tile's first frame. |
 | `MailIcon` | Lucide | `Mail` | A masked or revealed email address. |
-| `EyeIcon` | Lucide | `Eye` | Reveal a masked personal identifier. |
+| `EyeIcon` | Lucide | `Eye` | Reveal a masked personal identifier; Markdown's Preview in a narrow Files panel (#2913). |
 | `EyeOffIcon` | Lucide | `EyeOff` | Hide a revealed personal identifier. |
 | `PanelRightIcon` | Lucide | `PanelRight` | Right panel placement; Preview Right, the Sessions preview beside the list (#2219). |
 | `PanelBottomIcon` | Lucide | `PanelBottom` | Preview Below, the Sessions preview under the list (#2219). |
@@ -137,7 +137,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `PaperclipIcon` | Lucide | `Paperclip` | A message that carries images: a row of the composer's queue tray. |
 | `AtSignIcon` | Lucide | `AtSign` | Reference a workspace file: the + menu's Reference a File… row, which opens the @ picker. |
 | `ChainIcon` | Lucide | `GitCommitVertical` | Worktree or context-chain relationship. |
-| `CodeIcon` | Lucide | `Code` | Generic code destination. |
+| `CodeIcon` | Lucide | `Code` | Generic code destination; Markdown's Source in a narrow Files panel (#2913). |
 | `VisualStudioCodeIcon` | Custom Exception | `Official VS Code Stable Mark (2021-06-21)` | Microsoft's canonical multicolor product mark; Lucide excludes vendor logos. |
 | `CursorEditorIcon` | Custom Exception | `Simple Icons 16.29.0: Cursor` | Canonical monochrome product mark; Lucide excludes vendor logos. |
 | `DevinDesktopIcon` | Custom Exception | `Official Devin Mark` | Cognition's compact product mark; Lucide excludes vendor logos. |

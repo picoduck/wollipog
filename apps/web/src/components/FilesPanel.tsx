@@ -15,6 +15,7 @@ import {
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { writeClipboardText } from "../clipboard.js";
+import { useNarrowerThanRem } from "../composer-usage-placement.js";
 import { highlightDiffLine } from "../diff-view.js";
 import {
   GIT_MARKER_LABEL,
@@ -49,6 +50,8 @@ import { useFeedback } from "./FeedbackProvider.js";
 import { FieldError } from "./FieldError.js";
 import {
   CloseIcon,
+  CodeIcon,
+  EyeIcon,
   FileCodeIcon,
   FileIcon,
   FolderIcon,
@@ -83,6 +86,12 @@ interface FileView {
 /** How long Go to File waits after the last keystroke before it asks the runner. */
 export const GO_TO_FILE_DEBOUNCE_MS = 150;
 const RECENT_FILES_LIMIT = 20;
+/**
+ * A side panel narrower than its 400px default (at the default text size) has no room for Go to
+ * Symbol beside the worded Preview and Source, so Markdown's row shows their icons and the shorter
+ * placeholder instead (#2913).
+ */
+const MARKDOWN_ROW_COMPACT_PANEL_REM = 25;
 
 /**
  * Files opened in this visit, most recent first, per session: Go to File ranks them with the changed
@@ -357,6 +366,12 @@ export function FilesBrowser({
   const viewerRef = useRef<HTMLDivElement>(null);
   const fieldRef = useRef<HTMLInputElement>(null);
   const symbolRef = useRef<HTMLInputElement>(null);
+  // The side panel's own width, which its `rp` container queries also answer to.
+  const [measurePanel, narrowPanel] = useNarrowerThanRem<HTMLElement>(MARKDOWN_ROW_COMPACT_PANEL_REM);
+  const viewerFieldRef = useCallback(
+    (field: HTMLDivElement | null) => measurePanel(field?.closest<HTMLElement>(".rpanel") ?? null),
+    [measurePanel],
+  );
   const mountedRef = useRef(true);
   useEffect(() => {
     mountedRef.current = true;
@@ -921,6 +936,7 @@ export function FilesBrowser({
   const viewed = searching ? null : shownFile;
   const markdown = viewed !== null && !viewed.binary && isMarkdownPath(viewed.path);
   const symbolShown = viewed !== null && !viewed.binary && !(markdown && rendered);
+  const compactMarkdownRow = markdown && narrowPanel;
   const targetSet = viewed !== null && location?.path === viewed.path && (location.line !== undefined || location.symbol !== undefined);
   // A missing symbol's error clears as soon as the field no longer holds that symbol (§8.5).
   const symbolError = symbolInputError ?? (target?.missingSymbol && symbolDraft === location?.symbol ? target.error! : null);
@@ -949,7 +965,12 @@ export function FilesBrowser({
           className="sm"
           label="Markdown View"
           value={rendered ? "preview" : "source"}
-          options={[{ value: "preview", label: "Preview" }, { value: "source", label: "Source" }]}
+          options={compactMarkdownRow
+            ? [
+              { value: "preview", label: <EyeIcon size={16} />, ariaLabel: "Preview", title: "Preview" },
+              { value: "source", label: <CodeIcon size={16} />, ariaLabel: "Source", title: "Source" },
+            ]
+            : [{ value: "preview", label: "Preview" }, { value: "source", label: "Source" }]}
           onChange={(view) => setRendered(view === "preview")}
         />
       )}
@@ -962,7 +983,7 @@ export function FilesBrowser({
             type="text"
             aria-label="Go to Symbol"
             title="Finds the first place this text appears in the file."
-            placeholder="Go to symbol"
+            placeholder={compactMarkdownRow ? "Symbol" : "Go to symbol"}
             value={symbolDraft}
             maxLength={256}
             autoComplete="off"
@@ -1011,7 +1032,7 @@ export function FilesBrowser({
       {goToFileField}
       {viewerToolbar && (
         // A field (§8.5): Go to Symbol's error sits under the row, and its invalid edge is the field's.
-        <div className="field files-viewer-field">
+        <div ref={viewerFieldRef} className="field files-viewer-field">
           {viewerToolbar}
           {symbolShown && symbolError && <FieldError id={symbolErrorId}>{symbolError}</FieldError>}
         </div>
