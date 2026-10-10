@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useInsertionEffect,
   useMemo,
   useRef,
   useSyncExternalStore,
@@ -2961,12 +2962,13 @@ export interface StoreValueSource<T> {
 /**
  * `selector`'s value as a source an effect can read and watch, for work that follows a change
  * without showing it, such as a refetch (#2872). The component does not render for it. `selector`
- * is read when the source is, so it may use values the component renders with.
+ * is read when the source is, so it may use values the component renders with: the one of the latest
+ * committed render, taken before any effect runs.
  */
 export function useStoreValueSource<T>(selector: (s: State) => T): StoreValueSource<T> {
   const store = useStoreHandle();
   const selectorRef = useRef(selector);
-  selectorRef.current = selector;
+  useInsertionEffect(() => { selectorRef.current = selector; });
   return useMemo(() => ({ read: () => selectorRef.current(store.getState()), subscribe: store.subscribe }), [store]);
 }
 

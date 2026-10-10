@@ -323,3 +323,25 @@ test("a replayed chunk that replaces one already folded shows its own text (#287
     await view.unmount();
   }
 });
+
+test("a replay that rewrites an event the view already derived renders the view (#2872)", async () => {
+  const view = await mount();
+  try {
+    for (const word of ["Alpha", "Bravo"]) await view.append({ kind: "agent_message", text: `${word} ` });
+    const text = () => view.container.textContent ?? "";
+    assert.ok(text().includes("in sessions.ts"));
+    const charlie = view.lastSeq() + 1;
+    // A chunk, then a replay of an earlier reply with corrected text, then a paced upsert, all in
+    // one published frame: the array keeps both ends, but the store marks it as a merge.
+    await view.pushTogether([
+      { type: "session_event", event: { id: charlie, sessionId: view.fixture.id, seq: charlie, ts: charlie, payload: { kind: "agent_message", text: "Charlie " } } },
+      { type: "session_event", event: { id: 9_005, sessionId: view.fixture.id, seq: 5, ts: 5, payload: { kind: "agent_message", text: "The control plane, in the hub." } } },
+      { type: "session_upsert", session: sessionView(view.fixture.id, { messageCount: 12, preview: "Charlie" }) },
+    ]);
+    assert.ok(text().includes("The control plane, in the hub."), `the corrected reply is shown: ${text()}`);
+    assert.ok(!text().includes("in sessions.ts"));
+    assert.ok(text().includes("Alpha Bravo Charlie"));
+  } finally {
+    await view.unmount();
+  }
+});

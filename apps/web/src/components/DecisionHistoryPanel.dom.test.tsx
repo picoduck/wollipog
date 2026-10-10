@@ -18,7 +18,18 @@ import {
   decisionDayLabel,
   DecisionHistoryPanel,
   filterDecisions,
+  untilNextLocalDay,
 } from "./DecisionHistoryPanel.js";
+
+test("a day header changes exactly when untilNextLocalDay says (#2872)", () => {
+  for (const now of [new Date(2026, 9, 9, 23, 59, 59, 999), new Date(2026, 9, 10, 0, 0, 0, 0), new Date(2026, 9, 10, 13, 7)]) {
+    const at = now.getTime();
+    const wait = untilNextLocalDay(at);
+    assert.ok(wait > 0 && wait <= 86_400_000);
+    assert.equal(decisionDayLabel(at, at + wait - 1), decisionDayLabel(at, at), "still the same day just before");
+    assert.notEqual(decisionDayLabel(at, at + wait), decisionDayLabel(at, at), "a new day at it");
+  }
+});
 
 const domWindow = new Window({ url: "http://localhost/" });
 const globals: Record<string, unknown> = {

@@ -19,20 +19,24 @@ export function relativeTimeChangesIn(diff: number): number {
 }
 
 /**
- * `relativeTime(at)`, rendering its caller again whenever that reading changes (#2872). An age read
- * from the clock only as its component rendered moved on while something else kept rendering it,
- * such as a session view rendering four times a second while an agent streamed.
+ * Renders the caller again in `ms`, once per render, for a reading that changes with the clock
+ * (#2872). Such a reading moved on while something else kept rendering it, such as a session view
+ * rendering four times a second while an agent streamed. Null schedules nothing.
  */
-export function useRelativeTime(at: number | null | undefined): string {
+export function useRerenderIn(ms: number | null): void {
   const [, setTick] = useState(0);
-  const text = relativeTime(at ?? null);
   useEffect(() => {
-    if (!at) return undefined;
+    if (ms === null || !Number.isFinite(ms)) return undefined;
     // A little past the change, so the next reading has moved on.
-    const timer = setTimeout(() => setTick((tick) => tick + 1), relativeTimeChangesIn(Date.now() - at) + 20);
+    const timer = setTimeout(() => setTick((tick) => tick + 1), Math.max(0, ms) + 20);
     return () => clearTimeout(timer);
   });
-  return text;
+}
+
+/** `relativeTime(at)`, rendering its caller again whenever that reading changes. */
+export function useRelativeTime(at: number | null | undefined): string {
+  useRerenderIn(at ? relativeTimeChangesIn(Date.now() - at) : null);
+  return relativeTime(at ?? null);
 }
 
 /** `relativeTime(at)` that keeps itself current. */

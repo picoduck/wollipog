@@ -1,6 +1,6 @@
 import { useMemo, useRef } from "react";
 import type { SessionEvent } from "@wollipog/protocol";
-import { useStoreSelector } from "../store.js";
+import { isRebuiltEventsArray, useStoreSelector } from "../store.js";
 import {
   continueStreamingText,
   publishTimelineSnapshotDelta,
@@ -37,6 +37,9 @@ export function onlyContinuesTrailingText(
   next: readonly SessionEvent[] | undefined,
 ): boolean {
   if (!previous || !next || next.length <= previous.length || previous.length === 0) return false;
+  // A merge (a replay, a history load) can replace any earlier event while keeping the ends: the
+  // session view derives again from it, as it always has (#2872).
+  if (isRebuiltEventsArray(next as SessionEvent[])) return false;
   const last = previous[previous.length - 1]!;
   // The store appends by copying the array, so an unchanged prefix keeps its event objects.
   if (next[0] !== previous[0] || next[previous.length - 1] !== last) return false;

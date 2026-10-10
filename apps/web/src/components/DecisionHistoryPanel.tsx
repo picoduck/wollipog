@@ -7,6 +7,7 @@ import { humanResolver, ViewerIdentityContext, type ViewerIdentity } from "../re
 import { ShieldCheckIcon } from "./Icons.js";
 import { DecisionRecord } from "./requests/DecisionRecord.js";
 import { State } from "./State.js";
+import { useRerenderIn } from "./RelativeTime.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { SegmentedControl } from "./ui/ChoiceControls.js";
 
@@ -53,6 +54,13 @@ function startOfDay(at: number): number {
 }
 
 /** The group header for a day (§5.2): "Today", "Yesterday", then the date. */
+/** How long until the local day after `now`'s begins. */
+export function untilNextLocalDay(now: number): number {
+  const next = new Date(now);
+  next.setHours(24, 0, 0, 0);
+  return next.getTime() - now;
+}
+
 export function decisionDayLabel(at: number, now: number): string {
   const today = startOfDay(now);
   const day = startOfDay(at);
@@ -174,6 +182,8 @@ export function DecisionHistoryPanel({
   const [filter, setFilter] = useState<DecisionHistoryFilter>("all");
   const [openAuditId, setOpenAuditId] = useState<string | null>(null);
   const showSkeleton = useDelayedFlag(status === "loading", DECISION_HISTORY_SKELETON_DELAY_MS);
+  // Today's decisions become yesterday's at midnight (#2872).
+  useRerenderIn(now === undefined ? untilNextLocalDay(Date.now()) : null);
 
   if (status === "loading") {
     return showSkeleton ? (
