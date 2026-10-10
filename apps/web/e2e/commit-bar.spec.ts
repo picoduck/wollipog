@@ -94,7 +94,7 @@ for (const size of SIZES) {
 
 test("the Open Pull Request dialog is a sheet on a phone and shows its field error", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await openReview(page, "scenario=staged");
+  await openReview(page, "scenario=unstaged");
   await page.getByRole("region", { name: "Commit" }).getByRole("button", { name: "Open Pull Request…" }).click();
   const dialog = page.getByRole("dialog", { name: "Open Pull Request" });
   await expect(dialog).toBeVisible();
@@ -121,4 +121,13 @@ test("opening a pull request closes the dialog, adds the summary row and offers 
   await expect(link).toHaveAttribute("href", "https://github.com/acme/shop/pull/412");
   expect(await link.evaluate((element) => getComputedStyle(element).textDecorationLine)).toBe("none");
   await expect(bar.getByRole("button", { name: "Push to Pull Request" })).toBeVisible();
+});
+
+test("a partial stage disables Open Pull Request in the dialog and says why in its footer", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openReview(page, "scenario=staged");
+  await page.getByRole("region", { name: "Commit" }).getByRole("button", { name: "Open Pull Request…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Open Pull Request" });
+  await expect(dialog.getByRole("button", { name: "Open Pull Request", exact: true })).toBeDisabled();
+  await expect(dialog.getByText("Commit the staged changes first.")).toBeVisible();
 });

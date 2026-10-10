@@ -6471,7 +6471,8 @@ textarea {
    Guardrails (#2175) puts its one footer line here too: what empty means, or a Viewer's refusal.
    Hand Off (#2186) says why Create Handoff is disabled: "Choose a supported service tier." Snooze
    (#2181) says why a reminder conflict refuses its primary: "Reload the reminder before saving." Open
-   Pull Request (#2847) says why it can't open the request: offline, or a Viewer's refusal. */
+   Pull Request (#2847) says why it can't open the request: offline, a Viewer's refusal, or a partial
+   stage ("Commit the staged changes first."). */
 .modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason) {
   flex: 0 1 auto;
   min-width: 0;

@@ -19,7 +19,10 @@ const REASON_ID = "open-request-reason";
  *
  * A missing title is a field error; a failure the runner reports is a danger notice above the
  * footer, in plain words with Git's output behind Show Details. Closing while it runs is allowed:
- * the result then shows in the commit bar.
+ * the result then shows in the commit bar. A partial stage is a state the runner always refuses to
+ * push, so the primary is disabled with "Commit the staged changes first." in the footer (§7.3)
+ * rather than offered and refused — the issue's "Only staged changes are committed before pushing."
+ * would describe something the runner never does (Orchestrator decision on #2847).
  */
 export function OpenRequestDialog({
   requestName,
@@ -45,7 +48,7 @@ export function OpenRequestDialog({
   onBodyChange: (body: string) => void;
   branch: string;
   onBranchChange: (branch: string) => void;
-  /** Some changes are staged and some aren't, which the runner refuses to push. */
+  /** Some changes are staged and some aren't, which the runner always refuses to push. */
   partialStage: boolean;
   busy: boolean;
   /** A read or another Git action is running, so the request waits for it. */
@@ -63,9 +66,11 @@ export function OpenRequestDialog({
   const request = requestName.toLowerCase();
   const formId = "open-request-form";
   const validate = (value: string) => value.trim() ? null : `Enter a title for the ${request}.`;
+  // Why the primary can't run: offline or refused first, then a partial stage.
+  const reason = unavailable ?? (partialStage ? "Commit the staged changes first." : null);
 
   const submit = () => {
-    if (busy || held || unavailable) return;
+    if (busy || held || reason) return;
     const problem = validate(title);
     setTitleError(problem);
     setEdited(true);
@@ -83,11 +88,11 @@ export function OpenRequestDialog({
       {...(returnFocusRef ? { returnFocusRef } : {})}
       footer={(
         <>
-          {unavailable && <p className="open-request-reason" id={REASON_ID}>{unavailable}</p>}
+          {reason && <p className="open-request-reason" id={REASON_ID}>{reason}</p>}
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
           <BusyButton className="btn primary" type="submit" form={formId} busy={busy}
-            disabled={!busy && (held || unavailable !== null)}
-            aria-describedby={unavailable && !busy ? REASON_ID : undefined}
+            disabled={!busy && (held || reason !== null)}
+            aria-describedby={reason && !busy ? REASON_ID : undefined}
             progress={`Opening the ${request}…`}>
             {`Open ${requestName}`}
           </BusyButton>
@@ -137,11 +142,6 @@ export function OpenRequestDialog({
           />
           <p className="field-helper" id={BRANCH_HELPER_ID}>Defaults to the agent's branch.</p>
         </div>
-        {partialStage && (
-          <Notice tone="warning" compact role="status">
-            Commit the staged changes first. Opening a {request} won't commit a partial stage.
-          </Notice>
-        )}
         {failure && (
           <Notice
             tone="danger"

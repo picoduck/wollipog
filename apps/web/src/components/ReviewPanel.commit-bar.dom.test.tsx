@@ -527,12 +527,10 @@ test("a prefilled-link fallback is a warning with Finish on GitHub", async () =>
 });
 
 test("the dialog's own failures stay in the dialog: a missing title under the field, a push failure above the footer", async () => {
-  const harness = await mountReview();
+  const harness = await mountReview({ status: statusOf({ stagedCount: 0 }) });
   try {
     await click(only(bar(harness.container), "Open Pull Request…"));
-    assert.equal(dialog()!.querySelector(".notice.t-warning")?.textContent,
-      "Commit the staged changes first. Opening a pull request won't commit a partial stage.",
-      "a partial stage is warned about before anything is sent");
+    assertNoDomNode(dialog()!.querySelector(".open-request-reason"), "nothing staged is not a partial stage");
 
     await typeInto(dialogField("Title"), "");
     await click(only(dialog()!, "Open Pull Request"));
@@ -642,7 +640,7 @@ test("the dialog can't open a request once the runner disconnects, and says why 
 });
 
 test("a request opened after a session switch still releases the drafts it consumed", async () => {
-  const harness = await mountReview();
+  const harness = await mountReview({ status: statusOf({ stagedCount: 0 }) });
   try {
     await click(only(bar(harness.container), "Open Pull Request…"));
     await typeInto(dialogField("Description (Optional)") as unknown as HTMLTextAreaElement, "Submitted once.");
@@ -665,7 +663,7 @@ test("a request opened after a session switch still releases the drafts it consu
 test("a newly opened request is followed even while the forge still reports an older, closed one", async () => {
   const closed: GitPrSummary = { ...openPr, number: 42, state: "CLOSED", title: "An older attempt" };
   const oldChecks: GitChecksSummary = { failing: 1, pending: 0, passing: 3, failingNames: ["old-pr-build"], url: "https://github.com/acme/shop/pull/42/checks" };
-  const harness = await mountReview({ forgeFacts: { pr: closed, checks: oldChecks } });
+  const harness = await mountReview({ status: statusOf({ stagedCount: 3 }), forgeFacts: { pr: closed, checks: oldChecks } });
   try {
     assert.deepEqual(actionRow(harness.container).slice(0, 1), ["Open Pull Request…"], "a closed request is not pushed to");
     await click(only(bar(harness.container), "Open Pull Request…"));
@@ -762,7 +760,7 @@ test("Cancel returns focus to Open Pull Request…", async () => {
 });
 
 test("a request opened while the status refresh holds the bar keeps keyboard position in the bar", async () => {
-  const harness = await mountReview();
+  const harness = await mountReview({ status: statusOf({ stagedCount: 3 }) });
   try {
     const opener = only(bar(harness.container), "Open Pull Request…");
     opener.focus();
@@ -844,6 +842,33 @@ test("Try Again takes its notice away and leaves focus on the action it started"
     assertNoDomNode(bar(harness.container).querySelector(".notice"), "the notice went as the action started");
     assert.equal(focusedName(), "button: Commit Staged", "focus is on the running Commit Staged");
     await release();
+  } finally {
+    await harness.unmount();
+  }
+});
+
+/* Orchestrator decision on #2847: a partial stage disables Open Pull Request with its reason */
+
+test("a partial stage disables Open Pull Request with \"Commit the staged changes first.\" in the footer", async () => {
+  const harness = await mountReview();
+  try {
+    await click(only(bar(harness.container), "Open Pull Request…"));
+    const primary = only(dialog()!, "Open Pull Request");
+    assert.equal(primary.disabled, true, "an action the runner always refuses is not offered");
+    const reason = domWindow.document.getElementById(primary.getAttribute("aria-describedby")!);
+    assert.equal(reason?.textContent, "Commit the staged changes first.");
+    assert.ok(reason?.closest(".modal-foot"), "the reason is the footer's left slot (§7.3)");
+    assertNoDomNode(dialog()!.querySelector(".notice"), "no warning notice beside it");
+    await act(async () => {
+      fireDomEvent.submit(dialog()!.querySelector("form")!);
+      await Promise.resolve();
+    });
+    assert.deepEqual(harness.sent, [], "neither the button nor Enter sends anything");
+
+    // Staging the rest (or committing the staged files) lifts it.
+    await harness.render({ status: statusOf({ stagedCount: 3 }) });
+    assert.equal(only(dialog()!, "Open Pull Request").disabled, false);
+    assertNoDomNode(dialog()!.querySelector(".open-request-reason"));
   } finally {
     await harness.unmount();
   }
