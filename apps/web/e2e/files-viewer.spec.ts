@@ -84,6 +84,62 @@ for (const [label, viewport, panel] of [
   });
 }
 
+/** The field's room for text, and the width its placeholder (and a typed `sample`) needs in the field's own font. */
+async function symbolRoom(page: Page, sample: string): Promise<{ room: number; placeholder: number; sample: number }> {
+  return symbolField(page).evaluate((input: HTMLInputElement, text) => {
+    const style = getComputedStyle(input);
+    const context = document.createElement("canvas").getContext("2d")!;
+    context.font = style.font;
+    return {
+      room: input.clientWidth - parseFloat(style.paddingInlineStart) - parseFloat(style.paddingInlineEnd),
+      placeholder: context.measureText(input.placeholder).width,
+      sample: context.measureText(text).width,
+    };
+  }, sample);
+}
+
+// #2913: beside Markdown's Preview and Source, Go to Symbol stays readable in a narrow panel. The
+// control shows its icons and the placeholder shortens; their names do not change.
+for (const [label, viewport, panel] of [
+  ["a 320px panel", { width: 1440, height: 900 }, 320],
+  ["a 390px phone", { width: 390, height: 844 }, 0],
+] as const) {
+  test.describe(`Markdown Source in ${label}`, () => {
+    test.use({ viewport, ...(panel ? {} : { hasTouch: true, isMobile: true }) });
+    const query = panel ? `&panel=${panel}` : "";
+
+    test("Go to Symbol has room for its whole placeholder, and a target moves no other control", async ({ page }) => {
+      await open(page, `?open=README.md${query}`);
+      const row = viewerRow(page);
+      await row.getByRole("radio", { name: "Source" }).click();
+      await expect(row.getByRole("radio", { name: "Source" })).toHaveAttribute("aria-checked", "true");
+      await expect(row.getByRole("radio", { name: "Preview" })).toBeVisible();
+      await expect(symbolField(page)).toHaveAttribute("placeholder", "Symbol");
+      await expectOneRow(row);
+      const fit = await symbolRoom(page, "Sessi");
+      expect(fit.room, `room ${fit.room} for a ${fit.placeholder}px placeholder`).toBeGreaterThanOrEqual(fit.placeholder);
+      expect(fit.room).toBeGreaterThanOrEqual(fit.sample);
+
+      const before = await controlBoxes(row);
+      await symbolField(page).fill("Sessions");
+      await symbolField(page).press("Enter");
+      await expect(page.locator(".cl.is-target mark")).toHaveText("Sessions");
+      await expectOneRow(row);
+      expect(await controlBoxes(row)).toEqual(before);
+      await row.getByRole("button", { name: "Clear Target" }).click();
+      await expect(page.locator(".cl.is-target")).toHaveCount(0);
+      expect(await controlBoxes(row)).toEqual(before);
+    });
+
+    test("a source file keeps the whole placeholder and the row's width", async ({ page }) => {
+      await open(page, `?open=${CHECKLIST}${query}`);
+      await expect(symbolField(page)).toHaveAttribute("placeholder", "Go to symbol");
+      const fit = await symbolRoom(page, "");
+      expect(fit.room).toBeGreaterThanOrEqual(fit.placeholder);
+    });
+  });
+}
+
 test.describe("at 400px", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
@@ -141,6 +197,16 @@ test.describe("at 400px", () => {
       return { background: style.backgroundColor, border: style.borderTopWidth, plain: getComputedStyle(plain).color === text };
     });
     expect(look).toEqual({ background: "rgba(0, 0, 0, 0)", border: "0px", plain: true });
+  });
+
+  test("Markdown Source keeps the worded Preview and Source and the whole placeholder", async ({ page }) => {
+    await open(page, "?open=README.md");
+    const row = viewerRow(page);
+    await row.getByRole("radio", { name: "Source" }).click();
+    await expect(row.getByRole("radio", { name: "Preview" })).toHaveText("Preview");
+    await expect(row.getByRole("radio", { name: "Source" })).toHaveText("Source");
+    await expect(row.locator(".seg-option svg")).toHaveCount(0);
+    await expect(symbolField(page)).toHaveAttribute("placeholder", "Go to symbol");
   });
 
   test("with no editor found, File Actions shows Open in Editor… unavailable with its reason", async ({ page }) => {
