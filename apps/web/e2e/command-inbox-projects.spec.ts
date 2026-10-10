@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { waitForSessionPreview } from "./session-readiness.js";
 import { dialogMotionSettled } from "./dialog-motion.js";
 
 /**
@@ -2008,6 +2009,7 @@ test.describe("Go to File (#2852)", () => {
     await page.reload();
     await page.getByRole("button", { name: /Alpha Session/ }).click();
     const expand = page.getByRole("button", { name: "Open Session", exact: true });
+    await waitForSessionPreview(page);
     if (await expand.isVisible()) await expand.click();
     await expect(page.locator("header.session-bar")).toBeVisible();
     await expect(page.locator("#right-panel")).toHaveCount(0);
