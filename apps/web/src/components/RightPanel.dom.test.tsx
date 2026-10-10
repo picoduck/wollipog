@@ -24,6 +24,10 @@ import { ApiProvider } from "../api-context.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime } from "../ui-transport.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
+import { InfoPopover } from "./InfoPopover.js";
+import { Notice } from "./Notice.js";
+import { PanelNoticeRegionContext, PanelNoticeSlot } from "./PanelNoticeSlot.js";
+import { PANEL_NOTICE_RANK, type SessionNoticeEntry } from "./SessionNoticeSlot.js";
 
 const connection: UiConnectionRuntime = {
   instanceId: "right-panel-test", runtimeKey: "right-panel-test",
@@ -148,6 +152,7 @@ const governanceDecision: GovernanceDecision = {
 function PanelHarness({
   initialSession = liveSession,
   initialRunnerOnline = true,
+  items = agentItems,
   decisionHistory,
   decisionHistoryHasMore,
   descendantRequests,
@@ -158,6 +163,7 @@ function PanelHarness({
 }: {
   initialSession?: SessionView;
   initialRunnerOnline?: boolean;
+  items?: TimelineItem[];
   decisionHistory?: readonly GovernanceDecision[];
   decisionHistoryHasMore?: boolean;
   descendantRequests?: readonly DescendantRequestView[];
@@ -197,7 +203,7 @@ function PanelHarness({
         runnerOnline={runnerOnline}
         runnerProtocolVersion={null}
         git={harnessGit}
-        items={agentItems}
+        items={items}
         decisionHistory={decisionHistory}
         decisionHistoryHasMore={decisionHistoryHasMore}
         descendantRequests={descendantRequests}
@@ -246,8 +252,12 @@ test("RightPanel consumes a transcript focus request in shared state and does no
   try {
     await act(async () => root.render(<PanelHarness onState={(next) => { state = next; }} />));
     await act(async () => container.querySelector<HTMLButtonElement>("#open-agent")!.click());
-    const detail = container.querySelector<HTMLElement>(".subagent-detail")!;
-    assert.equal(domWindow.document.activeElement, detail);
+    // The transcript's Open lands on the worker's page with its title focused (#2856).
+    const title = container.querySelector<HTMLElement>(".rpanel-page-title")!;
+    assert.equal(title.textContent, "Audit Agent");
+    assert.ok((domWindow.document.activeElement as unknown as Element | null) === (title as unknown as Element),
+      "the page title takes focus");
+    assert.ok(container.querySelector(".subagent-detail"), "the page shows the worker's detail");
     assert.equal(state.subagentTarget?.subagentId, "agent");
     assert.equal(state.subagentTarget?.focusRequest, undefined, "the mounted panel acknowledges shared focus intent");
 
@@ -640,8 +650,9 @@ test("the header is one bar with the tool switcher as its title and one Close, a
       assert.equal(switcher.getAttribute("aria-haspopup"), "menu");
       assert.ok(switcher.querySelector(".rpanel-switcher-icon svg"), `${mode}: the tool's icon`);
       // Switcher, the (empty) action slot, Expand Panel (#2845), then Close Panel; no back control in
-      // any tool.
-      assert.deepEqual([...head.children].map((child) => child.getAttribute("aria-label") ?? child.className),
+      // any tool's list. A pushed page's title waits hidden (#2856).
+      assert.deepEqual([...head.children].filter((child) => !(child as HTMLElement).hidden)
+        .map((child) => child.getAttribute("aria-label") ?? child.className),
         ["rpanel-title", "rpanel-actions", "Expand Panel", "Close Panel"], mode);
       assert.equal(head.querySelectorAll('[aria-label="Close Panel"]').length, 1, `${mode}: one Close`);
       for (const element of aside.querySelectorAll("*")) {
@@ -904,6 +915,286 @@ test("crossing the phone breakpoint with the panel open keeps focus on the panel
     assert.ok(focused() === (outside as unknown as Element));
   } finally {
     phoneViewport = false;
+    await panel.dispose();
+  }
+});
+
+/** Thirty workers, so the list is long enough to scroll and the last row opens far down (#2856). */
+const workerItems: TimelineItem[] = Array.from({ length: 30 }, (_, index) => ({
+  kind: "tool_call", id: index + 1, toolCallId: `worker-${index + 1}`, title: `Worker ${index + 1}`, text: "",
+  toolKind: "agent", status: "in_progress", startedAt: 10 + index,
+}) as TimelineItem);
+
+/** The header's visible children, by accessible name, else class. */
+const headParts = (head: Element) => [...head.children]
+  .filter((child) => !(child as HTMLElement).hidden)
+  .map((child) => child.getAttribute("aria-label") ?? child.className);
+
+test("a row opens its page in the switcher's place, and Back and Escape return to the row with the list scrolled where it was (#2856)", async () => {
+  let state!: RightPanelState;
+  const panel = await mountPanel(<PanelHarness items={workerItems} onState={(next) => { state = next; }} />);
+  const focused = () => domWindow.document.activeElement as unknown as Element | null;
+  try {
+    await act(async () => state.show("subagents"));
+    const aside = panel.container.querySelector<HTMLElement>("#right-panel")!;
+    assert.equal(aside.dataset.presentation, "docked");
+    const head = aside.querySelector(".rpanel-head")!;
+    const body = aside.querySelector<HTMLElement>(".rpanel-body")!;
+    const rows = [...aside.querySelectorAll<HTMLButtonElement>(".agents-list button")];
+    assert.equal(rows.length, 30);
+    const last = rows.at(-1)!;
+    for (const leave of ["Back", "Escape"] as const) {
+      body.scrollTop = 900;
+      last.focus();
+      await act(async () => last.click());
+      assert.deepEqual(headParts(head), ["Back to Agents", "rpanel-page-title", "rpanel-actions", "Expand Panel", "Close Panel"],
+        "Back and the page's title take the switcher's place; the tool's actions and Close stay");
+      assert.equal(head.querySelector('[aria-label="Back to Agents"]')?.getAttribute("title"), "Back to Agents");
+      const title = head.querySelector<HTMLElement>(".rpanel-page-title")!;
+      assert.equal(title.textContent, "Worker 30");
+      assert.equal(title.tabIndex, -1);
+      assert.ok(focused() === (title as unknown as Element), "the page's title takes focus");
+      assert.equal(body.scrollTop, 0, "the page opens at its top");
+      assert.ok(aside.querySelector<HTMLElement>(".agents-panel")!.hidden, "the list waits, hidden, under the page");
+      assert.ok(aside.querySelector('.agents-page[aria-label="Worker 30"] .subagent-detail'), "the page shows the worker");
+
+      if (leave === "Back") await act(async () => head.querySelector<HTMLButtonElement>('[aria-label="Back to Agents"]')!.click());
+      else await keydown(title, "Escape");
+      assert.equal(state.open, true, `${leave} leaves the panel open`);
+      assert.deepEqual(headParts(head), ["rpanel-title", "rpanel-actions", "Expand Panel", "Close Panel"], `${leave}: the switcher is back`);
+      assert.ok(focused() === (last as unknown as Element), `${leave}: focus returns to the row that opened the page`);
+      assert.equal(body.scrollTop, 900, `${leave}: the list is scrolled where it was`);
+    }
+    // On the list, Escape closes the panel as #2843 specifies.
+    await keydown(last, "Escape");
+    assert.equal(state.open, false);
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("switching tools or closing the panel clears its pages, so a tool reopens on its list (#2856)", async () => {
+  let state!: RightPanelState;
+  const panel = await mountPanel(<PanelHarness items={workerItems} onState={(next) => { state = next; }} />);
+  const pageShown = () => !panel.container.querySelector<HTMLElement>(".rpanel-page-title")!.hidden;
+  const openFirst = () => act(async () => panel.container.querySelector<HTMLButtonElement>(".agents-list button")!.click());
+  try {
+    await act(async () => state.show("subagents"));
+    await openFirst();
+    assert.ok(pageShown());
+    await act(async () => state.show("decisions"));
+    assert.ok(!pageShown(), "another tool shows its own list");
+    await act(async () => state.show("subagents"));
+    assert.ok(!pageShown(), "and Agents comes back on its list");
+    assert.ok(!panel.container.querySelector<HTMLElement>(".agents-panel")!.hidden);
+
+    await openFirst();
+    assert.ok(pageShown());
+    await act(async () => state.close());
+    await act(async () => state.show("subagents"));
+    assert.ok(!pageShown(), "closing the panel clears the stack too");
+    assert.ok(panel.container.querySelector(".rpanel-switcher"));
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("a page in an overlaid panel has the same Back, and the scrim still closes the whole panel (#2856)", async () => {
+  let state!: RightPanelState;
+  const panel = await mountPanel(<PanelHarness items={workerItems} onState={(next) => { state = next; }} />);
+  panel.container.getBoundingClientRect = () => ({
+    width: 700, height: 600, top: 0, left: 0, right: 700, bottom: 600, x: 0, y: 0, toJSON: () => ({}),
+  }) as DOMRect;
+  try {
+    await act(async () => state.show("subagents"));
+    const aside = panel.container.querySelector<HTMLElement>("#right-panel")!;
+    assert.equal(aside.dataset.presentation, "overlay");
+    const rows = [...aside.querySelectorAll<HTMLButtonElement>(".agents-list button")];
+    rows.at(-1)!.focus();
+    await act(async () => rows.at(-1)!.click());
+    const head = aside.querySelector(".rpanel-head")!;
+    assert.deepEqual(headParts(head), ["Back to Agents", "rpanel-page-title", "rpanel-actions", "Expand Panel", "Close Panel"]);
+    await act(async () => head.querySelector<HTMLButtonElement>('[aria-label="Back to Agents"]')!.click());
+    assert.ok((domWindow.document.activeElement as unknown as Element | null) === (rows.at(-1) as unknown as Element));
+
+    await act(async () => rows[0]!.click());
+    await act(async () => panel.container.querySelector<HTMLElement>(".rpanel-scrim")!.click());
+    assert.equal(state.open, false, "the scrim closes the panel, page and all");
+    await act(async () => state.show("subagents"));
+    assert.ok(panel.container.querySelector(".rpanel-switcher"), "and it reopens on the list");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("on a phone a pushed page's Back is the bar's one Back: it pops the page, and the next returns to the session (#2856)", async () => {
+  phoneViewport = true;
+  let state!: RightPanelState;
+  const panel = await mountPanel(<PanelHarness items={workerItems} onState={(next) => { state = next; }} />);
+  const labels = (head: Element) => [...head.querySelectorAll("button")].map((button) => button.getAttribute("aria-label") ?? button.textContent);
+  try {
+    await act(async () => state.show("subagents"));
+    const head = panel.container.querySelector(".rpanel-head")!;
+    assert.deepEqual(labels(head), ["Back to Session", "Agents"]);
+    const row = panel.container.querySelectorAll<HTMLButtonElement>(".agents-list button")[4]!;
+    row.focus();
+    await act(async () => row.click());
+    assert.deepEqual(labels(head), ["Back to Agents"], "one Back, no switcher and no second bar");
+    assert.equal(panel.container.querySelectorAll(".rpanel-head").length, 1);
+    assert.equal(head.querySelector(".rpanel-page-title")?.textContent, "Worker 5");
+
+    await act(async () => head.querySelector<HTMLButtonElement>('[aria-label="Back to Agents"]')!.click());
+    assert.equal(state.open, true, "the first Back pops the page");
+    assert.deepEqual(labels(head), ["Back to Session", "Agents"]);
+    assert.ok((domWindow.document.activeElement as unknown as Element | null) === (row as unknown as Element));
+    await act(async () => head.querySelector<HTMLButtonElement>('[aria-label="Back to Session"]')!.click());
+    assert.equal(state.open, false, "the next returns to the conversation");
+  } finally {
+    phoneViewport = false;
+    await panel.dispose();
+  }
+});
+
+test("a subagent opened from the transcript lands on its page, and Back goes to its row in the list (#2856)", async () => {
+  let state!: RightPanelState;
+  const panel = await mountPanel(<PanelHarness onState={(next) => { state = next; }} />);
+  const focused = () => domWindow.document.activeElement as unknown as Element | null;
+  try {
+    await act(async () => panel.container.querySelector<HTMLButtonElement>("#open-agent")!.click());
+    const head = panel.container.querySelector(".rpanel-head")!;
+    const title = head.querySelector<HTMLElement>(".rpanel-page-title")!;
+    assert.equal(title.textContent, "Audit Agent");
+    assert.ok(focused() === (title as unknown as Element));
+    await keydown(title, "Escape");
+    const row = panel.container.querySelector<HTMLElement>('[data-panel-page-key="subagent:agent"]')!;
+    assert.ok(focused() === (row as unknown as Element), "the transcript's Open is outside the panel, so Back lands on the worker's row");
+    assert.equal(state.open, true);
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("InfoPopover is a button named About <Tool> that opens anchored, a sheet on phones, and Escape closes only it (#2856)", async () => {
+  let panelEscapes = 0;
+  const popover = (
+    <div onKeyDown={(event) => { if (event.key === "Escape" && !event.defaultPrevented) panelEscapes += 1; }}>
+      <InfoPopover tool="Background Work" facts={[{ term: "Shared", value: "Timing and status" }]}>
+        Jobs the agent leaves running after a turn.
+      </InfoPopover>
+    </div>
+  );
+  const dialog = () => domWindow.document.querySelector('[role="dialog"][aria-label="About Background Work"]') as unknown as HTMLElement | null;
+  for (const phone of [false, true]) {
+    phoneViewport = phone;
+    const mounted = await mountPanel(popover);
+    try {
+      const trigger = mounted.container.querySelector<HTMLButtonElement>('[aria-label="About Background Work"]')!;
+      assert.equal(trigger.getAttribute("title"), "About Background Work", "a matching tooltip");
+      assert.ok(trigger.classList.contains("icon-btn"));
+      assert.equal(trigger.getAttribute("aria-haspopup"), "dialog");
+      trigger.focus();
+      await act(async () => trigger.click());
+      const surface = dialog()!;
+      assert.ok(surface, "it opens");
+      assert.equal(surface.querySelector(".info-popover-head")?.textContent, "About Background Work");
+      assert.match(surface.querySelector(".info-popover-text")?.textContent ?? "", /^Jobs the agent leaves running/);
+      assert.equal(surface.querySelector(".facts dt")?.textContent, "Shared");
+      assert.ok(surface.querySelector(".sheet-grabber"), "the sheet's grabber (shown on phones only)");
+      assert.ok((domWindow.document.activeElement as unknown as Element | null) === (surface as unknown as Element),
+        "the popover holds focus, so Escape reaches it");
+      if (phone) assert.equal(surface.style.top, "", "a phone's sheet docks to the bottom, unplaced");
+      else assert.notEqual(surface.style.top, "", "a fine pointer's popover is anchored to its button");
+      await keydown(surface, "Escape");
+      assertNoDomNode(dialog(), "Escape closes the popover");
+      // Focus goes back to the button on the next task, as every dismissible popover's does.
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+      assert.ok((domWindow.document.activeElement as unknown as Element | null) === (trigger as unknown as Element));
+      assert.equal(panelEscapes, 0, "and nothing under it sees the key");
+    } finally {
+      phoneViewport = false;
+      await mounted.dispose();
+    }
+  }
+});
+
+test("an InfoPopover's Escape in the side panel leaves the panel open (#2856)", async () => {
+  let state!: RightPanelState;
+  const panel = await mountPanel(<PanelHarness onState={(next) => { state = next; }} />);
+  try {
+    await act(async () => state.show("browser"));
+    const slot = panel.container.querySelector<HTMLElement>(".rpanel-actions")!;
+    const about = await mountPanel(
+      <PanelActionSlotContext.Provider value={slot}>
+        <PanelHeaderActions><InfoPopover tool="Browser">Pages the agent opened.</InfoPopover></PanelHeaderActions>
+      </PanelActionSlotContext.Provider>,
+    );
+    try {
+      const trigger = slot.querySelector<HTMLButtonElement>('[aria-label="About Browser"]')!;
+      await act(async () => trigger.click());
+      // Focus on the button inside the panel: the open popover's backdrop takes Escape first.
+      trigger.focus();
+      await keydown(trigger, "Escape");
+      assert.equal(state.open, true, "the panel stays open");
+    } finally {
+      await about.dispose();
+    }
+  } finally {
+    await panel.dispose();
+  }
+});
+
+function panelNotice(key: string, rank: number, title: string): SessionNoticeEntry {
+  return {
+    key, severity: "warning", rank, title,
+    render: ({ trailing }) => <Notice tone="warning" ariaLabel={title} title={title} trailing={trailing}>{title}.</Notice>,
+  };
+}
+
+test("the panel notice slot sits under the header and shows one notice, the rest behind +N More in rank order (#2856)", async () => {
+  let state!: RightPanelState;
+  const panel = await mountPanel(<PanelHarness onState={(next) => { state = next; }} />);
+  try {
+    await act(async () => state.show("subagents"));
+    const aside = panel.container.querySelector<HTMLElement>("#right-panel")!;
+    const region = aside.querySelector<HTMLElement>(".rpanel-notices")!;
+    assert.ok(region.previousElementSibling?.classList.contains("rpanel-head"), "directly under the header");
+
+    const three = [
+      panelNotice("inventory", PANEL_NOTICE_RANK.inventoryError, "Background Work Unavailable"),
+      panelNotice("offline", PANEL_NOTICE_RANK.runnerOffline, "Machine Offline"),
+      panelNotice("identity", PANEL_NOTICE_RANK.ambiguousIdentity, "Ambiguous Workers"),
+    ];
+    const Harness = ({ entries }: { entries: readonly SessionNoticeEntry[] }) => (
+      <PanelNoticeRegionContext.Provider value={{ element: region, focusHead: () => undefined }}>
+        <PanelNoticeSlot sessionId="session-1" entries={entries} />
+      </PanelNoticeRegionContext.Provider>
+    );
+    const host = domWindow.document.createElement("div");
+    domWindow.document.body.append(host);
+    const container = host as unknown as HTMLDivElement;
+    const root = createRoot(container);
+    const shown = () => region.querySelector<HTMLElement>(".panel-notice-slot")?.dataset.noticeKey;
+    try {
+      await act(async () => root.render(<Harness entries={three} />));
+      assertNoDomNode(container.querySelector(".panel-notice-slot"), "the slot portals out of the tool's body");
+      assert.equal(shown(), "offline", "the highest-ranked notice shows");
+      const more = region.querySelector<HTMLButtonElement>(".session-notice-more")!;
+      assert.equal(more.textContent, "+2 More");
+      await act(async () => more.click());
+      const menu = domWindow.document.querySelector('[role="menu"][aria-label="Panel Notices"]') as unknown as HTMLElement;
+      const items = [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+      assert.deepEqual(items.map((item) => item.textContent), ["Background Work Unavailable", "Ambiguous Workers"], "in rank order");
+      await act(async () => items[1]!.click());
+      assert.equal(shown(), "identity", "a chosen notice shows");
+      await act(async () => root.render(<Harness entries={[...three].reverse()} />));
+      assert.equal(shown(), "identity", "and keeps showing while the set is the same");
+      await act(async () => root.render(<Harness entries={three.filter((entry) => entry.key !== "inventory")} />));
+      assert.equal(shown(), "offline", "until the set changes");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  } finally {
     await panel.dispose();
   }
 });

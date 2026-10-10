@@ -159,10 +159,14 @@ for (const viewport of [
     await expect(roster.getByText("Review Documentation", { exact: true })).toBeVisible();
     await page.getByRole("radio", { name: "Active (3)", exact: true }).click();
     await roster.getByRole("button", { name: /Background Monitor/ }).click();
-    await expect(page.getByText("Managed Background Job", { exact: true }).first()).toBeVisible();
+    // The job opens as a page in the roster's place (#2856).
+    await expect(page.locator(".agents-page").getByText("Monitor Job 1", { exact: true })).toBeVisible();
+    await expect(roster).toBeHidden();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: `.agents/tmp/wave2-evidence/agents-${viewport.name}-${theme}.png`, fullPage: true });
     await page.getByRole("button", { name: "Disconnect Runner", exact: true }).click();
-    await expect(page.getByRole("radio", { name: "Active (0)", exact: true })).toBeVisible();
+    // This fixture renders the roster outside the side panel, with no header Back, so the roster
+    // stays under the page.
+    await expect(page.getByRole("radio", { name: "Active (0)", exact: true, includeHidden: true })).toBeAttached();
   });
 }

@@ -14,6 +14,7 @@ import { SubagentsPanel } from "./SubagentsPanel.js";
 import { BackgroundWorkPanel } from "./BackgroundWorkPanel.js";
 import { SessionQuestionBanner } from "./SessionApproval.js";
 import { RequestCard } from "./requests/RequestCard.js";
+import { PanelPageTitle, usePanelPages } from "./PanelPages.js";
 import { SegmentedControl } from "./ui/ChoiceControls.js";
 
 const PAGE_SIZE = 50;
@@ -312,10 +313,14 @@ type Props = ComponentProps<typeof SubagentsPanel> & Pick<ComponentProps<typeof 
     attentionTarget?: import("../navigation.js").AttentionTarget;
   };
 
-/** One roster retains each transport's own detail and response boundary. */
+/**
+ * One roster retains each transport's own detail and response boundary. A worker or a job opens as a
+ * page inside the panel (#2856), and so does a subagent opened from the transcript.
+ */
 export function AgentsPanel(props: Props) {
   const api = useApi();
-  const { items, runnerOnline, requestedId } = props;
+  const { items, runnerOnline, requestedId, focusRequest, onFocusRequestHandled } = props;
+  const pages = usePanelPages();
   // The registry refreshes as the session's message count and activity move, which the session view
   // does not render for (#2872).
   const session = useLiveSession(props.session);
@@ -622,6 +627,8 @@ export function AgentsPanel(props: Props) {
   useEffect(() => {
     if (!targetKey || handledTarget.current === targetKey) return;
     handledTarget.current = targetKey;
+    // The request is answered in the roster's Worker Attention section, so a page gives way to it.
+    pages.clear();
     setRequestId(targetEpochMatches && !linkedRequestMissing ? target?.requestId ?? null : null);
     setChosen(null);
     setFilter("active");
@@ -632,7 +639,15 @@ export function AgentsPanel(props: Props) {
     else window.requestAnimationFrame(() =>
       (request.requestId === session.pendingApproval?.requestId ? primaryRequestRef.current : requestDetailRef.current)?.focus());
   }, [targetKey, targetEpochMatches, linkedRequestMissing, target, requests, projection.ambiguousIds, unresolvedOwnerIds,
-    props.onSelect, session.pendingApproval?.requestId]);
+    props.onSelect, session.pendingApproval?.requestId, pages]);
+  // The transcript's Open lands on that worker's page, with Back going to the list (#2856).
+  useEffect(() => {
+    if (focusRequest === undefined) return;
+    if (requestedId) pages.push(`subagent:${requestedId}`, { root: true });
+    onFocusRequestHandled?.(focusRequest);
+    // Each request is acted on once, when it arrives.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusRequest]);
   const primaryInSession = shouldOpenPrimaryRequestInSession(selectedRequest, Boolean(props.onOpenPrimaryRequest));
   useLayoutEffect(() => {
     if ((!selectedRequest || primaryInSession) && requestOwnsFocus.current) {
@@ -670,8 +685,32 @@ export function AgentsPanel(props: Props) {
   const filtered = rows.filter((row) => filter === "all" || (filter === "active" ? isCurrentWorker(row) : !isCurrentWorker(row)));
   const now = useTimelineClock(rows.length > 0);
   const selectFilter = (value: typeof filter) => { setFilter(value); setLimit(PAGE_SIZE); };
+  // The worker whose request is selected in Worker Attention, while it is the selected worker.
+  const attentionOwnerId = selectedRequest && !primaryInSession && selectedRequest.ownerToolUseId === requestedId
+    ? requestedId : null;
+  const openSubagentPage = (id: string) => {
+    props.onSelect(id);
+    pages.push(`subagent:${id}`);
+  };
+  // The page on top: a subagent's detail, or a background job's.
+  const page = pages.current === null ? null : (() => {
+    const key = pages.current;
+    const separator = key.indexOf(":");
+    const kind = key.slice(0, separator);
+    const id = key.slice(separator + 1);
+    const row = rows.find((candidate) => candidate.id === key);
+    if (kind === "background") {
+      return { key, title: row?.name ?? "Background Job",
+        body: <BackgroundWorkPanel {...props} selectedJobId={id} /> };
+    }
+    const title = row?.name ?? (!projection.ambiguousIds.has(id) ? agents.find((agent) => agent.id === id)?.title : undefined) ?? "Subagent";
+    return { key, title, body: <SubagentsPanel {...props} detailOnly titled={false} requestedId={id}
+      focusRequest={undefined} onFocusRequestHandled={undefined} onSelect={openSubagentPage} /> };
+  })();
   return (
-    <div className="agents-panel" ref={panelRef} tabIndex={-1} role="region" aria-label="Worker Roster">
+    <>
+    {/* The roster stays mounted under a page, so its rows, filter and scroll are there on Back. */}
+    <div className="agents-panel" ref={panelRef} tabIndex={-1} role="region" aria-label="Worker Roster" hidden={page !== null}>
       {!targetEpochMatches && <p role="status">This attention link belongs to an earlier session version. No request was selected.</p>}
       {targetEpochMatches && linkedRequestMissing && <p role="status">The linked request is no longer pending. No replacement request was selected.</p>}
       {requests.length > 0 && <section ref={attentionRef} tabIndex={-1} aria-label="Worker Attention" className="agents-attention">
@@ -744,11 +783,15 @@ export function AgentsPanel(props: Props) {
           return <div key={row.id} role="listitem">
             <button type="button" className="subagent-list-row" aria-current={selected?.id === row.id ? "true" : undefined}
               style={{ paddingLeft: 12 + Math.min(row.depth, 2) * 14 }}
+              data-panel-page-key={row.target.kind === "session" ? undefined : row.id}
               onClick={() => {
                 setChosen(row.id);
-                if (row.target.kind === "subagent") props.onSelect(row.target.id);
+                if (row.target.kind === "subagent") openSubagentPage(row.target.id);
                 else if (row.target.kind === "session") navigate({ name: "session", id: row.target.id });
-                else props.onSelect("");
+                else {
+                  props.onSelect("");
+                  pages.push(row.id);
+                }
               }}>
               <span className="subagent-list-copy">
                 <span className="subagent-list-title">{row.name}</span>
@@ -774,10 +817,17 @@ export function AgentsPanel(props: Props) {
       {filtered.length > limit && <button type="button" className="btn ghost sm" onClick={() => setLimit((value) => value + PAGE_SIZE)}>Show More Workers</button>}
       {registryAfter !== null && registry !== null && <button type="button" className="btn ghost sm" disabled={registryLoading}
         onClick={() => loadRegistry(registryAfter)}>{registryLoading ? "Loading More Workers…" : "Load More Recorded Workers"}</button>}
-      {(selected?.target.kind === "subagent" || requestedId) &&
-        <SubagentsPanel {...props} detailOnly requestedId={requestedId || (selected?.target.kind === "subagent" ? selected.target.id : null)} />}
-      {selected?.target.kind === "background" &&
-        <BackgroundWorkPanel {...props} selectedJobId={selected.target.id} />}
+      {/* A worker's request is answered in Worker Attention, with that worker's activity beside it
+          for context, until the worker page carries its request (#2860). */}
+      {attentionOwnerId && <SubagentsPanel {...props} detailOnly requestedId={attentionOwnerId}
+        focusRequest={undefined} onFocusRequestHandled={undefined} />}
     </div>
+    {page && (
+      <section key={page.key} className="agents-page" aria-label={page.title}>
+        <PanelPageTitle>{page.title}</PanelPageTitle>
+        {page.body}
+      </section>
+    )}
+    </>
   );
 }

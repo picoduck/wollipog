@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { CampaignIcon, ChevronDownIcon, ChevronLeftIcon, CloseIcon, CommandLineIcon, DiffIcon, FolderIcon, GlobeIcon, GridIcon, QuestionIcon, InboxIcon, JobsIcon, LockIcon, TeamIcon } from "./Icons.js";
 import { Maximize2Icon, Minimize2Icon } from "./Icons.js";
@@ -27,6 +27,8 @@ import {
   type RightPanelMode,
 } from "../right-panel.js";
 import { FilesBrowser, requestGoToFileFocus } from "./FilesPanel.js";
+import { PanelPagesContext, PanelPageTitleSlotContext, type PanelPagesController } from "./PanelPages.js";
+import { PanelNoticeRegionContext } from "./PanelNoticeSlot.js";
 import { Notice } from "./Notice.js";
 import { BrowserPanel } from "./BrowserPanel.js";
 import { SideChatPanel } from "./SideChatPanel.js";
@@ -64,6 +66,19 @@ const EMPTY_PARENT_TURN_EVENTS: ReadonlyMap<string, number> = new Map();
 const EMPTY_GOVERNANCE_DECISIONS: readonly GovernanceDecision[] = [];
 const HIDDEN_CAMPAIGN: CampaignStatusAvailability = { kind: "hidden" };
 
+/** A pushed page, with where its Back returns: the control that opened it and the scroll it left. */
+interface PanelPageEntry {
+  key: string;
+  opener: HTMLElement | null;
+  scrollTop: number;
+}
+const NO_PAGES: { tool: RightPanelMode; pages: readonly PanelPageEntry[] } = { tool: "launcher", pages: [] };
+
+/** The tool's one vertical scroller: its `.rpanel-scroll` on the frame's slots, else the body. */
+function panelScroller(aside: HTMLElement | null): HTMLElement | null {
+  return aside?.querySelector<HTMLElement>(".rpanel-body > .rpanel-scroll") ?? aside?.querySelector<HTMLElement>(".rpanel-body") ?? null;
+}
+
 /**
  * Where focus goes when the panel closes: the control that opened it, else the session's composer.
  * A phone's panel replaces its session app bar, toggle included, and the composer (#2843), so when
@@ -98,8 +113,9 @@ export const PanelActionSlotContext = createContext<HTMLElement | null>(null);
  * its own actions in the 48px header, between the tool switcher and Expand Panel (on a phone, after
  * the switcher). A tool renders this anywhere inside its body; its children are portalled into the
  * header, in order, and leave with the tool. Use `.icon-btn` buttons (32px, 44px on touch) with a
- * Title Case `aria-label` and the same `title`; a pushed page's Back, an About popover and similar
- * per-tool controls (#2856) belong here rather than in a second bar inside the body.
+ * Title Case `aria-label` and the same `title`; an About popover (`InfoPopover`) and similar
+ * per-tool controls (#2856) belong here rather than in a second bar inside the body. A pushed page's
+ * Back is the frame's own (`usePanelPages`), not the tool's.
  *
  * Outside the side panel it renders nothing.
  */
@@ -513,7 +529,7 @@ export function RightPanel({
       returnFocusRef.current = active instanceof HTMLElement && active !== document.body ? active : null;
       // A phone's panel covers the session bar whose toggle opened it, so focus moves into the
       // panel's own bar unless the tool already took it (#2843).
-      if (phone && !asideRef.current?.contains(document.activeElement)) switcherRef.current?.focus();
+      if (phone && !asideRef.current?.contains(document.activeElement)) focusHead();
       return;
     }
     if (!wasOpen || state.open) return;
@@ -539,7 +555,8 @@ export function RightPanel({
     if (previousPhoneRef.current === phone) return;
     previousPhoneRef.current = phone;
     const active = document.activeElement;
-    if (state.open && (!active || active === document.body)) switcherRef.current?.focus();
+    if (state.open && (!active || active === document.body)) focusHead();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phone, state.open]);
 
   // The row the chat column and the panel share (`.detail-columns`), measured before paint so the
@@ -600,7 +617,8 @@ export function RightPanel({
     const aside = asideRef.current;
     const active = document.activeElement;
     if (!expanded || !aside || !active || aside.contains(active)) return;
-    if (aside.parentElement?.contains(active)) switcherRef.current?.focus();
+    if (aside.parentElement?.contains(active)) focusHead();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [expanded]);
 
   // Guard against a mid-drag unmount: closing the panel (shortcut/header button)
@@ -618,6 +636,85 @@ export function RightPanel({
   /** Escape's step for the panel itself: Restore Panel while expanded, then Close Panel (#2845). */
   const dismiss = expanded ? () => state.setExpanded(false) : state.close;
 
+  // The current tool's pushed pages (#2856). They belong to the tool that pushed them, so a switch
+  // never shows another tool's page, and switching tools or closing the panel clears them. The
+  // update is functional: a tool's first effect can push before this one runs for the same switch.
+  const [pageStack, setPageStack] = useState(NO_PAGES);
+  useEffect(() => {
+    setPageStack((current) => !state.open || (current.tool !== state.mode && current.pages.length > 0) ? NO_PAGES : current);
+  }, [state.open, state.mode]);
+  const pages = state.open && pageStack.tool === state.mode ? pageStack.pages : NO_PAGES.pages;
+  const page = pages.at(-1) ?? null;
+  // The header's page title: the focus target on push, and the element the tool's PanelPageTitle
+  // portals into. It stays mounted, hidden with no page, so a page's title is there in the very
+  // commit that pushes it.
+  const pageTitleRef = useRef<HTMLHeadingElement>(null);
+  const [pageTitleSlot, setPageTitleSlot] = useState<HTMLSpanElement | null>(null);
+  /** What the next commit does with focus: the new page's title, or back to what opened a page. */
+  const pageFocus = useRef<{ kind: "title" } | { kind: "return"; entry: PanelPageEntry } | null>(null);
+  const pagesController = useMemo<PanelPagesController>(() => ({
+    current: pages.at(-1)?.key ?? null,
+    push: (key, options) => {
+      const top = pages.at(-1);
+      if (top?.key === key && (!options?.root || pages.length === 1)) {
+        pageTitleRef.current?.focus({ preventScroll: true });
+        return;
+      }
+      const aside = asideRef.current;
+      const active = document.activeElement;
+      // From outside the panel (the transcript), Back returns to the item's row instead.
+      const opener = !options?.root && active instanceof HTMLElement && aside?.contains(active) ? active : null;
+      const scrollTop = options?.root && pages[0] ? pages[0].scrollTop : panelScroller(aside)?.scrollTop ?? 0;
+      const entry = { key, opener, scrollTop };
+      pageFocus.current = { kind: "title" };
+      setPageStack({ tool: state.mode, pages: options?.root ? [entry] : [...pages, entry] });
+    },
+    pop: () => {
+      const top = pages.at(-1);
+      if (!top) return;
+      pageFocus.current = { kind: "return", entry: top };
+      setPageStack({ tool: state.mode, pages: pages.slice(0, -1) });
+    },
+    clear: () => {
+      pageFocus.current = null;
+      setPageStack(NO_PAGES);
+    },
+  }), [pages, state.mode]);
+  /** The bar's first focus target: the switcher, or a pushed page's title in its place. */
+  const focusHead = () => (switcherRef.current ?? pageTitleRef.current)?.focus();
+  // A push lands on the page's title with the page at its top. A pop restores the scroll the page
+  // was opened from and returns focus to the control that opened it, else to the row that carries
+  // its key (an entry point outside the panel, or an opener that went with an earlier page), else
+  // to the bar.
+  useLayoutEffect(() => {
+    const pending = pageFocus.current;
+    if (!pending) return;
+    pageFocus.current = null;
+    const aside = asideRef.current;
+    const scroller = panelScroller(aside);
+    if (pending.kind === "title") {
+      if (scroller) scroller.scrollTop = 0;
+      pageTitleRef.current?.focus({ preventScroll: true });
+      return;
+    }
+    if (scroller) scroller.scrollTop = pending.entry.scrollTop;
+    const { opener, key } = pending.entry;
+    if (opener?.isConnected && aside?.contains(opener)) {
+      opener.focus({ preventScroll: true });
+      return;
+    }
+    const row = [...(aside?.querySelectorAll<HTMLElement>("[data-panel-page-key]") ?? [])]
+      .find((candidate) => candidate.dataset.panelPageKey === key);
+    if (row) row.focus();
+    else focusHead();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pages]);
+  /** Escape's step once nothing above and no tool layer takes it: a pushed page pops first (#2856). */
+  const escapeStep = page ? pagesController.pop : dismiss;
+
+  // The region under the header the panel's notice slot portals into (`PanelNoticeSlot`).
+  const [noticeRegion, setNoticeRegion] = useState<HTMLDivElement | null>(null);
+
   // Requests also takes Escape with focus outside the panel, as it always has (#2206); every tool
   // takes it from inside the panel (onPanelKeyDown below).
   useEffect(() => {
@@ -630,11 +727,11 @@ export function RightPanel({
       // handled before the layer saw it.
       if (escapeTakenAbovePanel()) return;
       event.preventDefault();
-      dismiss();
+      escapeStep();
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [state, dismiss]);
+  }, [state, escapeStep]);
 
   const sessionEventEpoch = session.eventEpoch ?? 0;
   useEffect(() => {
@@ -715,10 +812,10 @@ export function RightPanel({
   /**
    * Escape closes the panel from any tool while focus is inside it (§16.2; #1260), once nothing
    * above the panel takes it: an open menu, popover or dialog, then whatever the tool itself layers
-   * on its body (a selection, a pushed page, an expanded state). Such a tool layer handles Escape
-   * first and calls `preventDefault()`, which this respects, or registers itself with
-   * `usePanelEscapeLayer` (Review's Select Lines, #2849). An expanded panel restores before it
-   * closes (#2845). A terminal keeps Escape for its shell;
+   * on its body (a selection, an expanded state). Such a tool layer handles Escape first and calls
+   * `preventDefault()`, which this respects, or registers itself with `usePanelEscapeLayer`
+   * (Review's Select Lines, #2849). Then a pushed page pops (#2856), and an expanded panel restores
+   * before it closes (#2845). A terminal keeps Escape for its shell;
    * Ctrl+Esc leaves it first. React delivers this before the shell's window listener, so the session
    * never reads the press as "leave the session".
    */
@@ -730,7 +827,7 @@ export function RightPanel({
     event.preventDefault();
     const layer = escapeLayerRef.current;
     if (layer) layer();
-    else dismiss();
+    else escapeStep();
   };
 
   // The session's own requests are on its request dock (#2179); this panel lists its descendants'.
@@ -962,9 +1059,22 @@ export function RightPanel({
       >
         {/* One 48px bar in every tool (§4.4): the tool switcher as the title, the tool's actions,
             Expand Panel, then Close Panel. A phone's panel covers the session bar, so its bar leads
-            with Back to Session instead and has neither Expand nor Close (#2843, #2845). */}
+            with Back to Session instead and has neither Expand nor Close (#2843, #2845). While a
+            page is pushed, Back to <Tool> and the page's title take the switcher's place, and on a
+            phone that Back is the bar's one Back (#2856). */}
         <div className="rpanel-head">
-          {phone && (
+          {page && (
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={pagesController.pop}
+              title={`Back to ${sessionTool(state.mode).name}`}
+              aria-label={`Back to ${sessionTool(state.mode).name}`}
+            >
+              <ChevronLeftIcon />
+            </button>
+          )}
+          {!page && phone && (
             <button
               type="button"
               className="icon-btn"
@@ -975,7 +1085,10 @@ export function RightPanel({
               <ChevronLeftIcon />
             </button>
           )}
-          <ToolSwitcher current={state.mode} context={toolContext} triggerRef={switcherRef} onChoose={chooseTool} />
+          <h2 ref={pageTitleRef} className="rpanel-page-title" tabIndex={-1} hidden={!page}>
+            <span ref={setPageTitleSlot} />
+          </h2>
+          {!page && <ToolSwitcher current={state.mode} context={toolContext} triggerRef={switcherRef} onChoose={chooseTool} />}
           <div className="rpanel-actions" ref={setActionSlot} />
           {!phone && (
             <button
@@ -994,6 +1107,7 @@ export function RightPanel({
             </button>
           )}
         </div>
+        <div className="rpanel-notices" ref={setNoticeRegion} />
         <PanelActionSlotContext.Provider value={actionSlot}>
           {state.mode === "launcher" ? (
             <Launcher
@@ -1008,7 +1122,13 @@ export function RightPanel({
             />
           ) : (
             <PanelEscapeLayerContext.Provider value={escapeLayerRef}>
-              <div className="rpanel-body">{modeBody(state.mode)}</div>
+              <PanelPagesContext.Provider value={pagesController}>
+                <PanelPageTitleSlotContext.Provider value={pageTitleSlot}>
+                  <PanelNoticeRegionContext.Provider value={noticeRegion ? { element: noticeRegion, focusHead } : null}>
+                    <div className="rpanel-body">{modeBody(state.mode)}</div>
+                  </PanelNoticeRegionContext.Provider>
+                </PanelPageTitleSlotContext.Provider>
+              </PanelPagesContext.Provider>
             </PanelEscapeLayerContext.Provider>
           )}
         </PanelActionSlotContext.Provider>
