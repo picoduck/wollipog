@@ -247,6 +247,22 @@ test("a shell that takes input again reports its size again, unchanged or after 
   await expect.poll(logs, { message: "a history reload reports the size, as a remount did" }).toEqual([size, size]);
 });
 
+test("a terminal listed as a pipe and corrected to a PTY writes the PTY's stream as is (#2865)", async ({ page }) => {
+  await page.goto("/xterm-smoke-e2e.html?pty=0");
+  await expect.poll(() => page.evaluate(() => typeof window.__WOLLIPOG_XTERM_E2E__)).toBe("object");
+  const terminal = page.getByRole("region", { name: "Interactive Terminal Fixture" });
+  await expect(terminalRows(terminal)).toContainText("Initial terminal output");
+  // The registry corrects the shell to a PTY, and the history reload that follows replays it.
+  await page.evaluate(() => {
+    window.__WOLLIPOG_XTERM_E2E__.setPtyMode(true);
+    window.__WOLLIPOG_XTERM_E2E__.replaceInteractive("abc\nX");
+  });
+  await expect(terminalRows(terminal)).toContainText("abc");
+  // A PTY's bare LF moves down without returning, so X lands under the column after "abc".
+  const second = await terminalRows(terminal).locator(":scope > div").nth(1).innerText();
+  expect(second.replace(/\u00a0/g, " ")).toMatch(/^ {3}X/);
+});
+
 test("a manual selection over the active match takes the active wash with it (#2865)", async ({ page }) => {
   const terminal = page.getByRole("region", { name: "Interactive Terminal Fixture" });
   await page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.appendInteractive("test one\r\ntest two\r\n"));

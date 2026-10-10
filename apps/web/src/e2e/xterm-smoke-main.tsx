@@ -71,6 +71,8 @@ declare global {
       replaceInteractive(text: string): void;
       /** The interactive terminal's shell stops or starts taking input (a disconnect and back). */
       setInteractiveMode(on: boolean): void;
+      /** The registry corrects whether a real PTY backs the interactive terminal's shell. */
+      setPtyMode(on: boolean): void;
       setSearchTerm(value: string): void;
       setTheme(theme: "dark" | "light"): void;
     };
@@ -102,6 +104,8 @@ function Fixture() {
   const [tab, setTab] = useState<"a" | "b">("a");
   const [theme, setTheme] = useState<"dark" | "light">(initialTheme);
   const [takesInput, setTakesInput] = useState(true);
+  // `?pty=0` starts the interactive terminal as a pipe, as a shell still being opened is listed.
+  const [ptyMode, setPtyMode] = useState(new URLSearchParams(window.location.search).get("pty") !== "0");
 
   const openNewSession = useCallback(() => {
     appShortcutCount += 1;
@@ -128,6 +132,7 @@ function Fixture() {
         setInteractive((current) => ({ text, total: text.length, revision: (current.revision ?? 0) + 1 }));
       }),
       setInteractiveMode: (on) => flushSync(() => setTakesInput(on)),
+      setPtyMode: (on) => flushSync(() => setPtyMode(on)),
       setSearchTerm,
       setTheme: (next) => {
         document.documentElement.dataset.theme = next;
@@ -163,7 +168,7 @@ function Fixture() {
           total={interactive.total}
           revision={interactive.revision}
           interactive={takesInput}
-          pty
+          pty={ptyMode}
           searchTerm={searchTerm}
           onSearchResults={setSearchResults}
           handleRef={terminalRef}

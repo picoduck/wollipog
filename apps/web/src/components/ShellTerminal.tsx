@@ -63,7 +63,9 @@ export function ShellTerminal({
   /** PTY mode: capture keystrokes + report size. */
   interactive: boolean;
   /** A real PTY backs the shell, so its stream is written as is. A pipe's LF-only output is converted.
-   * Fixed for the terminal's life; defaults to `interactive` at mount. */
+   * Defaults to `interactive`. The registry can correct it after the terminal mounts (a shell another
+   * dashboard is still opening is listed as a pipe until its runner answers), and the terminal follows
+   * before it writes anything more. */
   pty?: boolean;
   /** Kept mounted but out of sight and out of the accessibility tree, at the same size. */
   hidden?: boolean;
@@ -117,6 +119,7 @@ export function ShellTerminal({
   const interactiveRef = useRef(interactive);
   interactiveRef.current = interactive;
   const ptyRef = useRef(pty);
+  ptyRef.current = pty;
   const reportedSizeRef = useRef<string | null>(null);
 
   /** Report the terminal's size to an interactive shell, once per distinct size. */
@@ -311,6 +314,13 @@ export function ShellTerminal({
     searchAgain();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [theme, scheme]);
+
+  // Ahead of the write effect below, so output and a replay that arrive with corrected metadata are
+  // parsed in the right mode.
+  useEffect(() => {
+    const term = termRef.current;
+    if (term && term.options.convertEol !== !pty) term.options.convertEol = !pty;
+  }, [pty]);
 
   // A shell becomes interactive when it reconnects and read-only when it exits or its machine goes
   // offline. The same terminal follows, and reports its size once it can take input again, even an
