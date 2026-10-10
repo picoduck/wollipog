@@ -212,7 +212,8 @@ test("an unfinished agent of a failed session on an online runner is Lost in the
   const panel = await mount(items, { session: failed });
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
-  const detail = createRoot(happyContainer);
+  const detailContainer = happyContainer as unknown as HTMLDivElement;
+  const detail = createRoot(detailContainer);
   try {
     // Lost is settled, so it sits in History.
     await act(async () => panel.container.querySelector<HTMLButtonElement>('[role="radio"][aria-label="History, 1"]')!.click());
@@ -220,10 +221,10 @@ test("an unfinished agent of a failed session on an online runner is Lost in the
     assert.equal(subagentStatusMeta(items[0] as Extract<TimelineItem, { kind: "tool_call" }>, subagentStatusContext(failed, true)).label, "Lost");
     await act(async () => detail.render(<SubagentsPanel session={failed} items={items} runnerOnline requestedId="stuck"
       onSelect={() => {}} detailOnly titled={false} />));
-    assert.match(text(happyContainer.querySelector(".subagent-detail-meta")), /^Lost · /);
+    assert.match(text(detailContainer.querySelector(".subagent-detail-meta")), /^Lost · /);
   } finally {
     await act(async () => detail.unmount());
-    happyContainer.remove();
+    detailContainer.remove();
     await panel.unmount();
   }
 });
