@@ -2386,6 +2386,17 @@ button.status { cursor: pointer; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* A group header inside a list (§5.2): 32px, the label type in --text-dim, Title Case as written,
+   at the rows' own inset. Shared by every grouped list; not sticky. */
+.group-label {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  margin: 0;
+  padding: 0 var(--space-3);
+  color: var(--text-dim);
+  font: var(--type-label);
+}
 /* A Section (§4.5, §5.1): no border and no fill, a title row and then its content 12px below.
    Sections sit 32px apart through their container's gap. A button in one never stretches (§3.1). */
 .section {
@@ -4813,58 +4824,48 @@ textarea {
 .subagent-selection-unavailable { margin: 12px; }
 .subagent-output .timeline { padding-bottom: 12px; }
 .subagent-output-empty { padding: 18px 4px; color: var(--text-faint); text-align: center; font-size: var(--text-sm); }
-/* The Codex empty state: a vertically centered launcher list. */
-.rp-launcher {
+/* Session Tools (#2844; docs/design-system.md §4.9, §5.2): the panel's landing list, top-aligned and
+   its own scroller, of two-line rows under group labels. A row has no card border; its 32px icon
+   tile is filled while the tool can open and hollow (an inset hairline) while it cannot, and its
+   reason is the second line in --text-faint, never an opacity (§3.1). */
+.session-tools {
+  display: flex;
   flex: 1;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-2) var(--space-1);
+}
+.session-tools > .notice { margin: 0 var(--space-3); }
+.session-tools-group {
   display: flex;
   flex-direction: column;
-  justify-content: center;
-  gap: 7px;
-  padding: 0 16px;
 }
-.rp-row {
-  display: flex;
+.session-tool-tile {
+  display: inline-flex;
+  flex: none;
   align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
+  justify-content: center;
+  width: 32px;
+  height: 32px;
   border-radius: var(--radius-sm);
   background: var(--bg-elev-2);
-  color: var(--text);
-  font-size: 13px;
-  cursor: pointer;
-  text-align: left;
+  color: var(--text-dim);
 }
-.rp-row:hover:not(:disabled) {
-  background: var(--bg-elev-3);
-}
-.rp-row:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-.rp-row-icon {
+.session-tool-badge {
   display: inline-flex;
-  color: var(--text-dim);
+  flex: none;
 }
-.rp-kbd {
-  margin-left: auto;
+.session-tool .row-line > kbd { margin-left: auto; }
+.session-tool[aria-disabled="true"] { cursor: default; }
+.session-tool[aria-disabled="true"] .session-tool-tile {
+  background: none;
+  box-shadow: inset 0 0 0 1px var(--border);
 }
-/* A launcher row whose unavailability reason is visible text (Campaign Status, #2417; #1261). */
-.rp-row-text {
-  display: grid;
-  gap: var(--space-1);
-  min-width: 0;
-}
-.rp-row-reason {
-  color: var(--text-dim);
-  font: var(--type-small);
-}
-.rp-row[aria-disabled="true"] {
-  cursor: default;
-}
-.rp-row[aria-disabled="true"] > .rp-row-icon,
-.rp-row[aria-disabled="true"] > .rp-row-text > :first-child {
-  opacity: 0.6;
+.session-tool[aria-disabled="true"] .row-sub { color: var(--text-faint); }
+@media (hover: hover) {
+  .session-tool[aria-disabled="true"]:hover { background: none; }
 }
 /* Campaign Status (#2417): summary facts over a filterable work list; an item's details replace it. */
 /* The panel owns its scroll so the list position it restores is the one the person sees. */

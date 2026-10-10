@@ -30,6 +30,7 @@ import {
   CircleGauge as LucideCircleGauge,
   CirclePause as LucideCirclePause,
   ClipboardList as LucideClipboardList,
+  Clock as LucideClock,
   CloudOff as LucideCloudOff,
   Code as LucideCode,
   CodeXml as LucideCodeXml,
@@ -92,6 +93,7 @@ import {
   MapPinOff as LucideMapPinOff,
   Mail as LucideMail,
   MessageCircleQuestion as LucideMessageCircleQuestion,
+  MessageSquare as LucideMessageSquare,
   MessageSquareCheck as LucideMessageSquareCheck,
   MessageSquareDot as LucideMessageSquareDot,
   Mic as LucideMic,
@@ -947,7 +949,17 @@ export function VersionIcon(props: IconProps) {
 }
 
 export function UpdatedIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideClock} {...props} />;
+}
+
+/** Decision History: the decisions recorded in a session (#2844). */
+export function HistoryIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideHistory} {...props} />;
+}
+
+/** Side Chat: a question asked beside the session without interrupting its agent (#2844). */
+export function MessageSquareIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideMessageSquare} {...props} />;
 }
 
 export function FilesIcon(props: IconProps) {

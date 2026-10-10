@@ -90,6 +90,13 @@ const REVIEW_DIFF = FIXTURE_QUERY.get("reviewDiff") === "1";
 const REVIEW_FINDINGS = FIXTURE_QUERY.get("findings") === "1";
 const INCLUDE_SESSION_SHELL = FIXTURE_QUERY.get("sessionShell") === "1";
 const LEGACY_WORKSPACES = FIXTURE_QUERY.get("legacyWorkspaces") === "1";
+/** `scenario=session-tools` (#2844): Alpha's three background jobs, one still running. */
+const SESSION_TOOLS = SCENARIO === "session-tools";
+const SESSION_TOOLS_JOBS = [0, 1, 2].map((index) => ({
+  id: `session-tools-job-${index}`, parentTurnId: "turn-1", launchType: "shell" as const,
+  registeredAt: 1_000 + index, lastObservedAt: 2_000, sourcePresent: index === 0,
+  ...(index === 0 ? {} : { terminalStatus: "completed" as const, terminalObservedAt: 1_500 }),
+}));
 const UNFILED_WORKSPACE = FIXTURE_QUERY.get("unfiledWorkspace") === "1";
 const LONG_AGENT = FIXTURE_QUERY.get("longAgent") === "1";
 /** A wide list's rows (#2218): one row per kind of status, a snoozed row and a markdown preview. */
@@ -648,6 +655,18 @@ function initialModel(): FixtureModel {
       worktreePath: "/repos/alpha/.agent-worktrees/session-alpha",
     });
   }
+  if (SCENARIO === "session-tools") {
+    // Session Tools (#2844): a session with changes, a running subagent and background jobs, one of
+    // them running; its findings and child requests are below.
+    Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
+      useWorktree: true,
+      worktreePath: "/repos/alpha/.agent-worktrees/session-alpha",
+      status: "running",
+      backgroundJobs: SESSION_TOOLS_JOBS,
+      // Its child sessions' requests come to it, so the panel reads them.
+      parentControl: "questions_and_approvals",
+    });
+  }
   if (SCENARIO === "pinned-summary") {
     // Every fact the session bar used to carry, now stated once in the Pinned Summary (#2160).
     Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
@@ -761,6 +780,14 @@ for (const value of model.sessions) {
     },
   });
 }
+if (SESSION_TOOLS) {
+  // Nine uncommitted changes, none staged, and no operation in progress.
+  const alpha = gitFixtures.get("session-alpha")!;
+  Object.assign(alpha.status, {
+    files: Array.from({ length: 9 }, (_, index) => ({ status: "M", path: `src/session-tools/file-${index + 1}.ts` })),
+    hasChanges: true, stagedCount: 0, modifiedCount: 9, untrackedCount: 0, conflictedCount: 0, operation: null,
+  });
+}
 const gitRequestCounts = new Map<string, { status: number; summary: number }>();
 const deferredGitRequests = new Set<string>();
 const heldGitSessions = new Set<string>();
@@ -862,6 +889,13 @@ if (SCENARIO === "preview-bar") {
       };
     }));
   }
+}
+if (SESSION_TOOLS) {
+  // A running subagent, so the Agents row has its one status badge (#2844).
+  sessionEvents.set("session-alpha", [
+    { id: 1, sessionId: "session-alpha", seq: 1, ts: 1, payload: { kind: "user_message", text: "Audit the checkout flow.", final: true } },
+    { id: 2, sessionId: "session-alpha", seq: 2, ts: 2, payload: { kind: "tool_call", toolCallId: "session-tools-agent", title: "Audit Checkout", toolKind: "agent", status: "in_progress" } },
+  ]);
 }
 if (SCENARIO === "conversation-handoff") {
   sessionEvents.set("session-alpha", [
@@ -1402,6 +1436,22 @@ function descendantRequestFixture(): DescendantRequestView {
   };
 }
 
+/** `scenario=session-tools` (#2844): a deploy approval and a question waiting on two child sessions. */
+function sessionToolsRequests(): DescendantRequestView[] {
+  const child = (id: string, sessionTitle: string, request: DescendantRequestView["request"]): DescendantRequestView => ({
+    sessionId: `session-tools-${id}`, sessionTitle, runnerId: runner.runnerId, runnerOnline: true, eventEpoch: 1,
+    createdAt: Date.now(), responseOwner: "human", occurrenceId: `session-tools-${id}-occurrence`, request,
+  });
+  return [
+    child("deploy", "Deploy Pipeline", { requestId: "session-tools-deploy", kind: "permission", title: "Run the deploy script", options: [] }),
+    child("docs", "Docs Subagent", {
+      requestId: "session-tools-docs", kind: "question", title: "Question", options: [],
+      questions: [{ id: "tone", question: "Which tone should the guide use?", options: [] }],
+    }),
+  ];
+}
+if (SESSION_TOOLS) descendantRequestRows = sessionToolsRequests();
+
 /**
  * Agent Skills in the real Shell (#1947). `?skills=` picks the library: the default is a small one
  * whose first skill has a SKILL.md long enough to scroll and an assignments table as its widest
@@ -1880,6 +1930,22 @@ const client = {
       summary: { total: 0, unresolved: 0, requiredUnresolved: 0, sent: 0, resolved: 0, dismissed: 0, completion: "complete" as const },
     }),
     ...(REVIEW_FINDINGS ? inMemoryReviewFindings(checkoutFindings("session-alpha", diffSectionsDiff().diffHash)) : {}),
+  } : {}),
+  // One required finding still open, as Review's findings section would count it, and two
+  // decisions already recorded (#2844).
+  ...(SESSION_TOOLS ? {
+    reviewFindings: async () => ({
+      findings: [],
+      summary: { total: 1, unresolved: 1, requiredUnresolved: 1, sent: 0, resolved: 0, dismissed: 0, completion: "blocked" as const },
+    }),
+    governanceAudit: async (sessionId: string) => ({
+      hasMore: false,
+      entries: [1, 2].map((index) => ({
+        auditId: `session-tools-audit-${index}`, requestId: `session-tools-request-${index}`, approvalKind: "permission" as const,
+        stage: "resolution" as const, outcome: "allowed" as const, actor: { kind: "human" as const, id: "local" },
+        scope: { sessionId, runnerId: runner.runnerId, toolName: "Bash" }, optionId: "allow", timestamp: Date.now() - index * 60_000,
+      })),
+    }),
   } : {}),
   ...(LIST_NOTICES.has("skills") ? {
     listSkills: async () => ({ skills: structuredClone(listNoticeSkills) }),

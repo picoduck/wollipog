@@ -269,8 +269,8 @@ async function settle() {
 }
 
 function launcherRow(container: HTMLElement, label: string): HTMLButtonElement | null {
-  return [...container.querySelectorAll<HTMLButtonElement>(".rp-launcher .rp-row")]
-    .find((row) => row.textContent?.startsWith(label)) ?? null;
+  return [...container.querySelectorAll<HTMLButtonElement>(".session-tools .session-tool")]
+    .find((row) => row.querySelector(".row-title")?.textContent === label) ?? null;
 }
 
 async function click(element: Element) {
@@ -350,7 +350,7 @@ test("navigating from a campaign to an unrelated session returns the open panel 
     await panel.setSession(unrelated);
     assert.equal(panel.state.open, true, "the panel stays open");
     assert.equal(panel.state.mode, "launcher");
-    assert.ok(panel.container.querySelector(".rp-launcher"));
+    assert.ok(panel.container.querySelector(".session-tools"));
   } finally {
     await panel.dispose();
   }

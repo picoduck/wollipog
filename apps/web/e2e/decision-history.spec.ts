@@ -82,7 +82,7 @@ for (const theme of ["dark", "light"] as const) {
 
     test("the empty, loading and error states", async ({ page }) => {
       await page.goto(`/decision-history-e2e.html?theme=${theme}&scenario=empty&open=launcher`);
-      const launcherRow = page.locator(".rp-launcher .rp-row", { hasText: "Decision History" });
+      const launcherRow = page.locator('.session-tools [data-tool="decisions"]');
       await expect(launcherRow).toBeEnabled();
       await capture(page, `launcher-1440-${theme}`);
       await launcherRow.click();

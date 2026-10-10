@@ -124,7 +124,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `BanIcon` | Lucide | `Ban` | Why a choice can't be made: a disabled command's reason in the / picker; the sign-in card's notice that a conversation can't continue under another account. |
 | `UserXIcon` | Lucide | `UserX` | An account removed from its machine while Choose Another Account listed it. |
 | `FolderUpIcon` | Lucide | `CornerUpLeft` | Navigate to the parent directory. |
-| `QuestionIcon` | Lucide | `MessageCircleQuestion` | A question: an agent's question row and pending-question marker in the transcript; Side Chat's launcher; the Request Card's Question kind. |
+| `QuestionIcon` | Lucide | `MessageCircleQuestion` | A question: an agent's question row and pending-question marker in the transcript; the Request Card's Question kind. |
 | `LocateIcon` | Lucide | `Locate` | Show Where Asked: scrolls the transcript to a docked question's marker. |
 | `MicIcon` | Lucide | `Mic` | Dictation action. |
 | `ImageIcon` | Lucide | `Image` | Image attachment; the Request Card's UI Evidence kind; a screenshot artifact's kind tile in the Browser (#2854). |
@@ -175,7 +175,9 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `HeldIcon` | Lucide | `CirclePause` | Child sessions held from starting their next turn: the Held Children campaign notice. |
 | `ExperimentIcon` | Lucide | `FlaskConical` | An experimental feature, on the page a turned-off experiment's route shows. |
 | `VersionIcon` | Lucide | `Tag` | A numbered version ("v3") in a meta row. |
-| `UpdatedIcon` | Lucide | `History` | When something last changed, in a meta row. |
+| `UpdatedIcon` | Lucide | `Clock` | When something last changed, in a meta row. |
+| `HistoryIcon` | Lucide | `History` | Decision History, in the Session Tools list and the tool switcher (#2844). |
+| `MessageSquareIcon` | Lucide | `MessageSquare` | Side Chat, in the Session Tools list and the tool switcher (#2844). |
 | `FilesIcon` | Lucide | `Files` | A count of files, in a meta row. |
 | `SkillSourceIcon` | Lucide | `Package` | Where a skill's content comes from (Git, Machine, Built-In or Library). |
 | `ReadIcon` | Lucide | `BookOpen` | A read step in the transcript. |
@@ -187,7 +189,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `TerminalIcon` | Lucide | `Terminal` | A command step in the transcript; distinct from the Command Line destination's framed terminal. |
 | `ThoughtIcon` | Lucide | `Brain` | A thought step in the transcript. |
 | `AgentLogIcon` | Lucide | `ScrollText` | An Agent Log step (a harness's own output) in the transcript. |
-| `BotIcon` | Lucide | `Bot` | An agent step in the transcript. |
+| `BotIcon` | Lucide | `Bot` | An agent step in the transcript; the Agents tool in the Session Tools list and the tool switcher (#2844). |
 | `ToolIcon` | Lucide | `Hammer` | A tool step of any other kind; distinct from the project setup wrench; the Request Card's Tool Calls kind. |
 
 The Visual Studio Code mark comes from Microsoft's
