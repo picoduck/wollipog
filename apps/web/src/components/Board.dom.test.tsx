@@ -188,6 +188,7 @@ async function mount({ runners = [runner("runner-1", "Studio")], sessions = SESS
   const approvals: Array<{ sessionId: string; requestId: string; optionId: string | null }> = [];
   const menus: string[] = [];
   const detailReads: string[] = [];
+  const opened: string[] = [];
   const client = {
     ...api,
     session: async (sessionId: string) => {
@@ -208,7 +209,9 @@ async function mount({ runners = [runner("runner-1", "Studio")], sessions = SESS
   await act(async () => {
     root.render(
       <ApiProvider client={client}>
-        <StoreProvider connection={connection} navigation={navigation}>
+        <StoreProvider connection={connection} navigation={{ ...navigation, push: (view) => {
+          if (view.name === "session") opened.push(view.id);
+        } }}>
           <Harness onSessionMenu={(sessionId) => menus.push(sessionId)} />
         </StoreProvider>
       </ApiProvider>,
@@ -230,6 +233,7 @@ async function mount({ runners = [runner("runner-1", "Studio")], sessions = SESS
     approvals,
     menus,
     detailReads,
+    opened,
     card,
     cards: () => [...domWindow.document.querySelectorAll(".board .card")] as unknown as HTMLElement[],
     unmount: () => act(async () => { root.unmount(); mountPoint.remove(); }),
@@ -355,6 +359,77 @@ test("a permission request shows exactly Approve and Deny, which send the first 
     assert.deepEqual(denyOnly.map((button) => button.textContent), ["Deny"], "only the options it has, labeled by kind");
   } finally {
     await board.unmount();
+  }
+});
+
+test("persistent-only permission requests explain their scope and open the session without approving", async () => {
+  const persistent = session("persistent", {
+    status: "input_required",
+    column: "input_required",
+    pendingApproval: {
+      requestId: "req-persistent",
+      kind: "permission",
+      title: "Allow future test runs?",
+      options: [
+        { optionId: "always", name: "Always Allow", kind: "allow_always" },
+        { optionId: "never", name: "Always Reject", kind: "reject_always" },
+      ],
+    },
+  });
+  const viewerReason = "Viewers cannot respond to requests.";
+  for (const state of ["online", "offline", "viewer", "summary"] as const) {
+    const detailed = { ...persistent, ...(state === "viewer" ? {
+      commandPermissions: { respond: { allowed: false, reason: viewerReason } } as SessionView["commandPermissions"],
+    } : {}) };
+    const board = await mount({
+      sessions: [state === "summary" ? { ...detailed, projection: "summary",
+        pendingApproval: { ...detailed.pendingApproval!, options: [] } } : detailed],
+      detailSessions: [detailed],
+      runners: [{ ...runner("runner-1", "Studio"), status: state === "offline" ? "offline" : "online" }],
+    });
+    try {
+      const card = board.card("persistent");
+      const buttons = [...card.querySelectorAll<HTMLButtonElement>(".card-request button")];
+      assert.deepEqual(buttons.map((button) => button.textContent), ["Answer in Session"], state);
+      assert.deepEqual(board.detailReads, state === "summary" ? ["persistent"] : []);
+      assert.match(card.querySelector(".card-request")!.textContent!, /These choices apply to future requests\./u);
+      assert.equal(buttons[0]!.disabled, false, "opening the session is available without response authority or an online runner");
+      if (state === "viewer") assert.equal(card.querySelector(".approval-refusal")?.textContent, viewerReason);
+      await act(async () => { buttons[0]!.click(); });
+      assert.deepEqual(board.opened, ["persistent"], "the explicit answer action opens the correct session once");
+      assert.deepEqual(board.approvals, [], "navigation never sends a persistent permission response");
+    } finally {
+      await board.unmount();
+    }
+  }
+});
+
+test("one-time decisions remain disabled offline and for viewers", async () => {
+  const permission = SESSIONS.find((candidate) => candidate.id === "approval")!;
+  const reason = "Viewers cannot respond to requests.";
+  for (const viewer of [false, true]) {
+    const board = await mount({
+      sessions: [{ ...permission, ...(viewer ? {
+        commandPermissions: { respond: { allowed: false, reason } } as SessionView["commandPermissions"],
+      } : {}) }],
+      runners: [{ ...runner("runner-1", "Studio"), status: viewer ? "online" : "offline" }],
+    });
+    try {
+      const card = board.card("approval");
+      const buttons = [...card.querySelectorAll<HTMLButtonElement>(".card-request button")];
+      assert.deepEqual(buttons.map((button) => button.textContent), ["Approve", "Deny"]);
+      assert.ok(buttons.every((button) => button.disabled));
+      if (viewer) {
+        const refusal = card.querySelector(".approval-refusal")!;
+        assert.equal(refusal.textContent, reason);
+        assert.ok(buttons.every((button) => button.getAttribute("aria-describedby") === refusal.id));
+      }
+      await act(async () => { for (const button of buttons) button.click(); });
+      assert.deepEqual(board.approvals, []);
+      assert.deepEqual(board.opened, []);
+    } finally {
+      await board.unmount();
+    }
   }
 });
 
