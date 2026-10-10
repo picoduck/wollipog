@@ -26,7 +26,8 @@ import {
   resolveRightPanelDrag,
   type RightPanelMode,
 } from "../right-panel.js";
-import { FilesBrowser } from "./FilesPanel.js";
+import { FilesBrowser, requestGoToFileFocus } from "./FilesPanel.js";
+import { Notice } from "./Notice.js";
 import { BrowserPanel } from "./BrowserPanel.js";
 import { SideChatPanel } from "./SideChatPanel.js";
 import { ReviewPanel } from "./ReviewPanel.js";
@@ -137,6 +138,15 @@ export interface RightPanelState {
   selectSubagent: (sessionId: string, eventEpoch: number, subagentId: string) => void;
   showSubagent: (sessionId: string, eventEpoch: number, subagentId: string) => void;
   consumeSubagentFocusRequest: (sessionId: string, eventEpoch: number, request: number) => void;
+}
+
+/**
+ * Ctrl/⌘+P (#2852): the panel on Files, with focus in Go to File. It opens the panel and switches it
+ * to Files when needed, and never closes it, so a second press only puts focus back in the field.
+ */
+export function openGoToFile(state: Pick<RightPanelState, "show">): void {
+  state.show("files");
+  requestGoToFileFocus();
 }
 
 export function useRightPanelState(navigationScope: string | null = null, attentionNavigation = false): RightPanelState {
@@ -279,7 +289,8 @@ function ToolSwitcher({
   current: RightPanelMode;
   context: SessionToolContext;
   triggerRef: { current: HTMLButtonElement | null };
-  onChoose: (tool: SessionToolId) => void;
+  /** `keyboard` when Enter or Space chose the tool, rather than a pointer. */
+  onChoose: (tool: SessionToolId, keyboard: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
   const menu = useAccessibleMenu(open, setOpen, "session-tool-switcher", "item", { reachUnavailable: true });
@@ -303,10 +314,13 @@ function ToolSwitcher({
         aria-disabled={reason ? "true" : undefined}
         description={reason ?? undefined}
         trail={entry.shortcut && !coarsePointer ? <kbd>{shortcutDisplay(entry.shortcut)}</kbd> : undefined}
-        onClick={() => {
+        onClick={(event) => {
           if (reason) return;
           menu.close(true);
-          if (id !== current) onChoose(id);
+          // A click from Enter or Space carries no pointer press count. Files chosen again by keyboard
+          // still lands in Go to File (#2852).
+          const keyboard = event.detail === 0;
+          if (id !== current || (id === "files" && keyboard)) onChoose(id, keyboard);
         }}
       >
         {entry.name}
@@ -707,12 +721,14 @@ export function RightPanel({
             runnerOnline={runnerOnline}
             runnerProtocolVersion={runnerProtocolVersion}
             location={sourceLocation}
+            git={git}
             onOpenLocation={onOpenSourceLocation}
             onClearLocation={onClearSourceLocation}
             onAttachWorkspaceReference={onAttachWorkspaceReference}
           />
         ) : (
-          <div className="hint warn">{filesHint}</div>
+          // An older runner: the reason the switcher gives the tool, as a compact neutral notice (#2852).
+          <Notice tone="neutral" compact role="status">{filesHint}</Notice>
         );
       case "requests":
         return (
@@ -853,7 +869,7 @@ export function RightPanel({
   const toolContext: SessionToolContext = {
     filesSupported, filesHint, terminalSupported, terminalHint, backgroundAvailable, campaignAvailability,
   };
-  const chooseTool = (tool: SessionToolId) => {
+  const chooseTool = (tool: SessionToolId, keyboard = false) => {
     if (tool === "terminal") {
       onOpenTerminal();
       return;
@@ -861,6 +877,8 @@ export function RightPanel({
     // Requests opens the list, never a request left open from an earlier visit.
     if (tool === "requests") onSelectedRequestKeyChange(null);
     state.setMode(tool);
+    // Files chosen by keyboard lands in Go to File, as Ctrl/⌘+P does (#2852).
+    if (tool === "files" && keyboard && filesSupported) requestGoToFileFocus();
   };
 
   return (

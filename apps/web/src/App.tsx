@@ -39,7 +39,7 @@ import { AutomationsView } from "./components/AutomationsView.js";
 import { SkillsView } from "./components/SkillsView.js";
 import { UsageView } from "./components/UsageView.js";
 import { ShellDock } from "./components/ShellDock.js";
-import { useRightPanelState, type RightPanelState } from "./components/RightPanel.js";
+import { openGoToFile, useRightPanelState, type RightPanelState } from "./components/RightPanel.js";
 import { usePinnedSummaryState } from "./components/pinned-summary-state.js";
 import { EditorSelect } from "./components/EditorSelect.js";
 import { DesktopCloseGuard } from "./components/DesktopCloseGuard.js";
@@ -670,9 +670,10 @@ export function Shell() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented || shortcutLayerActive(document, false, e) || xtermOwnsKey(e.target) || view.name !== "session") return;
+      // Go to File: opens the panel on Files when needed and never closes it (#2852).
       if (matchesShortcut(e, "open-files")) {
         e.preventDefault();
-        if (filesSupported) rightPanel.openMode("files");
+        if (filesSupported) openGoToFile(rightPanel);
         else rightPanel.show("launcher");
       }
       if (matchesShortcut(e, "open-review")) {

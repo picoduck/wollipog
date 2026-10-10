@@ -5089,18 +5089,87 @@ textarea {
   padding: var(--space-3) 0;
   border-top: 1px solid var(--border);
 }
-/* Files browser hosted in the panel: let the listing fill the column instead of the
-   inline panel's 320px cap. */
+/* Files (#2852, §4.9): Go to File is the panel's toolbar, and the scroller holds the notices, then the
+   path row over the folder's dense rows (§5.2) or the viewer, or, while the field has text, the
+   matching files. Nothing in it scrolls on its own but the viewer's source (#2853). */
 .files-browser {
-  flex: 1;
-  min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-3);
+  min-width: 0;
 }
-.files-browser .files-list {
-  max-height: none;
+.files-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+/* The search field (§8.4) fills the row. Its suffix is the Ctrl/⌘+P keycap on fine pointers, or Clear
+   once it has text, so the input keeps room for the wider of the two. */
+.files-goto { flex: 1; }
+.input-affix.files-goto:has(> .input-affix-text:last-child) > input {
+  padding-inline-end: calc(var(--space-3) + 3.5rem + var(--space-1));
+}
+/* Clear is a target inside the field's edge, unlike a text affix. */
+.input-affix-text.files-goto-clear {
+  inset-inline-end: var(--space-1);
+  pointer-events: auto;
+}
+/* Up One Folder leads the breadcrumbs (§4.8), which wrap rather than clip. */
+.files-path {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+/* The folder's rows and Go to File's results: dense rows with no gap between them (§5.2). */
+.files-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+/* A changed file's quiet A, M or U, after its name. */
+.files-git-marker {
+  flex: none;
+  color: var(--text-dim);
+  font: var(--type-micro);
+  font-variant-numeric: tabular-nums;
+}
+.files-goto-count {
+  margin: 0 0 var(--space-1);
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+/* An option is a row, not a button. The active one is drawn as the composer's pickers draw theirs,
+   with the control edge rather than the teal selected wash (§9.1), and at every width: the field
+   keeps focus, so on a phone too this is the only sign of the row Enter opens. */
+.files-goto-option { cursor: pointer; }
+.files-goto-option.is-active {
+  background: var(--bg-elev-3);
+  box-shadow: inset 0 0 0 1px var(--control-outline);
+}
+.files-goto-name { flex: none; max-width: 60%; }
+.files-goto-folder {
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-dim);
+  font: var(--type-small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.files-goto-match { text-decoration: underline; }
+/* Dense skeleton rows (§12.3): a name bar and a short trailing size bar, flush with the list. */
+.skeleton.files-skeleton {
+  gap: 0;
+  min-height: 0;
+  padding: 0;
+}
+.files-skeleton > .row > .skeleton-bar:last-child {
+  width: 12%;
+  margin-left: auto;
 }
 
 /* Browser and authenticated artifact previews. Both iframe surfaces are sandboxed in markup; the
@@ -11809,31 +11878,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   margin-left: 0;
 }
 
-/* ---- Git / PR panel (session detail) ---- */
-.git-status-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-/* The Files panel's file list: dense rows (§5.2), 32px on a fine pointer and 44px on touch, with
-   no gap between them. */
-.git-files {
-  list-style: none;
-  margin: 0;
-  padding: var(--space-1);
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  max-height: 180px;
-  overflow: auto;
-  display: flex;
-  flex-direction: column;
-}
 /* ------------------------- Files panel (session browser) ------------------------ */
-.files-list {
-  max-height: 320px;
-}
 .files-viewer {
   display: flex;
   flex-direction: column;

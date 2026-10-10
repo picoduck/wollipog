@@ -44,7 +44,6 @@ const TERMINAL = "Terminal epic (not yet filed)";
 const RECORDED: readonly (readonly [string, string, string, string])[] = [
   ["components/AutomationsView.tsx", "▸", "▸", AUTOMATIONS],
   ["components/AutomationsView.tsx", "×", "×", AUTOMATIONS],
-  ["components/FilesPanel.tsx", "↻", "↻ Refresh", RIGHT_PANEL],
   ["components/OnboardRunnerDialog.tsx", "✓", "✓", CONNECTIONS],
   ["components/OnboardRunnerDialog.tsx", "△", "△", CONNECTIONS],
   ["components/OnboardRunnerDialog.tsx", "✓", "✓", CONNECTIONS],
