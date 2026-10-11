@@ -7806,6 +7806,7 @@ function SessionDetailLoaded({
           parentTurns={backgroundParentTurns}
           onViewTurn={viewBackgroundTurn}
           machineName={runnerDisp.name || undefined}
+          runnerConnectedAt={runner?.connectedAt}
           onOpenMachine={() => navigate({ name: "runners", section: "machines" })}
           backgroundInventoryError={backgroundInventoryError}
           onRetryBackgroundInventory={retryBackgroundInventory}

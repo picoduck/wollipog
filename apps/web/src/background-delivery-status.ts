@@ -1,6 +1,6 @@
-import type { BackgroundDeliveryView, BackgroundDeliveryWatchdogState } from "@wollipog/protocol";
+import type { BackgroundDeliveryView, BackgroundDeliveryWatchdogState, ManagedBackgroundJobView } from "@wollipog/protocol";
 import type { ApiClient } from "./api.js";
-import type { BackgroundJobStopAvailability } from "./background-job-stop.js";
+import { backgroundJobSentenceName } from "./background-job-stop.js";
 
 /** `pending` progresses on its own; `blocked` and `missing` do not and ask for a step. */
 export type BackgroundDeliverySeverity = "pending" | "blocked" | "missing";
@@ -8,8 +8,6 @@ export type BackgroundDeliverySeverity = "pending" | "blocked" | "missing";
 export interface BackgroundDeliveryStatusCopy {
   label: string;
   description: string;
-  completed: string;
-  outstanding: string;
   recovery: string;
   action: string;
   diagnostic: string;
@@ -21,8 +19,6 @@ export const BACKGROUND_DELIVERY_STATUS: Record<BackgroundDeliveryWatchdogState,
   terminal_without_continuation: {
     label: "Result Pending",
     description: "A background job finished, but its result has not yet been returned to this conversation.",
-    completed: "The background job finished.",
-    outstanding: "Its result has not yet been returned to this conversation.",
     recovery: "Wollipog is returning the result automatically.",
     action: "No action is needed.",
     diagnostic: "The job is terminal, but no continuation has been recorded.",
@@ -31,8 +27,6 @@ export const BACKGROUND_DELIVERY_STATUS: Record<BackgroundDeliveryWatchdogState,
   continuation_blocked: {
     label: "Result Blocked",
     description: "A background job finished, but its result cannot be returned while another job from the same turn is still running.",
-    completed: "The background job finished.",
-    outstanding: "Its result waits until every job started by the same turn has finished.",
     recovery: "Wollipog returns the result automatically once the remaining job ends. It ends that job itself only when a queued handoff has waited on it past its bound.",
     action: "Ask the session to stop the unfinished job (a monitor that never fires ends only with its provider process); stopping or restarting the session also ends that job, together with every other job.",
     diagnostic: "The job is terminal, but a sibling job from its parent turn has no terminal status, so no continuation can be recorded.",
@@ -41,8 +35,6 @@ export const BACKGROUND_DELIVERY_STATUS: Record<BackgroundDeliveryWatchdogState,
   accepted_without_result: {
     label: "Result Missing",
     description: "A background job finished, but its result is missing after Wollipog accepted the return step.",
-    completed: "The background job finished and Wollipog accepted the return step.",
-    outstanding: "The result did not arrive in this conversation.",
     recovery: "Wollipog will not repeat an accepted step automatically because that could duplicate work.",
     action: "Acknowledge the missing result to clear immediate attention without retrying the continuation.",
     diagnostic: "The accepted provider turn ended without a durable delivery receipt.",
@@ -51,8 +43,6 @@ export const BACKGROUND_DELIVERY_STATUS: Record<BackgroundDeliveryWatchdogState,
   result_not_projected: {
     label: "Transcript Delayed",
     description: "A background result reached Wollipog, but it has not appeared in this conversation yet.",
-    completed: "Wollipog received the background result.",
-    outstanding: "The result has not appeared in this conversation yet.",
     recovery: "Wollipog is updating the transcript automatically.",
     action: "No action is needed.",
     diagnostic: "The runner result was recorded, but transcript projection is pending.",
@@ -61,8 +51,6 @@ export const BACKGROUND_DELIVERY_STATUS: Record<BackgroundDeliveryWatchdogState,
   dashboard_observation_pending: {
     label: "Notification Pending",
     description: "A background result reached the conversation, but this dashboard has not yet confirmed the update.",
-    completed: "The background result reached the conversation and a notification was queued.",
-    outstanding: "This dashboard has not yet confirmed the update.",
     recovery: "Wollipog is waiting for the dashboard confirmation automatically.",
     action: "No action is needed.",
     diagnostic: "A notification was queued, but dashboard observation is pending.",
@@ -92,32 +80,81 @@ export function shownWatchdogDelivery<T extends Pick<BackgroundDeliveryView, "wa
   return watched.find((delivery) => backgroundDeliveryNeedsYou(delivery.watchdogState)) ?? watched[0];
 }
 
+/** What a recovery notice names (#2859): the one job it is about, or how many when it is several or
+ * none of them is listed. */
+export type BackgroundRecoverySubject = { job: string } | { count: number };
+
+const capitalize = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+
+function subjectName(subject: BackgroundRecoverySubject): string {
+  if ("job" in subject) return subject.job;
+  return subject.count === 1 ? "a background job" : `${subject.count} background jobs`;
+}
+
+function subjectResult(subject: BackgroundRecoverySubject): string {
+  if ("job" in subject) return `${subject.job}'s result`;
+  return subject.count === 1 ? "the result of a background job" : `the result of ${subject.count} background jobs`;
+}
+
+const singular = (subject: BackgroundRecoverySubject) => "job" in subject || subject.count === 1;
+
 /**
- * The step a watchdog state asks for, where the surface knows whether this runner can stop one job
- * (#1780). Result Blocked then offers Stop Job, or says why it is unavailable; every other state,
- * and a surface that does not know, keeps the shared copy. `restartReportsResult` says the runner's
- * restart hands this result to the new conversation rather than discarding it (v191, #1779).
+ * A recovery notice's one sentence (#2859), naming the job: "Shell job a1f3c9 finished, but its result
+ * never reached this conversation. …" for Result Missing, "Returning shell job a1f3c9's result to this
+ * conversation." for Result Pending. The notice's action, or none, is the rest of what the person needs.
  */
-export function backgroundDeliveryAction(
+export function backgroundRecoverySentence(
   state: BackgroundDeliveryWatchdogState,
-  jobStop?: BackgroundJobStopAvailability | null,
-  stoppableJobListed = true,
-  restartReportsResult = false,
+  subject: BackgroundRecoverySubject,
 ): string {
-  const status = BACKGROUND_DELIVERY_STATUS[state];
-  if (state !== "continuation_blocked" || !jobStop) return status.action;
-  if (jobStop.available) {
-    // Stop Job is on the job's own page (#2858).
-    const where = stoppableJobListed
-      ? "Open the unfinished job below and use Stop Job"
-      : "Open the unfinished job from the same turn in Background Work and use Stop Job";
-    return `${where}: only that job ends, it is recorded as killed, and this result is then returned. ` +
-      (restartReportsResult
-        ? "Stopping the session also ends it but discards this result; restarting the session ends every job " +
-          "and reports this result to the new conversation instead."
-        : "Restarting or stopping the session also ends it, but ends every other job and discards this result.");
+  const its = singular(subject) ? "its" : "their";
+  switch (state) {
+    case "accepted_without_result":
+      return `${capitalize(subjectName(subject))} finished, but ${its} result never reached this conversation. ` +
+        "Wollipog won't retry on its own, so the step can't run twice.";
+    case "continuation_blocked":
+      return `${capitalize(subjectName(subject))} finished, but ${its} result can't be returned while another job ` +
+        "from the same turn is still running.";
+    case "terminal_without_continuation":
+      return `Returning ${subjectResult(subject)} to this conversation.`;
+    case "result_not_projected":
+      return `${capitalize(subjectResult(subject))} reached Wollipog and is being added to this conversation.`;
+    case "dashboard_observation_pending":
+      return `Confirming that this dashboard shows ${subjectResult(subject)}.`;
   }
-  return `Stop Job is unavailable: ${jobStop.reason} ${status.action}`;
+}
+
+/**
+ * The Lost notice's sentence (#2859): "Studio Workstation restarted while monitor job 7be210 was
+ * running, so its result can't come back to this conversation." `machine` is the person's name for it.
+ */
+export function backgroundLostSentence(
+  machine: string | null,
+  lostJobs: readonly Pick<ManagedBackgroundJobView, "launchType" | "id">[],
+): string {
+  const where = machine ?? "The machine";
+  if (lostJobs.length > 1) {
+    return `${where} restarted while ${lostJobs.length} background jobs were running, so their results can't come back ` +
+      "to this conversation.";
+  }
+  const job = lostJobs.length === 1 ? backgroundJobSentenceName(lostJobs[0]!) : "a background job";
+  return `${where} restarted while ${job} was running, so its result can't come back to this conversation.`;
+}
+
+/** What Result Missing's Acknowledge does, as its Show Details says it. */
+export const ACKNOWLEDGE_MISSING_RESULT_EFFECT = "Clears the alert. It doesn't rerun the job or resend the result.";
+
+/**
+ * Result Blocked's other ways out, behind its Show Details (#1779, #2859): stopping or restarting the
+ * session ends the unfinished job too, at a cost. `restartReportsResult` says the runner's restart hands
+ * this result to the new conversation rather than discarding it (v191).
+ */
+export function blockedResultSessionAlternative(restartReportsResult: boolean): string {
+  return restartReportsResult
+    ? "Stopping the session also ends the unfinished job but discards this result. Restarting the session ends " +
+      "every job and reports this result to the new conversation."
+    : "Restarting or stopping the session also ends the unfinished job, but ends every other job and discards " +
+      "this result.";
 }
 
 /** The continuation a Result Missing delivery's Acknowledge Missing Result applies to, or `null` when
