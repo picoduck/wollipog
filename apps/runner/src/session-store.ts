@@ -1121,11 +1121,12 @@ export class SessionStore {
     }
   }
 
-  /** Validation key for the clean cache: bigint mtime (ns) + size. */
+  /** Constant-cost validation: identity catches atomic replacements even with equal mtime/size.
+   * ctime also invalidates in-place changes and platforms that provide less distinctive inodes. */
   private statKey(p: string): string | null {
     try {
       const s = statSync(p, { bigint: true });
-      return `${s.mtimeNs}:${s.size}`;
+      return `${s.dev}:${s.ino}:${s.ctimeNs}:${s.mtimeNs}:${s.size}`;
     } catch {
       return null;
     }
