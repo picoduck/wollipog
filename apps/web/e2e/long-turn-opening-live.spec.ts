@@ -291,10 +291,18 @@ for (const rate of [1, 4]) test(`an incomplete cache opens its real authoritativ
   await cdp.send("Emulation.setCPUThrottlingRate", { rate: 1 });
 });
 
-test("cold preview hands off after contiguous hydration without moving its visible prompt", async ({ page }) => {
+test("cold preview retries interrupted hydration and retains loaded pages without moving its visible prompt", async ({ page }) => {
   await signIn(page);
   await page.goto(`${base}${viewPath({ name: "session", id: COLD_SESSION_ID })}`);
   await expect(page.getByText(LONG_TURN_PROMPT, { exact: true })).toBeInViewport();
+  await page.getByRole("button", { name: "Load Later Activity", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Load Later Activity", exact: true })).toBeEnabled();
+  await expect(page.getByText(LONG_TURN_PROMPT, { exact: true })).toBeInViewport();
+  const before = coldRunner!.ordinaryReadCount();
+  expect(coldRunner!.interruptHydration()).toBeGreaterThan(0);
+  // Observe a new ordinary request caused by preview polling, before any explicit opening HTTP
+  // poll can mask a missing retry. Existing service admission joins and cursor-gates that work.
+  await expect.poll(() => coldRunner!.ordinaryReadCount()).toBeGreaterThan(before);
   coldRunner!.releaseHydration();
   await expect.poll(async () => {
     const response = await page.request.get(`${base}/api/sessions/${COLD_SESSION_ID}/events?opening=current-turn&limit=200&eventEpoch=0`, { headers: { authorization: `Bearer ${token}` } });
@@ -331,6 +339,11 @@ test("paced evidence of the cold reader paging and hydration handoff", async ({ 
     await expect(page.locator(".detail-scroll")).toHaveAttribute("data-follow-tail-state", "paused");
     await delay(3_000);
     coldRunner!.releaseHydration();
+    await expect.poll(async () => {
+      const response = await page.request.get(`${base}/api/sessions/${COLD_SESSION_ID}/events?opening=current-turn&limit=200&eventEpoch=0`,
+        { headers: { authorization: `Bearer ${token}` } });
+      return (await response.json()).cacheComplete;
+    }).toBe(true);
     await expect(page.getByText("Recent activity is readable as a snapshot while full history loads. Refresh to check for new activity.", { exact: true })).toHaveCount(0);
     await expect(page.locator(".detail-scroll")).toHaveAttribute("data-follow-tail-state", "paused");
     await delay(4_000);

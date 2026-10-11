@@ -23,14 +23,14 @@ export function convertPreviewReadingState(reading: TimelineReadingState, page: 
   const oldGroups = groupTimeline(reading.items);
   const sourceEnd = (item: TimelineItem): number => {
     const end = "sourceEndId" in item ? item.sourceEndId ?? item.id : item.id;
-    return item.kind === "tool_call" ? Math.max(end, ...(item.children ?? []).map(sourceEnd)) : end;
+    return item.kind === "tool_call" ? (item.children ?? []).reduce((value, child) => Math.max(value, sourceEnd(child)), end) : end;
   };
   for (const group of groups) {
     if (group.kind !== "work") continue;
     const source = reverse.get(group.items[0]!.id);
     if (source === undefined) continue;
     const old = oldGroups.find(value => value.kind === "work" && source >= value.items[0]!.id &&
-      source <= Math.max(...value.items.map(sourceEnd)));
+      source <= value.items.reduce((end, item) => Math.max(end, sourceEnd(item)), 0));
     if (!old || old.kind !== "work") continue;
     const summary = reading.rows.find(row => row.kind === "work_summary" && row.firstItemId === old.items[0]!.id);
     if (summary?.kind === "work_summary") disclosure.set(`work:${group.id}`, summary.open);

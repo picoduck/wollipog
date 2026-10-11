@@ -38,7 +38,8 @@ export function seedColdHistoryPreview(databasePath: string, root: string) {
 export async function connectColdHistoryRunner(base: string, fixture: ReturnType<typeof seedColdHistoryPreview>) {
   const socket = new WebSocket(`${base.replace("http:", "ws:")}/runner`);
   let hydrating = false;
-  const held: Array<() => void> = [];
+  const held: Array<{ reply: () => void; fail: () => void }> = [];
+  let ordinaryReads = 0;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   await new Promise<void>((done, reject) => {
     socket.addEventListener("error", () => reject(new Error("synthetic runner connection failed")));
@@ -60,11 +61,18 @@ export async function connectColdHistoryRunner(base: string, fixture: ReturnType
         if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "session_history_page_result",
           requestId: message.requestId, sessionId: COLD_SESSION_ID, ...result }));
       };
-      if (message.indexedOnly || hydrating) reply(); else held.push(reply);
+      if (message.indexedOnly) reply(); else {
+        ordinaryReads++;
+        if (hydrating) reply(); else held.push({ reply, fail: () => socket.send(JSON.stringify({
+          type: "session_history_page_result", requestId: message.requestId, sessionId: COLD_SESSION_ID,
+          ok: false, code: "history_cursor_invalid", error: "Synthetic interrupted hydration read" })) });
+      }
     });
   });
   return {
-    releaseHydration() { hydrating = true; for (const reply of held.splice(0)) reply(); },
+    ordinaryReadCount() { return ordinaryReads; },
+    interruptHydration() { const pending = held.splice(0); for (const read of pending) read.fail(); return pending.length; },
+    releaseHydration() { hydrating = true; for (const read of held.splice(0)) read.reply(); },
     stop() { if (heartbeat) clearInterval(heartbeat); socket.close(); },
   };
 }

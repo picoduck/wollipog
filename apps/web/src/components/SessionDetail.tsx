@@ -52,8 +52,8 @@ import {
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { convertPreviewReadingState, timelineRowSource } from "../history-preview-handoff.js";
-import { useHistoryPreview, type PreviewAnchor } from "../use-history-preview.js";
-import type { SessionHistoryHandoff } from "@wollipog/protocol";
+import { useHistoryPreview, type PreviewAnchor, type PreviewHandoff } from "../use-history-preview.js";
+import type { SessionEventsResponse } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { outstandingSessionResult } from "../session-follow-up.js";
 import { SkillsUnavailableNotice, skillsUnavailableSentence, useSessionSkillsUnavailable, useSkillsNoticeDismissal } from "./SkillsUnavailableNotice.js";
@@ -1161,6 +1161,7 @@ function SessionDetailLoaded({
   const {
     loadEvents,
     loadTurnStartWindow,
+    loadHistoryPreviewHandoff,
     loadOlderEvents,
     beginOlderEventsLoad,
     failOlderEventsLoad,
@@ -1205,10 +1206,12 @@ function SessionDetailLoaded({
   const handoffDisclosure = useRef<{ key: string; values: ReadonlyMap<string, boolean> } | null>(null);
   const previewHandlers = useRef<{
     anchor: () => PreviewAnchor | null;
-    handoff: (page: SessionHistoryHandoff, anchor: PreviewAnchor) => boolean;
-  }>({ anchor: () => null, handoff: () => false });
+    handoff: (page: PreviewHandoff, anchor: PreviewAnchor) => boolean;
+    refreshOpening: (page: SessionEventsResponse) => boolean;
+  }>({ anchor: () => null, handoff: () => false, refreshOpening: () => false });
   const historyPreview = useHistoryPreview(api, sessionId, recoveryEventEpoch,
-    () => previewHandlers.current.anchor(), (page, anchor) => previewHandlers.current.handoff(page, anchor), instanceScope);
+    () => previewHandlers.current.anchor(), (page, anchor) => previewHandlers.current.handoff(page, anchor), instanceScope,
+    page => previewHandlers.current.refreshOpening(page));
   const evs = historyPreview.active ? historyPreview.events : cachedEvents;
   // Read inside the recovery effect without becoming one of its dependencies: that effect must run
   // once per open, not once per streamed event.
@@ -3975,7 +3978,7 @@ function SessionDetailLoaded({
       if (!detailMountedRef.current || !reading || page.eventEpoch !== recoveryEventEpoch || page.cacheComplete !== true) return false;
       const converted = convertPreviewReadingState(reading, page, anchor);
       if (!converted) return false;
-      const applied = loadTurnStartWindow(sessionId, page,
+      const applied = loadHistoryPreviewHandoff(sessionId, page.pages,
         cachedEventHistory?.recoveryRevision ?? recoveryRevision ?? -1, recoveryGeneration);
       if (applied) {
         handoffDisclosure.current = { key: timelineHistoryKey, values: converted.disclosure };
@@ -3983,7 +3986,18 @@ function SessionDetailLoaded({
       }
       return applied;
     },
+    refreshOpening: page => {
+      if (!detailMountedRef.current || page.eventEpoch !== recoveryEventEpoch || page.cacheComplete !== true) return false;
+      const applied = loadTurnStartWindow(sessionId, page,
+        cachedEventHistory?.recoveryRevision ?? recoveryRevision ?? -1, recoveryGeneration);
+      if (applied && page.events[0]) seedFollowTailAnchor(instanceScope, sessionId,
+        { key: `item:${page.events[0].payload.kind}:${page.events[0].seq}`, offset: 0 }, "paused");
+      return applied;
+    },
   };
+  useEffect(() => {
+    if (!historyPreview.active) handoffDisclosure.current = null;
+  }, [historyPreview.active, timelineHistoryKey]);
   useEffect(() => {
     provisionalFollowStateRef.current?.(followTail.state);
   }, [followTail.state]);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { ControlPlaneToUi, PodView, SessionEvent, SessionReminderView, SessionView, SteeringAttemptView } from "@wollipog/protocol";
+import type { ControlPlaneToUi, PodView, SessionEvent, SessionHistoryHandoff, SessionReminderView, SessionView, SteeringAttemptView } from "@wollipog/protocol";
 import { isPartialHistory, Store } from "./store.js";
 import { shouldReadOpeningWindow } from "./history-recovery.js";
 import { ACTIVITY_BUCKET_MS, activitySeries } from "./activity.js";
@@ -28,6 +28,36 @@ const pod = (members: string[]): PodView => ({
 function message(store: Store, msg: ControlPlaneToUi, now?: number): void {
   store.dispatch({ type: "msg", msg, now });
 }
+
+test("preview handoff installs all bounded pages atomically while preserving the opening transport guard", () => {
+  const store = new Store({ name: "session", id: "s1" });
+  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [] });
+  store.beginEventHistoryLoad("s1", 0, -1);
+  const events = Array.from({ length: 401 }, (_, i) => i === 0 ? userEvent("s1", 100 + i) : event("s1", 100 + i));
+  const pages: SessionHistoryHandoff[] = [];
+  for (let offset = 0; offset < events.length; offset += 200) {
+    const rows = events.slice(offset, offset + 200), end = rows.at(-1)!.seq;
+    pages.push({ events: rows, identities: [], eventEpoch: 0, cacheComplete: true,
+      windowStartSeq: 100, windowEndSeq: 500, anchorSeq: 450, hasMoreHandoff: end < 500,
+      turnStartSeq: 100, nextAfter: end, tailSeq: 900, hasMoreLater: true, hasMoreOlder: true, turnAligned: offset === 0 });
+  }
+  assert.equal(store.loadTurnStartWindow("s1", { ...pages.at(-1)!, events }, -1), false,
+    "a joined range must never disable the bounded opening guard");
+  const before = store.getState();
+  assert.equal(store.loadHistoryPreviewHandoff("s1", pages.slice(0, 2), -1), false);
+  assert.equal(store.getState(), before, "a partial chain publishes no rows");
+  const corrupt = pages.map(page => ({ ...page }));
+  corrupt[1] = { ...corrupt[1]!, eventEpoch: 1 };
+  assert.equal(store.loadHistoryPreviewHandoff("s1", corrupt, -1), false);
+  assert.equal(store.getState(), before, "an epoch change cannot partially install a chain");
+  let publications = 0; const unsubscribe = store.subscribe(() => publications++);
+  assert.equal(store.loadHistoryPreviewHandoff("s1", pages, -1), true);
+  unsubscribe();
+  assert.equal(publications, 1, "the range and unread gap publish together");
+  assert.deepEqual(store.getState().events.get("s1")?.map(row => row.seq), events.map(row => row.seq));
+  assert.equal(store.getState().eventWindows.get("s1")?.laterGap?.afterSeq, 500);
+  assert.equal(store.getState().eventWindows.get("s1")?.hasOlder, true);
+});
 
 test("a turn-start prefix keeps its unread remainder and live traffic outside the reader", () => {
   const store = new Store({ name: "session", id: "s1" });

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { SessionEvent, SessionHistoryHandoff, SessionHistoryPreview } from "@wollipog/protocol";
+import type { SessionEvent, SessionEventsResponse, SessionHistoryHandoff, SessionHistoryPreview } from "@wollipog/protocol";
 import type { ApiClient } from "./api.js";
 import type { EventWindowState } from "./store.js";
 
@@ -16,6 +16,7 @@ export function validHistoryPreview(page: SessionHistoryPreview): boolean {
 
 type PreviewState = { key: string; viewRevision: number; source: SessionHistoryPreview; events: SessionEvent[];
   loading: "older" | "later" | "latest" | null; error: string | null };
+export interface PreviewHandoff extends SessionHistoryHandoff { pages: SessionHistoryHandoff[] }
 export interface PreviewAnchor { seq: number; kind: string; offset: number; rowKind?: string; rowKey?: string }
 
 /** A view-private coordinate space. The global store, live recovery cursor and CP identity-based
@@ -23,7 +24,8 @@ export interface PreviewAnchor { seq: number; kind: string; offset: number; rowK
  * the entire explicitly loaded range is converted before changing coordinate spaces. */
 export function useHistoryPreview(api: ApiClient, sessionId: string, eventEpoch: number,
   anchor: () => PreviewAnchor | null,
-  handoff: (page: SessionHistoryHandoff, anchor: PreviewAnchor) => boolean, scope = "") {
+  handoff: (page: PreviewHandoff, anchor: PreviewAnchor) => boolean, scope = "",
+  refreshOpening?: (page: SessionEventsResponse) => boolean) {
   const key = `${scope}:${sessionId}:${eventEpoch}`;
   const currentKey = useRef(key);
   currentKey.current = key;
@@ -32,8 +34,8 @@ export function useHistoryPreview(api: ApiClient, sessionId: string, eventEpoch:
   const currentRef = useRef(current);
   currentRef.current = current;
   const olderRead = useRef<Promise<void> | null>(null);
-  const handlers = useRef({ anchor, handoff });
-  handlers.current = { anchor, handoff };
+  const handlers = useRef({ anchor, handoff, refreshOpening });
+  handlers.current = { anchor, handoff, refreshOpening };
   const project = useCallback((page: SessionHistoryPreview): SessionEvent[] => page.events.map(event => ({
     ...event, id: -event.seq, sessionId,
   })), [sessionId]);
@@ -48,7 +50,8 @@ export function useHistoryPreview(api: ApiClient, sessionId: string, eventEpoch:
     if (!current) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
-    let conversion: { owner: PreviewState; position: PreviewAnchor; page: SessionHistoryHandoff } | null = null;
+    let conversion: { owner: PreviewState; position: PreviewAnchor; page: PreviewHandoff } | null = null;
+    let retryDelay = 500;
     const samePosition = (a: PreviewAnchor, b: PreviewAnchor) => a.seq === b.seq && a.kind === b.kind &&
       a.offset === b.offset && a.rowKey === b.rowKey && a.rowKind === b.rowKind;
     const check = async () => {
@@ -75,8 +78,9 @@ export function useHistoryPreview(api: ApiClient, sessionId: string, eventEpoch:
           return;
         }
         const page = response.handoff;
-        if (!page) conversion = null;
+        if (!page) { conversion = null; retryDelay = Math.min(5_000, retryDelay * 2); }
         else {
+          retryDelay = 500;
           const previous = conversion?.page;
           const after = previous?.nextAfter ?? page.windowStartSeq - 1;
           if (page.eventEpoch !== eventEpoch || page.cacheComplete !== true || !page.events.length ||
@@ -86,7 +90,8 @@ export function useHistoryPreview(api: ApiClient, sessionId: string, eventEpoch:
               (previous && (previous.windowStartSeq !== page.windowStartSeq || previous.windowEndSeq !== page.windowEndSeq ||
                 previous.anchorSeq !== page.anchorSeq))) throw new Error("invalid identity conversion");
           const joined = previous ? { ...page, events: [...previous.events, ...page.events],
-            identities: [...previous.identities, ...page.identities], turnAligned: previous.turnAligned } : page;
+            identities: [...previous.identities, ...page.identities], pages: [...previous.pages, page],
+            turnAligned: previous.turnAligned } : { ...page, pages: [page] };
           conversion = { owner: selected, position, page: joined };
           if (!page.hasMoreHandoff) {
             const identities = new Map(joined.identities.map(identity => [identity.runnerSeq, identity.seq]));
@@ -100,17 +105,17 @@ export function useHistoryPreview(api: ApiClient, sessionId: string, eventEpoch:
           }
         }
       } catch {
-        conversion = null;
+        conversion = null; retryDelay = Math.min(5_000, retryDelay * 2);
         if (!cancelled) setState(prior => prior?.key === key ? { ...prior,
           error: "Full activity is not available yet. The loaded snapshot is still readable." } : prior);
       }
-      if (!cancelled) timer = setTimeout(check, 500);
+      if (!cancelled) timer = setTimeout(check, retryDelay);
     };
     timer = setTimeout(check, 500);
     return () => { cancelled = true; clearTimeout(timer); };
   }, [api, key, sessionId, current?.source]);
 
-  const load = useCallback((direction: "older" | "later" | "latest") => {
+  const load = useCallback((direction: "older" | "later") => {
     const selected = currentRef.current;
     if (!selected || selected.loading) return false;
     const boundary = direction === "older" ? selected.events[0]?.seq : selected.events.at(-1)?.seq;
@@ -120,19 +125,17 @@ export function useHistoryPreview(api: ApiClient, sessionId: string, eventEpoch:
     setState(owned);
     const pending = api.getSessionHistoryPreview(sessionId, { eventEpoch, logEpoch: selected.source.logEpoch,
       throughSeq: selected.source.throughSeq, turnStartSeq: selected.source.turnStartSeq,
-      ...(direction === "older" ? { beforeSeq: boundary } : direction === "latest"
-        ? { beforeSeq: selected.source.throughSeq + 1 } : { afterSeq: boundary }),
+      ...(direction === "older" ? { beforeSeq: boundary } : { afterSeq: boundary }),
     }).then(response => {
       if (currentKey.current !== key || currentRef.current !== owned) return;
       const page = response.preview;
       if (!page || !validHistoryPreview(page) || page.logEpoch !== selected.source.logEpoch ||
           page.throughSeq !== selected.source.throughSeq || page.eventEpoch !== eventEpoch ||
-          (direction === "older" ? page.events.at(-1)?.seq !== boundary - 1 : direction === "latest"
-            ? page.events.at(-1)?.seq !== selected.source.throughSeq : page.events[0]?.seq !== boundary + 1)) {
+          (direction === "older" ? page.events.at(-1)?.seq !== boundary - 1 : page.events[0]?.seq !== boundary + 1)) {
         throw new Error("unavailable preview page");
       }
       setState({ ...selected, loading: null, events: direction === "older"
-        ? [...project(page), ...selected.events] : direction === "latest" ? project(page) : [...selected.events, ...project(page)] });
+        ? [...project(page), ...selected.events] : [...selected.events, ...project(page)] });
     }).catch(() => {
       if (currentKey.current === key && currentRef.current === owned) setState({ ...selected, loading: null,
         error: `Could not load ${direction === "older" ? "earlier" : "later"} activity. Retry to continue reading.` });
@@ -152,7 +155,14 @@ export function useHistoryPreview(api: ApiClient, sessionId: string, eventEpoch:
     void api.getSessionTurnStartPage(sessionId, eventEpoch).then(response => {
       if (currentKey.current !== key || currentRef.current !== owned) return;
       const page = response.preview;
-      if (!page) { setState({ ...selected, loading: null }); return; }
+      if (!page) {
+        if (response.eventEpoch === eventEpoch && response.cacheComplete === true && handlers.current.refreshOpening?.(response)) {
+          setState(null); return;
+        }
+        setState({ ...selected, loading: null,
+          error: "Recent activity is not available to refresh yet. The loaded snapshot is still readable." });
+        return;
+      }
       if (page.eventEpoch !== eventEpoch || !validHistoryPreview(page) ||
           (page.events.length && page.events[0]!.seq !== page.turnStartSeq)) throw new Error("unavailable snapshot");
       setState({ key, viewRevision: selected.viewRevision + 1, source: page, events: project(page), loading: null, error: null });

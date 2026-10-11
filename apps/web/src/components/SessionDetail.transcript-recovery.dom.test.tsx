@@ -202,9 +202,14 @@ test("a frozen preview stays explicitly paused when live activity arrives, and r
   let release!: () => void;
   const ready = new Promise<void>(done => { release = done; });
   const fixture = await mountFixture(pageController(), 0, { acknowledgeSubscription: false, client: {
-    getSessionTurnStartPage: async () => {
+    getSessionTurnStartPage: async id => {
       await ready;
-      const seq = ++openings === 1 ? 501 : 601;
+      const attempt = ++openings;
+      if (attempt === 3) return { events: [{ id: 2_000, seq: 705, ts: 1, sessionId: id,
+        payload: { kind: "user_message", text: "Fresh CP conversation" } }], eventEpoch: 0,
+        turnStartSeq: 705, nextAfter: 705, tailSeq: 705, hasMoreLater: false, hasMoreOlder: true,
+        turnAligned: true, cacheComplete: true };
+      const seq = attempt === 1 ? 501 : 601;
       return { events: [], eventEpoch: 0, turnStartSeq: 0, tailSeq: 0, nextAfter: 0, hasMoreLater: false,
         cacheComplete: false, preview: { eventEpoch: 0, logEpoch: 14,
         throughSeq: seq, turnStartSeq: seq, nextAfterSeq: seq, hasMore: false,
@@ -232,6 +237,13 @@ test("a frozen preview stays explicitly paused when live activity arrives, and r
     assert.ok(fixture.container.textContent!.includes("Fresh delivered prompt"));
     assert.equal(fixture.container.textContent!.includes("Frozen prompt"), false);
     assert.equal(fixture.scroller.getAttribute("data-follow-tail-state"), "paused");
+    const refreshCP = [...fixture.container.querySelectorAll<HTMLButtonElement>("[data-later-activity-gap] button")]
+      .find(button => button.textContent === "Refresh Recent Activity");
+    assert.ok(refreshCP); await act(async () => refreshCP.click()); await flushAsyncWork(30);
+    assert.equal(openings, 3);
+    assert.ok(fixture.container.textContent!.includes("Fresh CP conversation"));
+    assert.equal(fixture.readLoadedEvents()?.[0]?.id, 2_000, "explicit refresh can leave a completed snapshot via real CP identities");
+    assert.equal(fixture.container.textContent!.includes("Showing a loaded snapshot."), false);
   } finally { await unmountFixture(fixture); }
 });
 

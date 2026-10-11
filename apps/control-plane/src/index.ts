@@ -4327,6 +4327,9 @@ app.get("/api/sessions/:id/history-preview", async (req, reply) => {
   if (state.eventEpoch !== values.eventEpoch || (state.historyEpoch !== null && state.historyEpoch !== values.logEpoch)) {
     return reply.code(409).send({ error: "session event history was replaced", code: "stale_event_epoch", eventEpoch: state.eventEpoch });
   }
+  // A ready preview ends opening recovery polls. Continue the existing deduplicated maintenance
+  // path if an earlier hydration RPC timed out; private rows never supply its cursor or writes.
+  if (!state.complete) void svc.hydrateHistory(id);
   const read = { ...values, limit: values.limit! };
   if (values.handoffSeq !== undefined) return { handoff: historyPreviews.handoff(id, values.eventEpoch!, read) };
   return { preview: await historyPreviews.read(id, values.eventEpoch!, read) };
