@@ -30,6 +30,7 @@ const recoveryStatePath = process.env.WOLLIPOG_FAKE_QUESTION_STATE;
 const recovering = Boolean(recoveryStatePath && existsSync(recoveryStatePath));
 let dogfoodTurnCount = 0;
 let asyncTurnCount = 0;
+let rootCwd;
 const asyncDelivery = process.env.WOLLIPOG_FAKE_CODEX_ASYNC_DELIVERY;
 const asyncReceiptPath = process.env.WOLLIPOG_FAKE_CODEX_RECEIPT;
 const asyncReleasePath = process.env.WOLLIPOG_FAKE_CODEX_ASYNC_RELEASE;
@@ -50,6 +51,23 @@ function send(message) {
 
 createInterface({ input: process.stdin }).on("line", (line) => {
   const message = JSON.parse(line);
+  if (scenario === "full-control-root" && message.method == null && message.id === "root-question") {
+    if (message.result?.answers?.library?.answers?.[0] !== "Library A (Recommended)") {
+      process.stderr.write("root question was not resolved from its bounded suggested answer\n"); process.exitCode = 2; return;
+    }
+    send({ id: "root-tool", method: "item/commandExecution/requestApproval", params: {
+      threadId, turnId: "fixture-turn", itemId: "root-command", command: "cat src/authentication.ts", cwd: rootCwd,
+    } });
+    return;
+  }
+  if (scenario === "full-control-root" && message.method == null && message.id === "root-tool") {
+    if (message.result?.decision !== "accept") {
+      process.stderr.write("root tool approval was not resolved one time\n"); process.exitCode = 2; return;
+    }
+    send({ method: "item/agentMessage/delta", params: { threadId, turnId: "fixture-turn", itemId: "root-result", delta: "Root continued autonomously." } });
+    send({ method: "turn/completed", params: { threadId, turn: { id: "fixture-turn", status: "completed" } } });
+    return;
+  }
   if (!recovering && (choiceQuestionScenario || scenario === "dogfood-question") && message.method == null && message.id === questionRequestId) {
     const expected = scenario === "dogfood-question"
       ? {
@@ -101,8 +119,9 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   }
   if (message.method === "thread/start" && (
     scenario === "fresh" || choiceQuestionScenario || scenario === "dogfood-question" ||
-    scenario === "async-question" || scenario === "subagents"
+    scenario === "async-question" || scenario === "subagents" || scenario === "full-control-root"
   )) {
+    rootCwd = message.params.cwd;
     send({ id: message.id, result: { thread: { id: threadId } } });
     return;
   }
@@ -130,6 +149,14 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       : dogfoodTurnCount > 1 ? `fixture-turn-${dogfoodTurnCount}` : "fixture-turn";
     send({ id: message.id, result: { turn: { id: turnId } } });
     send({ method: "turn/started", params: { threadId, turn: { id: turnId } } });
+    if (scenario === "full-control-root") {
+      send({ id: "root-question", method: "item/tool/requestUserInput", params: {
+        threadId, turnId, itemId: "root-question", questions: [{ id: "library", header: "Architecture",
+          question: "Which authentication library should we implement?", isOther: true,
+          options: [{ label: "Library A (Recommended)", description: "Use the existing library" }, { label: "Library B", description: "Replace the library" }] }],
+      } });
+      return;
+    }
     if (scenario === "async-question") {
       const text = message.params?.input?.find((input) => input?.type === "text")?.text;
       if (typeof text === "string" && text.includes("Answer: Patch")) {

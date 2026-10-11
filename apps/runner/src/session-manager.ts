@@ -1,4 +1,5 @@
 import { artifactGuidance } from "./artifact-guidance.js";
+import { campaignOperationEvidenceCurrent } from "./campaign-operation-evidence.js";
 import { effectiveProjectMemoryKey, prepareProjectMemory, prepareProjectMemoryArgs, projectMemoryKey, projectMemoryUnavailable } from "./project-memory.js";
 import { isTerminal } from "@wollipog/protocol";
 import { inspectCampaignIssueScope } from "./campaign-issue-scope.js";
@@ -15197,6 +15198,13 @@ export class SessionManager {
       return;
     }
     const entry = this.active.get(sessionId);
+    const pending = resolvedByParentSessionId ? pendingRequests(this.store.readMeta(sessionId)?.pendingApproval)
+      .find((request) => request.requestId === requestId) : undefined;
+    if (pending?.context?.operation && pending.context.toolName &&
+        !campaignOperationEvidenceCurrent(pending.context.toolName, pending.context.operation)) {
+      optionId = null;
+      this.log(JSON.stringify({ event: "campaign_operation_evidence_stale", sessionId, requestId }));
+    }
     const delivered = entry ? entry.client.resolvePermission(requestId, optionId) : false;
     if (delivered) {
       const started = this.approvalStarted.get(`${sessionId}:${requestId}`);
@@ -18917,6 +18925,7 @@ export class SessionManager {
         pendingApproval: addPendingRequest(this.store.readMeta(sessionId)?.pendingApproval, {
           requestId: payload.requestId,
           ...(payload.occurrenceId ? { occurrenceId: payload.occurrenceId } : {}),
+          ...(payload.requestSource ? { requestSource: payload.requestSource } : {}),
           title: payload.title,
           options: payload.options,
           ...(payload.purpose === "authentication" ? { kind: "authentication" as const } : {}),
@@ -18938,6 +18947,7 @@ export class SessionManager {
         pendingApproval: addPendingRequest(this.store.readMeta(sessionId)?.pendingApproval, {
           requestId: payload.requestId,
           ...(payload.occurrenceId ? { occurrenceId: payload.occurrenceId } : {}),
+          ...(payload.requestSource ? { requestSource: payload.requestSource } : {}),
           title: payload.questions[0]?.question ?? "The agent has a question",
           options: [],
           kind: "question",

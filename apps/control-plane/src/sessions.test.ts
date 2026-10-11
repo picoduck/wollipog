@@ -4066,6 +4066,7 @@ test("opt-in Parent Control resolves exact nested request occurrences with agent
         requestId: "provider-reused-id",
         occurrenceId: questionOccurrence,
         owner: "orchestrator",
+        authorityEvaluation: { owner: "orchestrator", basis: "custom_policy", reason: "custom_owner", operation: "question" },
       }],
     });
     assert.equal(hub.suppressedReminderEvents.at(-1)?.payload.kind, "question_request",
@@ -4145,7 +4146,7 @@ test("opt-in Parent Control resolves exact nested request occurrences with agent
     assert.deepEqual(db.getSession(child.id)?.pendingRequestOwners, {
       human: 1,
       orchestrator: 0,
-      requests: [{ requestId: "policy-human", occurrenceId: "request_policy_human", owner: "human" }],
+      requests: [{ requestId: "policy-human", occurrenceId: "request_policy_human", owner: "human", authorityEvaluation: { owner: "human", basis: "custom_policy", reason: "custom_owner", operation: "policy_ask" } }],
     });
     assert.ok(svc.approve(child.id, "policy-human", "deny").ok);
     const approvalOccurrence = "request_approval_occurrence";
@@ -4160,7 +4161,7 @@ test("opt-in Parent Control resolves exact nested request occurrences with agent
     assert.deepEqual(db.getSession(child.id)?.pendingRequestOwners, {
       human: 0,
       orchestrator: 1,
-      requests: [{ requestId: "permission", occurrenceId: approvalOccurrence, owner: "orchestrator" }],
+      requests: [{ requestId: "permission", occurrenceId: approvalOccurrence, owner: "orchestrator", authorityEvaluation: { owner: "orchestrator", basis: "custom_policy", reason: "custom_owner", operation: "tool_approval" } }],
     });
     assert.equal(svc.resolveDescendantRequest(parent.data.id, child.id, approvalOccurrence, {
       action: "approve", optionId: "always",
@@ -20984,7 +20985,7 @@ test("Orchestrator is an additive role independent of the provider permission mo
     assert.deepEqual(db.getSession(child.data.id)?.pendingRequestOwners, {
       human: 0,
       orchestrator: 1,
-      requests: [{ requestId: "permission", occurrenceId: "request_additive_owner", owner: "orchestrator" }],
+      requests: [{ requestId: "permission", occurrenceId: "request_additive_owner", owner: "orchestrator", authorityEvaluation: { owner: "orchestrator", basis: "custom_policy", reason: "custom_owner", operation: "tool_approval" } }],
     }, "descendant request ownership resolves through the persisted role, not the preset literal");
 
     const defaulted = svc.createSession({ ...request, role: "orchestrator" }, undefined, undefined, false, false, false, human);

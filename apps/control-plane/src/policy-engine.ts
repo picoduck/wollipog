@@ -363,7 +363,7 @@ export function validateGovernancePolicy(policy: Omit<GovernancePolicy, "created
   const c = policy.conditions;
   if (!c) return null;
   if (typeof c !== "object" || Array.isArray(c)) return "conditions must be an object";
-  const conditionKeys = new Set(["statuses", "minCostUsd", "maxCostUsd", "minToolCalls", "maxToolCalls", "escalated"]);
+  const conditionKeys = new Set(["statuses", "minCostUsd", "maxCostUsd", "minToolCalls", "maxToolCalls", "escalated", "humanRequired"]);
   if (Object.keys(c).some((key) => !conditionKeys.has(key))) return "conditions contains unsupported fields";
   if (c.statuses !== undefined && (!Array.isArray(c.statuses) || !c.statuses.length || c.statuses.some((status) => !(["queued", "starting", "running", "input_required", "idle", "completed", "failed", "stopped"] as unknown[]).includes(status)))) {
     return "conditions.statuses contains an invalid session status";
@@ -376,6 +376,7 @@ export function validateGovernancePolicy(policy: Omit<GovernancePolicy, "created
   if (c.minCostUsd !== undefined && c.maxCostUsd !== undefined && c.minCostUsd > c.maxCostUsd) return "minimum cost exceeds maximum cost";
   if (c.minToolCalls !== undefined && c.maxToolCalls !== undefined && c.minToolCalls > c.maxToolCalls) return "minimum tool calls exceeds maximum tool calls";
   if (c.escalated !== undefined && typeof c.escalated !== "boolean") return "conditions.escalated must be boolean";
+  if (c.humanRequired !== undefined && (typeof c.humanRequired !== "boolean" || policy.effect !== "ask")) return "Human Required applies only to ask policies";
   if (policy.effect === "allow" && c.escalated !== undefined) {
     return "allow policies cannot depend on runner-asserted escalation state";
   }

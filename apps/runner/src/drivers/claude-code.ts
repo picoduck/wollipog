@@ -24,6 +24,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentQuestion, PlanEntry, PromptImage, SessionConfig } from "@wollipog/protocol";
 import { approvalScopeContext } from "../approval-scope.js";
+import { campaignOperationEvidence } from "../campaign-operation-evidence.js";
 import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
 import { inspectClaudeBackgroundWork, inspectClaudeBackgroundWorkInContext, type ClaudeBackgroundWorkInspection } from "../claude-background-work.js";
 import { effectiveClaudePermissionMode } from "../claude-permission.js";
@@ -2998,6 +2999,7 @@ export class ClaudeCodeDriver implements Driver {
             }
             this.cb.onEvent({
               kind: "question_request",
+              requestSource: "provider_question",
               ...(this.cb.supportsWorkerAttention?.() && parentId ? { ownerToolUseId: parentId } : {}),
               requestId: msg.request_id,
               questions,
@@ -3011,6 +3013,7 @@ export class ClaudeCodeDriver implements Driver {
           const title = req.tool_name ? `${req.tool_name}: ${truncate(detail, 80)}` : "Permission requested";
           this.cb.onEvent({
             kind: "permission_request",
+            requestSource: "provider_tool",
             ...(this.cb.supportsWorkerAttention?.() && parentId ? { ownerToolUseId: parentId } : {}),
             requestId: msg.request_id,
             title,
@@ -3020,6 +3023,10 @@ export class ClaudeCodeDriver implements Driver {
             ],
             // The trust surface: the card shows WHAT it authorizes, not just the tool name.
             context: {
+              ...(req.tool_name === "Bash" && typeof req.input?.command === "string" && req.input.command.length <= 2000
+                ? { operation: campaignOperationEvidence("Bash", { kind: "command", input: req.input.command }) }
+                : ["Read", "Edit", "Write"].includes(req.tool_name ?? "") && typeof req.input?.file_path === "string" && req.input.file_path.length <= 1024
+                  ? { operation: campaignOperationEvidence(req.tool_name, { kind: "file", path: req.input.file_path }) } : {}),
               toolName: req.tool_name ? truncate(String(req.tool_name), 256) : undefined,
               input: renderApprovalInput(req.tool_name, req.input),
               ...approvalScopeContext(req.input),
