@@ -16,6 +16,13 @@ recovers it.
   still fails fast, and periodic work defers its tick as before.
 - `synchronous=FULL` on the connection: every commit flushes the WAL before it returns, so a
   control-plane decision is durable once it has been acknowledged.
+- `secure_delete=ON`: SQLite overwrites deleted ordinary-table content with zeros rather than
+  leaving session text, credentials or decision content recoverable from free pages in the main
+  database file. The extra delete I/O is an intentional privacy tradeoff; reducing maintenance
+  scans does not relax it. This is not complete storage erasure: WAL/journal files, backups,
+  external artifact blobs, and FTS virtual-table shadow storage need their own retention handling.
+  See [SQLite's secure-delete documentation](https://sqlite.org/pragma.html#pragma_secure_delete)
+  and the [index/sweep measurements](./session-event-index-and-sweep-performance.md).
 - Runner-replayable event ingest is the one exception. `appendEvent` called with a runner sequence
   number and `appendHydratedPage` switch the connection to `synchronous=NORMAL` for their own
   transaction and back to `FULL` afterwards (`replayableCommit`). They are relaxed only in WAL mode

@@ -297,6 +297,7 @@ import {
 } from "./archive-session-page.js";
 import type { DurableBackgroundPushDelivery, PushAudience, PushServiceOutcome } from "./web-push.js";
 import { matchWorkspaceId, matchWorkspaceIds, workspacePathsEqual } from "./workspace-match.js";
+import { installMaintenanceIndexes } from "./maintenance-indexes.js";
 import { CAMPAIGN_WORK_LEDGER_SCHEMA, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import {
   CAMPAIGN_FORGE_OBSERVATION_SCHEMA,
@@ -5193,6 +5194,8 @@ export class ControlPlaneDb {
     // FULL flushes the WAL at every commit, so control-plane decisions are durable once
     // acknowledged. Only runner-replayable event ingest relaxes it; see replayableCommit.
     db.exec("PRAGMA synchronous = FULL;");
+    // Deleted session content and credentials must not remain in ordinary free pages. See the
+    // secure_delete rationale and its WAL/FTS/backup limits in control-plane-database-durability.md.
     db.exec("PRAGMA secure_delete = ON;");
     db.exec("PRAGMA foreign_keys = ON;");
     // The child-charge triggers carry a settled charge up every ancestor by re-firing on each
@@ -6690,6 +6693,7 @@ export class ControlPlaneDb {
       db, artifactBlobs, instanceId, journalMode === "wal" ? `${resolvePath(location)}-wal` : null, hostRebooted,
     );
     try {
+      installMaintenanceIndexes(db);
       controlPlane.recoverPendingArtifactBlobs();
       controlPlane.migrateInlineWorkflowArtifacts();
       controlPlane.backfillSessionEventArtifactReferences();
@@ -26202,7 +26206,7 @@ export class ControlPlaneDb {
       ).run(now, now, now);
       const rows = this.stmt(
         `SELECT delivery.*,subscription.callback_url,subscription.secret_key
-         FROM outbound_event_deliveries delivery
+         FROM outbound_event_deliveries delivery INDEXED BY idx_outbound_event_deliveries_retry
          JOIN outbound_event_subscriptions subscription
            ON subscription.subscription_id=delivery.subscription_id
          WHERE subscription.revoked_at IS NULL AND subscription.state='active'
@@ -26287,9 +26291,7 @@ export class ControlPlaneDb {
          WHERE status IN ('delivered','failed','dropped') AND updated_at<?`,
       ).run(now - 30 * 24 * 60 * 60 * 1_000);
       this.stmt(
-        `DELETE FROM outbound_events WHERE NOT EXISTS (
-           SELECT 1 FROM outbound_event_deliveries delivery WHERE delivery.event_id=outbound_events.event_id
-         )`,
+        `DELETE FROM outbound_events WHERE event_id IN (SELECT event_id FROM outbound_event_orphans)`,
       ).run();
       return Number(removed.changes);
     });
