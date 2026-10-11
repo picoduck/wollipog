@@ -1533,6 +1533,25 @@ test.describe("the appearance controls", () => {
     });
   }
 
+  // TEMPORARY (#2869): prints CI's own render of each Appearance group so its linux baselines can be
+  // taken from CI (ubuntu-22.04 fonts differ from a developer host's). Removed in the next commit.
+  test("TEMPORARY print the CI Appearance renders", async ({ page }) => {
+    for (const theme of THEMES) {
+      await useHarness(page, theme, { section: "appearance" });
+      await page.mouse.move(0, 0);
+      await page.evaluate(() => document.fonts.ready);
+      const group = page.locator(".settings-panel .settings-group");
+      const png = await page.screenshot({ clip: await snappedClip(group), animations: "disabled", caret: "hide", scale: "css" });
+      const data = png.toString("base64");
+      const size = 4000;
+      const total = Math.ceil(data.length / size);
+      for (let index = 0; index < total; index += 1) {
+        console.log(`CIBASELINE settings-rows-${theme} ${index + 1}/${total} ${data.slice(index * size, (index + 1) * size)}`);
+      }
+    }
+    throw new Error("TEMPORARY: CI Appearance renders printed above");
+  });
+
   test("the picker opens a listbox of palettes and Escape puts focus back", async ({ page }) => {
     await useHarness(page, "dark", { section: "appearance" });
     await expect(trigger(page)).toHaveAttribute("aria-expanded", "false");
