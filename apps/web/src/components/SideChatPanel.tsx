@@ -389,13 +389,18 @@ export function SideChatPanel({
     setCreating(true);
     setStartFailed(null);
     setActionError(null);
+    const replacing = transcriptChildRef.current;
     try {
       const created = await api.createSideChat(session.id, replaceEnded);
       if (!mountedRef.current) return;
       if (created.session.id !== childId) resetTranscript(created);
       setSideChat(created);
     } catch (cause) {
-      if (mountedRef.current) setStartFailed(startFailure(cause, replaceEnded));
+      // Polling may have adopted the very child this request created before its answer was lost;
+      // that start did not fail, and its Retry would be refused as replacing a live side chat.
+      if (mountedRef.current && transcriptChildRef.current === replacing) {
+        setStartFailed(startFailure(cause, replaceEnded));
+      }
     } finally {
       if (mountedRef.current) setCreating(false);
     }
@@ -473,9 +478,9 @@ export function SideChatPanel({
     setStopping(turn);
     setActionError(null);
     try {
-      const updated = await api.cancelTurn(child.id);
-      if (!mountedRef.current) return;
-      setSideChat((prior) => prior?.session.id === updated.id ? { ...prior, session: updated } : prior);
+      // Polling reports the turn's end. The stop's own answer is the stored session, which carries
+      // no live turn coordinate, so adopting it would bring Send back while the turn still runs.
+      await api.cancelTurn(child.id);
     } catch (cause) {
       if (!mountedRef.current) return;
       setStopping(null);

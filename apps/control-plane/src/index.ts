@@ -69,7 +69,6 @@ import {
   type CreateAutomationRequest,
   type CreateAutomationTriggerRequest,
   type CreateOutboundEventSubscriptionRequest,
-  type CreateSideChatRequest,
   type CreateWorkflowDefinitionRequest,
   type CreateWorkflowDefinitionVersionRequest,
   type CreateWorkflowInstanceRequest,
@@ -185,6 +184,7 @@ import { readSshConfigHosts } from "./ssh-config.js";
 import { ControlPlaneDb, GOVERNANCE_AUDIT_RETENTION_MS } from "./db.js";
 import { logWalCheckpointerEvent } from "./wal-checkpointer.js";
 import { registerSessionLookupRoute } from "./session-lookup-route.js";
+import { registerSideChatRoutes } from "./side-chat-routes.js";
 import { registerVisibleCampaignChildrenHook } from "./visible-campaign-children-hook.js";
 import {
   sessionHoldReaderFor,
@@ -4266,19 +4266,11 @@ app.get("/api/sessions/:id/child-sessions", async (req, reply) => {
   });
 });
 
-app.get("/api/sessions/:id/side-chat", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const result = svc.sideChat(id);
-  if (!result.ok) return respond(reply, result);
-  return { sideChat: result.data ?? null };
-});
-
-app.post("/api/sessions/:id/side-chat", async (req, reply) => {
-  const body = (req.body ?? {}) as CreateSideChatRequest;
-  if (body.replaceEnded !== undefined && typeof body.replaceEnded !== "boolean") {
-    return reply.code(400).send({ error: "replaceEnded must be a boolean" });
-  }
-  return respond(reply, svc.createSideChat((req.params as { id: string }).id, body.replaceEnded === true));
+registerSideChatRoutes(app, {
+  service: svc,
+  permissions: db,
+  requestPrincipal: (req) => requestPrincipals.get(req) ?? requestPrincipal(req),
+  withQueue: (session) => hub.withQueue(session, true),
 });
 
 app.get("/api/sessions/:id/retained-attachment-events", async (req, reply) => {

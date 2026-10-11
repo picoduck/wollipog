@@ -119,8 +119,8 @@ test("while the side chat replies, Stop Turn takes Send's seat and interrupts th
       getSessionEventPage: async () => ({ events: [reply], eventEpoch: 0, nextAfter: 1, cacheComplete: true }),
       cancelTurn: async (id: string) => {
         cancelled.push(id);
-        current = { ...current, status: "idle", activeTurnId: undefined } as SessionView;
-        return current;
+        // The stop's answer is the stored session: still running, and with no live turn coordinate.
+        return { ...current, activeTurnId: undefined } as SessionView;
       },
     },
   );
@@ -132,7 +132,12 @@ test("while the side chat replies, Stop Turn takes Send's seat and interrupts th
     await act(async () => { stop.click(); });
     await tick(10);
     assert.deepEqual(cancelled, [child.id], "the side chat's own session is interrupted, never the parent");
-    assert.ok(view.button("Send"), "Send is back once the turn has stopped");
+    assert.equal(view.button("Stopping Turn")?.disabled, true, "the seat waits for the turn to end, not for the answer");
+    assert.equal(view.button("Send"), undefined);
+
+    current = { ...current, status: "idle", activeTurnId: undefined } as SessionView;
+    await tick(1_700);
+    assert.ok(view.button("Send"), "Send is back once polling reports the turn has stopped");
   } finally {
     await view.dispose();
   }
@@ -268,6 +273,34 @@ test("a replacement whose response was lost clears the failure once polling find
     assert.equal(view.container.querySelector(".sc-context .status")?.textContent, "Awaiting Prompt");
     assert.equal(view.button("Send")!.disabled, false, "the adopted replacement takes the kept draft");
     assert.equal(view.textarea()!.value, "still mine");
+  } finally {
+    await view.dispose();
+  }
+});
+
+/** Cross-model review CR-1.3: the same, with the create's rejection arriving after the adoption. */
+test("a create that rejects after polling adopted its replacement leaves no failure behind", async () => {
+  const ended = { ...child, status: "stopped" } as SessionView;
+  const replacement = { ...child, id: "side-session-late", status: "idle" } as SessionView;
+  let related: SideChatView = { parentSessionId: parent.id, session: ended, createdAt: 1 };
+  let reject: ((cause: Error) => void) | undefined;
+  const view = await render(<SideChatPanel session={parent} runnerOnline onInsertDraft={() => {}} />, {
+    sideChat: async () => ({ sideChat: related }),
+    createSideChat: () => new Promise<SideChatView>((_resolve, fail) => {
+      related = { parentSessionId: parent.id, session: replacement, createdAt: 2 };
+      reject = fail;
+    }),
+    getSessionEventPage: async () => ({ events: [], eventEpoch: 0, nextAfter: 0, cacheComplete: true }),
+  });
+  try {
+    await act(async () => { view.button("Start New Side Chat")!.click(); });
+    await view.type("late answer");
+    await tick(1_700);
+    await act(async () => { reject!(new TypeError("Failed to fetch")); });
+    await tick(1_700);
+    assertNoDomNode(view.container.querySelector(".notice.t-danger"), "the adopted replacement is not a failed start");
+    assert.equal(view.button("Send")!.disabled, false);
+    assert.equal(view.textarea()!.value, "late answer");
   } finally {
     await view.dispose();
   }
