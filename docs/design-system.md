@@ -864,9 +864,11 @@ the head (a sheet on phones, with 44px items) and has one item, **Move to Right 
 (`PanelRightIcon`, "Show the terminal as a tool in the right panel on this device. Running shells keep
 running."). It writes `"panel"` and opens the side panel on its Terminal tool with the same tab and
 focus in its terminal; the dock's stored visibility and height are kept for when the terminal moves
-back. A move's focus request waits for the next host of the session's terminals to mount, however
-long its code takes to load, and leaving the session cancels it (`requestTerminalFocus`,
-`cancelTerminalFocusRequest`), so a first move on a slow network still lands focus in the moved terminal.
+back. A move's focus request names its destination and waits for that place's host to mount, however
+long its code takes to load, so a first move on a slow network still lands focus in the moved
+terminal. It ends with the move: the other place's host mounting instead, the destination closing
+before its host mounts, or leaving the session drops it (`requestTerminalFocus`,
+`cancelTerminalFocusRequest`), so a terminal that opens later for another reason never takes focus.
 Both places render the one `TerminalMoreActions` (`TerminalHead.tsx`), each with its move. The
 session bar's Terminal toggle and Ctrl+` call `toggleTerminalTool()` in Right Panel placement, and the
 toggle's `aria-pressed` is then `terminalToolShowing()`; in Bottom Dock placement they show and hide

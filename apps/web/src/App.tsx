@@ -58,7 +58,7 @@ import {
   rovingChoiceTabIndex,
 } from "./components/interactions.js";
 import { cycleFocusZone, escapeOwner, focusZone, indicateFocusZone, sessionReadingTarget, shortcutScopeForFocus } from "./focus-zones.js";
-import { installTerminalExitBoundary, requestTerminalFocus } from "./terminal-focus.js";
+import { cancelTerminalFocusRequest, installTerminalExitBoundary, requestTerminalFocus } from "./terminal-focus.js";
 import {
   bareDigitPressed,
   isEditableShortcutTarget,
@@ -477,9 +477,18 @@ export function Shell() {
    */
   const moveTerminalToPanel = (sessionId: string) => {
     setTerminalPlacement("panel");
-    requestTerminalFocus(sessionId);
+    requestTerminalFocus(sessionId, "panel");
     rightPanel.show("terminal");
   };
+  // A move whose destination closes before its terminal mounts (the panel closed or switched tools, the
+  // dock hidden) is abandoned, so a later terminal never takes its focus request (#2869 review).
+  const panelTerminalOpen = terminalToolShowing(rightPanel);
+  const sessionId = view.name === "session" ? view.id : null;
+  useEffect(() => {
+    if (!sessionId) return;
+    if (!panelTerminalOpen) cancelTerminalFocusRequest(sessionId, "panel");
+    if (!dockVisible) cancelTerminalFocusRequest(sessionId, "dock");
+  }, [sessionId, panelTerminalOpen, dockVisible]);
 
   // Stable, because the identity chain runs all the way down: an inline arrow here rebuilds
   // InboxView's `expand`, which rebuilds `handleSelect`, which gives every mounted InboxRow unequal

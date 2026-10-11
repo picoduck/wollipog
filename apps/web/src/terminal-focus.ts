@@ -1,6 +1,7 @@
 import { matchesShortcut } from "./shortcuts.js";
 import { sessionReadingTarget } from "./focus-zones.js";
 import { MOBILE_BREAKPOINT_PX } from "./components/useIsMobile.js";
+import type { TerminalPlacement } from "./terminal-placement.js";
 
 const PHONE_MEDIA = `(max-width: ${MOBILE_BREAKPOINT_PX}px)`;
 
@@ -33,24 +34,28 @@ export function installTerminalExitBoundary(targetWindow: Window, targetDocument
 
 /**
  * Moving the terminal to another place (Move to Bottom Dock, #2868; Move to Right Panel, #2869) puts
- * focus in it there. The host that shows the session's terminals next takes the request as it mounts,
- * however long its code or the session view around it takes to load (#2869 review): a move leaves no
- * other host showing them, so the next one is the move's destination. Leaving the session cancels the
- * request (`cancelTerminalFocusRequest`), so it never surfaces on an unrelated later visit.
+ * focus in it there. The request names its destination, and that place's host takes it as it mounts,
+ * however long its code or the session view around it takes to load (#2869 review). It ends with the
+ * move: the other place's host mounting instead supersedes it, the destination closing before its host
+ * mounts abandons it (the app cancels it), and leaving the session drops it. So a request never
+ * surfaces later in a terminal that opened for another reason.
  */
-let terminalFocusRequest: { sessionId: string } | null = null;
+let terminalFocusRequest: { sessionId: string; place: TerminalPlacement } | null = null;
 
-export function requestTerminalFocus(sessionId: string): void {
-  terminalFocusRequest = { sessionId };
+export function requestTerminalFocus(sessionId: string, place: TerminalPlacement): void {
+  terminalFocusRequest = { sessionId, place };
 }
 
-/** The session's terminals are disposed (leaving the session): a move still pending is dropped. */
-export function cancelTerminalFocusRequest(sessionId: string): void {
-  if (terminalFocusRequest?.sessionId === sessionId) terminalFocusRequest = null;
+/** The move is abandoned: its destination (`place`, or any) closed, or the session was left. */
+export function cancelTerminalFocusRequest(sessionId: string, place?: TerminalPlacement): void {
+  const request = terminalFocusRequest;
+  if (request?.sessionId === sessionId && (place === undefined || request.place === place)) terminalFocusRequest = null;
 }
 
-export function takeTerminalFocusRequest(sessionId: string): boolean {
-  if (terminalFocusRequest?.sessionId !== sessionId) return false;
+/** A host of `place` mounted for the session: true when it is the move's destination. Either way the move ends. */
+export function takeTerminalFocusRequest(sessionId: string, place: TerminalPlacement): boolean {
+  const request = terminalFocusRequest;
+  if (request?.sessionId !== sessionId) return false;
   terminalFocusRequest = null;
-  return true;
+  return request.place === place;
 }

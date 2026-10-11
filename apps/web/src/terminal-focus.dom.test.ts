@@ -76,22 +76,33 @@ test("Ctrl+Escape lands on an expanded side panel's switcher, since the panel hi
   cleanup();
 });
 
-test("a move's focus request waits for its destination however long it takes to mount (#2869)", async () => {
-  requestTerminalFocus("session-a");
+test("a move's focus request waits for its destination's host however long it takes to mount (#2869)", async () => {
+  requestTerminalFocus("session-a", "panel");
   // The destination's code, or the session view around it, is slow to arrive.
   await new Promise((resolve) => setTimeout(resolve, 1_200));
-  assert.equal(takeTerminalFocusRequest("session-b"), false, "another session's host does not take it");
-  assert.equal(takeTerminalFocusRequest("session-a"), true, "the next host for the session takes it");
-  assert.equal(takeTerminalFocusRequest("session-a"), false, "once");
+  assert.equal(takeTerminalFocusRequest("session-b", "panel"), false, "another session's host does not take it");
+  assert.equal(takeTerminalFocusRequest("session-a", "panel"), true, "the destination's host takes it");
+  assert.equal(takeTerminalFocusRequest("session-a", "panel"), false, "once");
 });
 
-test("leaving the session drops a move's pending focus request (#2869)", () => {
-  requestTerminalFocus("session-a");
+test("the other place's host mounting instead ends the move without focus (#2869)", () => {
+  requestTerminalFocus("session-a", "panel");
+  assert.equal(takeTerminalFocusRequest("session-a", "dock"), false, "the dock is not the move's destination");
+  assert.equal(takeTerminalFocusRequest("session-a", "panel"), false, "and the move is over");
+});
+
+test("a move abandoned before its destination mounts, or a session left, drops the request (#2869)", () => {
+  // The panel closed (or the dock hid) before the terminal mounted there.
+  requestTerminalFocus("session-a", "panel");
+  cancelTerminalFocusRequest("session-a", "dock");
+  assert.equal(takeTerminalFocusRequest("session-a", "panel"), true, "closing the other place leaves it");
+  requestTerminalFocus("session-a", "panel");
+  cancelTerminalFocusRequest("session-a", "panel");
+  assert.equal(takeTerminalFocusRequest("session-a", "panel"), false, "closing its destination drops it");
+
+  // Leaving the session drops it, whatever its destination; leaving another session does not.
+  requestTerminalFocus("session-a", "dock");
   cancelTerminalFocusRequest("session-b");
   cancelTerminalFocusRequest("session-a");
-  assert.equal(takeTerminalFocusRequest("session-a"), false, "a later visit's host does not take it");
-
-  requestTerminalFocus("session-a");
-  cancelTerminalFocusRequest("session-b");
-  assert.equal(takeTerminalFocusRequest("session-a"), true, "leaving another session leaves it pending");
+  assert.equal(takeTerminalFocusRequest("session-a", "dock"), false);
 });

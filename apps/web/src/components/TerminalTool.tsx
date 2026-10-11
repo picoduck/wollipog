@@ -38,6 +38,7 @@ export function TerminalTool({ sessionId, onMoveToDock }: {
   const tabsetId = `terminal-tool-${useId().replace(/:/g, "")}`;
   const theme = useOptionalTheme();
   const host = useTerminalHost(sessionId, tabsetId, {
+    place: "panel",
     searchPlacement: "row",
     fallbackFocusIds: [`${tabsetId}-new`, `${tabsetId}-more`],
   });

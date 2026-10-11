@@ -434,7 +434,7 @@ export class SessionTerminals {
     this.resizeQueue.clear();
     for (const terminal of this.terminals.values()) terminal.dispose();
     this.terminals.clear();
-    // A move still on its way to its next host is dropped with the session (#2869).
+    // A move still on its way to its destination is dropped with the session (#2869).
     cancelTerminalFocusRequest(this.sessionId);
   }
 

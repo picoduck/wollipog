@@ -149,6 +149,47 @@ test.describe(HOST_MOVES, () => {
     expect(toolRequested).toBe(true);
     await expect(panel.locator(".shell-term:not(.is-hidden) .xterm-helper-textarea")).toBeFocused();
   });
+
+  // A move abandoned before its destination mounts takes no focus later: closing the panel while the
+  // Terminal tool loads, then typing in the composer, keeps the keys out of the shell when another window
+  // puts the terminal back in the dock.
+  test("an abandoned Move to Right Panel never moves focus later, so typing in the composer stays there", async ({ page, context }) => {
+    await page.route(/\/src\/components\/TerminalTool\.tsx/u, async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      await route.continue();
+    });
+    const response = await page.goto("/command-inbox-projects-e2e.html?fullShell=1&terminalShells=2");
+    expect(response?.ok(), "fixture page should be served").toBe(true);
+    await page.getByRole("button", { name: /Alpha Session/ }).first().click();
+    await page.getByRole("button", { name: "Open Session" }).click();
+    await page.getByRole("button", { name: "Terminal", exact: true }).first().click();
+    const dock = page.getByRole("region", { name: "Terminal" });
+    await expect(dock.locator(".shell-term:not(.is-hidden) .xterm-rows")).toContainText("24 files passed");
+
+    await dock.getByRole("button", { name: "More Terminal Actions" }).click();
+    await page.getByRole("menuitem", { name: /Move to Right Panel/ }).click();
+    const panel = page.locator("#right-panel");
+    await expect(panel.getByText("Loading terminal…")).toBeVisible();
+    await page.getByRole("button", { name: "Side Panel", exact: true }).first().click();
+    await expect(panel).toHaveCount(0);
+
+    const composer = page.locator(".composer-input");
+    await composer.click();
+    await page.keyboard.type("draft");
+    // Another window puts the terminal back in the dock, which shows again (its visibility was kept).
+    const other = await context.newPage();
+    await other.goto(`/command-inbox-projects-e2e.html?fullShell=1&path=${encodeURIComponent("/settings/appearance")}`);
+    await other.getByRole("radiogroup", { name: "Terminal Placement" }).getByRole("radio", { name: "Bottom Dock" }).click();
+    await expect(dock.locator(".shell-term:not(.is-hidden) .xterm-rows")).toContainText("24 files passed");
+    // Past the frame the dock's host would have moved focus in.
+    await page.waitForTimeout(500);
+    await expect(composer).toBeFocused();
+    await page.keyboard.type(" more");
+    await expect(composer).toHaveValue("draft more");
+    const { input } = await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.shellCalls());
+    expect(input, "no key reached a shell").toEqual([]);
+    await other.close();
+  });
 });
 
 test(SEARCH_DURING_FONT_LOAD_TEST, async ({ page }) => {

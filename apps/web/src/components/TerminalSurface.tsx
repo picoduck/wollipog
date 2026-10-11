@@ -24,6 +24,7 @@ import { BusyButton } from "./ui/BusyButton.js";
 import { TerminalIcon } from "./Icons.js";
 import type { ResolvedTheme } from "../theme.js";
 import { takeTerminalFocusRequest } from "../terminal-focus.js";
+import type { TerminalPlacement } from "../terminal-placement.js";
 
 /** Focus the first of these controls that is there and enabled. */
 function focusFirst(ids: readonly string[]): void {
@@ -84,12 +85,15 @@ export interface TerminalHostModel extends SessionTerminalsState {
  *
  * `searchPlacement` is where the open search sits (`useSearchFocus`): "head" in place of Search Output,
  * or "row" on a row of its own. `fallbackFocusIds` are the controls, in order, that take focus when a
- * closed tab leaves no tab to focus: New Tab while it can open one, else the host's own.
+ * closed tab leaves no tab to focus: New Tab while it can open one, else the host's own. `place` is
+ * where this host shows the terminal, which a move's focus request names (`requestTerminalFocus`).
  */
 export function useTerminalHost(sessionId: string, tabsetId: string, {
+  place,
   searchPlacement,
   fallbackFocusIds,
 }: {
+  place: TerminalPlacement;
   searchPlacement: "head" | "row";
   fallbackFocusIds: readonly string[];
 }): TerminalHostModel | null {
@@ -133,7 +137,7 @@ export function useTerminalHost(sessionId: string, tabsetId: string, {
   // good (an effect run again detaches and attaches them).
   const ready = Boolean(session && terminals && state);
   useEffect(() => {
-    if (!ready || !takeTerminalFocusRequest(sessionId)) return;
+    if (!ready || !takeTerminalFocusRequest(sessionId, place)) return;
     window.requestAnimationFrame(() => {
       if (pipeInputRef.current) pipeInputRef.current.focus();
       else if (terminalRef.current) terminalRef.current.focus();

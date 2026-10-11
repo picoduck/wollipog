@@ -400,11 +400,11 @@ test("leaving the session disposes its terminals", async () => {
   await until(() => shell1.terminal !== null, "Shell 1's terminal to open");
   const disposals = countDisposals(shell1.terminal!);
   // A move whose destination never mounted before the session was left (#2869).
-  requestTerminalFocus(session.id);
+  requestTerminalFocus(session.id, "panel");
   await view.unmount();
   await settle(10);
   assert.equal(disposals.count, 1, "the session's store ends its terminals when it goes");
-  assert.equal(takeTerminalFocusRequest(session.id), false, "its focus request goes with it");
+  assert.equal(takeTerminalFocusRequest(session.id, "panel"), false, "its focus request goes with it");
 });
 
 test("a reopened empty dock offers a first shell once the last open's New Shell settles", async () => {
@@ -1073,7 +1073,7 @@ function ToolHarness({ controls }: { controls: ToolControls }) {
                   onMoveToDock={() => {
                     // As the side panel does: the terminal's next host takes focus, then the dock opens.
                     controls.moves += 1;
-                    requestTerminalFocus(session.id);
+                    requestTerminalFocus(session.id, "dock");
                     setPlace("dock");
                   }}
                 />
@@ -1087,7 +1087,7 @@ function ToolHarness({ controls }: { controls: ToolControls }) {
               onMoveToPanel={() => {
                 // As the app does: the terminal's next host takes focus, then the panel opens on Terminal.
                 controls.moves += 1;
-                requestTerminalFocus(session.id);
+                requestTerminalFocus(session.id, "panel");
                 setPlace("panel");
               }}
               theme="dark"

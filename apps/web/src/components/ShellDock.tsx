@@ -82,6 +82,7 @@ export function ShellDock({
   const phone = useIsMobile();
   // On a phone the open search has its own row; elsewhere it replaces Search Output in the head.
   const host = useTerminalHost(sessionId, tabsetId, {
+    place: "dock",
     searchPlacement: phone ? "row" : "head",
     fallbackFocusIds: [`${tabsetId}-new`, `${tabsetId}-more`, `${tabsetId}-hide`],
   });

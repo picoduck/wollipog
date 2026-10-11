@@ -725,7 +725,7 @@ export function RightPanel({
    */
   const moveTerminalToDock = () => {
     setTerminalPlacement("dock");
-    requestTerminalFocus(session.id);
+    requestTerminalFocus(session.id, "dock");
     state.close();
     onOpenTerminal();
   };
