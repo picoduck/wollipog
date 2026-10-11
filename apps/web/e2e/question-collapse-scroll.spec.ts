@@ -33,10 +33,13 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
       const card = page.locator(".request-dock .question-card");
       const toggle = card.locator(".question-reading-toggle");
       const title = card.locator(".question-text");
-      const before = await transcriptPosition(page);
       const question = await title.textContent();
       await card.getByRole("radio", { name: /^Hold/ }).check();
       await title.evaluate((element) => (element as HTMLElement).focus({ preventScroll: true }));
+      // The synthetic after=40 history hydrates after the first question render. Wait for its tail
+      // before comparing reading positions, including on slower browser engines.
+      await expect(page.getByText("Later reply 20: the agent explains what it did and why.", { exact: true })).toBeInViewport();
+      const before = await transcriptPosition(page);
       if (activation === "nonfocusing click") {
         // Exercise the browser branch that clicks a button without giving it focus.
         await toggle.evaluate((element) => element.addEventListener("mousedown", (event) => event.preventDefault()));
