@@ -86,6 +86,9 @@ import { SESSION_COMMAND_AUTHORITY_PROTOCOL_VERSION } from "./session-command-au
 
 /** A session's persisted metadata (superset of the protocol SessionSnapshot with runner-only fields). */
 export interface SessionMeta {
+  /** Derived semantic anchor in the local log; never a CP event identity. Missing after an
+   * upgrade until ordinary append/index maintenance proves it. A read never scans the whole log. */
+  historyTurnAnchor?: { logEpoch: number; seq: number; throughSeq: number };
   /** A deliberate fresh handoff may have boundary events before its first provider launch. */
   handoffPending?: boolean;
   sessionId: string;
@@ -477,7 +480,7 @@ export type HistoryPageResult =
   | {
       ok: true;
       events: StoredEvent[];
-      page: { logEpoch: number; throughSeq: number; nextAfterSeq: number; hasMore: boolean };
+      page: { logEpoch: number; throughSeq: number; nextAfterSeq: number; hasMore: boolean; turnStartSeq?: number };
     }
   | { ok: false; code: SessionHistoryPageErrorCode; error: string };
 
@@ -1100,7 +1103,9 @@ export class SessionStore {
       writeFileSync(this.eventsPath(meta.sessionId), "");
       this.fsyncFile(this.eventsPath(meta.sessionId));
     }
-    this.writeMeta(meta);
+    this.writeMeta(createdEvents ? { ...meta, historyTurnAnchor: {
+      logEpoch: meta.logEpoch ?? 0, seq: 0, throughSeq: 0,
+    } } : meta);
     // Never stamp an empty index over a legacy non-empty log. Missing indexes rebuild lazily on the
     // first paged read or append; a newly-created empty log can start with a valid header immediately.
     if (createdEvents) {
@@ -1572,10 +1577,13 @@ export class SessionStore {
     const tmp = `${p}.${process.pid}.${randomUUID()}.tmp`;
     let fd: number | undefined;
     let prior: HistoryCheckpoint | null = null;
+    let turnStartSeq = 0;
     try {
       fd = openSync(tmp, "wx");
       this.writeAll(fd, this.historyIndexHeader(epoch));
       const scanned = this.scanHistoryPrefix(id, initialSize, (event, offset) => {
+        if (event.payload.kind === "user_message" && event.payload.deliveryIntent !== "steer" &&
+            event.payload.commandInvocation === undefined) turnStartSeq = event.seq;
         if (
           !prior ||
           event.seq - prior.seq >= HISTORY_INDEX_EVENT_STRIDE ||
@@ -1597,6 +1605,8 @@ export class SessionStore {
       closeSync(fd);
       fd = undefined;
       this.publishHistoryIndex(id, tmp);
+      this.patchMetaLazy(id, { historyTurnAnchor: { logEpoch: epoch, seq: turnStartSeq,
+        throughSeq: scanned.tailSeq } });
       return {
         seq: scanned.tailSeq,
         completeBytes: scanned.completeBytes,
@@ -1700,7 +1710,10 @@ export class SessionStore {
   private ensureHistoryIndex(id: string, epoch: number, suppliedTail?: HistoryTail): HistoryTail {
     let tail = suppliedTail ?? this.historyTail(id);
     let info = this.readHistoryIndexInfo(id, epoch);
-    const stale = !info ||
+    // Upgrade maintenance derives the semantic anchor alongside the existing full index rebuild.
+    // Reader requests explicitly bypass this maintenance path and return unavailable until ready.
+    const anchor = this.readMeta(id)?.historyTurnAnchor;
+    const stale = !info || !anchor || anchor.logEpoch !== epoch ||
       (tail.seq === 0 ? info.count !== 0 : info.count === 0) ||
       Boolean(info?.last && (
         info.last.seq > tail.seq ||
@@ -2155,7 +2168,14 @@ export class SessionStore {
     } catch {
       this.checkpointCache.delete(id); // a torn/missing derived index rebuilds on demand
     }
-    this.patchMetaLazy(id, { seq, updatedAt: ts });
+    const anchor = this.readMeta(id)?.historyTurnAnchor;
+    const semanticPrompt = payload.kind === "user_message" && payload.deliveryIntent !== "steer" &&
+      payload.commandInvocation === undefined;
+    this.patchMetaLazy(id, { seq, updatedAt: ts,
+      ...((semanticPrompt || anchor?.logEpoch === epoch) ? { historyTurnAnchor: {
+        logEpoch: epoch, seq: semanticPrompt ? seq : anchor!.seq, throughSeq: seq,
+      } } : {}),
+    });
     return ev;
   }
 
@@ -2910,6 +2930,7 @@ export class SessionStore {
     id: string,
     request: { afterSeq: number; limit: number; logEpoch?: number; throughSeq?: number },
     protocolVersion: number | null | undefined,
+    indexedOnly = false,
   ): HistoryPageResult {
     try {
       if (!this.eventProjectionRequired(protocolVersion)) {
@@ -2928,6 +2949,7 @@ export class SessionStore {
         const result = this.readEventPage(
           id,
           { ...request, ...(localEpoch === undefined ? {} : { logEpoch: localEpoch }) },
+          indexedOnly,
         );
         if (!result.ok) return result;
         return {
@@ -3010,6 +3032,35 @@ export class SessionStore {
     }
   }
 
+  /** Seek one authoritative current-turn prefix without replaying history or updating any CP
+   * cursor. Unsaved metadata is checked only across a bounded append suffix. Missing upgrade
+   * anchors wait for ordinary index/hydration maintenance instead of adding an opening scan. */
+  readCurrentTurnPageForProtocol(id: string, limit: number, protocolVersion: number | null | undefined): HistoryPageResult {
+    const meta = this.readMeta(id);
+    const anchor = meta?.historyTurnAnchor;
+    if (!meta || !anchor || anchor.logEpoch !== (meta.logEpoch ?? 0) ||
+        ![anchor.seq, anchor.throughSeq].every(value => Number.isSafeInteger(value) && value >= 0) ||
+        anchor.seq > anchor.throughSeq || this.eventProjectionRequired(protocolVersion)) {
+      return { ok: false, code: "history_cursor_invalid", error: "current-turn anchor is not available yet" };
+    }
+    // Reading after the observed anchor boundary freezes and validates the durable tail using the
+    // existing sparse index. At most 200 raced appends may be examined before opening.
+    const suffix = this.readEventPageForProtocol(id, { afterSeq: anchor.throughSeq, limit: 200 }, protocolVersion, true);
+    if (!suffix.ok) return suffix;
+    if (suffix.page.hasMore) return { ok: false, code: "history_cursor_invalid", error: "current-turn anchor is still catching up" };
+    let start = anchor.seq;
+    for (const event of suffix.events) if (event.payload.kind === "user_message" &&
+        event.payload.deliveryIntent !== "steer" && event.payload.commandInvocation === undefined) start = event.seq;
+    const page = this.readEventPageForProtocol(id, { afterSeq: start > 0 ? start - 1 : 0, limit,
+      logEpoch: suffix.page.logEpoch, throughSeq: suffix.page.throughSeq }, protocolVersion, true);
+    if (!page.ok) return page;
+    if (start > 0 && (page.events[0]?.seq !== start || page.events[0]?.payload.kind !== "user_message" ||
+        page.events[0].payload.deliveryIntent === "steer" || page.events[0].payload.commandInvocation !== undefined)) {
+      return { ok: false, code: "history_corrupt", error: "current-turn anchor does not identify a semantic prompt" };
+    }
+    return { ...page, page: { ...page.page, turnStartSeq: start || page.events[0]?.seq || 0 } };
+  }
+
   /** Events with seq > afterSeq, in seq order. */
   readEvents(id: string, afterSeq = 0): StoredEvent[] {
     let sources: HistorySource[];
@@ -3044,6 +3095,7 @@ export class SessionStore {
   readEventPage(
     id: string,
     request: { afterSeq: number; limit: number; logEpoch?: number; throughSeq?: number },
+    indexedOnly = false,
   ): HistoryPageResult {
     let observedEpoch: number | undefined;
     try {
@@ -3088,7 +3140,15 @@ export class SessionStore {
       let info: HistoryIndexInfo | null;
       let frozenThrough: number;
       if (throughSeq === undefined) {
-        tail = this.ensureHistoryIndex(id, currentEpoch, this.historyTail(id));
+        tail = this.historyTail(id);
+        if (indexedOnly) {
+          const ready = this.readHistoryIndexInfo(id, currentEpoch);
+          if (!ready || (tail.seq > 0 && (!ready.last || ready.last.seq > tail.seq ||
+              tail.seq - ready.last.seq >= HISTORY_INDEX_EVENT_STRIDE ||
+              tail.lineOffset - ready.last.offset >= HISTORY_INDEX_BYTE_STRIDE))) {
+            throw new HistoryStoreError("history_cursor_invalid", "session history index is not ready for bounded reading");
+          }
+        } else tail = this.ensureHistoryIndex(id, currentEpoch, tail);
         frozenThrough = tail.seq;
         info = this.readHistoryIndexInfo(id, currentEpoch);
         if (!info) throw new HistoryStoreError("history_corrupt", "session history index is unavailable");
@@ -3130,6 +3190,7 @@ export class SessionStore {
         } else {
           // A frozen chain cannot rebuild through a later oversized/corrupt append. Recover by
           // validating only its authoritative prefix from byte zero.
+          if (indexedOnly) throw new HistoryStoreError("history_corrupt", "frozen history checkpoint is unavailable");
           tail.completeBytes = this.scanHistoryThrough(id, tail.fileBytes, frozenThrough);
           info = null;
         }
@@ -3149,6 +3210,7 @@ export class SessionStore {
         checkpointEntry &&
         !this.validateHistoryCheckpoint(id, checkpointEntry.index, tail.fileBytes)
       ) {
+        if (indexedOnly) throw new HistoryStoreError("history_corrupt", "history checkpoint is invalid");
         if (throughSeq === undefined) {
           this.rebuildHistoryIndex(id, currentEpoch);
           return this.readEventPage(id, request);
@@ -3167,12 +3229,16 @@ export class SessionStore {
           tail.fileBytes,
         );
         if (!interval.ok) {
+          if (indexedOnly) throw new HistoryStoreError("history_corrupt", "history seek checkpoint is invalid");
           if (throughSeq === undefined) {
             this.rebuildHistoryIndex(id, currentEpoch);
             return this.readEventPage(id, request);
           }
           checkpointEntry = null;
         }
+      }
+      if (indexedOnly && !checkpointEntry && request.afterSeq >= HISTORY_INDEX_EVENT_STRIDE) {
+        throw new HistoryStoreError("history_corrupt", "bounded history seek requires a checkpoint");
       }
       const checkpoint = checkpointEntry?.checkpoint;
       const offset = checkpoint?.offset ?? 0;

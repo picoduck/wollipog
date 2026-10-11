@@ -3084,6 +3084,8 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         limit: msg.limit,
         ...(msg.logEpoch === undefined ? {} : { logEpoch: msg.logEpoch }),
         ...(msg.throughSeq === undefined ? {} : { throughSeq: msg.throughSeq }),
+        ...(msg.opening === undefined ? {} : { opening: msg.opening }),
+        ...(msg.indexedOnly === undefined ? {} : { indexedOnly: msg.indexedOnly }),
       });
       sendUp(result.ok
         ? {

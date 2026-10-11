@@ -222,6 +222,7 @@ import {
   INDEFINITE_SESSION_REMINDER_UI_PROTOCOL,
   isRunnerRequestTimeoutError,
 } from "./hub.js";
+import { HistoryPreviewReader } from "./history-preview.js";
 import {
   buildRunnerWsUrl,
   isAllowedOrigin,
@@ -4303,6 +4304,34 @@ app.get("/api/sessions/:id/retained-attachment-events", async (req, reply) => {
   return { events: page.events, eventEpoch, nextAfter: page.nextAfterSeq, hasMore: page.hasMore };
 });
 
+const historyPreviews = new HistoryPreviewReader(db, hub);
+
+app.get("/api/sessions/:id/history-preview", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const query = req.query as Record<string, string | undefined>;
+  const values: Record<string, number> = {};
+  for (const key of ["eventEpoch", "logEpoch", "throughSeq", "turnStartSeq", "afterSeq", "beforeSeq", "handoffSeq", "limit"]) {
+    if (query[key] === undefined) continue;
+    const value = Number(query[key]);
+    if (!Number.isSafeInteger(value) || value < 0) return reply.code(400).send({ error: "invalid history preview cursor" });
+    values[key] = value;
+  }
+  if (["eventEpoch", "logEpoch", "throughSeq", "turnStartSeq", "limit"].some(key => values[key] === undefined) ||
+      values.limit! < 1 || values.limit! > 200 || values.turnStartSeq! > values.throughSeq! ||
+      (values.afterSeq !== undefined && values.beforeSeq !== undefined) ||
+      [values.afterSeq, values.beforeSeq, values.handoffSeq].some(value => value !== undefined && value > values.throughSeq! + 1)) {
+    return reply.code(400).send({ error: "invalid history preview cursor" });
+  }
+  const state = db.getRunnerHistoryState(id);
+  if (!state) return reply.code(404).send({ error: "session not found" });
+  if (state.eventEpoch !== values.eventEpoch || (state.historyEpoch !== null && state.historyEpoch !== values.logEpoch)) {
+    return reply.code(409).send({ error: "session event history was replaced", code: "stale_event_epoch", eventEpoch: state.eventEpoch });
+  }
+  const read = { ...values, limit: values.limit! };
+  if (values.handoffSeq !== undefined) return { handoff: historyPreviews.handoff(id, values.eventEpoch!, read) };
+  return { preview: await historyPreviews.read(id, values.eventEpoch!, read) };
+});
+
 app.get("/api/sessions/:id/events", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const query = req.query as {
@@ -4393,7 +4422,12 @@ app.get("/api/sessions/:id/events", async (req, reply) => {
   if (currentTurnOpening) {
     const opening = db.listCachedCurrentTurnOpening(id, limit);
     void svc.hydrateHistory(id);
-    return { ...opening, eventEpoch: state.eventEpoch, cacheComplete };
+    const preview = cacheComplete ? null : await historyPreviews.read(id, requestedEpoch, { limit });
+    const current = db.getRunnerHistoryState(id);
+    if (!current || current.eventEpoch !== requestedEpoch) return reply.code(409).send({
+      error: "session event history was replaced", code: "stale_event_epoch", eventEpoch: current?.eventEpoch,
+    });
+    return { ...opening, eventEpoch: state.eventEpoch, cacheComplete, ...(preview ? { preview } : {}) };
   }
   if (backward) {
     const tail = db.listCachedEventTailPage(id, before, limit, { alignToTurn });

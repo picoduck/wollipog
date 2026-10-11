@@ -21,6 +21,8 @@ export async function recoverSessionTurnStartWindow(
     readKey: string;
     fetchOpening?: (id: string, epoch: number, limit: number) => Promise<SessionEventsResponse>;
     applyOpening: (page: SessionEventsResponse) => boolean;
+    /** Owns an explicitly separate read-local preview, never an `events_loaded` CP application. */
+    applyPreview?: (preview: NonNullable<SessionEventsResponse["preview"]>) => boolean;
     onUnsupported?: () => void;
   },
 ): Promise<{ supported: boolean; complete: boolean }> {
@@ -52,11 +54,15 @@ export async function recoverSessionTurnStartWindow(
       return recoverSessionHistoryWindow(request, options);
     }
     if (page.eventEpoch !== request.eventEpoch) return { supported: true, complete: false };
-    if (page.cacheComplete === true || options.cacheCannotFill?.() || poll >= (options.maxIdlePolls ?? 160)) {
+    if (page.preview?.eventEpoch === request.eventEpoch && options.applyPreview?.(page.preview)) {
+      return { supported: true, complete: true };
+    }
+    if (page.cacheComplete === true) {
       return { supported: true, complete: options.applyOpening(page) && page.cacheComplete === true };
     }
-    // A hydrating prefix cannot prove the latest turn yet. Retain the loading state until the
-    // cache catches up, or show an explicitly incomplete offline/timeout fallback.
+    // An unavailable runner/upgrade can expose an incomplete-history notice, never certify the
+    // cached prefix as the current turn when its full-cache proof is absent.
+    if (options.cacheCannotFill?.() || poll >= (options.maxIdlePolls ?? 160)) return { supported: true, complete: false };
     reads.delete(options.readKey);
     await wait(options.idlePollMs ?? 75);
   }
@@ -344,9 +350,7 @@ export async function recoverSessionHistoryWindow(
     // exists to remove, so re-read the same window instead of showing it. Targeted WebSocket
     // delivery supplies live rows in the meantime, and the reader keeps its loading state.
     if (++idlePolls > maxIdlePolls || options.cacheCannotFill?.() === true) {
-      // The cache never caught up, or cannot. Show whatever it does hold rather than leaving the
-      // reader with nothing, still reporting the load as incomplete so the transcript says so.
-      applyPage(false);
+      // Keep an explicit incomplete state. A forward-filled prefix cannot prove the current tail.
       return { supported: true, complete: false };
     }
     await wait(idlePollMs);

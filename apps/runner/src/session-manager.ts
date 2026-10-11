@@ -4613,10 +4613,12 @@ export class SessionManager {
 
   historyPage(
     sessionId: string,
-    request: { afterSeq: number; limit: number; logEpoch?: number; throughSeq?: number },
+    request: { afterSeq: number; limit: number; logEpoch?: number; throughSeq?: number; indexedOnly?: boolean; opening?: "current-turn" },
   ) {
+    if (request.opening === "current-turn") return this.store.readCurrentTurnPageForProtocol(
+      sessionId, request.limit, this.controlPlaneProtocolVersion());
     return this.store.readEventPageForProtocol(
-      sessionId, request, this.controlPlaneProtocolVersion(),
+      sessionId, request, this.controlPlaneProtocolVersion(), request.indexedOnly === true,
     );
   }
 

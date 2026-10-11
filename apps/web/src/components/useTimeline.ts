@@ -53,11 +53,11 @@ function waitForRetainedPageRetry(ms: number, signal: AbortSignal): Promise<void
 
 /** Keep the reset-owned prefix available even when the ordinary opening page starts at a much
  * newer sequence. Each request is count-bounded and a changed epoch discards the whole chain. */
-function useRetainedAttachments(sessionId: string, eventEpoch: number): RetainedAttachments | null {
+function useRetainedAttachments(sessionId: string, eventEpoch: number, readLocal = false): RetainedAttachments | null {
   const api = useApi();
   const [loaded, setLoaded] = useState<RetainedAttachments | null>(null);
   useEffect(() => {
-    if (eventEpoch <= 0) return;
+    if (eventEpoch <= 0 || readLocal) return;
     const controller = new AbortController();
     const { signal } = controller;
     void (async () => {
@@ -87,16 +87,16 @@ function useRetainedAttachments(sessionId: string, eventEpoch: number): Retained
       }
     })().catch(() => { /* unexpected failures retain streamed rows */ });
     return () => { controller.abort(); };
-  }, [api, sessionId, eventEpoch]);
-  return loaded?.sessionId === sessionId && loaded.eventEpoch === eventEpoch ? loaded : null;
+  }, [api, sessionId, eventEpoch, readLocal]);
+  return !readLocal && loaded?.sessionId === sessionId && loaded.eventEpoch === eventEpoch ? loaded : null;
 }
 
 /** Fold live runner events incrementally. Only the control-plane attachment prefix retained by a
  * history reset is placed by timestamp; normal attachments stay at their durable sequence. The
  * placement moves existing item objects, so replay does not rebuild the entire TimelineBuilder
  * for every earlier runner event. */
-export function useTimeline(sessionId: string, events: SessionEvent[] | undefined, eventEpoch = 0): TimelineItem[] {
-  const retained = useRetainedAttachments(sessionId, eventEpoch);
+export function useTimeline(sessionId: string, events: SessionEvent[] | undefined, eventEpoch = 0, readLocal = false): TimelineItem[] {
+  const retained = useRetainedAttachments(sessionId, eventEpoch, readLocal);
   const ref = useRef<BuilderState | null>(null);
   const evs = events ?? [];
   const firstRawSeq = evs[0]?.seq ?? Number.MAX_SAFE_INTEGER;

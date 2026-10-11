@@ -662,7 +662,8 @@
 //      optional: older runners ignore the field and older control planes send none; such
 //      resolutions name nobody, as before.
 // 212: lightweight session summaries and byte-bounded dashboard snapshot pages (#2769).
-export const PROTOCOL_VERSION = 212;
+// 213: authoritative bounded history previews in an explicit runner coordinate space (#2881).
+export const PROTOCOL_VERSION = 213;
 export const SESSION_SUMMARY_UI_PROTOCOL = 212;
 export const SKILL_REPORT_REQUEST_LIFETIME_MS = 30_000;
 export const MAX_SKILL_REPORT_REQUESTS = 64;
@@ -871,6 +872,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   automationCommandReceipts: 53,
   runnerLocalAgentEnv: 54,
   indexedHistory: 55,
+  authoritativeHistoryWindow: 213,
   promptImageReferences: 56,
   durableSessionShells: 57,
   agentTuiMirror: 58,
@@ -8269,6 +8271,8 @@ export interface SessionHistoryPageResultMessage {
     throughSeq: number;
     nextAfterSeq: number;
     hasMore: boolean;
+    /** v213 opening reads only; identifies the authoritative semantic prompt. */
+    turnStartSeq?: number;
   };
 }
 
@@ -9661,6 +9665,10 @@ export interface SessionHistoryPageRequestMessage {
   limit: number;
   logEpoch?: number;
   throughSeq?: number;
+  /** v213: initial read seeks to a semantic prompt rather than the forward hydration prefix. */
+  opening?: "current-turn";
+  /** Refuse an unavailable sparse index rather than rebuilding/scanning it on a reader request. */
+  indexedOnly?: boolean;
 }
 
 /** Phase 2: permanently delete a session from the box store (the source of truth). Without this the
@@ -11061,6 +11069,18 @@ export interface SessionEventsResponse {
   /** Backward reads that requested turn alignment: whether the page begins at a user-anchored turn
    * start. False when no anchor was within the extension cap, so the page begins mid-turn. */
   turnAligned?: boolean;
+  /** Read-local authoritative runner rows. These are never CP events or CP paging cursors. */
+  preview?: SessionHistoryPreview;
+}
+
+export interface SessionHistoryPreview {
+  eventEpoch: number;
+  logEpoch: number;
+  throughSeq: number;
+  turnStartSeq: number;
+  events: { seq: number; ts: number; payload: SessionEventPayload }[];
+  nextAfterSeq: number;
+  hasMore: boolean;
 }
 
 export interface RunsResponse {

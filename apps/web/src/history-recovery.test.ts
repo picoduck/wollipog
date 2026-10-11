@@ -21,6 +21,33 @@ const event = (seq: number): SessionEvent => ({
   payload: { kind: "agent_message", text: String(seq) },
 });
 
+test("authoritative current-turn window paints before the forward cache finishes hydrating", async () => {
+  const applied: number[][] = [];
+  let calls = 0;
+  const result = await recoverSessionTurnStartWindow(
+    { sessionId: "s1", eventEpoch: 3, recoveryRevision: 1 },
+    {
+      scope: {}, readKey: "cold-cache:3",
+      fetchOpening: async () => {
+        calls++;
+        return { events: [event(1)], eventEpoch: 3, turnStartSeq: 1,
+          tailSeq: 2, nextAfter: 1, hasMoreLater: true, hasMoreOlder: false,
+          cacheComplete: false, preview: { events: [event(501), event(502)], eventEpoch: 3,
+            logEpoch: 7, throughSeq: 3_000, turnStartSeq: 501, nextAfterSeq: 502, hasMore: true } };
+      },
+      fetchTailPage: async () => { throw new Error("must not replace the turn start with a tail"); },
+      applyWindow: () => { throw new Error("must not replace the turn start with a tail"); },
+      applyOpening: () => { assert.fail("the old CP prefix must never become the current turn"); },
+      applyPreview: (page) => { applied.push(page.events.map(entry => entry.seq)); return true; },
+      isCurrent: () => true,
+      wait: async () => { assert.fail("authoritative window must paint without waiting for full hydration"); },
+    },
+  );
+  assert.deepEqual(applied, [[501, 502]]);
+  assert.equal(calls, 1);
+  assert.deepEqual(result, { supported: true, complete: true });
+});
+
 test("provisional and acknowledged turn-start owners issue one opening request", async () => {
   const scope = {};
   let calls = 0;
@@ -588,7 +615,7 @@ test("a hydrating cache is never painted: its newest cached row is still an old 
     "only the complete tail reaches the transcript");
 });
 
-test("a cache that never catches up shows what it has rather than an empty reader", async () => {
+test("a timeout never presents an unproven cached prefix as the current tail", async () => {
   const applied: Array<{ seqs: number[]; complete: boolean }> = [];
   const result = await recoverSessionHistoryWindow(
     { sessionId: "s1", eventEpoch: 1, recoveryRevision: 0 },
@@ -604,8 +631,7 @@ test("a cache that never catches up shows what it has rather than an empty reade
     },
   );
   assert.deepEqual(result, { supported: true, complete: false });
-  assert.deepEqual(applied, [{ seqs: [1], complete: false }],
-    "the budget expires into a visible, explicitly incomplete transcript");
+  assert.deepEqual(applied, [], "the timeout keeps the old prefix out of the current-tail reader");
 });
 
 test("a cache that cannot fill settles on its first answer, and one that can again keeps reading (#2773)", async () => {
@@ -627,7 +653,7 @@ test("a cache that cannot fill settles on its first answer, and one that can aga
   const offline = await recoverSessionHistoryWindow({ sessionId: "s1", eventEpoch: 1, recoveryRevision: 0 }, options);
   assert.deepEqual(offline, { supported: true, complete: false });
   assert.equal(requests, 1, "one read, not the whole re-read budget");
-  assert.deepEqual(applied, [{ seqs: [1], complete: false }]);
+  assert.deepEqual(applied, [], "offline does not make a cached prefix authoritative");
 
   // The machine reconnects during a later read: the cache can fill, so the window waits for it.
   requests = 0;
@@ -639,6 +665,7 @@ test("a cache that cannot fill settles on its first answer, and one that can aga
   );
   assert.deepEqual(online, { supported: true, complete: false });
   assert.equal(requests, 4, "the full budget while the cache can still fill");
+  assert.deepEqual(applied, []);
 });
 
 test("a re-read window keeps polling the tail instead of walking the log forward", async () => {

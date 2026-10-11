@@ -180,6 +180,16 @@ export function expireFollowTailAnchor(scope: string, sessionId: string): void {
   followTailSnapshots.delete(key);
 }
 
+/** Transfer a proven logical anchor into another coordinate space. Revoke queued writes from
+ * the old owner before seeding the remounted reader. */
+export function seedFollowTailAnchor(scope: string, sessionId: string, anchor: VirtualScrollAnchor,
+  state: FollowTailState = "paused"): void {
+  expireFollowTailAnchor(scope, sessionId);
+  const key = snapshotKey(scope, sessionId);
+  const snapshot = loadSnapshot(key);
+  storeSnapshot(key, { state, anchor }, snapshot.generation);
+}
+
 export function isFollowTailUpwardReadingKey(event: FollowTailKey): boolean {
   if (event.ctrlKey || event.metaKey || event.altKey) return false;
   return event.key === "k" || event.key === "ArrowUp" || event.key === "PageUp" ||
