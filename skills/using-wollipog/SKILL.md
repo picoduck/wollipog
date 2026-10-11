@@ -94,7 +94,9 @@ Descendant reads and lists require control plane protocol v214. Older runners wi
 can use an updated CLI or the read-only HTTP endpoints
 `GET /api/sessions/:id/workflow-decisions/:occurrenceId` and
 `GET /api/sessions/:id/workflow-decisions?limit=50&cursor=<occurrence-id>` with their existing
-session credential. Older control planes expose only pending requests through
+session credential where a token is provisioned. Provider-isolated sessions hold only a runner
+relay key, which cannot authenticate direct HTTP calls; upgrade the runner/CLI for the tools rather
+than seeking a bearer token. Older control planes expose only pending requests through
 `list_descendant_requests`; update them for authoritative descendant state inspection.
 Only the current owner may resolve the exact pending occurrence. Authentication, secrets,
 persistent grants, governance, budgets, and tool guardrails remain human-only.

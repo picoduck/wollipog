@@ -1084,6 +1084,7 @@ test("CLI typed-decision help is discoverable and malformed or cross-session com
     ["decision", "list", "--limit", "101"],
     ["decision", "list", "--limit", "1.5"],
     ["decision", "list", "--cursor"],
+    ["decision", "list", "unexpected"],
   ]) {
     const result = await captureCli([...malformed, "--json"]);
     assert.equal(result.code, 2, malformed.join(" "));

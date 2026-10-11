@@ -72,7 +72,7 @@ function optionPresent(args: string[], name: string): boolean {
   return args.some((arg) => arg === name || arg.startsWith(`${name}=`));
 }
 
-function positional(args: string[]): string[] {
+function positional(args: string[], extraValueOptions: readonly string[] = []): string[] {
   const values: string[] = [];
   const valueOptions = new Set([
     "--url", "--token-file", "--runner", "--agent", "--workspace", "--path", "--prompt",
@@ -80,6 +80,7 @@ function positional(args: string[]): string[] {
     "--interval", "--cost-budget", "--max-tool-calls", "--session", "--branch", "--base", "--base-ref",
     "--max-child-sessions", "--offset", "--event-epoch",
     "--revision",
+    ...extraValueOptions,
   ]);
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
@@ -266,6 +267,9 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
         : { error: "decision get requires an occurrence id" };
     }
     if (verb === "list") {
+      if (positional(args.slice(groupIndex), ["--cursor"]).length !== 2) {
+        return { error: "decision list does not accept an occurrence id; use decision get <occurrence-id>" };
+      }
       const input: Record<string, unknown> = {};
       for (const [optionName, key] of [["--session", "sessionId"], ["--cursor", "cursor"]] as const) {
         if (!optionPresent(args, optionName)) continue;

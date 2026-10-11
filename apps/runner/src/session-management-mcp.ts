@@ -1658,7 +1658,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "get_workflow_decision",
-    description: "Read the authoritative state of one exact workflow decision occurrence, including terminal states. Omit sessionId for self; an Orchestrator may pass an accessible descendant. A 404 never proves consumption. Descendant reads require control plane v214; older runners can use the read-only HTTP endpoint or an updated CLI against a v214 control plane.",
+    description: "Read the authoritative state of one exact workflow decision occurrence, including terminal states. Omit sessionId for self; an Orchestrator may pass an accessible descendant. A 404 never proves consumption. Descendant reads require control plane v214; older runners can use an updated CLI or the read-only HTTP endpoint where a session token is provisioned. Provider-isolated sessions hold only a relay key; upgrade the runner/CLI instead of seeking a bearer token.",
     inputSchema: {
       type: "object",
       properties: { occurrenceId: { type: "string" }, sessionId: { type: "string", minLength: 1, maxLength: 256 } },
@@ -1685,7 +1685,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "list_workflow_decisions",
-    description: "List a session's nonterminal workflow decisions (pending and approved), including authority, resource key, category and timestamps. Omit sessionId for self; an Orchestrator may inspect an accessible descendant. Follow nextCursor until absent. Terminal decisions remain readable by exact occurrence. Requires control plane v214; older runners can use GET /api/sessions/:id/workflow-decisions?limit=50&cursor=<occurrence> or an updated CLI. Older control planes support only list_descendant_requests for pending requests; absence never proves consumption.",
+    description: "List a session's nonterminal workflow decisions (pending and approved), including authority, resource key, category and timestamps. Omit sessionId for self; an Orchestrator may inspect an accessible descendant. Follow nextCursor until absent. Terminal decisions remain readable by exact occurrence. Requires control plane v214; older runners can use an updated CLI or GET /api/sessions/:id/workflow-decisions?limit=50&cursor=<occurrence> where a session token is provisioned. Provider-isolated sessions have only a relay key: upgrade the runner/CLI instead of seeking a bearer token. Older control planes support only list_descendant_requests for pending requests; absence never proves consumption.",
     inputSchema: {
       type: "object",
       properties: {
