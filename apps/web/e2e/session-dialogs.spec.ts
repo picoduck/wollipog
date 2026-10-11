@@ -1,3 +1,4 @@
+import { waitForSessionPreview } from "./session-readiness.js";
 import { expect, test, type Page } from "@playwright/test";
 import type { SessionView } from "@wollipog/protocol";
 import { dialogMotionSettled } from "./dialog-motion.js";
@@ -16,6 +17,7 @@ async function openAlpha(page: Page, query = "") {
   await page.goto(`/command-inbox-projects-e2e.html?fullShell=1&reminders=1${query}`);
   await page.getByRole("button", { name: /Alpha Session/ }).first().click();
   const expand = page.getByRole("button", { name: "Open Session", exact: true });
+  await waitForSessionPreview(page);
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator(".session-bar")).toBeVisible();
 }

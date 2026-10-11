@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useLayoutEffect } from "react";
 import { focusZoneForElement } from "./focus-zones.js";
 import { inTypingContext, matchesShortcut, shortcutLayerActive, type ShortcutId } from "./shortcuts.js";
 
@@ -61,7 +61,8 @@ const BINDINGS: ReadonlyArray<[ShortcutId, keyof InboxKeyActions]> = [
 
 /** The sole Inbox keyboard listener. Rows, tabs, and the preview expose mouse paths only. */
 export function useInboxKeys(enabled: boolean, actions: InboxKeyActions): void {
-  useEffect(() => {
+  // Suspense disconnects layout effects when a route is hidden; invisible rows must not act.
+  useLayoutEffect(() => {
     if (!enabled) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented || shortcutLayerActive(document, false, event) || inTypingContext(document)) return;
