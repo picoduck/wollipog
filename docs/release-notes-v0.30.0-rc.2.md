@@ -45,10 +45,14 @@ may report `The address is not a Wollipog control plane.` and must be upgraded b
 - Browse Sessions with consistent rows, group tabs, search counts, and an optional Preview Right
   layout on wider screens. The phone Board shows one column at a time and opens on the first
   column that needs attention.
+- Load the Inbox with less startup JavaScript by loading secondary views and dialogs when opened.
+  On phones, arriving notices keep the top session rows in place instead of pushing them down.
 - Answer questions, permissions, policy requests, and workflow decisions on request cards docked
   above the composer. Step through question forms, enter custom answers, expand long questions,
   and return to where a question was asked. Recover eligible non-secret question drafts and
   completed steps across reloads.
+- Keep the question header visible after collapsing a long question, and preserve other saved
+  question drafts when one answer exceeds the storage budget.
 - See who resolved a question, permission, or sign-in request in Decision History. Review UI
   evidence through named tiles or a viewer with previous and next navigation and review progress.
 - Edit queued messages in the composer, see queued work as an expandable count, retry failed
@@ -68,13 +72,18 @@ may report `The address is not a Wollipog control plane.` and must be upgraded b
   Orchestrator controls in dedicated dialogs.
 - Open session tools in a panel that can expand to fill the content area and overlays the chat
   when space is tight. Details open as pages within the tool.
+- Browse Background Work as named jobs grouped by the turn that started them. Open a job's
+  detail page to inspect its status and result delivery, or stop that job after a confirmation
+  that names it.
 - Review changed files with sticky file headers, a commit bar, finding authors, and explicit line
   selection. Find files with Ctrl/Cmd+P and inspect them in a viewer with syntax highlighting.
 - Browse artifacts with kind labels, previews, download menus, and clear loading or blocked-page
-  states. Side Chat can insert a reply into the draft with Undo and opens with Ctrl/Cmd+;.
+  states. Side Chat shows one context line, a composer with Send and Stop Turn, and clear starting,
+  ended, and error states. It can insert a reply into the draft with Undo and opens with Ctrl/Cmd+;.
 - Use a terminal dock with shell tabs, search match counts, previous and next navigation, a visible
-  resize grip, and scroll positions retained across tabs. The Agents roster groups workers and
-  shows offline active workers as unverified.
+  resize grip, and scroll positions retained across tabs. Closing and reopening the dock preserves
+  its terminals, scrollback, and search state. The Agents roster groups workers and shows offline
+  active workers as unverified.
 
 ## Reliability, Costs, and Headless Updates
 
