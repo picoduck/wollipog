@@ -7230,7 +7230,7 @@ test("Jump to Question reaches the dock, not the hidden answer, when a phone ses
         assert.equal(revealed, true);
         const focused = fixture.container.ownerDocument.activeElement as HTMLElement | null;
         assert.ok(focused?.closest(".request-dock"), "focus lands on the question's dock card");
-        assert.equal(focused?.closest(".composer"), null, "not in the hidden composer");
+        assertNoDomNode(focused?.closest(".composer") ?? null, "not in the hidden composer");
       });
   } finally {
     setQuestionResponseStyle("interactive", domWindow as never);
