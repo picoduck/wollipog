@@ -157,6 +157,7 @@ interface HarnessProps {
   descendantRequests?: readonly DescendantRequestView[];
   items?: TimelineItem[];
   session?: SessionView;
+  runnerOnline?: boolean;
 }
 
 async function settle() {
@@ -182,7 +183,7 @@ async function mount(initial: HarnessProps) {
       <ApiProvider client={client}><StoreProvider connection={connection}><RightPanel
         state={panel}
         session={props.session ?? session}
-        runnerOnline
+        runnerOnline={props.runnerOnline ?? true}
         runnerProtocolVersion={props.runnerProtocolVersion === undefined ? CURRENT_RUNNER : props.runnerProtocolVersion}
         git={props.git}
         items={props.items ?? []}
@@ -301,6 +302,55 @@ test("an agent waiting on the user takes the Agents badge with the roster's atte
   const panel = await mount({ git: gitWith(0), items: runningAgent, session: asking });
   try {
     assert.match(row(panel.container, "subagents")?.querySelector(".status")?.textContent ?? "", /^1 Approval Required$/);
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("mixed attention kinds: the Agents badge and the Agents notice both count every kind (#2861)", async () => {
+  const agents: TimelineItem[] = ["audit", "parser", "docs"].map((id, index) => ({
+    kind: "tool_call", id: index + 1, toolCallId: id, title: `${id[0]!.toUpperCase()}${id.slice(1)} Agent`, text: "",
+    toolKind: "agent", status: "in_progress", startedAt: 10,
+  }));
+  const mixed = { ...session, status: "input_required", pendingApproval: {
+    requestId: "audit-edit", ownerToolUseId: "audit", title: "Edit: src/a.ts", options: [],
+    additionalRequests: [
+      { requestId: "parser-run", ownerToolUseId: "parser", title: "Bash: npm test", options: [] },
+      { requestId: "docs-ask", ownerToolUseId: "docs", kind: "question", title: "Which docs?", options: [],
+        questions: [{ id: "q", question: "Which docs?", options: [{ label: "API" }] }] },
+    ],
+  } } as unknown as SessionView;
+  const panel = await mount({ git: gitWith(0), items: agents, session: mixed });
+  try {
+    const badge = row(panel.container, "subagents")!.querySelector<HTMLElement>(".status")!;
+    assert.equal(badge.textContent, "3 Awaiting Input", "the badge counts every worker that needs you, not only the top kind");
+    assert.equal(badge.getAttribute("aria-label"), "3 Awaiting Input: 2 Approval Required, 1 Answer Required");
+    assert.equal(badge.getAttribute("title"), "2 Approval Required, 1 Answer Required");
+    assert.match(badge.className, /t-warning/);
+
+    await act(async () => row(panel.container, "subagents")!.click());
+    await settle();
+    const slot = panel.container.querySelector<HTMLElement>("#right-panel .rpanel-notices .panel-notice-slot")!;
+    assert.equal(slot.dataset.noticeKey, "agents-attention");
+    assert.equal(slot.querySelector(".notice-body")?.textContent, "3 workers need you: 2 approvals, 1 answer.");
+    // The rows keep their own words: two approvals and one answer.
+    const words = [...panel.container.querySelectorAll(".agents-list .worker-row .status")].map((status) => status.textContent).sort();
+    assert.deepEqual(words, ["Answer Required", "Approval Required", "Approval Required"]);
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("offline, the Agents badge keeps the attention count in a neutral hollow badge that asks for nothing (#2861)", async () => {
+  const asking = { ...session, status: "input_required", pendingApproval: {
+    requestId: "edit", ownerToolUseId: "agent", title: "Edit: src/a.ts", options: [] } } as SessionView;
+  const panel = await mount({ git: gitWith(0), items: runningAgent, session: asking, runnerOnline: false });
+  try {
+    const badge = row(panel.container, "subagents")!.querySelector<HTMLElement>(".status")!;
+    assert.equal(badge.textContent, "1 Approval Required", "the count stays while the machine is offline");
+    assert.match(badge.className, /t-neutral/);
+    assert.doesNotMatch(badge.className, /t-warning/);
+    assert.match(badge.className, /hollow/);
   } finally {
     await panel.dispose();
   }

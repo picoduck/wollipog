@@ -41,6 +41,19 @@ const initial: SessionView = {
   backgroundJobs: [{ id: "job-monitor-7be210", parentTurnId: "turn-1", launchType: "monitor", registeredAt: now - 60_000,
     lastObservedAt: now, sourcePresent: true }],
 };
+// Evidence states for the attention notice (#2861): one worker's approval, three workers of mixed
+// kinds, and the session's own question.
+if (params.has("one-approval")) initial.pendingApproval = { ...initial.pendingApproval!.additionalRequests![0]! };
+if (params.has("mixed")) {
+  initial.pendingApproval = { ...initial.pendingApproval!, additionalRequests: [...initial.pendingApproval!.additionalRequests!, {
+    requestId: "question-c", ownerToolUseId: "summary", kind: "question", title: "Which Findings Matter?", options: [],
+    questions: [{ id: "findings", question: "Which findings matter most?", options: [{ label: "Storage", description: "The storage audit." }] }],
+  }] };
+}
+if (params.has("session-question")) {
+  initial.pendingApproval = { requestId: "session-question", kind: "question", title: "Choose Release Scope", options: [],
+    questions: [{ id: "scope", question: "Which release should this cover?", options: [{ label: "Patch", description: "Fixes only." }] }] };
+}
 if (params.has("primary-question")) {
   initial.pendingApproval = { ...initial.pendingApproval!, kind: "question", options: [],
     title: "Choose Audit Scope", questions: [{ id: "scope",
@@ -59,6 +72,8 @@ const items: TimelineItem[] = [
   { kind: "agent_message", id: 3, text: "The parser tests are ready to run.", parentToolUseId: "parser", createdAt: now - 10_000 },
   { kind: "tool_call", id: 4, toolCallId: "done", title: "Review Documentation", text: "",
     toolKind: "agent", status: "completed", startedAt: now - 120_000, completedAt: now - 30_000 },
+  ...params.has("mixed") ? [{ kind: "tool_call" as const, id: 5, toolCallId: "summary", title: "Summarize Findings", text: "",
+    toolKind: "agent", status: "in_progress", startedAt: now - 45_000 }] : [],
 ];
 const connection: UiConnectionRuntime = {
   instanceId: "agents-fixture", runtimeKey: "agents-fixture",
@@ -68,7 +83,7 @@ const connection: UiConnectionRuntime = {
 function Fixture() {
   const [session, setSession] = useState(initial);
   const [selected, setSelected] = useState<string | null>(null);
-  const [online, setOnline] = useState(true);
+  const [online, setOnline] = useState(!params.has("offline"));
   const primaryRef = useRef<HTMLHeadingElement>(null);
   const registryCalls = useRef(0);
   const inventoryConflictCount = useRef(0);
@@ -104,7 +119,7 @@ function Fixture() {
     {navigationMode ? <NavigationFixture session={session} onSession={setSession} online={online} /> :
     <main style={{ maxWidth: 780, padding: 16, margin: "0 auto" }}>
       <h1 ref={primaryRef} tabIndex={-1}>Agents</h1>
-      {params.has("primary-question") && <>
+      {(params.has("primary-question") || params.has("session-question")) && <>
         <SessionApprovalRegion session={session} runnerOnline={online} fallbackFocusRef={primaryRef} />
         {/* The session's own question waits on its request dock (#2205). */}
         <RequestDock session={session} requests={dockRequests(prioritizedPendingRequests(session.pendingApproval))}
@@ -116,7 +131,8 @@ function Fixture() {
       }))}>Resolve Primary Request</button>}
       <button type="button" className="btn" style={{ marginBottom: 12 }} onClick={() => setOnline((value) => !value)}>{online ? "Disconnect Runner" : "Reconnect Runner"}</button>
       <AgentsPanel session={session} items={items} runnerOnline={online}
-        onOpenPrimaryRequest={params.has("primary-question") ? (requestId) => focusSessionRequest(session.id, requestId) : undefined}
+        onOpenPrimaryRequest={params.has("primary-question") || params.has("session-question")
+          ? (requestId) => focusSessionRequest(session.id, requestId) : undefined}
         runnerProtocolVersion={PROTOCOL_VERSION} requestedId={selected} onSelect={setSelected}
         parentTurns={new Map()} onViewTurn={() => {}} />
     </main>}

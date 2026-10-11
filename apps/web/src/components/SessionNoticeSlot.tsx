@@ -116,6 +116,9 @@ export const SESSION_NOTICE_RANK = {
 /**
  * The side panel's own ranks (`PanelNoticeSlot`, #2856), one table for every panel tool, so the
  * order of a tool's conditions is reviewed in one place. Each tool adds its entries in its own unit.
+ * The panel slot orders by this table alone, whatever the severity (#2861): a machine that is offline
+ * explains the errors under it, so it leads them, and a worker's request comes before an inventory
+ * that didn't load.
  */
 export const PANEL_NOTICE_RANK = {
   runnerOffline: 1,
@@ -127,6 +130,7 @@ export const PANEL_NOTICE_RANK = {
   workflowDetailsUnavailable: 7,
   olderHistoryTruncated: 8,
   backgroundWorkLost: 9,
+  staleAttentionLink: 10,
 } as const;
 
 /**
@@ -145,6 +149,14 @@ export function compareSessionNotices(
 ): number {
   return SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity] || a.rank - b.rank ||
     (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
+}
+
+/** The lowest rank first, then the most severe: the side panel's order (`PANEL_NOTICE_RANK`, #2861). */
+export function compareNoticesByRank(
+  a: Pick<SessionNoticeEntry, "key" | "severity" | "rank">,
+  b: Pick<SessionNoticeEntry, "key" | "severity" | "rank">,
+): number {
+  return a.rank - b.rank || compareSessionNotices(a, b);
 }
 
 /** Info dismissals, per session, for the life of the page. Module state rather than component
@@ -180,7 +192,7 @@ export function revealSessionNotice(sessionId: string, key: string, focus: boole
   return (noticeRevealers.get(sessionId) ?? []).some((revealer) => revealer(key, focus));
 }
 
-export function SessionNoticeSlot({ sessionId, entries, lead, label = "Session Notices", className, onFocusLost }: {
+export function SessionNoticeSlot({ sessionId, entries, lead, label = "Session Notices", className, order = "severity", onFocusLost }: {
   /** Whose info dismissals these are. The Sessions list's slot passes its own fixed scope. */
   sessionId: string;
   entries: readonly SessionNoticeEntry[];
@@ -189,6 +201,9 @@ export function SessionNoticeSlot({ sessionId, entries, lead, label = "Session N
   /** The "+N More" menu's name, Title Case. */
   label?: string;
   className?: string;
+  /** Which entry shows first: the most severe (the session, list and terminal slots), or the lowest
+   * rank (the side panel's, whose one table already orders its severities). */
+  order?: "severity" | "rank";
   /** Where focus goes when the slot is gone while a control in it, or its "+N More" menu, held
    * focus: the composer, or the page title when the composer cannot take it. */
   onFocusLost?: () => void;
@@ -200,7 +215,7 @@ export function SessionNoticeSlot({ sessionId, entries, lead, label = "Session N
   );
   const visible = entries
     .filter((entry) => entry.severity !== "info" || !dismissed.has(entry.key))
-    .sort(compareSessionNotices);
+    .sort(order === "rank" ? compareNoticesByRank : compareSessionNotices);
   type Shown = { lead: SessionNoticeLead } | { entry: SessionNoticeEntry };
   const candidates: Shown[] = [...(lead ? [{ lead }] : []), ...visible.map((entry) => ({ entry }))];
   const keyOf = (candidate: Shown) => "lead" in candidate ? candidate.lead.key : candidate.entry.key;

@@ -56,11 +56,13 @@ async function serveFixtureUnderSessionRoutes(page: import("@playwright/test").P
   await page.route("**/sessions/**", (route) => route.fulfill({ contentType: "text/html", body: fixtureHtml }));
 }
 
-test("aggregate attention links focus the full request list without choosing a request", async ({ page }) => {
+test("aggregate attention links focus the attention notice without choosing a request (#2861)", async ({ page }) => {
   await serveFixtureUnderSessionRoutes(page);
   await page.goto(`${attentionPath()}?epoch=0`);
   await expect(page).toHaveURL(/\/attention\?epoch=0$/);
-  await expect(page.getByRole("region", { name: "Worker Attention", exact: true })).toBeFocused();
+  const slot = page.locator(".panel-notice-slot");
+  await expect(slot).toBeFocused();
+  await expect(slot.locator(".notice-body")).toHaveText("2 workers are waiting for your approval.");
   await expect(page.getByRole("region", { name: "Selected Worker Request", exact: true })).toHaveCount(0);
 });
 
@@ -71,7 +73,10 @@ test("attention links cannot alias reused requests after reprocessing and primar
   await expect(page.getByRole("button", { name: "Allow", exact: true })).toHaveCount(1);
   await expect(page.getByRole("button", { name: "Open Request in Session", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "Reprocess Session", exact: true }).click();
-  await expect(page.getByText("This attention link belongs to an earlier session version. No request was selected.")).toBeVisible();
+  // The stale link waits behind the attention notice's "+1 More" (#2861).
+  await page.locator(".panel-notice-slot .session-notice-more").click();
+  await page.getByRole("menuitem", { name: "Attention Link Out of Date", exact: true }).click();
+  await expect(page.getByText("This attention link belongs to an earlier version of the session, so no request was selected.")).toBeVisible();
   await expect(page.getByRole("button", { name: "Open Request in Session", exact: true })).toHaveCount(0);
 });
 
@@ -79,7 +84,9 @@ test("a worker's question is answered on its page in Agents, never on the dock, 
   await page.goto("/agents-e2e.html?primary-question=1");
   await expect(page.locator(".request-dock")).toHaveCount(0);
   await expect(page.getByRole("radio", { name: /Parser/ })).toHaveCount(0);
-  await page.getByRole("button", { name: "Audit Storage · Answer Required", exact: true }).click();
+  // The question outranks the approval, so Review in Session opens it (#2861).
+  await expect(page.locator(".panel-notice-slot .notice-body")).toHaveText("2 workers need you: 1 answer, 1 approval.");
+  await page.getByRole("button", { name: "Review in Session", exact: true }).click();
   await expect(page.getByRole("region", { name: "Pending Request", exact: true })).toBeFocused();
   await expect(page.locator(".agents-page .notice")).toHaveText("Has a question and is waiting for your answer.");
   await expect(page.getByRole("button", { name: "Open Request in Session", exact: true })).toHaveCount(0);
@@ -90,7 +97,7 @@ test("a worker's question is answered on its page in Agents, never on the dock, 
 
 test("a worker's long question expanded on its Agents panel card keeps its answers and footer in reach (#2683)", async ({ page }) => {
   await page.goto("/agents-e2e.html?primary-question=1&long-question=1");
-  await page.getByRole("button", { name: "Audit Storage · Answer Required", exact: true }).click();
+  await page.getByRole("button", { name: "Review in Session", exact: true }).click();
   const card = page.getByRole("region", { name: "Pending Request", exact: true }).getByRole("region", { name: "Agent Questions" });
   await card.getByRole("button", { name: "Show Full Question" }).click();
   await expect(card.getByRole("button", { name: "Collapse Question" })).toHaveAttribute("aria-expanded", "true");
@@ -108,8 +115,8 @@ test("a worker's long question expanded on its Agents panel card keeps its answe
 
 test("a worker's request promoted to primary stays on its page with one form", async ({ page }) => {
   await page.goto("/agents-e2e.html?primary-question=1");
-  await page.getByRole("button", { name: "Inspect Parser · Approval Required", exact: true }).click();
-  await expect(page.getByRole("region", { name: "Pending Request", exact: true })).toBeFocused();
+  await page.locator(".agents-list .worker-row", { hasText: "Inspect Parser" }).click();
+  await expect(page.getByRole("region", { name: "Pending Request", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Resolve Primary Request", exact: true }).click();
   await expect(page.locator('.agents-page [data-session-request-id="permission-b"]')).toBeVisible();
   await expect(page.getByRole("button", { name: "Open Request in Session", exact: true })).toHaveCount(0);
@@ -118,7 +125,7 @@ test("a worker's request promoted to primary stays on its page with one form", a
 
 test("a nested worker opened from the activity under a worker's request opens as a page (#2856, #2860)", async ({ page }) => {
   await page.goto("/agents-e2e.html");
-  await page.getByRole("button", { name: "Audit Storage · Approval Required", exact: true }).click();
+  await page.getByRole("button", { name: "Review in Session", exact: true }).click();
   await expect(page.getByRole("region", { name: "Pending Request", exact: true })).toBeFocused();
   // Audit Storage's activity sits under its request on its page, with its nested worker's Open.
   const activity = page.locator(".agents-page").getByRole("list", { name: "Subagent Activity" });
@@ -135,14 +142,13 @@ test("an active-tail conflict on initial registry load retries against the curre
   await page.goto("/agents-e2e.html?registry-retry=initial");
   await expect(page.getByText("Durable First", { exact: true })).toBeVisible();
   await expect.poll(() => page.evaluate(() => (window as unknown as { __registryCalls?: number }).__registryCalls)).toBe(2);
-  await expect(page.getByRole("button", { name: "Retry Recorded Workers", exact: true })).toHaveCount(0);
+  await expect(page.getByText("Couldn't Load Recorded Workers", { exact: true })).toHaveCount(0);
 });
 
 test("a Load More generation conflict preserves verified pages and retries the cursor", async ({ page }) => {
   await page.goto("/agents-e2e.html?registry-retry=load-more");
   await expect(page.getByText("Durable First", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Show 50 More", exact: true }).click();
-  await expect(page.getByText("Recorded worker inventory changed while loading. Retrying…", { exact: true })).toBeVisible();
   await expect(page.getByText("Durable First", { exact: true })).toBeVisible();
   await expect(page.getByText("Durable Second", { exact: true })).toBeVisible();
   await expect.poll(() => page.evaluate(() => (window as unknown as { __registryCalls?: number }).__registryCalls)).toBe(3);
@@ -150,7 +156,9 @@ test("a Load More generation conflict preserves verified pages and retries the c
 
 test("exhausted automatic registry retries retain a manual recovery action", async ({ page }) => {
   await page.goto("/agents-e2e.html?registry-retry=exhaust");
-  const retry = page.getByRole("button", { name: "Retry Recorded Workers", exact: true });
+  const slot = page.locator(".panel-notice-slot");
+  await expect(slot.locator(".notice-title")).toHaveText("Couldn't Load Recorded Workers");
+  const retry = slot.getByRole("button", { name: "Retry", exact: true });
   await expect(retry).toBeVisible();
   await retry.click();
   await expect(page.getByText("Durable First", { exact: true })).toBeVisible();
@@ -181,8 +189,9 @@ for (const viewport of [
     await expect(page.getByRole("radio", { name: "Active, 3", exact: true, includeHidden: true })).toBeAttached();
 
     // A worker's request is answered on its page (#2860).
-    await page.goto(`/agents-e2e.html?theme=${theme}`);
-    await page.getByRole("button", { name: "Inspect Parser · Approval Required", exact: true }).click();
+    await page.goto(`/agents-e2e.html?theme=${theme}&one-approval=1`);
+    await expect(page.locator(".panel-notice-slot .notice-body")).toHaveText("Inspect Parser is waiting for your approval.");
+    await page.getByRole("button", { name: "Review in Session", exact: true }).click();
     const request = page.getByRole("region", { name: "Pending Request" });
     await expect(request).toBeFocused();
     await expect(page.getByText("The parser tests are ready to run.")).toBeVisible();
@@ -191,3 +200,41 @@ for (const viewport of [
     await expect(page.locator(".agents-page .worker-detail-head .status")).toHaveText("Running");
   });
 }
+
+test("at 390px the attention notice's buttons are 44px and its sentence wraps whole (#2861)", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/agents-e2e.html?mixed=1&registry-retry=exhaust");
+  const slot = page.locator(".panel-notice-slot");
+  // The registry error leads (rank 2); the attention notice waits behind "+1 More".
+  await expect(slot.locator(".notice-title")).toHaveText("Couldn't Load Recorded Workers");
+  await slot.locator(".session-notice-more").click();
+  await page.getByRole("menuitem", { name: "3 Workers Need You", exact: true }).click();
+  const body = slot.locator(".notice-body");
+  await expect(body).toHaveText("3 workers need you: 2 approvals, 1 answer.");
+  for (const button of [slot.getByRole("button", { name: "Review in Session", exact: true }), slot.locator(".session-notice-more")]) {
+    expect((await button.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  }
+  // The sentence is never cut: it wraps inside its notice with nothing clipped or overflowing.
+  expect(await body.evaluate((element) => element.scrollWidth <= element.clientWidth && getComputedStyle(element).textOverflow !== "ellipsis")).toBe(true);
+  expect(await slot.locator(".notice").evaluate((element) => element.scrollHeight <= element.clientHeight + 1)).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
+
+test("offline, the machine notice leads and the attention count offers nothing to press (#2861)", async ({ page }) => {
+  await page.goto("/agents-e2e.html?offline=1");
+  const slot = page.locator(".panel-notice-slot");
+  await expect(slot.locator(".notice-title")).toHaveText("Machine Offline");
+  await expect(page.locator(".agents-list .worker-row .status", { hasText: "Approval Required" })).toHaveCount(0);
+  await slot.locator(".session-notice-more").click();
+  await page.getByRole("menuitem", { name: "Requests Waiting", exact: true }).click();
+  await expect(slot.locator(".notice-body")).toHaveText(/^2 requests are waiting\. You can answer them when .+ reconnects\.$/);
+  await expect(slot.getByRole("button", { name: "Review in Session", exact: true })).toHaveCount(0);
+});
+
+test("the session's own question reads as the session's, and Review in Session opens it on the dock (#2861)", async ({ page }) => {
+  await page.goto("/agents-e2e.html?session-question=1");
+  await expect(page.locator(".panel-notice-slot .notice-body")).toHaveText("The session has a question for you.");
+  await page.getByRole("button", { name: "Review in Session", exact: true }).click();
+  await expect(page.locator(".request-dock")).toBeVisible();
+  await expect(page.locator(".agents-page")).toHaveCount(0);
+});

@@ -956,7 +956,8 @@ Requests, Decision History, and Terminal once #2868 moves it) opens in one frame
   an optional `.facts` list; a bottom sheet with the grabber on phones. Escape closes only it.
 - **Notice slot.** A tool's status sentences go to the panel's one notice slot directly under the
   header (and under a pushed page's header): `PanelNoticeSlot`, an instance of `SessionNoticeSlot`
-  with its own ranks in `PANEL_NOTICE_RANK` (§13.2). It shows one notice and the rest behind "+N More".
+  with its own ranks in `PANEL_NOTICE_RANK` (§13.2), lowest rank first. It shows one notice and the
+  rest behind "+N More". Agents' entries are §4.12.
 - **Body slots.** `.rpanel-body` scrolls as one by default. A tool with fixed controls lays out on
   three slots instead, rendering `PanelToolLayout` as its body (#2846): `.rpanel-toolbar`, fixed
   above, which is only the place for the shared `.toolbar` row (§4.7); `.rpanel-scroll`, the tool's
@@ -1115,11 +1116,11 @@ part starts on the panel's left edge:
   total ("600 Tokens, 740 With Nested").
 - **Pending request.** While the worker owns a request, a compact warning notice says what it wants
   ("Wants to run npm test -- storage and is waiting for your approval.") and the request's card sits
-  under it, answered here. Worker Attention and an attention link open this page with focus on the
-  request, as does `showSubagent(…, { request: true })`. The session's own request is never shown
-  here; it stays on the request dock. A request no page can carry (an ambiguous or unresolved owner,
-  or one preserved across a runner restart) stays in Worker Attention, so nothing becomes
-  unanswerable.
+  under it, answered here. The attention notice's Review in Session (§4.12) and an attention link open
+  this page with focus on the request, as does `showSubagent(…, { request: true })`. The session's
+  own request is never shown here; it stays on the request dock. A request no page can carry (an
+  ambiguous or unresolved owner, or one preserved across a runner restart) opens above the roster
+  instead, as the request's card, so nothing becomes unanswerable.
 - **Nested Workers.** The workers it started, as roster rows (§5.2), each pushing its own page.
 - **Activity.** The worker's own transcript, virtualized against the panel body. With none, the
   sentence "No output recorded yet. Activity appears here as the subagent works."; a Codex session
@@ -1129,6 +1130,38 @@ part starts on the panel's left edge:
 - A background job's row pushes the shared Job Detail page (§4.10) with **Open in Background Work**,
   which switches the panel to Background Work with that job's page pushed. A member session's row
   opens that session.
+
+### 4.12 Agents Notices
+
+The Agents tab says what needs the person, and every other condition, in the panel's one notice
+slot (§13.2, #2861), never as sentences between its filter and its list.
+
+- **Attention.** While the session has a pending request, one warning `Notice` counts who needs the
+  person, with the request card's words (`worker-attention.ts`): one asker is named ("Audit Storage
+  has a question for you.", "The session has a question for you.", "Inspect Parser needs you to sign
+  in."), several of one kind are counted ("2 workers are waiting for your approval."), and mixed kinds
+  are counted by kind, the most first ("3 workers need you: 2 approvals, 1 answer."). An asker is the
+  session, for its own requests and any preserved across a runner restart, or one worker with its
+  most urgent request. Its one action, **Review in Session**, opens the top request by the request
+  dock's priority rule (or the one an attention link chose): the session's own on the request dock,
+  a worker's by pushing its page with the request card on top (§4.11). Each waiting row keeps its
+  badge (§11.2); no request is a button of its own.
+- **Offline.** The count stays (§12.5) and nothing is offered, since nothing can be answered until the
+  machine is back: "2 requests are waiting. You can answer them when Build Box reconnects.", titled
+  Requests Waiting in "+N More", behind the Machine Offline notice. The rows read Unverified.
+- **The other conditions**, one entry each in `PANEL_NOTICE_RANK` order: Machine Offline (warning,
+  "<Machine> is offline. Workers are shown as Unverified until it reconnects."), Couldn't Load
+  Recorded Workers (danger, once the automatic retries of a changing inventory are spent; Retry reads
+  from the cursor that failed, and the cause is behind Show Details), the attention notice, Couldn't
+  Load Background Work (danger, with Retry), earlier activity not loaded, workers that can't be listed
+  because their IDs are ambiguous, workflow details unavailable, and a stale attention link (info,
+  compact and dismissible).
+- **Not notices.** The roster's first read is skeleton rows (§12.3); more recorded workers are the
+  list foot (§5.6). Background-job tracking and truncation are Background Work's to say (§4.10).
+- **Session Tools.** The Agents row's badge counts the same askers' workers: one kind keeps its word
+  ("2 Approval Required"), mixed kinds read "3 Awaiting Input" with each kind in its name and
+  tooltip ("2 Approval Required, 1 Answer Required"), danger if any is Recovery Required. Offline it
+  keeps the count, neutral with a hollow dot.
 
 ---
 
@@ -2635,8 +2668,13 @@ so every host of the terminal shows the same ones.
 `PanelNoticeSlot`, directly under the side panel's header (§4.9), with its menu named "Panel Notices"
 and its ranks in `PANEL_NOTICE_RANK`: runner offline 1, load error 2, attention 3, inventory error 4,
 earlier activity not loaded 5, ambiguous identity 6, workflow details unavailable 7, older history
-truncated 8. Each tool adds its own entries in its own unit; Review, Files and Browser keep the
-notices at the top of their scrollers.
+truncated 8, background work lost 9, stale attention link 10. Unlike the other slots it orders by
+this table alone, with severity only breaking a tie (#2861): an offline machine explains the errors
+under it, so Machine Offline leads Couldn't Load Recorded Workers, Background Work's Lost and Side
+Chat's Couldn't Refresh, and a worker's request leads an inventory error. Each tool adds its own
+entries in its own unit; Review, Files and Browser keep the notices at the top of their scrollers.
+Below 760px its notices' buttons, "+N More" included, are 44px, and the resolving action fills the
+action row.
 
 - **Machine sign-in** (`MachineSignInNotice`): "Sign In to {Provider} on {Machine}", one sentence for
   the sign-in's state, the device code inline after it in a `.code-well` with its copy button, then

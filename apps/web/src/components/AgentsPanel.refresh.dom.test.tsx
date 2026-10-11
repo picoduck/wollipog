@@ -265,7 +265,7 @@ test("a folded re-statement refreshes promptly without restoring per-event regis
     });
     await advance(150);
     assert.equal(calls, 2, "a folded re-statement refreshes the roster on the 1 s tier, not the 15 s one");
-    assert.match(container.textContent ?? "", /1 worker has an ambiguous provider identity/,
+    assert.match(container.textContent ?? "", /1 worker can't be listed because its ID is ambiguous\./,
       "the reclassification the re-statement caused is visible without waiting for the idle cadence");
   } finally {
     await act(async () => { root.unmount(); });

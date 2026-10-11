@@ -123,7 +123,8 @@ test("a worker's request opens on its page, a nested worker is a page on top, an
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/panel-pages-e2e.html?nested=1&request=1");
   const panel = page.getByRole("complementary", { name: "Side Panel" });
-  await panel.getByRole("button", { name: /^Profile Payouts 30 · / }).click();
+  await expect(panel.locator(".rpanel-notices .notice-body")).toHaveText("Profile Payouts 30 is waiting for your approval.");
+  await panel.getByRole("button", { name: "Review in Session", exact: true }).click();
   const owner = panel.getByRole("region", { name: "Profile Payouts 30", exact: true });
   await expect(panel.locator(".rpanel-page-title")).toHaveText("Profile Payouts 30");
   await expect(owner.getByRole("region", { name: "Pending Request", exact: true })).toBeFocused();

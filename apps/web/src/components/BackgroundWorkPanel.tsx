@@ -87,7 +87,8 @@ export interface BackgroundWorkPanelProps {
 /** One request to open a job's page; `seq` tells a repeated request for the same job apart. */
 export interface BackgroundJobPageRequest { jobId: string; seq: number }
 
-function useDelayedFlag(active: boolean, delayMs: number): boolean {
+/** True once `active` has held for `delayMs`: a skeleton that never flashes for a fast load (§12.3). */
+export function useDelayedFlag(active: boolean, delayMs: number): boolean {
   const [shown, setShown] = useState(false);
   useEffect(() => {
     if (!active) {

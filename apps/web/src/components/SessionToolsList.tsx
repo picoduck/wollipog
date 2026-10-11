@@ -14,7 +14,8 @@ import { shortcutDisplay } from "../shortcuts.js";
 import { useOptionalStoreSelector } from "../store.js";
 import { IncrementalSubagentProjector } from "../subagents.js";
 import type { TimelineItem } from "../timeline.js";
-import { workerRoster, workerStatusMeta, type WorkerState } from "../worker-roster.js";
+import { workerRoster, workerStatusMeta } from "../worker-roster.js";
+import { attentionAskers, attentionBadge } from "../worker-attention.js";
 import {
   SESSION_TOOL_GROUPS,
   SESSION_TOOLS,
@@ -185,10 +186,6 @@ const OLDER_RUNNER_REASONS: Partial<Record<SessionToolId, string>> = {
   terminal: "Needs a newer runner to open a terminal",
 };
 
-/** The most urgent live state first, for the Agents row's one status badge (§11.1). An Unverified
- * agent is not live, so it never takes the badge. */
-const AGENT_URGENCY: readonly WorkerState[] = ["attention", "running"];
-
 interface RowFact {
   text: string;
   badge?: ReactNode;
@@ -239,14 +236,18 @@ function SessionToolsListView({
     return workerRoster(session, unambiguous, [], () => runnerOnline)
       .filter((row) => row.target.kind === "subagent");
   }, [projection, registry, runnerOnline, session]);
-  // The roster's own word for the most urgent agent (#2857): "1 Running", or its attention label,
-  // counting the agents that read the same word.
-  const urgent = AGENT_URGENCY.map((state) => subagents.find((row) => row.state === state)).find(Boolean);
-  const agentsBadge = urgent && (() => {
-    const meta = workerStatusMeta(urgent);
-    const n = subagents.filter((row) => row.state === urgent.state && row.attention === urgent.attention).length;
-    return <StatusBadge meta={meta} label={`${n} ${meta.label}`} />;
-  })();
+  // The Agents row's one status badge (§11.1): the workers that need the person, every kind counted
+  // from the same askers as the Agents panel's attention notice (#2861), and kept while the machine
+  // is offline; else "1 Running", where an Unverified agent never takes the badge.
+  const attention = attentionBadge(attentionAskers(session.pendingApproval, () => undefined)
+    .flatMap((asker) => asker.ownerId === null ? [] : [asker.kind]), runnerOnline);
+  const running = subagents.filter((row) => row.state === "running");
+  const agentsBadge = attention
+    ? <StatusBadge meta={attention.meta} label={attention.label}
+      {...attention.description === attention.label ? {} : { title: attention.description, ariaLabel: `${attention.label}: ${attention.description}` }} />
+    : running.length > 0
+      ? <StatusBadge meta={workerStatusMeta(running[0]!)} label={`${running.length} ${workerStatusMeta(running[0]!).label}`} />
+      : undefined;
 
   const waitingForYou = descendantRequests.filter((request) => request.responseOwner === "human").length;
 
@@ -259,7 +260,7 @@ function SessionToolsListView({
       case "files": return { text: filesFact(workspaceFolderName(session.worktreePath, session.workspaceName)) };
       case "browser": return { text: browserFact(artifacts) };
       case "terminal": return { text: TERMINAL_FACT };
-      case "subagents": return { text: agentsFact(subagents.length, registry?.nextAfter != null), badge: agentsBadge || undefined };
+      case "subagents": return { text: agentsFact(subagents.length, registry?.nextAfter != null), badge: agentsBadge };
       case "sidechat": return { text: SIDE_CHAT_FACT };
       case "background": {
         // No jobs to count: an inventory still loading, a server that does not report one, or only

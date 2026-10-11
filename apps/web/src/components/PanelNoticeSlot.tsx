@@ -14,8 +14,8 @@ export const PanelNoticeRegionContext = createContext<{ element: HTMLElement; fo
  * `SessionNoticeSlot`, so a tool shows one notice and the rest behind "+N More" exactly as the
  * session slot does, rather than stacking status sentences between its filter and its list. A tool
  * renders it anywhere in its body (outside the part it hides while a page is pushed) with the
- * entries that apply to what it shows; they take ranks from `PANEL_NOTICE_RANK`. Outside the side
- * panel it renders in place.
+ * entries that apply to what it shows; they take ranks from `PANEL_NOTICE_RANK`, and the lowest rank
+ * shows first whatever its severity (#2861). Outside the side panel it renders in place.
  */
 export function PanelNoticeSlot({ sessionId, entries }: {
   /** Whose info dismissals these are; kept apart from the session slot's. */
@@ -29,6 +29,7 @@ export function PanelNoticeSlot({ sessionId, entries }: {
       entries={entries}
       label="Panel Notices"
       className="panel-notice-slot"
+      order="rank"
       onFocusLost={region?.focusHead}
     />
   );

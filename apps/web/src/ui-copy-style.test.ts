@@ -43,7 +43,8 @@ import { QUESTION_CARD_COPY, questionStepLabel } from "./components/requests/Que
 import { SIGN_IN_COPY } from "./components/AuthenticationRecoveryPanel.js";
 import { REQUEST_PANEL_COPY, requestPanelPositionLabel } from "./components/SessionRequestPanel.js";
 import { childRequestsLabel } from "./status-meta.js";
-import { AGENTS_ROSTER_COPY, opensSessionLabel, workerListFootLabel } from "./components/AgentsPanel.js";
+import { AGENTS_NOTICE_COPY, AGENTS_ROSTER_COPY, opensSessionLabel, workerListFootLabel } from "./components/AgentsPanel.js";
+import { attentionSentence, attentionTitle, offlineAttentionSentence, type AttentionAsker } from "./worker-attention.js";
 import { BACKGROUND_GROUP, SUBAGENT_GROUP, stepActivity, workerStatusMeta, type WorkerState } from "./worker-roster.js";
 
 const SOURCE_ROOT = path.resolve("apps/web/src");
@@ -1232,7 +1233,7 @@ test("the confirmation body reader treats copy it cannot see as unreadable, and 
 });
 
 test("the Agents roster's labels, headings and badges are Title Case; its lines and empty-state bodies are sentences (#2857)", () => {
-  const sentences = new Set(["emptyActiveBody", "emptyHistoryBody", "emptyAllBody", "loadingMore"]);
+  const sentences = new Set(["emptyActiveBody", "emptyHistoryBody", "emptyAllBody", "loadingMore", "loading"]);
   for (const [key, value] of Object.entries(AGENTS_ROSTER_COPY)) {
     if (sentences.has(key)) assert.ok(isSentenceCase(value) && !isTitleCase(value), `${key}: ${JSON.stringify(value)}`);
     else assert.ok(isTitleCase(value) && !/[.!?…]$/.test(value), `${key}: ${JSON.stringify(value)}`);
@@ -1246,4 +1247,25 @@ test("the Agents roster's labels, headings and badges are Title Case; its lines 
   }
   // A tooltip is a sentence (§9.3) that names the session as its title is written.
   assert.equal(opensSessionLabel("Fix the Parser"), "Opens Fix the Parser");
+});
+
+test("the Agents notices' titles and buttons are Title Case; their sentences are sentence case (#2861)", () => {
+  for (const [key, value] of Object.entries(AGENTS_NOTICE_COPY)) {
+    assert.ok(isTitleCase(value) && !/[.!?…]$/.test(value), `${key}: ${JSON.stringify(value)}`);
+  }
+  const asker = (ownerId: string | null, kind: AttentionAsker["kind"], name?: string): AttentionAsker =>
+    ({ ownerId, kind, ...(name ? { name } : {}), request: { requestId: `${ownerId}`, title: "", options: [] } as unknown as AttentionAsker["request"] });
+  const sets: AttentionAsker[][] = [
+    [asker("audit", "approval_required")],
+    [asker(null, "answer_required")],
+    [asker("a", "approval_required"), asker("b", "approval_required")],
+    [asker(null, "authentication_required"), asker("a", "approval_required"), asker("b", "answer_required")],
+  ];
+  for (const set of sets) {
+    const title = attentionTitle(set);
+    assert.ok(isTitleCase(title) && !/[.!?…]$/.test(title), JSON.stringify(title));
+    const sentence = attentionSentence(set);
+    assert.ok(isSentenceCase(sentence.replace(/^\d+ /, "N ")) && /\.$/.test(sentence), JSON.stringify(sentence));
+  }
+  for (const part of offlineAttentionSentence(2, "build box").split(". ")) assert.ok(isSentenceCase(part.replace(/^\d+ /, "N ")), part);
 });
