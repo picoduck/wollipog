@@ -307,6 +307,10 @@ export function SideChatPanel({
     epochRef.current = sideChat?.session.eventEpoch ?? 0;
     setEvents([]);
     setLoadedTranscript(null);
+    // A start that "failed" while the replacement it asked for exists after all (the response was
+    // lost) is over once polling adopts that child: its Retry would be refused as replacing a live
+    // chat, and the failure would keep Send closed over a ready side chat.
+    setStartFailed(null);
   }, [childId]);
 
   useEffect(() => {

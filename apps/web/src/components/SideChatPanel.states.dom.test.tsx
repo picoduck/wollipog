@@ -240,6 +240,39 @@ test("a failed start says Couldn't Start Side Chat with Retry, keeps the draft, 
   }
 });
 
+/**
+ * Cross-model review CR-1.1. A replacement the control plane created while its response was lost
+ * reads as a failed start; once polling adopts that replacement the failure is over. Left in place
+ * it kept Send closed over a ready side chat, and its Retry (replaceEnded) was refused as replacing
+ * a live one.
+ */
+test("a replacement whose response was lost clears the failure once polling finds it", async () => {
+  const ended = { ...child, status: "stopped" } as SessionView;
+  const replacement = { ...child, id: "side-session-new", status: "idle" } as SessionView;
+  let related: SideChatView = { parentSessionId: parent.id, session: ended, createdAt: 1 };
+  const view = await render(<SideChatPanel session={parent} runnerOnline onInsertDraft={() => {}} />, {
+    sideChat: async () => ({ sideChat: related }),
+    createSideChat: async () => {
+      related = { parentSessionId: parent.id, session: replacement, createdAt: 2 };
+      throw new TypeError("Failed to fetch");
+    },
+    getSessionEventPage: async () => ({ events: [], eventEpoch: 0, nextAfter: 0, cacheComplete: true }),
+  });
+  try {
+    await act(async () => { view.button("Start New Side Chat")!.click(); });
+    await tick(10);
+    assert.ok(view.container.querySelector(".notice.t-danger"), "the lost response reads as a failed start");
+    await view.type("still mine");
+    await tick(1_700);
+    assertNoDomNode(view.container.querySelector(".notice.t-danger"));
+    assert.equal(view.container.querySelector(".sc-context .status")?.textContent, "Awaiting Prompt");
+    assert.equal(view.button("Send")!.disabled, false, "the adopted replacement takes the kept draft");
+    assert.equal(view.textarea()!.value, "still mine");
+  } finally {
+    await view.dispose();
+  }
+});
+
 test("a refused start keeps the draft without claiming the machine didn't respond", async () => {
   const view = await render(<SideChatPanel session={parent} runnerOnline onInsertDraft={() => {}} />, {
     sideChat: async () => ({ sideChat: null }),
