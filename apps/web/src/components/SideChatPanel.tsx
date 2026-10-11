@@ -231,6 +231,28 @@ export function SideChatPanel({
   });
   const stoppingRef = useRef(stopping);
   stoppingRef.current = stopping;
+  const runnerOnlineRef = useRef(runnerOnline);
+  runnerOnlineRef.current = runnerOnline;
+  /** Let go of a stop, here and in the registry, unless a newer press has replaced it there. */
+  const releaseStop = useCallback((attempt: StopAttempt) => {
+    if (stopsInFlight.get(panelScratch)?.attempt === attempt.attempt) stopsInFlight.delete(panelScratch);
+    setStopping((current) => current?.attempt === attempt.attempt ? null : current);
+  }, [panelScratch]);
+  /**
+   * What the relationship poll says about the held stop: over once the parent's side chat is
+   * another child or has ended, or, with its machine online, runs no turn or a different one. A
+   * machine that is offline reports no turn at all, which is not the turn ending.
+   */
+  const settleStop = useCallback((latest: SideChatView | null) => {
+    const held = stoppingRef.current;
+    if (!held) return;
+    const session = latest?.session;
+    const over = !session || session.id !== held.childId || isTerminal(session.status) ||
+      (runnerOnlineRef.current && session.activeTurnId !== held.turn);
+    if (over) releaseStop(held);
+  }, [releaseStop]);
+  const settleStopRef = useRef(settleStop);
+  settleStopRef.current = settleStop;
   const [actionError, setActionError] = useState<{ kind: "send" | "stop"; message: string; status?: number } | null>(null);
   const [pollError, setPollError] = useState<string | null>(null);
   const enterKeySetting = useEnterKeyBehavior();
@@ -355,6 +377,7 @@ export function SideChatPanel({
         if (!current || transcriptChildRef.current !== childId) return;
         // A different child means a new generation; this effect re-runs for it rather than merging
         // the two transcripts here.
+        settleStopRef.current(latest);
         if (latest?.session.id !== childId) {
           resetTranscript(latest);
           setSideChat(latest);
@@ -418,7 +441,9 @@ export function SideChatPanel({
     try {
       const created = await api.createSideChat(session.id, replaceEnded);
       if (!mountedRef.current) return;
-      if (created.session.id !== childId) resetTranscript(created);
+      // Polling may have adopted this child already, with a newer view than the create's answer.
+      if (transcriptChildRef.current === created.session.id) return;
+      resetTranscript(created);
       setSideChat(created);
     } catch (cause) {
       // Polling may have adopted the very child this request created before its answer was lost;
@@ -447,19 +472,10 @@ export function SideChatPanel({
     activeTurnId: child.activeTurnId,
   });
   const stopRefusal = child ? sessionCommandRefusal(child, "cancelTurn") : null;
-  // The turn a Stop Turn was pressed for: once it is over, or another took its place, Send is back.
-  const stoppingTurn = stopping !== null && canStopTurn && child?.id === stopping.childId &&
-    child.activeTurnId === stopping.turn;
-  /** Let go of a stop, here and in the registry, unless a newer press has replaced it there. */
-  const releaseStop = useCallback((attempt: StopAttempt) => {
-    if (stopsInFlight.get(panelScratch)?.attempt === attempt.attempt) stopsInFlight.delete(panelScratch);
-    setStopping((current) => current?.attempt === attempt.attempt ? null : current);
-  }, [panelScratch]);
-  // Once the side chat has loaded, a stop whose turn is over is done. Before that nothing can say so:
-  // a remounted panel keeps the seat held while it loads.
-  useEffect(() => {
-    if (stopping !== null && child !== undefined && !stoppingTurn) releaseStop(stopping);
-  }, [child, releaseStop, stopping, stoppingTurn]);
+  // A pressed Stop Turn holds the seat for its side chat until polling says its turn is over, it
+  // fails, or its deadline passes. Nothing derived here releases it: a machine dropping offline for a
+  // moment, or a late answer carrying an older view, says nothing about whether the turn has ended.
+  const stoppingTurn = stopping !== null && child?.id === stopping.childId;
   useEffect(() => {
     const listener = (scope: string, attempt: number, cause: unknown) => {
       if (scope !== panelScratch || stoppingRef.current?.attempt !== attempt) return;

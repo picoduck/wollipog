@@ -475,6 +475,101 @@ test("a late send answer keeps a pending stop, and a stop's failure reaches a re
   }
 });
 
+/**
+ * Cross-model review CR-5.1 and CR-5.2. Only polling ends a held stop: the machine dropping offline
+ * for a moment does not, and neither does a create's late answer carrying an older view of a child
+ * polling has already adopted.
+ */
+test("a held stop outlasts a machine blip and a create's late, older answer", async () => {
+  const enter = async (field: HTMLTextAreaElement) => {
+    await act(async () => {
+      field.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }) as unknown as Event);
+    });
+  };
+  const shiftEscape = async (field: HTMLTextAreaElement) => {
+    await act(async () => {
+      field.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", shiftKey: true, bubbles: true, cancelable: true }) as unknown as Event);
+    });
+  };
+  const prompted: string[] = [];
+  const running = { ...child, status: "running", activeTurnId: "turn-x" } as SessionView;
+  const stub: Partial<Api> = {
+    sideChat: async () => ({ sideChat: { parentSessionId: parent.id, session: running, createdAt: 1 } }),
+    getSessionEventPage: async () => ({ events: [], eventEpoch: 0, nextAfter: 0, cacheComplete: true }),
+    cancelTurn: () => new Promise<SessionView>(() => {}),
+    prompt: async (_id: string, text: string) => {
+      prompted.push(text);
+      return running;
+    },
+  };
+  const host = domWindow.document.createElement("div");
+  domWindow.document.body.append(host);
+  Object.assign(api, stub);
+  const root = createRoot(host as unknown as HTMLDivElement);
+  const show = async (online: boolean) => {
+    await act(async () => {
+      root.render(
+        <React.StrictMode>
+          <SideChatPanel session={parent} runnerOnline={online} runnerProtocolVersion={PROTOCOL_VERSION} onInsertDraft={() => {}} />
+        </React.StrictMode>,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+  };
+  const field = () => host.querySelector("textarea") as unknown as HTMLTextAreaElement;
+  try {
+    await show(true);
+    await shiftEscape(field());
+    await show(false);
+    await tick(1_700);
+    await show(true);
+    await tick(10);
+    assert.ok(host.querySelector('button[aria-label="Stopping Turn"]'), "the blip did not end the stop");
+    await act(async () => {
+      field().value = "after the blip";
+      fireDomEvent.change(field());
+    });
+    await enter(field());
+    assert.equal(prompted.length, 0);
+  } finally {
+    await act(async () => { root.unmount(); });
+    host.remove();
+    Object.assign(api, ORIGINAL);
+  }
+
+  // A replacement adopted by polling, its turn stopped, and then the create's late `starting` answer.
+  const ended = { ...child, status: "stopped" } as SessionView;
+  const fresh = { ...child, id: "side-session-fresh-turn", status: "running", activeTurnId: "turn-y" } as SessionView;
+  let related: SideChatView = { parentSessionId: parent.id, session: ended, createdAt: 1 };
+  let answer: ((value: SideChatView) => void) | undefined;
+  const view = await render(
+    <SideChatPanel session={parent} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION} onInsertDraft={() => {}} />,
+    {
+      ...stub,
+      sideChat: async () => ({ sideChat: related }),
+      createSideChat: () => new Promise<SideChatView>((resolve) => {
+        related = { parentSessionId: parent.id, session: fresh, createdAt: 2 };
+        answer = resolve;
+      }),
+    },
+  );
+  try {
+    await act(async () => { view.button("Start New Side Chat")!.click(); });
+    await tick(1_700);
+    await shiftEscape(view.textarea()!);
+    await act(async () => {
+      answer!({ parentSessionId: parent.id, session: { ...fresh, status: "starting", activeTurnId: undefined } as SessionView, createdAt: 2 });
+    });
+    await tick(1_700);
+    assert.ok(view.button("Stopping Turn"), "the create's older answer did not end the stop");
+    await view.type("still stopping");
+    await enter(view.textarea()!);
+    assert.equal(prompted.length, 0);
+  } finally {
+    await view.dispose();
+  }
+});
+
 test("a refused start keeps the draft without claiming the machine didn't respond", async () => {
   const view = await render(<SideChatPanel session={parent} runnerOnline onInsertDraft={() => {}} />, {
     sideChat: async () => ({ sideChat: null }),
