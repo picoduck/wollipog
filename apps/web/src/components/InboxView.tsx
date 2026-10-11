@@ -1535,15 +1535,24 @@ export function InboxView({
   useLayoutEffect(() => {
     const notices = listNoticesRef.current;
     if (!isMobile || !notices || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() => {
+    const revealFocusedControl = () => {
       const focused = notices.ownerDocument.activeElement;
       if (!(focused instanceof HTMLElement) || !notices.contains(focused)) return;
       const bounds = notices.getBoundingClientRect(), control = focused.getBoundingClientRect();
-      if (control.bottom > bounds.bottom) notices.scrollTop += control.bottom - bounds.bottom;
-      else if (control.top < bounds.top) notices.scrollTop -= bounds.top - control.top;
-    });
+      const style = getComputedStyle(focused);
+      const outline = style.outlineStyle === "none" ? 0 :
+        parseFloat(style.outlineWidth) + Math.max(0, parseFloat(style.outlineOffset));
+      const clearance = outline + 1;
+      if (control.bottom + clearance > bounds.bottom) notices.scrollTop += control.bottom + clearance - bounds.bottom;
+      else if (control.top - clearance < bounds.top) notices.scrollTop -= bounds.top - control.top + clearance;
+    };
+    const observer = new ResizeObserver(revealFocusedControl);
     observer.observe(notices);
-    return () => observer.disconnect();
+    notices.addEventListener("focusin", revealFocusedControl);
+    return () => {
+      observer.disconnect();
+      notices.removeEventListener("focusin", revealFocusedControl);
+    };
   }, [isMobile]);
   const orderLineId = `inbox-order-line-${useId().replace(/:/gu, "")}`;
   // A list notice that held focus and went (Dismiss All took the last skill) leaves focus in the list.

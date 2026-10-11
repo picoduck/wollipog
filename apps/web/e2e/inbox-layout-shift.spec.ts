@@ -75,6 +75,14 @@ for (const mode of ["list", "board", "empty"] as const) {
     await expect(page.getByRole("region", { name: "Recommended Skills", exact: true })).toBeVisible();
     const content = page.locator(mode === "board" ? ".board-wrap" : mode === "empty" ? ".inbox-state" : ".inbox-list");
     await expect(content).toBeVisible();
+    const action = page.getByRole("button", { name: "Dismiss All", exact: true });
+    const actionInside = () => action.evaluate(button => {
+      const b = button.getBoundingClientRect();
+      const n = button.closest(".inbox-list-notices")!.getBoundingClientRect();
+      const style = getComputedStyle(button);
+      const outline = parseFloat(style.outlineWidth) + Math.max(0, parseFloat(style.outlineOffset));
+      return style.outlineStyle !== "none" && outline > 0 && b.top - outline >= n.top && b.bottom + outline <= n.bottom;
+    });
     for (const height of [400, 320]) {
       await page.setViewportSize({ width: 390, height });
       await expect.poll(async () => page.locator(".inbox-list-pane").evaluate(pane => {
@@ -83,13 +91,14 @@ for (const mode of ["list", "board", "empty"] as const) {
         const p = pane.getBoundingClientRect(), n = notices.getBoundingClientRect(), c = content.getBoundingClientRect();
         return n.height <= p.height / 2 + 1 && c.height >= p.height / 2 - 1 && c.bottom <= n.top + 1 && notices.scrollHeight > notices.clientHeight;
       })).toBe(true);
-      await page.getByRole("button", { name: "Dismiss All", exact: true }).focus();
-      await expect(page.getByRole("button", { name: "Dismiss All", exact: true })).toBeInViewport();
-      await expect.poll(async () => page.getByRole("button", { name: "Dismiss All", exact: true }).evaluate(button => {
-        const b = button.getBoundingClientRect();
-        const n = button.closest(".inbox-list-notices")!.getBoundingClientRect();
-        return b.top >= n.top - 1 && b.bottom <= n.bottom + 1;
-      })).toBe(true);
+      // Assert the already focused control after shrinking, before a new focus() could scroll it.
+      if (height === 320) {
+        await expect(action).toBeFocused();
+        await expect.poll(actionInside).toBe(true);
+      }
+      await action.focus();
+      await expect(action).toBeInViewport();
+      await expect.poll(actionInside).toBe(true);
       if (process.env.EVIDENCE_DIR && mode === "list" && height === 320) {
         await page.screenshot({ path: `${process.env.EVIDENCE_DIR}/phone-short-ready.png` });
       }

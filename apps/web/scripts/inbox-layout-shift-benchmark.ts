@@ -74,6 +74,8 @@ try {
   }
   browser = await chromium.launch();
   for (let run = 1; run <= runs; run++) {
+    const sample: Record<string, unknown> = { run };
+    samples.push(sample);
     const context = await browser.newContext({ viewport: { width, height: 844 }, serviceWorkers: "block" });
     try {
       const page = await context.newPage();
@@ -118,7 +120,7 @@ try {
         const state = (window as unknown as { __INBOX_CLS__: { firstRowMs: number | null;
           shifts: Array<{ startTime: number; value: number }> } }).__INBOX_CLS__;
         const cls = (entries: typeof state.shifts) => {
-          let maximum = 0, total = 0, start = 0, previous = 0;
+          let maximum = 0, total = 0, start = -Infinity, previous = -Infinity;
           for (const entry of entries) {
             if (entry.startTime - previous >= 1_000 || entry.startTime - start >= 5_000) { total = 0; start = entry.startTime; }
             total += entry.value; previous = entry.startTime; maximum = Math.max(maximum, total);
@@ -140,15 +142,14 @@ try {
         dismissalFocus = await page.evaluate(() => ({ tag: document.activeElement?.tagName,
           className: document.activeElement?.getAttribute("class") }));
       }
-      const sample = { run, ...timing, errors, dismissalFocus };
-      samples.push(sample);
+      Object.assign(sample, timing, { errors, dismissalFocus });
       measuredCls.push(timing.clsSettled);
       console.log(JSON.stringify({ run, firstRowMs: timing.firstRowMs, clsThroughFirstRow: timing.clsThroughFirstRow,
         clsSettled: timing.clsSettled, shifts: timing.shifts, errors, dismissalFocus }));
       assert.deepEqual(errors, []);
       assert.ok(timing.firstRowMs !== null);
     } catch (error) {
-      samples.push({ run, failed: String(error) });
+      sample.failed = String(error);
       throw error;
     } finally { await context.close(); }
   }

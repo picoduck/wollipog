@@ -2546,8 +2546,9 @@ notices at the top of their scrollers.
   partial failure keeps what the server did not record and says "Could not dismiss {names}. Try
   again." in `--danger-text` with `role="alert"`. No confirmation: Show Recommendation in Skills undoes
   a dismissal.
-- **New order** is not a notice: when live activity would reorder the list, a neutral line under the
-  slot reads "New activity changed the order." with a ghost **Apply**, which the sentence describes.
+- **New order** is not a notice: when live activity would reorder the list, a neutral line above the
+  rows reads "New activity changed the order." with a ghost **Apply**, which the sentence describes.
+  It follows the notice slot on desktop/tablet; on phones the notice stays below the scroll area.
   Nothing in the header or the tab row moves for it.
 - **Budget.** The slot, the order line and Reconnecting… are the list head. Stacked, the head takes
   whole rows of the list's height (§6.3): the divider keeps its stored position, the rows start right

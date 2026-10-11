@@ -6,6 +6,8 @@ rows. It remains one mounted `SessionsListNotices`, with the existing ranking, m
 offline hiding, and focus rules. At most half of the phone pane is used by the notice; longer
 notices scroll. Desktop/tablet notices retain their placement above the content, and stacked
 list geometry measures the combined notice and status-line heights.
+When focus enters the phone notice or its viewport shrinks, only that notice's scroll position
+adjusts to keep the complete focused control and its outline visible.
 
 Reproduce the cold measurement with a production build:
 
