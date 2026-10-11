@@ -1,0 +1,103 @@
+import { expect, test, type Locator, type Page } from "@playwright/test";
+
+test.use({ hasTouch: true });
+
+const transcriptPosition = (page: Page) => page.locator(".detail-scroll").evaluate((reader) => {
+  const box = reader.getBoundingClientRect();
+  const rows = [...reader.querySelectorAll<HTMLElement>("[data-virtual-row]")];
+  const state = reader.getAttribute("data-follow-tail-state");
+  const row = state === "following"
+    ? rows.findLast((item) => item.getBoundingClientRect().top < box.bottom - 1)
+    : rows.find((item) => item.getBoundingClientRect().bottom > box.top + 1);
+  return { state, row: row?.getAttribute("data-virtual-key"),
+    offset: state === "following" ? null : Math.round((row?.getBoundingClientRect().top ?? box.top) - box.top) };
+});
+
+async function expectHeaderVisible(card: Locator) {
+  await expect.poll(() => card.locator(".request-card-head").evaluate((head) => {
+    const cardBox = head.closest(".question-card")!.getBoundingClientRect();
+    const box = head.getBoundingClientRect();
+    const toggle = head.querySelector(".question-reading-toggle")!;
+    const control = toggle.getBoundingClientRect();
+    const hit = document.elementFromPoint(control.left + control.width / 2, control.top + control.height / 2);
+    return box.top >= cardBox.top - 0.5 && box.bottom <= cardBox.bottom + 0.5 &&
+      (hit === toggle || toggle.contains(hit));
+  }), { message: "the entire collapsed header stays visible and its toggle is clickable" }).toBe(true);
+}
+
+for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }]) {
+  for (const activation of ["focused click", "nonfocusing click", "touch"] as const) {
+    test(`header collapse after scrolling preserves the answer and transcript at ${viewport.width}×${viewport.height} with ${activation} (#2928)`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await page.goto("/agent-questions-e2e.html?set=long-text&more=1&after=40");
+      const card = page.locator(".request-dock .question-card");
+      const toggle = card.locator(".question-reading-toggle");
+      const title = card.locator(".question-text");
+      const before = await transcriptPosition(page);
+      const question = await title.textContent();
+      await card.getByRole("radio", { name: /^Hold/ }).check();
+      await title.evaluate((element) => (element as HTMLElement).focus({ preventScroll: true }));
+      if (activation === "nonfocusing click") {
+        // Exercise the browser branch that clicks a button without giving it focus.
+        await toggle.evaluate((element) => element.addEventListener("mousedown", (event) => event.preventDefault()));
+      }
+      if (activation === "focused click") await toggle.focus();
+      if (activation === "touch") await toggle.tap();
+      else await toggle.click();
+      await expect(toggle).toHaveAttribute("aria-expanded", "true");
+      await card.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+      expect(await card.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+      if (activation === "touch") await toggle.tap();
+      else await toggle.click();
+      await expect(toggle).toHaveAttribute("aria-expanded", "false");
+      await expectHeaderVisible(card);
+      if (activation === "nonfocusing click") await expect(title).toBeFocused();
+      if (activation === "focused click") await expect(toggle).toBeFocused();
+      await expect(card.getByRole("radio", { name: /^Hold/ })).toBeChecked();
+      expect(await title.textContent()).toBe(question);
+      await expect(page.locator(".detail-main")).toHaveCSS("visibility", "visible");
+      await expect.poll(() => transcriptPosition(page)).toEqual(before);
+      expect(await page.evaluate(() => window.agentQuestionCalls)).toEqual([]);
+    });
+  }
+}
+
+test("nonfocusing header collapse also reveals the header after inline expansion (#2928)", async ({ page }) => {
+  await page.setViewportSize({ width: 844, height: 390 });
+  await page.goto("/agent-questions-e2e.html?set=long-text&more=1&after=40");
+  const card = page.locator(".request-dock .question-card");
+  await card.getByRole("button", { name: "Show Full Question" }).click();
+  const toggle = card.locator(".question-reading-toggle");
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+  const title = card.locator(".question-text");
+  await title.evaluate((element) => (element as HTMLElement).focus({ preventScroll: true }));
+  await toggle.evaluate((element) => element.addEventListener("mousedown", (event) => event.preventDefault()));
+  await card.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expectHeaderVisible(card);
+  await expect(title).toBeFocused();
+});
+
+test("touch header collapse preserves a focused draft and reveals the header when the keyboard closes (#2928)", async ({ page }) => {
+  await page.setViewportSize({ width: 667, height: 375 });
+  await page.goto("/agent-questions-e2e.html?set=long-text&more=1&after=40");
+  const card = page.locator(".request-dock .question-card");
+  const toggle = card.locator(".question-reading-toggle");
+  await toggle.tap();
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+  await card.getByRole("radio", { name: "Something Else…" }).check();
+  const field = card.locator(".question-input");
+  await field.fill("Keep this answer draft");
+  await card.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await toggle.tap();
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(field).toHaveValue("Keep this answer draft");
+  // holdFieldFocus preserves the phone's keyboard through the click; collapse must not steal it.
+  await expect(field).toBeFocused();
+  // Compact keyboard mode deliberately hides the header (#2205). Closing the keyboard reveals it.
+  await field.evaluate((element) => (element as HTMLTextAreaElement).blur());
+  await expect(card).not.toHaveAttribute("data-keyboard-open", "");
+  await expectHeaderVisible(card);
+  expect(await page.evaluate(() => window.agentQuestionCalls)).toEqual([]);
+});
