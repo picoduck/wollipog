@@ -1,4 +1,4 @@
-import { type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, memo, useCallback, useDeferredValue, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { lazy, Suspense, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, memo, useCallback, useDeferredValue, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { prioritizedPendingRequests, providerSupportsConversationFork, type BoardColumn, type SessionReminderView, type SessionView, type SetSessionReminderRequest, type SnoozeScheduleInput, type SourceLocation } from "@wollipog/protocol";
 import { archiveAndStopMessage, archiveResultMessage, archiveResultTone, sessionArchiveRequiresStop } from "../archive-actions.js";
 import { sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
@@ -46,7 +46,7 @@ import { useFeedback, type ConfirmationOptions } from "./FeedbackProvider.js";
 import { InboxList, type InboxListEntry } from "./InboxList.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
 import { ProjectSplitMenu, type ProjectSplitActionsProps } from "./ProjectSplitMenu.js";
-import { SessionDetail, type PreviewForkControls, type SessionDetailProps } from "./SessionDetail.js";
+import type { PreviewForkControls, SessionDetailProps } from "./SessionDetail.js";
 import { useStableCallbacks } from "./stable-callbacks.js";
 import type { RightPanelState } from "./RightPanel.js";
 import type { PinnedSummaryState } from "./pinned-summary-state.js";
@@ -86,6 +86,8 @@ import { normalizeSessionsQuery, searchInboxSplits, sessionMatchesQuery } from "
 import { SessionsNoMatches, SessionsSearchField } from "./SessionsSearch.js";
 import { SessionsListSkeleton, SessionsPreviewSkeleton, SessionsSituationState } from "./SessionsStates.js";
 import { SessionsArrivalFailed, useSessionsArrivalWait } from "./SessionsStates.js";
+import { SessionPlaceholder } from "./SessionPlaceholder.js";
+import { LazySessionBoundary } from "./LazySessionBoundary.js";
 import { sessionsSituation, sessionsSituationOffersNewSession, sessionsSyncingCount } from "../sessions-states.js";
 import { sessionsToRestore } from "../sessions-states.js";
 import { useOpenSearchPalette } from "./search-palette-context.js";
@@ -93,6 +95,8 @@ import { State, useSnapshotState } from "./State.js";
 import { StaleContent } from "./StaleContent.js";
 import { useRemovedFocus } from "./useRemovedFocus.js";
 import { sessionReadingTarget } from "../focus-zones.js";
+
+const SessionDetail = lazy(() => import("./SessionDetail.js").then((module) => ({ default: module.SessionDetail })));
 
 const PROJECT_PIN_KEY = "wollipog.projects.pinned";
 const SEEN_DWELL_MS = 1_500;
@@ -1504,6 +1508,7 @@ export function InboxView({
   // divider stays where the stored ratio puts it. What the head leaves of its last row is space
   // under the last whole row, above the divider.
   const listHeadRef = useRef<HTMLDivElement>(null);
+  const listNoticesRef = useRef<HTMLDivElement>(null);
   const [listHeadHeight, setListHeadHeight] = useState(0);
   useLayoutEffect(() => {
     const head = listHeadRef.current;
@@ -1511,17 +1516,44 @@ export function InboxView({
       setListHeadHeight(0);
       return;
     }
-    const measure = () => setListHeadHeight(head.getBoundingClientRect().height);
+    const notices = listNoticesRef.current;
+    const measure = () => setListHeadHeight(head.getBoundingClientRect().height +
+      (notices?.getBoundingClientRect().height ?? 0));
     measure();
     if (typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(measure);
     observer.observe(head);
+    if (notices) observer.observe(notices);
     return () => observer.disconnect();
   }, [stacked]);
   // The epsilon keeps a head of exactly whole rows from taking one more through floating-point error.
   const listHeadRows = stacked && listHeadHeight > 0 && splitGeometry.rowHeight > 0
     ? Math.ceil(listHeadHeight / splitGeometry.rowHeight - 1e-6)
     : 0;
+  // A phone keyboard/rotation can shrink a notice that already holds focus. Keep that control
+  // inside the notice's own scroller without moving the list or taking focus elsewhere.
+  useLayoutEffect(() => {
+    const notices = listNoticesRef.current;
+    if (!isMobile || !notices || typeof ResizeObserver === "undefined") return;
+    const revealFocusedControl = () => {
+      const focused = notices.ownerDocument.activeElement;
+      if (!(focused instanceof HTMLElement) || !notices.contains(focused)) return;
+      const bounds = notices.getBoundingClientRect(), control = focused.getBoundingClientRect();
+      const style = getComputedStyle(focused);
+      const outline = style.outlineStyle === "none" ? 0 :
+        parseFloat(style.outlineWidth) + Math.max(0, parseFloat(style.outlineOffset));
+      const clearance = outline + 1;
+      if (control.bottom + clearance > bounds.bottom) notices.scrollTop += control.bottom + clearance - bounds.bottom;
+      else if (control.top - clearance < bounds.top) notices.scrollTop -= bounds.top - control.top + clearance;
+    };
+    const observer = new ResizeObserver(revealFocusedControl);
+    observer.observe(notices);
+    notices.addEventListener("focusin", revealFocusedControl);
+    return () => {
+      observer.disconnect();
+      notices.removeEventListener("focusin", revealFocusedControl);
+    };
+  }, [isMobile]);
   const orderLineId = `inbox-order-line-${useId().replace(/:/gu, "")}`;
   // A list notice that held focus and went (Dismiss All took the last skill) leaves focus in the list.
   const focusListZone = useCallback(() => {
@@ -1766,10 +1798,9 @@ export function InboxView({
         aria-hidden={expanded || undefined}
         inert={expanded || undefined}
       >
-        {/* What sits above the rows (§13.2, #2221): the one list notice, then the quiet new-order
-            line, then the Reconnecting… line. Stacked, it takes whole rows of the list's height, so
-            the divider stays put and no row is cut at it. */}
-        <div className="inbox-list-head" ref={listHeadRef}>
+        {/* One mounted notice slot: above the list on desktop, below its scroller on a phone so
+            asynchronously loaded recommendations cannot move the already rendered top rows. */}
+        <div className="inbox-list-notices" ref={listNoticesRef}>
           <SessionsListNotices
             signIns={machineProviderLogins}
             machineName={machineName}
@@ -1781,6 +1812,9 @@ export function InboxView({
             onSetupGenerated={openGeneratedWorktreeSetup}
             onFocusLost={focusListZone}
           />
+        </div>
+        {/* The quiet order and reconnecting lines stay above the rows in every layout. */}
+        <div className="inbox-list-head" ref={listHeadRef}>
           {/* Live activity would reorder the rows. Neutral and outside the slot, so no notice ever
               waits behind it, and nothing in the header or the tab row moves for it. */}
           {orderUpdateAvailable && (
@@ -1888,7 +1922,16 @@ export function InboxView({
           {split && !stacked && <SessionsListWidthDivider grid={viewRef} width={listWidth} onWidthChange={changeListWidth} />}
           <div className="inbox-preview-pane" ref={previewPaneRef} data-focus-zone="main">
             {surfaceSessionId && !listSkeleton ? (
-              <InboxSessionDetail key={surfaceSessionId} {...surfaceProps} />
+              <LazySessionBoundary sessionId={surfaceSessionId} preview={!expanded} isMobile={isMobile}
+                containerRef={previewPaneRef} onBack={onCollapse ?? (() => navigate({ name: "inbox" }))}>
+              <Suspense fallback={expanded
+                ? <SessionPlaceholder sessionId={surfaceSessionId} preview={false} isMobile={isMobile}
+                    placeholder={{ title: "Loading Session…", hint: null, variant: "loading", actions: [] }}
+                    onBack={onCollapse ?? (() => navigate({ name: "inbox" }))} onRetry={() => {}} />
+                : <SessionsPreviewSkeleton />}>
+                <InboxSessionDetail key={surfaceSessionId} {...surfaceProps} />
+              </Suspense>
+              </LazySessionBoundary>
             ) : (
               // Rows always select their first (inbox.ts repairInboxSelection), so the preview is
               // empty only while the list loads.

@@ -99,7 +99,7 @@ test("a burst of transcript events with an unchanged roster costs no extra regis
   const render = (session: SessionView, items: TimelineItem[]) =>
     root.render(<ApiProvider client={client}><FeedbackProvider><StoreProvider connection={connection}>
       <AgentsPanel session={session} items={items} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
-        requestedId={null} onSelect={() => {}} parentTurnEventIds={new Map()} onOpenParentTurn={() => {}} />
+        requestedId={null} onSelect={() => {}} parentTurns={new Map()} onViewTurn={() => {}} />
     </StoreProvider></FeedbackProvider></ApiProvider>);
 
   try {
@@ -159,7 +159,7 @@ test("a page load started under an armed timer moves the deadline instead of los
   const render = (session: SessionView, items: TimelineItem[]) =>
     root.render(<ApiProvider client={client}><FeedbackProvider><StoreProvider connection={connection}>
       <AgentsPanel session={session} items={items} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
-        requestedId={null} onSelect={() => {}} parentTurnEventIds={new Map()} onOpenParentTurn={() => {}} />
+        requestedId={null} onSelect={() => {}} parentTurns={new Map()} onViewTurn={() => {}} />
     </StoreProvider></FeedbackProvider></ApiProvider>);
 
   try {
@@ -218,7 +218,7 @@ test("a folded re-statement refreshes promptly without restoring per-event regis
   const render = (session: SessionView, items: TimelineItem[]) =>
     root.render(<ApiProvider client={client}><FeedbackProvider><StoreProvider connection={connection}>
       <AgentsPanel session={session} items={items} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
-        requestedId={null} onSelect={() => {}} parentTurnEventIds={new Map()} onOpenParentTurn={() => {}} />
+        requestedId={null} onSelect={() => {}} parentTurns={new Map()} onViewTurn={() => {}} />
     </StoreProvider></FeedbackProvider></ApiProvider>);
 
   // Real events through the real fold: hand-authored items could not show that a re-statement
@@ -312,7 +312,7 @@ test("a single child's change costs two requests against a five-page registry, n
   const render = (session: SessionView, items: TimelineItem[]) =>
     root.render(<ApiProvider client={client}><FeedbackProvider><StoreProvider connection={connection}>
       <AgentsPanel session={session} items={items} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
-        requestedId={null} onSelect={() => {}} parentTurnEventIds={new Map()} onOpenParentTurn={() => {}} />
+        requestedId={null} onSelect={() => {}} parentTurns={new Map()} onViewTurn={() => {}} />
     </StoreProvider></FeedbackProvider></ApiProvider>);
 
   try {
@@ -396,7 +396,7 @@ test("a rejected refresh leaves its evidence unspent, so the next one still read
   const render = (session: SessionView, items: TimelineItem[]) =>
     root.render(<ApiProvider client={client}><FeedbackProvider><StoreProvider connection={connection}>
       <AgentsPanel session={session} items={items} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
-        requestedId={null} onSelect={() => {}} parentTurnEventIds={new Map()} onOpenParentTurn={() => {}} />
+        requestedId={null} onSelect={() => {}} parentTurns={new Map()} onViewTurn={() => {}} />
     </StoreProvider></FeedbackProvider></ApiProvider>);
 
   try {
@@ -471,7 +471,7 @@ test("the Nth idle refresh sweeps every loaded page, and the Nth active refresh 
   const render = (session: SessionView, items: TimelineItem[]) =>
     root.render(<ApiProvider client={client}><FeedbackProvider><StoreProvider connection={connection}>
       <AgentsPanel session={session} items={items} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
-        requestedId={null} onSelect={() => {}} parentTurnEventIds={new Map()} onOpenParentTurn={() => {}} />
+        requestedId={null} onSelect={() => {}} parentTurns={new Map()} onViewTurn={() => {}} />
     </StoreProvider></FeedbackProvider></ApiProvider>);
   const realNow = Date.now;
   let skew = 0;
@@ -564,7 +564,7 @@ test("a deduplicated idle callback does not count toward the backstop", async ()
   const render = (session: SessionView, items: TimelineItem[]) =>
     root.render(<ApiProvider client={client}><FeedbackProvider><StoreProvider connection={connection}>
       <AgentsPanel session={session} items={items} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
-        requestedId={null} onSelect={() => {}} parentTurnEventIds={new Map()} onOpenParentTurn={() => {}} />
+        requestedId={null} onSelect={() => {}} parentTurns={new Map()} onViewTurn={() => {}} />
     </StoreProvider></FeedbackProvider></ApiProvider>);
   const realNow = Date.now;
   let skew = 0;

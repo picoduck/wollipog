@@ -782,7 +782,7 @@ extending the settled one-bar session chrome app-wide.
 - It opens the Session Status popover (§9.2, 340px; a bottom sheet on phones): the title, then one
   row per condition with its badge, one sentence and the action that resolves it where one exists
   (Review Request, Answer, Sign In…, Open for Background Work, Open Agents, Open Requests). Result
-  Blocked offers Stop Job… (the Background Work panel's danger confirmation) when Stop Job is
+  Blocked offers Stop Job… (the Job Detail page's danger confirmation, §4.10) when Stop Job is
   available and exactly one job of the blocked turn is still running, and Result Missing offers
   Acknowledge Missing Result; otherwise either opens Background Work. The step closes the popover and
   leaves focus on the Session Status control; reopened while its request runs, the row's button is
@@ -835,6 +835,18 @@ or unreadable value means Bottom Dock.
   the panel tool. Both menus and the Settings row write the same preference and update each other
   live. Moving never restarts a running shell; its tab and scrollback move with it.
 - The Terminal toggle and Ctrl+` open the terminal wherever it is placed.
+
+**One terminal state, any host (#2867).** The open session's terminals live above the places that
+show them: `useSessionTerminals(sessionId)` (`session-terminals.tsx`, provided above the app's main
+area) owns the shell list, the active tab, the search (open, term and match count), the pipe rows'
+drafts and history, and the key and resize queues. Each shell's xterm terminal is created once per
+session and attached to whichever host shows it (`ShellTerminal` with the store's `terminal(shellId)`);
+a host calls `openHost()` while mounted. Hiding a host detaches its terminals and keeps the rest, so
+reopening shows the same tab, search, scrollback and scroll position without fetching history again.
+Exactly one host shows a shell's terminal at a time, so each shell has one resize stream. Leaving the
+session disposes its terminals; the shells keep running. The placement is `terminal-placement.ts`:
+`terminalPlacement()`, `setTerminalPlacement()` and `useTerminalPlacement()` on the per-device key
+`wollipog.terminal.placement` (`"dock"` or `"panel"`), live across tabs.
 
 **The terminal's body (#2865).** The terminal is flush: no border, radius or padding of its own, on
 a body that is `--terminal-bg` edge to edge with `--space-2` `--space-3` padding. Each shell keeps one
@@ -954,6 +966,16 @@ Requests, Decision History, and Terminal once #2868 moves it) opens in one frame
   focus, such as the finding editor's textarea (#2907): the keyboard serves that field, so the foot's
   height goes to the scroller. It returns unchanged when the field loses focus. Focus in the foot's
   own fields never collapses it, and a fine pointer never does.
+- **Side Chat** (#2863, `SideChatPanel.tsx`) lays out on its own three parts: a 40px context line
+  (`.sc-context`: the side chat's one `StatusBadge` in the session words, Unverified while its
+  machine is offline, "Separate Worktree" as meta, and Open Session), the transcript as the one
+  scroller, and a foot. The foot is the composer card (`.sc-composer`, the main composer's card
+  recipe: a textarea that grows from one line to eight with Send inset at its trailing edge, never
+  wrapping), whose Send seat holds Stop Turn while the side chat replies. Ended, the foot is one
+  sentence and Start New Side Chat instead, with no textarea; at 760px and below they stack and the
+  button is full width and 44px. Starting keeps the textarea and holds Send with the sentence that
+  says why; a failed start is a danger notice with Retry over the kept draft. About Side Chat holds
+  what is shared and what comes back.
 - **Resize handle.** An 8px strip centred on the leading edge that takes no room. On hover a 2px
   line and a grip in `--control-outline`, on keyboard focus the line in `--focus` (with a transparent
   outline for forced colors), and the width in a tooltip while dragging. Arrow keys, Home, End,
@@ -1021,6 +1043,41 @@ Requests, Decision History, and Terminal once #2868 moves it) opens in one frame
   survives, and while a focused field hides the tab bar the sheet reaches the keyboard inset (§15.1). Back
   returns focus to the control that opened the panel if it is still on screen, else to the
   conversation (the app bar's toggle went with the bar).
+
+### 4.10 Background Work
+
+Background Work (`BackgroundWorkPanel`, #2858) lists the jobs the agent left running after a turn
+and whether their result came back. It is one list of turn groups, never a card per turn:
+
+- **Turn groups.** One §5.2 `.group-label` per turn that started jobs, most recent first: the
+  transcript's own turn number as its footer shows it ("Turn 4"; "Earlier Turn" while the turn is
+  outside the loaded window, "Unknown Turn" where the runner could not name it), the group's
+  `jobGroup` status as the inline badge (§11.2), and a `.btn.sm.ghost` **View Turn** that scrolls the
+  transcript to the turn, loading earlier activity a page at a time until it is there. An unknown
+  turn, or one the fully loaded transcript does not hold, has no View Turn. The heading never wraps
+  View Turn under its label; the label gives way first.
+- **Job rows.** `.row.row-2`: line 1 is the job's name, its kind and the last six characters of its
+  id in mono `--text-faint` ("Shell Job a1f3c9", `backgroundJobLabel()`, the same name everywhere),
+  and its `job` badge; line 2 is one sentence about its result ("Started 10m ago", "Result waits for
+  the other job", "Result returned 50m ago", "Last seen 12m ago") with the duration trailing, then a
+  chevron. A row pushes the job's **Job Detail** page (§4.9 Pages). A turn with only a retained
+  receipt lists one "Result Receipt" row per receipt, which opens nothing.
+- **Job Detail** (`JobDetail`, shared with the Agents tab's job page): the job's name as the page
+  title, its badge, then a §5.4 `.facts` list: Started (its age and clock time), Running For or
+  Duration, Finished, Last Activity, Result (a sentence), Notification, Started By (the turn, with
+  View Turn) and, for a job Wollipog ended, Ended By and Reason. Raw delivery stages stay off it.
+  **Stop Job…** (`.btn.sm`) follows the facts while the job can be stopped and opens the §7.4 danger
+  confirmation titled "Stop <job name>", Cancel focused. While the request runs the button is busy;
+  then a sentence under it says what happened, or a compact danger notice says why it failed.
+  Unavailable, the button stays disabled with its reason as visible text it is described by.
+- **States**, each one notice or one compact state, in this order: machine offline (a warning in the
+  panel notice slot naming the machine, over the last-known list), loading (skeleton rows at the row
+  height after 300ms), a failed load (§12.4, Retry and Show Details), not tracked ("Background Work
+  Isn't Tracked", with Open Terminal), an older runner (Open Machine), the list, then empty ("No
+  Background Work"). A list cut at its bound ends in a §5.6 `ListFoot`: "Showing the 128 most recent
+  jobs."
+- **About Background Work** (`InfoPopover`) says what the list shows and that commands, file paths,
+  credentials and output stay on the machine. There is no privacy footnote under the list.
 
 ---
 
@@ -1135,8 +1192,7 @@ One recipe for every read-only label and value list. It is the §19.4 merge of t
   pairs side by side between two hairlines, separated by vertical hairlines, the value in
   `--type-title` with tabular figures. Under 760px the strip becomes rows, label left and value
   right. It is a modifier, not a second class.
-- A region may set the list's spacing or size (the background work panel uses `--type-small`) but
-  not its structure.
+- A region may set the list's spacing or size but not its structure.
 - Replaces `.agent-details-grid`, `.background-work-job-meta`, `.usage-totals`,
   `.subscription-buckets`, `.skills-orphan-facts` and `.settings-about`. Ten more `<dl>` recipes
   remain (§19.4); each area moves its own onto `.facts` when it is redesigned.
@@ -1862,6 +1918,7 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Tool call | Running: info · Completed: success (inline, no pill) · Failed: danger |
 | Session family rollup chip | "N Awaiting Input" when a child waits on the user: warning. Otherwise neutral. The settled design's "tints orange" is implemented as the warning tone; `--accent-2` keeps no UI role. |
 | Subagent / background job | Queued, Canceled: neutral · Running: info (pulse) · Stalled: warning (still listed by its runner with no result past the stall bound) · Completed: success · Failed: danger · Unverified: neutral, hollow dot (its runner is offline) · Lost: danger (replaces Orphaned) · Result Missing: warning (finished, but the result never arrived) |
+| Background Work turn group (`jobGroup`, the group's inline badge, #2858) | Waiting for 1 Job, Waiting for N Jobs: info · N of M Finished: neutral · Returning Result: info · Result Returned: success (inline) · Result Missing: warning · Missing Result Acknowledged: neutral · Unverified: neutral, hollow dot |
 | Session header, background work | "Background Work Lost": danger (was "Background Work Orphaned") |
 | Delivery receipt | Delivered: success (inline, no pill) · Delivery Failed: danger |
 | Queued message (`queuedMessage`: the composer queue) | Pending, Queued, Canceled: neutral · Sending, Starting, Steering…: info (pulse) · Accepted, Pending Delivery: info · Held, Delivery Uncertain: warning · Delivery Failed, Not Sent: danger. Rendered as the inline badge. |
@@ -2502,9 +2559,12 @@ Replaces `.quarantine-banner`, `.skills-unavailable-notice`, `.worktree-setup-no
 `.queued-error`, `.form-error` (when used as a banner), `.settings-inline-error`, `.skills-git-held`
 and `PendingSetting`.
 
-**Sessions list notice slot (#2221).** The top of the Sessions list pane has one slot of its own:
-above the rows when stacked, at the top of the list column in Preview Right, and above the columns on
-the Board. `SessionsListNotices` (`apps/web/src/components/SessionsListNotices.tsx`) is a second
+**Sessions list notice slot (#2221, #2780).** The Sessions list pane has one slot of its own:
+above the rows on desktop/tablet, at the top of the list column in Preview Right, and above the
+Board's columns. On phones it is a visible sibling below the list/Board/state scroll area, so a
+late recommendation never moves already rendered top rows. The slot scrolls within at most half
+the pane's height, preserving usable content space on short screens and with the keyboard open.
+`SessionsListNotices` (`apps/web/src/components/SessionsListNotices.tsx`) is a second
 `SessionNoticeSlot`, so the ranking, the "+N More" menu (named "Sessions Notices") and the focus rules
 are the session slot's. Its ranks, in `LIST_NOTICE_RANK`: a machine sign-in that belongs to no
 session 1 (warning while pending, danger once failed or timed out), the open Project's setup
@@ -2543,8 +2603,9 @@ notices at the top of their scrollers.
   partial failure keeps what the server did not record and says "Could not dismiss {names}. Try
   again." in `--danger-text` with `role="alert"`. No confirmation: Show Recommendation in Skills undoes
   a dismissal.
-- **New order** is not a notice: when live activity would reorder the list, a neutral line under the
-  slot reads "New activity changed the order." with a ghost **Apply**, which the sentence describes.
+- **New order** is not a notice: when live activity would reorder the list, a neutral line above the
+  rows reads "New activity changed the order." with a ghost **Apply**, which the sentence describes.
+  It follows the notice slot on desktop/tablet; on phones the notice stays below the scroll area.
   Nothing in the header or the tab row moves for it.
 - **Budget.** The slot, the order line and Reconnecting… are the list head. Stacked, the head takes
   whole rows of the list's height (§6.3): the divider keeps its stored position, the rows start right

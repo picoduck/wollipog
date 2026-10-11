@@ -5,6 +5,8 @@ const port = playwrightPort("development");
 
 export default defineConfig({
   testDir: "./apps/web/e2e",
+  // Chunk interception requires emitted production assets, not Vite's source modules.
+  testIgnore: "inbox-lazy.spec.ts",
   fullyParallel: false,
   retries: process.env.CI ? 2 : 0,
   // A retry-only pass is a regression signal, not a green build hidden behind the retry budget.

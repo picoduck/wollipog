@@ -1,3 +1,4 @@
+import { waitForSessionPreview } from "./session-readiness.js";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { dialogMotionSettled } from "./dialog-motion.js";
 
@@ -20,6 +21,7 @@ async function openSession(page: Page, width: number, storage: Record<string, st
   await page.goto(FIXTURE);
   await page.getByRole("button", { name: /Alpha Session/ }).first().click();
   const expand = page.getByRole("button", { name: "Open Session", exact: true });
+  await waitForSessionPreview(page);
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator(".md table")).toBeVisible();
 }
@@ -128,6 +130,7 @@ test("a wide right panel turns the summary into a drawer, and the reader never d
   await page.reload();
   await page.getByRole("button", { name: /Alpha Session/ }).first().click();
   const expand = page.getByRole("button", { name: "Open Session", exact: true });
+  await waitForSessionPreview(page);
   if (await expand.isVisible()) await expand.click();
   let docked = 0;
   let drawers = 0;

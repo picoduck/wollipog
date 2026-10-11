@@ -420,6 +420,7 @@ export function SessionQuestionBanner({
   const titleToggleRef = useRef<HTMLButtonElement>(null);
   const headerToggleRef = useRef<HTMLButtonElement>(null);
   const expandedFromHeader = useRef(false);
+  const headerCollapsePending = useRef(false);
   // Set while the control that changed the question's state is the one about to be replaced.
   const toggleFocusPending = useRef(false);
   const onReadingChangeRef = useRef(onReadingChange);
@@ -557,9 +558,10 @@ export function SessionQuestionBanner({
   // The header toggle keeps focus in place; the inline link returns focus to that same link after
   // collapsing from the header. If the inline link no longer exists, the header remains available.
   useIsomorphicLayoutEffect(() => {
-    if (!toggleFocusPending.current) return;
-    toggleFocusPending.current = false;
-    if (!titleExpanded && expandedFromHeader.current) {
+    // Pointer activation can leave focus on a field or elsewhere. Reveal the header on an explicit
+    // header collapse independently of focus, without scrolling unrelated request/step changes.
+    if (headerCollapsePending.current) {
+      headerCollapsePending.current = false;
       const card = cardRef.current;
       if (card) {
         card.scrollTop = 0;
@@ -567,6 +569,8 @@ export function SessionQuestionBanner({
         if (dock) dock.scrollTop = 0;
       }
     }
+    if (!toggleFocusPending.current) return;
+    toggleFocusPending.current = false;
     (titleExpanded || expandedFromHeader.current ? headerToggleRef.current ?? titleRef.current
       : titleToggleRef.current ?? headerToggleRef.current ?? titleRef.current)?.focus({ preventScroll: true });
   }, [titleExpanded]);
@@ -578,6 +582,7 @@ export function SessionQuestionBanner({
   }, [reading]);
   const toggleQuestion = (event: React.MouseEvent<HTMLButtonElement>) => {
     if (!question) return;
+    headerCollapsePending.current = titleExpanded && event.currentTarget === headerToggleRef.current;
     if (!titleExpanded) expandedFromHeader.current = event.currentTarget === headerToggleRef.current;
     toggleFocusPending.current = event.currentTarget === event.currentTarget.ownerDocument.activeElement;
     setExpandedQuestion(titleExpanded ? null : question.id);

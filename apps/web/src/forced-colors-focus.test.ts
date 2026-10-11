@@ -42,6 +42,7 @@ const REVIEWED: ReadonlyMap<string, string> = new Map([
   // Text entry: forced colors keeps the caret, which marks focus in a field.
   [".composer-input { outline: none }", "a text field: forced colors keeps the caret, which marks focus"],
   [".composer-answer-input { outline: none }", "a text field: forced colors keeps the caret, which marks focus"],
+  [".sc-composer > textarea { outline: none }", "a text field: forced colors keeps the caret, which marks focus"],
   [".palette-input { outline: none }", "a text field: forced colors keeps the caret, which marks focus"],
   [".project-manager-search input { outline: 0 }", "a text field: forced colors keeps the caret, which marks focus"],
   [".archive-search input { outline: 0 }", "a text field: forced colors keeps the caret, which marks focus"],

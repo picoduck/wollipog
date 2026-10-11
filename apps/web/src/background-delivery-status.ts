@@ -107,9 +107,10 @@ export function backgroundDeliveryAction(
   const status = BACKGROUND_DELIVERY_STATUS[state];
   if (state !== "continuation_blocked" || !jobStop) return status.action;
   if (jobStop.available) {
+    // Stop Job is on the job's own page (#2858).
     const where = stoppableJobListed
-      ? "Use Stop Job on the unfinished job below"
-      : "Use Stop Job on the unfinished job from the same turn, listed in Background Work";
+      ? "Open the unfinished job below and use Stop Job"
+      : "Open the unfinished job from the same turn in Background Work and use Stop Job";
     return `${where}: only that job ends, it is recorded as killed, and this result is then returned. ` +
       (restartReportsResult
         ? "Stopping the session also ends it but discards this result; restarting the session ends every job " +

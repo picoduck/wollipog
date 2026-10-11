@@ -75,6 +75,9 @@ function records(scope: string): RecordEntry[] {
 
 function save(scope: string, entries: RecordEntry[]): void {
   try {
+    // A record that cannot fit alone stays in page memory without evicting unrelated drafts.
+    // update() already removed its previous value, so an oversized replacement cannot restore it.
+    entries = entries.filter((entry) => JSON.stringify([entry]).length <= MAX_CHARS);
     while (entries.length > LIMIT || JSON.stringify(entries).length > MAX_CHARS) entries.shift();
     if (entries.length) storage()?.setItem(STORAGE_PREFIX + scope, JSON.stringify(entries));
     else storage()?.removeItem(STORAGE_PREFIX + scope);

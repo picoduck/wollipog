@@ -24,6 +24,7 @@ const DESTINATIONS = [
 async function openDestination(page: Page, path: string, title: string) {
   await page.goto(shell(path));
   await expect(page.getByRole("heading", { level: 1, name: title, exact: true })).toBeVisible();
+  await expect(page.locator("[data-route-loading]")).toBeHidden();
 }
 
 test.describe("at 1440×900", () => {

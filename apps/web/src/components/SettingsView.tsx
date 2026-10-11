@@ -13,7 +13,6 @@ import {
   type SessionNamingSettingsView,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
-import { notifier } from "../notify.js";
 import { tailnetAccessDescription, type TailnetAccessSetting } from "../tailnet-access.js";
 import { availableUpdateMessage, type DesktopUpdateSetting } from "../desktop-updates.js";
 import { type PushSetting } from "../push.js";
@@ -1789,28 +1788,8 @@ function DesktopUpdateRows({ update }: { update: DesktopUpdateSetting }) {
  * the Playwright fixture cannot drive a singleton, so it copied a `SwitchRow` that looked like this
  * one — and a copy is a second description that drifts. Both callers mount the same component now.
  */
-export interface NotifySetting {
-  supported: boolean;
-  on: boolean;
-  disabled?: boolean;
-  toggle: () => void;
-}
-
-export function useNotifySetting(): NotifySetting {
-  const [on, setOn] = useState(notifier.enabled);
-  return {
-    supported: notifier.supported,
-    on,
-    toggle: () => {
-      if (on) {
-        notifier.disable();
-        setOn(false);
-      } else {
-        void notifier.enable().then(setOn);
-      }
-    },
-  };
-}
+export { useNotifySetting, type NotifySetting } from "../use-notify-setting.js";
+import type { NotifySetting } from "../use-notify-setting.js";
 
 export function NotifyRow({ notify }: { notify: NotifySetting }) {
   if (!notify.supported) return null;

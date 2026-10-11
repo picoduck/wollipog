@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   PROTOCOL_VERSION,
@@ -11,6 +11,7 @@ import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { ShellDock } from "../components/ShellDock.js";
+import { SessionTerminalsProvider } from "../session-terminals.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
@@ -26,6 +27,8 @@ import "../styles.css";
  * For #2865: `?pipe=1` makes every shell a Windows-native pipe shell; `?reconnecting=1` has Shell 1
  * reconnecting; `?long=1` gives Shell 1 two hundred lines to scroll; `?expired=1` says retention removed
  * Shell 1's oldest output; `?status=completed` ends the session, so an empty dock opens no shell itself.
+ * For #2867: `?toggle=1` makes Hide Terminal hide the dock, as the app does, with a Show Terminal button
+ * to reopen it under the same session terminals.
  */
 const params = new URLSearchParams(window.location.search);
 const theme = params.get("theme") === "light" ? "light" : "dark";
@@ -100,6 +103,7 @@ const output: Record<string, string> = {
 
 let opened = shells.length;
 let openRequests = 0;
+let historyRequests = 0;
 /** Every registry read before this moment waits for it (the dock reads once on mount and again online). */
 const listReadyAt = Date.now() + Number(params.get("listDelay") ?? 0);
 const client: ApiClient = {
@@ -109,13 +113,16 @@ const client: ApiClient = {
     if (wait > 0) await new Promise((resolve) => window.setTimeout(resolve, wait));
     return { shells: structuredClone(shells) };
   },
-  shellHistory: async (_sessionId, shellId) => ({
-    shellId,
-    chunks: output[shellId] ? [{ seq: 1, stream: "stdout" as const, data: output[shellId]! }] : [],
-    nextAfter: 1,
-    hasMore: false,
-    truncatedBefore: shellId === "shell-1" && params.get("expired") === "1",
-  }),
+  shellHistory: async (_sessionId, shellId) => {
+    historyRequests += 1;
+    return {
+      shellId,
+      chunks: output[shellId] ? [{ seq: 1, stream: "stdout" as const, data: output[shellId]! }] : [],
+      nextAfter: 1,
+      hasMore: false,
+      truncatedBefore: shellId === "shell-1" && params.get("expired") === "1",
+    };
+  },
   openShell: async (_sessionId, request) => {
     openRequests += 1;
     await new Promise((resolve) => window.setTimeout(resolve, 600));
@@ -175,12 +182,18 @@ const navigation: ViewNavigation = {
 let hideCount = 0;
 declare global {
   interface Window {
-    __WOLLIPOG_SHELL_DOCK_E2E__: { hideCount(): number; openRequests(): number };
+    __WOLLIPOG_SHELL_DOCK_E2E__: { hideCount(): number; openRequests(): number; historyRequests(): number };
   }
 }
-window.__WOLLIPOG_SHELL_DOCK_E2E__ = { hideCount: () => hideCount, openRequests: () => openRequests };
+window.__WOLLIPOG_SHELL_DOCK_E2E__ = {
+  hideCount: () => hideCount,
+  openRequests: () => openRequests,
+  historyRequests: () => historyRequests,
+};
+const toggle = params.get("toggle") === "1";
 
 function Fixture() {
+  const [dockOpen, setDockOpen] = useState(true);
   return (
     <ApiProvider client={client}>
       <FeedbackProvider>
@@ -188,13 +201,25 @@ function Fixture() {
           <main className="main" style={{ height: "100vh", display: "flex", flexDirection: "column", background: "var(--bg)" }}>
             <div className="main-body" tabIndex={-1} style={{ flex: 1, padding: 24, color: "var(--text-dim)" }}>
               Session Transcript
+              {toggle && !dockOpen && (
+                <div>
+                  <button type="button" className="btn" onClick={() => setDockOpen(true)}>Show Terminal</button>
+                </div>
+              )}
             </div>
-            <ShellDock
-              sessionId={session.id}
-              onClose={() => { hideCount += 1; }}
-              theme={theme}
-              scheme="wollipog"
-            />
+            <SessionTerminalsProvider sessionId={session.id}>
+              {dockOpen && (
+                <ShellDock
+                  sessionId={session.id}
+                  onClose={() => {
+                    hideCount += 1;
+                    if (toggle) setDockOpen(false);
+                  }}
+                  theme={theme}
+                  scheme="wollipog"
+                />
+              )}
+            </SessionTerminalsProvider>
           </main>
         </StoreProvider>
       </FeedbackProvider>

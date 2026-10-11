@@ -29,8 +29,8 @@ export interface MachineSignIn {
 
 /**
  * The one notice slot at the top of the Sessions list pane (docs/design-system.md §13.2, #2221):
- * above the rows when stacked, at the top of the list column in Preview Right, and above the Board's
- * columns. It shows one notice, the most severe and then the lowest rank, and lists the others behind
+ * above the rows on desktop/tablet, and below the phone's scroll area. It shows one notice, the
+ * most severe and then the lowest rank, and lists the others behind
  * that notice's "+N More": every machine sign-in that belongs to no session, the open Project's setup
  * suggestion, then Recommended Skills. `hidden` keeps the slot out while reconnecting, when what it
  * would show is stale (§12.5), and keeps its state for when the connection returns.

@@ -18,7 +18,7 @@ async function open(page: Page, notices = ""): Promise<void> {
   await expect(page.locator(".session-detail.preview header.session-preview-bar")).toBeVisible();
 }
 
-const head = (page: Page): Locator => page.locator(".inbox-list-pane > .inbox-list-head");
+const head = (page: Page): Locator => page.locator(".inbox-list-pane > .inbox-list-notices");
 const slot = (page: Page): Locator => head(page).locator(".list-notice-slot");
 const shownTitle = (page: Page): Locator => slot(page).locator(".notice-title");
 
@@ -44,6 +44,7 @@ async function split(page: Page): Promise<Split> {
     const pane = view.querySelector<HTMLElement>(".inbox-list-pane")!.getBoundingClientRect();
     const scroller = list.getBoundingClientRect();
     const listHead = view.querySelector<HTMLElement>(".inbox-list-head")!.getBoundingClientRect();
+    const notices = view.querySelector<HTMLElement>(".inbox-list-notices")!.getBoundingClientRect();
     const line = pane.bottom;
     // What shows of the list ends at the scroll box or the divider, whichever comes first; a row the
     // virtualizer keeps past the scroll box is clipped, not cut.
@@ -58,7 +59,8 @@ async function split(page: Page): Promise<Split> {
       firstTop: Math.min(...rows.map((row) => row.top)),
       rowHeight: Number.parseFloat(getComputedStyle(view).getPropertyValue("--row-h-2")),
       // An empty head is not displayed; the rows then start at the list's own top.
-      headBottom: listHead.height > 0 ? listHead.bottom : scroller.top,
+      headBottom: Math.max(listHead.height > 0 ? listHead.bottom : scroller.top,
+        notices.height > 0 ? notices.bottom : scroller.top),
       listTop: scroller.top,
     };
   });
@@ -180,11 +182,11 @@ test.describe("at 1440×900, stacked", () => {
         status: "running",
       });
     });
-    const line = head(page).locator(".inbox-order-line");
+    const line = page.locator(".inbox-list-head > .inbox-order-line");
     await expect(line).toBeVisible();
     await expect(line.locator("span")).toHaveText("New activity changed the order.");
     expect(await line.evaluate((element) => {
-      const slotElement = element.parentElement!.querySelector(".list-notice-slot")!;
+      const slotElement = element.closest(".inbox-list-pane")!.querySelector(".list-notice-slot")!;
       return slotElement.getBoundingClientRect().bottom <= element.getBoundingClientRect().top;
     })).toBe(true);
     expect(await stationary()).toEqual(before);
@@ -208,7 +210,7 @@ test.describe("at 390×844", () => {
     await page.goto(FIXTURE + "&listNotices=skills");
     await page.evaluate(() => localStorage.clear());
     await page.goto(FIXTURE + "&listNotices=skills");
-    const notice = page.locator(".inbox-list-head .notice");
+    const notice = page.locator(".inbox-list-notices .notice");
     await expect(notice).toHaveAttribute("aria-label", "Recommended Skills");
     const layout = await notice.evaluate((element) => {
       const row = element.querySelector<HTMLElement>(".skill-recommendations-row")!.getBoundingClientRect();

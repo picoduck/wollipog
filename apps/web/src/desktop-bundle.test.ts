@@ -37,15 +37,33 @@ function assertBundledTerminalFont(out: string): void {
   }
 }
 
+function assertInboxEntryBudget(out: string): void {
+  const report = JSON.parse(readFileSync(join(out, "entry-bundle-report.json"), "utf8")) as {
+    budgetBytes: number; rawBytes: number; chunks: Array<{ file: string; rawBytes: number }>;
+  };
+  assert.equal(report.budgetBytes, 1_250_000);
+  assert.ok(report.rawBytes > 100_000 && report.rawBytes <= report.budgetBytes);
+  assert.equal(report.rawBytes, report.chunks.reduce((sum, chunk) => {
+    const bytes = readFileSync(join(out, chunk.file)).byteLength;
+    assert.equal(chunk.rawBytes, bytes);
+    return sum + bytes;
+  }, 0));
+}
+
 /**
- * #2767: every script and stylesheet the control plane serves has brotli and gzip sidecars that
- * decode to it exactly, and nothing outside assets/ (sw.js above all) has one.
+ * #2767: eligible scripts and stylesheets have exact brotli and gzip sidecars. Tiny lazy chunks
+ * stay raw under the existing 1 KiB threshold; stable names (sw.js above all) have no sidecars.
  */
 function assertPrecompressedAssets(out: string): void {
   const text = readdirSync(join(out, "assets")).filter((name) => /\.(?:js|css)$/u.test(name));
   assert.ok(text.length >= 2, "the build must emit at least the entry script and stylesheet");
   for (const name of text) {
     const source = readFileSync(join(out, "assets", name));
+    if (source.byteLength < 1024) {
+      assert.equal(existsSync(join(out, "assets", `${name}.br`)), false, `${name} is below the compression threshold`);
+      assert.equal(existsSync(join(out, "assets", `${name}.gz`)), false, `${name} is below the compression threshold`);
+      continue;
+    }
     assert.ok(brotliDecompressSync(readFileSync(join(out, "assets", `${name}.br`))).equals(source), `${name}.br`);
     assert.ok(gunzipSync(readFileSync(join(out, "assets", `${name}.gz`))).equals(source), `${name}.gz`);
   }
@@ -156,6 +174,7 @@ test("a desktop build ships neither the service worker nor the manifest", { time
   assert.doesNotMatch(html, /rel="manifest"/,
     "the link would 404 on every launch now that the file is gone");
   assertBundledTerminalFont(out);
+  assertInboxEntryBudget(out);
   // The app ships this directory as its `web/` resource, which the sidecar serves to phones.
   assertPrecompressedAssets(out);
 });
@@ -174,5 +193,6 @@ test("an ordinary web build keeps both, because the PWA is the point there", { t
   }
   assert.match(readFileSync(join(out, "index.html"), "utf8"), /rel="manifest"/);
   assertBundledTerminalFont(out);
+  assertInboxEntryBudget(out);
   assertPrecompressedAssets(out);
 });

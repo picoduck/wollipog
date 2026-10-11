@@ -1,3 +1,4 @@
+import { waitForSessionPreview } from "./session-readiness.js";
 import { expect, test, type Page } from "@playwright/test";
 import { TRAY_IMAGE, TRAY_REFERENCE } from "./fixtures/composer-tray.js";
 
@@ -9,6 +10,7 @@ async function openSteeringSession(page: Page) {
   await page.goto(fixtureUrl);
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Open Session", exact: true });
+  await waitForSessionPreview(page);
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator(".session-bar")).toBeVisible();
   await page.evaluate(() => {
@@ -35,6 +37,7 @@ async function reopenSteeringSession(page: Page) {
   await page.getByRole("tab", { name: /Alpha/ }).click();
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Open Session", exact: true });
+  await waitForSessionPreview(page);
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator(".session-bar")).toBeVisible();
   await expect(page.locator(".composer-input")).toBeEnabled();
@@ -1423,6 +1426,7 @@ test.describe("the collapsed queue tray (#2788)", () => {
     await page.getByRole("tab", { name: /No Project/ }).click();
     await page.getByRole("button", { name: /No Project Session/ }).click();
     const expand = page.getByRole("button", { name: "Open Session", exact: true });
+    await waitForSessionPreview(page);
     if (await expand.isVisible()) await expand.click();
     await expect(tray(page).locator(".queue-summary")).toHaveText("2 Queued Messages");
     await expect(tray(page).locator(".queue-summary")).toHaveAttribute("aria-expanded", "false");

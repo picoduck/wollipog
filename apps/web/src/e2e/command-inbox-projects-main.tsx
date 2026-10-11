@@ -58,6 +58,7 @@ import { ProjectsView } from "../components/ProjectsView.js";
 import { RunDetail } from "../components/RunsView.js";
 import { SessionDetail } from "../components/SessionDetail.js";
 import { ShellDock } from "../components/ShellDock.js";
+import { SessionTerminalsProvider } from "../session-terminals.js";
 import { useRightPanelState } from "../components/RightPanel.js";
 import { useIsMobile } from "../components/useIsMobile.js";
 import { Header, Shell } from "../App.js";
@@ -73,6 +74,7 @@ import "../styles.css";
 import { staticPinnedSummary } from "../components/pinned-summary-state.js";
 import { DIFF_SECTIONS_STATUS_FILES, diffSectionsDiff } from "./diff-sections-fixture.js";
 import { checkoutFindings, inMemoryReviewFindings } from "./review-findings-fixture.js";
+import { SIDE_CHAT_STATES, installSideChatFixture, type SideChatFixtureState } from "./side-chat-fixture.js";
 import type { WorkflowArtifactView } from "@wollipog/protocol";
 
 const FIXTURE_QUERY = new URLSearchParams(window.location.search);
@@ -2979,6 +2981,15 @@ const client = {
   },
 } as ApiClient;
 
+/** `?sideChat=<state>` (#2863): the open session's side chat, in a state `side-chat-fixture.ts` names. */
+const SIDE_CHAT_STATE = FIXTURE_QUERY.get("sideChat") as SideChatFixtureState | null;
+const sideChatFixture = SIDE_CHAT_STATE && SIDE_CHAT_STATES.includes(SIDE_CHAT_STATE)
+  ? installSideChatFixture(client, SIDE_CHAT_STATE, (id) => model.sessions.find((candidate) => candidate.id === id))
+  : null;
+if (sideChatFixture) {
+  (window as unknown as { __WOLLIPOG_SIDE_CHAT_E2E__: typeof sideChatFixture }).__WOLLIPOG_SIDE_CHAT_E2E__ = sideChatFixture;
+}
+
 let workspaceMoveCount = 0;
 let identityTeams: TeamView[] = [];
 
@@ -3637,11 +3648,13 @@ function FixtureSurface() {
           providerCommandAttachmentPolicy={providerCommandAttachmentPolicy}
         />
         {terminalSessionId === view.id && (
-          <ShellDock
-            sessionId={view.id}
-            onClose={() => setTerminalSessionId(null)}
-            theme="dark" scheme="wollipog"
-          />
+          <SessionTerminalsProvider sessionId={view.id}>
+            <ShellDock
+              sessionId={view.id}
+              onClose={() => setTerminalSessionId(null)}
+              theme="dark" scheme="wollipog"
+            />
+          </SessionTerminalsProvider>
         )}
       </>
     );
@@ -3664,11 +3677,13 @@ function FixtureSurface() {
         />
       </div>
       {view.name === "session" && terminalSessionId === view.id && (
-        <ShellDock
-          sessionId={view.id}
-          onClose={() => setTerminalSessionId(null)}
-          theme="dark" scheme="wollipog"
-        />
+        <SessionTerminalsProvider sessionId={view.id}>
+          <ShellDock
+            sessionId={view.id}
+            onClose={() => setTerminalSessionId(null)}
+            theme="dark" scheme="wollipog"
+          />
+        </SessionTerminalsProvider>
       )}
       {newSession && (
         <NewSessionDialog

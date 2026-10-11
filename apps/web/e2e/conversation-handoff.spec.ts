@@ -1,3 +1,4 @@
+import { waitForSessionPreview } from "./session-readiness.js";
 import { expect, test, type Locator } from "@playwright/test";
 import { pinWidestFace } from "./font-geometry";
 import { expectGeometry } from "./geometry-margins";
@@ -47,6 +48,7 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
     await page.evaluate((theme) => document.documentElement.dataset.theme = theme, theme);
     await page.getByRole("button", { name: /Alpha Session/ }).click();
     const expand = page.getByRole("button", { name: "Open Session", exact: true });
+    await waitForSessionPreview(page);
     if (await expand.isVisible()) await expand.click();
     // The turn's footer holds the turn's menu: Hand Off, Fork and its prompt's Rewind are all there.
     const more = page.locator(".tl-turn-footer").getByRole("button", { name: "More Turn Actions" });

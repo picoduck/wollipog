@@ -12,6 +12,39 @@ async function chooseFirstTwo(page: Page, style: string) {
 }
 
 for (const style of ["interactive", "composer"]) {
+  for (const replacement of [false, true]) {
+    test(`${style} preserves other pending drafts after an oversized ${replacement ? "replacement" : "new answer"} and real reloads`, async ({ page }) => {
+      const url = (session: string) => `/agent-questions-e2e.html?set=budget-note&style=${style}&session=${session}`;
+      const input = page.locator(style === "composer" ? ".composer-answer-input" : ".question-input");
+      for (const session of ["first", "second"]) {
+        await page.goto(url(session));
+        await input.fill(`${session} saved answer`);
+      }
+      await page.goto(url("large"));
+      await expect(input).toHaveAttribute("maxlength", "250000");
+      if (replacement) await input.fill("Stale saved answer");
+      const oversized = "x".repeat(210000);
+      await input.fill(oversized);
+      await expect(input).toHaveValue(oversized);
+      await input.press("End");
+      await input.press("!");
+      await expect(input).toHaveValue(`${oversized}!`);
+
+      for (const session of ["first", "second"]) {
+        await page.goto(url(session));
+        await page.reload();
+        await expect(input).toHaveValue(`${session} saved answer`);
+      }
+      await page.goto(url("large"));
+      await page.reload();
+      await expect(input).toHaveValue("");
+      const raw = await persisted(page);
+      expect(raw.length).toBeLessThanOrEqual(200000);
+      expect(raw).not.toContain("Stale saved answer");
+      expect(raw).not.toContain("x".repeat(100));
+    });
+  }
+
   test(`${style} restores the same pending form's step and non-secret answers after an actual reload`, async ({ page }) => {
     await page.goto(`/agent-questions-e2e.html?set=forms&style=${style}`);
     await chooseFirstTwo(page, style);

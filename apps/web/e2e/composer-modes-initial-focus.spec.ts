@@ -1,3 +1,4 @@
+import { waitForSessionPreview } from "./session-readiness.js";
 import { devices, expect, test, type Page } from "@playwright/test";
 
 /**
@@ -27,6 +28,7 @@ async function openSession(page: Page, { images, plan }: { images: boolean; plan
   );
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Open Session", exact: true });
+  await waitForSessionPreview(page);
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator(".composer-input")).toBeEnabled();
 }

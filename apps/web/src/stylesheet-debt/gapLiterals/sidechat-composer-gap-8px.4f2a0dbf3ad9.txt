@@ -1,1 +1,0 @@
-|.sidechat-composer|gap|8px
