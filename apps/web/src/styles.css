@@ -6817,6 +6817,14 @@ body.shell-dock-dragging * {
     background: inherit;
   }
 }
+@container chat-reading (max-height: 480px) {
+  /* The open waiting list can leave less room than a collapsed question's header and footer.
+     Scroll the whole card in the dock instead of shrinking its frame until the footer covers
+     the header (#2942). Expanded reading mode still scrolls inside the card. */
+  .request-dock[data-more-open]:not([data-reading]) :is(.request-dock-card, .question-card) {
+    flex: none;
+  }
+}
 .request-card .request-card-body > * { margin: 0; }
 /* An expanded workflow decision keeps its head and actions still while there is room for them.
    Only the details scroll; its review component stays mounted through every toggle. */

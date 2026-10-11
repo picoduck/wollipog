@@ -48,8 +48,11 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
       if (activation === "touch") await toggle.tap();
       else await toggle.click();
       await expect(toggle).toHaveAttribute("aria-expanded", "true");
-      await card.evaluate((element) => { element.scrollTop = element.scrollHeight; });
-      expect(await card.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+      // The dock enters reading mode after the question toggles; wait for its scrollable layout.
+      await expect.poll(() => card.evaluate((element) => {
+        element.scrollTop = element.scrollHeight;
+        return element.scrollTop;
+      })).toBeGreaterThan(0);
       if (activation === "touch") await toggle.tap();
       else await toggle.click();
       await expect(toggle).toHaveAttribute("aria-expanded", "false");

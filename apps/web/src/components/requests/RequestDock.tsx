@@ -285,6 +285,7 @@ export function RequestDock({
       data-keyboard-open={keyboardOpen ? "" : undefined}
       data-collapsed={collapsed ? "" : undefined}
       data-reading={reading ? "" : undefined}
+      data-more-open={!collapsed && moreOpen && waiting.length > 0 ? "" : undefined}
     >
       {collapsed && (
         // The whole strip is the pointer target; Expand is its keyboard and assistive-technology
