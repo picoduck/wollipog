@@ -752,7 +752,8 @@ export function AgentsPanel(props: Props) {
   const requestPageOwner = (request: PendingApproval | undefined): string | null => {
     const ownerId = request?.ownerToolUseId;
     if (!ownerId || request.recoveryReason || projection.ambiguousIds.has(ownerId) || unresolvedOwnerIds.has(ownerId)) return null;
-    return agents.some((agent) => agent.id === ownerId) ? ownerId : null;
+    return agents.some((agent) => agent.id === ownerId) || projection.descriptors.some((agent) => agent.id === ownerId)
+      ? ownerId : null;
   };
   // A worker page opened for its request, which takes focus once the page shows it.
   const [pageRequest, setPageRequest] = useState<{ key: string; requestId?: string; focus?: number } | null>(null);
@@ -899,8 +900,18 @@ export function AgentsPanel(props: Props) {
       </> };
     }
     const ambiguous = projection.ambiguousIds.has(id);
-    const descriptor = ambiguous ? undefined : agents.find((agent) => agent.id === id);
-    const title = row?.name ?? descriptor?.title ?? "Subagent";
+    // A worker the transcript holds whose registry page is not read yet (past the first 50) is not a
+    // roster row until Show More, but its page still shows it, read from the transcript as its row
+    // will be.
+    const loaded = ambiguous || unresolvedOwnerIds.has(id) ? undefined : projection.descriptors.find((agent) => agent.id === id);
+    const descriptor = ambiguous ? undefined : agents.find((agent) => agent.id === id) ?? loaded;
+    const loadedParent = loaded?.parentId ? projection.descriptors.find((agent) => agent.id === loaded.parentId) : undefined;
+    const unlisted = row || !loaded ? [] : workerRoster(session, loadedParent ? [loadedParent, loaded] : [loaded], [],
+      () => runnerOnline);
+    const rowOf = (rowId: string) => rows.find((candidate) => candidate.id === rowId) ??
+      unlisted.find((candidate) => candidate.id === rowId);
+    const worker = row ?? rowOf(key);
+    const title = worker?.name ?? descriptor?.title ?? "Subagent";
     // The request an attention link or Worker Attention opened the page for, else the worker's most
     // urgent; never one another worker or the session owns.
     const named = pageRequest?.key === key && pageRequest.requestId
@@ -908,9 +919,9 @@ export function AgentsPanel(props: Props) {
     const request = [named, ownerRequests.get(id)].find((candidate) => candidate && requestPageOwner(candidate) === id);
     return { key, title, body: <WorkerDetail session={session} runnerOnline={runnerOnline}
       earlierActivityUnloaded={props.earlierActivityUnloaded}
-      worker={ambiguous ? undefined : row} lifecycle={descriptor?.lifecycle}
-      unavailable={ambiguous ? "ambiguous" : row ? undefined : "missing"}
-      parent={row?.parentId ? rows.find((candidate) => candidate.id === row.parentId) : undefined}
+      worker={ambiguous ? undefined : worker} lifecycle={descriptor?.lifecycle}
+      unavailable={ambiguous ? "ambiguous" : worker ? undefined : "missing"}
+      parent={worker?.parentId ? rowOf(worker.parentId) : undefined}
       nested={rows.filter((candidate) => candidate.parentId === key)} output={pageOutput} statusContext={statusContext}
       request={request} requestOwner={`${title}, a subagent`}
       requestFocus={pageRequest?.key === key ? pageRequest.focus : undefined} onRequestFocusHandled={spendRequestFocus}

@@ -103,11 +103,12 @@ export function WorkerDetail({
   // Whether focus is in the request, so answering it (which removes the card) keeps focus on the page.
   const requestOwnsFocus = useRef(false);
   useEffect(() => {
-    if (requestFocus === undefined || !requestRef.current) return;
-    requestRef.current.focus();
-    // Spent once taken, so the page coming back after Back from a nested page does not take it again.
+    if (requestFocus === undefined) return;
+    // With no request to land on, the title keeps focus. Either way the intent is spent, so a request
+    // that arrives later, or the page coming back after Back from a nested page, does not take focus.
+    requestRef.current?.focus();
     onRequestFocusHandled?.(requestFocus);
-  }, [requestFocus, request?.requestId, onRequestFocusHandled]);
+  }, [requestFocus, onRequestFocusHandled]);
   useLayoutEffect(() => {
     if (!requestOwnsFocus.current) return;
     const active = document.activeElement;
@@ -129,7 +130,6 @@ export function WorkerDetail({
   const tokens = workerTokensLabel(worker.tokens, worker.inclusiveTokens);
   const historyKey = `${session.id}:${session.eventEpoch ?? 0}:${worker.target.id}`;
   const nestedHeading = `${idPrefix}-nested`;
-  const activityHeading = `${idPrefix}-activity`;
   return (
     <section ref={pageRef} className="worker-detail" aria-label={worker.name} tabIndex={-1}>
       <div className="worker-detail-head">
@@ -181,27 +181,28 @@ export function WorkerDetail({
           </div>
         </section>
       )}
-      <section className="worker-detail-section" aria-labelledby={activityHeading}>
-        <h3 className="group-label" id={activityHeading}>{WORKER_DETAIL_COPY.activity}</h3>
-        {earlierActivityUnloaded && <p className="worker-detail-note">{WORKER_DETAIL_COPY.partial}</p>}
-        {output.length > 0 ? (
-          <EventTimeline
-            key={historyKey}
-            items={output}
-            driver={session.driver}
-            scrollRef={scroller ? scrollRef : undefined}
-            historyKey={historyKey}
-            sessionActive={["starting", "running", "waiting"].includes(lifecycle ?? "unknown")}
-            ariaLabel="Subagent Activity"
-            onOpenSubagent={onOpenSubagent}
-            subagentStatus={statusContext}
-          />
-        ) : session.driver === "codex" ? (
-          <Notice tone="neutral" compact role="status">{WORKER_DETAIL_COPY.codex}</Notice>
-        ) : (
-          <p className="worker-detail-note">{WORKER_DETAIL_COPY.empty}</p>
-        )}
-      </section>
+      {/* Activity's list is a direct child of the page, after everything above it: a virtual list
+          watches the siblings before it, so a request that resolves or a section that grows moves
+          its scroll margin with it. */}
+      <h3 className="group-label">{WORKER_DETAIL_COPY.activity}</h3>
+      {earlierActivityUnloaded && <p className="worker-detail-note">{WORKER_DETAIL_COPY.partial}</p>}
+      {output.length > 0 ? (
+        <EventTimeline
+          key={historyKey}
+          items={output}
+          driver={session.driver}
+          scrollRef={scroller ? scrollRef : undefined}
+          historyKey={historyKey}
+          sessionActive={["starting", "running", "waiting"].includes(lifecycle ?? "unknown")}
+          ariaLabel="Subagent Activity"
+          onOpenSubagent={onOpenSubagent}
+          subagentStatus={statusContext}
+        />
+      ) : session.driver === "codex" ? (
+        <Notice tone="neutral" compact role="status">{WORKER_DETAIL_COPY.codex}</Notice>
+      ) : (
+        <p className="worker-detail-note">{WORKER_DETAIL_COPY.empty}</p>
+      )}
     </section>
   );
 }

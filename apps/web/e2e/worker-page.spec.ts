@@ -40,6 +40,8 @@ for (const viewport of VIEWPORTS) for (const theme of ["dark", "light"] as const
     await expect(waiting.getByRole("region", { name: "Pending Request", exact: true })).toContainText("npm test -- payouts");
     await expect(waiting.getByRole("list", { name: "Nested Workers" }).getByRole("button")).toHaveText([/Check Payout Fixtures/]);
     await expect(waiting.getByText("Checked 32 files in the payouts module; two need a migration step.")).toBeVisible();
+    // Activity virtualizes against the panel body as the page's own child, after the request (#2941 review).
+    await expect(waiting.locator(':scope > .timeline[data-virtual-kind="timeline"]')).toHaveCount(1);
     // One bar with one Back on every width; a phone's sheet draws no second bar or Back (§4.9).
     await expect(back).toHaveCount(1);
     await expect(panel.getByRole("button", { name: "Back to Session", exact: true })).toHaveCount(0);

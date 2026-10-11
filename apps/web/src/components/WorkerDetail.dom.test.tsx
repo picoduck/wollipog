@@ -69,7 +69,8 @@ const focused = () => domWindow.document.activeElement as unknown as Element | n
 
 /** AgentsPanel outside the side panel, where pages keep a stack of their own. Approving a request
  * removes it from the session, as the control plane would. */
-function Harness({ initial, runnerOnline = true, requestedId = null, focusRequest, focusPendingRequest, onOpenInBackgroundWork, list = items }: {
+function Harness({ initial, runnerOnline = true, requestedId = null, focusRequest, focusPendingRequest, onOpenInBackgroundWork, list = items,
+  childSessions, onSession }: {
   initial: SessionView;
   runnerOnline?: boolean;
   requestedId?: string | null;
@@ -77,13 +78,18 @@ function Harness({ initial, runnerOnline = true, requestedId = null, focusReques
   focusPendingRequest?: boolean;
   onOpenInBackgroundWork?: (jobId: string) => void;
   list?: TimelineItem[];
+  /** The durable child registry; by default an older control plane without one. */
+  childSessions?: ApiClient["childSessions"];
+  /** Hands the test a way to change the session, as a live update would. */
+  onSession?: (set: (session: SessionView) => void) => void;
 }) {
   const [current, setCurrent] = useState(initial);
+  onSession?.(setCurrent);
   const [selected, setSelected] = useState<string | null>(requestedId);
   const [focus, setFocus] = useState(focusRequest);
   const client: ApiClient = {
     ...api,
-    childSessions: async () => { throw new Error("registry unavailable"); },
+    childSessions: childSessions ?? (async () => { throw new Error("registry unavailable"); }),
     approve: async (_sessionId, { requestId }) => {
       const next = { ...current, pendingApproval: removePendingRequest(current.pendingApproval, requestId) };
       setCurrent(next);
@@ -314,4 +320,57 @@ test("the tokens fact adds the nested total only when nested workers add to it",
   assert.equal(workerTokensLabel(600, 600), "600 Tokens");
   assert.equal(workerTokensLabel(1200, undefined), "1,200 Tokens");
   assert.equal(workerTokensLabel(undefined, undefined), null);
+});
+
+test("a transcript worker past the registry's first page still opens its page, before Show More lists it", async () => {
+  const many: TimelineItem[] = Array.from({ length: 51 }, (_, index) => agent(`worker-${index + 1}`, index + 1,
+    { title: `Worker ${index + 1}` }));
+  const firstPage: ApiClient["childSessions"] = async () => ({
+    children: Array.from({ length: 50 }, (_, index) => ({ toolCallId: `worker-${index + 1}`, name: `Worker ${index + 1}`,
+      status: "in_progress", lifecycle: "running", sourceSeq: index + 1, startedAt: now - 30_000, lastActivityAt: now, toolCount: 0 })),
+    attentionOwners: [], unidentifiedChildren: 0, eventEpoch: 0, nextAfter: 50, truncated: true,
+  }) as unknown as Awaited<ReturnType<ApiClient["childSessions"]>>;
+  const panel = await mount(<Harness initial={session} list={many} childSessions={firstPage} requestedId="worker-51" focusRequest={1} />);
+  try {
+    assertNoDomNode(panel.container.querySelector('.agents-panel [data-panel-page-key="subagent:worker-51"]'),
+      "the registry has not listed it yet");
+    const page = panel.container.querySelector(".agents-page .worker-detail");
+    assert.equal(page?.getAttribute("aria-label"), "Worker 51");
+    assert.equal(text(page?.querySelector(".worker-detail-head .status")), "Running");
+  } finally {
+    await panel.unmount();
+  }
+});
+
+test("Activity's list follows everything above it as the page's own child, so its virtual scroller sees them move", async () => {
+  const panel = await mount(<Harness initial={asking} requestedId="parser" focusRequest={1} />);
+  try {
+    const page = panel.container.querySelector(".agents-page .worker-detail")!;
+    const children = [...page.children];
+    const list = page.querySelector(":scope > .timeline");
+    assert.ok(list, "the activity list is a direct child of the page");
+    assert.ok(children.indexOf(page.querySelector(":scope > .worker-detail-request")!) < children.indexOf(list),
+      "the request comes before it");
+  } finally {
+    await panel.unmount();
+  }
+});
+
+test("a request focus asked for a worker with no request is spent, so a request that arrives later does not take focus", async () => {
+  let setSession!: (session: SessionView) => void;
+  const panel = await mount(<Harness initial={session} requestedId="parser" focusRequest={1} focusPendingRequest
+    onSession={(set) => { setSession = set; }} />);
+  try {
+    assertNoDomNode(panel.container.querySelector(`[aria-label="${WORKER_DETAIL_COPY.request}"]`));
+    const outside = domWindow.document.createElement("button");
+    domWindow.document.body.append(outside);
+    outside.focus();
+    await act(async () => setSession(asking));
+    const request = panel.container.querySelector(`.agents-page [aria-label="${WORKER_DETAIL_COPY.request}"]`);
+    assert.ok(request, "the request now shows on the page");
+    assert.ok(focused() === (outside as unknown as Element), "focus stays where the person left it");
+    outside.remove();
+  } finally {
+    await panel.unmount();
+  }
 });

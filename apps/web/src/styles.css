@@ -4093,9 +4093,12 @@ textarea {
 .worker-detail {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
   min-width: 0;
 }
+/* Spacing is margins rather than a gap so a group label sits on what it heads: Activity's label and
+   its list are both the page's children, as the list's virtual scroller needs (WorkerDetail.tsx). */
+.worker-detail > * + * { margin-top: var(--space-4); }
+.worker-detail > .group-label + * { margin-top: 0; }
 .worker-detail:focus { outline: 2px solid transparent; }
 .worker-detail-head {
   display: flex;
