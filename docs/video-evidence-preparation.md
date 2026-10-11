@@ -38,13 +38,18 @@ remains present even when adjacent frames look identical. Splitting partitions t
 sequence and retains absolute source timestamps; it does not transcode, seek, or sample the source.
 A hold longer than four seconds is refused rather than represented as a segment exceeding its bound.
 
-PNG conversion preserves decoded pixels at native dimensions. No frame-rate filter, speed change,
+FFmpeg converts decoded colour planes to RGB before lossless PNG encoding at native dimensions;
+the PNG samples are not the original encoded/YUV sample values. No frame-rate filter, speed change,
 audio stripping, lossy re-encoding, or incomplete sequence is accepted. Audio/extra streams,
 missing/ambiguous timing, varying dimensions, or insufficient resolution require recapture.
 Excess duration/frame count requires smaller original clips; excess derived bytes or decoder work
 requires splitting or recapture. Busy work queues rather than immediately asking a human. The CLI
 retries only busy admission, at most twice with bounded delay. Unsupported isolation retains human
 review. Failures never yield a partial manifest.
+
+The profile's bounds are an admission envelope, not a promise that every 30-second recording fits
+the derived-byte or CPU limits. Detailed or noisy recordings can exceed them and need shorter
+captures. A realistic maximum-profile benchmark remains part of #1321's pre-enablement validation.
 
 ## Local Preparation
 
@@ -57,7 +62,8 @@ node --import tsx apps/control-plane/scripts/prepare-video-evidence.ts \
   --media-type video/webm
 ```
 
-The command reads a bounded stable regular file, refuses source symlinks and existing output
+The command reads a bounded stable regular file, refuses FIFOs without waiting for a writer,
+source symlinks and existing output
 directories, creates private PNG files and `manifest.json`, and prints only hashes/counts. It makes
 no network request, uploads nothing, calls no model, and creates no workflow decision or receipt.
 Output filenames derive from source frame index. SHA-256 of the exact UTF-8 `manifest.json` bytes

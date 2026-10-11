@@ -124,7 +124,7 @@ export async function videoPreparationDecoderAvailable(): Promise<boolean> {
 
 type Probe = {
   streams?: Array<{ codec_type?: unknown; codec_name?: unknown; width?: unknown; height?: unknown }>;
-  frames?: Array<{ media_type?: unknown; pts_time?: unknown; duration_time?: unknown;
+  frames?: Array<{ media_type?: unknown; pts_time?: unknown; pkt_pts_time?: unknown; duration_time?: unknown;
     pkt_duration_time?: unknown; width?: unknown; height?: unknown }>;
 };
 function timestamp(raw: unknown): number | null {
@@ -133,6 +133,16 @@ function timestamp(raw: unknown): number | null {
   const value = Number(raw) * 1_000_000;
   return Number.isSafeInteger(Math.round(value)) && Math.abs(value - Math.round(value)) < 0.01
     ? Math.round(value) : null;
+}
+
+/** FFmpeg 4.x calls the explicit source PTS pkt_pts_time; 5+ calls it pts_time.
+ * Never substitute an inferred best-effort timestamp or accept conflicting identities. */
+export function videoPresentationTimeUs(frame: { pts_time?: unknown; pkt_pts_time?: unknown }): number | null {
+  if (frame.pts_time !== undefined && frame.pkt_pts_time !== undefined) {
+    const current = timestamp(frame.pts_time);
+    return current !== null && current === timestamp(frame.pkt_pts_time) ? current : null;
+  }
+  return timestamp(frame.pts_time ?? frame.pkt_pts_time);
 }
 
 const PNG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
@@ -162,7 +172,7 @@ function imagesFromPipe(bytes: Buffer, width: number, height: number): Buffer[] 
 }
 
 /** Derive a complete sequence from the source, preserving every source frame at its native
- * dimensions. PNG conversion is lossless with respect to decoded frames; it never rescales,
+ * dimensions. FFmpeg converts decoded colour planes to RGB for lossless PNG encoding. It never rescales,
  * samples, strips audio, changes playback speed, or claims to repair an unreadable capture. */
 export async function prepareVideoEvidence(source: Buffer, mediaType: "video/webm" | "video/mp4")
   : Promise<VideoPreparationResult> {
@@ -187,7 +197,7 @@ export async function prepareVideoEvidence(source: Buffer, mediaType: "video/web
     await writeFile(input, snapshot, { mode: 0o400, flag: "wx" });
     const metadata = await isolated(input, "ffprobe", [
       "-v", "error", "-show_streams", "-show_frames", "-show_entries",
-      "stream=codec_type,codec_name,width,height:frame=media_type,pts_time,duration_time,pkt_duration_time,width,height",
+      "stream=codec_type,codec_name,width,height:frame=media_type,pts_time,pkt_pts_time,duration_time,pkt_duration_time,width,height",
       "-of", "json", "/input",
     ], 512 * 1024);
     if (!metadata) return failure("decode_limit", "Complete inspection exceeded the isolated decoder limits.");
@@ -209,7 +219,7 @@ export async function prepareVideoEvidence(source: Buffer, mediaType: "video/web
     if (!Array.isArray(probe.frames) || probe.frames.length < 2 || probe.frames.length > PROFILE.frames) {
       return failure("split_capture", "Split the original scenario into clips of at most 900 source frames.");
     }
-    const pts = probe.frames.map((frame) => timestamp(frame.pts_time));
+    const pts = probe.frames.map(videoPresentationTimeUs);
     const lastDuration = timestamp(probe.frames.at(-1)!.duration_time ?? probe.frames.at(-1)!.pkt_duration_time);
     if (lastDuration === null || lastDuration <= 0 || pts.some((time, index) => time === null ||
         (index === 0 ? time !== 0 : time - pts[index - 1]! < PROFILE.minimumFrameIntervalUs)) ||
