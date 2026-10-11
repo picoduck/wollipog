@@ -58,7 +58,7 @@ import {
   rovingChoiceTabIndex,
 } from "./components/interactions.js";
 import { cycleFocusZone, escapeOwner, focusZone, indicateFocusZone, sessionReadingTarget, shortcutScopeForFocus } from "./focus-zones.js";
-import { installTerminalExitBoundary, loadTerminalHost, requestTerminalFocus } from "./terminal-focus.js";
+import { installTerminalExitBoundary, requestTerminalFocus } from "./terminal-focus.js";
 import {
   bareDigitPressed,
   isEditableShortcutTarget,
@@ -125,9 +125,7 @@ const PodsView = lazy(() => import("./components/PodsView.js").then((module) => 
 const AutomationsView = lazy(() => import("./components/AutomationsView.js").then((module) => ({ default: module.AutomationsView })));
 const SkillsView = lazy(() => import("./components/SkillsView.js").then((module) => ({ default: module.SkillsView })));
 const UsageView = lazy(() => import("./components/UsageView.js").then((module) => ({ default: module.UsageView })));
-// Move to Bottom Dock's focus request waits for it (`loadTerminalHost`, #2869).
-const ShellDock = lazy(loadTerminalHost(() =>
-  import("./components/ShellDock.js").then((module) => ({ default: module.ShellDock }))));
+const ShellDock = lazy(() => import("./components/ShellDock.js").then((module) => ({ default: module.ShellDock })));
 const ProjectsView = lazy(() => import("./components/ProjectsView.js").then((module) => ({ default: module.ProjectsView })));
 const OrchestratorSettingsPanel = lazy(() => import("./components/OrchestratorSettingsPanel.js").then((module) => ({ default: module.OrchestratorSettingsPanel })));
 const ShortcutReference = lazy(() => import("./components/ShortcutReference.js").then((module) => ({ default: module.ShortcutReference })));

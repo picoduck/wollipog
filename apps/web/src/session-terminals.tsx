@@ -20,6 +20,7 @@ import {
   type TerminalSearchResults,
 } from "./shells-panel.js";
 import { ShellTerminalInstance } from "./shell-terminal-instance.js";
+import { cancelTerminalFocusRequest } from "./terminal-focus.js";
 
 /**
  * A session's terminals, above the places that show them (#2867; docs/design-system.md §4.6).
@@ -433,6 +434,8 @@ export class SessionTerminals {
     this.resizeQueue.clear();
     for (const terminal of this.terminals.values()) terminal.dispose();
     this.terminals.clear();
+    // A move still on its way to its next host is dropped with the session (#2869).
+    cancelTerminalFocusRequest(this.sessionId);
   }
 
   private opened(): void {

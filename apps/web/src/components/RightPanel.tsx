@@ -56,7 +56,7 @@ import { SessionToolIcon, SessionToolsList } from "./SessionToolsList.js";
 import { ErrorBoundary } from "./ErrorBoundary.js";
 import { State } from "./State.js";
 import { setTerminalPlacement, useTerminalPlacement } from "../terminal-placement.js";
-import { loadTerminalHost, requestTerminalFocus } from "../terminal-focus.js";
+import { requestTerminalFocus } from "../terminal-focus.js";
 
 export { SESSION_TOOL_ICONS } from "./SessionToolsList.js";
 import { MenuItem, MenuLabel, MenuSeparator, MenuSurface } from "./Menu.js";
@@ -70,9 +70,7 @@ import {
 } from "../session-tools.js";
 
 // xterm loads with the terminal's hosts, never with the session view (`entry-bundle-budget.ts`).
-// Move to Right Panel's focus request waits for it (`loadTerminalHost`, #2869).
-const TerminalTool = lazy(loadTerminalHost(() =>
-  import("./TerminalTool.js").then((module) => ({ default: module.TerminalTool }))));
+const TerminalTool = lazy(() => import("./TerminalTool.js").then((module) => ({ default: module.TerminalTool })));
 
 const EMPTY_PARENT_TURNS: ReadonlyMap<string, BackgroundParentTurn> = new Map();
 const EMPTY_GOVERNANCE_DECISIONS: readonly GovernanceDecision[] = [];

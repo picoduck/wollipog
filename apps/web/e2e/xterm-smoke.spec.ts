@@ -124,13 +124,13 @@ test.describe(HOST_MOVES, () => {
     expect([...histories].sort(), "no history was read again by either move").toEqual(["shell-1", "shell-2"]);
   });
 
-  // A move's focus request lasts a second from when the destination's code arrives: the first Move to
-  // Right Panel on a slow network still lands focus in the moved terminal.
+  // A move's focus request waits for its destination to mount, however long its code takes to arrive:
+  // the first Move to Right Panel on a slow network still lands focus in the moved terminal.
   test("the first Move to Right Panel focuses the moved terminal even when the Terminal tool's code is slow to arrive", async ({ page }) => {
     let toolRequested = false;
     await page.route(/\/src\/components\/TerminalTool\.tsx/u, async (route) => {
       toolRequested = true;
-      await new Promise((resolve) => setTimeout(resolve, 1500));
+      await new Promise((resolve) => setTimeout(resolve, 3000));
       await route.continue();
     });
     const response = await page.goto("/command-inbox-projects-e2e.html?fullShell=1&terminalShells=2");

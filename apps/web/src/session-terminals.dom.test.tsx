@@ -44,7 +44,7 @@ const { ShellDock, MOVE_TO_RIGHT_PANEL_DESCRIPTION } = await import("./component
 const { ShellTerminal } = await import("./components/ShellTerminal.js");
 const { TerminalTool, MOVE_TO_BOTTOM_DOCK_DESCRIPTION } = await import("./components/TerminalTool.js");
 const { PanelActionSlotContext } = await import("./components/RightPanel.js");
-const { requestTerminalFocus } = await import("./terminal-focus.js");
+const { requestTerminalFocus, takeTerminalFocusRequest } = await import("./terminal-focus.js");
 type SessionTerminals = import("./session-terminals.js").SessionTerminals;
 
 /**
@@ -399,9 +399,12 @@ test("leaving the session disposes its terminals", async () => {
   const shell1 = terminals.terminal("shell-1");
   await until(() => shell1.terminal !== null, "Shell 1's terminal to open");
   const disposals = countDisposals(shell1.terminal!);
+  // A move whose destination never mounted before the session was left (#2869).
+  requestTerminalFocus(session.id);
   await view.unmount();
   await settle(10);
   assert.equal(disposals.count, 1, "the session's store ends its terminals when it goes");
+  assert.equal(takeTerminalFocusRequest(session.id), false, "its focus request goes with it");
 });
 
 test("a reopened empty dock offers a first shell once the last open's New Shell settles", async () => {

@@ -34,44 +34,23 @@ export function installTerminalExitBoundary(targetWindow: Window, targetDocument
 /**
  * Moving the terminal to another place (Move to Bottom Dock, #2868; Move to Right Panel, #2869) puts
  * focus in it there. The host that shows the session's terminals next takes the request as it mounts,
- * provided it mounts within a second, so a request never surfaces on an unrelated later visit.
+ * however long its code or the session view around it takes to load (#2869 review): a move leaves no
+ * other host showing them, so the next one is the move's destination. Leaving the session cancels the
+ * request (`cancelTerminalFocusRequest`), so it never surfaces on an unrelated later visit.
  */
-let terminalFocusRequest: { sessionId: string; at: number } | null = null;
-const TERMINAL_FOCUS_WINDOW_MS = 1000;
+let terminalFocusRequest: { sessionId: string } | null = null;
 
 export function requestTerminalFocus(sessionId: string): void {
-  terminalFocusRequest = { sessionId, at: Date.now() };
+  terminalFocusRequest = { sessionId };
 }
 
-/**
- * A lazy host's code arrived (#2869): a request made for the move that started loading it gets its
- * second from now, so a slow network never spends it before the host can mount. `loadStartedAt` is when
- * that load began; an older request belongs to an earlier move and is left to expire.
- */
-export function renewTerminalFocusRequest(loadStartedAt: number): void {
-  const request = terminalFocusRequest;
-  if (request && request.at >= loadStartedAt - TERMINAL_FOCUS_WINDOW_MS) {
-    terminalFocusRequest = { ...request, at: Date.now() };
-  }
-}
-
-/**
- * The code of a host that may be a move's destination, loaded once: when it arrives it renews the
- * pending focus request (`renewTerminalFocusRequest`). For `React.lazy`.
- */
-export function loadTerminalHost<T>(load: () => Promise<T>): () => Promise<T> {
-  return () => {
-    const startedAt = Date.now();
-    return load().then((module) => {
-      renewTerminalFocusRequest(startedAt);
-      return module;
-    });
-  };
+/** The session's terminals are disposed (leaving the session): a move still pending is dropped. */
+export function cancelTerminalFocusRequest(sessionId: string): void {
+  if (terminalFocusRequest?.sessionId === sessionId) terminalFocusRequest = null;
 }
 
 export function takeTerminalFocusRequest(sessionId: string): boolean {
-  const request = terminalFocusRequest;
-  if (request?.sessionId !== sessionId) return false;
+  if (terminalFocusRequest?.sessionId !== sessionId) return false;
   terminalFocusRequest = null;
-  return Date.now() - request.at <= TERMINAL_FOCUS_WINDOW_MS;
+  return true;
 }

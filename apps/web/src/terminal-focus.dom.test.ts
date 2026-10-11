@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import test, { mock } from "node:test";
+import test from "node:test";
 import { Window } from "happy-dom";
 import {
+  cancelTerminalFocusRequest,
   installTerminalExitBoundary,
-  loadTerminalHost,
   requestTerminalFocus,
   takeTerminalFocusRequest,
 } from "./terminal-focus.js";
@@ -76,46 +76,22 @@ test("Ctrl+Escape lands on an expanded side panel's switcher, since the panel hi
   cleanup();
 });
 
-/** A host's code, loaded on demand, that arrives when the test releases it. */
-function slowHost() {
-  let release!: () => void;
-  const arrived = new Promise<void>((resolve) => { release = resolve; });
-  return { load: loadTerminalHost(() => arrived.then(() => "host")), release };
-}
-
-test("a move's focus request lasts a second from when the destination's code arrives (#2869)", async () => {
-  mock.timers.enable({ apis: ["Date"], now: 10_000 });
-  try {
-    // The move asks for focus, then its destination's code takes 1.5s to arrive.
-    requestTerminalFocus("session-a");
-    const host = slowHost();
-    const loading = host.load();
-    mock.timers.tick(1_500);
-    host.release();
-    await loading;
-    mock.timers.tick(500);
-    assert.equal(takeTerminalFocusRequest("session-a"), true, "the request outlives the load");
-
-    // Without a load in between, a request still expires after its second.
-    requestTerminalFocus("session-a");
-    mock.timers.tick(1_500);
-    assert.equal(takeTerminalFocusRequest("session-a"), false);
-  } finally {
-    mock.timers.reset();
-  }
+test("a move's focus request waits for its destination however long it takes to mount (#2869)", async () => {
+  requestTerminalFocus("session-a");
+  // The destination's code, or the session view around it, is slow to arrive.
+  await new Promise((resolve) => setTimeout(resolve, 1_200));
+  assert.equal(takeTerminalFocusRequest("session-b"), false, "another session's host does not take it");
+  assert.equal(takeTerminalFocusRequest("session-a"), true, "the next host for the session takes it");
+  assert.equal(takeTerminalFocusRequest("session-a"), false, "once");
 });
 
-test("code that starts loading long after a request leaves that request to expire (#2869)", async () => {
-  mock.timers.enable({ apis: ["Date"], now: 50_000 });
-  try {
-    requestTerminalFocus("session-a");
-    mock.timers.tick(5_000);
-    const host = slowHost();
-    const loading = host.load();
-    host.release();
-    await loading;
-    assert.equal(takeTerminalFocusRequest("session-a"), false, "an earlier move's request is not revived");
-  } finally {
-    mock.timers.reset();
-  }
+test("leaving the session drops a move's pending focus request (#2869)", () => {
+  requestTerminalFocus("session-a");
+  cancelTerminalFocusRequest("session-b");
+  cancelTerminalFocusRequest("session-a");
+  assert.equal(takeTerminalFocusRequest("session-a"), false, "a later visit's host does not take it");
+
+  requestTerminalFocus("session-a");
+  cancelTerminalFocusRequest("session-b");
+  assert.equal(takeTerminalFocusRequest("session-a"), true, "leaving another session leaves it pending");
 });
