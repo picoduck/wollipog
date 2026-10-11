@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { SessionStatus, SessionView } from "@wollipog/protocol";
+import type { PendingApproval, SessionStatus, SessionView } from "@wollipog/protocol";
 import { statusValues } from "./status-meta.js";
 import {
   backgroundWorkerState,
@@ -10,6 +10,7 @@ import {
   memberWorkerStatus,
   stepActivity,
   subagentWorkerStatus,
+  workerRequestSentence,
   workerRoster,
   workerStatusMeta,
   type WorkerState,
@@ -125,6 +126,18 @@ test("a step reads as what the worker is doing, did, or waits to do", () => {
   assert.equal(stepActivity("Agent: Write Parser Tests", "now"), "Waiting on Write Parser Tests", "a worker waits on the one it spawned");
   assert.equal(stepActivity("$ npm test", "seen"), "Last seen running npm test");
   assert.equal(stepActivity("Read Schema", "seen"), "Last seen: Read Schema");
+});
+
+test("a worker page's notice says what the worker wants and what it waits for (#2860)", () => {
+  const request = (title: string, extra: Partial<PendingApproval> = {}) =>
+    ({ requestId: "r", title, options: [{ optionId: "yes", name: "Allow", kind: "allow_once" }], ...extra }) as PendingApproval;
+  assert.equal(workerRequestSentence(request("Bash: npm test -- storage")),
+    "Wants to run npm test -- storage and is waiting for your approval.");
+  assert.equal(workerRequestSentence(request("Edit: /repo/src/a.ts"), "/repo"), "Wants to edit src/a.ts and is waiting for your approval.");
+  assert.equal(workerRequestSentence(request("Run Parser Tests?")), "Is waiting for your approval.",
+    "a title that is not a step leaves the card to say it");
+  assert.equal(workerRequestSentence(request("Choose Scope", { kind: "question", options: [], questions: [] })),
+    "Has a question and is waiting for your answer.");
 });
 
 test("offline workers stay current as Unverified; settled ones move to History", () => {

@@ -262,7 +262,7 @@ test("RightPanel consumes a transcript focus request in shared state and does no
     assert.equal(title.textContent, "Audit Agent");
     assert.ok((domWindow.document.activeElement as unknown as Element | null) === (title as unknown as Element),
       "the page title takes focus");
-    assert.ok(container.querySelector(".subagent-detail"), "the page shows the worker's detail");
+    assert.ok(container.querySelector(".agents-page .worker-detail"), "the page shows the worker");
     assert.equal(state.subagentTarget?.subagentId, "agent");
     assert.equal(state.subagentTarget?.focusRequest, undefined, "the mounted panel acknowledges shared focus intent");
 
@@ -289,17 +289,18 @@ test("RightPanel drops unmounted-generation focus intent and renders honest offl
     assert.equal(state.subagentTarget?.sessionId, "session-1");
     assert.equal(state.subagentTarget?.focusRequest, undefined,
       "a request is consumed when its session generation is not the mounted panel");
-    assertNoDomNode(container.querySelector(".subagent-detail"),
+    assertNoDomNode(container.querySelector(".worker-detail"),
       "a stale target does not select a different session's worker");
     // An offline worker stays in Active, as Unverified, rather than moving to History (#2857).
     assert.equal(container.querySelector('[aria-label="Worker Filter"] [aria-checked="true"]')?.getAttribute("aria-label"), "Active, 1");
     assert.equal(container.querySelector(".agents-list .worker-row .status")?.textContent, "Unverified");
     await act(async () => container.querySelector<HTMLButtonElement>(".agents-list button")!.click());
-    assert.match(container.querySelector(".subagent-detail-meta")?.textContent ?? "", /Recorded Activity/,
-      "offline active state is explicitly recorded rather than current");
+    // The page reads its badge from the row, so an offline worker is Unverified there too (#2860).
+    assert.equal(container.querySelector(".worker-detail-head .status")?.textContent, "Unverified",
+      "offline active state is explicitly unverified rather than current");
 
     await act(async () => container.querySelector<HTMLButtonElement>("#recorded")!.click());
-    assert.match(container.querySelector(".subagent-detail-meta")?.textContent ?? "", /Stopped · Recorded Activity/,
+    assert.equal(container.querySelector(".worker-detail-head .status")?.textContent, "Stopped",
       "recorded state preserves the observed nonterminal tool lifecycle without claiming reachability");
   } finally {
     await act(async () => root.unmount());
@@ -307,7 +308,7 @@ test("RightPanel drops unmounted-generation focus intent and renders honest offl
   }
 });
 
-test("an adopted session that is online and running reports Current Activity", async () => {
+test("an adopted session that is online and running shows its worker as Running", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
   const container = happyContainer as unknown as HTMLDivElement;
@@ -316,9 +317,7 @@ test("an adopted session that is online and running reports Current Activity", a
     await act(async () => root.render(<PanelHarness onState={() => {}} />));
     await act(async () => container.querySelector<HTMLButtonElement>("#open-agent")!.click());
     await act(async () => container.querySelector<HTMLButtonElement>("#adopted-live")!.click());
-    const detail = container.querySelector(".subagent-detail-meta")?.textContent ?? "";
-    assert.match(detail, /Running .* Current Activity/);
-    assert.doesNotMatch(container.querySelector(".subagents-panel")?.textContent ?? "", /Recorded/);
+    assert.equal(container.querySelector(".worker-detail-head .status")?.textContent, "Running");
   } finally {
     await act(async () => root.unmount());
     container.remove();
@@ -957,7 +956,7 @@ test("a row opens its page in the switcher's place, and Back and Escape return t
       assert.ok(focused() === (title as unknown as Element), "the page's title takes focus");
       assert.equal(body.scrollTop, 0, "the page opens at its top");
       assert.ok(aside.querySelector<HTMLElement>(".agents-panel")!.hidden, "the list waits, hidden, under the page");
-      assert.ok(aside.querySelector('.agents-page .subagent-detail[aria-label="Worker 30"]'), "the page shows the worker");
+      assert.ok(aside.querySelector('.agents-page .worker-detail[aria-label="Worker 30"]'), "the page shows the worker");
 
       if (leave === "Back") await act(async () => head.querySelector<HTMLButtonElement>('[aria-label="Back to Agents"]')!.click());
       else await keydown(title, "Escape");
@@ -1283,6 +1282,33 @@ test("the panel notice slot sits under the header and shows one notice, the rest
       await act(async () => root.unmount());
       host.remove();
     }
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("a job page in Agents opens Background Work on the same job, and Back goes to its list (#2860)", async () => {
+  let state!: RightPanelState;
+  const withJob = { ...liveSession, backgroundWorkState: "running", backgroundWorkTracking: "managed", backgroundJobsAvailable: true,
+    backgroundJobs: [{ id: "job-monitor-7be210", parentTurnId: "turn-1", launchType: "monitor", registeredAt: 1_000,
+      lastObservedAt: 2_000, sourcePresent: true }] } as unknown as SessionView;
+  const panel = await mountPanel(<PanelHarness initialSession={withJob} onState={(next) => { state = next; }} />);
+  try {
+    await act(async () => state.show("subagents"));
+    const aside = panel.container.querySelector<HTMLElement>("#right-panel")!;
+    const row = aside.querySelector<HTMLButtonElement>(`[data-panel-page-key="background:job-monitor-7be210"]`)!;
+    await act(async () => row.click());
+    assert.equal(aside.querySelector(".rpanel-page-title")?.textContent, "Monitor Job 7be210");
+    assertNoDomNode(aside.querySelector(".background-work-panel"), "no Background Work list renders inside Agents");
+    const open = [...aside.querySelectorAll<HTMLButtonElement>(".agents-page button")].find((button) => button.textContent === "Open in Background Work")!;
+    await act(async () => open.click());
+    assert.equal(state.mode, "background");
+    const title = aside.querySelector<HTMLElement>(".rpanel-page-title")!;
+    assert.equal(title.textContent, "Monitor Job 7be210");
+    assert.ok((domWindow.document.activeElement as unknown as Element | null) === (title as unknown as Element), "the job page's title takes focus");
+    assert.ok(aside.querySelector(".background-work-page .job-detail"), "Background Work shows the job's page");
+    await act(async () => aside.querySelector<HTMLButtonElement>(`[aria-label="Back to Background Work"]`)!.click());
+    assert.equal(aside.querySelector<HTMLElement>(".background-work-panel")?.hidden, false, "Back goes to the Background Work list");
   } finally {
     await panel.dispose();
   }

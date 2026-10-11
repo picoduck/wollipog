@@ -21,7 +21,14 @@ export interface RightPanelState {
   expanded: boolean;
   dragging: boolean;
   /** Ephemeral selection; provider tool ids can expire when event history resets. */
-  subagentTarget: { sessionId: string; eventEpoch: number; subagentId: string; focusRequest?: number } | null;
+  subagentTarget: {
+    sessionId: string;
+    eventEpoch: number;
+    subagentId: string;
+    focusRequest?: number;
+    /** With `focusRequest`, focus lands on the worker's pending request rather than its page title. */
+    focusPendingRequest?: boolean;
+  } | null;
   toggle: () => void;
   /** Open the panel on a mode; calling with the already-visible mode closes the panel (toggle). */
   openMode: (mode: RightPanelMode) => void;
@@ -33,7 +40,11 @@ export interface RightPanelState {
   setDragging: (d: boolean) => void;
   close: () => void;
   selectSubagent: (sessionId: string, eventEpoch: number, subagentId: string) => void;
-  showSubagent: (sessionId: string, eventEpoch: number, subagentId: string) => void;
+  /**
+   * Open the panel on a subagent's page in Agents (#2856, #2860). With `request`, focus lands on the
+   * request it waits on, answered on that page, instead of the page title (Review in Session, #2861).
+   */
+  showSubagent: (sessionId: string, eventEpoch: number, subagentId: string, options?: { request?: boolean }) => void;
   consumeSubagentFocusRequest: (sessionId: string, eventEpoch: number, request: number) => void;
 }
 
@@ -139,12 +150,13 @@ export function useRightPanelState(navigationScope: string | null = null, attent
         subagentId,
       });
     },
-    showSubagent: (sessionId, eventEpoch, subagentId) => {
+    showSubagent: (sessionId, eventEpoch, subagentId, options) => {
       setSubagentTarget({
         sessionId,
         eventEpoch,
         subagentId,
         focusRequest: ++nextSubagentFocusRequest.current,
+        ...(options?.request ? { focusPendingRequest: true } : {}),
       });
       setOpen(true);
       setMode("subagents");
@@ -153,7 +165,7 @@ export function useRightPanelState(navigationScope: string | null = null, attent
       setSubagentTarget((current) => {
         if (current?.sessionId !== sessionId || current.eventEpoch !== eventEpoch ||
             current.focusRequest !== request) return current;
-        const { focusRequest: _consumed, ...target } = current;
+        const { focusRequest: _consumed, focusPendingRequest: _pendingRequest, ...target } = current;
         return target;
       });
     },

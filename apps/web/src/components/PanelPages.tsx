@@ -37,6 +37,13 @@ export const PanelPagesContext = createContext<PanelPagesController | null>(null
 export const PanelPageTitleSlotContext = createContext<HTMLElement | null>(null);
 
 /**
+ * The panel body, the one vertical scroller a page scrolls in (§4.9 Body slots). A page whose list
+ * is virtual (a worker's Activity, #2860) measures against it rather than scrolling on its own. Only
+ * RightPanel provides it (and tests); outside the panel a page renders its list in full.
+ */
+export const PanelScrollerContext = createContext<HTMLElement | null>(null);
+
+/**
  * The panel's page stack. Outside the side panel (a fixture rendering a tool alone) the tool keeps a
  * stack of its own, with no header to show a title or Back.
  */

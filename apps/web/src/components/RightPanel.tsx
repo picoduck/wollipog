@@ -26,7 +26,7 @@ import {
 } from "../right-panel.js";
 import { FilesBrowser } from "./FilesPanel.js";
 import { requestGoToFileFocus } from "./go-to-file-focus.js";
-import { PanelPagesContext, PanelPageTitleSlotContext, type PanelPagesController } from "./PanelPages.js";
+import { PanelPagesContext, PanelPageTitleSlotContext, PanelScrollerContext, type PanelPagesController } from "./PanelPages.js";
 import { PanelNoticeRegionContext } from "./PanelNoticeSlot.js";
 import { Notice } from "./Notice.js";
 import { BrowserPanel } from "./BrowserPanel.js";
@@ -45,7 +45,7 @@ import { focusSessionRequest } from "./SessionApproval.js";
 import { dockRequests } from "./requests/RequestDock.js";
 import { RequestKindIcon } from "./requests/request-meta.js";
 import { CountBadge } from "./CountBadge.js";
-import { BackgroundWorkPanel } from "./BackgroundWorkPanel.js";
+import { BackgroundWorkPanel, type BackgroundJobPageRequest } from "./BackgroundWorkPanel.js";
 import type { BackgroundParentTurn } from "../background-work.js";
 import { SessionRequestPanel, sessionRequestPanelKey, type DescendantRequestStatus } from "./SessionRequestPanel.js";
 import { CampaignStatusPanel } from "./CampaignStatusPanel.js";
@@ -568,6 +568,10 @@ export function RightPanel({
 
   // The region under the header the panel's notice slot portals into (`PanelNoticeSlot`).
   const [noticeRegion, setNoticeRegion] = useState<HTMLDivElement | null>(null);
+  // The body, which a page's virtual list measures against (`PanelScrollerContext`).
+  const [bodyScroller, setBodyScroller] = useState<HTMLDivElement | null>(null);
+  // A job Agents asked Background Work to open as its page (Open in Background Work, #2860).
+  const [jobPageRequest, setJobPageRequest] = useState<BackgroundJobPageRequest | null>(null);
 
   // Requests also takes Escape with focus outside the panel, as it always has (#2206); every tool
   // takes it from inside the panel (onPanelKeyDown below).
@@ -833,10 +837,15 @@ export function RightPanel({
               state.subagentTarget.eventEpoch === sessionEventEpoch
               ? state.subagentTarget.focusRequest
               : undefined}
+            focusPendingRequest={state.subagentTarget?.focusPendingRequest === true}
             onFocusRequestHandled={(request) => {
               state.consumeSubagentFocusRequest(session.id, sessionEventEpoch, request);
             }}
             onSelect={(subagentId) => state.selectSubagent(session.id, sessionEventEpoch, subagentId)}
+            onOpenInBackgroundWork={(jobId) => {
+              setJobPageRequest((current) => ({ jobId, seq: (current?.seq ?? 0) + 1 }));
+              state.setMode("background");
+            }}
           />
         );
       case "background":
@@ -859,6 +868,8 @@ export function RightPanel({
             onOpenMachine={onOpenMachine}
             inventoryError={backgroundInventoryError}
             onRetryInventory={onRetryBackgroundInventory}
+            openJob={jobPageRequest}
+            onOpenJobHandled={(seq) => setJobPageRequest((current) => current?.seq === seq ? null : current)}
           />
         );
       default: {
@@ -1026,7 +1037,9 @@ export function RightPanel({
               <PanelPagesContext.Provider value={pagesController}>
                 <PanelPageTitleSlotContext.Provider value={pageTitleSlot}>
                   <PanelNoticeRegionContext.Provider value={noticeRegion ? { element: noticeRegion, focusHead } : null}>
-                    <div className="rpanel-body">{modeBody(state.mode)}</div>
+                    <div className="rpanel-body" ref={setBodyScroller}>
+                      <PanelScrollerContext.Provider value={bodyScroller}>{modeBody(state.mode)}</PanelScrollerContext.Provider>
+                    </div>
                   </PanelNoticeRegionContext.Provider>
                 </PanelPageTitleSlotContext.Provider>
               </PanelPagesContext.Provider>

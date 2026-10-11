@@ -40,7 +40,7 @@ for (const viewport of VIEWPORTS) for (const theme of ["dark", "light"] as const
     await expect(back).toBeVisible();
     await expect(panel.locator(".rpanel-switcher")).toHaveCount(0);
     await expect(panel.getByRole("button", { name: "Back to Session", exact: true })).toHaveCount(0);
-    await expect(panel.locator(".subagent-detail")).toBeVisible();
+    await expect(panel.locator(".agents-page .worker-detail")).toBeVisible();
     await shot(page, `${viewport.name}-${theme}-2-page`);
 
     await back.click();
@@ -98,7 +98,7 @@ for (const viewport of VIEWPORTS) for (const theme of ["dark", "light"] as const
   });
 }
 
-test("a nested worker opened from a page is a page on top, and Back returns to the outer page's title", async ({ page }) => {
+test("a nested worker opened from a page is a page on top, and Back returns to its row on the outer page", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/panel-pages-e2e.html?nested=1");
   const panel = page.getByRole("complementary", { name: "Side Panel" });
@@ -110,34 +110,34 @@ test("a nested worker opened from a page is a page on top, and Back returns to t
   await panel.locator(".agents-page .tl-agent > .btn").click();
   await expect(title).toHaveText("Check Payout Fixtures");
   await expect(title).toBeFocused();
-  // The Open that pushed it went with the outer page, and the nested worker's row waits hidden
-  // under the pages, so focus lands on the outer page's title.
+  // The Open that pushed it went with the outer page, so focus lands on the nested worker's row,
+  // which the outer page lists under Nested Workers (#2860).
   await panel.getByRole("button", { name: "Back to Agents", exact: true }).click();
   await expect(title).toHaveText("Profile Payouts 30");
-  await expect(title).toBeFocused();
+  await expect(panel.locator('.agents-page [data-panel-page-key="subagent:worker-31"]')).toBeFocused();
   await panel.getByRole("button", { name: "Back to Agents", exact: true }).click();
   await expect(panel.locator('[data-panel-page-key="subagent:worker-30"]')).toBeFocused();
 });
 
-test("a nested worker opened beside a worker's request is a page, and Back keeps the request and its owner's activity", async ({ page }) => {
+test("a worker's request opens on its page, a nested worker is a page on top, and Back keeps the request", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/panel-pages-e2e.html?nested=1&request=1");
   const panel = page.getByRole("complementary", { name: "Side Panel" });
   await panel.getByRole("button", { name: /^Profile Payouts 30 · / }).click();
-  await expect(panel.getByRole("region", { name: "Selected Worker Request", exact: true })).toBeFocused();
   const owner = panel.getByRole("region", { name: "Profile Payouts 30", exact: true });
-  await expect(owner).toBeVisible();
+  await expect(panel.locator(".rpanel-page-title")).toHaveText("Profile Payouts 30");
+  await expect(owner.getByRole("region", { name: "Pending Request", exact: true })).toBeFocused();
+  await expect(owner.locator(".notice")).toHaveText("Wants to run npm test -- payouts and is waiting for your approval.");
   const disclosure = owner.locator(".tl-work > .disclosure-trigger");
   if (await disclosure.count() && await disclosure.getAttribute("aria-expanded") === "false") await disclosure.click();
   const open = owner.locator(".tl-agent > .btn");
   await open.click();
   await expect(panel.locator(".rpanel-page-title")).toHaveText("Check Payout Fixtures");
   await panel.getByRole("button", { name: "Back to Agents", exact: true }).click();
-  await expect(panel.getByRole("region", { name: "Selected Worker Request", exact: true })).toBeVisible();
-  await expect(owner).toBeVisible();
-  // The activity's virtual rows were remeasured while the roster was hidden, so the Open is a new
-  // element; focus goes to the nested worker's own row, as for any opener that is gone.
-  await expect(panel.locator('[data-panel-page-key="subagent:worker-31"]')).toBeFocused();
+  await expect(owner.getByRole("region", { name: "Pending Request", exact: true })).toBeVisible();
+  // The Open went with the page it was on; focus goes to the nested worker's own row, which the
+  // outer page lists under Nested Workers, as for any opener that is gone.
+  await expect(owner.locator('[data-panel-page-key="subagent:worker-31"]')).toBeFocused();
 });
 
 test("the transcript's Open lands on that worker's page with its title focused", async ({ page }) => {

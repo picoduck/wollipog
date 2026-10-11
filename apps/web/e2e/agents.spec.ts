@@ -32,18 +32,20 @@ for (const viewport of [
     // first load in session storage, so the deep link carries only the epoch.
     await page.goto(`${attentionPath("permission-b")}?epoch=0`);
     await expect(page).toHaveURL(/\/attention\/.*epoch=0$/);
-    const selected = page.getByRole("region", { name: "Selected Worker Request", exact: true });
+    // A worker's request opens on that worker's page, beside its activity (#2860).
+    const workerPage = page.locator(".agents-page").getByRole("region", { name: "Inspect Parser", exact: true });
+    const selected = workerPage.getByRole("region", { name: "Pending Request", exact: true });
     await expect(selected).toBeFocused();
     await expect(selected.getByText("Run Parser Tests?", { exact: true })).toBeVisible();
-    await expect(page.getByText("The parser tests are ready to run.", { exact: true })).toBeVisible();
+    await expect(workerPage.getByText("The parser tests are ready to run.", { exact: true })).toBeVisible();
     await page.reload();
     await expect(selected).toBeFocused();
     await expect(selected.getByText("Run Parser Tests?", { exact: true })).toBeVisible();
     await page.screenshot({ path: `.agents/tmp/attention-navigation/${surface}-${viewport.name}-${theme}-target.png`, fullPage: true });
     await selected.getByRole("button", { name: "Allow", exact: true }).click();
     await expect(selected).toHaveCount(0);
-    await expect(page.getByText("The linked request is no longer pending. No replacement request was selected.")).toBeVisible();
-    await expect(page.getByRole("button", { name: "Audit Storage · Approval Required", exact: true })).toBeVisible();
+    await expect(workerPage).toBeFocused();
+    await expect(workerPage.locator(".worker-detail-head .status")).toHaveText("Running");
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   });
 }
@@ -65,7 +67,7 @@ test("aggregate attention links focus the full request list without choosing a r
 test("attention links cannot alias reused requests after reprocessing and primary requests keep one form", async ({ page }) => {
   await serveFixtureUnderSessionRoutes(page);
   await page.goto(`${attentionPath("permission-a")}?epoch=0`);
-  await expect(page.getByRole("region", { name: "Selected Worker Request", exact: true })).toBeFocused();
+  await expect(page.getByRole("region", { name: "Pending Request", exact: true })).toBeFocused();
   await expect(page.getByRole("button", { name: "Allow", exact: true })).toHaveCount(1);
   await expect(page.getByRole("button", { name: "Open Request in Session", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "Reprocess Session", exact: true }).click();
@@ -73,12 +75,13 @@ test("attention links cannot alias reused requests after reprocessing and primar
   await expect(page.getByRole("button", { name: "Open Request in Session", exact: true })).toHaveCount(0);
 });
 
-test("a worker's question is answered on its Agents panel card, never on the dock, with one form (#2205)", async ({ page }) => {
+test("a worker's question is answered on its page in Agents, never on the dock, with one form (#2205, #2860)", async ({ page }) => {
   await page.goto("/agents-e2e.html?primary-question=1");
   await expect(page.locator(".request-dock")).toHaveCount(0);
   await expect(page.getByRole("radio", { name: /Parser/ })).toHaveCount(0);
   await page.getByRole("button", { name: "Audit Storage · Answer Required", exact: true }).click();
-  await expect(page.getByRole("region", { name: "Selected Worker Request", exact: true })).toBeFocused();
+  await expect(page.getByRole("region", { name: "Pending Request", exact: true })).toBeFocused();
+  await expect(page.locator(".agents-page .notice")).toHaveText("Has a question and is waiting for your answer.");
   await expect(page.getByRole("button", { name: "Open Request in Session", exact: true })).toHaveCount(0);
   await page.getByRole("radio", { name: /Parser/ }).click();
   await expect(page.getByRole("button", { name: "Submit Answers", exact: true })).toHaveCount(1);
@@ -88,7 +91,7 @@ test("a worker's question is answered on its Agents panel card, never on the doc
 test("a worker's long question expanded on its Agents panel card keeps its answers and footer in reach (#2683)", async ({ page }) => {
   await page.goto("/agents-e2e.html?primary-question=1&long-question=1");
   await page.getByRole("button", { name: "Audit Storage · Answer Required", exact: true }).click();
-  const card = page.getByRole("region", { name: "Selected Worker Request", exact: true }).getByRole("region", { name: "Agent Questions" });
+  const card = page.getByRole("region", { name: "Pending Request", exact: true }).getByRole("region", { name: "Agent Questions" });
   await card.getByRole("button", { name: "Show Full Question" }).click();
   await expect(card.getByRole("button", { name: "Collapse Question" })).toHaveAttribute("aria-expanded", "true");
   const bounds = (locator: typeof card) => locator.evaluate((element) => element.getBoundingClientRect().toJSON() as DOMRect);
@@ -103,28 +106,28 @@ test("a worker's long question expanded on its Agents panel card keeps its answe
   expect(submitBox.top).toBeGreaterThanOrEqual(cardBox.top);
 });
 
-test("a selected child request promoted to primary moves focus to its canonical response form", async ({ page }) => {
+test("a worker's request promoted to primary stays on its page with one form", async ({ page }) => {
   await page.goto("/agents-e2e.html?primary-question=1");
   await page.getByRole("button", { name: "Inspect Parser · Approval Required", exact: true }).click();
-  await expect(page.getByRole("region", { name: "Selected Worker Request", exact: true })).toBeFocused();
+  await expect(page.getByRole("region", { name: "Pending Request", exact: true })).toBeFocused();
   await page.getByRole("button", { name: "Resolve Primary Request", exact: true }).click();
-  await expect(page.locator('[data-session-request-id="permission-b"]')).toBeFocused();
+  await expect(page.locator('.agents-page [data-session-request-id="permission-b"]')).toBeVisible();
   await expect(page.getByRole("button", { name: "Open Request in Session", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Allow", exact: true })).toHaveCount(1);
 });
 
-test("a nested worker opened from the activity beside a worker's request opens as a page (#2856)", async ({ page }) => {
+test("a nested worker opened from the activity under a worker's request opens as a page (#2856, #2860)", async ({ page }) => {
   await page.goto("/agents-e2e.html");
   await page.getByRole("button", { name: "Audit Storage · Approval Required", exact: true }).click();
-  await expect(page.getByRole("region", { name: "Selected Worker Request", exact: true })).toBeFocused();
-  // Audit Storage's activity sits under its request, with its nested worker's Open.
-  const activity = page.getByRole("region", { name: "Worker Roster" }).locator(".subagent-output");
+  await expect(page.getByRole("region", { name: "Pending Request", exact: true })).toBeFocused();
+  // Audit Storage's activity sits under its request on its page, with its nested worker's Open.
+  const activity = page.locator(".agents-page").getByRole("list", { name: "Subagent Activity" });
   const disclosure = activity.locator(".tl-work > .disclosure-trigger");
   if (await disclosure.count() && await disclosure.getAttribute("aria-expanded") === "false") await disclosure.click();
   const open = activity.locator(".tl-agent > .btn");
   await open.click();
   await expect(page.getByRole("region", { name: "Inspect Parser", exact: true })).toBeVisible();
-  await expect(page.locator(".agents-page .subagent-detail")).toBeVisible();
+  await expect(page.locator(".agents-page .worker-detail")).toHaveCount(1);
   // Back, which this fixture has no header for, is covered in panel-pages.spec.ts.
 });
 
@@ -163,13 +166,6 @@ for (const viewport of [
     await page.goto(`/agents-e2e.html?theme=${theme}`);
     const roster = page.locator(".agents-list");
     await expect(roster.getByRole("listitem")).toHaveCount(3);
-    await page.getByRole("button", { name: "Inspect Parser · Approval Required", exact: true }).click();
-    await expect(page.getByRole("region", { name: "Selected Worker Request" })).toBeFocused();
-    await expect(page.getByText("The parser tests are ready to run.")).toBeVisible();
-    await page.getByRole("button", { name: "Allow", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Inspect Parser · Approval Required", exact: true })).toHaveCount(0);
-    await expect(page.getByRole("region", { name: "Worker Attention", exact: true })).toBeFocused();
-    await expect(page.getByRole("button", { name: "Audit Storage · Approval Required", exact: true })).toBeVisible();
     await page.getByRole("radio", { name: "History, 1", exact: true }).click();
     await expect(roster.getByText("Review Documentation", { exact: true })).toBeVisible();
     await page.getByRole("radio", { name: "Active, 3", exact: true }).click();
@@ -183,5 +179,15 @@ for (const viewport of [
     // This fixture renders the roster outside the side panel, with no header Back, so the roster
     // stays under the page. Offline workers stay in Active, as Unverified (#2857).
     await expect(page.getByRole("radio", { name: "Active, 3", exact: true, includeHidden: true })).toBeAttached();
+
+    // A worker's request is answered on its page (#2860).
+    await page.goto(`/agents-e2e.html?theme=${theme}`);
+    await page.getByRole("button", { name: "Inspect Parser · Approval Required", exact: true }).click();
+    const request = page.getByRole("region", { name: "Pending Request" });
+    await expect(request).toBeFocused();
+    await expect(page.getByText("The parser tests are ready to run.")).toBeVisible();
+    await request.getByRole("button", { name: "Allow", exact: true }).click();
+    await expect(request).toHaveCount(0);
+    await expect(page.locator(".agents-page .worker-detail-head .status")).toHaveText("Running");
   });
 }

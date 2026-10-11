@@ -16,7 +16,6 @@ import { assertNoDomNode } from "../dom-test-assertions.js";
 import { subagentStatusContext, type WorkerRow } from "../worker-roster.js";
 import { AgentsPanel, groupWorkerRows, memberMetadata } from "./AgentsPanel.js";
 import { subagentStatusMeta } from "./EventTimeline.js";
-import { SubagentsPanel } from "./SubagentsPanel.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 const globals: Record<string, unknown> = {
@@ -210,21 +209,14 @@ test("an unfinished agent of a failed session on an online runner is Lost in the
   const failed = { ...session, status: "failed" } as SessionView;
   const items = [agent("stuck", 1)];
   const panel = await mount(items, { session: failed });
-  const happyContainer = domWindow.document.createElement("div");
-  domWindow.document.body.append(happyContainer);
-  const detailContainer = happyContainer as unknown as HTMLDivElement;
-  const detail = createRoot(detailContainer);
   try {
     // Lost is settled, so it sits in History.
     await act(async () => panel.container.querySelector<HTMLButtonElement>('[role="radio"][aria-label="History, 1"]')!.click());
     assert.equal(text(panel.container.querySelector(".worker-row .status")), "Lost");
     assert.equal(subagentStatusMeta(items[0] as Extract<TimelineItem, { kind: "tool_call" }>, subagentStatusContext(failed, true)).label, "Lost");
-    await act(async () => detail.render(<SubagentsPanel session={failed} items={items} runnerOnline requestedId="stuck"
-      onSelect={() => {}} detailOnly titled={false} />));
-    assert.match(text(detailContainer.querySelector(".subagent-detail-meta")), /^Lost · /);
+    await act(async () => panel.container.querySelector<HTMLButtonElement>(".worker-row")!.click());
+    assert.equal(text(panel.container.querySelector(".agents-page .worker-detail-head .status")), "Lost");
   } finally {
-    await act(async () => detail.unmount());
-    detailContainer.remove();
     await panel.unmount();
   }
 });
