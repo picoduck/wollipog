@@ -1736,7 +1736,7 @@ export function InboxView({
             description: projectsSupported ? undefined : "New Project is unavailable on this connection.",
             onClick: () => setCreatingProject(true),
           },
-          ...(onOpenShortcuts ? [{ label: "Keyboard Shortcuts", onClick: onOpenShortcuts }] : []),
+          ...(onOpenShortcuts ? [{ label: "Keyboard Shortcuts", onClick: () => onOpenShortcuts() }] : []),
         ]}
         primary={stateOffersNewSession ? undefined : { label: "New Session", shortcut: shortcutDisplay("new-session"), onClick: newSession }}
         tabs={(

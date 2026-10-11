@@ -1709,6 +1709,12 @@ stacks on the first. Desktop keeps stacked dialogs as above.
 - Nested dialogs push onto the sheet with a back arrow instead of replacing the parent. A
   confirmation opened from a sheet replaces the sheet's content, with Back, and keeps the parent's
   values (§7.1); it never stacks a second sheet.
+- The shared ⋯ (`ActionsMenu`, in `PageHeader`, `DetailBar` and in-page headers such as
+  `SkillDetailHeader`) calls each item with `{ reopen }`, which opens the same ⋯ again with focus on
+  that item. An item that confirms passes it as the confirmation's Back:
+  `back: { label: "Back to More Actions", run: reopen }`. On a phone Back resolves the confirmation
+  as cancelled and brings the ⋯ sheet back; desktop draws no Back and the confirmation stacks. A
+  menu that keeps its own open state (a row ⋯ such as `ProjectSplitMenu`) passes its own `back`.
 - Menus and popovers shown as sheets (§9.2) carry the same 36px grabber.
 
 ---
