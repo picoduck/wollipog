@@ -368,6 +368,61 @@ test("Enter never sends past a pending Stop Turn or a pending start", async () =
   }
 });
 
+/**
+ * Cross-model review CR-3.1 and CR-3.2. A stop is held by its own press: an earlier press failing
+ * late does not release a newer one, and a panel closed and reopened while a stop waits keeps the
+ * seat held.
+ */
+test("a pending Stop Turn survives an earlier stop's late failure and a remount", async () => {
+  const enter = async (field: HTMLTextAreaElement) => {
+    await act(async () => {
+      field.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }) as unknown as Event);
+    });
+  };
+  const prompted: string[] = [];
+  const cancels: Array<{ reject: (cause: Error) => void }> = [];
+  let current = { ...child, status: "running", activeTurnId: "turn-a" } as SessionView;
+  const stub: Partial<Api> = {
+    sideChat: async () => ({ sideChat: { parentSessionId: parent.id, session: current, createdAt: 1 } }),
+    getSessionEventPage: async () => ({ events: [], eventEpoch: 0, nextAfter: 0, cacheComplete: true }),
+    cancelTurn: () => new Promise<SessionView>((_resolve, reject) => { cancels.push({ reject }); }),
+    prompt: async (_id: string, text: string) => {
+      prompted.push(text);
+      return current;
+    },
+  };
+  const panel = <SideChatPanel session={parent} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION} onInsertDraft={() => {}} />;
+  const first = await render(panel, stub);
+  try {
+    await act(async () => { first.button("Stop Turn")!.click(); });
+    // Turn A ends and turn B starts before A's stop request has answered.
+    current = { ...current, activeTurnId: "turn-b" } as SessionView;
+    await tick(1_700);
+    await act(async () => { first.button("Stop Turn")!.click(); });
+    assert.equal(cancels.length, 2);
+    await act(async () => { cancels[0]!.reject(new Error("turn already finished")); });
+    await first.type("not while B stops");
+    assert.equal(first.button("Stopping Turn")?.disabled, true, "B's stop still holds the seat");
+    await enter(first.textarea()!);
+    assert.equal(prompted.length, 0);
+  } finally {
+    await first.dispose();
+  }
+
+  // Reopened while B's stop is still waiting: the seat stays held.
+  const second = await render(panel, stub);
+  try {
+    assert.equal(second.button("Stopping Turn")?.disabled, true, "a remounted panel inherits the pending stop");
+    await enter(second.textarea()!);
+    assert.equal(prompted.length, 0, "nothing sends past a stop pressed before the remount");
+    current = { ...current, status: "idle", activeTurnId: undefined } as SessionView;
+    await tick(1_700);
+    assert.ok(second.button("Send"), "the turn's end releases it");
+  } finally {
+    await second.dispose();
+  }
+});
+
 test("a refused start keeps the draft without claiming the machine didn't respond", async () => {
   const view = await render(<SideChatPanel session={parent} runnerOnline onInsertDraft={() => {}} />, {
     sideChat: async () => ({ sideChat: null }),

@@ -67,6 +67,23 @@ const COMPOSER_MAX_LINES = 8;
  */
 const sendsInFlight = new Map<string, Promise<unknown>>();
 
+/** One Stop Turn: the side chat and turn it was pressed for, which press it was, and when the panel
+ * stops waiting for the turn to end. */
+interface StopAttempt {
+  childId: string;
+  turn: string;
+  attempt: number;
+  deadline: number;
+}
+
+/**
+ * Stop Turns still waiting for their turn to end, by panel scratch scope. Like a send, a stop
+ * outlives the panel that pressed it, and a panel mounted meanwhile keeps the seat held rather than
+ * offering Send over a turn that is being stopped (#2863).
+ */
+const stopsInFlight = new Map<string, StopAttempt>();
+let stopAttempts = 0;
+
 /** Prose, so sentence case: these complete the sentence "This side chat …". */
 const ENDED_PHRASE: Partial<Record<SessionStatus, string>> = {
   completed: "has finished",
@@ -205,7 +222,11 @@ export function SideChatPanel({
   const [creating, setCreating] = useState(false);
   const [startFailed, setStartFailed] = useState<StartFailure | null>(null);
   const [sending, setSending] = useState(false);
-  const [stopping, setStopping] = useState<string | null>(null);
+  // A remounted panel inherits a stop an earlier mount started, until that stop's deadline.
+  const [stopping, setStopping] = useState<StopAttempt | null>(() => {
+    const inherited = stopsInFlight.get(panelScratch);
+    return inherited && inherited.deadline > Date.now() ? inherited : null;
+  });
   const [actionError, setActionError] = useState<{ kind: "send" | "stop"; message: string; status?: number } | null>(null);
   const [pollError, setPollError] = useState<string | null>(null);
   const enterKeySetting = useEnterKeyBehavior();
@@ -423,18 +444,26 @@ export function SideChatPanel({
   });
   const stopRefusal = child ? sessionCommandRefusal(child, "cancelTurn") : null;
   // The turn a Stop Turn was pressed for: once it is over, or another took its place, Send is back.
-  const stoppingTurn = stopping !== null && canStopTurn && child?.activeTurnId === stopping;
+  const stoppingTurn = stopping !== null && canStopTurn && child?.id === stopping.childId &&
+    child.activeTurnId === stopping.turn;
+  /** Let go of a stop, here and in the registry, unless a newer press has replaced it there. */
+  const releaseStop = useCallback((attempt: StopAttempt) => {
+    if (stopsInFlight.get(panelScratch)?.attempt === attempt.attempt) stopsInFlight.delete(panelScratch);
+    setStopping((current) => current?.attempt === attempt.attempt ? null : current);
+  }, [panelScratch]);
+  // Once the side chat has loaded, a stop whose turn is over is done. Before that nothing can say so:
+  // a remounted panel keeps the seat held while it loads.
   useEffect(() => {
-    if (stopping !== null && !stoppingTurn) setStopping(null);
-  }, [stopping, stoppingTurn]);
+    if (stopping !== null && child !== undefined && !stoppingTurn) releaseStop(stopping);
+  }, [child, releaseStop, stopping, stoppingTurn]);
   useEffect(() => {
-    if (!stoppingTurn) return;
+    if (stopping === null) return;
     const timer = window.setTimeout(() => {
-      setStopping(null);
+      releaseStop(stopping);
       setActionError({ kind: "stop", message: "The turn is still running." });
-    }, STOP_TURN_WAIT_MS);
+    }, Math.max(0, stopping.deadline - Date.now()));
     return () => window.clearTimeout(timer);
-  }, [stoppingTurn]);
+  }, [releaseStop, stopping]);
 
   // Why Send is closed, as the visible reason beside it, or null when it is open. Send, Enter and
   // anything else that submits read this one answer, so a key never sends past a disabled button.
@@ -482,17 +511,24 @@ export function SideChatPanel({
 
   /** Interrupt the side chat's own turn, as the main composer's Stop Turn does for the session's. */
   const stopTurn = async () => {
-    if (!child?.activeTurnId || !canStopTurn || stopRefusal !== null || stopping !== null) return;
-    const turn = child.activeTurnId;
-    setStopping(turn);
+    if (!child?.activeTurnId || !canStopTurn || stopRefusal !== null || stoppingTurn) return;
+    const attempt: StopAttempt = {
+      childId: child.id, turn: child.activeTurnId, attempt: ++stopAttempts, deadline: Date.now() + STOP_TURN_WAIT_MS,
+    };
+    stopsInFlight.set(panelScratch, attempt);
+    setStopping(attempt);
     setActionError(null);
     try {
       // Polling reports the turn's end. The stop's own answer is the stored session, which carries
       // no live turn coordinate, so adopting it would bring Send back while the turn still runs.
       await api.cancelTurn(child.id);
     } catch (cause) {
+      // Only this press's own failure releases the seat: an earlier press failing late must not
+      // reopen Send under a newer stop that is still waiting.
+      if (stopsInFlight.get(panelScratch)?.attempt !== attempt.attempt) return;
+      stopsInFlight.delete(panelScratch);
       if (!mountedRef.current) return;
-      setStopping(null);
+      setStopping((current) => current?.attempt === attempt.attempt ? null : current);
       setActionError({ kind: "stop", message: (cause as Error).message,
         status: cause instanceof ApiError ? cause.status : undefined });
     }
