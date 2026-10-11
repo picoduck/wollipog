@@ -33,7 +33,7 @@ import {
   requestsFact,
   reviewFact,
   sessionToolAvailability,
-  terminalFact,
+  terminalListFact,
   type SessionTool,
   type SessionToolContext,
   type SessionToolId,
@@ -169,11 +169,7 @@ function useTerminalFact(sessionId: string): string {
   useEffect(() => (counting ? terminals?.watchShells() : undefined), [counting, terminals]);
   const shellOutput = useOptionalStoreSelector((s) => s.shellOutput);
   if (!counting) return TERMINAL_FACT;
-  const state = sessionTerminals?.state;
-  if (!state || state.shells === null) return terminalFact(state?.listUnreadable ? "unknown" : "checking");
-  // An exited shell's tab stays until it is closed, but it is not an open shell.
-  return terminalFact(state.shells.filter((shell) =>
-    shell.status !== "exited" && !shellOutput?.get(shell.shellId)?.exited).length);
+  return terminalListFact(sessionTerminals?.state ?? null, (shellId) => Boolean(shellOutput?.get(shellId)?.exited));
 }
 
 /**

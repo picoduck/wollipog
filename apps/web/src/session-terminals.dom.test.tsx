@@ -969,6 +969,13 @@ test("watching the shell list reads it with no host open, loading no history and
     assert.equal(lists, before + 1, "with a host open the host reloads the list, not a second read");
     release();
 
+    // With the host gone again, a reconnect still refreshes the watched list (its own read is the newest).
+    const rewatch = terminals.watchShells();
+    registry.pop();
+    terminals.reconnected();
+    await until(() => terminals.getSnapshot().shells?.length === 1, "the list after a reconnect, once a host has been open");
+    rewatch();
+
     unwatch();
     const unwatched = lists;
     terminals.registryChanged();
@@ -1110,6 +1117,22 @@ test("Move to Bottom Dock moves the panel's terminals into the dock: same tab, x
     assert.equal(requests.opens, 0, "no shell is opened, so none restarts");
     await settle(30);
     assert.ok(domWindow.document.activeElement?.closest(".shell-dock .xterm"), "focus followed the terminal into the dock");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("moving a pipe shell to the dock puts focus in its command field, which is what types into it", async () => {
+  fixtureShells = [{ ...shell(1), pty: false }];
+  const view = await mountTool();
+  try {
+    await until(() => view.container.querySelector(".term-host .pipe-row .shell-input") !== null, "the pipe shell's command row");
+    await act(async () => fireDomEvent.click(view.button("More Terminal Actions")!));
+    await act(async () => fireDomEvent.click((domWindow.document as unknown as Document).querySelector('[role="menu"] [role="menuitem"]')!));
+    await settle(30);
+    const field = view.container.querySelector(".shell-dock .pipe-row .shell-input");
+    assert.ok(field, "the dock shows the command row");
+    assert.ok((domWindow.document.activeElement as unknown) === field, "focus is in the command field, not the read-only output");
   } finally {
     await view.unmount();
   }

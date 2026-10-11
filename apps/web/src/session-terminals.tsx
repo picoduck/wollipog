@@ -360,14 +360,16 @@ export class SessionTerminals {
 
   /** The runner reconciled its shells after its own reconnect. */
   registryChanged(): void {
+    if (this.everOpened) {
+      // Every shell's history is reloaded: now if a host shows the terminal, otherwise on the next open.
+      // A load still in flight read the registry before the reconnect, so it must not land and mark it.
+      this.supersedeLoads();
+      this.outputDrops++;
+      this.historyLoaded.clear();
+      if (this.hosts > 0) void this.loadShells({ reconcile: this.initialShellLoadSettled });
+    }
+    // After superseding, so this read is the newest.
     this.peek();
-    if (!this.everOpened) return;
-    // Every shell's history is reloaded: now if a host shows the terminal, otherwise on the next open.
-    // A load still in flight read the registry before the reconnect, so it must not land and mark it.
-    this.supersedeLoads();
-    this.outputDrops++;
-    this.historyLoaded.clear();
-    if (this.hosts > 0) void this.loadShells({ reconcile: this.initialShellLoadSettled });
   }
 
   /** Output for a live shell with no tab: another dashboard opened it. */

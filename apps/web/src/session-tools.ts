@@ -1,4 +1,4 @@
-import type { DescendantRequestView, PendingApproval, SessionView } from "@wollipog/protocol";
+import type { DescendantRequestView, PendingApproval, SessionView, ShellView } from "@wollipog/protocol";
 import type { CampaignStatusAvailability } from "./campaign-status.js";
 import type { RightPanelMode } from "./right-panel.js";
 import type { ShortcutId } from "./shortcuts.js";
@@ -131,6 +131,20 @@ export function terminalFact(shells: number | "checking" | "unknown"): string {
   if (shells === "checking") return "Checking for shells…";
   if (shells === "unknown") return "Shells can't be listed right now";
   return shells === 0 ? "No shells open" : `${count(shells, "shell", "shells")} open`;
+}
+
+/**
+ * Terminal's fact from the session's shell list as its terminals hold it (`watchShells`): its open
+ * shells, where an exited shell's tab is not one; a list the last read failed to refresh is not
+ * counted as current. Null before the session has terminals.
+ */
+export function terminalListFact(
+  list: { shells: readonly Pick<ShellView, "shellId" | "status">[] | null; listUnreadable: boolean } | null,
+  exited: (shellId: string) => boolean,
+): string {
+  if (list?.listUnreadable) return terminalFact("unknown");
+  if (!list || list.shells === null) return terminalFact("checking");
+  return terminalFact(list.shells.filter((shell) => shell.status !== "exited" && !exited(shell.shellId)).length);
 }
 
 export function filesFact(folderName: string): string {

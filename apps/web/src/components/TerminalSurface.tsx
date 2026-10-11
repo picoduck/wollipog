@@ -127,14 +127,16 @@ export function useTerminalHost(sessionId: string, tabsetId: string, {
 
   const searchFocus = useSearchFocus(state?.searchOpen ?? false, searchPlacement);
 
-  // The terminal moved here from its other place: focus follows it (`requestTerminalFocus`), to the
-  // selected shell, else to the host's first control that can act. A frame later, once the shells'
-  // terminals are attached here for good (an effect run again detaches and attaches them).
+  // The terminal moved here from its other place: focus follows it (`requestTerminalFocus`), to what
+  // types into the selected shell (a pipe shell's command field, else its terminal), else to the
+  // host's first control that can act. A frame later, once the shells' terminals are attached here for
+  // good (an effect run again detaches and attaches them).
   const ready = Boolean(session && terminals && state);
   useEffect(() => {
     if (!ready || !takeTerminalFocusRequest(sessionId)) return;
     window.requestAnimationFrame(() => {
-      if (terminalRef.current) terminalRef.current.focus();
+      if (pipeInputRef.current) pipeInputRef.current.focus();
+      else if (terminalRef.current) terminalRef.current.focus();
       else focusFirst(fallbackFocusIds);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
