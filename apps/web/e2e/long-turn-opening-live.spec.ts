@@ -233,12 +233,28 @@ for (const rate of [1, 4]) test(`an incomplete cache opens its real authoritativ
     if (path === `/api/sessions/${COLD_SESSION_ID}/events`) requests.push(request.url());
   });
   await page.evaluate(path => {
-    const state = { started: performance.now(), interactiveMs: 0, firstVisibleKey: "", longTasks: [] as number[] };
+    const state = { started: performance.now(), interactiveMs: 0, firstVisibleKey: "", longTasks: [] as number[],
+      longTaskDetails: [] as Array<{ startTime: number; duration: number }>, longAnimationFrames: [] as unknown[] };
     (window as unknown as { __coldOpening: typeof state }).__coldOpening = state;
     const observer = new PerformanceObserver(list => {
-      for (const entry of list.getEntries()) if (entry.startTime >= state.started) state.longTasks.push(entry.duration);
+      for (const entry of list.getEntries()) if (entry.startTime >= state.started) {
+        state.longTasks.push(entry.duration);
+        if (state.longTaskDetails.length < 8) state.longTaskDetails.push({ startTime: entry.startTime, duration: entry.duration });
+      }
     });
     observer.observe({ type: "longtask", buffered: true });
+    // Keep the existing budget intact; retain the task's frame/script attribution when available
+    // so a CI-only miss can be investigated without losing the diagnostic attachment with the VM.
+    const animationObserver = new PerformanceObserver(list => {
+      for (const entry of list.getEntries()) if (entry.startTime >= state.started && state.longAnimationFrames.length < 8) {
+        const frame = entry.toJSON();
+        if (Array.isArray(frame.scripts)) frame.scripts = frame.scripts.slice(0, 16);
+        state.longAnimationFrames.push(frame);
+      }
+    });
+    if (PerformanceObserver.supportedEntryTypes.includes("long-animation-frame")) {
+      animationObserver.observe({ type: "long-animation-frame", buffered: true });
+    }
     const frame = () => {
       const reader = document.querySelector<HTMLElement>(".detail-scroll");
       const ready = reader?.querySelector('[data-virtual-measurements="ready"]');
@@ -251,7 +267,7 @@ for (const rate of [1, 4]) test(`an incomplete cache opens its real authoritativ
       const control = document.querySelector<HTMLButtonElement>("[data-later-activity-gap] button");
       if (row && control && !control.disabled && reader?.getAttribute("aria-busy") !== "true") {
         state.interactiveMs = performance.now() - state.started;
-        requestAnimationFrame(() => observer.disconnect());
+        requestAnimationFrame(() => { observer.disconnect(); animationObserver.disconnect(); });
         return;
       }
       requestAnimationFrame(frame);
@@ -272,6 +288,7 @@ for (const rate of [1, 4]) test(`an incomplete cache opens its real authoritativ
   const body = await opening.json();
   const report = { rate, ...measured, longestTaskMs: Math.max(0, ...measured.longTasks),
     requestCount: requests.length, cacheComplete: body.cacheComplete, previewEvents: body.preview?.events.length ?? 0 };
+  console.info(`Cold Opening Diagnostic: ${JSON.stringify(report)}`);
   await info.attach(`cold-opening-${rate}x.json`, { body: JSON.stringify(report, null, 2), contentType: "application/json" });
   if (evidenceDir) {
     mkdirSync(evidenceDir, { recursive: true });
