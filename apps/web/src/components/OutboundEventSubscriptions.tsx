@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { StatusBadge } from "./StatusBadge.js";
 import { statusMeta } from "../status-meta.js";
 import type {
@@ -9,6 +9,7 @@ import type {
   OutboundEventSubscriptionView,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
+import { startVisiblePolling } from "../visible-polling.js";
 import { titleCaseLabel } from "../format.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { Checkbox, Select } from "./ui/ChoiceControls.js";
@@ -58,27 +59,48 @@ export function OutboundEventSubscriptions({
     ? scopeId
     : scopeOptions[0]?.id ?? "";
 
-  const refresh = useCallback(async () => {
-    const next = await api.outboundEventSubscriptions();
-    setSubscriptions(next);
-    const receiptEntries = await Promise.all(next.map(async (subscription) => [
-      subscription.subscriptionId,
-      await api.outboundEventDeliveries(subscription.subscriptionId),
-    ] as const));
-    setDeliveries(Object.fromEntries(receiptEntries));
+  const refreshInFlight = useRef<Promise<void> | null>(null);
+  const refresh = useCallback(async (onlyWhileVisible = false) => {
+    while (refreshInFlight.current) {
+      await refreshInFlight.current.catch(() => {});
+    }
+    if (onlyWhileVisible && document.visibilityState === "hidden") return;
+    const work = (async () => {
+      const next = await api.outboundEventSubscriptions();
+      setSubscriptions(next);
+      const results = await Promise.allSettled(next.map(async (subscription) => [
+        subscription.subscriptionId,
+        await api.outboundEventDeliveries(subscription.subscriptionId),
+      ] as const));
+      const receiptEntries = results.map((result) => {
+        if (result.status === "rejected") throw result.reason;
+        return result.value;
+      });
+      setDeliveries(Object.fromEntries(receiptEntries));
+    })();
+    refreshInFlight.current = work;
+    try {
+      await work;
+    } finally {
+      refreshInFlight.current = null;
+    }
   }, [api]);
 
   useEffect(() => {
     let active = true;
-    const load = () => refresh().then(() => {
-      if (active) {
-        setError(null);
-        setLoaded(true);
-      }
-    }).catch((cause) => active && setError((cause as Error).message));
-    void load();
-    const timer = window.setInterval(load, 5_000);
-    return () => { active = false; window.clearInterval(timer); };
+    let initialRefresh = true;
+    const load = () => {
+      if (refreshInFlight.current && !initialRefresh) return;
+      initialRefresh = false;
+      void refresh(true).then(() => {
+        if (active) {
+          setError(null);
+          setLoaded(true);
+        }
+      }).catch((cause) => active && setError((cause as Error).message));
+    };
+    const stopPolling = startVisiblePolling(load, 5_000);
+    return () => { active = false; stopPolling(); };
   }, [refresh]);
 
   const mutate = async (action: () => Promise<unknown>) => {

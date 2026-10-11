@@ -25,6 +25,7 @@ import { AutomationsView } from "./AutomationsView.js";
 import { agentOptions } from "./agent-options.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
+import { withScopedClockOverrides } from "./test-clock-overrides.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -178,6 +179,7 @@ async function mountFixture(
   outboundDeliveries: Record<string, OutboundEventDeliveryView[]> = {},
   runnerViews: RunnerView[] = runners,
   workflowViews: WorkflowDefinition[] = [],
+  clientOverrides: Partial<ApiClient> = {},
 ): Promise<Fixture> {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
@@ -240,6 +242,7 @@ async function mountFixture(
       updates.push({ id, spec: structuredClone(spec) });
       return { ...items.find((item) => item.automationId === id)!, ...spec };
     },
+    ...clientOverrides,
   } as unknown as ApiClient;
 
   await act(async () => {
@@ -1118,6 +1121,59 @@ test("cards expand independently and collapse back to header-only", async () => 
   } finally {
     await unmountFixture(fixture);
   }
+});
+
+test("failed fan-out reads stay busy until every request settles and a mutation then refreshes", async () => {
+  const items = [schedule("automation-a", "Alpha")];
+  const intervals = new Set<() => void>();
+  let listCalls = 0;
+  let failDetails = false;
+  let release: (() => void) | undefined;
+  let mutationFinished = false;
+  await withScopedClockOverrides(domWindow, {
+    setInterval: (poll: () => void) => { intervals.add(poll); return 1; },
+    clearInterval: () => {},
+  }, async () => {
+    const fixture = await mountFixture(items, {}, {}, [], {}, runners, [], {
+      automations: async () => { listCalls += 1; return { automations: structuredClone(items) }; },
+      automation: async () => {
+        if (failDetails) throw new Error("Detail unavailable");
+        return { automation: items[0]!, executions: [], events: [] };
+      },
+      automationTriggers: async () => {
+        if (failDetails) await new Promise<void>((resolve) => { release = resolve; });
+        return { triggers: [] };
+      },
+      workflowDefinitions: async () => {
+        if (failDetails) throw new Error("Workflow unavailable");
+        return [];
+      },
+      updateAutomation: async (_id, spec) => {
+        items[0] = { ...items[0]!, ...spec };
+        mutationFinished = true;
+        return items[0];
+      },
+    });
+    try {
+      await expandCard(fixture, "Alpha");
+      assert.equal(listCalls, 1);
+      failDetails = true;
+      await act(async () => { for (const poll of intervals) poll(); });
+      assert.equal(listCalls, 2);
+      await act(async () => { for (const poll of intervals) poll(); });
+      assert.equal(listCalls, 2, "a failed sibling cannot release the guard while another read is pending");
+      await act(async () => { button(fixture.container, "Pause").click(); });
+      assert.equal(mutationFinished, true);
+      assert.equal(listCalls, 2, "the post-mutation refresh waits for the outstanding poll");
+      failDetails = false;
+      await act(async () => { release?.(); });
+      assert.equal(listCalls, 3, "the mutation gets a fresh read after the earlier refresh settles");
+      assert.ok(button(fixture.container, "Enable"), "the authoritative post-mutation state is rendered");
+    } finally {
+      release?.();
+      await unmountFixture(fixture);
+    }
+  });
 });
 
 test("a routine poll preserves expansion and leaves newly loaded cards collapsed", async () => {

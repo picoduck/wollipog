@@ -55,6 +55,7 @@ import { convertPreviewReadingState, timelineRowSource } from "../history-previe
 import { useHistoryPreview, type PreviewAnchor, type PreviewHandoff } from "../use-history-preview.js";
 import type { SessionEventsResponse } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
+import { startVisiblePolling } from "../visible-polling.js";
 import { outstandingSessionResult } from "../session-follow-up.js";
 import { SkillsUnavailableNotice, skillsUnavailableSentence, useSessionSkillsUnavailable, useSkillsNoticeDismissal } from "./SkillsUnavailableNotice.js";
 import {
@@ -921,6 +922,7 @@ export function useDescendantRequestPolling({
       ));
       return;
     }
+    if (!supersede && document.visibilityState === "hidden") return;
     if (inFlightRef.current && !supersede) return;
     abortInFlight();
     const controller = new AbortController();
@@ -979,11 +981,10 @@ export function useDescendantRequestPolling({
   }, [abortInFlight, api]);
   const refreshAfterResolution = useCallback(() => refresh(true), [refresh]);
   useEffect(() => {
-    refresh();
-    if (!enabled || !available) return;
-    const timer = window.setInterval(refresh, DESCENDANT_REQUEST_POLL_INTERVAL_MS);
+    if (!enabled || !available) { refresh(); return; }
+    const stopPolling = startVisiblePolling(refresh, DESCENDANT_REQUEST_POLL_INTERVAL_MS);
     return () => {
-      window.clearInterval(timer);
+      stopPolling();
       generationRef.current += 1;
       abortInFlight();
     };

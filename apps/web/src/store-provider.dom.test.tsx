@@ -12,6 +12,7 @@ import {
 import type { SessionView } from "@wollipog/protocol";
 import type { UiConnectionRuntime, UiSocket } from "./ui-transport.js";
 import { installDomTestCleanup } from "./dom-test-cleanup.js";
+import { withScopedClockOverrides } from "./components/test-clock-overrides.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -109,6 +110,64 @@ test("changing instance runtimes closes the old socket before the replacement re
   await act(async () => { root.unmount(); });
   assert.equal(bSockets[0]!.closeCount, 1);
   container.remove();
+});
+
+test("reconnects back off with bounded jitter, reset only after authentication, and preserve authorization cadence", async () => {
+  const timers = new Map<number, { run: () => void; delay: number }>();
+  let nextId = 1;
+  let random = 0;
+  const originalRandom = Math.random;
+  Math.random = () => random;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const sockets: FakeSocket[] = [];
+  try {
+    await withScopedClockOverrides(domWindow, {
+      setTimeout: (run: () => void, delay: number) => { const id = nextId++; timers.set(id, { run, delay }); return id; },
+      clearTimeout: (id: number) => { timers.delete(id); },
+    }, async () => {
+      await act(async () => {
+        root.render(<StoreProvider connection={runtime("backoff", "backoff:1", sockets)}><div /></StoreProvider>);
+      });
+      const fail = async (code = 1006) => {
+        await act(async () => { sockets.at(-1)!.onclose?.({ code }); });
+        const id = nextId - 1;
+        assert.ok(timers.has(id));
+        return { id, ...timers.get(id)! };
+      };
+      const fire = async (timer: { id: number; run: () => void }) => {
+        timers.delete(timer.id);
+        await act(async () => { timer.run(); });
+      };
+      for (const expected of [750, 1_500, 3_000, 6_000, 12_000, 15_000, 15_000]) {
+        const timer = await fail();
+        assert.equal(timer.delay, expected, "the jitter window grows exponentially and stops at the ceiling");
+        await fire(timer);
+        await act(async () => { sockets.at(-1)!.onopen?.(); });
+      }
+      random = 0.9;
+      const ceiling = await fail();
+      assert.equal(ceiling.delay, 28_500, "jitter varies the delay within the capped window");
+      await fire(ceiling);
+      await act(async () => { sockets.at(-1)!.onmessage?.({ data: snapshot("session", "Authenticated") }); });
+      random = 0;
+      const reset = await fail();
+      assert.equal(reset.delay, 750, "an authenticated frame resets the backoff window");
+      await fire(reset);
+      const unauthorized = await fail(1008);
+      assert.equal(unauthorized.delay, 10_000, "authorization failures retain their slow fixed retry");
+      await fire(unauthorized);
+      const next = await fail();
+      assert.equal(next.delay, 1_500, "authorization closes do not advance or reset ordinary backoff");
+      await act(async () => { root.unmount(); });
+      assert.equal(timers.size, 0, "unmount cancels retry and activity timers");
+    });
+  } finally {
+    Math.random = originalRandom;
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
 });
 
 test("initial and reconnect snapshots acknowledge unobserved background delivery projections", async () => {
