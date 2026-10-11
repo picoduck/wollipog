@@ -42,6 +42,8 @@ for (const viewport of VIEWPORTS) for (const theme of ["dark", "light"] as const
     await expect(waiting.getByText("Checked 32 files in the payouts module; two need a migration step.")).toBeVisible();
     // Activity virtualizes against the panel body as the page's own child, after the request (#2941 review).
     await expect(waiting.locator(':scope > .timeline[data-virtual-kind="timeline"]')).toHaveCount(1);
+    // Its scroll host, the panel body, opts out of native anchoring while it is there (#2941 review).
+    expect(await panel.locator(".rpanel-body").evaluate((body) => getComputedStyle(body).overflowAnchor)).toBe("none");
     // One bar with one Back on every width; a phone's sheet draws no second bar or Back (§4.9).
     await expect(back).toHaveCount(1);
     await expect(panel.getByRole("button", { name: "Back to Session", exact: true })).toHaveCount(0);

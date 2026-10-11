@@ -97,6 +97,15 @@ export function WorkerDetail({
   const { loadSession } = useStoreActions();
   const scroller = useContext(PanelScrollerContext);
   const scrollRef = useMemo(() => ({ current: scroller }), [scroller]);
+  // While Activity virtualizes against the panel body, the body opts out of native scroll anchoring
+  // as every external host of a measured virtual list does: the list's own corrections must be the
+  // only ones. Only for as long as the list is there, so other tools keep the browser's anchoring.
+  const virtualActivity = scroller !== null && worker !== undefined && unavailable === undefined && output.length > 0;
+  useLayoutEffect(() => {
+    if (!virtualActivity || !scroller) return;
+    scroller.classList.add("measured-virtual-scroll");
+    return () => scroller.classList.remove("measured-virtual-scroll");
+  }, [virtualActivity, scroller]);
   const now = useTimelineClock(worker !== undefined && (isLiveWorker(worker) || nested.some(isLiveWorker)));
   const idPrefix = `worker-detail-${useId().replace(/:/g, "")}`;
   const pageRef = useRef<HTMLElement>(null);

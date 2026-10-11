@@ -1313,3 +1313,20 @@ test("a job page in Agents opens Background Work on the same job, and Back goes 
     await panel.dispose();
   }
 });
+
+test("a worker page's Activity opts the panel body out of native scroll anchoring only while it is there (#2941 review)", async () => {
+  let state!: RightPanelState;
+  const panel = await mountPanel(<PanelHarness onState={(next) => { state = next; }} />);
+  try {
+    await act(async () => panel.container.querySelector<HTMLButtonElement>("#open-agent")!.click());
+    const aside = panel.container.querySelector<HTMLElement>("#right-panel")!;
+    const body = aside.querySelector<HTMLElement>(".rpanel-body")!;
+    assert.ok(aside.querySelector(".agents-page .worker-detail > .timeline"), "Activity virtualizes against the body");
+    assert.ok(body.classList.contains("measured-virtual-scroll"), "the body is a measured virtual list's host");
+    await act(async () => aside.querySelector<HTMLButtonElement>('[aria-label="Back to Agents"]')!.click());
+    assert.equal(body.classList.contains("measured-virtual-scroll"), false, "the roster keeps the browser's anchoring");
+    assert.equal(state.mode, "subagents");
+  } finally {
+    await panel.dispose();
+  }
+});
