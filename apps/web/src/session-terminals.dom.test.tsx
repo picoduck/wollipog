@@ -404,7 +404,7 @@ test("leaving the session disposes its terminals", async () => {
   await view.unmount();
   await settle(10);
   assert.equal(disposals.count, 1, "the session's store ends its terminals when it goes");
-  assert.equal(takeTerminalFocusRequest(session.id, "panel"), false, "its focus request goes with it");
+  assert.equal(takeTerminalFocusRequest(session.id, "panel"), null, "its focus request goes with it");
 });
 
 test("a reopened empty dock offers a first shell once the last open's New Shell settles", async () => {

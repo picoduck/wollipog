@@ -867,7 +867,7 @@ focus in its terminal; the dock's stored visibility and height are kept for when
 back. A move's focus request names its destination and waits for that place's host to mount, however
 long its code takes to load, so a first move on a slow network still lands focus in the moved
 terminal. It ends with the move: the other place's host mounting instead, the destination closing
-before its host mounts, the person typing or clicking before it mounts, or leaving the session drops it
+before its host mounts, the person typing or clicking before focus moves, or leaving the session drops it
 (`requestTerminalFocus`, `cancelTerminalFocusRequest`), so focus never jumps into a terminal the person
 has stopped waiting for, and their keys never reach a shell they did not choose.
 Both places render the one `TerminalMoreActions` (`TerminalHead.tsx`), each with its move. The

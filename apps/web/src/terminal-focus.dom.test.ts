@@ -76,35 +76,38 @@ test("Ctrl+Escape lands on an expanded side panel's switcher, since the panel hi
   cleanup();
 });
 
+/** What a host of `place` mounting for the session does with a move's request: whether it moves focus. */
+const focuses = (sessionId: string, place: "dock" | "panel") => takeTerminalFocusRequest(sessionId, place)?.() ?? false;
+
 test("a move's focus request waits for its destination's host however long it takes to mount (#2869)", async () => {
   requestTerminalFocus("session-a", "panel");
   // The destination's code, or the session view around it, is slow to arrive.
   await new Promise((resolve) => setTimeout(resolve, 1_200));
-  assert.equal(takeTerminalFocusRequest("session-b", "panel"), false, "another session's host does not take it");
-  assert.equal(takeTerminalFocusRequest("session-a", "panel"), true, "the destination's host takes it");
-  assert.equal(takeTerminalFocusRequest("session-a", "panel"), false, "once");
+  assert.equal(focuses("session-b", "panel"), false, "another session's host does not take it");
+  assert.equal(focuses("session-a", "panel"), true, "the destination's host takes it");
+  assert.equal(focuses("session-a", "panel"), false, "once");
 });
 
 test("the other place's host mounting instead ends the move without focus (#2869)", () => {
   requestTerminalFocus("session-a", "panel");
-  assert.equal(takeTerminalFocusRequest("session-a", "dock"), false, "the dock is not the move's destination");
-  assert.equal(takeTerminalFocusRequest("session-a", "panel"), false, "and the move is over");
+  assert.equal(focuses("session-a", "dock"), false, "the dock is not the move's destination");
+  assert.equal(focuses("session-a", "panel"), false, "and the move is over");
 });
 
 test("a move abandoned before its destination mounts, or a session left, drops the request (#2869)", () => {
   // The panel closed (or the dock hid) before the terminal mounted there.
   requestTerminalFocus("session-a", "panel");
   cancelTerminalFocusRequest("session-a", "dock");
-  assert.equal(takeTerminalFocusRequest("session-a", "panel"), true, "closing the other place leaves it");
+  assert.equal(focuses("session-a", "panel"), true, "closing the other place leaves it");
   requestTerminalFocus("session-a", "panel");
   cancelTerminalFocusRequest("session-a", "panel");
-  assert.equal(takeTerminalFocusRequest("session-a", "panel"), false, "closing its destination drops it");
+  assert.equal(focuses("session-a", "panel"), false, "closing its destination drops it");
 
   // Leaving the session drops it, whatever its destination; leaving another session does not.
   requestTerminalFocus("session-a", "dock");
   cancelTerminalFocusRequest("session-b");
   cancelTerminalFocusRequest("session-a");
-  assert.equal(takeTerminalFocusRequest("session-a", "dock"), false);
+  assert.equal(focuses("session-a", "dock"), false);
 });
 
 test("typing or clicking before the destination mounts takes focus back from the move (#2869)", async () => {
@@ -117,25 +120,50 @@ test("typing or clicking before the destination mounts takes focus back from the
     requestTerminalFocus("session-a", "panel");
     domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Enter" }));
     await nextTask();
-    assert.equal(takeTerminalFocusRequest("session-a", "panel"), true, "the choosing key leaves the request");
+    assert.equal(focuses("session-a", "panel"), true, "the choosing key leaves the request");
 
     requestTerminalFocus("session-a", "panel");
     await nextTask();
     domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "d" }));
-    assert.equal(takeTerminalFocusRequest("session-a", "panel"), false, "a later key ends it");
+    assert.equal(focuses("session-a", "panel"), false, "a later key ends it");
 
     requestTerminalFocus("session-a", "panel");
     await nextTask();
     domWindow.dispatchEvent(new domWindow.PointerEvent("pointerdown"));
-    assert.equal(takeTerminalFocusRequest("session-a", "panel"), false, "a later click ends it");
+    assert.equal(focuses("session-a", "panel"), false, "a later click ends it");
 
     // A request that ended stops watching, so input never ends the next one early.
     requestTerminalFocus("session-a", "panel");
     await nextTask();
-    assert.equal(takeTerminalFocusRequest("session-a", "panel"), true);
+    assert.equal(focuses("session-a", "panel"), true);
     requestTerminalFocus("session-a", "dock");
     domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "d" }));
-    assert.equal(takeTerminalFocusRequest("session-a", "dock"), true, "the taken request's watch is gone");
+    assert.equal(focuses("session-a", "dock"), true, "the taken request's watch is gone");
+  } finally {
+    Object.defineProperty(globalThis, "window", { configurable: true, writable: true, value: prior });
+    domWindow.close();
+  }
+});
+
+test("typing or clicking between the destination mounting and its focus frame keeps focus where it is (#2869)", async () => {
+  const domWindow = new Window();
+  const prior = (globalThis as Record<string, unknown>).window;
+  Object.defineProperty(globalThis, "window", { configurable: true, writable: true, value: domWindow });
+  const nextTask = () => new Promise((resolve) => domWindow.setTimeout(resolve, 0));
+  try {
+    requestTerminalFocus("session-a", "panel");
+    await nextTask();
+    // The destination mounted and its focus waits for the next frame; the person types first.
+    const claim = takeTerminalFocusRequest("session-a", "panel");
+    assert.ok(claim, "the destination's host claims the request");
+    domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "d" }));
+    assert.equal(claim!(), false, "the frame finds the move ended and leaves focus alone");
+
+    requestTerminalFocus("session-a", "panel");
+    await nextTask();
+    const untouched = takeTerminalFocusRequest("session-a", "panel");
+    assert.equal(untouched!(), true, "with no input in between, focus moves");
+    assert.equal(untouched!(), false, "once");
   } finally {
     Object.defineProperty(globalThis, "window", { configurable: true, writable: true, value: prior });
     domWindow.close();

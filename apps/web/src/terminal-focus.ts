@@ -77,10 +77,22 @@ export function cancelTerminalFocusRequest(sessionId: string, place?: TerminalPl
   if (request?.sessionId === sessionId && (place === undefined || request.place === place)) endTerminalFocusRequest();
 }
 
-/** A host of `place` mounted for the session: true when it is the move's destination. Either way the move ends. */
-export function takeTerminalFocusRequest(sessionId: string, place: TerminalPlacement): boolean {
+/**
+ * A host of `place` mounted for the session. For the move's destination it returns the claim to call
+ * right before moving focus, which ends the move and says whether it still wants focus: the request
+ * stays open to cancellation (typing, clicking, the destination closing) until then. The other place's
+ * host ends the move and gets null.
+ */
+export function takeTerminalFocusRequest(sessionId: string, place: TerminalPlacement): (() => boolean) | null {
   const request = terminalFocusRequest;
-  if (request?.sessionId !== sessionId) return false;
-  endTerminalFocusRequest();
-  return request.place === place;
+  if (request?.sessionId !== sessionId) return null;
+  if (request.place !== place) {
+    endTerminalFocusRequest();
+    return null;
+  }
+  return () => {
+    const wanted = terminalFocusRequest === request;
+    if (wanted) endTerminalFocusRequest();
+    return wanted;
+  };
 }

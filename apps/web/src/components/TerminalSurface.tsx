@@ -134,11 +134,13 @@ export function useTerminalHost(sessionId: string, tabsetId: string, {
   // The terminal moved here from its other place: focus follows it (`requestTerminalFocus`), to what
   // types into the selected shell (a pipe shell's command field, else its terminal), else to the
   // host's first control that can act. A frame later, once the shells' terminals are attached here for
-  // good (an effect run again detaches and attaches them).
+  // good (an effect run again detaches and attaches them), unless the person typed or clicked since.
   const ready = Boolean(session && terminals && state);
   useEffect(() => {
-    if (!ready || !takeTerminalFocusRequest(sessionId, place)) return;
+    const claim = ready ? takeTerminalFocusRequest(sessionId, place) : null;
+    if (!claim) return;
     window.requestAnimationFrame(() => {
+      if (!claim()) return;
       if (pipeInputRef.current) pipeInputRef.current.focus();
       else if (terminalRef.current) terminalRef.current.focus();
       else focusFirst(fallbackFocusIds);
