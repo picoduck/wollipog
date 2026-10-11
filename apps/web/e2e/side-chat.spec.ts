@@ -74,6 +74,12 @@ test.describe("with a mouse", () => {
     const text = await box(panel(page).locator(".sc-ended-text"));
     const action = await box(panel(page).getByRole("button", { name: "Start New Side Chat" }));
     expect(Math.abs((text.y + text.height / 2) - (action.y + action.height / 2))).toBeLessThan(12);
+    // CI's fonts run wider than a dev machine's: with wider glyphs the two still share one row.
+    await page.addStyleTag({ content: "#right-panel .sc-ended { letter-spacing: 1px; } #right-panel .sc-ended .btn { padding-inline: 32px; }" });
+    const wideText = await box(panel(page).locator(".sc-ended-text"));
+    const wideAction = await box(panel(page).getByRole("button", { name: "Start New Side Chat" }));
+    expect(wideAction.x).toBeGreaterThan(wideText.x + wideText.width - 1);
+    expect(Math.abs((wideText.y + wideText.height / 2) - (wideAction.y + wideAction.height / 2))).toBeLessThan(12);
   });
 });
 

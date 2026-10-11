@@ -4264,13 +4264,14 @@ textarea {
    phone. */
 .sc-ended {
   display: flex;
-  flex-wrap: wrap;
+  /* Side by side whatever the font: the sentence gives way, so the button never drops below it. */
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2) var(--space-4);
 }
 .sc-ended-text {
-  flex: 1 1 200px;
+  flex: 1 1 0;
+  min-width: 0;
   margin: 0;
   color: var(--text);
   font: var(--type-body);
@@ -4278,7 +4279,9 @@ textarea {
 .sc-ended-action {
   display: flex;
   flex-direction: column;
+  flex: none;
   align-items: flex-start;
+  max-width: 60%;
   gap: var(--space-1);
 }
 /* The height comes from the tokens, as in `.worktree-missing-sheet`, never a per-button patch. */
@@ -4289,7 +4292,10 @@ textarea {
     align-items: stretch;
   }
   .sc-ended-text { flex: none; }
-  .sc-ended-action { align-items: stretch; }
+  .sc-ended-action {
+    align-items: stretch;
+    max-width: none;
+  }
   .sc-ended-action > .btn { max-width: none; }
 }
 
