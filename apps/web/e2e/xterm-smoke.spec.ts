@@ -43,8 +43,11 @@ test.describe(HOST_MOVES, () => {
     await page.keyboard.type("sleep 60");
     await page.keyboard.press("Enter");
     await expect(panelRows).toContainText("sleep 60");
-    await expect.poll(async () => (await calls()).input.map((entry) => `${entry.shellId}:${entry.data}`).join(""))
-      .toBe("shell-1:sleep 60\r");
+    // Typing reaches the shell in batches, however the keys fall into them: only what arrives counts.
+    await expect.poll(async () => {
+      const { input } = await calls();
+      return { shells: [...new Set(input.map((entry) => entry.shellId))], typed: input.map((entry) => entry.data).join("") };
+    }).toEqual({ shells: ["shell-1"], typed: "sleep 60\r" });
 
     await panel.getByRole("button", { name: "More Terminal Actions" }).click();
     await page.getByRole("menuitem", { name: /Move to Bottom Dock/ }).click();
