@@ -5,21 +5,23 @@ import { TERMINAL_SEARCH_LIMIT, type TerminalSearchResults } from "./shells-pane
 import { terminalSearchDecorations, terminalTheme, type ResolvedTheme } from "./theme.js";
 import { TERMINAL_FONT_FAMILY, loadTerminalFont, terminalFontMetrics } from "./terminal-font.js";
 
+/** xterm and the addons a terminal loads. */
+export interface XtermModules {
+  Terminal: typeof Terminal;
+  FitAddon: typeof FitAddon;
+  SearchAddon: typeof SearchAddon;
+}
+
 /**
- * xterm and its addons, loaded the first time a terminal opens. The session's terminal store, which
- * imports this module, sits above the app's main area in the inbox entry; importing xterm here
- * statically would put it there too, and the entry must stay without it (#2875,
- * `entry-bundle-budget.ts`). A load that fails is tried again by the next open.
+ * xterm, as provided by the terminal host module (`ShellTerminal.tsx`), which imports it statically.
+ * The session's terminal store imports this module from above the app's main area, in the inbox
+ * entry, which must stay without xterm (#2875, `entry-bundle-budget.ts`); the host comes in with the
+ * lazy terminal views, so xterm loads with them, and a chunk that fails to load reaches their error
+ * boundary as before. Only a host attaches a terminal, so xterm is here by the first attach.
  */
-let xterm: Promise<{ Terminal: typeof Terminal; FitAddon: typeof FitAddon; SearchAddon: typeof SearchAddon }> | null = null;
-function loadXterm() {
-  xterm ??= Promise.all([import("@xterm/xterm"), import("@xterm/addon-fit"), import("@xterm/addon-search")])
-    .then(([core, fit, search]) => ({ Terminal: core.Terminal, FitAddon: fit.FitAddon, SearchAddon: search.SearchAddon }))
-    .catch((error: unknown) => {
-      xterm = null;
-      throw error;
-    });
-  return xterm;
+let xterm: XtermModules | null = null;
+export function provideXterm(modules: XtermModules): void {
+  xterm = modules;
 }
 
 /** What a host's search controls drive (#2864): Next and Previous Match, and focus on Escape. */
@@ -151,6 +153,7 @@ export class ShellTerminalInstance {
    */
   attach(host: HTMLElement, callbacks: ShellTerminalCallbacks): void {
     if (this.disposed) return;
+    if (!xterm) throw new Error("Attach a terminal through ShellTerminal, which loads xterm.");
     if (this.host && this.host !== host) this.detach(this.host);
     this.host = host;
     this.callbacks = callbacks;
@@ -292,16 +295,12 @@ export class ShellTerminalInstance {
     this.opening = true;
     // xterm measures character cells while opening. Settle the locally bundled face first so a
     // later font swap cannot change wrapping, cursor placement, or the PTY's rows and columns.
-    let loaded: Awaited<ReturnType<typeof loadXterm>>;
-    try {
-      [loaded] = await Promise.all([loadXterm(), loadTerminalFont(this.surface.ownerDocument.fonts)]);
-    } finally {
-      this.opening = false;
-    }
-    const { Terminal, FitAddon, SearchAddon } = loaded;
+    await loadTerminalFont(this.surface.ownerDocument.fonts);
+    this.opening = false;
     const host = this.host;
     // Opened only into a host, so the first measurement is a real one; a later attach opens it.
-    if (this.disposed || this.term || !host) return;
+    if (this.disposed || this.term || !host || !xterm) return;
+    const { Terminal, FitAddon, SearchAddon } = xterm;
 
     const inputs = this.inputs;
     const term = new Terminal({

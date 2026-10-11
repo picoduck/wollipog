@@ -1,13 +1,20 @@
 import { useEffect, useImperativeHandle, useRef, type Ref } from "react";
 import type { TerminalSearchResults } from "../shells-panel.js";
 import type { ResolvedTheme } from "../theme.js";
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
 import {
   ShellTerminalInstance,
+  provideXterm,
   type ShellTerminalCallbacks,
   type ShellTerminalHandle,
   type ShellTerminalInputs,
 } from "../shell-terminal-instance.js";
 import "@xterm/xterm/css/xterm.css";
+
+// xterm loads with this host, in the lazy terminal views, never with the session's terminal store.
+provideXterm({ Terminal, FitAddon, SearchAddon });
 
 export type { ShellTerminalHandle } from "../shell-terminal-instance.js";
 
