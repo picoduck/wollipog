@@ -458,10 +458,10 @@ test("long-pressed rows and cards pin their target, persist the state, and expos
   await expect(menu).toHaveCount(0, "the action dismisses the touch menu");
   await expect(runningRow.getByLabel("Pinned Session")).toBeVisible();
   await expect(runningRow.getByLabel("Pinned Session")).toHaveAttribute("title", "Pinned Session");
-  await expect(page.locator('.inbox-row-shell[aria-rowindex="1"] .inbox-row-title')).toHaveText("Approval Session");
-  await expect(page.locator('.inbox-row-shell[aria-rowindex="2"] .inbox-row-title')).toHaveText("Review Session");
-  await expect(page.locator('.inbox-row-shell[aria-rowindex="3"] .inbox-row-title')).toHaveText("Running Session",
-    "the exact long-pressed row leads Working, below human input and the returned reminder");
+  await expect(page.locator('.inbox-row-shell[aria-rowindex="1"] .inbox-row-title')).toHaveText("Running Session",
+    "the exact long-pressed row leads the list above human input and the returned reminder");
+  await expect(page.locator('.inbox-row-shell[aria-rowindex="2"] .inbox-row-title')).toHaveText("Approval Session");
+  await expect(page.locator('.inbox-row-shell[aria-rowindex="3"] .inbox-row-title')).toHaveText("Review Session");
   expect(harnessPath(page)).toBe("/");
   await expect(page.locator(".inbox-view.expanded")).toHaveCount(0);
 
@@ -469,11 +469,15 @@ test("long-pressed rows and cards pin their target, persist the state, and expos
   await expect(page.locator(SESSIONS_HEADER)).toBeVisible();
   const persistedRunningRow = page.locator(".inbox-row-shell", { hasText: "Running Session" });
   await expect(persistedRunningRow.getByLabel("Pinned Session")).toBeVisible();
+  await expect(page.locator('.inbox-row-shell[aria-rowindex="1"] .inbox-row-title')).toHaveText("Running Session",
+    "the persisted pin still leads the list after reloading");
   await persistedRunningRow.click({ button: "right" });
   menu = page.getByRole("menu", { name: "Session Actions for Running Session" });
   await expect(menu.getByRole("menuitem", { name: "Unpin Session" })).toBeVisible();
   await menu.getByRole("menuitem", { name: "Unpin Session" }).click();
   await expect(persistedRunningRow.getByLabel("Pinned Session")).toHaveCount(0);
+  await expect(page.locator('.inbox-row-shell[aria-rowindex="1"] .inbox-row-title')).toHaveText("Approval Session");
+  await expect(page.locator('.inbox-row-shell[aria-rowindex="2"] .inbox-row-title')).toHaveText("Review Session");
   await expect(page.locator('.inbox-row-shell[aria-rowindex="3"] .inbox-row-title')).toHaveText("Queued Session",
     "unpinning restores the Working group's deterministic order without displacing input");
 

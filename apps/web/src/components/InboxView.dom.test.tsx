@@ -2065,6 +2065,48 @@ test("a Viewer's Inbox archive and decision shortcuts and row menu send nothing 
   assert.deepEqual(calls, [], "no decision is sent from the board");
 });
 
+for (const mobile of [true, false]) {
+  test(`persisted pins lead input, review, work, and returned reminders in the ${mobile ? "mobile" : "desktop"} session list`, async () => {
+    mobileViewport = mobile;
+    saveKeySet(SESSION_PIN_KEY, new Set(["pinned"]));
+    cleanup(() => saveKeySet(SESSION_PIN_KEY, new Set()));
+    const { container, root } = mountTestRoot();
+    const socket = new FakeSocket();
+    const connection: UiConnectionRuntime = {
+      instanceId: `pin-priority-${mobile}`,
+      runtimeKey: `pin-priority-${mobile}:1`,
+      createSocket: () => socket,
+      close() {},
+    };
+    await act(async () => {
+      root.render(
+        <StoreProvider connection={connection} navigation={navigation}>
+          <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
+        </StoreProvider>,
+      );
+    });
+    const review = session("review", 40, {
+      attention: { version: 1, meaningfulAt: 40, humanActions: [], acknowledgedRevision: null,
+        result: { revision: "result", at: 40, owner: "human" } },
+    });
+    await act(async () => {
+      socket.push({
+        ...snapshot([
+          session("input", 50, { status: "input_required" }),
+          review,
+          session("returned", 30),
+          session("working", 20, { status: "running" }),
+          session("pinned", 1),
+        ]),
+        reminders: [{ ...reminder("returned"), state: "fired", firedAt: 30 }],
+      });
+    });
+    assert.deepEqual(rowTitles(container), [
+      "Session pinned", "Session input", "Session review", "Session returned", "Session working",
+    ]);
+  });
+}
+
 test("row and card context menus pin their exact target, reorder immediately, persist, and restore keyboard focus", async () => {
   mobileViewport = false;
   setWindowFocused(true);
@@ -2094,10 +2136,11 @@ test("row and card context menus pin their exact target, reorder immediately, pe
   });
 
   await mountView("list");
-  await act(async () => { socket.push(snapshot([session("A", 30), session("B", 20)])); });
+  await act(async () => { socket.push(snapshot([session("A", 30, { status: "running" }), session("B", 20)])); });
   assert.deepEqual(rowTitles(container), ["Session A", "Session B"]);
   assert.equal(selectedRowTitle(container), "Session A");
 
+  // Pinning a quiet session must also move it above working sessions.
   // The menu target, not the currently selected row, owns the action.
   let rowB = [...container.querySelectorAll<HTMLElement>(".inbox-row-shell")]
     .find((row) => row.textContent?.includes("Session B"))!;

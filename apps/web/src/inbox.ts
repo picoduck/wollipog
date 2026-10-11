@@ -125,8 +125,8 @@ interface InboxOrderKey {
 }
 
 function compareInboxOrderKeys(left: InboxOrderKey, right: InboxOrderKey): number {
-  if (left.urgency !== right.urgency) return right.urgency - left.urgency;
   if (left.pinned !== right.pinned) return left.pinned ? -1 : 1;
+  if (left.urgency !== right.urgency) return right.urgency - left.urgency;
   if (left.urgency === 3 && left.requestRank !== right.requestRank) return left.requestRank - right.requestRank;
   if (left.at !== right.at) return left.urgency === 3 ? left.at - right.at : right.at - left.at;
   return left.id.localeCompare(right.id);
@@ -171,10 +171,11 @@ function inboxChildrenByParent(sessions: readonly SessionView[]): Map<string, Se
 }
 
 /**
- * Stable card ordering: human input, outstanding results, work, then quiet, with deterministic
- * fallbacks. A session whose parent is also in the list never orders on its own: the parent and
- * every descendant travel as one family, placed by the family's strongest member, with the parent
- * first and each generation ordered among itself by the same rule (#896).
+ * Stable card ordering: pinned families first, then human input, outstanding results, work, and
+ * quiet, with deterministic fallbacks within each pin group. A session whose parent is also in
+ * the list never orders on its own: the parent and every descendant travel as one family, placed
+ * by the family's strongest member, with the parent first and each generation ordered among
+ * itself by the same rule (#896).
  */
 export function sortInboxSessions(
   sessions: Iterable<SessionView>,
