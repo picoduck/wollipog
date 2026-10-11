@@ -210,13 +210,125 @@ test("SaveBar shows only while there is something to save, and a failed save off
     assert.ok(failed.querySelector(".save-bar-icon"));
     assert.deepEqual(buttons().map((button) => button.textContent), ["Discard", "Try Again"]);
 
-    await view.rerender(bar({ dirty: true, busy: true }));
-    assert.deepEqual(buttons().map((button) => [button.textContent, button.disabled]), [["Discard", true], ["Saving…", true]]);
-
     assert.match(rule(".save-bar"), /position:\s*sticky;/);
     assert.match(rule(".save-bar.is-error"), /background:\s*color-mix\(in srgb, var\(--red\) 7%, var\(--bg-elev\)\);/);
   } finally {
     await view.unmount();
+  }
+});
+
+test("SaveBar names its actions, and a new record's bar shows from the start with Save enabled (§8.6)", async () => {
+  const actions: string[] = [];
+  const bar = (props: { dirty: boolean; error?: string | null }) => (
+    <SaveBar {...props} saveLabel="Create Automation" discardLabel="Cancel" alwaysShown
+      onDiscard={() => actions.push("cancel")} onSave={() => actions.push("create")} />
+  );
+  const view = await render(bar({ dirty: false }));
+  try {
+    const buttons = () => [...view.container.querySelectorAll<HTMLButtonElement>(".save-bar button")];
+    const clean = view.container.querySelector<HTMLElement>(".save-bar");
+    assert.ok(clean, "a new record's bar renders while the form is clean");
+    assert.equal(clean.querySelector(".save-bar-message")?.textContent, "", "nothing is unsaved yet");
+    assert.deepEqual(buttons().map((button) => button.textContent), ["Cancel", "Create Automation"]);
+    for (const button of buttons()) {
+      assert.equal(button.disabled, false, `${button.textContent} is enabled`);
+      assert.equal(button.getAttribute("aria-disabled"), null, `${button.textContent} is not aria-disabled`);
+    }
+    await act(async () => { buttons()[1]!.click(); buttons()[0]!.click(); });
+    assert.deepEqual(actions, ["create", "cancel"], "an empty form still submits, so the editor's validation runs");
+
+    await view.rerender(bar({ dirty: true }));
+    assert.equal(view.container.querySelector(".save-bar-message")?.textContent, "Unsaved changes");
+    assert.deepEqual(buttons().map((button) => button.textContent), ["Cancel", "Create Automation"]);
+
+    await view.rerender(bar({ dirty: true, error: "The automation could not be created." }));
+    assert.deepEqual(buttons().map((button) => button.textContent), ["Cancel", "Try Again"], "Try Again replaces the custom label");
+  } finally {
+    await view.unmount();
+  }
+
+  const saved = await render(<SaveBar dirty saveLabel="Save Defaults" onDiscard={() => {}} onSave={() => {}} />);
+  try {
+    assert.deepEqual([...saved.container.querySelectorAll(".save-bar button")].map((button) => button.textContent), ["Discard", "Save Defaults"]);
+  } finally {
+    await saved.unmount();
+  }
+});
+
+test("SaveBar's blocked reason refuses Save, says why in the message's place and describes Save (§8.6)", async () => {
+  const actions: string[] = [];
+  const bar = (props: { blockedReason?: string | null; error?: string | null }) => (
+    <SaveBar dirty {...props} onDiscard={() => actions.push("discard")} onSave={() => actions.push("save")} />
+  );
+  const view = await render(bar({ blockedReason: "Fix 1 setting to save" }));
+  try {
+    const element = () => view.container.querySelector<HTMLElement>(".save-bar")!;
+    const [discard, save] = [...element().querySelectorAll<HTMLButtonElement>("button")];
+    const message = element().querySelector<HTMLElement>(".save-bar-message")!;
+    assert.equal(message.textContent, "Fix 1 setting to save", "the reason replaces \"Unsaved changes\"");
+    assert.ok(message.id, "the message has an id to be referenced");
+    assert.equal(save!.getAttribute("aria-describedby"), message.id, "Save is described by the reason");
+    assert.equal(save!.getAttribute("aria-disabled"), "true");
+    assert.equal(save!.disabled, false, "Save stays focusable to explain itself");
+    assert.equal(discard!.disabled, false, "Discard stays enabled");
+    await act(async () => { save!.click(); discard!.click(); });
+    assert.deepEqual(actions, ["discard"], "a blocked Save does nothing");
+
+    await view.rerender(bar({ blockedReason: "Fix 1 setting to save", error: "The defaults could not be saved." }));
+    assert.equal(element().classList.contains("is-error"), false, "a block outranks a failure from an earlier draft");
+    assert.equal(element().getAttribute("role"), null);
+    assert.equal(message.textContent, "Fix 1 setting to save");
+    assert.equal(save!.textContent, "Save");
+
+    await view.rerender(bar({ blockedReason: null }));
+    assert.equal(message.textContent, "Unsaved changes");
+    assert.equal(save!.getAttribute("aria-describedby"), null);
+    assert.equal(save!.getAttribute("aria-disabled"), null);
+    await act(async () => { save!.click(); });
+    assert.deepEqual(actions, ["discard", "save"]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("SaveBar's busy Save keeps its label and width beside a spinner, and Discard is disabled (§3.1, §8.6)", async () => {
+  // happy-dom has no layout: a button is as wide as its label plus its spinner, unless an inline
+  // width says otherwise, which is the one fact that would let a busy Save grow (BusyButton.dom.test.tsx).
+  const layout = (element: Element) => {
+    const inline = (element as HTMLElement).style?.width;
+    if (inline) return Number.parseFloat(inline);
+    return 24 + (element.querySelector(".spinner") ? 22 : 0) + (element.textContent ?? "").length * 7;
+  };
+  const native = Object.getOwnPropertyDescriptor(domWindow, "getComputedStyle");
+  Object.defineProperty(domWindow, "getComputedStyle", {
+    configurable: true, writable: true, value: (element: Element) => ({ width: `${layout(element)}px` }),
+  });
+  const bar = (busy: boolean, error: string | null = null) => (
+    <SaveBar dirty busy={busy} error={error} saveLabel="Save Changes" onDiscard={() => {}} onSave={() => {}} />
+  );
+  const view = await render(bar(false));
+  try {
+    const buttons = () => [...view.container.querySelectorAll<HTMLButtonElement>(".save-bar button")];
+    const idleWidth = layout(buttons()[1]!);
+
+    await view.rerender(bar(true));
+    const [discard, save] = buttons();
+    assert.equal(discard!.disabled, true, "Discard is disabled while saving");
+    assert.equal(save!.textContent, "Save Changes", "the label stays");
+    assert.equal(save!.getAttribute("aria-busy"), "true");
+    assert.equal(save!.getAttribute("aria-disabled"), "true");
+    assert.ok(save!.querySelector(".spinner"), "a spinner shows the save running");
+    assert.equal(layout(save!), idleWidth, "the width does not change");
+    assert.equal(view.container.querySelector('.save-bar [role="status"]')?.textContent, "Saving changes…");
+
+    await view.rerender(bar(true, "The defaults could not be saved."));
+    assert.equal(buttons()[1]!.textContent, "Try Again", "a retry keeps Try Again while it runs");
+
+    assert.doesNotMatch(view.container.textContent ?? "", /Saving…/);
+  } finally {
+    await view.unmount();
+    if (native) Object.defineProperty(domWindow, "getComputedStyle", native);
+    else delete (domWindow as unknown as Record<string, unknown>).getComputedStyle;
   }
 });
 

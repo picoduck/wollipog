@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { FieldError } from "../components/FieldError.js";
 import { FieldWarning } from "../components/FieldWarning.js";
@@ -15,6 +15,10 @@ import "../styles.css";
  * sat (`.field-helper`).
  * A field warning (§8.5) and a failed save's bar (§8.6), whose tone icons follow their words in
  * forced colors (#2269).
+ * The editor save bar's states (#2948, §8.6) under the form, each in its own `[data-save-bar]` region
+ * so the sticky bars do not stack: dirty with a custom label, blocked, busy (pressing Save makes it
+ * busy and it stays busy, so a spec can measure the same button idle and busy), a new record shown
+ * while clean with Cancel and its create label, and a failed save.
  * Field anatomy (#2270, §8.1): a `.field-head` label row with a control beside the label, and a field
  * warning under a helper, so a spec can measure label to control, control to helper and helper to
  * warning.
@@ -107,6 +111,27 @@ function ConfirmingDetailBar() {
   );
 }
 
+function BusySaveBar() {
+  const [busy, setBusy] = useState(false);
+  return <SaveBar dirty busy={busy} saveLabel="Save Changes" onDiscard={() => {}} onSave={() => setBusy(true)} />;
+}
+
+const SAVE_BAR_STATES: [string, React.ReactNode][] = [
+  ["dirty", <SaveBar dirty saveLabel="Save Changes" onDiscard={() => {}} onSave={() => {}} />],
+  ["blocked", <SaveBar dirty saveLabel="Save Changes" blockedReason="Fix 1 setting to save" onDiscard={() => {}} onSave={() => {}} />],
+  ["busy", <BusySaveBar />],
+  ["new-record", <SaveBar dirty={false} alwaysShown saveLabel="Create Automation" discardLabel="Cancel" onDiscard={() => {}} onSave={() => {}} />],
+  ["error", <SaveBar dirty error="Couldn't save the instructions." onDiscard={() => {}} onSave={() => {}} />],
+];
+
+function SaveBarStates() {
+  return (
+    <section className="save-bar-states" style={{ display: "grid", gap: 16, maxWidth: 560, margin: "24px auto 0" }}>
+      {SAVE_BAR_STATES.map(([state, bar]) => <div key={state} data-save-bar={state}>{bar}</div>)}
+    </section>
+  );
+}
+
 function Harness() {
   const params = new URLSearchParams(window.location.search);
   document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
@@ -133,8 +158,8 @@ function Harness() {
         </label>
         <HeadField />
         <WarnField />
-        <SaveBar dirty error="Couldn't save the instructions." onDiscard={() => {}} onSave={() => {}} />
       </form>
+      <SaveBarStates />
     </div>
   );
 }
