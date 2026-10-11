@@ -51,8 +51,9 @@ import {
   type WorkspaceReferenceCandidate,
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
+import { convertPreviewReadingState, timelineRowSource } from "../history-preview-handoff.js";
 import { useHistoryPreview, type PreviewAnchor } from "../use-history-preview.js";
-import type { SessionEventsResponse } from "@wollipog/protocol";
+import type { SessionHistoryHandoff } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { outstandingSessionResult } from "../session-follow-up.js";
 import { SkillsUnavailableNotice, skillsUnavailableSentence, useSessionSkillsUnavailable, useSkillsNoticeDismissal } from "./SkillsUnavailableNotice.js";
@@ -112,7 +113,7 @@ import { QueuedMessages, queuedMessageExcerpt } from "./QueuedMessages.js";
 import { sessionArchivedAtRest } from "../status-meta.js";
 import {
   EventTimeline,
-  flattenTimelineRows,
+  type TimelineReadingState,
   TranscriptErrorAlert,
   transcriptTurnsById,
   userRewindTurns,
@@ -1200,9 +1201,11 @@ function SessionDetailLoaded({
   // A chunk that only lengthens the trailing reply renders the transcript alone (`ProfiledEventTimeline`
   // folds it in); this view reads it the next time it renders for anything else (#2763).
   const cachedEvents = useStoreSelectorUnlessQuiet((s) => s.events.get(sessionId), onlyContinuesTrailingText);
+  const previewReadingState = useRef<TimelineReadingState | null>(null);
+  const handoffDisclosure = useRef<{ key: string; values: ReadonlyMap<string, boolean> } | null>(null);
   const previewHandlers = useRef<{
     anchor: () => PreviewAnchor | null;
-    handoff: (page: SessionEventsResponse, anchor: PreviewAnchor) => boolean;
+    handoff: (page: SessionHistoryHandoff, anchor: PreviewAnchor) => boolean;
   }>({ anchor: () => null, handoff: () => false });
   const historyPreview = useHistoryPreview(api, sessionId, recoveryEventEpoch,
     () => previewHandlers.current.anchor(), (page, anchor) => previewHandlers.current.handoff(page, anchor), instanceScope);
@@ -3949,8 +3952,9 @@ function SessionDetailLoaded({
     scrollRef,
     contentRevision: `${evs?.length ?? 0}:${items.length}:${pending?.text.length ?? 0}:${pending?.images.length ?? 0}:${session.status}`,
     sessionId,
-    persistenceScope: historyPreview.active ? `${instanceScope}:preview:${recoveryEventEpoch}` : instanceScope,
+    persistenceScope: historyPreview.active ? `${instanceScope}:preview:${recoveryEventEpoch}:${historyPreview.viewRevision}` : instanceScope,
     rows: items,
+    allowFollowing: !historyPreview.active,
     rowGeneration: session.eventEpoch ?? 0,
     openingAnchor: eventWindow?.openingStartSeq && evs?.[0]
       ? { key: `item:${evs[0].payload.kind}:${eventWindow.openingStartSeq}`, offset: 0 }
@@ -3960,27 +3964,23 @@ function SessionDetailLoaded({
     anchor: () => {
       const anchor = followTail.getInitialAnchor();
       if (!anchor) return null;
-      const rows = flattenTimelineRows(groupTimeline(items), new Map());
-      const row = rows.find(row => row.key === anchor.key);
-      const seq = row?.kind === "item" ? row.item.id : row?.kind === "work_summary"
-        ? row.firstItemId : row?.tool.id;
+      const row = previewReadingState.current?.rows.find(row => row.key === anchor.key);
+      const seq = row && timelineRowSource(row);
       const source = evs?.find(event => event.seq === seq);
-      return source ? { kind: source.payload.kind, seq: source.seq, offset: anchor.offset } : null;
+      return source && row ? { kind: source.payload.kind, seq: source.seq, offset: anchor.offset,
+        rowKind: row.kind, rowKey: row.key } : null;
     },
     handoff: (page, anchor) => {
-      if (!detailMountedRef.current || page.eventEpoch !== recoveryEventEpoch || page.cacheComplete !== true ||
-          page.events[0]?.payload.kind !== anchor.kind) return false;
-      // Pin the proven CP row before the virtual list changes coordinate spaces. Its new history
-      // key remounts the list using this exact reader anchor and offset.
-      const builder = new TimelineBuilder();
-      for (const event of page.events) builder.push(event);
-      const rows = flattenTimelineRows(groupTimeline(builder.snapshot()), new Map());
-      const row = rows.find(row => row.kind === "item" ? row.item.id === page.events[0]!.seq
-        : row.kind === "work_summary" ? row.firstItemId === page.events[0]!.seq : row.tool.id === page.events[0]!.seq);
-      if (!row) return false;
+      const reading = previewReadingState.current;
+      if (!detailMountedRef.current || !reading || page.eventEpoch !== recoveryEventEpoch || page.cacheComplete !== true) return false;
+      const converted = convertPreviewReadingState(reading, page, anchor);
+      if (!converted) return false;
       const applied = loadTurnStartWindow(sessionId, page,
         cachedEventHistory?.recoveryRevision ?? recoveryRevision ?? -1, recoveryGeneration);
-      if (applied) seedFollowTailAnchor(instanceScope, sessionId, { key: row.key, offset: anchor.offset }, followTail.state);
+      if (applied) {
+        handoffDisclosure.current = { key: timelineHistoryKey, values: converted.disclosure };
+        seedFollowTailAnchor(instanceScope, sessionId, converted.anchor, "paused");
+      }
       return applied;
     },
   };
@@ -3995,7 +3995,8 @@ function SessionDetailLoaded({
     acknowledgedFollowRef.current = { key: timelineHistoryKey, state: followTail.state };
     if (followTail.state !== "following") return;
     if (historyPreview.active) {
-      historyPreview.jumpLatest();
+      // Reaching the physical bottom of a frozen snapshot cannot resume live following.
+      followTail.pause();
       return;
     }
     const gap = eventWindow?.laterGap;
@@ -7048,7 +7049,7 @@ function SessionDetailLoaded({
                 the reader is at the tail. */}
             {historyPreview.active && (
               <div className="transcript-history-band" role="status">
-                Recent activity is ready. Earlier history is still loading.
+                Recent activity is readable as a snapshot while full history loads. Refresh to check for new activity.
               </div>
             )}
             {!historyPreview.active && (transcript.notice === "stale" || transcript.notice === "error") && (
@@ -7195,10 +7196,13 @@ function SessionDetailLoaded({
                         onOpenSession={openSession}
                         workspaceRoot={session.worktreePath ?? runner?.workspaces.find((workspace) => workspace.id === session.workspaceId)?.path}
                         scrollRef={scrollRef}
-                        historyKey={historyPreview.active ? `${timelineHistoryKey}:preview` : timelineHistoryKey}
+                        historyKey={historyPreview.active ? `${timelineHistoryKey}:preview:${historyPreview.viewRevision}` : timelineHistoryKey}
                         getInitialAnchor={followTail.getInitialAnchor}
                         preserveAnchor={!followTail.isFollowing}
                         anchorRecoveryPending={anchorRecoveryPending}
+                        readingStateRef={historyPreview.active ? previewReadingState : undefined}
+                        initialDisclosure={!historyPreview.active && handoffDisclosure.current?.key === timelineHistoryKey
+                          ? handoffDisclosure.current.values : undefined}
                         onVisibleAnchorChange={followTail.onVisibleAnchorChange}
                         onAnchorLost={followTail.onAnchorLost}
                         // Keep checkpoint actions discoverable when the runner or worktree cannot
@@ -7282,7 +7286,8 @@ function SessionDetailLoaded({
               onFocusLost={keepFocusInReader}
             />
             <LaterActivityControl gap={eventWindow?.laterGap} onLoad={loadLater}
-              onJump={followTail.follow} onFocusLost={keepFocusInReader} />
+              snapshot={historyPreview.active ? { canLoadLater: historyPreview.canLoadLater } : undefined}
+              onJump={historyPreview.active ? () => { followTail.pause(); historyPreview.jumpLatest(); } : followTail.follow} onFocusLost={keepFocusInReader} />
             {/* The one polite live region for recovery, whatever the control is showing. */}
             <span className="sr-only" role="status" data-transcript-recovery-status>{recoveryAnnouncement}</span>
           </div>

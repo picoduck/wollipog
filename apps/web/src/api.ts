@@ -769,10 +769,11 @@ export function createApiClient(transport: ApiTransport) {
   getSessionHistoryPreview: (id: string, cursor: {
     eventEpoch: number; logEpoch: number; throughSeq: number; turnStartSeq: number;
     afterSeq?: number; beforeSeq?: number; handoffSeq?: number;
+    handoffFirstSeq?: number; handoffLastSeq?: number; handoffAfter?: number;
   }) => {
     const query = new URLSearchParams({ limit: "200" });
     for (const [key, value] of Object.entries(cursor)) if (value !== undefined) query.set(key, String(value));
-    return req<{ preview?: import("@wollipog/protocol").SessionHistoryPreview | null; handoff?: SessionEventsResponse | null }>(
+    return req<{ preview?: import("@wollipog/protocol").SessionHistoryPreview | null; handoff?: import("@wollipog/protocol").SessionHistoryHandoff | null }>(
       `/api/sessions/${encodeURIComponent(id)}/history-preview?${query}`);
   },
 

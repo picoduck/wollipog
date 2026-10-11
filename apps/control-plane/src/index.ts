@@ -4310,7 +4310,7 @@ app.get("/api/sessions/:id/history-preview", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const query = req.query as Record<string, string | undefined>;
   const values: Record<string, number> = {};
-  for (const key of ["eventEpoch", "logEpoch", "throughSeq", "turnStartSeq", "afterSeq", "beforeSeq", "handoffSeq", "limit"]) {
+  for (const key of ["eventEpoch", "logEpoch", "throughSeq", "turnStartSeq", "afterSeq", "beforeSeq", "handoffSeq", "handoffFirstSeq", "handoffLastSeq", "handoffAfter", "limit"]) {
     if (query[key] === undefined) continue;
     const value = Number(query[key]);
     if (!Number.isSafeInteger(value) || value < 0) return reply.code(400).send({ error: "invalid history preview cursor" });
@@ -4319,7 +4319,7 @@ app.get("/api/sessions/:id/history-preview", async (req, reply) => {
   if (["eventEpoch", "logEpoch", "throughSeq", "turnStartSeq", "limit"].some(key => values[key] === undefined) ||
       values.limit! < 1 || values.limit! > 200 || values.turnStartSeq! > values.throughSeq! ||
       (values.afterSeq !== undefined && values.beforeSeq !== undefined) ||
-      [values.afterSeq, values.beforeSeq, values.handoffSeq].some(value => value !== undefined && value > values.throughSeq! + 1)) {
+      [values.afterSeq, values.beforeSeq, values.handoffSeq, values.handoffFirstSeq, values.handoffLastSeq].some(value => value !== undefined && value > values.throughSeq! + 1)) {
     return reply.code(400).send({ error: "invalid history preview cursor" });
   }
   const state = db.getRunnerHistoryState(id);

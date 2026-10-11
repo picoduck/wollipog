@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { PROTOCOL_VERSION, type WorkflowArtifactView, type ControlPlaneToRunner } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, SESSION_HISTORY_PREVIEW_BYTE_BUDGET, type WorkflowArtifactView, type ControlPlaneToRunner } from "@wollipog/protocol";
 import { SessionStore } from "../../runner/src/session-store.js";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
@@ -38,7 +38,7 @@ function fixture(protocol = PROTOCOL_VERSION) {
     const message = JSON.parse(data) as ControlPlaneToRunner;
     messages.push(message);
     if (message.type !== "session_history_page") return;
-    const result = message.opening ? store.readCurrentTurnPageForProtocol("s1", message.limit, PROTOCOL_VERSION)
+    const result = message.opening ? store.readCurrentTurnPageForProtocol("s1", message.limit, PROTOCOL_VERSION, message.maxBytes)
       : store.readEventPageForProtocol("s1", message, PROTOCOL_VERSION, message.indexedOnly === true);
     const reply = () => hub.resolveRunnerRequest({ type: "session_history_page_result",
       requestId: message.requestId, sessionId: "s1", ...result });
@@ -97,7 +97,7 @@ test("hydration handoff uses proven CP identities including CP-only rows, never 
     const preview = await f.reader.read("s1", 0, { limit: 200 });
     assert.ok(preview);
     const read = { logEpoch: preview.logEpoch, throughSeq: preview.throughSeq,
-      turnStartSeq: preview.turnStartSeq, handoffSeq: 22, limit: 200 };
+      turnStartSeq: preview.turnStartSeq, handoffSeq: 22, handoffFirstSeq: 22, handoffLastSeq: 221, limit: 200 };
     assert.equal(f.reader.handoff("s1", 0, read), null, "incomplete cache cannot prove the handoff identity");
     const bytes = Buffer.from("synthetic attachment");
     const artifact: WorkflowArtifactView = { artifactId: "a1", sessionId: "s1", kind: "test_log",
@@ -123,11 +123,27 @@ test("hydration handoff uses proven CP identities including CP-only rows, never 
     assert.equal(handoff.events.length, 200);
     assert.equal(handoff.cacheComplete, true);
     assert.equal(handoff.hasMoreLater, true);
+    assert.equal(handoff.hasMoreHandoff, true, "CP-only rows cannot consume a loaded runner row's slot");
+    const final = f.reader.handoff("s1", 0, { ...read, handoffAfter: handoff.nextAfter });
+    assert.ok(final);
+    assert.equal(final.hasMoreHandoff, false);
+    const identities = [...handoff.identities, ...final.identities];
+    assert.deepEqual(identities.map(row => row.runnerSeq), Array.from({ length: 200 }, (_, i) => i + 22));
+    assert.equal(final.events.at(-1)?.seq, final.windowEndSeq);
+    const expanded = f.reader.handoff("s1", 0, { ...read, handoffFirstSeq: 1, handoffLastSeq: f.tail });
+    assert.ok(expanded);
+    const all = [...expanded.events];
+    let next = expanded;
+    while (next.hasMoreHandoff) {
+      const page = f.reader.handoff("s1", 0, { ...read, handoffFirstSeq: 1, handoffLastSeq: f.tail, handoffAfter: next.nextAfter });
+      assert.ok(page); all.push(...page.events); next = page;
+    }
+    assert.equal(all.length, f.tail + 2, "the entire explicitly loaded range retains CP-only rows");
   } finally { f.close(); }
 });
 
 test("mixed and offline peers cannot serve a falsely authoritative cache prefix", async () => {
-  const old = fixture(212);
+  const old = fixture(RUNNER_CAPABILITY_MIN_PROTOCOL.authoritativeHistoryWindow - 1);
   try {
     assert.equal(await old.reader.read("s1", 0, { limit: 200 }), null);
     assert.equal(old.messages.length, 0);
@@ -165,8 +181,43 @@ test("preview admission deduplicates readers and bounds concurrent runner work i
 test("the live negotiated capability, rather than stale persisted capability, gates preview reads", async () => {
   const f = fixture();
   try {
-    f.hub.attachRunner("r1", f.socket, 212);
+    f.hub.attachRunner("r1", f.socket, RUNNER_CAPABILITY_MIN_PROTOCOL.authoritativeHistoryWindow - 1);
     assert.equal(await f.reader.read("s1", 0, { limit: 200 }), null);
     assert.equal(f.messages.length, 0);
   } finally { f.close(); }
+});
+
+
+test("large realistic turn pages use the negotiated byte budget and preserve an oversized single record", async () => {
+  const f = fixture();
+  try {
+    f.store.appendEvent("s1", { kind: "user_message", text: "Large authoritative turn" }, 5);
+    for (let i = 0; i < 200; i++) f.store.appendEvent("s1", { kind: "stderr", text: "x".repeat(16_000) }, 6);
+    const large = await f.reader.read("s1", 0, { limit: 200 });
+    assert.ok(large);
+    assert.equal(large.events[0]?.payload.kind, "user_message");
+    assert.ok(large.events.length < 200);
+    assert.ok(Buffer.byteLength(JSON.stringify(large.events)) < SESSION_HISTORY_PREVIEW_BYTE_BUDGET);
+    assert.equal(large.hasMore, true);
+    assert.ok(f.messages.some(message => message.type === "session_history_page" && message.maxBytes === SESSION_HISTORY_PREVIEW_BYTE_BUDGET));
+    f.store.appendEvent("s1", { kind: "user_message", text: "x".repeat(512_000) }, 7);
+    const jumbo = await f.reader.read("s1", 0, { limit: 200 });
+    assert.ok(jumbo);
+    assert.equal(jumbo.events.length, 1, "one authoritative record may use the existing global transport ceiling");
+    assert.equal(jumbo.hasMore, false);
+  } finally { f.store.flush("s1"); f.close(); }
+});
+
+test("unavailable preview results back off for the same history identity and retry on a new tail", async () => {
+  const f = fixture();
+  try {
+    f.store.patchMeta("s1", { historyTurnAnchor: undefined });
+    assert.equal(await f.reader.read("s1", 0, { limit: 200 }), null);
+    const before = f.messages.length;
+    for (let i = 0; i < 20; i++) assert.equal(await f.reader.read("s1", 0, { limit: 200 }), null);
+    assert.equal(f.messages.length, before, "75-ms opening polls cannot repeat the unavailable runner work");
+    f.store.appendEvent("s1", { kind: "user_message", text: "New turn restores authority" }, 8);
+    f.db.reconcileRunnerHistory("s1", f.epoch, 473);
+    assert.ok(await f.reader.read("s1", 0, { limit: 200 }));
+  } finally { f.store.flush("s1"); f.close(); }
 });

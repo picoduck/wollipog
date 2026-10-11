@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { runnerSupportsProtocol, type SessionEventsResponse, type SessionHistoryPreview } from "@wollipog/protocol";
+import { SESSION_HISTORY_PAGE_MAX_BYTES, SESSION_HISTORY_PREVIEW_BYTE_BUDGET, runnerSupportsProtocol, type SessionHistoryHandoff, type SessionHistoryPreview } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
 
@@ -11,12 +11,16 @@ export interface HistoryPreviewRead {
   /** Preserve the original semantic anchor across frozen older/later pages. */
   turnStartSeq?: number;
   handoffSeq?: number;
+  handoffFirstSeq?: number;
+  handoffLastSeq?: number;
+  handoffAfter?: number;
   limit: number;
 }
 
 export class HistoryPreviewReader {
   private readonly inFlight = new Map<string, Promise<SessionHistoryPreview | null>>();
   private readonly runnerReads = new Map<string, number>();
+  private readonly unavailable = new Map<string, number>();
   constructor(private readonly db: ControlPlaneDb, private readonly hub: Hub) {}
 
   async read(sessionId: string, eventEpoch: number, read: HistoryPreviewRead): Promise<SessionHistoryPreview | null> {
@@ -24,7 +28,10 @@ export class HistoryPreviewReader {
     const state = this.db.getRunnerHistoryState(sessionId);
     if (!session || !state || state.eventEpoch !== eventEpoch || !this.hub.isRunnerOnline(session.runnerId) ||
         !runnerSupportsProtocol(this.hub.runnerProtocolVersion(session.runnerId), "authoritativeHistoryWindow")) return null;
-    const key = JSON.stringify([sessionId, eventEpoch, read]);
+    const key = JSON.stringify([sessionId, eventEpoch, state.historyEpoch, state.tailSeq, read]);
+    const retryAt = this.unavailable.get(key);
+    if (retryAt !== undefined && retryAt > Date.now()) return null;
+    this.unavailable.delete(key);
     const existing = this.inFlight.get(key);
     if (existing) return existing;
     // Preview requests do not join the forward hydration queue. Keep their independent admission
@@ -34,7 +41,14 @@ export class HistoryPreviewReader {
     this.runnerReads.set(session.runnerId, running + 1);
     const pending = this.fetch(sessionId, session.runnerId, eventEpoch, read);
     this.inFlight.set(key, pending);
-    try { return await pending; } finally {
+    try {
+      const result = await pending;
+      if (!result) {
+        this.unavailable.set(key, Date.now() + 1_000);
+        while (this.unavailable.size > 512) this.unavailable.delete(this.unavailable.keys().next().value!);
+      }
+      return result;
+    } finally {
       this.inFlight.delete(key);
       const remaining = (this.runnerReads.get(session.runnerId) ?? 1) - 1;
       if (remaining) this.runnerReads.set(session.runnerId, remaining); else this.runnerReads.delete(session.runnerId);
@@ -54,7 +68,7 @@ export class HistoryPreviewReader {
         const requestId = `recent_${randomUUID()}`;
         const afterSeq = read.beforeSeq === undefined ? read.afterSeq ?? 0 : Math.max(0, read.beforeSeq - 1 - span);
         const result = await this.hub.requestFromRunner(runnerId, requestId, {
-          type: "session_history_page", requestId, sessionId, afterSeq, limit: span, indexedOnly: true,
+          type: "session_history_page", requestId, sessionId, afterSeq, limit: span, indexedOnly: true, maxBytes: SESSION_HISTORY_PREVIEW_BYTE_BUDGET,
           ...(first ? { opening: "current-turn" as const } : { logEpoch: read.logEpoch, throughSeq: read.throughSeq }),
         }, remaining);
         const state = this.db.getRunnerHistoryState(sessionId);
@@ -66,7 +80,7 @@ export class HistoryPreviewReader {
           Number.isSafeInteger(value) && value! >= 0) ||
             (state.historyEpoch !== null && state.historyEpoch !== page.logEpoch) ||
             (!first && (read.logEpoch !== page.logEpoch || read.throughSeq !== page.throughSeq)) ||
-            result.events.length > span || Buffer.byteLength(JSON.stringify(result.events)) > 256 * 1024 ||
+            result.events.length > span || Buffer.byteLength(JSON.stringify(result.events)) > SESSION_HISTORY_PAGE_MAX_BYTES ||
             start! > page.throughSeq || (first && page.throughSeq < state.tailSeq) || page.nextAfterSeq > page.throughSeq || page.hasMore !== (page.nextAfterSeq < page.throughSeq)) return null;
         const base = first ? Math.max(0, start! - 1) : afterSeq;
         if (result.events.some((event, index) => event.seq !== base + index + 1 ||
@@ -90,17 +104,37 @@ export class HistoryPreviewReader {
 
   /** Convert a read-local position only after the contiguous cache proves its real CP identity.
    * Includes every CP-only row between runner rows. No inferred offsets or synthetic CP ids. */
-  handoff(sessionId: string, eventEpoch: number, read: HistoryPreviewRead): SessionEventsResponse | null {
+  handoff(sessionId: string, eventEpoch: number, read: HistoryPreviewRead): SessionHistoryHandoff | null {
     const state = this.db.getRunnerHistoryState(sessionId);
+    const first = read.handoffFirstSeq, last = read.handoffLastSeq, anchor = read.handoffSeq;
     if (!state?.complete || state.eventEpoch !== eventEpoch || state.historyEpoch !== read.logEpoch ||
-        read.handoffSeq === undefined || read.handoffSeq > (read.throughSeq ?? -1)) return null;
-    const row = this.db.raw().prepare("SELECT seq FROM session_events WHERE session_id=? AND runner_seq=?")
-      .get(sessionId, read.handoffSeq) as { seq: number } | undefined;
-    if (!row) return null;
-    const page = this.db.listCachedEventPage(sessionId, row.seq - 1, read.limit);
+        first === undefined || last === undefined || anchor === undefined || first < 1 ||
+        first > anchor || anchor > last || last > (read.throughSeq ?? -1)) return null;
+    const lookup = this.db.raw().prepare("SELECT seq FROM session_events WHERE session_id=? AND runner_seq=?");
+    const start = (lookup.get(sessionId, first) as { seq: number } | undefined)?.seq;
+    const end = (lookup.get(sessionId, last) as { seq: number } | undefined)?.seq;
+    const position = (lookup.get(sessionId, anchor) as { seq: number } | undefined)?.seq;
+    if (start === undefined || end === undefined || position === undefined) return null;
+    const after = read.handoffAfter ?? start - 1;
+    if (after < start - 1 || after >= end) return null;
+    const page = this.db.listCachedEventPage(sessionId, after, read.limit);
+    const events = [] as SessionHistoryHandoff["events"];
+    let bytes = 0;
+    for (const event of page.events) {
+      if (event.seq > end) break;
+      const size = Buffer.byteLength(JSON.stringify(event));
+      if (size > SESSION_HISTORY_PAGE_MAX_BYTES || (events.length > 0 && bytes + size > SESSION_HISTORY_PREVIEW_BYTE_BUDGET)) break;
+      events.push(event); bytes += size;
+    }
+    if (!events.length) return null;
+    const next = events.at(-1)!.seq;
+    const identities = this.db.raw().prepare(`SELECT runner_seq AS runnerSeq, seq FROM session_events
+      WHERE session_id=? AND seq>? AND seq<=? AND runner_seq IS NOT NULL ORDER BY seq`)
+      .all(sessionId, after, next) as { runnerSeq: number; seq: number }[];
     const tail = this.db.listCachedEventTailPage(sessionId, undefined, 1).events.at(-1)?.seq ?? 0;
-    return { events: page.events, eventEpoch, turnStartSeq: row.seq, nextAfter: page.nextAfterSeq,
-      tailSeq: tail, hasMoreLater: page.hasMore, hasMoreOlder: row.seq > 1,
-      turnAligned: page.events[0]?.payload.kind === "user_message", cacheComplete: true };
+    return { events, identities, eventEpoch, windowStartSeq: start, windowEndSeq: end, anchorSeq: position,
+      hasMoreHandoff: next < end, turnStartSeq: start, nextAfter: next,
+      tailSeq: tail, hasMoreLater: end < tail, hasMoreOlder: start > 1,
+      turnAligned: events[0]?.payload.kind === "user_message", cacheComplete: true };
   }
 }

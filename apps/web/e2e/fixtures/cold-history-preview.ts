@@ -55,7 +55,7 @@ export async function connectColdHistoryRunner(base: string, fixture: ReturnType
       if (message.type !== "session_history_page" || message.sessionId !== COLD_SESSION_ID) return;
       const reply = () => {
         const result = message.opening === "current-turn"
-          ? fixture.store.readCurrentTurnPageForProtocol(COLD_SESSION_ID, message.limit, PROTOCOL_VERSION)
+          ? fixture.store.readCurrentTurnPageForProtocol(COLD_SESSION_ID, message.limit, PROTOCOL_VERSION, message.maxBytes)
           : fixture.store.readEventPageForProtocol(COLD_SESSION_ID, message, PROTOCOL_VERSION, message.indexedOnly === true);
         if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "session_history_page_result",
           requestId: message.requestId, sessionId: COLD_SESSION_ID, ...result }));

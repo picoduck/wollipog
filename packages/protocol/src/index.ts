@@ -9657,6 +9657,9 @@ export interface SessionHistoryRequestMessage {
 
 /** Protocol-v54 seekable, count/byte-bounded runner history page. The first request omits the
  * frozen fields; every continuation echoes the result's logEpoch and throughSeq exactly. */
+export const SESSION_HISTORY_PAGE_MAX_BYTES = 32 * 1024 * 1024;
+export const SESSION_HISTORY_PREVIEW_BYTE_BUDGET = 256 * 1024;
+
 export interface SessionHistoryPageRequestMessage {
   type: "session_history_page";
   requestId: string;
@@ -9669,6 +9672,8 @@ export interface SessionHistoryPageRequestMessage {
   opening?: "current-turn";
   /** Refuse an unavailable sparse index rather than rebuilding/scanning it on a reader request. */
   indexedOnly?: boolean;
+  /** Preferred payload budget. One larger record may use the established global page ceiling. */
+  maxBytes?: number;
 }
 
 /** Phase 2: permanently delete a session from the box store (the source of truth). Without this the
@@ -11071,6 +11076,15 @@ export interface SessionEventsResponse {
   turnAligned?: boolean;
   /** Read-local authoritative runner rows. These are never CP events or CP paging cursors. */
   preview?: SessionHistoryPreview;
+}
+
+/** Bounded conversion of a frozen read-local range to proven control-plane identities. */
+export interface SessionHistoryHandoff extends SessionEventsResponse {
+  windowStartSeq: number;
+  windowEndSeq: number;
+  anchorSeq: number;
+  hasMoreHandoff: boolean;
+  identities: { runnerSeq: number; seq: number }[];
 }
 
 export interface SessionHistoryPreview {

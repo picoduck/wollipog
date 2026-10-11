@@ -3162,3 +3162,24 @@ test("bounded opening refuses missing indexes and upgrade anchors without a whol
     assert.ok(store.readCurrentTurnPageForProtocol("s_abc", 200, CURRENT_PEER).ok);
   } finally { store.flush("s_abc"); rmSync(root, { recursive: true, force: true }); }
 });
+
+
+test("upgrade anchor absence never forces an existing healthy index to rebuild on append", () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    store.appendEvent("s_abc", { kind: "user_message", text: "Prior turn" }, 1);
+    for (let i = 0; i < 399; i++) store.appendEvent("s_abc", { kind: "stderr", text: "Work" }, 2);
+    store.flush("s_abc");
+    store.patchMeta("s_abc", { historyTurnAnchor: undefined });
+    const index = join(root, "s_abc", "events.idx");
+    const before = statSync(index).ino;
+    store.appendEvent("s_abc", { kind: "stderr", text: "Append after upgrade" }, 3);
+    assert.equal(statSync(index).ino, before, "append retains the healthy sparse index");
+    assert.equal(store.readMeta("s_abc")?.historyTurnAnchor, undefined);
+    store.appendEvent("s_abc", { kind: "user_message", text: "New authoritative prompt" }, 4);
+    const page = store.readCurrentTurnPageForProtocol("s_abc", 200, CURRENT_PEER);
+    assert.ok(page.ok);
+    assert.equal(page.page.turnStartSeq, 402);
+  } finally { store.flush("s_abc"); rmSync(root, { recursive: true, force: true }); }
+});

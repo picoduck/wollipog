@@ -42,6 +42,7 @@ import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { TextDecoder } from "node:util";
 import {
   PROTOCOL_VERSION,
+  SESSION_HISTORY_PAGE_MAX_BYTES,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   runnerSupportsProtocol,
   projectSessionEventPayloadForProtocol,
@@ -471,7 +472,7 @@ export interface StoredEvent {
 }
 
 export const HISTORY_PAGE_MAX_EVENTS = 200;
-export const HISTORY_PAGE_MAX_BYTES = 32 * 1024 * 1024;
+export const HISTORY_PAGE_MAX_BYTES = SESSION_HISTORY_PAGE_MAX_BYTES;
 /** Exact-id delete fences outlive normal reconnect/retry windows but do not grow forever. */
 export const DELETED_SESSION_MARKER_RETENTION_MS = 90 * 24 * 60 * 60 * 1_000;
 const HISTORY_PAGE_EVENT_BUDGET = HISTORY_PAGE_MAX_BYTES - 64 * 1024;
@@ -1707,13 +1708,13 @@ export class SessionStore {
     }
   }
 
-  private ensureHistoryIndex(id: string, epoch: number, suppliedTail?: HistoryTail): HistoryTail {
+  private ensureHistoryIndex(id: string, epoch: number, suppliedTail?: HistoryTail, deriveTurnAnchor = false): HistoryTail {
     let tail = suppliedTail ?? this.historyTail(id);
     let info = this.readHistoryIndexInfo(id, epoch);
     // Upgrade maintenance derives the semantic anchor alongside the existing full index rebuild.
     // Reader requests explicitly bypass this maintenance path and return unavailable until ready.
     const anchor = this.readMeta(id)?.historyTurnAnchor;
-    const stale = !info || !anchor || anchor.logEpoch !== epoch ||
+    const stale = !info || (deriveTurnAnchor && (!anchor || anchor.logEpoch !== epoch)) ||
       (tail.seq === 0 ? info.count !== 0 : info.count === 0) ||
       Boolean(info?.last && (
         info.last.seq > tail.seq ||
@@ -2928,7 +2929,7 @@ export class SessionStore {
   /** Indexed history keeps its frozen page contract while omitting reviewed additive events. */
   readEventPageForProtocol(
     id: string,
-    request: { afterSeq: number; limit: number; logEpoch?: number; throughSeq?: number },
+    request: { afterSeq: number; limit: number; logEpoch?: number; throughSeq?: number; maxBytes?: number },
     protocolVersion: number | null | undefined,
     indexedOnly = false,
   ): HistoryPageResult {
@@ -3035,7 +3036,7 @@ export class SessionStore {
   /** Seek one authoritative current-turn prefix without replaying history or updating any CP
    * cursor. Unsaved metadata is checked only across a bounded append suffix. Missing upgrade
    * anchors wait for ordinary index/hydration maintenance instead of adding an opening scan. */
-  readCurrentTurnPageForProtocol(id: string, limit: number, protocolVersion: number | null | undefined): HistoryPageResult {
+  readCurrentTurnPageForProtocol(id: string, limit: number, protocolVersion: number | null | undefined, maxBytes?: number): HistoryPageResult {
     const meta = this.readMeta(id);
     const anchor = meta?.historyTurnAnchor;
     if (!meta || !anchor || anchor.logEpoch !== (meta.logEpoch ?? 0) ||
@@ -3052,7 +3053,7 @@ export class SessionStore {
     for (const event of suffix.events) if (event.payload.kind === "user_message" &&
         event.payload.deliveryIntent !== "steer" && event.payload.commandInvocation === undefined) start = event.seq;
     const page = this.readEventPageForProtocol(id, { afterSeq: start > 0 ? start - 1 : 0, limit,
-      logEpoch: suffix.page.logEpoch, throughSeq: suffix.page.throughSeq }, protocolVersion, true);
+      logEpoch: suffix.page.logEpoch, throughSeq: suffix.page.throughSeq, maxBytes }, protocolVersion, true);
     if (!page.ok) return page;
     if (start > 0 && (page.events[0]?.seq !== start || page.events[0]?.payload.kind !== "user_message" ||
         page.events[0].payload.deliveryIntent === "steer" || page.events[0].payload.commandInvocation !== undefined)) {
@@ -3094,7 +3095,7 @@ export class SessionStore {
    * for old control planes; only this path relies on the derived sparse index. */
   readEventPage(
     id: string,
-    request: { afterSeq: number; limit: number; logEpoch?: number; throughSeq?: number },
+    request: { afterSeq: number; limit: number; logEpoch?: number; throughSeq?: number; maxBytes?: number },
     indexedOnly = false,
   ): HistoryPageResult {
     let observedEpoch: number | undefined;
@@ -3108,6 +3109,11 @@ export class SessionStore {
           `limit must be an integer from 1 to ${HISTORY_PAGE_MAX_EVENTS}`,
         );
       }
+      if (request.maxBytes !== undefined && (!Number.isSafeInteger(request.maxBytes) ||
+          request.maxBytes < 1 || request.maxBytes > HISTORY_PAGE_EVENT_BUDGET)) {
+        throw new HistoryStoreError("history_cursor_invalid", "maxBytes must fit the bounded history page budget");
+      }
+      const preferredBytes = request.maxBytes ?? HISTORY_PAGE_EVENT_BUDGET;
       const hasEpoch = request.logEpoch !== undefined;
       const hasThrough = request.throughSeq !== undefined;
       if (hasEpoch !== hasThrough) {
@@ -3148,7 +3154,7 @@ export class SessionStore {
               tail.lineOffset - ready.last.offset >= HISTORY_INDEX_BYTE_STRIDE))) {
             throw new HistoryStoreError("history_cursor_invalid", "session history index is not ready for bounded reading");
           }
-        } else tail = this.ensureHistoryIndex(id, currentEpoch, tail);
+        } else tail = this.ensureHistoryIndex(id, currentEpoch, tail, true);
         frozenThrough = tail.seq;
         info = this.readHistoryIndexInfo(id, currentEpoch);
         if (!info) throw new HistoryStoreError("history_corrupt", "session history index is unavailable");
@@ -3264,6 +3270,7 @@ export class SessionStore {
         if (event.seq <= request.afterSeq) return;
         if (
           events.length >= request.limit ||
+          (events.length > 0 && responseBytes + line.length + 1 > preferredBytes) ||
           responseBytes + line.length + (events.length ? 1 : 0) > HISTORY_PAGE_EVENT_BUDGET
         ) {
           stoppedAtBound = true;

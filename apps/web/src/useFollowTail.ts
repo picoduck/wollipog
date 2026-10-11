@@ -63,6 +63,8 @@ export interface UseFollowTailOptions {
   rowGeneration?: unknown;
   /** A cold current-turn opening owns its first position before any content can paint. */
   openingAnchor?: VirtualScrollAnchor | null;
+  /** A frozen read-local window cannot follow live activity in another coordinate space. */
+  allowFollowing?: boolean;
 }
 
 export interface FollowTailApi {
@@ -210,6 +212,7 @@ export function useFollowTail({
   rows,
   rowGeneration,
   openingAnchor,
+  allowFollowing = true,
 }: UseFollowTailOptions): FollowTailApi {
   const initialKey = snapshotKey(persistenceScope, sessionId);
   const initialSnapshotRef = useRef<FollowTailSnapshot | undefined>(undefined);
@@ -275,6 +278,11 @@ export function useFollowTail({
       storeSnapshot(currentKey, { state: "paused", anchor: openingAnchor }, snapshotGenerationRef.current);
     }
   }
+  if (!allowFollowing && stateRef.current === "following") {
+    stateRef.current = "paused";
+    setState("paused");
+    storeSnapshot(currentKey, { state: "paused", anchor: anchorRef.current }, snapshotGenerationRef.current);
+  }
   const snapshotGeneration = snapshotGenerationRef.current;
 
   const persist = useCallback(() => {
@@ -287,7 +295,7 @@ export function useFollowTail({
     // callbacks from another session or event log; storeSnapshot rejects an expired generation.
     if (activeKeyRef.current !== currentKey ||
         snapshotGenerationRef.current !== snapshotGeneration) return;
-    const next = nextFollowTailState(stateRef.current, event);
+    const next = nextFollowTailState(stateRef.current, event === "resume" && !allowFollowing ? "pause" : event);
     if (next === stateRef.current) return;
     if (next === "following") detachBaselineRef.current = null;
     else if (stateRef.current === "following") {
@@ -298,7 +306,7 @@ export function useFollowTail({
     stateRef.current = next;
     setState(next);
     storeSnapshot(currentKey, { state: next, anchor: anchorRef.current }, snapshotGeneration);
-  }, [currentKey, snapshotGeneration]);
+  }, [allowFollowing, currentKey, snapshotGeneration]);
 
   /**
    * Position accounting for layout-driven scrolls. When viewport geometry changes, the browser's

@@ -151,9 +151,13 @@ test("cold-cache preview is readable outside the CP store, pages its frozen rang
     getSessionHistoryPreview: async (id, cursor) => {
       if (cursor.handoffSeq !== undefined) {
         handoffCalls++;
-        return { handoff: handoffReady ? { events: [{ id: 9_999, sessionId: id, seq: 507, ts: 1,
-          payload: { kind: "user_message", text: "Authoritative current prompt" } }],
-          eventEpoch: 0, turnStartSeq: 507, nextAfter: 507, tailSeq: 906, hasMoreLater: true,
+        const events = [...previewEvents, { seq: 503, ts: 1,
+          payload: { kind: "agent_message" as const, text: "Later authoritative activity", final: true } }]
+          .map(event => ({ ...event, id: 9_999 + event.seq - 501, sessionId: id, seq: event.seq + 6 }));
+        return { handoff: handoffReady ? { events,
+          eventEpoch: 0, windowStartSeq: 507, windowEndSeq: 509, anchorSeq: cursor.handoffSeq + 6,
+          identities: events.map(event => ({ runnerSeq: event.seq - 6, seq: event.seq })), hasMoreHandoff: false,
+          turnStartSeq: 507, nextAfter: 509, tailSeq: 906, hasMoreLater: true,
           hasMoreOlder: true, cacheComplete: true } : null };
       }
       assert.equal(cursor.logEpoch, 14);
@@ -174,7 +178,7 @@ test("cold-cache preview is readable outside the CP store, pages its frozen rang
     await flushAsyncWork(30);
     assert.ok(fixture.container.textContent!.includes("Authoritative current prompt"), fixture.container.querySelector(".timeline")?.outerHTML.slice(0, 1800) ?? "No timeline");
     assert.equal(fixture.container.textContent!.includes("Old cached prefix"), false);
-    assert.equal(fixture.container.querySelector(".transcript-skeleton"), null);
+    assertNoDomNode(fixture.container.querySelector(".transcript-skeleton"));
     assert.deepEqual(fixture.readLoadedEvents() ?? [], [], "read-local runner rows never enter CP state");
     assert.equal(fixture.scroller.getAttribute("aria-busy"), "false");
     const later = [...fixture.container.querySelectorAll<HTMLButtonElement>("[data-later-activity-gap] button")]
@@ -190,6 +194,44 @@ test("cold-cache preview is readable outside the CP store, pages its frozen rang
     assert.equal(fixture.readLoadedEvents()?.[0]?.id, 9_999);
     assert.equal(fixture.readLoadedEvents()?.[0]?.seq, 507);
     assert.equal(fixture.container.textContent!.includes("Old cached prefix"), false);
+  } finally { await unmountFixture(fixture); }
+});
+
+test("a frozen preview stays explicitly paused when live activity arrives, and refresh requests fresh authority", async () => {
+  let openings = 0;
+  let release!: () => void;
+  const ready = new Promise<void>(done => { release = done; });
+  const fixture = await mountFixture(pageController(), 0, { acknowledgeSubscription: false, client: {
+    getSessionTurnStartPage: async () => {
+      await ready;
+      const seq = ++openings === 1 ? 501 : 601;
+      return { events: [], eventEpoch: 0, turnStartSeq: 0, tailSeq: 0, nextAfter: 0, hasMoreLater: false,
+        cacheComplete: false, preview: { eventEpoch: 0, logEpoch: 14,
+        throughSeq: seq, turnStartSeq: seq, nextAfterSeq: seq, hasMore: false,
+        events: [{ seq, ts: 1, payload: { kind: "user_message", text: seq === 501 ? "Frozen prompt" : "Fresh delivered prompt" } }] } };
+    },
+    getSessionHistoryPreview: async () => ({ handoff: null }),
+  } });
+  try {
+    Object.defineProperties(fixture.scroller, { offsetHeight: { configurable: true, value: 500 },
+      offsetWidth: { configurable: true, value: 800 }, clientWidth: { configurable: true, value: 800 } });
+    setScrollerMetrics(fixture.scroller, { clientHeight: 500, scrollHeight: 10_000, scrollTop: 0 });
+    await act(async () => release()); await flushAsyncWork(30);
+    assert.equal(fixture.scroller.getAttribute("data-follow-tail-state"), "paused");
+    await act(async () => fixture.socket.push({ type: "session_event", event: { id: 1, seq: 1, ts: 1,
+      sessionId: fixture.sessionId, payload: { kind: "user_message", text: "Live CP prompt has another identity" } } }));
+    await flushAsyncWork();
+    assert.equal(fixture.container.textContent!.includes("Live CP prompt has another identity"), false);
+    assert.ok(fixture.container.textContent!.includes("Showing a loaded snapshot."));
+    assert.equal(fixture.scroller.getAttribute("data-follow-tail-state"), "paused");
+    const buttons = [...fixture.container.querySelectorAll<HTMLButtonElement>("[data-later-activity-gap] button")];
+    assert.equal(buttons.some(button => button.textContent === "Load Later Activity"), false, "frozen exhaustion keeps an honest snapshot notice");
+    const refresh = buttons.find(button => button.textContent === "Refresh Recent Activity");
+    assert.ok(refresh); await act(async () => refresh.click()); await flushAsyncWork(30);
+    assert.equal(openings, 2, "refresh obtains fresh authority rather than reusing the frozen tail");
+    assert.ok(fixture.container.textContent!.includes("Fresh delivered prompt"));
+    assert.equal(fixture.container.textContent!.includes("Frozen prompt"), false);
+    assert.equal(fixture.scroller.getAttribute("data-follow-tail-state"), "paused");
   } finally { await unmountFixture(fixture); }
 });
 

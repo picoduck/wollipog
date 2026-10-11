@@ -302,7 +302,7 @@ test("cold preview hands off after contiguous hydration without moving its visib
   }).toBe(true);
   await expect(page.getByText(LONG_TURN_PROMPT, { exact: true })).toBeInViewport();
   await expect(page.locator(".detail-scroll")).toHaveAttribute("data-follow-tail-state", "paused");
-  await expect(page.getByText("Recent activity is ready. Earlier history is still loading.", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Recent activity is readable as a snapshot while full history loads. Refresh to check for new activity.", { exact: true })).toHaveCount(0);
   await expect(page.locator('[data-virtual-key="item:user_message:1504"]')).toBeInViewport();
   if (evidenceDir) await page.screenshot({ path: join(evidenceDir, "cold-hydrated-handoff.png") });
 });
@@ -318,21 +318,21 @@ test("paced evidence of the cold reader paging and hydration handoff", async ({ 
     await page.evaluate(path => { history.pushState(null, "", path); dispatchEvent(new PopStateEvent("popstate")); },
       viewPath({ name: "session", id: COLD_SESSION_ID }));
     await expect(page.getByText(LONG_TURN_PROMPT, { exact: true })).toBeInViewport();
-    await expect(page.getByText("Recent activity is ready. Earlier history is still loading.", { exact: true })).toBeVisible();
+    await expect(page.getByText("Recent activity is readable as a snapshot while full history loads. Refresh to check for new activity.", { exact: true })).toBeVisible();
     await delay(3_000);
     const later = page.getByRole("button", { name: "Load Later Activity", exact: true });
     await later.focus(); await delay(1_500); await later.click();
     await expect(later).toBeEnabled();
     await expect(page.getByText(LONG_TURN_PROMPT, { exact: true })).toBeInViewport();
     await delay(3_000);
-    const jump = page.getByRole("button", { name: "Jump to Latest", exact: true });
+    const jump = page.getByRole("button", { name: "Refresh Recent Activity", exact: true });
     await jump.focus(); await delay(1_500); await jump.click();
-    await expect(page.locator("[data-later-activity-gap]")).toHaveCount(0);
-    await expect(page.locator(".detail-scroll")).toHaveAttribute("data-follow-tail-state", "following");
+    await expect(page.locator("[data-later-activity-gap]")).toBeVisible();
+    await expect(page.locator(".detail-scroll")).toHaveAttribute("data-follow-tail-state", "paused");
     await delay(3_000);
     coldRunner!.releaseHydration();
-    await expect(page.getByText("Recent activity is ready. Earlier history is still loading.", { exact: true })).toHaveCount(0);
-    await expect(page.locator(".detail-scroll")).toHaveAttribute("data-follow-tail-state", "following");
+    await expect(page.getByText("Recent activity is readable as a snapshot while full history loads. Refresh to check for new activity.", { exact: true })).toHaveCount(0);
+    await expect(page.locator(".detail-scroll")).toHaveAttribute("data-follow-tail-state", "paused");
     await delay(4_000);
   } finally { await context.close(); }
   mkdirSync(evidenceDir!, { recursive: true });
