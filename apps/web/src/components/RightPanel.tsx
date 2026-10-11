@@ -799,7 +799,14 @@ export function RightPanel({
       case "browser":
         return <BrowserPanel session={session} />;
       case "sidechat":
-        return <SideChatPanel session={session} runnerOnline={runnerOnline} onInsertDraft={onInsertSideChatDraft} />;
+        return (
+          <SideChatPanel
+            session={session}
+            runnerOnline={runnerOnline}
+            runnerProtocolVersion={runnerProtocolVersion}
+            onInsertDraft={onInsertSideChatDraft}
+          />
+        );
       case "subagents":
         return (
           <AgentsPanel

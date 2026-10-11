@@ -13,7 +13,7 @@ import { viewPath, type View, type ViewNavigation } from "../navigation.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { ENTER_KEY_STORAGE_KEY } from "../enter-key.js";
 import { TOUCH_PHONE_MEDIA } from "../mobile-viewport.js";
-import { SideChatPanel, requestSideChatFocus, sideChatComposerUnavailable } from "./SideChatPanel.js";
+import { SideChatPanel, requestSideChatFocus, sideChatEndedSentence, sideChatStatusMeta } from "./SideChatPanel.js";
 import {
   clearPanelScratch,
   clearPanelScratchIf,
@@ -51,6 +51,7 @@ const parent = {
   id: "primary-session",
   runnerId: "runner-1",
   agentId: "claude",
+  driver: "claude-code",
   status: "idle",
   title: "Primary",
 } as SessionView;
@@ -125,7 +126,8 @@ test("side chat starts separately, prompts only the child, and inserts output ex
         onInsertDraft={(text) => inserted.push(text)} />, []));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    assert.match(container.textContent ?? "", /No prompt, transcript, attachments, artifacts, or budget are copied/);
+    assert.match(container.textContent ?? "", /Ask a Side Question/);
+    assert.match(container.textContent ?? "", /Uses Claude Code on runner-1\./, "the faint line names the agent and machine");
 
     const start = Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "Start Side Chat")!;
     await act(async () => {
@@ -133,14 +135,14 @@ test("side chat starts separately, prompts only the child, and inserts output ex
       await new Promise((resolve) => setTimeout(resolve, 25));
     });
     assert.equal(prompted.length, 0, "creating the auxiliary session does not send a prompt");
-    assert.match(container.textContent ?? "", /separate worktree and transcript/);
+    assert.equal(container.querySelector(".sc-context")?.textContent, "Awaiting PromptSeparate WorktreeOpen Session");
 
     const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
     await act(async () => {
       textarea.value = "independent question";
       fireDomEvent.change(textarea);
     });
-    const send = Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "Send")!;
+    const send = container.querySelector<HTMLButtonElement>('.sc-composer button[aria-label="Send"]')!;
     await act(async () => {
       (send as HTMLButtonElement).click();
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -158,16 +160,26 @@ test("side chat starts separately, prompts only the child, and inserts output ex
   }
 });
 
-test("the two composer closures never share a message", () => {
-  assert.match(sideChatComposerUnavailable("stopped", true)!, /session was stopped/);
-  assert.match(sideChatComposerUnavailable("failed", true)!, /session failed/);
-  assert.match(sideChatComposerUnavailable("completed", true)!, /session has finished/);
-  assert.match(sideChatComposerUnavailable("idle", false)!, /runner is offline/);
-  assert.doesNotMatch(sideChatComposerUnavailable("idle", false)!, /side chat's session/,
-    "an offline runner is not reported as an ended child");
-  assert.doesNotMatch(sideChatComposerUnavailable("stopped", true)!, /runner/,
-    "an ended child is not reported as an offline runner");
-  assert.equal(sideChatComposerUnavailable("running", true), null);
+test("an ended side chat says how it ended in one sentence, and where its transcript stays (#2863)", () => {
+  assert.equal(sideChatEndedSentence("stopped"), "This side chat was stopped. Its transcript stays here and in Sessions.");
+  assert.match(sideChatEndedSentence("failed"), /^This side chat failed\./);
+  assert.match(sideChatEndedSentence("completed"), /^This side chat has finished\./);
+});
+
+test("the context line's badge uses the session words, Unverified while the machine is offline (#2863)", () => {
+  assert.equal(sideChatStatusMeta("idle", true).label, "Awaiting Prompt");
+  assert.equal(sideChatStatusMeta("creating", true).label, "Starting");
+  assert.equal(sideChatStatusMeta("starting", true).label, "Starting");
+  assert.equal(sideChatStatusMeta("running", true).label, "Running");
+  assert.equal(sideChatStatusMeta("stopped", true).label, "Stopped");
+  assert.equal(sideChatStatusMeta("running", false).label, "Unverified", "nobody can vouch for a live status offline");
+  assert.equal(sideChatStatusMeta("stopped", false).label, "Stopped", "an ended child stays ended");
+  for (const status of ["idle", "starting", "running", "input_required", "stopped", "failed", "completed", "queued"] as const) {
+    for (const online of [true, false]) {
+      const { label } = sideChatStatusMeta(status, online);
+      assert.match(label, /^[A-Z][a-z]*( [A-Z][a-z]*)*$/, `"${label}" is Title Case, never a raw status`);
+    }
+  }
 });
 
 /**
@@ -210,9 +222,12 @@ test("a terminal side chat offers a working replacement and a link to the ended 
       await new Promise((resolve) => setTimeout(resolve, 25));
     });
 
-    assert.equal((container.querySelector("textarea") as HTMLTextAreaElement).disabled, true);
-    assert.match(container.textContent ?? "", /This side chat's session was stopped/,
-      "the disabled composer explains that the child ended, not that the runner is offline");
+    // One sentence and one primary: no dead textarea, no second primary (#2863).
+    assertNoDomNode(container.querySelector("textarea"), "an ended side chat renders no textarea");
+    assert.equal(container.querySelectorAll(".btn.primary, .icon-btn.primary").length, 1, "exactly one primary button");
+    assert.equal(container.querySelector(".sc-ended-text")?.textContent,
+      "This side chat was stopped. Its transcript stays here and in Sessions.");
+    assert.doesNotMatch(container.textContent ?? "", /No messages yet/, "an ended chat is not an empty invitation");
 
     const link = container.querySelector<HTMLAnchorElement>("a.sidechat-open-session")!;
     assert.equal(link.textContent, "Open Session");
@@ -221,7 +236,7 @@ test("a terminal side chat offers a working replacement and a link to the ended 
     assert.deepEqual(pushed, [{ name: "session", id: ended.id }],
       "the ended child's own session view stays reachable");
 
-    const restart = button("Start a New Side Chat")!;
+    const restart = button("Start New Side Chat")!;
     assert.equal(restart.disabled, false, "the recovery action is enabled, not merely present");
     await act(async () => {
       restart.click();
@@ -231,8 +246,8 @@ test("a terminal side chat offers a working replacement and a link to the ended 
     assert.deepEqual(createCalls, [{ id: parent.id, replaceEnded: true }]);
     assert.equal((container.querySelector("textarea") as HTMLTextAreaElement).disabled, false,
       "the replacement is usable without leaving the parent session");
-    assert.equal(button("Start a New Side Chat"), undefined, "a live child offers no replacement action");
-    assert.doesNotMatch(container.textContent ?? "", /can no longer receive/);
+    assert.equal(button("Start New Side Chat"), undefined, "a live child offers no replacement action");
+    assertNoDomNode(container.querySelector(".sc-ended"));
   } finally {
     await act(async () => { root.unmount(); });
     Object.assign(api, originals);
@@ -257,11 +272,13 @@ test("a terminal side chat cannot be replaced while the runner is offline", asyn
       await new Promise((resolve) => setTimeout(resolve, 25));
     });
     const restart = Array.from(container.querySelectorAll("button"))
-      .find((candidate) => candidate.textContent === "Start a New Side Chat") as HTMLButtonElement;
+      .find((candidate) => candidate.textContent === "Start New Side Chat") as HTMLButtonElement;
     assert.equal(restart.disabled, true);
-    assert.match(container.textContent ?? "", /runner must be online to start a new side chat/);
-    assert.match(container.textContent ?? "", /This side chat's session failed/,
+    const reason = container.querySelector(`#${restart.getAttribute("aria-describedby")}`);
+    assert.equal(reason?.textContent, "runner-1 is offline.", "the disabled button's reason is visible text beside it");
+    assert.match(container.textContent ?? "", /This side chat failed\./,
       "both closures are reported, because they have different remedies");
+    assertNoDomNode(container.querySelector("textarea"));
   } finally {
     await act(async () => { root.unmount(); });
     Object.assign(api, originals);
@@ -293,7 +310,7 @@ test("a side chat replaced by another client is picked up by the polling panel",
       root.render(mount(<SideChatPanel session={parent} runnerOnline onInsertDraft={() => {}} />, []));
       await new Promise((resolve) => setTimeout(resolve, 25));
     });
-    assert.match(container.textContent ?? "", /can no longer receive messages/);
+    assert.match(container.textContent ?? "", /This side chat was stopped/);
 
     // Somebody else replaces it. Only the control plane's answer changes.
     related = { parentSessionId: parent.id, session: replacement, createdAt: 3 };
@@ -301,7 +318,7 @@ test("a side chat replaced by another client is picked up by the polling panel",
 
     assert.equal((container.querySelector("textarea") as HTMLTextAreaElement).disabled, false,
       "the panel follows the parent's current side chat instead of arguing about a retired one");
-    assert.doesNotMatch(container.textContent ?? "", /can no longer receive messages/);
+    assert.doesNotMatch(container.textContent ?? "", /This side chat was stopped/);
   } finally {
     await act(async () => { root.unmount(); });
     Object.assign(api, originals);
@@ -331,10 +348,10 @@ test("the panel still renders where no store is mounted, minus the store-backed 
       root.render(<SideChatPanel session={parent} runnerOnline onInsertDraft={() => {}} />);
       await new Promise((resolve) => setTimeout(resolve, 25));
     });
-    assert.match(container.textContent ?? "", /separate worktree and transcript/);
+    assert.match(container.textContent ?? "", /Separate Worktree/);
     assertNoDomNode(container.querySelector("a.sidechat-open-session"));
     assert.equal(Array.from(container.querySelectorAll("button"))
-      .some((button) => button.textContent === "Start a New Side Chat"), true,
+      .some((button) => button.textContent === "Start New Side Chat"), true,
       "the recovery action needs no store and stays available");
   } finally {
     await act(async () => { root.unmount(); });
@@ -388,11 +405,11 @@ test("a replaced child carries neither the retired transcript nor its insert act
     assert.ok(container.querySelector('button[aria-label="Insert into Draft"]'));
 
     await act(async () => {
-      button("Start a New Side Chat")!.click();
+      button("Start New Side Chat")!.click();
       await new Promise((resolve) => setTimeout(resolve, 50));
     });
 
-    assert.match(container.textContent ?? "", /idle · separate worktree and transcript/);
+    assert.equal(container.querySelector(".sc-context .status")?.textContent, "Awaiting Prompt");
     assert.doesNotMatch(container.textContent ?? "", /Selected side-chat answer/,
       "the fresh child does not inherit the retired child's transcript");
     assertNoDomNode(container.querySelector('button[aria-label="Insert into Draft"]'),
@@ -439,7 +456,7 @@ function lateSendHarness() {
     });
     const textarea = () => container.querySelector("textarea") as HTMLTextAreaElement;
     const sendButton = () => Array.from(container.querySelectorAll("button"))
-      .find((button) => button.textContent === "Send" || button.textContent === "Sending…") as HTMLButtonElement;
+      .find((button) => button.getAttribute("aria-label") === "Send") as HTMLButtonElement;
     const close = async () => { await act(async () => { root.unmount(); }); container.remove(); };
     return { textarea, sendButton, close };
   };
@@ -476,7 +493,7 @@ test("a send that lands after the panel was switched away and back empties the r
     assert.equal(second.textarea().value, "sent while switching away",
       "the draft is still preserved while its send has not landed");
     assert.equal(second.sendButton().disabled, true, "the remounted panel does not offer a duplicate send");
-    assert.equal(second.sendButton().textContent, "Sending…");
+    assert.ok(second.sendButton().querySelector(".spinner"), "Send shows its send in flight");
 
     await harness.resolveSend();
     assert.equal(second.textarea().value, "", "sent text is not left in the remounted composer");
@@ -598,7 +615,7 @@ async function mountLive(options: {
     container,
     textarea: () => container.querySelector("textarea") as HTMLTextAreaElement,
     sendButton: () => Array.from(container.querySelectorAll("button"))
-      .find((button) => button.textContent === "Send" || button.textContent === "Sending…") as HTMLButtonElement,
+      .find((button) => button.getAttribute("aria-label") === "Send") as HTMLButtonElement,
     async dispose() {
       await act(async () => { root.unmount(); });
       Object.assign(api, originals);

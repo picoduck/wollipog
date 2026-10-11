@@ -73,6 +73,7 @@ import "../styles.css";
 import { staticPinnedSummary } from "../components/pinned-summary-state.js";
 import { DIFF_SECTIONS_STATUS_FILES, diffSectionsDiff } from "./diff-sections-fixture.js";
 import { checkoutFindings, inMemoryReviewFindings } from "./review-findings-fixture.js";
+import { SIDE_CHAT_STATES, installSideChatFixture, type SideChatFixtureState } from "./side-chat-fixture.js";
 import type { WorkflowArtifactView } from "@wollipog/protocol";
 
 const FIXTURE_QUERY = new URLSearchParams(window.location.search);
@@ -2978,6 +2979,15 @@ const client = {
     return { path: at, parent, entries };
   },
 } as ApiClient;
+
+/** `?sideChat=<state>` (#2863): the open session's side chat, in a state `side-chat-fixture.ts` names. */
+const SIDE_CHAT_STATE = FIXTURE_QUERY.get("sideChat") as SideChatFixtureState | null;
+const sideChatFixture = SIDE_CHAT_STATE && SIDE_CHAT_STATES.includes(SIDE_CHAT_STATE)
+  ? installSideChatFixture(client, SIDE_CHAT_STATE, (id) => model.sessions.find((candidate) => candidate.id === id))
+  : null;
+if (sideChatFixture) {
+  (window as unknown as { __WOLLIPOG_SIDE_CHAT_E2E__: typeof sideChatFixture }).__WOLLIPOG_SIDE_CHAT_E2E__ = sideChatFixture;
+}
 
 let workspaceMoveCount = 0;
 let identityTeams: TeamView[] = [];

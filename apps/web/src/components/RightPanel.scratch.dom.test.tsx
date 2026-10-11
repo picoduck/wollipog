@@ -629,8 +629,8 @@ test("a Side Chat send that lands after the panel closes does not restore the se
     const composer = field(panel, "Side Chat Message") as HTMLTextAreaElement;
     await type(composer, "already on its way");
     await act(async () => fireDomEvent.click(
-      [...panel.container.querySelectorAll<HTMLButtonElement>(".sidechat-composer button")]
-        .find((button) => button.textContent === "Send")!,
+      [...panel.container.querySelectorAll<HTMLButtonElement>(".sc-composer button")]
+        .find((button) => button.getAttribute("aria-label") === "Send")!,
     ));
 
     // The reviewer switches away while the prompt is still in flight, so the panel is unmounted
@@ -676,8 +676,8 @@ test("a send that resolves behind a live composer leaves the draft in it alone",
     await panel.show("sidechat");
     await type(field(panel, "Side Chat Message") as HTMLTextAreaElement, "same message");
     await act(async () => fireDomEvent.click(
-      [...panel.container.querySelectorAll<HTMLButtonElement>(".sidechat-composer button")]
-        .find((button) => button.textContent === "Send")!,
+      [...panel.container.querySelectorAll<HTMLButtonElement>(".sc-composer button")]
+        .find((button) => button.getAttribute("aria-label") === "Send")!,
     ));
 
     // Back before the send resolves, and the reviewer types the same bytes again. Reading alike is

@@ -4292,14 +4292,155 @@ textarea {
   font-weight: 600;
 }
 
-/* Side Chat: Open Session links to the side chat's own session, with a trailing arrow (#2862). */
+/* Side Chat (#2863): a 40px context line, the transcript as the tool's one scroller, and a foot that
+   is the composer card or, once the side chat has ended, one sentence and one button. The body gives
+   up its own scroll and padding to these three. */
+.rpanel-body:has(> .sc-panel) {
+  overflow: hidden;
+  padding: 0;
+}
+.sc-panel {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+/* The context line: the one status badge, "Separate Worktree" as meta, and Open Session last. */
+.sc-context {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-2);
+  height: var(--space-10);
+  padding: 0 var(--space-4);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.sc-meta {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-dim);
+  font: var(--type-small);
+  text-overflow: ellipsis;
+}
+/* Open Session links to the side chat's own session, with a trailing arrow (#2862). */
 .sidechat-open-session {
   display: inline-flex;
+  flex: none;
   align-items: center;
-  align-self: flex-start;
   gap: var(--space-1);
-  margin-top: var(--space-1);
+  margin-left: auto;
   font: var(--type-small);
+}
+.sc-transcript {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-3) var(--space-4);
+}
+.sc-empty {
+  margin: 0;
+  color: var(--text-faint);
+  font: var(--type-body);
+}
+.sc-foot {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4) var(--space-3);
+}
+/* A disabled control's reason, as visible text beside it (§3.1), and the faint line naming the
+   agent and machine under Start Side Chat. */
+.sc-reason,
+.sc-uses {
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+  white-space: normal;
+}
+.state-body > p.sc-uses {
+  margin-top: var(--space-2);
+  color: var(--text-faint);
+}
+/* The composer card: the main composer's card recipe with Send inset at its trailing edge, on the
+   textarea's last line however many lines it grows to (one to eight), so it never wraps. */
+.sc-composer {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-1);
+  padding-left: var(--space-3);
+  border: 1px solid var(--control-outline);
+  border-radius: var(--radius-lg);
+  background: var(--field-bg);
+}
+.sc-composer:focus-within { border-color: var(--focus); }
+.sc-composer > textarea {
+  flex: 1;
+  min-width: 0;
+  max-height: calc(8 * 22px);
+  /* One 22px line centred on Send, at the pointer's control height. */
+  margin: calc((var(--control-h) - 22px) / 2) 0;
+  padding: 0;
+  overflow-y: auto;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font: var(--type-reading);
+  outline: none;
+  resize: none;
+  field-sizing: content;
+}
+.sc-composer > textarea::placeholder {
+  color: var(--text-faint);
+  opacity: 1;
+}
+.sc-composer > .icon-btn { border-radius: var(--radius-md); }
+/* Stop Turn takes Send's seat as a neutral outlined square, as in the main composer: red would mean
+   failed (#2174). */
+.sc-stop {
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+  color: var(--text);
+}
+/* Ended: the sentence and Start New Side Chat side by side, stacked with a full-width 44px button on a
+   phone. */
+.sc-ended {
+  display: flex;
+  /* Side by side whatever the font: the sentence gives way, so the button never drops below it. */
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-4);
+}
+.sc-ended-text {
+  flex: 1 1 0;
+  min-width: 0;
+  margin: 0;
+  color: var(--text);
+  font: var(--type-body);
+}
+.sc-ended-action {
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  align-items: flex-start;
+  max-width: 60%;
+  gap: var(--space-1);
+}
+/* The height comes from the tokens, as in `.worktree-missing-sheet`, never a per-button patch. */
+@media (max-width: 760px) {
+  .sc-ended {
+    --control-h: 44px;
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .sc-ended-text { flex: none; }
+  .sc-ended-action {
+    align-items: stretch;
+    max-width: none;
+  }
+  .sc-ended-action > .btn { max-width: none; }
 }
 
 /* --- Terminal dock (§4.6). One head, --control-h-lg tall (40px, 48px on touch) over its hairline:
@@ -5836,52 +5977,7 @@ body.shell-dock-dragging * {
 .tl-artifact-head strong { min-width: 0; overflow-wrap: anywhere; }
 .tl-artifact-head span { color: var(--text-dim); font-size: var(--text-sm); }
 
-/* Provider-neutral auxiliary conversation. The boundary disclosure stays above the independently
-   polled transcript; only the explicit insert action can cross back into the primary composer. */
-.sidechat-panel {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.sidechat-panel { flex: 1; min-height: 0; }
 .state-body > .notice { margin-top: var(--space-2); }
-.sidechat-boundary {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elev-2);
-}
-.sidechat-boundary strong { font-size: 12px; }
-.sidechat-boundary span { color: var(--text-dim); font-size: var(--text-xs); }
-.sidechat-timeline {
-  min-height: 180px;
-  flex: 1;
-  overflow: auto;
-  padding: 2px;
-}
-.sidechat-restart { align-self: stretch; }
-.sidechat-composer { display: flex; align-items: flex-end; gap: 8px; }
-.sidechat-composer textarea {
-  min-width: 0;
-  flex: 1;
-  resize: vertical;
-  padding: 8px 9px;
-  color: var(--text);
-  background: var(--bg);
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
-  font: inherit;
-  line-height: 1.4;
-}
-
-@media (max-width: 600px) {
-  .sidechat-composer { flex-wrap: wrap; }
-  .sidechat-composer textarea { flex-basis: 100%; min-height: 88px; }
-}
 
 .detail-main {
   display: flex;

@@ -1,1 +1,0 @@
-|.sidechat-panel|gap|10px

@@ -28,7 +28,7 @@ import {
   type VirtualRowState,
   type VirtualScrollAnchor,
 } from "./MeasuredVirtualList.js";
-import { CopyButton } from "./common.js";
+import { COPY_RESULT_MS, CopyButton } from "./common.js";
 import { accountLabelText } from "../personal-identifiers.js";
 import {
   governanceDecisionRecord,
@@ -37,7 +37,7 @@ import {
   type DecisionRecordModel,
 } from "../decision-record.js";
 import { DecisionRecord } from "./requests/DecisionRecord.js";
-import { AccountIcon, AgentLogIcon, BotIcon, ChevronRightIcon, CompactedIcon, CopyIcon, EditIcon, EditInForkIcon, FileEditIcon, HandOffIcon, InsertIntoDraftIcon, NewFileIcon, PlanIcon, PlanInProgressIcon, PlanPendingIcon, RewindFilesIcon, ShieldIcon, StopTurnIcon, SuccessIcon, ThoughtIcon, ThreadForkIcon } from "./Icons.js";
+import { AccountIcon, AgentLogIcon, BotIcon, CheckIcon, ChevronRightIcon, CompactedIcon, CopyIcon, EditIcon, EditInForkIcon, FileEditIcon, HandOffIcon, InsertIntoDraftIcon, NewFileIcon, PlanIcon, PlanInProgressIcon, PlanPendingIcon, RewindFilesIcon, ShieldIcon, StopTurnIcon, SuccessIcon, ThoughtIcon, ThreadForkIcon } from "./Icons.js";
 import { diffFileIsPlain, diffMaxLineNumber, hunkLabel, parseUnifiedDiff, type DiffFile } from "../unified-diff.js";
 import { markdownPlainText } from "./markdown-plain-text.js";
 import { TranscriptActionMenu, transcriptActionAvailable, type TranscriptAction } from "./TranscriptActions.js";
@@ -1011,6 +1011,31 @@ const TimelineSessionLinkContext = createContext<((sessionId: string) => void) |
 
 /** Side Chat's Insert into Draft on every top-level reply (#2862); absent in the main transcript. */
 const InsertReplyContext = createContext<((item: AgentReplyItem) => void) | undefined>(undefined);
+
+/**
+ * Insert into Draft, which says it worked in place for two seconds, as Copy Response does (#2863).
+ * The draft it filled can be out of sight behind the panel (a phone's sheet covers the composer), so
+ * the reply itself shows the result; the toast's Undo is still the way back.
+ */
+function InsertReplyButton({ item, onInsert }: { item: AgentReplyItem; onInsert: (item: AgentReplyItem) => void }) {
+  const [inserted, setInserted] = useState(false);
+  useEffect(() => {
+    if (!inserted) return;
+    const timer = window.setTimeout(() => setInserted(false), COPY_RESULT_MS);
+    return () => window.clearTimeout(timer);
+  }, [inserted]);
+  const label = inserted ? "Inserted into Draft" : "Insert into Draft";
+  return (
+    <button type="button" className="icon-btn sm"
+      onClick={() => {
+        onInsert(item);
+        setInserted(true);
+      }}
+      title={label} aria-label={label}>
+      {inserted ? <CheckIcon size={16} className="copy-status-icon-copied" /> : <InsertIntoDraftIcon size={16} />}
+    </button>
+  );
+}
 /** What an agent row needs to read the same worker word as the Agents roster (#2857). A transcript
  * shown outside its session (a run, a pod, Side Chat) assumes a live runner and no requests. */
 const DEFAULT_SUBAGENT_STATUS: SubagentStatusContextValue = { sessionStatus: "running", runnerOnline: true, attention: new Map() };
@@ -2317,12 +2342,7 @@ function TimelineRowContent({
           {(standaloneCopy || insertable) && item.text && (
             <div className="tl-message-actions tl-reply-actions" role="group" aria-label="Message Actions">
               <CopyButton text={item.text} format={markdownPlainText} iconOnly ariaLabel="Copy Response" className="icon-btn sm" />
-              {insertable && onInsertReply && (
-                <button type="button" className="icon-btn sm" onClick={() => onInsertReply(item)}
-                  title="Insert into Draft" aria-label="Insert into Draft">
-                  <InsertIntoDraftIcon size={16} />
-                </button>
-              )}
+              {insertable && onInsertReply && <InsertReplyButton item={item} onInsert={onInsertReply} />}
             </div>
           )}
         </div>
