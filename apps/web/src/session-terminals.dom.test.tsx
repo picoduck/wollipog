@@ -398,26 +398,102 @@ test("leaving the session disposes its terminals", async () => {
 // --- The store's loads, without a host rendering ---
 
 /** A store over a shell API whose registry, history answers and shell creation the test controls. */
-function storeOver(registry: ShellView[], options: { failHistory?: () => boolean; openShell?: () => Promise<ShellView> } = {}) {
+function storeOver(registry: ShellView[], options: {
+  failHistory?: () => boolean;
+  /** Awaited before a history answer or a list answer is given. */
+  holdHistory?: () => Promise<void>;
+  holdList?: () => Promise<void>;
+  openShell?: () => Promise<ShellView>;
+} = {}) {
   const history: string[] = [];
   const loaded: string[] = [];
+  const opens = { count: 0 };
   const shellApi = {
     ...client,
-    listShells: async () => ({ shells: structuredClone(registry) }),
+    listShells: async () => {
+      const shells = structuredClone(registry);
+      await options.holdList?.();
+      return { shells };
+    },
     shellHistory: async (_sessionId: string, shellId: string) => {
       history.push(shellId);
+      await options.holdHistory?.();
       if (options.failHistory?.()) throw new Error("history unavailable");
       return { shellId, chunks: [], nextAfter: 0, hasMore: false, truncatedBefore: false };
     },
-    openShell: async () => ({ shell: await (options.openShell ?? (() => Promise.reject(new Error("no shell"))))() }),
+    openShell: async () => {
+      opens.count += 1;
+      return { shell: await (options.openShell ?? (() => Promise.reject(new Error("no shell"))))() };
+    },
   } as ApiClient;
   const terminals = new SessionTerminals(session.id, shellApi, {
     reconcileShellOutputs() {},
     loadShellHistory(_sessionId, shellId) { loaded.push(shellId); },
     removeShellOutput() {},
   });
-  return { terminals, history, loaded };
+  return { terminals, history, loaded, opens };
 }
+
+/** A promise the test resolves later. */
+function gate(): { wait: () => Promise<void>; open: () => void } {
+  let open!: () => void;
+  const opened = new Promise<void>((resolve) => { open = resolve; });
+  return { wait: () => opened, open };
+}
+
+test("history read before a reconnect does not count as loaded once it lands", async () => {
+  let hold: ReturnType<typeof gate> | null = gate();
+  const { terminals, history, loaded } = storeOver([shell(1)], { holdHistory: () => hold?.wait() ?? Promise.resolve() });
+  try {
+    let release = terminals.openHost();
+    await until(() => history.length === 1, "the first history request");
+    release();
+
+    // The connection drops and returns while the first answer is still on its way, then it lands.
+    terminals.reconnected();
+    const late = hold;
+    hold = null;
+    late.open();
+    await settle(10);
+    assert.deepEqual(loaded, [], "the pre-reconnect answer is dropped");
+
+    release = terminals.openHost();
+    await until(() => loaded.length === 1, "the reload on the next open");
+    release();
+    assert.deepEqual(history, ["shell-1", "shell-1"]);
+  } finally {
+    terminals.dispose();
+  }
+});
+
+test("a reopened terminal offers a first shell only once its own list has arrived", async () => {
+  const registry: ShellView[] = [];
+  let hold: ReturnType<typeof gate> | null = null;
+  const { terminals, opens } = storeOver(registry, { holdList: () => hold?.wait() ?? Promise.resolve() });
+  try {
+    let release = terminals.openHost();
+    await until(() => terminals.getSnapshot().shells !== null, "the first, empty list");
+    // The machine is offline, so nothing is offered; then the terminal is hidden.
+    terminals.offerFirstShell(false, true);
+    release();
+
+    // Another dashboard opens a shell; the terminal reopens while its list is still on the way.
+    registry.push(shell(7));
+    hold = gate();
+    release = terminals.openHost();
+    terminals.offerFirstShell(true, true);
+    assert.equal(opens.count, 0, "the last open's empty list is not this open's");
+
+    hold.open();
+    await until(() => terminals.getSnapshot().shells?.length === 1, "the reopened list");
+    terminals.offerFirstShell(true, true);
+    release();
+    assert.equal(opens.count, 0, "a session with a shell is offered none");
+    assert.deepEqual(terminals.getSnapshot().shells?.map((listed) => listed.shellId), ["shell-7"]);
+  } finally {
+    terminals.dispose();
+  }
+});
 
 test("history a reconnect left stale is fetched on every open until it lands", async () => {
   let failHistory = false;

@@ -315,6 +315,8 @@ export class SessionTerminals {
   registryChanged(): void {
     if (!this.everOpened) return;
     // Every shell's history is reloaded: now if a host shows the terminal, otherwise on the next open.
+    // A load still in flight read the registry before the reconnect, so it must not land and mark it.
+    this.loadSeq++;
     this.historyLoaded.clear();
     if (this.hosts > 0) void this.loadShells({ reconcile: this.initialShellLoadSettled });
   }
@@ -328,11 +330,13 @@ export class SessionTerminals {
    * Toggled on with nothing running: open a shell instead of showing an empty pane, once per open (a
    * shell the user then closes must not resurrect itself). Terminal-state sessions are excluded: their
    * runner-side session is often gone ("unknown session"), so auto-opening would greet the user with
-   * an error; the manual New Shell button still lets them try.
+   * an error; the manual New Shell button still lets them try. Only this open's own list counts: the
+   * list kept from the last open may be empty while another dashboard has opened shells since.
    */
   offerFirstShell(runnerOnline: boolean, sessionLive: boolean): void {
     const { shells, busy } = this.state;
-    if (this.hosts === 0 || shells === null || shells.length > 0 || !runnerOnline || !sessionLive || busy || this.autoOpened) return;
+    if (this.hosts === 0 || !this.initialShellLoadSettled || shells === null || shells.length > 0) return;
+    if (!runnerOnline || !sessionLive || busy || this.autoOpened) return;
     this.autoOpened = true;
     void this.newShell();
   }
