@@ -106,3 +106,38 @@ test("a move abandoned before its destination mounts, or a session left, drops t
   cancelTerminalFocusRequest("session-a");
   assert.equal(takeTerminalFocusRequest("session-a", "dock"), false);
 });
+
+test("typing or clicking before the destination mounts takes focus back from the move (#2869)", async () => {
+  const domWindow = new Window();
+  const prior = (globalThis as Record<string, unknown>).window;
+  Object.defineProperty(globalThis, "window", { configurable: true, writable: true, value: domWindow });
+  const nextTask = () => new Promise((resolve) => domWindow.setTimeout(resolve, 0));
+  try {
+    // The key that chose the move is still being dispatched when the request is made: it does not count.
+    requestTerminalFocus("session-a", "panel");
+    domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Enter" }));
+    await nextTask();
+    assert.equal(takeTerminalFocusRequest("session-a", "panel"), true, "the choosing key leaves the request");
+
+    requestTerminalFocus("session-a", "panel");
+    await nextTask();
+    domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "d" }));
+    assert.equal(takeTerminalFocusRequest("session-a", "panel"), false, "a later key ends it");
+
+    requestTerminalFocus("session-a", "panel");
+    await nextTask();
+    domWindow.dispatchEvent(new domWindow.PointerEvent("pointerdown"));
+    assert.equal(takeTerminalFocusRequest("session-a", "panel"), false, "a later click ends it");
+
+    // A request that ended stops watching, so input never ends the next one early.
+    requestTerminalFocus("session-a", "panel");
+    await nextTask();
+    assert.equal(takeTerminalFocusRequest("session-a", "panel"), true);
+    requestTerminalFocus("session-a", "dock");
+    domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "d" }));
+    assert.equal(takeTerminalFocusRequest("session-a", "dock"), true, "the taken request's watch is gone");
+  } finally {
+    Object.defineProperty(globalThis, "window", { configurable: true, writable: true, value: prior });
+    domWindow.close();
+  }
+});

@@ -37,25 +37,50 @@ export function installTerminalExitBoundary(targetWindow: Window, targetDocument
  * focus in it there. The request names its destination, and that place's host takes it as it mounts,
  * however long its code or the session view around it takes to load (#2869 review). It ends with the
  * move: the other place's host mounting instead supersedes it, the destination closing before its host
- * mounts abandons it (the app cancels it), and leaving the session drops it. So a request never
- * surfaces later in a terminal that opened for another reason.
+ * mounts abandons it (the app cancels it), the person typing or clicking anywhere first takes focus
+ * back from it, and leaving the session drops it. So focus never jumps into a terminal the person has
+ * stopped waiting for, and their keys never reach a shell they did not choose.
  */
 let terminalFocusRequest: { sessionId: string; place: TerminalPlacement } | null = null;
+let stopWatchingInput: (() => void) | null = null;
+
+function endTerminalFocusRequest(): void {
+  terminalFocusRequest = null;
+  stopWatchingInput?.();
+  stopWatchingInput = null;
+}
 
 export function requestTerminalFocus(sessionId: string, place: TerminalPlacement): void {
-  terminalFocusRequest = { sessionId, place };
+  endTerminalFocusRequest();
+  const request = { sessionId, place };
+  terminalFocusRequest = request;
+  if (typeof window === "undefined") return;
+  // Watched from the next task, so the click or key that chose the move does not count.
+  const target = window;
+  const onInput = () => {
+    if (terminalFocusRequest === request) endTerminalFocusRequest();
+  };
+  const timer = target.setTimeout(() => {
+    target.addEventListener("keydown", onInput, true);
+    target.addEventListener("pointerdown", onInput, true);
+  }, 0);
+  stopWatchingInput = () => {
+    target.clearTimeout(timer);
+    target.removeEventListener("keydown", onInput, true);
+    target.removeEventListener("pointerdown", onInput, true);
+  };
 }
 
 /** The move is abandoned: its destination (`place`, or any) closed, or the session was left. */
 export function cancelTerminalFocusRequest(sessionId: string, place?: TerminalPlacement): void {
   const request = terminalFocusRequest;
-  if (request?.sessionId === sessionId && (place === undefined || request.place === place)) terminalFocusRequest = null;
+  if (request?.sessionId === sessionId && (place === undefined || request.place === place)) endTerminalFocusRequest();
 }
 
 /** A host of `place` mounted for the session: true when it is the move's destination. Either way the move ends. */
 export function takeTerminalFocusRequest(sessionId: string, place: TerminalPlacement): boolean {
   const request = terminalFocusRequest;
   if (request?.sessionId !== sessionId) return false;
-  terminalFocusRequest = null;
+  endTerminalFocusRequest();
   return request.place === place;
 }

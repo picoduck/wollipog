@@ -190,6 +190,42 @@ test.describe(HOST_MOVES, () => {
     expect(input, "no key reached a shell").toEqual([]);
     await other.close();
   });
+
+  // Turning to the composer while the moved terminal loads ends the move's claim on focus: the
+  // Terminal tool arriving afterwards leaves the composer focused, so its keys never reach the shell.
+  test("typing in the composer while a moved terminal loads keeps focus there when it arrives", async ({ page }) => {
+    let releaseTool!: () => void;
+    const toolGate = new Promise<void>((resolve) => { releaseTool = resolve; });
+    await page.route(/\/src\/components\/TerminalTool\.tsx/u, async (route) => {
+      await toolGate;
+      await route.continue();
+    });
+    const response = await page.goto("/command-inbox-projects-e2e.html?fullShell=1&terminalShells=2");
+    expect(response?.ok(), "fixture page should be served").toBe(true);
+    await page.getByRole("button", { name: /Alpha Session/ }).first().click();
+    await page.getByRole("button", { name: "Open Session" }).click();
+    await page.getByRole("button", { name: "Terminal", exact: true }).first().click();
+    const dock = page.getByRole("region", { name: "Terminal" });
+    await expect(dock.locator(".shell-term:not(.is-hidden) .xterm-rows")).toContainText("24 files passed");
+
+    await dock.getByRole("button", { name: "More Terminal Actions" }).click();
+    await page.getByRole("menuitem", { name: /Move to Right Panel/ }).click();
+    const panel = page.locator("#right-panel");
+    await expect(panel.getByText("Loading terminal…")).toBeVisible();
+
+    const composer = page.locator(".composer-input");
+    await composer.click();
+    await page.keyboard.type("draft");
+    releaseTool();
+    await expect(panel.locator(".shell-term:not(.is-hidden) .xterm-rows")).toContainText("24 files passed");
+    // Past the frame the tool's host would have moved focus in.
+    await page.waitForTimeout(500);
+    await expect(composer).toBeFocused();
+    await page.keyboard.type(" more");
+    await expect(composer).toHaveValue("draft more");
+    const { input } = await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.shellCalls());
+    expect(input, "no key reached a shell").toEqual([]);
+  });
 });
 
 test(SEARCH_DURING_FONT_LOAD_TEST, async ({ page }) => {
