@@ -1198,3 +1198,126 @@ test("recovery notices' titles and labels are Title Case and their sentences sen
     await panel.dispose();
   }
 });
+
+test("a partly listed turn still says Result Missing, and Missing Result Acknowledged once acknowledged (#2859)", async () => {
+  const now = Date.now();
+  const panel = await mountBackgroundWork({
+    session: managedSession({
+      id: "session-partial-acknowledge",
+      backgroundWorkState: undefined,
+      backgroundJobsTruncated: true,
+      backgroundJobs: [{
+        ...baseJob, id: "task-a1f3c9", parentTurnId: "turn-4", launchType: "shell", registeredAt: now - 20 * MINUTE,
+        terminalStatus: "completed", terminalObservedAt: now - 15 * MINUTE, continuationRequired: true,
+        continuationId: "bgcont-partial", continuationMissingResultAt: now - 12 * MINUTE,
+      }],
+      backgroundDeliveries: [{
+        continuationId: "bgcont-partial", parentTurnId: "turn-4", jobCount: 2, terminalCount: 2,
+        acceptedAt: now - 14 * MINUTE, missingResultAt: now - 12 * MINUTE, watchdogState: "accepted_without_result",
+      }],
+    } as Partial<SessionView>),
+  }, { acknowledgeBackgroundMissingResult: async () => ({} as SessionView) } as unknown as ApiClient);
+  try {
+    assertNoDomNode(panel.container.querySelector(".background-work-turn-head .status"),
+      "the notice says Result Missing for the partly listed turn");
+    await act(async () => {
+      acknowledgeButtons(panel.container)[0]!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assertNoDomNode(panel.container.querySelector(".notice"));
+    assert.equal(panel.container.querySelector(".background-work-turn-head .status")?.textContent, "Missing Result Acknowledged",
+      "the acknowledgement stays visible even though some of the turn's jobs are not listed");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("a pending result names only the jobs its receipt returns, not a finished job with nothing to return (#2859)", async () => {
+  const now = Date.now();
+  const panel = await mountBackgroundWork({
+    session: managedSession({
+      id: "session-pending-subject",
+      backgroundWorkState: "continuation_pending",
+      backgroundJobs: [
+        { ...baseJob, id: "task-a1f3c9", parentTurnId: "turn-4", launchType: "shell", registeredAt: now - 9 * MINUTE,
+          terminalStatus: "completed", terminalObservedAt: now - 2 * MINUTE, continuationRequired: true },
+        { ...baseJob, id: "task-b2c3d4", parentTurnId: "turn-4", launchType: "agent", registeredAt: now - 8 * MINUTE,
+          terminalStatus: "completed", terminalObservedAt: now - MINUTE, continuationRequired: false },
+        { ...baseJob, id: "task-c3d4e5", parentTurnId: "turn-4", launchType: "shell", registeredAt: now - 7 * MINUTE,
+          terminalStatus: "completed", terminalObservedAt: now - MINUTE, continuationRequired: true, sourcePresent: false },
+      ],
+      backgroundDeliveries: [{ parentTurnId: "turn-4", jobCount: 1, terminalCount: 1, watchdogState: "terminal_without_continuation" }],
+    }),
+  });
+  try {
+    assert.equal(panel.container.querySelector('.notice[data-state="terminal_without_continuation"] .notice-body')?.textContent,
+      "Returning shell job a1f3c9's result to this conversation.");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("after Acknowledge, focus goes to the acknowledged turn's heading even when the groups reorder first (#2859)", async () => {
+  const now = Date.now();
+  let settle: ((value: SessionView) => void) | null = null;
+  const client = {
+    acknowledgeBackgroundMissingResult: () => new Promise<SessionView>((resolve) => { settle = resolve; }),
+  } as unknown as ApiClient;
+  const session = (acknowledgedAt?: number) => managedSession({
+    id: "session-acknowledge-focus",
+    backgroundWorkState: undefined,
+    backgroundJobs: [
+      { ...baseJob, id: "task-a1f3c9", parentTurnId: "turn-a", launchType: "shell", registeredAt: now - 30 * MINUTE,
+        terminalStatus: "completed", terminalObservedAt: now - 25 * MINUTE, continuationRequired: true,
+        continuationId: "bgcont-focus", continuationMissingResultAt: now - 20 * MINUTE },
+      { ...baseJob, id: "task-b2c3d4", parentTurnId: "turn-b", launchType: "shell", registeredAt: now - 5 * MINUTE },
+    ],
+    backgroundDeliveries: [{
+      continuationId: "bgcont-focus", parentTurnId: "turn-a", jobCount: 1, terminalCount: 1,
+      acceptedAt: now - 22 * MINUTE, missingResultAt: now - 20 * MINUTE,
+      ...(acknowledgedAt === undefined ? { watchdogState: "accepted_without_result" as const } : { missingResultAcknowledgedAt: acknowledgedAt }),
+    }],
+  } as Partial<SessionView>);
+  const parentTurns = new Map([["turn-a", { eventId: 10, turn: 1 }], ["turn-b", { eventId: 20, turn: 2 }]]);
+  const panel = await mountBackgroundWork({ session: session(), parentTurns }, client);
+  const titles = () => [...panel.container.querySelectorAll(".background-work-turn-head h3")].map((title) => title.textContent);
+  try {
+    assert.deepEqual(titles(), ["Turn 2", "Turn 1"]);
+    const acknowledge = acknowledgeButtons(panel.container)[0]!;
+    acknowledge.focus();
+    await act(async () => { acknowledge.click(); await Promise.resolve(); });
+    // The acknowledged snapshot arrives before the request settles, and moves Turn 1 to the top.
+    await panel.render({ session: session(now), parentTurns });
+    assert.deepEqual(titles(), ["Turn 1", "Turn 2"]);
+    await act(async () => {
+      settle!({} as SessionView);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(domWindow.document.activeElement?.textContent, "Turn 1", "focus is on the acknowledged turn's heading");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("Result Blocked stops the one live unfinished job, not counting a job the runner no longer lists (#2859)", async () => {
+  const now = Date.now();
+  const blocked = blockedSession("session-blocked-tombstone");
+  const panel = await mountBackgroundWork({
+    session: {
+      ...blocked,
+      backgroundJobs: [...blocked.backgroundJobs!, {
+        ...baseJob, id: "bg-shell-0dead0", parentTurnId: "blocked", launchType: "shell", registeredAt: now - 49 * MINUTE,
+        lastObservedAt: now - 40 * MINUTE, sourcePresent: false,
+      }],
+    } as SessionView,
+  });
+  try {
+    const notice = panel.container.querySelector<HTMLElement>('.notice[data-state="continuation_blocked"]')!;
+    assert.equal(notice.querySelector(".notice-actions button")?.textContent, "Stop Monitor Job 7be210…");
+    assert.equal(notice.querySelectorAll(".notice-body p").length, 1, "no reason line when Stop is offered");
+  } finally {
+    await panel.dispose();
+  }
+});

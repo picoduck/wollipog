@@ -4264,6 +4264,12 @@ textarea {
   font: var(--type-small);
 }
 .background-recovery-note.notice-error { color: var(--danger-text); }
+@media (max-width: 760px) {
+  /* As in the session notice slot (§13.2): the resolving action fills the row, and Show Details keeps
+     its own width. */
+  .background-recovery-notice .notice-actions > .btn:first-child:not(.notice-details-toggle) { flex: 1 1 auto; max-width: none; }
+  .background-recovery-notice .notice-actions > .notice-details-toggle { flex: none; }
+}
 
 /* Side Chat (#2863): a 40px context line, the transcript as the tool's one scroller, and a foot that
    is the composer card or, once the side chat has ended, one sentence and one button. The body gives

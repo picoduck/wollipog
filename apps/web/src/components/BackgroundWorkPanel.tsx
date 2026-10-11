@@ -121,15 +121,18 @@ function deliveryRecoveryState(
   return state === "accepted_without_result" && acknowledged ? null : state;
 }
 
-/** The jobs a delivery returns the result of: those its continuation names, else the turn's finished
- * jobs whose result is not back. */
+/**
+ * The listed jobs a delivery returns the result of: those its continuation names. One without a
+ * continuation yet is the control plane's pending receipt, which counts the turn's present, finished
+ * jobs that have a result to return and no continuation; a job with nothing to return, or one the
+ * runner no longer lists, is not among them.
+ */
 function deliveryJobs(delivery: BackgroundDeliveryView, group: BackgroundJobGroup): ManagedBackgroundJobView[] {
-  const named = delivery.continuationId == null
-    ? []
-    : group.jobs.filter((job) => job.continuationId === delivery.continuationId);
-  return named.length > 0
-    ? named
-    : group.jobs.filter((job) => job.terminalStatus != null && job.assistantResultPersistedAt == null);
+  if (delivery.continuationId != null) {
+    return group.jobs.filter((job) => job.continuationId === delivery.continuationId);
+  }
+  return group.jobs.filter((job) => job.sourcePresent && job.terminalStatus != null &&
+    job.continuationRequired !== false && job.continuationId == null && job.assistantResultPersistedAt == null);
 }
 
 /** A recovery notice names its one job, or counts them. */
@@ -193,23 +196,29 @@ export function BackgroundWorkPanel({
     delivery.continuationId != null && locallyAcknowledged.has(acknowledgementKey(session.id, delivery.continuationId));
 
   // A successful Acknowledge removes its notice, button and all; focus goes to the turn's heading,
-  // whose badge now reads Missing Result Acknowledged.
-  const acknowledgedFocus = useRef<string | null>(null);
+  // whose badge now reads Missing Result Acknowledged. The turn is found by its key once the panel
+  // has rendered the acknowledgement: the acknowledged snapshot can reorder the groups first.
+  const acknowledgedFocus = useRef<{ sessionId: string; groupKey: string } | null>(null);
   useEffect(() => {
-    const headingId = acknowledgedFocus.current;
+    const target = acknowledgedFocus.current;
     acknowledgedFocus.current = null;
-    if (headingId === null) return;
+    if (target === null || target.sessionId !== session.id) return;
+    const groupIndex = groups.findIndex((group) => group.key === target.groupKey);
     const active = document.activeElement;
-    if (active === null || active === document.body) document.getElementById(headingId)?.focus();
+    if (groupIndex >= 0 && (active === null || active === document.body)) {
+      document.getElementById(`${headingPrefix}-turn-${groupIndex}`)?.focus();
+    }
+    // Once per acknowledgement, reading the groups of the render that shows it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [locallyAcknowledged]);
-  const acknowledge = (continuationId: string, headingId: string) => {
+  const acknowledge = (continuationId: string, groupKey: string) => {
     const key = acknowledgementKey(session.id, continuationId);
     if (acknowledgementFeedback.get(key)?.state === "pending") return;
     const token = Symbol("missing-result-acknowledgement");
     setAcknowledgementFeedback((current) => new Map(current).set(key, { token, state: "pending" }));
     void requestMissingResultAcknowledgement(api, session.id, continuationId).then((failure) => {
       if (failure === null) {
-        acknowledgedFocus.current = headingId;
+        acknowledgedFocus.current = { sessionId: session.id, groupKey };
         setLocallyAcknowledged((current) => new Set(current).add(key));
       }
       setAcknowledgementFeedback((current) => {
@@ -324,8 +333,9 @@ export function BackgroundWorkPanel({
                 const acknowledgeable = state === "accepted_without_result" && continuationId != null &&
                   delivery.missingResultAt != null && delivery.runnerResultPersistedAt == null;
                 // Result Blocked's Stop ends the turn's one unfinished job. The bounded list can leave
-                // some out, so the receipt's own count of them must be one too.
-                const unfinished = group.jobs.filter((job) => job.terminalStatus == null);
+                // some out, so the receipt's own count of them must be one too. Like that count, a job
+                // the runner no longer lists is not one of them.
+                const unfinished = group.jobs.filter((job) => job.sourcePresent && job.terminalStatus == null);
                 const oneUnfinished = delivery.unfinishedSiblingJobs !== undefined
                   ? delivery.unfinishedSiblingJobs === 1
                   : session.backgroundJobsTruncated !== true;
@@ -339,7 +349,7 @@ export function BackgroundWorkPanel({
                     acknowledgement={acknowledgeable ? {
                       busy: feedback?.state === "pending",
                       error: feedback?.state === "error" ? feedback.message : null,
-                      onAcknowledge: () => acknowledge(continuationId, headingId),
+                      onAcknowledge: () => acknowledge(continuationId, group.key),
                     } : null}
                     jobStop={jobStop}
                     stopTarget={target && {
