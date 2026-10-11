@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { AgentDefinition, AgentDriverKind, RunnerToControlPlane } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, type AgentDefinition, type AgentDriverKind, type RunnerToControlPlane } from "@wollipog/protocol";
 import type { Driver, DriverCallbacks, DriverOptions } from "./drivers/driver.js";
 import { anchorForkRef, captureWorktreeTree } from "./git-ops.js";
 import { isolateFromAmbientIgnores } from "./git-test-repo.js";
@@ -112,7 +112,12 @@ for (const sourceDriver of ["codex-app-server", "claude-code"] as const) {
       assert.equal(git(child.worktreePath!, ["rev-parse", "HEAD"]), baseCommit);
       assert.equal(readFileSync(join(worktree.path, "file.txt"), "utf8"), "later source state");
       const after = store.readMeta(source.sessionId)!;
-      const stableMeta = (value: typeof after) => JSON.parse(JSON.stringify({ ...value, seq: 0, updatedAt: 0 }));
+      const stableMeta = (value: typeof after) => JSON.parse(JSON.stringify({ ...value, seq: 0, updatedAt: 0,
+        historyTurnAnchor: value.historyTurnAnchor ? { ...value.historyTurnAnchor, throughSeq: 0 } : undefined }));
+      const sourcePage = store.readEventPageForProtocol(source.sessionId, { afterSeq: 0, limit: 1 }, PROTOCOL_VERSION);
+      assert.ok(sourcePage.ok);
+      assert.equal(after.historyTurnAnchor?.throughSeq, sourcePage.page.throughSeq,
+        "derived anchor advances only through the source's actual append log");
       assert.deepEqual(stableMeta(after), stableMeta(JSON.parse(before)));
       assert.match(result.handoffDraft!.text, /Keep the checkpoint/);
       assert.doesNotMatch(result.handoffDraft!.text, /later excluded|private-provider-id|source-private-value/);

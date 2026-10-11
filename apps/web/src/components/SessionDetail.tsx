@@ -51,6 +51,9 @@ import {
   type WorkspaceReferenceCandidate,
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
+import { convertPreviewReadingState, timelineRowSource } from "../history-preview-handoff.js";
+import { useHistoryPreview, type PreviewAnchor, type PreviewHandoff } from "../use-history-preview.js";
+import type { SessionEventsResponse } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { outstandingSessionResult } from "../session-follow-up.js";
 import { SkillsUnavailableNotice, skillsUnavailableSentence, useSessionSkillsUnavailable, useSkillsNoticeDismissal } from "./SkillsUnavailableNotice.js";
@@ -91,6 +94,8 @@ import { runnerDisplay } from "../runners.js";
 import { MoveToProjectDialog, MoveToWorkspaceDialog, NewWorkspaceDialog } from "./SessionMoveDialogs.js";
 import {
   advanceAutomaticAccountSwitchNotice,
+  TimelineBuilder,
+  groupTimeline,
   type AutomaticAccountSwitchNoticeState,
   type TimelineItem,
 } from "../timeline.js";
@@ -108,6 +113,7 @@ import { QueuedMessages, queuedMessageExcerpt } from "./QueuedMessages.js";
 import { sessionArchivedAtRest } from "../status-meta.js";
 import {
   EventTimeline,
+  type TimelineReadingState,
   TranscriptErrorAlert,
   transcriptTurnsById,
   userRewindTurns,
@@ -256,6 +262,7 @@ import { GuardrailsDialog } from "./GuardrailsDialog.js";
 import { guardrailSummary } from "../guardrail-values.js";
 import {
   hasSavedFollowTailAnchor,
+  seedFollowTailAnchor,
   isFollowTailResumeKey,
   isFollowTailUpwardReadingKey,
   type FollowTailState,
@@ -816,6 +823,7 @@ export function SessionDetail(props: SessionDetailProps) {
 
 const DESCENDANT_REQUEST_POLL_INTERVAL_MS = 2_000;
 export const DESCENDANT_REQUEST_POLL_TIMEOUT_MS = 10_000;
+const EMPTY_GOVERNANCE_DECISIONS: GovernanceDecision[] = [];
 const EMPTY_DESCENDANT_REQUESTS: readonly DescendantRequestView[] = Object.freeze([]);
 const EMPTY_BLOCKED_CHILDREN: readonly DescendantBlockedChildView[] = Object.freeze([]);
 const EMPTY_HELD_CHILDREN: readonly CampaignHeldChild[] = Object.freeze([]);
@@ -1039,12 +1047,12 @@ function sameComposerTriggers(left: ComposerTriggers, right: ComposerTriggers): 
  * shows the chunks streamed into the trailing reply since `items` was derived from
  * `itemsDerivedFrom`, which render the transcript without the session view around it (#2763).
  */
-const ProfiledEventTimeline = memo(function ProfiledEventTimeline({ liveSessionId, itemsDerivedFrom, items, ...props }:
-  ComponentProps<typeof EventTimeline> & { liveSessionId: string; itemsDerivedFrom: SessionEvent[] | undefined }) {
-  const liveItems = useLiveTimelineTail(liveSessionId, itemsDerivedFrom, items);
+const ProfiledEventTimeline = memo(function ProfiledEventTimeline({ liveSessionId, itemsDerivedFrom, readLocal, items, ...props }:
+  ComponentProps<typeof EventTimeline> & { liveSessionId: string; itemsDerivedFrom: SessionEvent[] | undefined; readLocal?: boolean }) {
+  const liveItems = useLiveTimelineTail(liveSessionId, readLocal ? undefined : itemsDerivedFrom, items);
   return (
     <Profiler id={TRANSCRIPT_PROBE} onRender={reportRenderProbe}>
-      <EventTimeline {...props} items={liveItems} />
+      <EventTimeline {...props} items={readLocal ? items : liveItems} />
     </Profiler>
   );
 });
@@ -1153,6 +1161,7 @@ function SessionDetailLoaded({
   const {
     loadEvents,
     loadTurnStartWindow,
+    loadHistoryPreviewHandoff,
     loadOlderEvents,
     beginOlderEventsLoad,
     failOlderEventsLoad,
@@ -1192,20 +1201,34 @@ function SessionDetailLoaded({
   const recoveryGeneration = useStoreSelector((s) => s.snapshotRevision);
   // A chunk that only lengthens the trailing reply renders the transcript alone (`ProfiledEventTimeline`
   // folds it in); this view reads it the next time it renders for anything else (#2763).
-  const evs = useStoreSelectorUnlessQuiet((s) => s.events.get(sessionId), onlyContinuesTrailingText);
+  const cachedEvents = useStoreSelectorUnlessQuiet((s) => s.events.get(sessionId), onlyContinuesTrailingText);
+  const previewReadingState = useRef<TimelineReadingState | null>(null);
+  const handoffDisclosure = useRef<{ key: string; values: ReadonlyMap<string, boolean> } | null>(null);
+  const previewHandlers = useRef<{
+    anchor: () => PreviewAnchor | null;
+    handoff: (page: PreviewHandoff, anchor: PreviewAnchor) => boolean;
+    refreshOpening: (page: SessionEventsResponse) => boolean;
+  }>({ anchor: () => null, handoff: () => false, refreshOpening: () => false });
+  const historyPreview = useHistoryPreview(api, sessionId, recoveryEventEpoch,
+    () => previewHandlers.current.anchor(), (page, anchor) => previewHandlers.current.handoff(page, anchor), instanceScope,
+    page => previewHandlers.current.refreshOpening(page));
+  const evs = historyPreview.active ? historyPreview.events : cachedEvents;
   // Read inside the recovery effect without becoming one of its dependencies: that effect must run
   // once per open, not once per streamed event.
-  const evsRef = useRef(evs);
-  evsRef.current = evs;
+  const evsRef = useRef(cachedEvents);
+  evsRef.current = cachedEvents;
   const olderInFlightRef = useRef(false);
-  const eventHistory = useStoreSelector((s) => {
+  const cachedEventHistory = useStoreSelector((s) => {
     const history = s.eventHistory.get(sessionId);
     return history?.eventEpoch === (s.sessions.get(sessionId)?.eventEpoch ?? 0) ? history : undefined;
   });
-  const eventWindow = useStoreSelector((s) => {
+  const cachedEventWindow = useStoreSelector((s) => {
     const window = s.eventWindows.get(sessionId);
     return window?.eventEpoch === (s.sessions.get(sessionId)?.eventEpoch ?? 0) ? window : undefined;
   });
+  const eventHistory = historyPreview.active && cachedEventHistory
+    ? { ...cachedEventHistory, refreshing: false } : cachedEventHistory;
+  const eventWindow = historyPreview.active ? historyPreview.window : cachedEventWindow;
   const runner = useStoreSelector((s) => s.runners.get(session.runnerId));
   const showAgentLogs = useShowAgentLogs();
   // Which session first used each project's worktree reads no streaming field (#2872).
@@ -1482,6 +1505,8 @@ function SessionDetailLoaded({
   const openingReadKey = `${instanceScope}:${sessionId}:${recoveryEventEpoch}:${recoveryGeneration}:${historyRetry}`;
   const [unsupportedOpeningKey, setUnsupportedOpeningKey] = useState<string | null>(null);
   const timelineHistoryKey = `${session.id}:${session.eventEpoch ?? 0}`;
+  const timelineRenderHistoryKey = historyPreview.active
+    ? `${timelineHistoryKey}:preview:${historyPreview.viewRevision}` : timelineHistoryKey;
   const timelineHistoryKeyRef = useRef(timelineHistoryKey);
   timelineHistoryKeyRef.current = timelineHistoryKey;
   const [olderRequestSettled, setOlderRequestSettled] = useState({
@@ -2790,6 +2815,7 @@ function SessionDetailLoaded({
           fetchOpening: turnStartOpeningAvailable ? api.getSessionTurnStartPage : undefined,
           onUnsupported: () => { if (!cancelled) setUnsupportedOpeningKey(openingReadKey); },
           applyOpening: (page) => canApply() && loadTurnStartWindow(sessionId, page, revision, generation),
+          applyPreview: (page) => canApply() && historyPreview.accept(page),
           fetchTailPage: api.getSessionEventTailPage,
           applyWindow: (id, events, pageEpoch, pageRevision, complete, hasOlder, turnAligned) => {
             // A warm reader can pause while this GET is pending. Its saved row and offset own
@@ -2905,6 +2931,7 @@ function SessionDetailLoaded({
         fetchOpening: turnStartOpeningAvailable ? api.getSessionTurnStartPage : undefined,
         onUnsupported: () => { if (isCurrent()) setUnsupportedOpeningKey(openingReadKey); },
         applyOpening: (page) => isCurrent() && loadTurnStartWindow(sessionId, page, recoveryRevision, generation),
+        applyPreview: (page) => isCurrent() && historyPreview.accept(page),
       })
         .then((result) => (result.supported ? result.complete : forwardRecovery()))
       : recoverSessionHistoryGap(request, {
@@ -2936,6 +2963,7 @@ function SessionDetailLoaded({
   }, [api, sessionId, loadEvents, loadTurnStartWindow, conn, recoveryRevision, recoveryReadAfter, recoveryEventEpoch, recoveryGeneration, historyRetry, beginEventHistoryLoad, failEventHistoryLoad, isEventGapRecoveryCurrent, beginEventGapRecovery, cancelEventGapRecovery, finishEventGapRecovery, loadEventGapWindow, deferEventTail, cacheCannotFill, openingReadKey, turnStartOpeningAvailable]);
 
   const loadLater = useCallback(() => {
+    if (historyPreview.active) return historyPreview.loadLater();
     const request = beginLaterEventsLoad(sessionId);
     if (!request) return false;
     void api.getSessionEventPage(sessionId, request.after, request.fence.eventEpoch, SESSION_EVENT_PAGE_LIMIT)
@@ -2946,12 +2974,13 @@ function SessionDetailLoaded({
       })
       .catch(() => failLaterEventsLoad(request, "Could not load later activity. Retry to continue reading."));
     return true;
-  }, [api, sessionId, beginLaterEventsLoad, loadLaterEvents, failLaterEventsLoad]);
+  }, [api, sessionId, beginLaterEventsLoad, loadLaterEvents, failLaterEventsLoad, historyPreview.active, historyPreview.loadLater]);
 
   // Older pages have one serialized fetch path. Opening recovery may use it briefly to complete an
   // underfilled first viewport; afterward only explicit controls and reader navigation call it.
   // `preserveAnchor` keeps an existing reading row fixed while a prepend re-measures.
   const loadOlder = useCallback((alignToTurn = false) => {
+    if (historyPreview.active) return historyPreview.loadOlder();
     const base = eventWindowBase(sessionId);
     if (base <= 1 || olderInFlightRef.current) return false;
     const epoch = recoveryEventEpoch;
@@ -2996,7 +3025,7 @@ function SessionDetailLoaded({
         }));
       });
     return true;
-  }, [api, sessionId, recoveryEventEpoch, eventWindowBase, beginOlderEventsLoad, loadOlderEvents, failOlderEventsLoad]);
+  }, [api, sessionId, recoveryEventEpoch, eventWindowBase, beginOlderEventsLoad, loadOlderEvents, failOlderEventsLoad, historyPreview.active, historyPreview.loadOlder]);
 
   const cancelEarlierActivitySettle = useCallback(() => {
     const state = automaticEarlierLoadRef.current;
@@ -3350,7 +3379,7 @@ function SessionDetailLoaded({
 
   // Incremental derivation: streamed chunks push only the NEW events into a per-session
   // builder instead of re-folding the whole array (O(n²) over a long session).
-  const items = useTimeline(sessionId, evs, session.eventEpoch ?? 0);
+  const items = useTimeline(sessionId, evs, session.eventEpoch ?? 0, historyPreview.active);
   // When each docked request was raised: a workflow decision carries its own time, and a provider's
   // request has its transcript row.
   const requestCreatedAt = useMemo(() => {
@@ -3376,7 +3405,7 @@ function SessionDetailLoaded({
     return `${live?.updatedAt ?? ""}:${live?.pendingApproval?.requestId ?? ""}`;
   });
   const governanceAudit = useGovernanceAudit(sessionId, "", mode === "expanded", evs?.[0]?.ts, governanceRevision);
-  const governanceDecisions = governanceAudit.decisions;
+  const governanceDecisions = historyPreview.active ? EMPTY_GOVERNANCE_DECISIONS : governanceAudit.decisions;
   const timelineItems = useGovernanceTimeline(
     items,
     governanceDecisions,
@@ -3928,13 +3957,49 @@ function SessionDetailLoaded({
     scrollRef,
     contentRevision: `${evs?.length ?? 0}:${items.length}:${pending?.text.length ?? 0}:${pending?.images.length ?? 0}:${session.status}`,
     sessionId,
-    persistenceScope: instanceScope,
+    persistenceScope: historyPreview.active ? `${instanceScope}:preview:${recoveryEventEpoch}:${historyPreview.viewRevision}` : instanceScope,
     rows: items,
+    allowFollowing: !historyPreview.active,
     rowGeneration: session.eventEpoch ?? 0,
     openingAnchor: eventWindow?.openingStartSeq && evs?.[0]
       ? { key: `item:${evs[0].payload.kind}:${eventWindow.openingStartSeq}`, offset: 0 }
       : null,
   });
+  previewHandlers.current = {
+    anchor: () => {
+      const anchor = followTail.getInitialAnchor();
+      if (!anchor) return null;
+      const row = previewReadingState.current?.rows.find(row => row.key === anchor.key);
+      const seq = row && timelineRowSource(row);
+      const source = evs?.find(event => event.seq === seq);
+      return source && row ? { kind: source.payload.kind, seq: source.seq, offset: anchor.offset,
+        rowKind: row.kind, rowKey: row.key } : null;
+    },
+    handoff: (page, anchor) => {
+      const reading = previewReadingState.current;
+      if (!detailMountedRef.current || !reading || page.eventEpoch !== recoveryEventEpoch || page.cacheComplete !== true) return false;
+      const converted = convertPreviewReadingState(reading, page, anchor);
+      if (!converted) return false;
+      const applied = loadHistoryPreviewHandoff(sessionId, page.pages,
+        cachedEventHistory?.recoveryRevision ?? recoveryRevision ?? -1, recoveryGeneration);
+      if (applied) {
+        handoffDisclosure.current = { key: timelineHistoryKey, values: converted.disclosure };
+        seedFollowTailAnchor(instanceScope, sessionId, converted.anchor, "paused");
+      }
+      return applied;
+    },
+    refreshOpening: page => {
+      if (!detailMountedRef.current || page.eventEpoch !== recoveryEventEpoch || page.cacheComplete !== true) return false;
+      const applied = loadTurnStartWindow(sessionId, page,
+        cachedEventHistory?.recoveryRevision ?? recoveryRevision ?? -1, recoveryGeneration);
+      if (applied && page.events[0]) seedFollowTailAnchor(instanceScope, sessionId,
+        { key: `item:${page.events[0].payload.kind}:${page.events[0].seq}`, offset: 0 }, "paused");
+      return applied;
+    },
+  };
+  useEffect(() => {
+    if (!historyPreview.active) handoffDisclosure.current = null;
+  }, [historyPreview.active, timelineHistoryKey]);
   useEffect(() => {
     provisionalFollowStateRef.current?.(followTail.state);
   }, [followTail.state]);
@@ -3945,6 +4010,11 @@ function SessionDetailLoaded({
     const previous = acknowledgedFollowRef.current;
     acknowledgedFollowRef.current = { key: timelineHistoryKey, state: followTail.state };
     if (followTail.state !== "following") return;
+    if (historyPreview.active) {
+      // Reaching the physical bottom of a frozen snapshot cannot resume live following.
+      followTail.pause();
+      return;
+    }
     const gap = eventWindow?.laterGap;
     if (gap) {
       // Promotion cancels a pending reader-driven page before adopting the separately fetched tail.
@@ -3986,7 +4056,8 @@ function SessionDetailLoaded({
       setHistoryRetry((value) => value + 1);
     }
   }, [followTail.state, followTail.pause, jumpTailSettled, timelineHistoryKey, eventWindow?.laterGap, eventHistory?.error,
-    recoveryRevision, promoteDeferredEventTail, api, sessionId, isEventGapRecoveryCurrent, deferEventTail, failEventHistoryLoad]);
+    recoveryRevision, promoteDeferredEventTail, api, sessionId, isEventGapRecoveryCurrent, deferEventTail, failEventHistoryLoad,
+    historyPreview.active, historyPreview.jumpLatest]);
 
   // A 200-event opening window is a transport budget, not a visual one: hundreds of streamed
   // chunks can collapse into a single short timeline row. While a freshly opened reader is still
@@ -4110,7 +4181,7 @@ function SessionDetailLoaded({
     timelineRevealRestoreState.current = null;
     setTimelineRevealRequest(null);
     timelineRevealRequestId.current = 0;
-  }, [timelineHistoryKey]);
+  }, [timelineRenderHistoryKey]);
   const revealTranscriptEvent = useCallback((eventId: number, place: "operation" | "question") => {
     // Semantic navigation owns the viewport until the reader explicitly resumes following. A
     // question's place is read back to as the reader would scroll there, so the request dock takes
@@ -4122,13 +4193,13 @@ function SessionDetailLoaded({
     const request: TimelineRevealRequest = {
       eventId,
       requestId,
-      historyKey: timelineHistoryKey,
+      historyKey: timelineRenderHistoryKey,
       align: place === "question" ? "upper-third" : "center",
       focus: true,
     };
     timelineRevealRequestRef.current = request;
     setTimelineRevealRequest(request);
-  }, [followTail.pause, followTail.preview, followTail.state, timelineHistoryKey]);
+  }, [followTail.pause, followTail.preview, followTail.state, timelineRenderHistoryKey]);
   const revealCurrentOperation = useCallback((eventId: number) => revealTranscriptEvent(eventId, "operation"),
     [revealTranscriptEvent]);
   const handleTimelineReveal = useCallback((
@@ -4168,11 +4239,11 @@ function SessionDetailLoaded({
     }
     if (isMobile) rightPanelRef.current.close();
     else restoreExpandedPanel();
-    setPendingTurnView({ turnId, historyKey: timelineHistoryKey, requestedBase: null });
-  }, [backgroundParentTurns, isMobile, restoreExpandedPanel, revealTranscriptItemFromPanel, timelineHistoryKey]);
+    setPendingTurnView({ turnId, historyKey: timelineRenderHistoryKey, requestedBase: null });
+  }, [backgroundParentTurns, isMobile, restoreExpandedPanel, revealTranscriptItemFromPanel, timelineRenderHistoryKey]);
   useEffect(() => {
     if (!pendingTurnView) return;
-    if (pendingTurnView.historyKey !== timelineHistoryKey) {
+    if (pendingTurnView.historyKey !== timelineRenderHistoryKey) {
       setPendingTurnView(null);
       return;
     }
@@ -4182,7 +4253,15 @@ function SessionDetailLoaded({
       revealCurrentOperation(loaded.eventId);
       return;
     }
-    if (olderInFlightRef.current) return;
+    if (historyPreview.active) {
+      if (historyPreview.isLoadingOlder()) {
+        let cancelled = false;
+        void historyPreview.waitForOlder().then(() => {
+          if (!cancelled) setOlderReadReleases((count) => count + 1);
+        });
+        return () => { cancelled = true; };
+      }
+    } else if (olderInFlightRef.current) return;
     const base = eventWindow?.baseSeq;
     // A page that settled without moving the window's base failed; history without older events
     // has no such turn to show.
@@ -4193,7 +4272,8 @@ function SessionDetailLoaded({
     }
     setPendingTurnView({ ...pendingTurnView, requestedBase: base });
   }, [pendingTurnView, backgroundParentTurns, eventWindow?.baseSeq, eventWindow?.hasOlder, olderReadReleases,
-    timelineHistoryKey, loadOlder, revealCurrentOperation]);
+    timelineRenderHistoryKey, loadOlder, revealCurrentOperation,
+    historyPreview.active, historyPreview.isLoadingOlder, historyPreview.waitForOlder]);
   const previewNavigationControls = useMemo<PreviewNavigationControls>(() => ({
     beginProgrammaticScroll: followTail.beginProgrammaticScroll,
     follow: followTail.follow,
@@ -6992,7 +7072,12 @@ function SessionDetailLoaded({
             {/* The history notice heads the reading column in its own band above the scroller
                 (#2172): it takes its height, so it never covers a row, and it stays in view while
                 the reader is at the tail. */}
-            {(transcript.notice === "stale" || transcript.notice === "error") && (
+            {historyPreview.active && (
+              <div className="transcript-history-band" role="status">
+                Recent activity is readable as a snapshot while full history loads. Refresh to check for new activity.
+              </div>
+            )}
+            {!historyPreview.active && (transcript.notice === "stale" || transcript.notice === "error") && (
               <div className="transcript-history-band">
                 <LiveTranscriptHistoryNotice
                   sessionId={sessionId}
@@ -7123,6 +7208,7 @@ function SessionDetailLoaded({
                   {items.length > 0 && (
                     <Profiler id={SESSION_VIEW_PROBE} onRender={reportRenderProbe}>
                       <ProfiledEventTimeline
+                        readLocal={historyPreview.active}
                         driver={session.driver}
                         items={timelineItems}
                         itemsDerivedFrom={evs}
@@ -7135,27 +7221,30 @@ function SessionDetailLoaded({
                         onOpenSession={openSession}
                         workspaceRoot={session.worktreePath ?? runner?.workspaces.find((workspace) => workspace.id === session.workspaceId)?.path}
                         scrollRef={scrollRef}
-                        historyKey={timelineHistoryKey}
+                        historyKey={timelineRenderHistoryKey}
                         getInitialAnchor={followTail.getInitialAnchor}
                         preserveAnchor={!followTail.isFollowing}
                         anchorRecoveryPending={anchorRecoveryPending}
+                        readingStateRef={historyPreview.active ? previewReadingState : undefined}
+                        initialDisclosure={!historyPreview.active && handoffDisclosure.current?.key === timelineHistoryKey
+                          ? handoffDisclosure.current.values : undefined}
                         onVisibleAnchorChange={followTail.onVisibleAnchorChange}
                         onAnchorLost={followTail.onAnchorLost}
                         // Keep checkpoint actions discoverable when the runner or worktree cannot
                         // currently satisfy them; activation still uses the existing API contract.
-                        onRewind={mode === "expanded" ? onRewind : undefined}
+                        onRewind={mode === "expanded" && !historyPreview.active ? onRewind : undefined}
                         rewindUnavailableReason={rewindUnavailableReason}
-                        onFork={mode === "expanded" ? onFork : undefined}
-                        handoff={mode === "expanded" ? handoffControls : undefined}
-                        turnRetry={mode === "expanded" ? turnRetry : undefined}
-                        onEditAndResend={mode === "expanded" ? openResendAction : undefined}
+                        onFork={mode === "expanded" && !historyPreview.active ? onFork : undefined}
+                        handoff={mode === "expanded" && !historyPreview.active ? handoffControls : undefined}
+                        turnRetry={mode === "expanded" && !historyPreview.active ? turnRetry : undefined}
+                        onEditAndResend={mode === "expanded" && !historyPreview.active ? openResendAction : undefined}
                         editAndResendUnavailableReason={promptUnavailableReason ?? undefined}
-                        onEditInFork={mode === "expanded" ? openForkEditAction : undefined}
+                        onEditInFork={mode === "expanded" && !historyPreview.active ? openForkEditAction : undefined}
                         editInForkAvailabilityByItem={mode === "expanded" ? editInForkAvailabilityByItem : undefined}
                         forkAvailabilityByTurn={mode === "expanded" ? forkAvailabilityByTurn : undefined}
                         revealRequest={timelineRevealRequest}
                         onRevealHandled={handleTimelineReveal}
-                        questionContext={timelineQuestionContext}
+                        questionContext={historyPreview.active ? undefined : timelineQuestionContext}
                         subagentStatus={timelineSubagentStatus}
                       />
                     </Profiler>
@@ -7222,7 +7311,8 @@ function SessionDetailLoaded({
               onFocusLost={keepFocusInReader}
             />
             <LaterActivityControl gap={eventWindow?.laterGap} onLoad={loadLater}
-              onJump={followTail.follow} onFocusLost={keepFocusInReader} />
+              snapshot={historyPreview.active ? { canLoadLater: historyPreview.canLoadLater } : undefined}
+              onJump={historyPreview.active ? () => { followTail.pause(); historyPreview.jumpLatest(); } : followTail.follow} onFocusLost={keepFocusInReader} />
             {/* The one polite live region for recovery, whatever the control is showing. */}
             <span className="sr-only" role="status" data-transcript-recovery-status>{recoveryAnnouncement}</span>
           </div>

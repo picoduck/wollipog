@@ -20,6 +20,7 @@ import type {
   RunView,
   SessionEvent,
   SessionEventsResponse,
+  SessionHistoryHandoff,
   SessionReminderView,
   SessionView,
   ShellOutputChunk,
@@ -1793,6 +1794,7 @@ interface StoreValue extends State {
   finishEventGapRecovery: Store["finishEventGapRecovery"];
   loadEventGapWindow: Store["loadEventGapWindow"];
   loadTurnStartWindow: Store["loadTurnStartWindow"];
+  loadHistoryPreviewHandoff: Store["loadHistoryPreviewHandoff"];
   deferEventTail: Store["deferEventTail"];
   beginLaterEventsLoad: Store["beginLaterEventsLoad"];
   loadLaterEvents: Store["loadLaterEvents"];
@@ -2321,6 +2323,41 @@ export class Store {
           contiguousEventHighWater(page.events, start - 1) !== end || page.events.at(-1)!.seq !== end
           : start !== 0 || end !== 0) ||
         page.hasMoreLater !== (knownTail > end)) return false;
+    return this.installReadingWindow(sessionId, page, recoveryRevision, recoveryGeneration);
+  };
+
+  /** Install only a complete chain of individually bounded, proven CP pages. This does not relax
+   * the 200-row opening contract: an explicit private read can already own a larger loaded range. */
+  loadHistoryPreviewHandoff = (sessionId: string, pages: readonly SessionHistoryHandoff[], recoveryRevision: number,
+    recoveryGeneration = this.state.snapshotRevision): boolean => {
+    const first = pages[0], last = pages.at(-1);
+    if (!first || !last || first.eventEpoch === undefined || !Number.isSafeInteger(first.eventEpoch) || first.eventEpoch < 0 ||
+        !Number.isSafeInteger(first.windowStartSeq) || first.windowStartSeq < 1 ||
+        !Number.isSafeInteger(first.windowEndSeq) || first.windowEndSeq < first.windowStartSeq ||
+        !Number.isSafeInteger(first.anchorSeq) || first.anchorSeq < first.windowStartSeq || first.anchorSeq > first.windowEndSeq) return false;
+    let after = first.windowStartSeq - 1;
+    const events: SessionEvent[] = [];
+    for (const page of pages) {
+      if (page.eventEpoch !== first.eventEpoch || page.cacheComplete !== true ||
+          page.windowStartSeq !== first.windowStartSeq || page.windowEndSeq !== first.windowEndSeq ||
+          page.anchorSeq !== first.anchorSeq || !page.events.length || page.events.length > 200 ||
+          page.events.some((event, i) => event.sessionId !== sessionId || !Number.isSafeInteger(event.id) ||
+            event.id <= 0 || event.seq !== after + i + 1) ||
+          page.nextAfter !== page.events.at(-1)!.seq || page.nextAfter > first.windowEndSeq ||
+          page.hasMoreHandoff !== (page.nextAfter < first.windowEndSeq) ||
+          page.tailSeq === undefined || !Number.isSafeInteger(page.tailSeq) || page.tailSeq < first.windowEndSeq ||
+          page.hasMoreLater !== (page.tailSeq > first.windowEndSeq)) return false;
+      events.push(...page.events); after = page.nextAfter;
+    }
+    if (after !== first.windowEndSeq || last.hasMoreHandoff) return false;
+    return this.installReadingWindow(sessionId, { ...last, events, turnStartSeq: first.windowStartSeq,
+      nextAfter: after, turnAligned: first.turnAligned, hasMoreOlder: first.windowStartSeq > 1 }, recoveryRevision, recoveryGeneration);
+  };
+
+  private installReadingWindow = (sessionId: string, page: SessionEventsResponse, recoveryRevision: number,
+    recoveryGeneration: number): boolean => {
+    const epoch = page.eventEpoch!, start = page.turnStartSeq!, knownTail = page.tailSeq!;
+    let end = page.nextAfter!;
     const priorWindow = this.state.eventWindows.get(sessionId);
     const priorTail = this.deferredTails.get(sessionId);
     const reuse = priorWindow?.openingStartSeq === start && priorWindow.eventEpoch === epoch &&
@@ -3065,7 +3102,7 @@ export function useHasStore(): boolean {
 }
 
 /** Stable action handles (never cause re-renders). */
-export function useStoreActions(): Pick<Store, "dispatch" | "navigate" | "setInboxPersistenceEnabled" | "setInboxSelection" | "setInboxSplit" | "setInboxRatio" | "setFilters" | "loadEvents" | "loadTurnStartWindow" | "loadOlderEvents" | "beginOlderEventsLoad" | "failOlderEventsLoad" | "eventWindowBase" | "loadSession" | "beginSessionDetailLoad" | "getSession" | "beginSessionsBackfill" | "beginEventHistoryLoad" | "failEventHistoryLoad" | "isEventGapRecoveryCurrent" | "beginEventGapRecovery" | "cancelEventGapRecovery" | "finishEventGapRecovery" | "loadEventGapWindow" | "deferEventTail" | "beginLaterEventsLoad" | "loadLaterEvents" | "failLaterEventsLoad" | "promoteDeferredEventTail" | "loadPodContext" | "eventHighWater" | "recoveryAfter" | "recoveryReadAfter" | "eventEpoch" | "reconcileShellOutputs" | "loadShellHistory" | "removeShellOutput" | "reconnectNow"> {
+export function useStoreActions(): Pick<Store, "dispatch" | "navigate" | "setInboxPersistenceEnabled" | "setInboxSelection" | "setInboxSplit" | "setInboxRatio" | "setFilters" | "loadEvents" | "loadTurnStartWindow" | "loadHistoryPreviewHandoff" | "loadOlderEvents" | "beginOlderEventsLoad" | "failOlderEventsLoad" | "eventWindowBase" | "loadSession" | "beginSessionDetailLoad" | "getSession" | "beginSessionsBackfill" | "beginEventHistoryLoad" | "failEventHistoryLoad" | "isEventGapRecoveryCurrent" | "beginEventGapRecovery" | "cancelEventGapRecovery" | "finishEventGapRecovery" | "loadEventGapWindow" | "deferEventTail" | "beginLaterEventsLoad" | "loadLaterEvents" | "failLaterEventsLoad" | "promoteDeferredEventTail" | "loadPodContext" | "eventHighWater" | "recoveryAfter" | "recoveryReadAfter" | "eventEpoch" | "reconcileShellOutputs" | "loadShellHistory" | "removeShellOutput" | "reconnectNow"> {
   return useStoreHandle();
 }
 
@@ -3193,6 +3230,7 @@ export function useStore(): StoreValue {
     setFilters: store.setFilters,
     loadEvents: store.loadEvents,
     loadTurnStartWindow: store.loadTurnStartWindow,
+    loadHistoryPreviewHandoff: store.loadHistoryPreviewHandoff,
     loadOlderEvents: store.loadOlderEvents,
     beginOlderEventsLoad: store.beginOlderEventsLoad,
     failOlderEventsLoad: store.failOlderEventsLoad,

@@ -28,6 +28,10 @@ Object.defineProperty(domWindow.Element.prototype, "getBoundingClientRect", {
     return { x: 0, y: 0, top: 0, left: 0, right: 800, bottom: 72, width: 800, height: 72, toJSON: () => ({}) };
   },
 });
+Object.defineProperties(domWindow.HTMLElement.prototype, {
+  offsetWidth: { configurable: true, get() { return 800; } },
+  offsetHeight: { configurable: true, get() { return this.classList.contains("detail-scroll") ? 600 : 72; } },
+});
 for (const [name, value] of Object.entries({
   window: domWindow,
   document: domWindow.document,
@@ -98,7 +102,7 @@ function transcript(sessionId: string): SessionEvent[] {
 }
 
 /** SessionDetail on a session with jobs in Turns 1, 2 and 4, its Background Work panel open. */
-async function mountBackgroundTurns(sessionId: string) {
+async function mountBackgroundTurns(sessionId: string, cold = false, openingStart = 4) {
   const now = Date.now();
   const events = transcript(sessionId);
   const job = (id: string, parentTurnId: string, registeredAt: number) => ({
@@ -155,7 +159,12 @@ async function mountBackgroundTurns(sessionId: string) {
       tailCalls.push({ before, eventEpoch });
       return new Promise<SessionEventsResponse>((resolve) => { pending.push(resolve); });
     },
-    getSessionTurnStartPage: undefined,
+    getSessionTurnStartPage: cold ? () => new Promise<SessionEventsResponse>((resolve) => pending.push(resolve)) : undefined,
+    getSessionHistoryPreview: cold ? (_id: string, cursor: { beforeSeq?: number; eventEpoch: number }) => {
+      if (cursor.beforeSeq === undefined) return Promise.resolve({});
+      tailCalls.push({ before: cursor.beforeSeq, eventEpoch: cursor.eventEpoch });
+      return new Promise<SessionEventsResponse>((resolve) => pending.push(resolve));
+    } : undefined,
   } as unknown as ApiClient;
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
@@ -211,7 +220,7 @@ async function mountBackgroundTurns(sessionId: string) {
       sessionSubscriptions: false,
       boundedDelivery: false,
       paginatedSessionHistory: false,
-      currentTurnOpening: false,
+      currentTurnOpening: cold,
       projects: true,
     },
     runners: [runner],
@@ -225,17 +234,37 @@ async function mountBackgroundTurns(sessionId: string) {
   const headings = () => [...container.querySelectorAll(".background-work-turn-head h3")].map((heading) => heading.textContent);
   const viewTurn = (title: string) => [...container.querySelectorAll<HTMLElement>(".background-work-turn-head")]
     .find((head) => head.querySelector("h3")?.textContent === title)?.querySelector<HTMLButtonElement>("button") ?? null;
+  const viewTurnFor = (jobId: string) => container.querySelector<HTMLButtonElement>(
+    `.background-work-turn:has([data-panel-page-key="background:${jobId}"]) .background-work-turn-head button`,
+  );
   /** The older pages requested, as the `before` of each. */
   const olderRequests = () => tailCalls.filter((call) => call.before !== undefined);
   /** The opening window: Turns 2 to 4, with Turn 1 on an older page. */
-  const releaseOpening = (eventEpoch: number) => act(async () => pending.shift()!({
-    events: events.slice(3), eventEpoch, nextBefore: 4, hasMoreOlder: true, cacheComplete: true,
+  const preview = (first: number, last: number, eventEpoch: number) => ({
+    eventEpoch, logEpoch: 1, throughSeq: events.length, turnStartSeq: openingStart,
+    nextAfterSeq: last, hasMore: last < events.length,
+    events: events.slice(first - 1, last).map(({ seq, ts, payload }) => ({ seq, ts, payload })),
+  });
+  const releaseOpening = (eventEpoch: number) => act(async () => pending.shift()!(cold ? {
+    events: [], eventEpoch, cacheComplete: false, turnStartSeq: openingStart,
+    tailSeq: events.length, hasMoreLater: false, nextAfter: 0, hasMoreOlder: true,
+    preview: preview(openingStart, events.length, eventEpoch),
+  } as SessionEventsResponse : {
+    events: events.slice(openingStart - 1), eventEpoch, nextBefore: openingStart,
+    hasMoreOlder: true, cacheComplete: true,
+  } as SessionEventsResponse));
+  const releasePage = (first: number, last: number, eventEpoch = 0) => act(async () => pending.shift()!(cold ? {
+    preview: preview(first, last, eventEpoch),
+  } as unknown as SessionEventsResponse : {
+    events: events.slice(first - 1, last), eventEpoch, nextBefore: first,
+    hasMoreOlder: first > 1, cacheComplete: true,
   } as SessionEventsResponse));
   const releaseOlder = (eventEpoch: number) => act(async () => pending.shift()!({
     events: events.slice(0, 3), eventEpoch, nextBefore: 0, hasMoreOlder: false, cacheComplete: true,
   } as SessionEventsResponse));
   return {
-    container, socket, session, tailCalls, pending, headings, viewTurn, olderRequests, releaseOpening, releaseOlder,
+    container, socket, session, tailCalls, pending, headings, viewTurn, viewTurnFor,
+    olderRequests, releaseOpening, releaseOlder, releasePage,
     /** A reader whose first window fills it, so nothing older loads on its own; or one it does not
      * fill, so the reader's own earlier-activity fill reads an older page. */
     fillViewport(filled = true) {
@@ -326,4 +355,87 @@ test("View Turn waiting on an older read from a rebuilt history resumes once tha
   } finally {
     await view.dispose();
   }
+});
+
+for (const cold of [false, true]) {
+  test(`View Turn reaches an unloaded turn through multiple ${cold ? "private preview" : "CP"} pages`, async () => {
+    const view = await mountBackgroundTurns(`background-turns-multiple-${cold}`, cold, 7);
+    try {
+      view.fillViewport();
+      await view.releaseOpening(0);
+      await flushAsyncWork(1);
+      await act(async () => view.viewTurnFor("job-turn1-aaaaa1")!.click());
+      await flushAsyncWork(1);
+      assert.deepEqual(view.olderRequests(), [{ before: 7, eventEpoch: 0 }]);
+      await view.releasePage(4, 6);
+      await flushAsyncWork(1);
+      await flushAsyncWork(1);
+      assert.deepEqual(view.olderRequests(), [{ before: 7, eventEpoch: 0 }, { before: 4, eventEpoch: 0 }],
+        "navigation waits for its actual read owner, then continues toward Turn 1");
+      await view.releasePage(1, 3);
+      await flushAsyncWork(20);
+      assert.equal(view.headings().at(-1), "Turn 1");
+      assert.deepEqual(view.olderRequests().map((call) => call.before), [7, 4], "no page past the target is read");
+      assert.ok(view.container.querySelector('[data-virtual-key="item:user_message:1"][data-virtual-target="true"]'),
+        "the target prompt is revealed in the active reader coordinate space");
+    } finally { await view.dispose(); }
+  });
+}
+
+test("View Turn stops without progress after a private older page fails", async () => {
+  const view = await mountBackgroundTurns("background-turns-preview-no-progress", true, 7);
+  try {
+    view.fillViewport();
+    await view.releaseOpening(0);
+    await flushAsyncWork(1);
+    await act(async () => view.viewTurnFor("job-turn1-aaaaa1")!.click());
+    await flushAsyncWork(1);
+    await act(async () => view.pending.shift()!({} as SessionEventsResponse));
+    await flushAsyncWork(1);
+    await flushAsyncWork(1);
+    assert.deepEqual(view.olderRequests(), [{ before: 7, eventEpoch: 0 }], "failed paging cannot spin");
+    assert.match(view.container.textContent ?? "", /Could not load earlier activity/);
+    // A new explicit navigation owns a new attempt after the previous one settled.
+    await act(async () => view.viewTurnFor("job-turn1-aaaaa1")!.click());
+    await flushAsyncWork(1);
+    assert.deepEqual(view.olderRequests().map((call) => call.before), [7, 7]);
+    await view.releasePage(1, 6);
+    await flushAsyncWork(1);
+    assert.equal(view.headings().at(-1), "Turn 1");
+  } finally { await view.dispose(); }
+});
+
+test("a rebuilt private preview discards its old navigation/read without cancelling the new owner", async () => {
+  const view = await mountBackgroundTurns("background-turns-preview-rebuilt", true, 7);
+  try {
+    view.fillViewport();
+    await view.releaseOpening(0);
+    await flushAsyncWork(1);
+    await act(async () => view.viewTurnFor("job-turn1-aaaaa1")!.click());
+    await flushAsyncWork(1);
+    const oldRead = view.pending.shift()!;
+    await act(async () => view.socket.push({
+      type: "session_upsert", session: { ...view.session, eventEpoch: 1, updatedAt: 2 },
+    } as unknown as ControlPlaneToUi));
+    await flushAsyncWork(1);
+    await view.releaseOpening(1);
+    await flushAsyncWork(1);
+    await act(async () => view.viewTurnFor("job-turn1-aaaaa1")!.click());
+    await flushAsyncWork(1);
+    assert.deepEqual(view.olderRequests(), [{ before: 7, eventEpoch: 0 }, { before: 7, eventEpoch: 1 }]);
+    await act(async () => oldRead({ preview: {
+      eventEpoch: 0, logEpoch: 1, throughSeq: 12, turnStartSeq: 7, nextAfterSeq: 6, hasMore: true,
+      events: transcript(view.session.id).slice(0, 6),
+    } } as unknown as SessionEventsResponse));
+    await flushAsyncWork(1);
+    assert.equal(view.headings().at(-1), "Earlier Turn", "the old page cannot paint the new history");
+    await view.releasePage(4, 6, 1);
+    await flushAsyncWork(1);
+    await flushAsyncWork(1);
+    assert.deepEqual(view.olderRequests().map((call) => call.eventEpoch), [0, 1, 1],
+      "only the current owner continues navigation");
+    await view.releasePage(1, 3, 1);
+    await flushAsyncWork(1);
+    assert.equal(view.headings().at(-1), "Turn 1");
+  } finally { await view.dispose(); }
 });

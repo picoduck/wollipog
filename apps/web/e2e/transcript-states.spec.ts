@@ -210,10 +210,16 @@ test.describe("a history its machine cannot finish", () => {
       const notice = page.locator(".detail-reader .notice");
       // Well inside the reader's 12-second re-read budget: the first answer is the last.
       await expect(notice).toContainText("Couldn't Load the Full Conversation", { timeout: 2_000 });
-      await expect(notice).toContainText("Loaded 1 event from Build Box, which is offline.");
+      await expect(notice).toContainText("No activity loaded from Build Box, which is offline.");
+      // The cache's incomplete prefix is not proof of the current reading window (#2881).
+      await expect(page.locator(".detail-scroll .timeline")).toHaveCount(0);
+      await expect(page.getByText("No Messages", { exact: true })).toHaveCount(0);
       await expect(page.locator(".transcript-skeleton")).toHaveCount(0);
       await page.waitForTimeout(500);
       await expect(page.locator("body")).toHaveAttribute("data-tail-request-count", "1");
+      await notice.getByRole("button", { name: "Show Details" }).click();
+      await expect(notice.locator(".notice-details-body")).toHaveText(
+        "Session activity could not finish loading while its machine is offline.");
     });
   }
 

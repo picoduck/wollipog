@@ -766,6 +766,17 @@ export function createApiClient(transport: ApiTransport) {
     return req<SessionEventsResponse>(`/api/sessions/${encodeURIComponent(id)}/events?${query}`);
   },
 
+  getSessionHistoryPreview: (id: string, cursor: {
+    eventEpoch: number; logEpoch: number; throughSeq: number; turnStartSeq: number;
+    afterSeq?: number; beforeSeq?: number; handoffSeq?: number;
+    handoffFirstSeq?: number; handoffLastSeq?: number; handoffAfter?: number;
+  }) => {
+    const query = new URLSearchParams({ limit: "200" });
+    for (const [key, value] of Object.entries(cursor)) if (value !== undefined) query.set(key, String(value));
+    return req<{ preview?: import("@wollipog/protocol").SessionHistoryPreview | null; handoff?: import("@wollipog/protocol").SessionHistoryHandoff | null }>(
+      `/api/sessions/${encodeURIComponent(id)}/history-preview?${query}`);
+  },
+
   getRetainedAttachmentEventPage: (id: string, after: number, eventEpoch: number, limit = 200, signal?: AbortSignal) => {
     const query = new URLSearchParams({ after: String(after), limit: String(limit), eventEpoch: String(eventEpoch) });
     return req<{ events: SessionEvent[]; eventEpoch: number; nextAfter: number; hasMore: boolean }>(

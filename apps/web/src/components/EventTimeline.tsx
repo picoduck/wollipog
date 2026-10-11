@@ -114,6 +114,14 @@ export interface TimelineRevealRequest {
   focus?: boolean;
 }
 
+/** Committed rendered state used only when a private history reader changes identity spaces. */
+export interface TimelineReadingState {
+  rows: readonly TimelineRenderRow[];
+  items: TimelineItem[];
+  disclosure: ReadonlyMap<string, boolean>;
+  showAgentLogs: boolean;
+}
+
 export interface TimelineRevealTarget {
   rowKey: string;
   disclosureKeys: readonly string[];
@@ -575,6 +583,8 @@ export const EventTimeline = memo(function EventTimeline({
   preserveAnchor,
   anchorRecoveryPending,
   onVisibleAnchorChange,
+  readingStateRef,
+  initialDisclosure,
   onAnchorLost,
   sessionActive = false,
   driver,
@@ -613,6 +623,8 @@ export const EventTimeline = memo(function EventTimeline({
   preserveAnchor?: boolean;
   anchorRecoveryPending?: boolean;
   onVisibleAnchorChange?: (anchor: VirtualScrollAnchor) => void;
+  readingStateRef?: { current: TimelineReadingState | null };
+  initialDisclosure?: ReadonlyMap<string, boolean>;
   onAnchorLost?: (anchor: VirtualScrollAnchor) => void;
   /** True only while this session has a nonterminal turn that can still produce activity. */
   sessionActive?: boolean;
@@ -667,6 +679,8 @@ export const EventTimeline = memo(function EventTimeline({
       preserveAnchor={preserveAnchor}
       anchorRecoveryPending={anchorRecoveryPending}
       onVisibleAnchorChange={onVisibleAnchorChange}
+      readingStateRef={readingStateRef}
+      initialDisclosure={initialDisclosure}
       onAnchorLost={onAnchorLost}
       sessionActive={sessionActive}
       driver={driver}
@@ -703,6 +717,8 @@ function EventTimelineBody({
   preserveAnchor,
   anchorRecoveryPending,
   onVisibleAnchorChange,
+  readingStateRef,
+  initialDisclosure,
   onAnchorLost,
   sessionActive,
   driver,
@@ -731,6 +747,8 @@ function EventTimelineBody({
   preserveAnchor?: boolean;
   anchorRecoveryPending?: boolean;
   onVisibleAnchorChange?: (anchor: VirtualScrollAnchor) => void;
+  readingStateRef?: { current: TimelineReadingState | null };
+  initialDisclosure?: ReadonlyMap<string, boolean>;
   onAnchorLost?: (anchor: VirtualScrollAnchor) => void;
   sessionActive: boolean;
   driver?: AgentDriverKind;
@@ -745,13 +763,18 @@ function EventTimelineBody({
   if (!projector.current) projector.current = new IncrementalTimelineRows();
   const preparedRevealRef = useRef<{ eventId: number; requestId: number } | null>(null);
   const unresolvedRevealRef = useRef<number | null>(null);
-  const [disclosure, setDisclosure] = useState<Map<string, boolean>>(() => new Map());
+  const [disclosure, setDisclosure] = useState<Map<string, boolean>>(() => new Map(initialDisclosure));
   const showAgentLogs = useShowAgentLogs();
   const projection = useMemo(
     () => projector.current!.project(items, disclosure, showAgentLogs),
     [items, disclosure, showAgentLogs],
   );
   const { rows } = projection;
+  useBrowserLayoutEffect(() => {
+    if (!readingStateRef) return;
+    readingStateRef.current = { rows, items, disclosure, showAgentLogs };
+    return () => { readingStateRef.current = null; };
+  }, [readingStateRef, rows, projection.revision, items, disclosure, showAgentLogs]);
   const forkTurns = useMemo(() => assistantForkTurns(items), [items]);
   const rewindTurns = useMemo(() => userRewindTurns(items), [items]);
   // Rows are patched in place between revisions, so the revision (not the array) keys this pass.

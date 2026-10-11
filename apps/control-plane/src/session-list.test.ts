@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import Fastify from "fastify";
-import { PROTOCOL_VERSION, DEFAULT_ORCHESTRATOR_DEFAULTS, sessionCampaignRequests, campaignHumanAttentionAdded, type SessionView } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, SESSION_SUMMARY_UI_PROTOCOL, DEFAULT_ORCHESTRATOR_DEFAULTS, sessionCampaignRequests, campaignHumanAttentionAdded, type SessionView } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub, MAX_UI_BUFFERED_BYTES, serializeUiSnapshot, type Socket } from "./hub.js";
 import { LOCAL_OWNER_USER_ID, PERSONAL_ORGANIZATION_ID, type HumanPrincipal, type AgentPrincipal } from "./identity.js";
@@ -269,7 +269,7 @@ test("background summary recovery and observation metadata match the detail's ac
     assert.deepEqual(summary.attention?.humanActions, detail.attention?.humanActions);
     const legacyFrames: string[] = [];
     new Hub(db).addUiClient({ send(data) { legacyFrames.push(data); } }, {
-      principal: sessionListPrincipal, deviceId: null, uiProtocolVersion: PROTOCOL_VERSION - 1, close() { assert.fail("legacy closed"); },
+      principal: sessionListPrincipal, deviceId: null, uiProtocolVersion: SESSION_SUMMARY_UI_PROTOCOL - 1, close() { assert.fail("legacy closed"); },
     });
     assert.equal(legacyFrames.length, 1);
     assert.equal(JSON.parse(legacyFrames[0]!).sessions[0].projection, undefined);

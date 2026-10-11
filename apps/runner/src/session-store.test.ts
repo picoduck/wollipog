@@ -3115,3 +3115,71 @@ test("orphan collection during the copy never leaves a manifest naming removed f
     }
   }
 });
+
+
+test("bounded current-turn opening preserves semantic turn alignment and freezes its indexed tail", () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    store.appendEvent("s_abc", { kind: "user_message", text: "Old prompt" }, 1);
+    for (let i = 0; i < 400; i++) store.appendEvent("s_abc", { kind: "stderr", text: "Earlier work" }, 2);
+    store.appendEvent("s_abc", { kind: "user_message", text: "Current prompt" }, 3);
+    store.appendEvent("s_abc", { kind: "user_message", text: "Steer", deliveryIntent: "steer" }, 4);
+    for (let i = 0; i < 450; i++) store.appendEvent("s_abc", { kind: "stderr", text: "Current work" }, 5);
+    store.flush("s_abc");
+    const first = store.readCurrentTurnPageForProtocol("s_abc", 200, CURRENT_PEER);
+    assert.ok(first.ok);
+    assert.equal(first.page.turnStartSeq, 402);
+    assert.equal(first.events.length, 200);
+    assert.equal(first.page.throughSeq, 853);
+    assert.equal(first.events[0]?.payload.kind, "user_message");
+    store.appendEvent("s_abc", { kind: "user_message", text: "Next prompt" }, 6);
+    const later = store.readEventPageForProtocol("s_abc", { afterSeq: first.page.nextAfterSeq,
+      limit: 200, logEpoch: first.page.logEpoch, throughSeq: first.page.throughSeq }, CURRENT_PEER, true);
+    assert.ok(later.ok);
+    assert.equal(later.page.throughSeq, 853);
+    const newer = store.readCurrentTurnPageForProtocol("s_abc", 200, CURRENT_PEER);
+    assert.ok(newer.ok);
+    assert.equal(newer.page.turnStartSeq, 854);
+  } finally { store.flush("s_abc"); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("bounded opening refuses missing indexes and upgrade anchors without a whole-log rebuild", () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    store.appendEvent("s_abc", { kind: "user_message", text: "Current prompt" }, 1);
+    for (let i = 0; i < 400; i++) store.appendEvent("s_abc", { kind: "stderr", text: "Work" }, 2);
+    store.flush("s_abc");
+    const indexPath = join(root, "s_abc", "events.idx");
+    rmSync(indexPath);
+    assert.equal(store.readCurrentTurnPageForProtocol("s_abc", 200, CURRENT_PEER).ok, false);
+    assert.equal(existsSync(indexPath), false, "opening must not rebuild the missing index");
+    assert.ok(store.readEventPage("s_abc", { afterSeq: 0, limit: 200 }).ok, "ordinary maintenance may rebuild it");
+    store.patchMeta("s_abc", { historyTurnAnchor: undefined });
+    assert.equal(store.readCurrentTurnPageForProtocol("s_abc", 200, CURRENT_PEER).ok, false);
+    assert.ok(store.readEventPage("s_abc", { afterSeq: 0, limit: 200 }).ok);
+    assert.ok(store.readCurrentTurnPageForProtocol("s_abc", 200, CURRENT_PEER).ok);
+  } finally { store.flush("s_abc"); rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test("upgrade anchor absence never forces an existing healthy index to rebuild on append", () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    store.appendEvent("s_abc", { kind: "user_message", text: "Prior turn" }, 1);
+    for (let i = 0; i < 399; i++) store.appendEvent("s_abc", { kind: "stderr", text: "Work" }, 2);
+    store.flush("s_abc");
+    store.patchMeta("s_abc", { historyTurnAnchor: undefined });
+    const index = join(root, "s_abc", "events.idx");
+    const before = statSync(index).ino;
+    store.appendEvent("s_abc", { kind: "stderr", text: "Append after upgrade" }, 3);
+    assert.equal(statSync(index).ino, before, "append retains the healthy sparse index");
+    assert.equal(store.readMeta("s_abc")?.historyTurnAnchor, undefined);
+    store.appendEvent("s_abc", { kind: "user_message", text: "New authoritative prompt" }, 4);
+    const page = store.readCurrentTurnPageForProtocol("s_abc", 200, CURRENT_PEER);
+    assert.ok(page.ok);
+    assert.equal(page.page.turnStartSeq, 402);
+  } finally { store.flush("s_abc"); rmSync(root, { recursive: true, force: true }); }
+});

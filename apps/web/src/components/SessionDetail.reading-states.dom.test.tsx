@@ -481,12 +481,13 @@ test("an incomplete history whose machine is offline settles after one read (#27
     await view.resolveTail({ events: [agentLogEvent(view.id)], nextBefore: 1, cacheComplete: false });
     await flushAsyncWork(300);
     assert.equal(view.tailRequests(), 0, "no further read while the machine is offline");
+    assertNoDomNode(view.scroller.querySelector(".timeline"), "an unproven old prefix cannot masquerade as current activity");
     assertNoDomNode(view.scroller.querySelector(".transcript-skeleton"), "the reader left its loading state");
     const notices = view.reader.querySelectorAll(".notice");
     assert.equal(notices.length, 1, "one history notice");
     const notice = notices[0] as HTMLElement;
     assert.equal(notice.querySelector(".notice-title")?.textContent, "Couldn't Load the Full Conversation");
-    assert.equal(notice.querySelector(".notice-body")?.textContent, "Loaded 1 event from Build Box, which is offline.");
+    assert.equal(notice.querySelector(".notice-body")?.textContent, "No activity loaded from Build Box, which is offline.");
     await act(async () => view.button(notice, "Show Details")!.click());
     assert.equal(notice.querySelector(".notice-details-body")?.textContent,
       "Session activity could not finish loading while its machine is offline.");

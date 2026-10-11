@@ -1,12 +1,14 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type TestInfo } from "@playwright/test";
+import { createHash } from "node:crypto";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
-import { tmpdir } from "node:os";
+import { arch, availableParallelism, platform, release, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { defaultLocalDeviceTokenPath, loadOrCreateLocalDeviceToken } from "../../control-plane/src/local-device-credential.js";
+import { COLD_SESSION_ID, COLD_NAV_SESSION_ID, COLD_NAV_PROMPT, seedColdHistoryPreview, connectColdHistoryRunner } from "./fixtures/cold-history-preview.js";
 import { viewPath } from "../src/navigation.js";
 import { LONG_TURN_SESSION_ID, LONG_TURN_START_SEQ, LONG_TURN_PROMPT, seedLongTurnOpening } from "./fixtures/long-turn-opening-seed.js";
 
@@ -22,6 +24,7 @@ let base: string;
 let token: string;
 let child: ChildProcess | undefined;
 let logs = "";
+let coldRunner: Awaited<ReturnType<typeof connectColdHistoryRunner>> | undefined;
 
 function isolatedEnv() {
   return Object.fromEntries(Object.entries(process.env).filter(([key]) =>
@@ -36,6 +39,7 @@ test.beforeAll(async ({}, info) => {
   const databasePath = join(scratch, "control-plane.db");
   const dist = join(scratch, "web-dist");
   seedLongTurnOpening(databasePath);
+  const coldFixture = seedColdHistoryPreview(databasePath, join(scratch, "runner-store"));
   token = loadOrCreateLocalDeviceToken(defaultLocalDeviceTokenPath(databasePath));
   const built = spawnSync("pnpm", ["--dir", "apps/web", "exec", "vite", "build", "--outDir", dist], {
     cwd: referenceRoot, encoding: "utf8", timeout: 120_000, env: isolatedEnv(),
@@ -59,13 +63,16 @@ test.beforeAll(async ({}, info) => {
   child.stderr?.on("data", data => { logs = (logs + String(data)).slice(-8_192); });
   for (let attempt = 0; attempt < 400; attempt++) {
     if (child.exitCode !== null) throw new Error(`isolated control plane exited: ${logs}`);
-    try { if ((await fetch(`${base}/healthz`)).ok) return; } catch { /* starting */ }
+    let healthy = false;
+    try { healthy = (await fetch(`${base}/healthz`)).ok; } catch { /* starting */ }
+    if (healthy) { coldRunner = await connectColdHistoryRunner(base, coldFixture); return; }
     await delay(50);
   }
   throw new Error(`isolated control plane did not start: ${logs}`);
 });
 
 test.afterAll(async () => {
+  coldRunner?.stop();
   if (child && child.exitCode === null) {
     child.kill("SIGTERM");
     await Promise.race([new Promise<void>(done => child!.once("exit", () => done())), delay(5_000)]);
@@ -81,6 +88,76 @@ async function signIn(page: Page) {
   await expect(page.getByText("Opening Benchmark Ready").first()).toBeVisible({ timeout: 30_000 });
   await expect(page.getByText("Warm the application before measuring navigation.", { exact: true })).toBeVisible();
 }
+
+// Diagnostics run outside the existing browser measurement window. Keep an explicit
+// allowlist: no request bodies, tokens, DOM text, raw URLs, stacks or trace bytes.
+function diagnosticNumbers(value: unknown, keys: readonly string[]) {
+  const result: Record<string, number> = {};
+  if (!value || typeof value !== "object") return result;
+  const source = value as Record<string, unknown>;
+  for (const key of keys) {
+    if (typeof source[key] === "number" && Number.isFinite(source[key])) result[key] = source[key];
+  }
+  return result;
+}
+
+function coldOpeningEnvironment(page: Page, info: TestInfo, rate: number) {
+  const checkout = process.env.GITHUB_SHA;
+  const imageOS = process.env.ImageOS;
+  const imageVersion = process.env.ImageVersion;
+  return {
+    attempt: { rate, retry: info.retry, repeatEachIndex: info.repeatEachIndex, workerIndex: info.workerIndex },
+    environment: { node: process.version, platform: platform(), release: release().slice(0, 64), arch: arch(),
+      availableCPUs: availableParallelism(), browserVersion: page.context().browser()?.version() ?? null,
+      checkoutSha: checkout && /^[a-f0-9]{40}$/u.test(checkout) ? checkout : null,
+      imageOS: imageOS && /^ubuntu\d{2}$/u.test(imageOS) ? imageOS : null,
+      imageVersion: imageVersion && /^[0-9.]{1,32}$/u.test(imageVersion) ? imageVersion : null },
+  };
+}
+
+function coldOpeningDiagnostic(value: Record<string, unknown>, context: ReturnType<typeof coldOpeningEnvironment>, phase: "window" | "result") {
+  const assets = new Map<string, string | null>();
+  const frames = (Array.isArray(value.longAnimationFrames) ? value.longAnimationFrames : []).slice(0, 8).map(frame => {
+    const source = frame && typeof frame === "object" ? frame as Record<string, unknown> : {};
+    const scripts = (Array.isArray(source.scripts) ? source.scripts : []).slice(0, 16).map(script => {
+      const source = script && typeof script === "object" ? script as Record<string, unknown> : {};
+      let asset: string | null = null;
+      if (typeof source.sourceURL === "string") {
+        try {
+          const url = new URL(source.sourceURL);
+          if (url.origin === new URL(base).origin && /^\/assets\/[A-Za-z0-9_-]{1,160}\.js$/u.test(url.pathname)) {
+            asset = url.pathname.slice("/assets/".length);
+            if (!assets.has(asset) && assets.size < 8) {
+              const path = join(scratch, "web-dist", "assets", asset);
+              let digest: string | null = null;
+              try {
+                if (statSync(path).size <= 2 * 1024 * 1024) digest = createHash("sha256").update(readFileSync(path)).digest("hex");
+              } catch { /* Unavailable metadata does not change the opening verdict. */ }
+              assets.set(asset, digest);
+            }
+          }
+        } catch { /* Ignore malformed or foreign source URLs. */ }
+      }
+      const invoker = source.invoker === "Response.json.then" || source.invoker === "requestAnimationFrame" ? source.invoker : "other";
+      return { ...diagnosticNumbers(source, ["startTime", "duration", "executionStart", "forcedStyleAndLayoutDuration", "pauseDuration", "sourceCharPosition"]), asset, invoker };
+    });
+    return { ...diagnosticNumbers(source, ["startTime", "duration", "blockingDuration", "renderStart", "styleAndLayoutStart", "paintTime", "presentationTime"]), scripts };
+  });
+  const record = { schema: 1, phase, ...context,
+    ...diagnosticNumbers(value, ["rate", "started", "interactiveMs", "longestTaskMs", "requestCount", "previewEvents"]),
+    firstVisibleKey: typeof value.firstVisibleKey === "string" && /^item:user_message:[0-9]{1,16}$/u.test(value.firstVisibleKey) ? value.firstVisibleKey : null,
+    cacheComplete: typeof value.cacheComplete === "boolean" ? value.cacheComplete : null,
+    longTaskCount: Array.isArray(value.longTasks) ? value.longTasks.length : 0,
+    longTaskDetails: (Array.isArray(value.longTaskDetails) ? value.longTaskDetails : []).slice(0, 8)
+      .map(task => diagnosticNumbers(task, ["startTime", "duration"])),
+    longAnimationFrames: frames, assets: [...assets].map(([name, sha256]) => ({ name, sha256 })), omittedFrames: 0 };
+  while (Buffer.byteLength(JSON.stringify(record)) > 64 * 1024 && record.longAnimationFrames.length) {
+    record.longAnimationFrames.pop();
+    record.omittedFrames++;
+  }
+  return record;
+}
+
 
 for (const rate of [1, 4]) test(`a 10,503-event production opening starts at the current turn at ${rate}x CPU`, async ({ page }, info) => {
   await page.setViewportSize({ width: 1280, height: 900 });
@@ -213,4 +290,218 @@ test("paced evidence of opening and loading later activity", async ({ browser })
   }
   mkdirSync(evidenceDir!, { recursive: true });
   copyFileSync(await page.video()!.path(), join(evidenceDir!, "opening-and-load-later.webm"));
+});
+
+
+for (const rate of [1, 4]) test(`an incomplete cache opens its real authoritative turn at ${rate}x CPU`, async ({ page }, info) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await signIn(page);
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Emulation.setCPUThrottlingRate", { rate });
+  const diagnosticContext = coldOpeningEnvironment(page, info, rate);
+  console.info(`Cold Opening Environment Diagnostic: ${JSON.stringify(diagnosticContext)}`);
+  try {
+    const requests: string[] = [];
+    page.on("request", request => {
+      const path = new URL(request.url()).pathname;
+      if (path === `/api/sessions/${COLD_SESSION_ID}/events`) requests.push(request.url());
+    });
+    await page.evaluate(path => {
+      const state = { started: performance.now(), interactiveMs: 0, firstVisibleKey: "", longTasks: [] as number[],
+        longTaskDetails: [] as Array<{ startTime: number; duration: number }>, longAnimationFrames: [] as unknown[] };
+      (window as unknown as { __coldOpening: typeof state }).__coldOpening = state;
+      const observer = new PerformanceObserver(list => {
+        for (const entry of list.getEntries()) if (entry.startTime >= state.started) {
+          state.longTasks.push(entry.duration);
+          if (state.longTaskDetails.length < 8) state.longTaskDetails.push({ startTime: entry.startTime, duration: entry.duration });
+        }
+      });
+      observer.observe({ type: "longtask", buffered: true });
+      // Keep the existing budget intact; retain the task's frame/script attribution when available
+      // so a CI-only miss can be investigated without losing the diagnostic attachment with the VM.
+      const animationObserver = new PerformanceObserver(list => {
+        for (const entry of list.getEntries()) if (entry.startTime >= state.started && state.longAnimationFrames.length < 8) {
+          const frame = entry.toJSON();
+          if (Array.isArray(frame.scripts)) frame.scripts = frame.scripts.slice(0, 16);
+          state.longAnimationFrames.push(frame);
+        }
+      });
+      if (PerformanceObserver.supportedEntryTypes.includes("long-animation-frame")) {
+        animationObserver.observe({ type: "long-animation-frame", buffered: true });
+      }
+      const frame = () => {
+        const reader = document.querySelector<HTMLElement>(".detail-scroll");
+        const ready = reader?.querySelector('[data-virtual-measurements="ready"]');
+        const bounds = reader?.getBoundingClientRect();
+        const row = ready && bounds ? [...ready.querySelectorAll<HTMLElement>("[data-virtual-row]")].find(row => {
+          const rect = row.getBoundingClientRect();
+          return rect.height > 0 && rect.bottom > bounds.top && rect.top < bounds.bottom;
+        }) : undefined;
+        if (row) state.firstVisibleKey ||= row.dataset.virtualKey!;
+        const control = document.querySelector<HTMLButtonElement>("[data-later-activity-gap] button");
+        if (row && control && !control.disabled && reader?.getAttribute("aria-busy") !== "true") {
+          state.interactiveMs = performance.now() - state.started;
+          requestAnimationFrame(() => { observer.disconnect(); animationObserver.disconnect(); });
+          return;
+        }
+        requestAnimationFrame(frame);
+      };
+      requestAnimationFrame(frame);
+      history.pushState(null, "", path);
+      dispatchEvent(new PopStateEvent("popstate"));
+    }, viewPath({ name: "session", id: COLD_SESSION_ID }));
+    if (process.env.LONG_TURN_OPENING_BASELINE === "1") {
+      await delay(2_000);
+      if (evidenceDir) await page.screenshot({ path: join(evidenceDir, `cold-before-${rate}x.png`) });
+    }
+    await expect.poll(() => page.evaluate(() => (window as unknown as { __coldOpening: { interactiveMs: number } }).__coldOpening.interactiveMs),
+      { timeout: 15_000 }).toBeGreaterThan(0);
+    const measured = await page.evaluate(() => (window as unknown as { __coldOpening: {
+      interactiveMs: number; firstVisibleKey: string; longTasks: number[] } }).__coldOpening);
+    console.info(`Cold Opening Window Diagnostic: ${JSON.stringify(coldOpeningDiagnostic({ ...measured, longestTaskMs: Math.max(0, ...measured.longTasks), requestCount: requests.length }, diagnosticContext, "window"))}`);
+    const opening = await page.request.get(`${base}/api/sessions/${COLD_SESSION_ID}/events?opening=current-turn&limit=200&eventEpoch=0`, { headers: { authorization: `Bearer ${token}` } });
+    const body = await opening.json();
+    const report = { rate, ...measured, longestTaskMs: Math.max(0, ...measured.longTasks),
+      requestCount: requests.length, cacheComplete: body.cacheComplete, previewEvents: body.preview?.events.length ?? 0 };
+    const diagnostic = coldOpeningDiagnostic(report, diagnosticContext, "result");
+    console.info(`Cold Opening Diagnostic: ${JSON.stringify(diagnostic)}`);
+    await info.attach(`cold-opening-${rate}x.json`, { body: JSON.stringify(diagnostic, null, 2), contentType: "application/json" });
+    if (evidenceDir) {
+      mkdirSync(evidenceDir, { recursive: true });
+      writeFileSync(join(evidenceDir, `cold-opening-${rate}x.json`), JSON.stringify(diagnostic, null, 2));
+      await page.screenshot({ path: join(evidenceDir, `cold-after-${rate}x.png`) });
+    }
+    expect(body.cacheComplete).toBe(false);
+    expect(body.preview.events).toHaveLength(200);
+    expect(report.firstVisibleKey).toBe(`item:user_message:${LONG_TURN_START_SEQ}`);
+    expect(report.interactiveMs).toBeLessThan(1_000);
+    expect(report.longestTaskMs).toBeLessThanOrEqual(200);
+    expect(report.requestCount).toBeLessThanOrEqual(2);
+    await expect(page.getByText(LONG_TURN_PROMPT, { exact: true })).toBeInViewport();
+    await page.getByRole("button", { name: "Load Later Activity", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Load Later Activity", exact: true })).toBeEnabled();
+    await expect(page.getByText(LONG_TURN_PROMPT, { exact: true })).toBeInViewport();
+  } finally {
+    await cdp.send("Emulation.setCPUThrottlingRate", { rate: 1 }).catch(() => {});
+    await cdp.detach().catch(() => {});
+  }
+});
+
+async function verifyColdBackgroundTurn(page: Page, paced = false) {
+  await signIn(page);
+  const before: number[] = [];
+  page.on("request", request => {
+    const url = new URL(request.url());
+    if (url.pathname === `/api/sessions/${COLD_NAV_SESSION_ID}/history-preview` && url.searchParams.has("beforeSeq")) {
+      before.push(Number(url.searchParams.get("beforeSeq")));
+    }
+  });
+  await page.goto(`${base}${viewPath({ name: "session", id: COLD_NAV_SESSION_ID })}`);
+  await expect(page.getByText("Synthetic navigation turn 3.", { exact: true })).toBeInViewport();
+  if (paced) await delay(2_500);
+  const pinned = page.getByRole("complementary", { name: "Pinned Summary" });
+  if (!await pinned.isVisible()) await page.getByRole("button", { name: "Pinned Summary", exact: true }).click();
+  const background = page.getByTitle("Open Background Work", { exact: true }).filter({ visible: true });
+  if (paced) { await background.focus(); await delay(1_500); }
+  await background.click();
+  const viewTurn = page.getByRole("button", { name: "View Turn", exact: true });
+  await expect(viewTurn).toBeVisible();
+  if (paced) {
+    mkdirSync(evidenceDir!, { recursive: true });
+    await page.screenshot({ path: join(evidenceDir!, "navigation-before.png") });
+    await delay(2_500);
+    await viewTurn.focus();
+    await delay(1_500);
+  }
+  await viewTurn.click();
+  await expect(page.getByText(COLD_NAV_PROMPT, { exact: true })).toBeInViewport();
+  await expect(page.locator('[data-virtual-key="item:user_message:1"]')).toHaveAttribute("data-virtual-target", "true");
+  await expect(page.locator('[data-virtual-key="item:user_message:1"]')).toBeFocused();
+  expect(before.length).toBeGreaterThan(1);
+  expect(before[0]).toBe(803);
+  expect(before.at(-1)).toBeLessThanOrEqual(203);
+  expect(new Set(before).size).toBe(before.length);
+  await expect(page.getByRole("button", { name: "Refresh Recent Activity", exact: true })).toBeVisible();
+  const response = await page.request.get(`${base}/api/sessions/${COLD_NAV_SESSION_ID}/events?opening=current-turn&limit=200&eventEpoch=0`,
+    { headers: { authorization: `Bearer ${token}` } });
+  expect((await response.json()).cacheComplete).toBe(false);
+  if (paced) {
+    await page.screenshot({ path: join(evidenceDir!, "navigation-after.png") });
+    await delay(4_500);
+  }
+}
+
+test("cold Background Work View Turn pages to its private prompt and reveals it", async ({ page }) => {
+  await verifyColdBackgroundTurn(page);
+});
+
+test("paced evidence of cold Background Work navigation across private pages", async ({ browser }) => {
+  test.skip(!evidenceDir || process.env.LONG_TURN_OPENING_NAV_RECORD_VIDEO !== "1", "Opt-in paced evidence capture only.");
+  const viewport = { width: Number(process.env.LONG_TURN_OPENING_NAV_WIDTH ?? 1280), height: 900 };
+  const context = await browser.newContext({ viewport, colorScheme: process.env.LONG_TURN_OPENING_NAV_DARK === "1" ? "dark" : "light",
+    recordVideo: { dir: join(evidenceDir!, "navigation-recordings"), size: viewport } });
+  const page = await context.newPage();
+  try { await verifyColdBackgroundTurn(page, true); } finally { await context.close(); }
+  copyFileSync(await page.video()!.path(), join(evidenceDir!, "cold-background-navigation.webm"));
+});
+
+test("cold preview retries interrupted hydration and retains loaded pages without moving its visible prompt", async ({ page }) => {
+  await signIn(page);
+  await page.goto(`${base}${viewPath({ name: "session", id: COLD_SESSION_ID })}`);
+  await expect(page.getByText(LONG_TURN_PROMPT, { exact: true })).toBeInViewport();
+  await page.getByRole("button", { name: "Load Later Activity", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Load Later Activity", exact: true })).toBeEnabled();
+  await expect(page.getByText(LONG_TURN_PROMPT, { exact: true })).toBeInViewport();
+  const before = coldRunner!.ordinaryReadCount();
+  expect(coldRunner!.interruptHydration()).toBeGreaterThan(0);
+  // Observe a new ordinary request caused by preview polling, before any explicit opening HTTP
+  // poll can mask a missing retry. Existing service admission joins and cursor-gates that work.
+  await expect.poll(() => coldRunner!.ordinaryReadCount()).toBeGreaterThan(before);
+  coldRunner!.releaseHydration();
+  await expect.poll(async () => {
+    const response = await page.request.get(`${base}/api/sessions/${COLD_SESSION_ID}/events?opening=current-turn&limit=200&eventEpoch=0`, { headers: { authorization: `Bearer ${token}` } });
+    return (await response.json()).cacheComplete;
+  }).toBe(true);
+  await expect(page.getByText(LONG_TURN_PROMPT, { exact: true })).toBeInViewport();
+  await expect(page.locator(".detail-scroll")).toHaveAttribute("data-follow-tail-state", "paused");
+  await expect(page.getByText("Recent activity is readable as a snapshot while full history loads. Refresh to check for new activity.", { exact: true })).toHaveCount(0);
+  await expect(page.locator('[data-virtual-key="item:user_message:1504"]')).toBeInViewport();
+  if (evidenceDir) await page.screenshot({ path: join(evidenceDir, "cold-hydrated-handoff.png") });
+});
+
+test("paced evidence of the cold reader paging and hydration handoff", async ({ browser }) => {
+  test.skip(process.env.LONG_TURN_OPENING_COLD_RECORD_VIDEO !== "1" || !evidenceDir, "opt-in private evidence capture");
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 },
+    recordVideo: { dir: join(scratch, "cold-video"), size: { width: 1280, height: 900 } } });
+  const page = await context.newPage();
+  try {
+    await signIn(page);
+    await delay(2_000);
+    await page.evaluate(path => { history.pushState(null, "", path); dispatchEvent(new PopStateEvent("popstate")); },
+      viewPath({ name: "session", id: COLD_SESSION_ID }));
+    await expect(page.getByText(LONG_TURN_PROMPT, { exact: true })).toBeInViewport();
+    await expect(page.getByText("Recent activity is readable as a snapshot while full history loads. Refresh to check for new activity.", { exact: true })).toBeVisible();
+    await delay(3_000);
+    const later = page.getByRole("button", { name: "Load Later Activity", exact: true });
+    await later.focus(); await delay(1_500); await later.click();
+    await expect(later).toBeEnabled();
+    await expect(page.getByText(LONG_TURN_PROMPT, { exact: true })).toBeInViewport();
+    await delay(3_000);
+    const jump = page.getByRole("button", { name: "Refresh Recent Activity", exact: true });
+    await jump.focus(); await delay(1_500); await jump.click();
+    await expect(page.locator("[data-later-activity-gap]")).toBeVisible();
+    await expect(page.locator(".detail-scroll")).toHaveAttribute("data-follow-tail-state", "paused");
+    await delay(3_000);
+    coldRunner!.releaseHydration();
+    await expect.poll(async () => {
+      const response = await page.request.get(`${base}/api/sessions/${COLD_SESSION_ID}/events?opening=current-turn&limit=200&eventEpoch=0`,
+        { headers: { authorization: `Bearer ${token}` } });
+      return (await response.json()).cacheComplete;
+    }).toBe(true);
+    await expect(page.getByText("Recent activity is readable as a snapshot while full history loads. Refresh to check for new activity.", { exact: true })).toHaveCount(0);
+    await expect(page.locator(".detail-scroll")).toHaveAttribute("data-follow-tail-state", "paused");
+    await delay(4_000);
+  } finally { await context.close(); }
+  mkdirSync(evidenceDir!, { recursive: true });
+  copyFileSync(await page.video()!.path(), join(evidenceDir!, "cold-paging-and-handoff.webm"));
 });

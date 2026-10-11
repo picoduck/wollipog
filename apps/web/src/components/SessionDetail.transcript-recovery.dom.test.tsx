@@ -133,6 +133,160 @@ function cachedTranscriptEvents(sessionId: string, turns: number): SessionEvent[
   return events;
 }
 
+test("cold-cache preview is readable outside the CP store, pages its frozen range, and hands off to proven identities", async () => {
+  const pages = pageController();
+  let handoffReady = false;
+  let handoffCalls = 0;
+  let releaseOpening!: () => void;
+  const openingReady = new Promise<void>(done => { releaseOpening = done; });
+  const previewEvents = Array.from({ length: 2 }, (_, index) => ({ seq: 501 + index, ts: index,
+    payload: index === 0 ? { kind: "user_message" as const, text: "Authoritative current prompt" }
+      : { kind: "agent_message" as const, text: `Authoritative step ${index}`, final: true } }));
+  const fixture = await mountFixture(pages, 0, { acknowledgeSubscription: false, client: {
+    getSessionTurnStartPage: async id => { await openingReady; return { events: [{ id: 1, sessionId: id, seq: 1, ts: 1,
+      payload: { kind: "user_message", text: "Old cached prefix" } }], eventEpoch: 0,
+      turnStartSeq: 1, tailSeq: 1, nextAfter: 1, hasMoreLater: false, cacheComplete: false,
+      preview: { eventEpoch: 0, logEpoch: 14, throughSeq: 900, turnStartSeq: 501,
+        events: previewEvents, nextAfterSeq: 502, hasMore: true } }; },
+    getSessionHistoryPreview: async (id, cursor) => {
+      if (cursor.handoffSeq !== undefined) {
+        handoffCalls++;
+        const events = [...previewEvents, { seq: 503, ts: 1,
+          payload: { kind: "agent_message" as const, text: "Later authoritative activity", final: true } }]
+          .map(event => ({ ...event, id: 9_999 + event.seq - 501, sessionId: id, seq: event.seq + 6 }));
+        return { handoff: handoffReady ? { events,
+          eventEpoch: 0, windowStartSeq: 507, windowEndSeq: 509, anchorSeq: cursor.handoffSeq + 6,
+          identities: events.map(event => ({ runnerSeq: event.seq - 6, seq: event.seq })), hasMoreHandoff: false,
+          turnStartSeq: 507, nextAfter: 509, tailSeq: 906, hasMoreLater: true,
+          hasMoreOlder: true, cacheComplete: true } : null };
+      }
+      assert.equal(cursor.logEpoch, 14);
+      assert.equal(cursor.throughSeq, 900);
+      assert.equal(cursor.afterSeq, 502);
+      return { preview: { eventEpoch: 0, logEpoch: 14, throughSeq: 900, turnStartSeq: 501,
+        events: [{ seq: 503, ts: 1, payload: { kind: "agent_message", text: "Later authoritative activity", final: true } }],
+        nextAfterSeq: 503, hasMore: true } };
+    },
+  } });
+  try {
+    Object.defineProperties(fixture.scroller, {
+      offsetHeight: { configurable: true, value: 500 }, offsetWidth: { configurable: true, value: 800 },
+      clientWidth: { configurable: true, value: 800 },
+    });
+    setScrollerMetrics(fixture.scroller, { clientHeight: 500, scrollHeight: 10_000, scrollTop: 0 });
+    await act(async () => releaseOpening());
+    await flushAsyncWork(30);
+    assert.ok(fixture.container.textContent!.includes("Authoritative current prompt"), fixture.container.querySelector(".timeline")?.outerHTML.slice(0, 1800) ?? "No timeline");
+    assert.equal(fixture.container.textContent!.includes("Old cached prefix"), false);
+    assertNoDomNode(fixture.container.querySelector(".transcript-skeleton"));
+    assert.deepEqual(fixture.readLoadedEvents() ?? [], [], "read-local runner rows never enter CP state");
+    assert.equal(fixture.scroller.getAttribute("aria-busy"), "false");
+    const later = [...fixture.container.querySelectorAll<HTMLButtonElement>("[data-later-activity-gap] button")]
+      .find(button => button.textContent === "Load Later Activity");
+    assert.ok(later);
+    await act(async () => later.click());
+    await flushAsyncWork();
+    assert.deepEqual(fixture.readLoadedEvents() ?? [], []);
+    handoffReady = true;
+    await act(async () => { await new Promise<void>(done => setTimeout(done, 600)); });
+    await flushAsyncWork();
+    assert.ok(handoffCalls > 0);
+    assert.equal(fixture.readLoadedEvents()?.[0]?.id, 9_999);
+    assert.equal(fixture.readLoadedEvents()?.[0]?.seq, 507);
+    assert.equal(fixture.container.textContent!.includes("Old cached prefix"), false);
+  } finally { await unmountFixture(fixture); }
+});
+
+test("a frozen preview stays explicitly paused when live activity arrives, and refresh requests fresh authority", async () => {
+  let openings = 0;
+  let release!: () => void;
+  const ready = new Promise<void>(done => { release = done; });
+  const fixture = await mountFixture(pageController(), 0, { acknowledgeSubscription: false, client: {
+    getSessionTurnStartPage: async id => {
+      await ready;
+      const attempt = ++openings;
+      if (attempt === 3) return { events: [{ id: 2_000, seq: 705, ts: 1, sessionId: id,
+        payload: { kind: "user_message", text: "Fresh CP conversation" } }], eventEpoch: 0,
+        turnStartSeq: 705, nextAfter: 705, tailSeq: 705, hasMoreLater: false, hasMoreOlder: true,
+        turnAligned: true, cacheComplete: true };
+      const seq = attempt === 1 ? 501 : 601;
+      return { events: [], eventEpoch: 0, turnStartSeq: 0, tailSeq: 0, nextAfter: 0, hasMoreLater: false,
+        cacheComplete: false, preview: { eventEpoch: 0, logEpoch: 14,
+        throughSeq: seq, turnStartSeq: seq, nextAfterSeq: seq, hasMore: false,
+        events: [{ seq, ts: 1, payload: { kind: "user_message", text: seq === 501 ? "Frozen prompt" : "Fresh delivered prompt" } }] } };
+    },
+    getSessionHistoryPreview: async () => ({ handoff: null }),
+  } });
+  try {
+    Object.defineProperties(fixture.scroller, { offsetHeight: { configurable: true, value: 500 },
+      offsetWidth: { configurable: true, value: 800 }, clientWidth: { configurable: true, value: 800 } });
+    setScrollerMetrics(fixture.scroller, { clientHeight: 500, scrollHeight: 10_000, scrollTop: 0 });
+    await act(async () => release()); await flushAsyncWork(30);
+    assert.equal(fixture.scroller.getAttribute("data-follow-tail-state"), "paused");
+    await act(async () => fixture.socket.push({ type: "session_event", event: { id: 1, seq: 1, ts: 1,
+      sessionId: fixture.sessionId, payload: { kind: "user_message", text: "Live CP prompt has another identity" } } }));
+    await flushAsyncWork();
+    assert.equal(fixture.container.textContent!.includes("Live CP prompt has another identity"), false);
+    assert.ok(fixture.container.textContent!.includes("Showing a loaded snapshot."));
+    assert.equal(fixture.scroller.getAttribute("data-follow-tail-state"), "paused");
+    const buttons = [...fixture.container.querySelectorAll<HTMLButtonElement>("[data-later-activity-gap] button")];
+    assert.equal(buttons.some(button => button.textContent === "Load Later Activity"), false, "frozen exhaustion keeps an honest snapshot notice");
+    const refresh = buttons.find(button => button.textContent === "Refresh Recent Activity");
+    assert.ok(refresh); await act(async () => refresh.click()); await flushAsyncWork(30);
+    assert.equal(openings, 2, "refresh obtains fresh authority rather than reusing the frozen tail");
+    assert.ok(fixture.container.textContent!.includes("Fresh delivered prompt"));
+    assert.equal(fixture.container.textContent!.includes("Frozen prompt"), false);
+    assert.equal(fixture.scroller.getAttribute("data-follow-tail-state"), "paused");
+    const refreshCP = [...fixture.container.querySelectorAll<HTMLButtonElement>("[data-later-activity-gap] button")]
+      .find(button => button.textContent === "Refresh Recent Activity");
+    assert.ok(refreshCP); await act(async () => refreshCP.click()); await flushAsyncWork(30);
+    assert.equal(openings, 3);
+    assert.ok(fixture.container.textContent!.includes("Fresh CP conversation"));
+    assert.equal(fixture.readLoadedEvents()?.[0]?.id, 2_000, "explicit refresh can leave a completed snapshot via real CP identities");
+    assert.equal(fixture.container.textContent!.includes("Showing a loaded snapshot."), false);
+  } finally { await unmountFixture(fixture); }
+});
+
+test("an event-epoch replacement retires the preview and rejects its late frozen page", async () => {
+  const pages = pageController();
+  let releaseOpening!: () => void;
+  const ready = new Promise<void>(done => { releaseOpening = done; });
+  let releaseLater!: (page: Awaited<ReturnType<ApiClient["getSessionHistoryPreview"]>>) => void;
+  const fixture = await mountFixture(pages, 0, { acknowledgeSubscription: false, client: {
+    getSessionTurnStartPage: async (_id, epoch) => {
+      await ready;
+      const seq = epoch === 0 ? 501 : 751;
+      return { events: [], eventEpoch: epoch, turnStartSeq: 0, tailSeq: 0, nextAfter: 0,
+        hasMoreLater: false, cacheComplete: false, preview: { eventEpoch: epoch, logEpoch: 14 + epoch,
+          throughSeq: 900, turnStartSeq: seq, nextAfterSeq: seq, hasMore: true,
+          events: [{ seq, ts: 1, payload: { kind: "user_message", text: epoch === 0 ? "Before replacement" : "After replacement" } }] } };
+    },
+    getSessionHistoryPreview: async (_id, cursor) => cursor.handoffSeq === undefined
+      ? new Promise(done => { releaseLater = done; }) : { handoff: null },
+  } });
+  try {
+    Object.defineProperties(fixture.scroller, { offsetHeight: { configurable: true, value: 500 },
+      offsetWidth: { configurable: true, value: 800 }, clientWidth: { configurable: true, value: 800 } });
+    setScrollerMetrics(fixture.scroller, { clientHeight: 500, scrollHeight: 10_000, scrollTop: 0 });
+    await act(async () => releaseOpening());
+    await flushAsyncWork(30);
+    const later = [...fixture.container.querySelectorAll<HTMLButtonElement>("[data-later-activity-gap] button")]
+      .find(button => button.textContent === "Load Later Activity")!;
+    await act(async () => later.click());
+    assert.ok(releaseLater);
+    await act(async () => fixture.socket.push({ type: "session_events_reset", sessionId: fixture.sessionId, eventEpoch: 1, events: [] }));
+    await flushAsyncWork(30);
+    await act(async () => releaseLater({ preview: { eventEpoch: 0, logEpoch: 14, throughSeq: 900,
+      turnStartSeq: 501, nextAfterSeq: 502, hasMore: true,
+      events: [{ seq: 502, ts: 1, payload: { kind: "agent_message", text: "Late obsolete activity", final: true } }] } }));
+    await flushAsyncWork(30);
+    assert.ok(fixture.container.textContent!.includes("After replacement"));
+    assert.equal(fixture.container.textContent!.includes("Before replacement"), false);
+    assert.equal(fixture.container.textContent!.includes("Late obsolete activity"), false);
+    assert.deepEqual(fixture.readLoadedEvents() ?? [], []);
+  } finally { await unmountFixture(fixture); }
+});
+
 test("a very long turn first renders its start and shares the opening across socket acknowledgement", async () => {
   const pages = pageController();
   let calls = 0;
