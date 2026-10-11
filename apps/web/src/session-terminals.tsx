@@ -232,6 +232,8 @@ export class SessionTerminals {
     // DELETE returns before the runner's exit echo, so waiting would leave a window for a stale
     // list response, key batch, or resize batch to resurrect/target the closing shell.
     const listDropped = this.supersedeLoads();
+    // Closing a tab declines a first shell for this open: the last tab closed stays closed.
+    this.autoOpened = true;
     this.closingShellIds.add(shellId);
     this.cancelRemovedShellWork(new Set([shellId]));
     const { active } = this.state;

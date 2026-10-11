@@ -646,6 +646,33 @@ test("Close Tab during a reopen's list reads the registry again", async () => {
   }
 });
 
+test("closing the last tab before a reopen's list lands offers no first shell", async () => {
+  const registry = [shell(1)];
+  let hold: ReturnType<typeof gate> | null = null;
+  const { terminals, opens } = storeOver(registry, {
+    holdList: () => hold?.wait() ?? Promise.resolve(),
+    openShell: async () => shell(9),
+  });
+  try {
+    let release = terminals.openHost();
+    await until(() => terminals.getSnapshot().shells?.length === 1, "the first list");
+    release();
+
+    hold = gate();
+    release = terminals.openHost();
+    terminals.closeShell("shell-1");
+    registry.splice(0, registry.length);
+    hold.open();
+    await until(() => terminals.getSnapshot().shells?.length === 0, "the empty list");
+    await settle(10);
+    terminals.offerFirstShell(true, true);
+    release();
+    assert.equal(opens.count, 0, "the closed tab is not replaced");
+  } finally {
+    terminals.dispose();
+  }
+});
+
 test("a reopened terminal offers a first shell only once its own list has arrived", async () => {
   const registry: ShellView[] = [];
   let hold: ReturnType<typeof gate> | null = null;
