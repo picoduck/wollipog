@@ -22430,6 +22430,9 @@ test("a steering failure that already reached the runner is not re-queued as a s
   assert.match(result.error ?? "", /may already have reached the session/);
   assert.equal(hub.sentOfType("steer_session").length, 1);
   assert.equal(hub.sentOfType("prompt_session").length, 0, "the message must not also be queued");
+  const attempt = db.listSteeringAttempts(id)[0]!;
+  assert.ok(attempt.submissionId);
+  assert.ok(result.error?.includes(attempt.submissionId), "the failure names the exact durable submission to inspect");
 });
 
 test("a steering refusal that never reached the runner still falls back to the queue", async () => {

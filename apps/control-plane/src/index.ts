@@ -4669,6 +4669,18 @@ app.post("/api/sessions/:id/steer", async (req, reply) => {
   return respond(reply, result);
 });
 
+// Agent reads use the same descendant target gate as prompt and resolution in authorizeRequest.
+app.get("/api/sessions/:id/steering", async (req) => {
+  const { id } = req.params as { id: string };
+  return { attempts: db.listSteeringAttempts(id) };
+});
+
+app.get("/api/sessions/:id/steering/:submissionId", async (req, reply) => {
+  const { id, submissionId } = req.params as { id: string; submissionId: string };
+  const found = db.findSteeringAttemptBySubmission(id, submissionId);
+  return found ? { attempt: found.attempt } : reply.code(404).send({ error: "steering attempt not found" });
+});
+
 app.post("/api/sessions/:id/steering/:submissionId/resolve", async (req, reply) => {
   const { id, submissionId } = req.params as { id: string; submissionId: string };
   const body = (req.body ?? {}) as { action?: unknown };

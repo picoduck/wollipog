@@ -144,6 +144,53 @@ test("HTTP agent management scopes descendants and composes governance policy vi
     const ownerDb = ControlPlaneDb.open(database);
     const ownerId = ownerDb.localIdentityContext().userId;
     ownerDb.close();
+    // #1448: steering recovery reads and mutations have prompt's descendant scope, even when
+    // the caller can otherwise see the unrelated session. Offline recovery stays durably pending.
+    for (const sessionId of ["normal-child", "orchestrator-child", "orchestrator-grandchild", "normal", "orchestrator"]) {
+      liveDb.createSteeringAttempt({ requestId: `steer-${sessionId}`, sessionId, submissionId: "same-submission",
+        turnId: "turn", source: "direct", requestSha256: "a".repeat(64), text: `Recover ${sessionId}`, now: Date.now() });
+      liveDb.markSteeringAttemptUncertain(`steer-${sessionId}`, Date.now());
+    }
+    const steering = async (as: string | null, target: string, suffix = "", action?: string) => {
+      const response = await fetch(`http://127.0.0.1:${port}/api/sessions/${target}/steering${suffix}`, {
+        method: action === undefined ? "GET" : "POST", signal: AbortSignal.timeout(3000),
+        headers: { authorization: `Bearer ${as ? `token-${as}` : `device-${ownerId}`}`,
+          ...(as ? { [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: as } : {}),
+          ...(action === undefined ? {} : { "content-type": "application/json" }) },
+        ...(action === undefined ? {} : { body: JSON.stringify({ action }) }),
+      });
+      return { status: response.status, body: await response.json() as {
+        attempts?: Array<{ submissionId: string }>; attempt?: { text: string; resolution?: { state: string; action: string } };
+        resolution?: { state: string; action: string }; error?: string;
+      } };
+    };
+    for (const [as, target] of [["normal", "normal-child"], ["orchestrator", "orchestrator-child"], ["orchestrator", "orchestrator-grandchild"]]) {
+      const listed = await steering(as!, target!);
+      assert.equal(listed.status, 200);
+      assert.deepEqual(listed.body.attempts?.map((attempt) => attempt.submissionId), ["same-submission"]);
+      const read = await steering(as!, target!, "/same-submission");
+      assert.equal(read.status, 200);
+      assert.equal(read.body.attempt?.text, `Recover ${target}`);
+      const resolved = await steering(as!, target!, "/same-submission/resolve", "queue_again");
+      assert.equal(resolved.status, 202);
+      assert.deepEqual(resolved.body.resolution, { state: "pending", action: "queue_again" });
+      assert.equal((await steering(as!, target!, "/same-submission")).body.attempt?.resolution?.state, "pending");
+      assert.equal((await steering(as!, target!, "/same-submission/resolve", "dismiss")).status, 409,
+        "a conflicting retry cannot replace an unresolved queue action");
+      assert.equal((await steering(as!, target!, "/same-submission/resolve", "queue_again")).status, 202);
+    }
+    for (const target of ["orchestrator", "normal", "normal-child", "missing"]) {
+      for (const [suffix, action] of [["", undefined], ["/same-submission", undefined], ["/same-submission/resolve", "dismiss"]] as const) {
+        assert.equal((await steering("orchestrator", target, suffix, action)).status, 404, `refuse ${target}${suffix}`);
+      }
+    }
+    assert.equal((await steering("orchestrator-child", "orchestrator", "/same-submission/resolve", "dismiss")).status, 404,
+      "a child cannot resolve its ancestor's attempt");
+    assert.equal((await steering("orchestrator", "orchestrator-child", "/missing")).status, 404);
+    assert.equal((await steering("orchestrator", "orchestrator-child", "/same-submission/resolve", "invalid")).status, 400);
+    // Existing human dashboard resolution is still admitted and shares the exact same durable action.
+    assert.equal((await steering(null, "normal", "/same-submission/resolve", "dismiss")).status, 202);
+    assert.equal((await steering(null, "normal", "/same-submission")).body.attempt?.resolution?.action, "dismiss");
     await assertPolicies(`device-${ownerId}`, [...ordinary, ...humanQuestions, "fixture-unscoped-owner-question"]);
     await assertPolicies("device-policy-admin", [...ordinary, ...humanQuestions, "fixture-unscoped-admin-question"]);
     assert.equal((await policies("device-other-user")).status, 403, "ordinary human global-route admission is preserved");

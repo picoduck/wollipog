@@ -418,6 +418,9 @@ test("tools/list returns the curated session and workflow tools with schemas", a
       "discard_worktree",
       "create_session",
       "prompt_session",
+      "list_steering_attempts",
+      "get_steering_attempt",
+      "resolve_steering_attempt",
       "handoff_session_result",
       "stop_session",
       "stop_background_job",
@@ -1607,6 +1610,43 @@ test("prompt_session -> POST /api/sessions/:id/prompt {text}", async () => {
   assert.equal(calls[0]!.method, "POST");
   assert.equal(calls[0]!.url, `${CP_URL}/api/sessions/s_2/prompt`);
   assert.deepEqual(calls[0]!.body, { text: "carry on" });
+});
+
+test("steering tools expose exact receipts and preserve pending resolution without retrying", async () => {
+  const attempt = { submissionId: "sub /1", state: "uncertain", text: "recover",
+    resolution: { action: "queue_again", state: "pending" } };
+  const { deps, calls } = makeDeps((call) => ({ status: call.method === "POST" ? 202 : 200,
+    body: call.method === "POST" ? attempt : call.url.endsWith("/steering") ? { attempts: [attempt] } : { attempt } }));
+  deps.orchestrator = true;
+  const listed = await callTool(deps, "list_steering_attempts", { sessionId: "s_child" });
+  assert.deepEqual(resultJson(listed), { attempts: [attempt] });
+  const read = await callTool(deps, "get_steering_attempt", { sessionId: "s_child", submissionId: "sub /1" });
+  assert.deepEqual(resultJson(read), { attempt });
+  assert.equal(calls[1]!.url, `${CP_URL}/api/sessions/s_child/steering/sub%20%2F1`);
+  const resolved = await callTool(deps, "resolve_steering_attempt", { sessionId: "s_child", submissionId: "sub /1", action: "queue_again" });
+  assert.deepEqual(resultJson(resolved), { attempt });
+  assert.equal(calls[2]!.url, `${CP_URL}/api/sessions/s_child/steering/sub%20%2F1/resolve`);
+  assert.deepEqual(calls[2]!.body, { action: "queue_again" });
+  assert.equal(calls.filter((call) => call.method === "POST").length, 1);
+  for (const name of ["list_steering_attempts", "get_steering_attempt", "resolve_steering_attempt"]) {
+    assert.equal((await callTool(deps, name, { sessionId: SELF_ID, submissionId: "sub", action: "dismiss" })).isError, true);
+    assert.equal((await callTool(deps, name, {})).isError, true);
+  }
+  assert.equal((await callTool(deps, "resolve_steering_attempt", { sessionId: "s_child", submissionId: "sub", action: "retry" })).isError, true);
+  assert.equal(calls.length, 3, "invalid requests never reach the control plane");
+  const denied = makeDeps(() => ({ status: 404, body: { error: "session not found" } }));
+  for (const name of ["list_steering_attempts", "get_steering_attempt", "resolve_steering_attempt"]) {
+    assert.match(resultText(await callTool(denied.deps, name, { sessionId: "outside", submissionId: "sub", action: "dismiss" })), /HTTP 404: session not found/);
+  }
+});
+
+test("prompt_session reports the uncertain steering receipt instead of silently dropping it", async () => {
+  const attempts = [{ submissionId: "exact-submission", state: "uncertain", text: "continue" }];
+  const { deps } = makeDeps(() => ({ status: 200, body: { id: "s_child", steeringAttempts: attempts,
+    promptDelivery: { lane: "steered", detail: "Resolve the steering attempt rather than resending" } } }));
+  const result = resultJson(await callTool(deps, "prompt_session", { sessionId: "s_child", text: "continue" }));
+  assert.deepEqual(result.steeringAttempts, attempts);
+  assert.equal(result.delivery.lane, "steered");
 });
 
 test("stop_session -> POST /api/sessions/:id/stop", async () => {

@@ -147,6 +147,15 @@ test("session-management REST access is method- and route-scoped to its publishe
 });
 
 test("general CLI/MCP access shares the closed manager route allowlist", () => {
+  for (const role of [undefined, "orchestrator"]) {
+    for (const path of ["/api/sessions/:id/steering", "/api/sessions/:id/steering/:submissionId"]) {
+      assert.equal(isAgentControlApiRouteAllowed("GET", path, role), true);
+      assert.equal(isAgentControlApiRouteAllowed("POST", path, role), false);
+    }
+    assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions/:id/steering/:submissionId/resolve", role), true);
+    assert.equal(isAgentControlApiRouteAllowed("GET", "/api/sessions/:id/steering/:submissionId/resolve", role), false);
+    assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions/:id/steer", role), false);
+  }
   assert.equal(isAgentControlApiRouteAllowed("GET", "/api/compatibility"), true);
   assert.equal(isAgentControlApiRouteAllowed("GET", "/api/sessions"), true);
   assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions/:id/prompt"), true);

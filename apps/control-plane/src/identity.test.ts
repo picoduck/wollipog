@@ -131,7 +131,8 @@ test("ordinary credentials retain self worktrees but confine descendant lifecycl
     credential,
     "s_sibling",
   )!, /only its own session/);
-  for (const route of ["/api/sessions/:id/prompt", "/api/sessions/:id/stop", "/api/sessions/:id/restart", "/api/sessions/:id/archive"]) {
+  for (const route of ["/api/sessions/:id/prompt", "/api/sessions/:id/stop", "/api/sessions/:id/restart", "/api/sessions/:id/archive",
+    "/api/sessions/:id/steering", "/api/sessions/:id/steering/:submissionId", "/api/sessions/:id/steering/:submissionId/resolve"]) {
     assert.equal(agentCredentialSessionTargetError(route, credential, "s_grandchild", true), null);
     assert.match(agentCredentialSessionTargetError(route, credential, "s_sibling")!, /descendants/);
     assert.match(agentCredentialSessionTargetError(route, credential, "s_calling", true)!, /descendants/);

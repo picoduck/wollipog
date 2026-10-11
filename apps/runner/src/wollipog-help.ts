@@ -76,6 +76,9 @@ export function sessionHelp(): string {
     "                 [--prompt <text>] [--title <title>] [--model <model>] [--effort <effort>] [--permission-mode <mode>] [--worktree]",
     "                 [--cost-budget <usd>] [--max-tool-calls <count>] [--max-child-sessions <count>] [--json]",
     "  session prompt <session-id> <text> [--json]",
+    "  session steering <session-id> [--json]",
+    "  session steering-get <session-id> <submission-id> [--json]",
+    "  session resolve-steering <session-id> <submission-id> <queue_again|dismiss> [--json]",
     "  session handoff-result <session-id> --revision <result-revision> [--json]",
     "  session wait <session-id> [--for <state,...>] [--timeout <ms>] [--interval <ms>] [--json]",
     "  session stop <session-id> [--json]",
@@ -86,6 +89,7 @@ export function sessionHelp(): string {
     "                     [--max-child-sessions <count>] [--json]",
     "Options: --url <control-plane-origin>, --token-file <credential-file>.",
     "session events without --after returns the newest events. With --after it pages forward from that seq; pass the returned lastSeq as the next --after, and eventEpoch as --event-epoch, while hasMore is true.",
+    "For uncertain steering delivery, inspect the exact submission before resolving it. A pending resolution is not confirmed; read it before retrying the identical action. These commands use the same descendant scope as session prompt.",
   ].join("\n");
 }
 

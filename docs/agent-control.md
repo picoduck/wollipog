@@ -60,6 +60,9 @@ wollipog session get ID --json
 wollipog session events ID [--after SEQ [--event-epoch EPOCH]] [--limit COUNT] --json
 wollipog session create --runner ID --agent ID (--workspace ID | --path PATH) [--prompt TEXT] [--model MODEL] [--effort EFFORT] [--cost-budget USD] [--max-tool-calls N] [--max-child-sessions N] --json
 wollipog session prompt ID TEXT --json
+wollipog session steering ID --json
+wollipog session steering-get ID SUBMISSION_ID --json
+wollipog session resolve-steering ID SUBMISSION_ID queue_again|dismiss --json
 wollipog session wait ID [--for STATE,...] [--timeout MS] [--interval MS] --json
 wollipog session stop ID --json
 wollipog session restart ID --json
@@ -81,6 +84,22 @@ wollipog update
 wollipog pair <create|list|revoke|url> [options]
 wollipog help [doctor|update|pair|service|admin|session|worktree|artifact|decision]
 ```
+
+`wollipog session steering` (MCP `list_steering_attempts`) returns at most 50 receipts, prioritizing
+pending and unresolved uncertain attempts. `session steering-get` (`get_steering_attempt`) reads an
+exact submission, including its durable resolution. `prompt_session` includes steering receipts in
+successful replies, and ambiguous steering errors identify the exact submission to inspect.
+`session resolve-steering` (`resolve_steering_attempt`) uses the dashboard's existing Queue Again
+and Dismiss path. Agent reads and resolution have the same descendant scope and visibility checks
+as `prompt_session`; an agent cannot use them on itself, ancestors, siblings, or unrelated sessions.
+
+Queue Again explicitly admits one ordinary queued message; it cannot prove that an uncertain
+provider write was never delivered. Inspect the attempt and session events before choosing an
+action. A `resolution.state` of `pending` means recovery is staged, including while the runner is
+offline, rather than confirmed. Read the exact submission after an uncertain response before
+retrying the identical action. Identical retries reuse durable recovery and do not queue twice;
+an opposite action is refused while recovery is pending. Older control planes lacking these routes
+return an HTTP error; callers must not treat that error as successful recovery.
 
 `wollipog session events` (MCP `get_session_events`) without `--after` returns the newest `--limit`
 events (default 30, at most 100). With `--after SEQ` it pages forward: the first `--limit` events
