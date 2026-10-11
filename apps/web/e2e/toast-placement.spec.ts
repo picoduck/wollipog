@@ -110,6 +110,29 @@ test("at 390px in a session, a toast sits above the composer", async ({ page }) 
   }).toBeGreaterThanOrEqual(0);
 });
 
+test("a visible toast remeasures when closing the bottom dock moves an unchanged composer (#2779)", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("wollipog.terminal.placement", "dock"));
+  await open(page, 1440);
+  await page.getByRole("button", { name: /Alpha Session/ }).first().click();
+  await waitForSessionPreview(page);
+  await page.getByRole("button", { name: "Open Session", exact: true }).click();
+  await expect(page.locator(".composer")).toBeVisible();
+  await page.getByRole("button", { name: "Terminal", exact: true }).click();
+  const dock = page.getByRole("region", { name: "Terminal", exact: true });
+  await expect(dock).toBeVisible();
+  await show(page, "Session renamed.", { durationMs: 0 });
+  await expect(page.locator(".toast-region > .toast")).toBeVisible();
+  const before = await page.locator(".composer").boundingBox();
+  await dock.getByRole("button", { name: "Hide Terminal", exact: true }).click();
+  await expect(dock).toHaveCount(0);
+  const after = await page.locator(".composer").boundingBox();
+  expect(Math.round(after!.height)).toBe(Math.round(before!.height));
+  await expect.poll(async () => {
+    const [toast, composer] = await Promise.all([box(page, ".toast-region > .toast"), box(page, ".composer")]);
+    return composer.top - toast.bottom;
+  }).toBeGreaterThanOrEqual(0);
+});
+
 test("a toast clears the software keyboard where only the visual viewport shrinks (#280)", async ({ page }) => {
   await open(page, 390);
   await show(page, "Attached image.", { durationMs: 0 });

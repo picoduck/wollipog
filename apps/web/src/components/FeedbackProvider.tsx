@@ -532,7 +532,8 @@ function useToastClearance(active: boolean) {
     const measure = () => {
       const app = document.getElementById("root") ?? document.body;
       const bottom = app.getBoundingClientRect().bottom;
-      const chrome = toastChromeElements(document);
+      // The dock signals layout changes but does not contribute its box to toast clearance.
+      const chrome = toastChromeElements(document).filter((element) => element.matches(".app-rail, .composer, .modal-foot"));
       const boxes = chrome
         .map((element) => element.getBoundingClientRect())
         .filter((box) => box.width > 0 && box.height > 0 && box.height <= bottom / 2)

@@ -14,7 +14,7 @@ export function subscribeToastChrome(listener: () => void): () => void {
   return () => { listeners.delete(listener); };
 }
 
-/** Register a rail, composer or dialog footer for toast clearance; optionally keep its existing ref. */
+/** Register chrome or a dock that moves it; optionally keep the element's existing ref. */
 export function useToastChrome<T extends HTMLElement = HTMLElement>(ref?: { current: T | null }) {
   return useCallback((element: T | null) => {
     if (ref) ref.current = element;

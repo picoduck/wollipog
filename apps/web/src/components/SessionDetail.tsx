@@ -7374,8 +7374,8 @@ function SessionDetailLoaded({
           {mode === "expanded" && (
             <div
               className="composer"
-              ref={toastComposerRef}
               hidden={composerHiddenOnPhone}
+              ref={toastComposerRef}
               onFocusCapture={() => setActivePane("composer")}
               onPointerDownCapture={() => setActivePane("composer")}
             >

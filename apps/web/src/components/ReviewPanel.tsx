@@ -25,7 +25,7 @@ import { useApi } from "../api-context.js";
 import { formatClock } from "../format.js";
 import {
   GitDiffViewer,
-  initiallyCollapsedDiffPaths,
+  useInitiallyCollapsedDiffPaths,
   StageRaceNotice,
   type DiffFileFocus,
   type DiffFileNotice,
@@ -982,7 +982,7 @@ export function ReviewPanel({
     [fineDiffSupported, pane, scope, scopedDiff],
   );
 
-  const initialCollapsedPaths = useMemo(() => initiallyCollapsedDiffPaths(shownDiff?.files ?? []), [shownDiff]);
+  const initialCollapsedPaths = useInitiallyCollapsedDiffPaths(shownDiff?.files ?? [], `${session.id}:${scope}:${pane}`);
   const collapsedPaths = (collapsed.sessionId === session.id ? collapsed.paths : null) ?? initialCollapsedPaths;
 
   // Which change set the findings and the unsent drafts belong to. A pane switch is a different

@@ -19,6 +19,7 @@ import { useIsCoarsePointer, useIsMobile } from "./useIsMobile.js";
 import { shortcutAriaKeys, shortcutDisplay } from "../shortcuts.js";
 import type { ResolvedTheme } from "../theme.js";
 import { loadBrowserStorageValue, saveBrowserStorageValue } from "../instance-storage.js";
+import { useToastChrome } from "./useToastChrome.js";
 
 /** Viewport-aware height ceiling: every height write (stored, drag, keyboard) goes through
  * this so the dock can never crush the transcript + composer, even after the window shrinks. */
@@ -71,6 +72,7 @@ export function ShellDock({
   const tabsetId = `shell-dock-${useId().replace(/:/g, "")}`;
   const coarsePointer = useIsCoarsePointer();
   const phone = useIsMobile();
+  const toastLayoutRef = useToastChrome<HTMLDivElement>();
   // On a phone the open search has its own row; elsewhere it replaces Search Output in the head.
   const host = useTerminalHost(sessionId, tabsetId, {
     searchPlacement: phone ? "row" : "head",
@@ -166,7 +168,7 @@ export function ShellDock({
   const { terminals, active, busy, searchOpen } = host;
 
   return (
-    <div className={`shell-dock${dragging ? " is-dragging" : ""}`} role="region" aria-label="Terminal">
+    <div ref={toastLayoutRef} className={`shell-dock${dragging ? " is-dragging" : ""}`} role="region" aria-label="Terminal">
       <div
         className="shell-dock-grip"
         role="separator"

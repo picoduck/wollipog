@@ -325,6 +325,19 @@ test("a diff loaded after an empty pane is bounded, and Open in Review expands a
   assert.equal(handled, 1);
 });
 
+test("a refresh inserting an earlier file keeps a default-open finding editor mounted (#2779)", async () => {
+  const { container, render } = await mount();
+  const files = Array.from({ length: 12 }, (_, index) => file(`src/file-${index}.ts`));
+  await render(<GitDiffViewer diff={diffOf(files)} review={review(true)} />);
+  const section = container.querySelector<HTMLElement>('.dfile[data-path="src/file-9.ts"]')!;
+  await act(async () => { section.querySelector<HTMLButtonElement>('button[aria-label="Add Finding on Line 1"]')!.click(); });
+  const editor = section.querySelector(".dedit");
+  assert.ok(editor);
+  await render(<GitDiffViewer diff={diffOf([file("src/earlier.ts"), ...files])} review={review(true)} />);
+  assert.ok(section.querySelector(".dedit") === editor, "the editor remains mounted as the file moves past position ten");
+  assert.equal(section.querySelector(".dfile-toggle")!.getAttribute("aria-expanded"), "true");
+});
+
 test("Side by Side is two columns that break around an open editor, and each pair is a row when wrapped", async () => {
   const { container, render } = await mount();
   const long: GitHunk = {

@@ -215,8 +215,27 @@ export interface DiffFileNotice {
 
 /** Large diffs start with a bounded line DOM; every remaining file is still in the file index. */
 const INITIAL_EXPANDED_FILES = 10;
-export function initiallyCollapsedDiffPaths(files: readonly GitDiffFile[]): ReadonlySet<string> {
-  return new Set(files.slice(INITIAL_EXPANDED_FILES).map((file) => file.path));
+/** Defaults follow paths across refreshes, so newly inserted files cannot close an editor. */
+export function useInitiallyCollapsedDiffPaths(files: readonly GitDiffFile[], identity: string): ReadonlySet<string> {
+  const [snapshot, setSnapshot] = useState(() => ({
+    identity, seen: new Set<string>(), collapsed: new Set<string>(),
+  }));
+  let next = snapshot.identity === identity ? snapshot : {
+    identity, seen: new Set<string>(), collapsed: new Set<string>(),
+  };
+  const added = files.filter((file) => !next.seen.has(file.path));
+  if (next !== snapshot || added.length > 0) {
+    const seen = new Set(next.seen);
+    const collapsed = new Set(next.collapsed);
+    for (const file of added) {
+      if (seen.size >= INITIAL_EXPANDED_FILES) collapsed.add(file.path);
+      seen.add(file.path);
+    }
+    next = { identity, seen, collapsed };
+    // Adjust this component's defaults before committing any newly loaded file bodies.
+    setSnapshot(next);
+  }
+  return next.collapsed;
 }
 
 /** Added and removed line counts for one file's diffstat. */
@@ -288,7 +307,7 @@ export function GitDiffViewer({
   useEffect(() => {
     if (focus && !focusedPath && focusSettled) onFocusHandled?.();
   }, [focus, focusedPath, focusSettled, onFocusHandled]);
-  const initialCollapsed = useMemo(() => initiallyCollapsedDiffPaths(diff.files), [diff.files]);
+  const initialCollapsed = useInitiallyCollapsedDiffPaths(diff.files, `${diff.scope}:${review?.lineage ?? ""}`);
   const [ownCollapsed, setOwnCollapsed] = useState<ReadonlySet<string> | null>(null);
   const collapsed = collapsedPaths ?? ownCollapsed ?? initialCollapsed;
   const collapsedRef = useRef(collapsed);

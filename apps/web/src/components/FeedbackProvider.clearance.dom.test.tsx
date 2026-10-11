@@ -27,12 +27,15 @@ const { cleanup } = installDomTestCleanup(dom);
 const doc = dom.document as unknown as Document;
 let measurements = 0;
 let composerHeight = 100;
+let dockHeight = 200;
 const rect = (top: number, bottom: number, left = 0, right = 390) => ({ top, bottom, left, right, width: right - left, height: bottom - top, x: left, y: top, toJSON() {} });
 dom.HTMLElement.prototype.getBoundingClientRect = function () {
   measurements++;
   if (this.id === "root") return rect(0, 900) as never;
   if (this.classList.contains("app-rail")) return rect(850, 900) as never;
-  if (this.classList.contains("composer")) return rect(850 - composerHeight, 850) as never;
+  const dockSpace = doc.querySelector(".shell-dock") ? dockHeight : 0;
+  if (this.classList.contains("composer")) return rect(850 - dockSpace - composerHeight, 850 - dockSpace) as never;
+  if (this.classList.contains("shell-dock")) return rect(850 - dockHeight, 850) as never;
   if (this.classList.contains("modal-foot")) return rect(600, 650) as never;
   return rect(0, 0) as never;
 };
@@ -40,13 +43,14 @@ function Chrome({ kind }: { kind: string }) {
   const ref = useToastChrome<HTMLDivElement>();
   return <div ref={ref} className={kind} />;
 }
-let controls: { toast(): void; chrome(show: boolean): void; footer(show: boolean): void };
+let controls: { toast(): void; chrome(show: boolean): void; footer(show: boolean): void; dock(show: boolean): void };
 function Harness() {
   const { showToast } = useFeedback();
   const [chrome, setChrome] = useState(true);
   const [footer, setFooter] = useState(false);
-  controls = { toast: () => { showToast("Saved.", { durationMs: 0 }); }, chrome: setChrome, footer: setFooter };
-  return <>{chrome && <><Chrome kind="app-rail" /><Chrome kind="composer" /></>}{footer && <Chrome kind="modal-foot" />}<div id="transcript" /></>;
+  const [dock, setDock] = useState(false);
+  controls = { toast: () => { showToast("Saved.", { durationMs: 0 }); }, chrome: setChrome, footer: setFooter, dock: setDock };
+  return <>{chrome && <><Chrome kind="app-rail" /><Chrome kind="composer" /></>}{footer && <Chrome kind="modal-foot" />}{dock && <Chrome kind="shell-dock" />}<div id="transcript" /></>;
 }
 const settle = async () => { await act(async () => { await new Promise<void>((resolve) => dom.requestAnimationFrame(() => resolve())); }); };
 
@@ -82,4 +86,27 @@ test("toast clearance follows explicit chrome mounts, removal and resize, ignori
   await settle();
   assert.equal(clearance(), "0px", "route change releases docked chrome");
   assert.equal(toastChromeElements(doc).length, 0, "Strict Mode and unmount leave no registered elements");
+});
+
+test("dock resize and removal signal clearance without counting the dock's own box (#2779)", async () => {
+  composerHeight = 100;
+  dockHeight = 200;
+  const host = doc.createElement("div");
+  host.id = "root";
+  doc.body.append(host);
+  const root = createRoot(host);
+  cleanup(async () => { await act(async () => { root.unmount(); }); host.remove(); });
+  await act(async () => { root.render(<FeedbackProvider><Harness /></FeedbackProvider>); });
+  await act(async () => { controls.dock(true); controls.toast(); });
+  await settle();
+  const clearance = () => doc.documentElement.style.getPropertyValue("--toast-clear");
+  assert.equal(clearance(), "50px", "only the phone rail contributes while the dock displaces the composer");
+  assert.ok(resizes.at(-1)!.elements.has(doc.querySelector(".shell-dock")!), "dock size is observed as a layout signal");
+  dockHeight = 300;
+  resizes.at(-1)!.callback();
+  await settle();
+  assert.equal(clearance(), "50px");
+  await act(async () => { controls.dock(false); });
+  await settle();
+  assert.equal(clearance(), "150px", "composer movement after dock removal is measured without a composer resize");
 });
