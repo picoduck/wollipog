@@ -1,26 +1,28 @@
-import { useEffect, useId, useMemo, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   MANAGED_BACKGROUND_JOB_VIEW_LIMIT,
   runnerSupportsProtocol,
   type BackgroundDeliveryView,
+  type BackgroundDeliveryWatchdogState,
+  type ManagedBackgroundJobView,
   type SessionView,
 } from "@wollipog/protocol";
-import { formatDuration, formatRecordedRelativeTime, formatRecordedTimestamp } from "../format.js";
+import { formatDuration, formatRecordedRelativeTime } from "../format.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import {
-  BACKGROUND_DELIVERY_STATUS,
-  backgroundDeliveryAction,
+  backgroundLostSentence,
   requestMissingResultAcknowledgement,
   shownWatchdogDelivery,
+  type BackgroundRecoverySubject,
 } from "../background-delivery-status.js";
 import {
   backgroundJobCurrentState,
   backgroundJobKind,
   backgroundJobLabel,
+  backgroundJobSentenceName,
   backgroundJobShortId,
   backgroundJobStopAvailability,
   stoppableJobState,
-  type BackgroundJobStopAvailability,
 } from "../background-job-stop.js";
 import {
   UNKNOWN_PARENT_TURN,
@@ -38,6 +40,7 @@ import {
 import { useApi } from "../api-context.js";
 import { statusMeta } from "../status-meta.js";
 import { driverLabel } from "../usage-view-model.js";
+import { BackgroundRecoveryNotice, RecordedTime } from "./BackgroundRecoveryNotice.js";
 import { ChevronRightIcon } from "./Icons.js";
 import { InfoPopover } from "./InfoPopover.js";
 import { JobDetail } from "./JobDetail.js";
@@ -70,6 +73,8 @@ export interface BackgroundWorkPanelProps {
   onViewTurn?: (parentTurnId: string) => void;
   /** The session's machine, as the person named it. */
   machineName?: string;
+  /** When the session's runner last connected, which dates the restart that lost a job. */
+  runnerConnectedAt?: number | null;
   onOpenTerminal?: () => void;
   onOpenMachine?: () => void;
   inventoryError?: string | null;
@@ -102,131 +107,53 @@ function acknowledgementKey(sessionId: string, continuationId: string): string {
   return JSON.stringify([sessionId, continuationId]);
 }
 
-function recordedTime(timestamp: number | undefined, now: number) {
-  const exact = formatRecordedTimestamp(timestamp);
-  if (!exact) return <span>Unavailable</span>;
-  return <time dateTime={exact.dateTime} title={exact.title}>{formatRecordedRelativeTime(timestamp, now)}</time>;
+/**
+ * The recovery a delivery still shows (#2859): its watchdog state, or Result Missing for a missing
+ * result the watchdog no longer reports. `null` when there is nothing to recover, or once the person
+ * acknowledged the missing result, when the group's own status says so instead.
+ */
+function deliveryRecoveryState(
+  delivery: BackgroundDeliveryView,
+  acknowledged: boolean,
+): BackgroundDeliveryWatchdogState | null {
+  const missing = delivery.missingResultAt != null && delivery.runnerResultPersistedAt == null;
+  const state = delivery.watchdogState ?? (missing ? "accepted_without_result" : null);
+  return state === "accepted_without_result" && acknowledged ? null : state;
 }
 
 /**
- * A turn's recovery deliveries: a result that is blocked, missing or still on its way. They keep
- * their present summary until the recovery notices replace it (#2859).
+ * The listed jobs a delivery returns the result of: those its continuation names. One without a
+ * continuation yet is the control plane's pending receipt, which counts the turn's present, finished
+ * jobs that have a result to return and no continuation; a job with nothing to return, or one the
+ * runner no longer lists, is not among them.
  */
-function RecoverySummaries({
-  session,
-  group,
-  groupIndex,
-  now,
-  jobStop,
-  stoppableJobListed,
-  restartReportsResult,
-  locallyAcknowledged,
-  onAcknowledged,
-  acknowledgementFeedback,
-  setAcknowledgementFeedback,
-}: {
-  session: SessionView;
-  group: BackgroundJobGroup;
-  groupIndex: number;
-  now: number;
-  jobStop: BackgroundJobStopAvailability | null;
-  stoppableJobListed: boolean;
-  restartReportsResult: boolean;
-  locallyAcknowledged: (delivery: BackgroundDeliveryView) => boolean;
-  onAcknowledged: (key: string) => void;
-  /** Per session and continuation, held by the panel so a request outlives the group it started in. */
-  acknowledgementFeedback: ReadonlyMap<string, AcknowledgementFeedback>;
-  setAcknowledgementFeedback: Dispatch<SetStateAction<ReadonlyMap<string, AcknowledgementFeedback>>>;
-}) {
-  const api = useApi();
-  const recoveryDeliveries = group.deliveries.filter((delivery) =>
-    delivery.watchdogState || (delivery.missingResultAt != null && delivery.runnerResultPersistedAt == null));
-  return recoveryDeliveries.map((delivery, deliveryIndex) => {
-    const recoveryState = delivery.watchdogState;
-    const continuationId = delivery.continuationId;
-    const localAcknowledgementKey = continuationId == null ? null : acknowledgementKey(session.id, continuationId);
-    const feedback = localAcknowledgementKey == null ? undefined : acknowledgementFeedback.get(localAcknowledgementKey);
-    const acknowledging = feedback?.state === "pending";
-    const acknowledged = delivery.missingResultAcknowledgedAt != null || locallyAcknowledged(delivery);
-    const isMissing = delivery.missingResultAt != null;
-    const status = recoveryState
-      ? BACKGROUND_DELIVERY_STATUS[recoveryState]
-      : isMissing ? BACKGROUND_DELIVERY_STATUS.accepted_without_result : null;
-    const summaryId = `background-delivery-summary-${groupIndex}-${deliveryIndex}`;
-    return (
-      <div className="background-delivery-summary" role="group" key={continuationId ?? summaryId}
-        aria-labelledby={summaryId} data-recovery-state={acknowledged
-          ? "missing-result-acknowledged"
-          : recoveryState ?? (isMissing ? "accepted_without_result" : undefined)}>
-        <strong id={summaryId}>{acknowledged ? "Missing Result Acknowledged" : status?.label}</strong>
-        <p>{acknowledged
-          ? "You acknowledged that this continuation ended without a durable result. Its delivery history remains available."
-          : status?.description}</p>
-        <dl>
-          {status && !acknowledged && <>
-            <div><dt>Completed</dt><dd>{status.completed}</dd></div>
-            <div><dt>Still Pending</dt><dd>{status.outstanding}</dd></div>
-            <div><dt>Recovery</dt><dd>{status.recovery}</dd></div>
-            <div><dt>Your Action</dt><dd>{recoveryState
-              ? backgroundDeliveryAction(recoveryState, jobStop, stoppableJobListed, restartReportsResult)
-              : status.action}</dd></div>
-          </>}
-          {isMissing && <div><dt>Missing Since</dt><dd>{recordedTime(delivery.missingResultAt, now)}</dd></div>}
-          {isMissing && (
-            <div><dt>Recovery State</dt><dd>{acknowledged
-              ? delivery.missingResultAcknowledgedAt != null
-                ? <>Acknowledged {recordedTime(delivery.missingResultAcknowledgedAt, now)}</>
-                : "Acknowledged"
-              : "Acknowledgement Required"}</dd></div>
-          )}
-        </dl>
-        {!acknowledged && isMissing && delivery.runnerResultPersistedAt == null && continuationId && (
-          <button type="button" className="btn ghost sm"
-            disabled={acknowledging}
-            onClick={() => {
-              const key = localAcknowledgementKey!;
-              const token = Symbol("missing-result-acknowledgement");
-              setAcknowledgementFeedback((current) => new Map(current).set(key, { token, state: "pending" }));
-              void requestMissingResultAcknowledgement(api, session.id, continuationId).then((failure) => {
-                if (failure === null) onAcknowledged(key);
-                setAcknowledgementFeedback((current) => {
-                  const settled = current.get(key);
-                  if (settled?.token !== token || settled.state !== "pending") return current;
-                  const next = new Map(current);
-                  if (failure === null) next.delete(key);
-                  else next.set(key, { token, state: "error", message: failure });
-                  return next;
-                });
-              });
-            }}>
-            {acknowledging
-              ? "Acknowledging…"
-              : "Acknowledge Missing Result"}
-          </button>
-        )}
-        {feedback?.state === "error" && !acknowledged && isMissing && delivery.runnerResultPersistedAt == null && (
-          <p className="hint warn" role="alert">{feedback.message}</p>
-        )}
-        <details>
-          <summary>Technical Details</summary>
-          <dl>
-            <div><dt>Pipeline State</dt><dd><code>{acknowledged
-              ? "missing_result_acknowledged"
-              : recoveryState ?? (isMissing ? "accepted_without_result" : undefined)}</code></dd></div>
-            {status && !acknowledged && <div><dt>Diagnostic</dt><dd>{status.diagnostic}</dd></div>}
-          </dl>
-        </details>
-      </div>
-    );
-  });
+function deliveryJobs(delivery: BackgroundDeliveryView, group: BackgroundJobGroup): ManagedBackgroundJobView[] {
+  if (delivery.continuationId != null) {
+    return group.jobs.filter((job) => job.continuationId === delivery.continuationId);
+  }
+  return group.jobs.filter((job) => job.sourcePresent && job.terminalStatus != null &&
+    job.continuationRequired !== false && job.continuationId == null && job.assistantResultPersistedAt == null);
+}
+
+/** A recovery notice names its one job, or counts them. The receipt's own count covers jobs the
+ * bounded list leaves out, so a job is named only when the receipt is about that job alone. */
+function recoverySubject(delivery: BackgroundDeliveryView, jobs: readonly ManagedBackgroundJobView[]): BackgroundRecoverySubject {
+  const count = Math.max(1, jobs.length, delivery.terminalCount);
+  return count === 1 && jobs.length === 1 ? { job: backgroundJobSentenceName(jobs[0]!) } : { count };
+}
+
+function latestFinish(jobs: readonly ManagedBackgroundJobView[]): number | undefined {
+  const finished = jobs.flatMap((job) => job.terminalObservedAt ?? []);
+  return finished.length > 0 ? Math.max(...finished) : undefined;
 }
 
 /**
  * Background Work (#2858): the jobs the agent left running after a turn, as one group per turn
  * (§5.2 group headers: "Turn 4", the group's status, View Turn) of two-line job rows. A row opens
- * the job's page (`JobDetail`), where Stop Job lives. What the panel is and what stays on the
- * machine are its About popover; machine offline is its one notice; loading, a failed load, an
- * untracked provider, an older runner and an empty history are each one state, in that order.
+ * the job's page (`JobDetail`), where Stop Job lives. A result that went wrong is one notice at the
+ * top of its group (`BackgroundRecoveryNotice`, #2859). What the panel is and what stays on the
+ * machine are its About popover; machine offline and a lost job are its notices; loading, a failed
+ * load, an untracked provider, an older runner and an empty history are each one state, in that order.
  */
 export function BackgroundWorkPanel({
   session,
@@ -236,11 +163,13 @@ export function BackgroundWorkPanel({
   earlierActivityUnloaded = false,
   onViewTurn,
   machineName,
+  runnerConnectedAt,
   onOpenTerminal,
   onOpenMachine,
   inventoryError,
   onRetryInventory,
 }: BackgroundWorkPanelProps) {
+  const api = useApi();
   const pages = usePanelPages();
   const headingPrefix = useId();
   const [locallyAcknowledged, setLocallyAcknowledged] = useState<ReadonlySet<string>>(() => new Set());
@@ -267,23 +196,99 @@ export function BackgroundWorkPanel({
   const locallyAcknowledgedDelivery = (delivery: BackgroundDeliveryView) =>
     delivery.continuationId != null && locallyAcknowledged.has(acknowledgementKey(session.id, delivery.continuationId));
 
+  // A successful Acknowledge removes its notice, button and all; focus goes to the turn's heading,
+  // whose badge now reads Missing Result Acknowledged. The turn is found by its key once the panel
+  // has rendered the acknowledgement: the acknowledged snapshot can reorder the groups first.
+  const acknowledgedFocus = useRef<{ sessionId: string; groupKey: string } | null>(null);
+  useEffect(() => {
+    const target = acknowledgedFocus.current;
+    acknowledgedFocus.current = null;
+    if (target === null || target.sessionId !== session.id) return;
+    const groupIndex = groups.findIndex((group) => group.key === target.groupKey);
+    const active = document.activeElement;
+    if (groupIndex >= 0 && (active === null || active === document.body)) {
+      document.getElementById(`${headingPrefix}-turn-${groupIndex}`)?.focus();
+    }
+    // Once per acknowledgement, reading the groups of the render that shows it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [locallyAcknowledged]);
+  const acknowledge = (continuationId: string, groupKey: string) => {
+    const key = acknowledgementKey(session.id, continuationId);
+    if (acknowledgementFeedback.get(key)?.state === "pending") return;
+    const token = Symbol("missing-result-acknowledgement");
+    setAcknowledgementFeedback((current) => new Map(current).set(key, { token, state: "pending" }));
+    void requestMissingResultAcknowledgement(api, session.id, continuationId).then((failure) => {
+      if (failure === null) {
+        acknowledgedFocus.current = { sessionId: session.id, groupKey };
+        setLocallyAcknowledged((current) => new Set(current).add(key));
+      }
+      setAcknowledgementFeedback((current) => {
+        const settled = current.get(key);
+        if (settled?.token !== token || settled.state !== "pending") return current;
+        const next = new Map(current);
+        if (failure === null) next.delete(key);
+        else next.set(key, { token, state: "error", message: failure });
+        return next;
+      });
+    });
+  };
+
   const pageJobId = pages.current?.startsWith("background:") ? pages.current.slice("background:".length) : null;
   const pageJob = pageJobId === null ? undefined : jobs.find((job) => job.id === pageJobId);
 
-  const notices: SessionNoticeEntry[] = !runnerOnline && !untracked ? [{
-    key: "background-work-runner-offline",
-    severity: "warning",
-    rank: PANEL_NOTICE_RANK.runnerOffline,
-    title: "Machine Offline",
-    render: ({ trailing }) => (
-      <Notice tone="warning" title="Machine Offline" trailing={trailing}>
-        {machine ? `${machine} is offline.` : "The machine is offline."} Finished jobs are shown; running jobs can't be checked.
-      </Notice>
-    ),
-  }] : [];
-
   const turnViewable = (parentTurnId: string) => onViewTurn !== undefined && parentTurnId !== UNKNOWN_PARENT_TURN &&
     (parentTurns.has(parentTurnId) || earlierActivityUnloaded);
+
+  const notices: SessionNoticeEntry[] = [];
+  if (!runnerOnline && !untracked) {
+    notices.push({
+      key: "background-work-runner-offline",
+      severity: "warning",
+      rank: PANEL_NOTICE_RANK.runnerOffline,
+      title: "Machine Offline",
+      render: ({ trailing }) => (
+        <Notice tone="warning" title="Machine Offline" trailing={trailing}>
+          {machine ? `${machine} is offline.` : "The machine is offline."} Finished jobs are shown; running jobs can't be checked.
+        </Notice>
+      ),
+    });
+  }
+  if (aggregateState === "orphaned" && !untracked) {
+    // Lost (#2859): the runner restarted under a running job, so its result can't come back. The
+    // person can ask the agent to run it again from its turn; there is no Rerun.
+    const lostJobs = jobs.filter((job) =>
+      backgroundJobCurrentState(job, aggregateState, runnerOnline, inventorySupported, now) === "lost");
+    const title = lostJobs.length > 1 ? `Lost Track of ${lostJobs.length} Background Jobs` : "Lost Track of a Background Job";
+    const lostTurns = [...new Set(lostJobs.map((job) => job.parentTurnId))];
+    const viewTurn = lostTurns.length === 1 && turnViewable(lostTurns[0]!) ? lostTurns[0]! : null;
+    const lastSeen = lostJobs.length > 0 ? Math.max(...lostJobs.map((job) => job.lastObservedAt)) : undefined;
+    const restarted = runnerConnectedAt != null && (lastSeen === undefined || runnerConnectedAt >= lastSeen)
+      ? runnerConnectedAt
+      : undefined;
+    notices.push({
+      key: "background-work-lost",
+      severity: "danger",
+      rank: PANEL_NOTICE_RANK.backgroundWorkLost,
+      title,
+      render: ({ trailing }) => (
+        <Notice tone="danger" title={title} trailing={trailing} dataState="lost"
+          actions={viewTurn !== null && (
+            <button type="button" className="btn sm" onClick={() => onViewTurn!(viewTurn)}>View Turn</button>
+          )}
+          details={(lastSeen !== undefined || restarted !== undefined) && (
+            <dl className="facts">
+              {lastSeen !== undefined && <div><dt>Last Seen</dt><dd><RecordedTime at={lastSeen} now={now} /></dd></div>}
+              {restarted !== undefined && <div><dt>Runner Restarted</dt><dd><RecordedTime at={restarted} now={now} /></dd></div>}
+              {lostTurns.length > 0 && (
+                <div><dt>Started By</dt><dd>{lostTurns.map((turn) => backgroundTurnLabel(turn, parentTurns.get(turn))).join(", ")}</dd></div>
+              )}
+            </dl>
+          )}>
+          {backgroundLostSentence(machine, lostJobs)}
+        </Notice>
+      ),
+    });
+  }
 
   const list = (
     <>
@@ -297,17 +302,27 @@ export function BackgroundWorkPanel({
           const watchdogHighlighted = watchdogDelivery !== undefined && watchdogDelivery === highlightedWatchdogDelivery;
           const states = new Map(group.jobs.map((job) => [job.id, backgroundJobCurrentState(
             job, session.backgroundWorkState, runnerOnline, inventorySupported, now)] as const));
-          const stoppableJobListed = [...states.values()].some(stoppableJobState);
+          const lostCount = [...states.values()].filter((state) => state === "lost").length;
+          const recoveries =group.deliveries.flatMap((delivery, deliveryIndex) => {
+            const state = deliveryRecoveryState(delivery, delivery.missingResultAcknowledgedAt != null ||
+              locallyAcknowledgedDelivery(delivery));
+            return state === null ? [] : [{ delivery, deliveryIndex, state }];
+          });
           return (
             <section className="background-work-turn" key={group.key} aria-labelledby={headingId}
               data-watchdog-state={watchdogDelivery?.watchdogState}
               data-watchdog-highlighted={watchdogHighlighted || undefined}
               aria-current={watchdogHighlighted ? "true" : undefined}>
               <div className="group-label background-work-turn-head">
-                <h3 id={headingId} className="background-work-turn-title">
+                <h3 id={headingId} className="background-work-turn-title" tabIndex={-1}>
                   {backgroundTurnLabel(group.parentTurnId, parentTurns.get(group.parentTurnId))}
                 </h3>
-                <StatusBadge meta={backgroundJobGroupBadge(status)} inline />
+                {/* Result Missing's notice says it; the badge returns once it is acknowledged. A turn
+                    whose unfinished jobs were all lost is waiting for nothing: the Lost notice and the
+                    rows say what happened. */}
+                {status.key !== "result_missing" && !(status.key === "waiting" && lostCount >= status.unfinished) && (
+                  <StatusBadge meta={backgroundJobGroupBadge(status)} inline />
+                )}
                 {turnViewable(group.parentTurnId) && (
                   <button type="button" className="btn sm ghost background-work-view-turn" aria-describedby={headingId}
                     onClick={() => onViewTurn!(group.parentTurnId)}>
@@ -315,13 +330,47 @@ export function BackgroundWorkPanel({
                   </button>
                 )}
               </div>
-              <RecoverySummaries session={session} group={group} groupIndex={groupIndex} now={now} jobStop={jobStop}
-                stoppableJobListed={stoppableJobListed} restartReportsResult={restartReportsResult}
-                locallyAcknowledged={locallyAcknowledgedDelivery}
-                onAcknowledged={(key) => setLocallyAcknowledged((current) => new Set(current).add(key))}
-                acknowledgementFeedback={acknowledgementFeedback} setAcknowledgementFeedback={setAcknowledgementFeedback} />
+              {recoveries.map(({ delivery, deliveryIndex, state }) => {
+                const deliveredJobs = deliveryJobs(delivery, group);
+                const continuationId = delivery.continuationId;
+                const feedback = continuationId == null
+                  ? undefined
+                  : acknowledgementFeedback.get(acknowledgementKey(session.id, continuationId));
+                const acknowledgeable = state === "accepted_without_result" && continuationId != null &&
+                  delivery.missingResultAt != null && delivery.runnerResultPersistedAt == null;
+                // Result Blocked's Stop ends the turn's one unfinished job. The bounded list can leave
+                // some out, so the receipt's own count of them must be one too. Like that count, a job
+                // the runner no longer lists is not one of them.
+                const unfinished = group.jobs.filter((job) => job.sourcePresent && job.terminalStatus == null);
+                const oneUnfinished = delivery.unfinishedSiblingJobs !== undefined
+                  ? delivery.unfinishedSiblingJobs === 1
+                  : session.backgroundJobsTruncated !== true;
+                const target = state === "continuation_blocked" && unfinished.length === 1 && oneUnfinished
+                  ? unfinished[0]!
+                  : null;
+                return (
+                  <BackgroundRecoveryNotice key={continuationId ?? `${group.key}:${deliveryIndex}`}
+                    sessionId={session.id} state={state} subject={recoverySubject(delivery, deliveredJobs)}
+                    finishedAt={latestFinish(deliveredJobs)} now={now} missingSince={delivery.missingResultAt}
+                    acknowledgement={acknowledgeable ? {
+                      busy: feedback?.state === "pending",
+                      error: feedback?.state === "error" ? feedback.message : null,
+                      onAcknowledge: () => acknowledge(continuationId, group.key),
+                    } : null}
+                    jobStop={jobStop}
+                    stopTarget={target && {
+                      job: target,
+                      label: backgroundJobLabel(target),
+                      stoppable: stoppableJobState(states.get(target.id)!),
+                    }}
+                    unfinishedListed={unfinished.length} unfinishedUnlisted={counts.partial}
+                    restartReportsResult={restartReportsResult} />
+                );
+              })}
               <ul className="background-work-rows" aria-labelledby={headingId}>
-                {group.jobs.length === 0 ? group.deliveries.map((delivery, deliveryIndex) => (
+                {/* A receipt with a recovery notice is that notice; the rest list as rows. */}
+                {group.jobs.length === 0 ? group.deliveries.filter((delivery) =>
+                  !recoveries.some((recovery) => recovery.delivery === delivery)).map((delivery, deliveryIndex) => (
                   <li key={delivery.continuationId ?? `${group.key}:${deliveryIndex}`}>
                     <div className="row row-2 background-job-row">
                       <span className="row-body">
@@ -410,9 +459,8 @@ export function BackgroundWorkPanel({
       This version of Wollipog doesn't list individual background jobs.
     </State>
   ) : aggregateState === "orphaned" ? (
-    <State compact title="Background Work Lost">
-      A background job was lost, and its details aren't available.
-    </State>
+    // The Lost notice in the panel's slot says it all.
+    null
   ) : aggregateState ? (
     <State compact title="Background Work Running">
       A background job is running, but its details aren't available yet.

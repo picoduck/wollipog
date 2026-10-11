@@ -284,6 +284,7 @@ export function RightPanel({
   parentTurns = EMPTY_PARENT_TURNS,
   onViewTurn,
   machineName,
+  runnerConnectedAt,
   onOpenMachine,
   backgroundInventoryError = null,
   onRetryBackgroundInventory,
@@ -338,6 +339,8 @@ export function RightPanel({
   onViewTurn?: (parentTurnId: string) => void;
   /** The session's machine, as its people named it. */
   machineName?: string;
+  /** When the session's runner last connected, which dates a restart that lost a background job. */
+  runnerConnectedAt?: number | null;
   onOpenMachine?: () => void;
   backgroundInventoryError?: string | null;
   onRetryBackgroundInventory?: () => void;
@@ -849,6 +852,7 @@ export function RightPanel({
             earlierActivityUnloaded={earlierActivityUnloaded}
             onViewTurn={onViewTurn}
             machineName={machineName}
+            runnerConnectedAt={runnerConnectedAt}
             onOpenTerminal={() => {
               // The terminal docks under the chat column, which a phone's panel covers and an
               // expanded one replaces, so the panel gives way first (#2858).

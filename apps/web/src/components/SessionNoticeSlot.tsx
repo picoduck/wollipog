@@ -126,6 +126,7 @@ export const PANEL_NOTICE_RANK = {
   ambiguousIdentity: 6,
   workflowDetailsUnavailable: 7,
   olderHistoryTruncated: 8,
+  backgroundWorkLost: 9,
 } as const;
 
 /**

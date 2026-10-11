@@ -1070,6 +1070,30 @@ and whether their result came back. It is one list of turn groups, never a card 
   confirmation titled "Stop <job name>", Cancel focused. While the request runs the button is busy;
   then a sentence under it says what happened, or a compact danger notice says why it failed.
   Unavailable, the button stays disabled with its reason as visible text it is described by.
+- **Recovery notices** (`BackgroundRecoveryNotice`, #2859): a result that went wrong is one §13.2
+  `Notice` per delivery at the top of its turn group, under the heading, never a definition list of
+  explanations. Its sentence names the job ("Shell job a1f3c9 …", `backgroundJobSentenceName()`).
+  - **Result Missing** (warning): "Shell job a1f3c9 finished, but its result never reached this
+    conversation. Wollipog won't retry on its own, so the step can't run twice." then
+    **Acknowledge** (a `.btn.sm` `BusyButton`) and Show Details. A failed acknowledgement's message
+    sits under the actions and the notice stays. While it shows, the group's badge is omitted, so the
+    state word appears once in the group; once acknowledged the notice goes and the badge reads
+    Missing Result Acknowledged (neutral).
+  - **Result Blocked** (warning): the finished job's sentence, then **Stop <job name>…** for the turn's
+    one unfinished job, behind Job Detail's confirmation. Unavailable, the button stays disabled,
+    described by its reason as a body line; with several unfinished jobs the line says to open one.
+  - **Result Pending, Transcript Delayed, Notification Pending** (compact info): one sentence ("Returning
+    shell job a1f3c9's result to this conversation."), no action.
+  - Show Details is a `.facts` list: Finished, then Missing Since and Acknowledge ("Clears the alert. It
+    doesn't rerun the job or resend the result.") for Result Missing or Other Ways (stopping or
+    restarting the session) for Result Blocked, then Diagnostic: the pipeline code and its
+    explanation, wrapping anywhere.
+  - A receipt with a notice lists no Result Receipt row; the notice stands for it.
+- **Lost** (`backgroundWorkState` `orphaned`, #2859): a danger notice in the panel notice slot, "Lost
+  Track of a Background Job": "Studio Workstation restarted while monitor job 7be210 was running, so
+  its result can't come back to this conversation." with **View Turn** (to the job's turn, where the
+  person can ask the agent to run it again) and Show Details (Last Seen, Runner Restarted, Started
+  By). The job's row badge reads Lost. There is no Rerun, and no empty state under the notice.
 - **States**, each one notice or one compact state, in this order: machine offline (a warning in the
   panel notice slot naming the machine, over the last-known list), loading (skeleton rows at the row
   height after 300ms), a failed load (§12.4, Retry and Show Details), not tracked ("Background Work

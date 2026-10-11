@@ -4253,43 +4253,22 @@ textarea {
   color: var(--text-dim);
   font: var(--type-small);
 }
-/* A turn's recovery delivery (#1793, #2275): kept as it is until the recovery notices replace it (#2859). */
-.background-delivery-summary {
-  padding: 11px 12px;
-  border-top: 1px solid var(--border);
-  background: color-mix(in srgb, var(--amber) 8%, var(--bg-elev-1));
-}
-.background-delivery-summary[data-recovery-state="accepted_without_result"] {
-  background: color-mix(in srgb, var(--red) 8%, var(--bg-elev-1));
-}
-.background-delivery-summary > strong { font-size: var(--text-sm); }
-.background-delivery-summary > p {
-  margin: 4px 0 0;
+/* A turn's recovery notices (#2859, `BackgroundRecoveryNotice`): one `Notice` per recovery delivery,
+   between the turn's heading and its rows. A failed or finished step's line sits under the actions,
+   after Show Details, on a line of its own. */
+.background-recovery-notice { margin-bottom: var(--space-2); }
+.background-recovery-note {
+  flex-basis: 100%;
+  order: 1;
   color: var(--text-dim);
-  font-size: var(--text-xs);
+  font: var(--type-small);
 }
-.background-delivery-summary dl {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px 12px;
-  margin: 10px 0 0;
-}
-.background-delivery-summary dl > div { min-width: 0; }
-.background-delivery-summary dt {
-  color: var(--text-faint);
-  font-size: var(--text-xs);
-}
-.background-delivery-summary dd {
-  margin: 2px 0 0;
-  color: var(--text-dim);
-  font-size: var(--text-xs);
-}
-.background-delivery-summary details { margin-top: 10px; }
-.background-delivery-summary summary {
-  color: var(--text-dim);
-  cursor: pointer;
-  font-size: var(--text-xs);
-  font-weight: 600;
+.background-recovery-note.notice-error { color: var(--danger-text); }
+@media (max-width: 760px) {
+  /* As in the session notice slot (§13.2): the resolving action fills the row, and Show Details keeps
+     its own width. */
+  .background-recovery-notice .notice-actions > .btn:first-child:not(.notice-details-toggle) { flex: 1 1 auto; max-width: none; }
+  .background-recovery-notice .notice-actions > .notice-details-toggle { flex: none; }
 }
 
 /* Side Chat (#2863): a 40px context line, the transcript as the tool's one scroller, and a foot that

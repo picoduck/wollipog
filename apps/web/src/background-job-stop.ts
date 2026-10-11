@@ -91,6 +91,12 @@ export function backgroundJobLabel(job: Pick<ManagedBackgroundJobView, "launchTy
   return `${backgroundJobKind(job)} ${backgroundJobShortId(job)}`;
 }
 
+/** A job's name inside a sentence (#2859): "Shell job a1f3c9 finished…", "…while monitor job 7be210 was
+ * running". The kind is lower case there; capitalize it where it opens the sentence. */
+export function backgroundJobSentenceName(job: Pick<ManagedBackgroundJobView, "launchType" | "id">): string {
+  return `${backgroundJobKind(job).toLowerCase()} ${backgroundJobShortId(job)}`;
+}
+
 /** What Stop Job does, as its confirmation says it. */
 export const STOP_JOB_OUTCOME =
   "Only this job ends, and it is recorded as killed. The session, its conversation, and its other jobs keep running.";

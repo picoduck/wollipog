@@ -149,9 +149,10 @@ export function backgroundJobGroupCounts(group: BackgroundJobGroup, inventoryTru
 }
 
 /**
- * A group's one status. Unverified where the turn is unknown or some jobs are not listed; then
- * Waiting while none has finished, N of M Finished while some have, and once all have, whether
- * their result came back.
+ * A group's one status. Unverified where the turn is unknown; then Waiting while none has finished,
+ * N of M Finished while some have, and once all have, whether their result came back. Where some
+ * jobs are not listed, only a receipt can say that: Result Returned or Result Missing (and its
+ * acknowledgement), else Unverified.
  */
 export function backgroundJobGroupStatus(
   group: BackgroundJobGroup,
@@ -170,13 +171,15 @@ export function backgroundJobGroupStatus(
     group.deliveries.every((delivery) => delivery.runnerResultPersistedAt != null)) ||
     (!partial && returnedJobs === group.jobs.length);
   if (returned) return { key: "returned" };
-  if (partial) return { key: "unverified" };
+  // A missing result is on the receipt itself, so a partly listed turn still says so, and says it
+  // was acknowledged once the person has (#2859).
   const pending = group.deliveries.filter((delivery) => delivery.runnerResultPersistedAt == null);
   if (pending.some((delivery) => delivery.missingResultAt != null &&
       delivery.missingResultAcknowledgedAt == null && !acknowledged(delivery))) return { key: "result_missing" };
   if (pending.some((delivery) => delivery.missingResultAcknowledgedAt != null || acknowledged(delivery))) {
     return { key: "missing_acknowledged" };
   }
+  if (partial) return { key: "unverified" };
   return { key: "returning" };
 }
 
