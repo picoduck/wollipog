@@ -198,6 +198,8 @@ interface Fixture {
   rerenderWithDraftLoader: (loader: ComposerDraftLoader) => Promise<void>;
   /** Opens or closes the stub side panel and renders again. */
   setRightPanelOpen: (open: boolean) => Promise<void>;
+  /** Opens or hides the bottom terminal dock, as the app shell does (#2866). */
+  setTerminalOpen: (open: boolean) => Promise<void>;
   rerenderSessionWithDraftLoader: (sessionId: string, loader: ComposerDraftLoader) => Promise<void>;
   remountWithDraftLoader: (loader: ComposerDraftLoader) => Promise<HTMLTextAreaElement>;
   fullReloadWithDraftLoader: (loader: ComposerDraftLoader) => Promise<HTMLTextAreaElement>;
@@ -339,6 +341,7 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
   let detailMount = 0;
   let detailMode: "expanded" | "preview" = "expanded";
   let currentLoader: ComposerDraftLoader = () => draft.promise;
+  let terminalOpen = false;
   const renderWithDraftLoader = (
     loader: ComposerDraftLoader,
     sessionId = currentSession.id,
@@ -359,6 +362,7 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
                 mode={detailMode}
                 rightPanel={rightPanel}
                 onOpenTerminal={() => {}}
+                terminalOpen={terminalOpen}
                 composerFocusIntent={options.composerFocusIntent ?? "message"}
                 onComposerFocusConsumed={options.onComposerFocusConsumed}
                 onApprove={options.onApprove}
@@ -435,6 +439,10 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
     rerenderWithDraftLoader,
     setRightPanelOpen: async (open) => {
       rightPanel.open = open;
+      await act(async () => renderWithDraftLoader(currentLoader));
+    },
+    setTerminalOpen: async (open) => {
+      terminalOpen = open;
       await act(async () => renderWithDraftLoader(currentLoader));
     },
     rerenderSessionWithDraftLoader,
@@ -7027,6 +7035,43 @@ test("a draft that changed under a phone's side panel sheet is grown to fit when
       if (descriptor) Object.defineProperty(prototype, name, descriptor);
       else delete (prototype as unknown as Record<string, unknown>)[name];
     }
+  }
+});
+
+test("a phone's terminal sheet takes the composer's place and hands it back with its draft (#2866)", { timeout: 5_000 }, async () => {
+  const priorMatchMedia = domWindow.matchMedia;
+  domWindow.matchMedia = ((query: string) => ({
+    matches: query.includes("max-width: 760px"), media: query, onchange: null,
+    addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
+    dispatchEvent: () => false,
+  })) as never;
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    const composer = () => fixture.container.querySelector<HTMLElement>(".composer")!;
+    const input = () => fixture.container.querySelector<HTMLTextAreaElement>(".composer-input")!;
+    await resolveDraft(draft, "check the failing total");
+    assert.equal(composer().hidden, false);
+
+    await fixture.setTerminalOpen(true);
+    assert.equal(composer().hidden, true, "the open terminal hides every composer control");
+    assert.equal(input().value, "check the failing total", "the composer stays mounted with its draft");
+
+    await fixture.setTerminalOpen(false);
+    assert.equal(composer().hidden, false, "hiding the terminal brings the composer back");
+    assert.equal(input().value, "check the failing total");
+
+  } finally {
+    await unmountFixture(fixture);
+    domWindow.matchMedia = priorMatchMedia;
+  }
+  // Wider than a phone, the dock sits under the composer and hides nothing.
+  const desktop = await mountFixture(deferred<ComposerDraft | null>());
+  try {
+    await desktop.setTerminalOpen(true);
+    assert.equal(desktop.container.querySelector<HTMLElement>(".composer")?.hidden, false);
+  } finally {
+    await unmountFixture(desktop);
   }
 });
 

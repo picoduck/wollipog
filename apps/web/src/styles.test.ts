@@ -127,6 +127,9 @@ test("every referenced custom property is defined in the shared root scope", () 
     ["--sessions-list-w", '.sessions-md[data-layout="right"]'],
     // Where the Sessions preview's bar, meta line, request dock and transcript start (#2219).
     ["--preview-inset", ".session-detail.preview"],
+    // The terminal dock's stored height (#2866): ShellDock sets it; the body's on desktop, the
+    // terminal's in the phone sheet.
+    ["--dock-body-height", ".shell-dock-body"],
   ]);
   for (const [name, owner] of COMPONENT_LOCAL) {
     assert.ok(soleRuleProps(owner).has(name), `${name} is declared on ${owner}`);

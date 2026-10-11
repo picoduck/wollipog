@@ -866,6 +866,7 @@ export function Shell() {
               onOpenTerminal={() => {
                 if (terminalSupported) setDockVisible(true);
               }}
+              terminalOpen={view.name === "session" && dockVisible && terminalSupported}
               pinnedSummary={pinnedSummary}
               focusComposerSessionId={composerFocusSessionId}
               onComposerFocusConsumed={() => setComposerFocusSessionId(null)}

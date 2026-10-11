@@ -4625,9 +4625,12 @@ body.shell-dock-dragging * {
    edge with even padding. The body holds the terminal's one notice, the terminals, then an exited or
    read-only shell's status row or a pipe shell's command row. */
 .shell-dock-body {
+  /* ShellDock sets the height it renders (the dock's default until then). */
+  --dock-body-height: 220px;
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+  height: var(--dock-body-height);
   min-height: 0;
   padding: var(--space-2) var(--space-3);
   background: var(--terminal-bg);
@@ -4709,6 +4712,50 @@ body.shell-dock-dragging * {
   padding: 7px 10px;
   font-family: var(--font-terminal);
   font-size: 12.5px;
+}
+/* The phone dock's open search (#2866): its own row under the head, as tall as the head, holding the
+   field, the count, Previous Match, Next Match and Close Search. The field takes what the rest leave. */
+.dock-search-row {
+  display: flex;
+  flex: none;
+  align-items: center;
+  height: var(--control-h-lg);
+  padding: 0 var(--space-2) 0 var(--space-3);
+  box-shadow: inset 0 -1px 0 var(--border);
+}
+.dock-search-row > .shell-search {
+  flex: 1;
+  min-width: 0;
+}
+.dock-search-row .shell-search-field { flex: 1 1 auto; }
+/* --- Terminal sheet (#2866; §4.6, §15.1). At 760px and below the open dock takes the composer's place,
+   which the session hides meanwhile: a sheet with --radius-lg top corners and --elev-3, sitting on the
+   tab bar, which already clears the home indicator. It keeps the height it was given until the column
+   runs short, then it alone gives way: the transcript's flex basis is 0 and the session bar does not
+   shrink, so the sheet ends at the session bar rather than running off the screen. While one of
+   its fields has focus (the shell, search or a pipe row's input) the tab bar leaves for the keyboard
+   (§15.1) and the column ends at --keyboard-inset, so the sheet sits on the keyboard and shrinks with
+   the terminal's last line and the field still in view. The phone right panel is a fixed sheet above
+   the column, so it covers the dock as it covers the session. --- */
+@media (max-width: 760px) {
+  .shell-dock {
+    flex: 0 1 auto;
+    min-height: 0;
+    border-top-left-radius: var(--radius-lg);
+    border-top-right-radius: var(--radius-lg);
+    box-shadow: var(--elev-3);
+  }
+  /* The session bar keeps its height; only the transcript and the sheet give way. */
+  .main:has(> .shell-dock) > .topbar { flex-shrink: 0; }
+  /* The height it was given is the terminal's (or the empty state's), not the body's: the terminal's
+     one notice or a status row adds to the sheet instead of taking the terminal's lines, until the
+     column runs short. Without either, the sheet is as tall as the dock. */
+  .shell-dock-body { height: auto; }
+  .shell-dock-body > .shell-term-stack,
+  .shell-dock-body > .state {
+    flex: 0 1 calc(var(--dock-body-height) - 2 * var(--space-2));
+    min-height: 0;
+  }
 }
 
 /* The Requests panel (#2206; docs/design-system.md §6, §6.2): a list that opens each child request in
@@ -15486,13 +15533,6 @@ button.review-finding-location {
   .palette-item {
     align-items: center;
     min-height: var(--space-12);
-  }
-
-  /* The bottom terminal dock may take at most half the visible height, and its input must
-     clear the home indicator. */
-  .shell-dock {
-    max-height: 50dvh;
-    padding-bottom: env(safe-area-inset-bottom, 0px);
   }
 }
 /* Durable workflow presets and run inspection. */

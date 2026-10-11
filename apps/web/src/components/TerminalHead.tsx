@@ -78,6 +78,16 @@ export function TerminalTabs({ tabsetId, panelId, tabs, activeId, onSelect, onCl
   );
 }
 
+interface TerminalSearchControlsProps {
+  term: string;
+  /** The addon's counts for `term`; null before the first count arrives. */
+  results: TerminalSearchResults | null;
+  onTermChange: (term: string) => void;
+  onNext: () => void;
+  onPrevious: () => void;
+  onClose: () => void;
+}
+
 /**
  * Search Output (#2864, refs #1265): an icon button that opens, in the head, a field with the match
  * count, Previous Match, Next Match and Close Search. Enter goes to the next match, Shift+Enter to the
@@ -86,48 +96,76 @@ export function TerminalTabs({ tabsetId, panelId, tabs, activeId, onSelect, onCl
  */
 export function TerminalSearch({
   open,
-  term,
-  results,
   disabled = false,
   onOpen,
+  ...controls
+}: TerminalSearchControlsProps & {
+  open: boolean;
+  /** No terminal to search (no tab open). */
+  disabled?: boolean;
+  onOpen: () => void;
+}) {
+  const autoFocus = useSearchOpenedHere(open);
+  if (!open) return <TerminalSearchButton disabled={disabled} onClick={onOpen} />;
+  return <TerminalSearchControls {...controls} autoFocus={autoFocus} />;
+}
+
+/**
+ * Whether the open search was opened while this host showed it, so its field should take focus. A host
+ * mounted with search already open (the dock shown again, #2867) leaves focus where it was until search
+ * is closed and opened again.
+ */
+export function useSearchOpenedHere(open: boolean): boolean {
+  const openAtMount = useRef(open);
+  if (!open) openAtMount.current = false;
+  return !openAtMount.current;
+}
+
+/**
+ * The Search Output button alone, for a host that shows the open search on a row of its own (the phone
+ * dock, #2866): there it stays in the head, pressed while the row is open, and a press closes it.
+ */
+export function TerminalSearchButton({ disabled = false, pressed, onClick }: {
+  disabled?: boolean;
+  /** Set only by a host whose button stays while search is open. */
+  pressed?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="icon-btn sm"
+      aria-label="Search Output"
+      title="Search Output"
+      aria-pressed={pressed}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      <SearchIcon size={14} />
+    </button>
+  );
+}
+
+/**
+ * The open search: the field, its match count, Previous Match, Next Match and Close Search. The field
+ * takes focus when the controls appear, so opening search puts the caret in it; a host that mounts
+ * them with search already open (a dock shown again) keeps focus where it was through `autoFocus`.
+ */
+export function TerminalSearchControls({
+  term,
+  results,
   onTermChange,
   onNext,
   onPrevious,
   onClose,
-}: {
-  open: boolean;
-  term: string;
-  /** The addon's counts for `term`; null before the first count arrives. */
-  results: TerminalSearchResults | null;
-  /** No terminal to search (no tab open). */
-  disabled?: boolean;
-  onOpen: () => void;
-  onTermChange: (term: string) => void;
-  onNext: () => void;
-  onPrevious: () => void;
-  onClose: () => void;
-}) {
+  autoFocus = true,
+}: TerminalSearchControlsProps & { autoFocus?: boolean }) {
   const inputRef = useRef<HTMLInputElement>(null);
-  const wasOpen = useRef(open);
+  const focusOnMount = useRef(autoFocus);
   useEffect(() => {
-    if (open && !wasOpen.current) inputRef.current?.focus();
-    wasOpen.current = open;
-  }, [open]);
+    if (focusOnMount.current) inputRef.current?.focus();
+  }, []);
 
-  if (!open) {
-    return (
-      <button
-        type="button"
-        className="icon-btn sm"
-        aria-label="Search Output"
-        title="Search Output"
-        disabled={disabled}
-        onClick={onOpen}
-      >
-        <SearchIcon size={14} />
-      </button>
-    );
-  }
   const canStep = term !== "" && (results?.count ?? 0) > 0;
   return (
     <div

@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useId, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { Notice } from "./Notice.js";
 import { nativeTuiHasTrackedGuardrails, type ShellKind, type ShellView } from "@wollipog/protocol";
 import { useStoreSelector } from "../store.js";
@@ -22,13 +22,23 @@ import {
 } from "../shells-panel.js";
 import { runnerDisplay } from "../runners.js";
 import { ShellTerminal, type ShellTerminalHandle } from "./ShellTerminal.js";
-import { TerminalNewTab, TerminalSearch, TerminalTabs, terminalTabId, type TerminalTabKind } from "./TerminalHead.js";
+import {
+  TerminalNewTab,
+  TerminalSearch,
+  TerminalSearchButton,
+  TerminalSearchControls,
+  TerminalTabs,
+  terminalTabId,
+  useSearchOpenedHere,
+  type TerminalTabKind,
+} from "./TerminalHead.js";
 import { TerminalNoticeSlot } from "./TerminalNoticeSlot.js";
+import { holdFieldFocus } from "./requests/hold-field-focus.js";
 import type { SessionNoticeEntry } from "./SessionNoticeSlot.js";
 import { State } from "./State.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { ChevronDownIcon, TerminalIcon } from "./Icons.js";
-import { useIsCoarsePointer } from "./useIsMobile.js";
+import { useIsCoarsePointer, useIsMobile } from "./useIsMobile.js";
 import { shortcutAriaKeys, shortcutDisplay } from "../shortcuts.js";
 import type { ResolvedTheme } from "../theme.js";
 import { loadBrowserStorageValue, saveBrowserStorageValue } from "../instance-storage.js";
@@ -62,6 +72,11 @@ function viewportDockMax(): number {
  * Its body (#2865; §4.6) is the flush terminal on --terminal-bg: the terminal's one notice
  * (`TerminalNoticeSlot`), one mounted `ShellTerminal` per shell with the others hidden, then an
  * exited shell's status row or a pipe shell's command row; with no shell, an empty state.
+ *
+ * On a phone (#2866; §4.6, §15.1) the dock is a sheet in the composer's place, which the session hides
+ * while it is open. Its head stays one row: Search Output stays in it, pressed while search is open,
+ * and the open search takes its own row under the head (`.dock-search-row`). The stylesheet fits the
+ * sheet between the session bar and the tab bar, or the keyboard while one of its fields has focus.
  */
 export function ShellDock({
   sessionId,
@@ -87,6 +102,7 @@ export function ShellDock({
     ? [...s.boxes.values()].find((candidate) => candidate.runnerId === session.runnerId)
     : undefined);
   const coarsePointer = useIsCoarsePointer();
+  const phone = useIsMobile();
   const runnerOnline = runner?.status === "online";
   const sessionAgent = runner?.agents.find((agent) => agent.id === session?.agentId);
   const sessionAgentContextKind = sessionAgent
@@ -123,6 +139,7 @@ export function ShellDock({
   };
   const terminalRef = useRef<ShellTerminalHandle | null>(null);
   const pipeInputRef = useRef<HTMLInputElement | null>(null);
+  const searchAutoFocus = useSearchOpenedHere(searchOpen);
 
   // The dock is open while mounted: the store loads or refreshes the shells, and releases on hide.
   useEffect(() => terminals?.openHost(), [terminals]);
@@ -270,6 +287,15 @@ export function ShellDock({
     else terminalRef.current?.focus();
   };
 
+  const searchControls = {
+    term: searchTerm,
+    results: searchResults,
+    onTermChange: terminals?.setSearchTerm ?? (() => undefined),
+    onNext: () => terminalRef.current?.findNext(searchTerm),
+    onPrevious: () => terminalRef.current?.findPrevious(searchTerm),
+    onClose: closeSearch,
+  };
+
   // One notice above the terminal (§13.2): the most severe condition, the rest behind "+N More".
   const noticeEntries: SessionNoticeEntry[] = terminalNoticeConditions({
     machineOnline: runnerOnline,
@@ -337,18 +363,19 @@ export function ShellDock({
           onSelect={terminals.select}
           onClose={(shellId) => void closeShell(shellId)}
         />
-        <div className="shell-dock-tools">
-          <TerminalSearch
-            open={searchOpen}
-            term={searchTerm}
-            results={searchResults}
-            disabled={!active}
-            onOpen={terminals.openSearch}
-            onTermChange={terminals.setSearchTerm}
-            onNext={() => terminalRef.current?.findNext(searchTerm)}
-            onPrevious={() => terminalRef.current?.findPrevious(searchTerm)}
-            onClose={closeSearch}
-          />
+        {/* On a touch phone a focused field (the shell, search) is the keyboard, and its blur would bring
+            the tab bar back and move the sheet between press and click: these controls keep it focused
+            until the click lands (#2866). A tab still takes focus, so none stays in a hidden terminal. */}
+        <div className="shell-dock-tools" onMouseDown={holdFieldFocus}>
+          {phone ? (
+            <TerminalSearchButton
+              disabled={!active}
+              pressed={searchOpen}
+              onClick={searchOpen ? closeSearch : terminals.openSearch}
+            />
+          ) : (
+            <TerminalSearch open={searchOpen} disabled={!active} onOpen={terminals.openSearch} {...searchControls} />
+          )}
           <TerminalNewTab
             id={`${tabsetId}-new`}
             kinds={newTabKinds}
@@ -368,13 +395,19 @@ export function ShellDock({
           </button>
         </div>
       </div>
+      {phone && searchOpen && (
+        <div className="dock-search-row" onMouseDown={holdFieldFocus}>
+          <TerminalSearchControls {...searchControls} autoFocus={searchAutoFocus} />
+        </div>
+      )}
 
       <div
         className="shell-dock-body"
         id={`${tabsetId}-panel`}
         role="tabpanel"
         aria-labelledby={active ? `${tabsetId}-tab-${encodeURIComponent(active)}` : undefined}
-        style={{ height: effectiveHeight }}
+        // The body's height on desktop; on a phone the terminal's, so a notice grows the sheet (#2866).
+        style={{ "--dock-body-height": `${effectiveHeight}px` } as CSSProperties}
       >
         <TerminalNoticeSlot sessionId={sessionId} entries={noticeEntries} onFocusLost={() => terminalRef.current?.focus()} />
         {shells !== null && shells.length > 0 && (

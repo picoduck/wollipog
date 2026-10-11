@@ -588,6 +588,9 @@ export type SessionDetailProps = {
   attentionTarget?: import("../navigation.js").AttentionTarget;
   rightPanel: RightPanelState;
   onOpenTerminal: () => void;
+  /** The bottom terminal dock is open (#2866). On a phone it takes the composer's place, so the
+   * composer is hidden while it is. */
+  terminalOpen?: boolean;
   /** The Pinned Summary's state (#2147). Only the expanded session shows the summary; without it,
    * none is shown. */
   pinnedSummary?: PinnedSummaryState;
@@ -1094,6 +1097,7 @@ function SessionDetailLoaded({
   attentionTarget,
   rightPanel,
   onOpenTerminal,
+  terminalOpen = false,
   pinnedSummary: pinnedSummaryProp,
   composerFocusIntent,
   onComposerFocusConsumed,
@@ -3507,12 +3511,15 @@ function SessionDetailLoaded({
     if (!el) return;
     resizeComposerToContent(el);
   };
-  // A phone's side panel sheet hides the composer (#2843). A draft that changed while it was hidden
-  // had no width to measure, so revealing it grows it again.
+  // A phone's side panel sheet hides the composer (#2843), and so does a phone's terminal sheet, which
+  // takes the composer's place (#2866). A draft that changed while it was hidden had no width to
+  // measure, so revealing it grows it again.
   const phonePanelOpen = isMobile && rightPanel.open;
+  const phoneTerminalOpen = isMobile && mode === "expanded" && terminalOpen;
+  const composerHiddenOnPhone = phonePanelOpen || phoneTerminalOpen;
   useLayoutEffect(() => {
     autoGrowComposerRef.current();
-  }, [mode, phonePanelOpen]);
+  }, [mode, composerHiddenOnPhone]);
   // A changed draft commits in the textarea alone, so what followed the draft here runs from the
   // textarea's layout phase instead: a pending focus restore, then the auto-grow, in the order their
   // effects above run.
@@ -5698,12 +5705,13 @@ function SessionDetailLoaded({
   // other one.
   const queuedEditPromptId = queuedEdit?.promptId ?? null;
   useEffect(() => cancelDictation, [queuedEditPromptId, cancelDictation]);
-  // A phone's side panel sheet hides the composer, mic included (#2843), and so does an expanded
-  // panel on desktop (#2845): either ends dictation, so no phrase lands in a draft nobody can see.
-  const composerHiddenByPanel = phonePanelOpen || (mode === "expanded" && rightPanel.open && rightPanel.expanded);
+  // A phone's side panel or terminal sheet hides the composer, mic included (#2843, #2866), and so does
+  // an expanded panel on desktop (#2845): each ends dictation, so no phrase lands in a draft nobody can
+  // see.
+  const composerHidden = composerHiddenOnPhone || (mode === "expanded" && rightPanel.open && rightPanel.expanded);
   useEffect(() => {
-    if (composerHiddenByPanel) cancelDictation();
-  }, [composerHiddenByPanel, cancelDictation]);
+    if (composerHidden) cancelDictation();
+  }, [composerHidden, cancelDictation]);
   // Live context and cost sit in the composer bar's trailing cluster, or in Model Settings when the
   // bar has no room for them (#2166).
   const [composerBoxRef, composerColumnNarrow] = useNarrowerThanRem<HTMLDivElement>(COMPOSER_USAGE_MIN_COLUMN_REM);
@@ -7240,11 +7248,13 @@ function SessionDetailLoaded({
 
           {/* A phone's side panel is a full-screen sheet; while it is open the composer is hidden
               (no box, out of the accessibility tree), so nothing covers a field the panel is editing
-              (#2843). It stays mounted: Answer Mode keeps a secret answer only in its own state. */}
+              (#2843). A phone's terminal sheet takes the composer's place, so it hides it too (#2866).
+              It stays mounted: the draft returns with it, and Answer Mode keeps a secret answer only
+              in its own state. */}
           {mode === "expanded" && (
             <div
               className="composer"
-              hidden={phonePanelOpen}
+              hidden={composerHiddenOnPhone}
               onFocusCapture={() => setActivePane("composer")}
               onPointerDownCapture={() => setActivePane("composer")}
             >
