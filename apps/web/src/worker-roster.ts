@@ -3,6 +3,7 @@ import { plainTextPreview, prioritizedPendingRequests, sessionAttentionStatus } 
 import { statusMeta, statusValues, type StatusMeta } from "./status-meta.js";
 import type { SubagentDescriptor } from "./subagents.js";
 import { splitStepTitle } from "./work-steps.js";
+import { backgroundJobLabel } from "./background-job-stop.js";
 
 /**
  * The one word a worker shows (docs/design-system.md §11.2, #2857): the Subagent / background job
@@ -251,7 +252,7 @@ export function workerRoster(
   });
   for (const job of session.backgroundJobs ?? []) rows.push({
     id: `background:${job.id}`,
-    name: `Background ${job.launchType === "unknown" ? "Job" : job.launchType.charAt(0).toUpperCase() + job.launchType.slice(1)}`,
+    name: backgroundJobLabel(job),
     group: BACKGROUND_GROUP,
     state: backgroundWorkerState(job, session, online(session.runnerId)),
     activity: `${LAUNCH_NOUNS[job.launchType] ?? LAUNCH_NOUNS.unknown} the agent started in the background`,

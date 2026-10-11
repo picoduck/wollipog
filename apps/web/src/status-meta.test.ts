@@ -75,6 +75,14 @@ const TABLE: readonly Row[] = [
   ["job", "unverified", "Unverified", "neutral"],
   ["job", "lost", "Lost", "danger"],
   ["job", "result_missing", "Result Missing", "warning"],
+  // Background Work turn group (#2858); Waiting and Finished carry their counts in the label
+  ["jobGroup", "waiting", "Waiting for Jobs", "info"],
+  ["jobGroup", "finished", "Finished", "neutral"],
+  ["jobGroup", "returning", "Returning Result", "info"],
+  ["jobGroup", "returned", "Result Returned", "success"],
+  ["jobGroup", "result_missing", "Result Missing", "warning"],
+  ["jobGroup", "missing_acknowledged", "Missing Result Acknowledged", "neutral"],
+  ["jobGroup", "unverified", "Unverified", "neutral"],
   // Session header, background work
   ["background_work", "orphaned", "Background Work Lost", "danger"],
   // Queued message (the transcript's pending bubbles and the composer's queue)
@@ -184,7 +192,7 @@ test("an unknown value reads Status Unavailable, never its raw enum or a prototy
 
 test("every label is Title Case copy, with no glyph and no CSS transform needed", () => {
   for (const domain of ["attention", "session", "machine", "project_location", "skill", "automation", "tool", "family",
-    "job", "background_work", "queuedMessage", "messageReceipt", "delivery", "notification", "workflow", "pod", "member", "provider_account",
+    "job", "jobGroup", "background_work", "queuedMessage", "messageReceipt", "delivery", "notification", "workflow", "pod", "member", "provider_account",
     "shell", "share", "usage"] as const) {
     for (const value of statusValues(domain)) {
       const { label } = statusMeta(domain, value);

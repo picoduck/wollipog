@@ -256,9 +256,8 @@ function solidDangerButtons(): string[] {
 test("a solid danger button is only ever the confirm of a destructive confirmation", () => {
   // Everything else — an inline Delete, Revoke or Stop, a Deny decision — is `.btn.ghost.danger`
   // or a menu item (§3.1, §7.4). Each of these confirms something the user has already asked for:
-  // a checkbox- or name-gated dialog, an inline "Confirm Stop", or the shared confirmation dialog.
+  // a checkbox- or name-gated dialog, or the shared confirmation dialog.
   assert.deepEqual(solidDangerButtons(), [
-    'BackgroundWorkPanel.tsx: "btn danger sm"',
     'FeedbackProvider.tsx: {`btn ${danger ? "danger" : "primary"}`}',
     'ProjectsView.tsx: "btn danger"',
     'SkillMachineImportDialog.tsx: "btn danger"',

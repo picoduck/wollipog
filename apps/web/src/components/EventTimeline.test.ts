@@ -23,6 +23,7 @@ import {
   turnSpanDescription,
   stabilizeWorkGroupKeys,
   timelineFileSourceLocation,
+  transcriptTurnsById,
   userRewindTurns,
   type TimelineRenderRow,
 } from "./EventTimeline.js";
@@ -1995,4 +1996,22 @@ test("an in-place update of one of two agent calls sharing an id reaches its own
     "agent:duplicate:2:running:input",
     "agent-output:duplicate:2:running:input",
   ]);
+});
+
+test("a turn is loaded only once its prompt is, never by a steering message alone (#2858)", () => {
+  const items = [
+    { kind: "user_message", id: 5, text: "Also check the docs", turnId: "turn-1", deliveryIntent: "steer", createdAt: 5 },
+    { kind: "agent_message", id: 6, text: "Done." },
+    { kind: "conversation_checkpoint", id: 7, turn: 1 },
+    { kind: "user_message", id: 8, text: "Next", turnId: "turn-2", createdAt: 8 },
+    { kind: "agent_message", id: 9, text: "Ok." },
+    { kind: "conversation_checkpoint", id: 10, turn: 2 },
+  ] as TimelineItem[];
+  assert.deepEqual([...transcriptTurnsById(items)], [["turn-2", { eventId: 8, turn: 2, startedAt: 8 }]],
+    "turn 1's prompt is on an older page, so View Turn must keep loading rather than land on its steer");
+  const withPrompt = [
+    { kind: "user_message", id: 1, text: "Start", turnId: "turn-1", createdAt: 1 } as TimelineItem,
+    ...items,
+  ];
+  assert.deepEqual(transcriptTurnsById(withPrompt).get("turn-1"), { eventId: 1, turn: 1, startedAt: 1 });
 });

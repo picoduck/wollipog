@@ -137,7 +137,7 @@ function Fixture() {
       <aside aria-label="Agents" className="agents-roster-fixture-panel">
         <AgentsPanel session={session} items={items} runnerOnline={scene !== "offline"}
           runnerProtocolVersion={PROTOCOL_VERSION} requestedId={selected} onSelect={setSelected}
-          parentTurnEventIds={new Map()} onOpenParentTurn={() => {}} />
+          parentTurns={new Map()} onViewTurn={() => {}} />
       </aside>
     </main>
     <style>{`

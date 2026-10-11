@@ -1,1 +1,0 @@
-|.background-work-group-head|padding|12px
