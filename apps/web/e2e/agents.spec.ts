@@ -227,7 +227,7 @@ test("offline, the machine notice leads and the attention count offers nothing t
   await expect(page.locator(".agents-list .worker-row .status", { hasText: "Approval Required" })).toHaveCount(0);
   await slot.locator(".session-notice-more").click();
   await page.getByRole("menuitem", { name: "Requests Waiting", exact: true }).click();
-  await expect(slot.locator(".notice-body")).toHaveText(/^2 requests are waiting\. You can answer them when .+ reconnects\.$/);
+  await expect(slot.locator(".notice-body")).toHaveText(/^2 requests are waiting\. You can answer them when Build Box reconnects\.$/);
   await expect(slot.getByRole("button", { name: "Review in Session", exact: true })).toHaveCount(0);
 });
 

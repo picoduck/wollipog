@@ -101,7 +101,7 @@ if (scene === "pod") {
   items = Array.from({ length: 120 }, (_, index) => agent(`worker-${index + 1}`, index + 1, `Check Module ${index + 1}`));
 }
 
-const runner = (online: boolean) => ({ runnerId: "runner", hostname: "studio", os: "darwin", version: "1.0.0",
+const runner = (online: boolean) => ({ runnerId: "runner", displayName: "Studio Mac", hostname: "studio", os: "darwin", version: "1.0.0",
   status: online ? "online" : "offline", agents: [], workspaces: [], connectedAt: now, lastSeen: now }) as unknown as RunnerView;
 
 class FixtureSocket implements UiSocket {

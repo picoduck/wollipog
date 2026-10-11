@@ -369,3 +369,41 @@ test("a pod member waiting on the person is counted, and Review in Session opens
     await memberOnly.unmount();
   }
 });
+
+test("Review in Session on a request no page carries gives the roster back while a worker page is open (#2861 review)", async () => {
+  const orphan = { requestId: "gone-run", ownerToolUseId: "gone", title: "Bash: ls", options: allow };
+  const panel = await mount(<Harness initial={asking(orphan)} />);
+  try {
+    const row = [...panel.container.querySelectorAll(".agents-list .worker-row")].find((candidate) => text(candidate.querySelector(".row-title")) === "Inspect Parser");
+    await panel.click(row);
+    assert.ok(panel.container.querySelector(".agents-page"), "a worker page is open");
+    await panel.click(panel.button("Review in Session"));
+    await settle(20);
+    assertNoDomNode(panel.container.querySelector(".agents-page"), "the page gives way to the roster");
+    const card = panel.container.querySelector<HTMLElement>('[role="region"][aria-label="Selected Worker Request"]')!;
+    assert.equal(card.dataset.sessionRequestId, "gone-run");
+    assertNoDomNode(card.closest("[hidden]"), "the card is not inside a hidden roster");
+    assert.ok(focused() === (card as unknown as Element), "focus lands on the request card");
+  } finally {
+    await panel.unmount();
+  }
+});
+
+test("offline, a waiting member sharing the machine stays counted with no action (#2861 review)", async () => {
+  const lead = { ...baseSession() } as SessionView;
+  const reviewer = { ...baseSession(), id: "member-offline", runnerId: lead.runnerId, title: "Parser Reviewer", status: "input_required",
+    pendingApproval: permission("lint") } as unknown as SessionView;
+  const panel = await mount(<Harness initial={lead} runnerOnline={false} store={podConnection(lead, [reviewer])} />);
+  try {
+    await settle(20);
+    assert.ok(panel.rowBadges().includes("Parser Reviewer: Unverified"));
+    assert.equal(panel.shown(), "agents-runner-offline");
+    await panel.click(panel.slot()!.querySelector(".session-notice-more"));
+    assert.deepEqual(panel.menuItems(), ["Requests Waiting"]);
+    await panel.click(domWindow.document.querySelector('[role="menu"][aria-label="Panel Notices"] [role="menuitem"]') as unknown as Element);
+    assert.equal(panel.sentence(), "1 request is waiting. You can answer it when build-box reconnects.");
+    assert.equal(panel.button("Review in Session"), undefined);
+  } finally {
+    await panel.unmount();
+  }
+});

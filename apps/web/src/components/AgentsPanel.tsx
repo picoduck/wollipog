@@ -10,7 +10,8 @@ import { useTimelineClock } from "../timeline-clock.js";
 import type { TimelineItem } from "../timeline.js";
 import { isCurrentWorker, pendingRequestsByOwner, subagentStatusContext, workerRoster, type WorkerGroup,
   type WorkerMemberMetadata, type WorkerRow } from "../worker-roster.js";
-import { attentionAskers, attentionSentence, attentionTitle, offlineAttentionSentence, type AttentionAsker } from "../worker-attention.js";
+import { attentionAskers, attentionSentence, attentionTitle, memberAttentionAskers, memberSessions, offlineAttentionSentence,
+  type AttentionAsker } from "../worker-attention.js";
 import { runnerDisplay } from "../runners.js";
 import { WorkerDetail } from "./WorkerDetail.js";
 import { WorkerRowItem } from "./WorkerRowItem.js";
@@ -738,18 +739,19 @@ export function AgentsPanel(props: Props) {
     if (!registry) return projection.descriptors.filter((agent) => !unresolvedOwnerIds.has(agent.id));
     return mergeDurableAgents(durableAgents, projection.descriptors, unresolvedOwnerIds);
   }, [durableAgents, projection.descriptors, registry, unresolvedOwnerIds]);
-  const rows = useMemo(() => {
+  const machineOnline = useCallback((id: string) => id === session.runnerId ? runnerOnline : runners.get(id)?.status === "online",
+    [session.runnerId, runnerOnline, runners]);
+  const { members, metadata } = useMemo(() => {
     const run = session.runId ? runs.get(session.runId) : undefined;
     const pod = [...pods.values()].find((value) => value.members.some((member) => member.sessionId === session.id));
     const metadata = memberMetadata(session, run, pod, workflows);
-    const members = [...new Set([...(run?.sessionIds ?? []), ...metadata.keys()])].flatMap((id) => {
-      const member = sessions.get(id);
-      return member ? [member] : [];
-    });
+    return { members: memberSessions(session, runs, pods, sessions, metadata.keys()), metadata };
+  }, [session, runs, sessions, pods, workflows]);
+  const rows = useMemo(() => {
     const unambiguousAgents = agents.map((agent) => projection.ambiguousIds.has(agent.id)
       ? { ...agent, lifecycle: "unknown" as const, availability: "recorded" as const } : agent);
-    return workerRoster(session, unambiguousAgents, members, (id) => id === session.runnerId ? runnerOnline : runners.get(id)?.status === "online", metadata);
-  }, [session, agents, projection.ambiguousIds, runs, sessions, runners, pods, workflows, runnerOnline]);
+    return workerRoster(session, unambiguousAgents, members, machineOnline, metadata);
+  }, [session, agents, projection.ambiguousIds, members, metadata, machineOnline]);
   // Workers the transcript holds that the registry has not listed yet (past its first page): not
   // roster rows until Show More, but their own pages show them and their parents' pages list them,
   // read from the transcript as their rows will be.
@@ -880,13 +882,14 @@ export function AgentsPanel(props: Props) {
     ...attentionAskers(session.pendingApproval, (ownerId, request) =>
       (!projection.ambiguousIds.has(ownerId) ? agents.find((agent) => agent.id === ownerId)?.title : undefined) ??
         compactAttentionOwners.find((value) => value.requestId === request.requestId && value.toolCallId === ownerId)?.name),
-    ...rows.flatMap((row): AttentionAsker[] => row.target.kind === "session" && row.state === "attention"
-      ? [{ ownerId: row.id, name: row.name, kind: row.attention ?? "input_required", sessionId: row.target.id }] : []),
+    ...memberAttentionAskers(members, machineOnline,
+      (member) => rows.find((row) => row.id === `session:${member.id}`)?.name ?? member.title),
   ];
   // Review in Session opens what the notice is about: the request an attention link chose, else this
-  // session's top request by the request dock's priority rule, else a waiting member's session.
+  // session's top request by the request dock's priority rule, else a waiting member's session whose
+  // machine is connected.
   const reviewTarget: { request: PendingApproval } | { sessionId: string } | undefined = selectedRequest
-    ? { request: selectedRequest } : askers.find((asker) => asker.request) ?? askers[0];
+    ? { request: selectedRequest } : askers.find((asker) => asker.request) ?? askers.find((asker) => asker.online);
   const review = (target: { request?: PendingApproval; sessionId?: string }) => {
     if (target.request) reviewRequest(target.request);
     else if (target.sessionId) navigate({ name: "session", id: target.sessionId });
@@ -905,7 +908,8 @@ export function AgentsPanel(props: Props) {
       props.onOpenPrimaryRequest?.(request.requestId);
       return;
     }
-    // A request no page or dock can carry is answered here, in the roster.
+    // A request no page or dock can carry is answered here, in the roster, which a page gives way to.
+    pages.clear();
     setRequestId(request.requestId);
     const owner = request.ownerToolUseId;
     const compactOwner = compactAttentionOwners.find((value) => value.requestId === request.requestId && value.toolCallId === owner);

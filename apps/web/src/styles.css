@@ -4084,11 +4084,13 @@ textarea {
   padding: 0;
 }
 /* The panel notice slot on a phone (#2861, §13.2): its notices' buttons, "+N More" included, are
-   44px touch targets, and the resolving action fills the action row as in the session slot. */
+   44px touch targets, and the resolving action fills the action row as in the session slot. A 44px
+   "+N More" overhangs its 20px title line by 8px each way, so the body stays close to the title. */
 @media (max-width: 760px) {
   .panel-notice-slot .notice {
     --control-h-sm: 44px;
   }
+  .panel-notice-slot .notice-head > .notice-trailing { margin-top: calc(var(--space-2) * -1); margin-bottom: calc(var(--space-2) * -1); }
 }
 .agents-page {
   display: flex;

@@ -75,10 +75,21 @@ const items: TimelineItem[] = [
   ...params.has("mixed") ? [{ kind: "tool_call" as const, id: 5, toolCallId: "summary", title: "Summarize Findings", text: "",
     toolKind: "agent", status: "in_progress", startedAt: now - 45_000 }] : [],
 ];
+// The session's machine, by the name a person gave it, as the offline notice names it (#2861).
 const connection: UiConnectionRuntime = {
   instanceId: "agents-fixture", runtimeKey: "agents-fixture",
-  createSocket: () => ({ readyState: UI_SOCKET_OPEN, onopen: null, onmessage: null,
-    onclose: null, onerror: null, send() {}, close() {} }), close() {},
+  createSocket: () => {
+    const socket = { readyState: UI_SOCKET_OPEN, onopen: null as (() => void) | null,
+      onmessage: null as ((event: { data: string }) => void) | null, onclose: null, onerror: null, send() {}, close() {} };
+    window.setTimeout(() => {
+      socket.onopen?.();
+      socket.onmessage?.({ data: JSON.stringify({ type: "snapshot", boxes: [], sessions: [], runs: [], pods: [],
+        runners: [{ runnerId: "runner", displayName: "Build Box", hostname: "build-box", os: "linux", version: "1.0.0",
+          status: "online", agents: [], workspaces: [], connectedAt: now, lastSeen: now }] }) });
+    }, 0);
+    return socket;
+  },
+  close() {},
 };
 function Fixture() {
   const [session, setSession] = useState(initial);
