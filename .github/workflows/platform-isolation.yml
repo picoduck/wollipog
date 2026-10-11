@@ -15,6 +15,10 @@ on:
         description: Run ten consecutive focused retained-process disposal tests on macOS.
         type: boolean
         default: false
+      lock_result_publication_load:
+        description: Run ten focused lock-result publication tests under CPU and filesystem load on Windows.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -82,6 +86,11 @@ jobs:
 
       - name: Verify Session Writer Lock Across Processes
         run: node --import tsx --test apps/runner/src/session-store-lock.test.ts
+
+      - name: Verify Lock Result Publication Ten Times Under Windows Load
+        if: github.event_name == 'workflow_dispatch' && inputs.lock_result_publication_load && startsWith(matrix.os, 'windows-')
+        timeout-minutes: 10
+        run: node apps/runner/scripts/verify-lock-result-publication-load.mjs
 
       - name: Verify Source Provider-HOME Worker
         run: node apps/runner/scripts/verify-provider-home-worker-binary.mjs --source

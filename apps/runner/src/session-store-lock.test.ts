@@ -96,7 +96,21 @@ else if (config.op === "reset") result = (store.resetEvents(config.id), true);
 else if (config.op === "append") result = store.appendEvent(config.id, { kind: "agent_message", text: config.owner }) !== null;
 else if (config.op === "refresh") result = store.refreshLock(config.id, config.owner);
 else store.releaseLock(config.id, config.owner);
-fs.writeFileSync(signal(config.name, "result"), JSON.stringify(result));
+// Publish through a private sibling, so existence of the final path means every byte was written.
+const resultPath = signal(config.name, "result");
+const pendingPath = signal(config.name, "result.pending");
+const payload = config.resultFault === "invalid" ? "private malformed result" : JSON.stringify(result);
+if (config.resultPause) {
+  fs.writeFileSync(pendingPath, payload.slice(0, config.resultPause.bytes));
+  fs.writeFileSync(signal(config.resultPause.name, "checked"), "");
+  while (!realExists(signal(config.resultPause.name, "go"))) Atomics.wait(cell, 0, 0, 5);
+}
+if (config.resultFault === "exit") {
+  process.stderr.write("private child stderr: " + config.owner);
+  process.exit(7);
+}
+fs.writeFileSync(pendingPath, payload);
+fs.renameSync(pendingPath, resultPath);
 // Optionally stay alive afterwards, so this process's files name a live pid.
 while (config.stayAlive && !realExists(signal(config.name, "exit"))) Atomics.wait(cell, 0, 0, 5);
 `;
@@ -137,6 +151,17 @@ type ChildSpec = {
   splitWrite?: { name: string; path: string; bytes: number };
   /** Act as the runner: the one store allowed to break an abandoned guard. */
   breaker?: boolean;
+  /** Stall after creating an empty or partial unpublished result. Harness regression only. */
+  resultPause?: { name: string; bytes: number };
+  /** Simulate incomplete exit or malformed publication without exposing payloads in diagnostics. */
+  resultFault?: "exit" | "invalid";
+};
+
+type RaceChild = {
+  process: ChildProcess;
+  closed: Promise<void>;
+  stderrBytes: number;
+  spawnError: boolean;
 };
 
 class LockRace {
@@ -146,9 +171,11 @@ class LockRace {
   readonly guardPath = join(this.root, ID, "lock.guard");
   readonly metaPath = join(this.root, ID, "meta.json");
   private readonly childScript = join(this.root, "child.mjs");
-  private readonly children = new Map<string, ChildProcess>();
+  private readonly children = new Map<string, RaceChild>();
+  private readonly results = new Map<string, boolean | null>();
+  private disposed = false;
 
-  constructor() {
+  constructor(private readonly signal?: AbortSignal) {
     fs.mkdirSync(this.signalDir);
     writeFileSync(this.childScript, CHILD_SOURCE);
     new SessionStore(this.root).create(sessionMeta());
@@ -156,6 +183,8 @@ class LockRace {
 
   /** Start a child and wait until it reaches `waitFor` (any of its pauses by default) or finishes. */
   async start(spec: ChildSpec, waitFor?: string): Promise<void> {
+    assert.ok(!this.disposed, "fixture already disposed");
+    assert.ok(!this.children.has(spec.name), "fixture child names must be unique");
     const pauses = spec.pauses ?? (spec.pauseOn ? [{ name: spec.name, fn: spec.pauseOn, arg: 0, path: this.lockPath }] : []);
     const child = spawn(process.execPath, ["--import", "tsx", this.childScript], {
       cwd: REPO_ROOT,
@@ -167,28 +196,30 @@ class LockRace {
       },
       stdio: ["ignore", "ignore", "pipe"],
     });
-    let stderr = "";
-    child.stderr!.on("data", (chunk) => { stderr += chunk; });
-    const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
-    this.children.set(spec.name, child);
-    const names = waitFor ? [waitFor] : [...pauses.map((pause) => pause.name), ...spec.splitWrite ? [spec.splitWrite.name] : []];
+    const state: RaceChild = {
+      process: child, closed: new Promise<void>((resolve) => child.once("close", () => resolve())),
+      stderrBytes: 0, spawnError: false,
+    };
+    child.stderr!.on("data", (chunk: Buffer) => { state.stderrBytes += chunk.length; });
+    child.once("error", () => { state.spawnError = true; });
+    this.children.set(spec.name, state);
+    const names = waitFor ? [waitFor] : [
+      ...pauses.map((pause) => pause.name),
+      ...spec.splitWrite ? [spec.splitWrite.name] : [],
+      ...spec.resultPause ? [spec.resultPause.name] : [],
+    ];
     await this.until(
-      () => names.some((name) => this.has(name, "checked")) || this.has(spec.name, "result") || child.exitCode !== null,
-      `${spec.name} started`,
+      () => names.some((name) => this.has(name, "checked")) || this.readPublishedResult(spec.name),
+      "start", spec.name,
     );
-    if (child.exitCode !== null && !this.has(spec.name, "result")) {
-      await exited;
-      throw new Error(`${spec.name} exited without a result: ${stderr}`);
-    }
   }
 
   /** Release pause `pause` of child `name`, then wait until it reaches `next` or finishes. */
-  async resume(name: string, pause: string, next?: string): Promise<void> {
+  async resume(name: string, pause: string, next?: string, waitMs = 30_000): Promise<void> {
     writeFileSync(join(this.signalDir, `${pause}.go`), "");
-    const child = this.children.get(name)!;
     await this.until(
-      () => (next !== undefined && this.has(next, "checked")) || this.has(name, "result") || child.exitCode !== null,
-      `${name} resumed`,
+      () => (next !== undefined && this.has(next, "checked")) || this.readPublishedResult(name),
+      "resume", name, waitMs,
     );
   }
 
@@ -201,19 +232,34 @@ class LockRace {
     return this.has(pause, "checked");
   }
 
+  /** Observe a fixture-controlled publication pause while start/resume is still waiting. */
+  async waitForPause(name: string, pause: string): Promise<void> {
+    await this.until(() => this.paused(pause), "pause", name);
+  }
+
   async kill(name: string): Promise<void> {
     const child = this.children.get(name)!;
-    const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
-    child.kill("SIGKILL");
-    await exited;
+    if (child.process.exitCode === null && child.process.signalCode === null) child.process.kill("SIGKILL");
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        child.closed,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(this.failure("cleanup", name, "close-timeout")), 30_000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   pidOf(name: string): number {
-    return this.children.get(name)!.pid!;
+    return this.children.get(name)!.process.pid!;
   }
 
   result(name: string): unknown {
-    return JSON.parse(readFileSync(join(this.signalDir, `${name}.result`), "utf8"));
+    if (!this.readPublishedResult(name)) throw this.failure("result", name, "unpublished");
+    return this.results.get(name);
   }
 
   lockOwner(): string | null {
@@ -257,21 +303,44 @@ class LockRace {
   }
 
   async dispose(): Promise<void> {
-    for (const name of this.children.keys()) writeFileSync(join(this.signalDir, `${name}.exit`), "");
-    for (const child of this.children.values()) {
-      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-    }
-    rmSync(this.root, { recursive: true, force: true });
+    this.disposed = true;
+    // Await owned handles before removing files: Windows can refuse removal while a child uses them.
+    await Promise.all([...this.children.keys()].map((name) => this.kill(name)));
+    rmSync(this.root, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   }
 
   private has(name: string, suffix: string): boolean {
     return existsSync(join(this.signalDir, `${name}.${suffix}`));
   }
 
-  private async until(condition: () => boolean, what: string): Promise<void> {
-    const deadline = Date.now() + 30_000;
+  private readPublishedResult(name: string): boolean {
+    if (this.results.has(name)) return true;
+    const path = join(this.signalDir, `${name}.result`);
+    if (!existsSync(path)) return false;
+    let value: unknown;
+    try { value = JSON.parse(readFileSync(path, "utf8")); }
+    catch { throw this.failure("publication", name, "invalid-json"); }
+    if (value !== null && typeof value !== "boolean") throw this.failure("publication", name, "invalid-shape");
+    this.results.set(name, value);
+    return true;
+  }
+
+  private failure(phase: string, name: string, parse: string): Error {
+    const child = this.children.get(name)!;
+    return new Error(`lock-race phase=${phase} exit=${child.process.exitCode ?? "pending"} `
+      + `signal=${child.process.signalCode ?? "none"} spawn=${child.spawnError ? "failed" : "ok"} `
+      + `parse=${parse} stderrBytes=${child.stderrBytes}`);
+  }
+
+  private async until(condition: () => boolean, phase: string, name: string, waitMs = 30_000): Promise<void> {
+    const deadline = Date.now() + waitMs;
     while (!condition()) {
-      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+      const child = this.children.get(name)!;
+      if (this.disposed || this.signal?.aborted) throw this.failure(phase, name, "cancelled");
+      if (child.spawnError || child.process.exitCode !== null || child.process.signalCode !== null) {
+        throw this.failure(phase, name, "unpublished");
+      }
+      if (Date.now() > deadline) throw this.failure(phase, name, "timeout-unpublished");
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
   }
@@ -302,10 +371,103 @@ function startTimeOf(pid: number): string | null {
   }
 }
 
+/* ---- result publication harness ---- */
+
+test("result publication keeps empty and split JSON private during start and resume", async (t) => {
+  for (const phase of ["start", "resume"] as const) {
+    for (const bytes of [0, 2]) {
+      await t.test(`${phase}, ${bytes} bytes`, async (t) => {
+        const race = new LockRace(t.signal);
+        let pending: Promise<unknown> | undefined;
+        try {
+          const spec: ChildSpec = {
+            name: "a", op: "acquire", owner: "runner-a",
+            resultPause: { name: "report", bytes },
+            ...phase === "resume" ? { pauseOn: "existsSync" as const } : {},
+          };
+          let settled = false;
+          const operation = phase === "start"
+            ? race.start(spec, "never-reached")
+            : (await race.start(spec), race.resume("a", "a"));
+          // Observe rejection immediately too, so a regression cannot become an unhandled rejection.
+          pending = operation.then(() => { settled = true; return null; }, (error: unknown) => {
+            settled = true;
+            return error;
+          });
+          await race.waitForPause("a", "report");
+          assert.equal(readFileSync(join(race.signalDir, "a.result.pending"), "utf8"), "true".slice(0, bytes));
+          assert.equal(existsSync(join(race.signalDir, "a.result")), false);
+          assert.throws(() => race.result("a"), /phase=result .*parse=unpublished/);
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          assert.equal(settled, false, "readiness must wait until all JSON bytes are published");
+          await race.resume("a", "report");
+          assert.equal(await pending, null);
+          assert.equal(race.result("a"), true);
+          assert.equal(race.lockOwner(), "runner-a");
+          assert.equal(existsSync(join(race.signalDir, "a.result.pending")), false);
+        } finally {
+          await race.dispose();
+          await pending;
+          assert.equal(existsSync(race.root), false);
+        }
+      });
+    }
+  }
+});
+
+test("result publication reports sanitized exit and parse failures", async (t) => {
+  for (const resultFault of ["exit", "invalid"] as const) {
+    await t.test(resultFault, async (t) => {
+      const race = new LockRace(t.signal);
+      try {
+        await assert.rejects(race.start({ name: "a", op: "acquire", owner: "private-owner", resultFault }), (error: Error) => {
+          assert.match(error.message, resultFault === "exit"
+            ? /phase=start exit=7 .*parse=unpublished stderrBytes=[1-9][0-9]*/
+            : /phase=publication .*parse=invalid-json/);
+          assert.doesNotMatch(error.message, /private|malformed|child stderr|wollipog-lock-race/);
+          return true;
+        });
+      } finally {
+        await race.dispose();
+        assert.equal(existsSync(race.root), false);
+      }
+    });
+  }
+});
+
+test("result publication times out and cancellation cleans only fixture-owned children", async (t) => {
+  const other = new LockRace(t.signal);
+  try {
+    await other.start({ name: "other", op: "acquire", owner: "runner-other", stayAlive: true });
+    for (const cancelled of [false, true]) {
+      const controller = new AbortController();
+      const race = new LockRace(controller.signal);
+      try {
+        await race.start({ name: "a", op: "acquire", owner: "runner-a", resultPause: { name: "report", bytes: 2 } });
+        const failure = assert.rejects(race.resume("a", "unrelated", undefined, 50), cancelled
+          ? /phase=resume .*parse=cancelled/
+          : /phase=resume .*parse=timeout-unpublished/);
+        if (cancelled) controller.abort();
+        await failure;
+      } finally {
+        const pid = race.pidOf("a");
+        await race.dispose();
+        assert.equal(existsSync(race.root), false);
+        assert.throws(() => process.kill(pid, 0), /ESRCH/);
+        assert.doesNotThrow(() => process.kill(other.pidOf("other"), 0));
+        assert.equal(existsSync(other.root), true);
+        assert.equal(other.result("other"), true);
+      }
+    }
+  } finally {
+    await other.dispose();
+  }
+});
+
 /* ---- races between processes ---- */
 
-test("of two processes taking a free lock, exactly one wins", async () => {
-  const race = new LockRace();
+test("of two processes taking a free lock, exactly one wins", async (t) => {
+  const race = new LockRace(t.signal);
   try {
     await race.start({ name: "a", op: "acquire", owner: "runner-a", pauseOn: "existsSync" });
     await race.start({ name: "b", op: "acquire", owner: "runner-b", pauseOn: "existsSync" });
@@ -320,8 +482,8 @@ test("of two processes taking a free lock, exactly one wins", async () => {
   }
 });
 
-test("a newly taken lock is never visible empty", async () => {
-  const race = new LockRace();
+test("a newly taken lock is never visible empty", async (t) => {
+  const race = new LockRace(t.signal);
   try {
     await race.start({
       name: "a", op: "acquire", owner: "runner-a",
@@ -338,8 +500,8 @@ test("a newly taken lock is never visible empty", async () => {
   }
 });
 
-test("of two processes taking over a stale lock, exactly one wins", async () => {
-  const race = new LockRace();
+test("of two processes taking over a stale lock, exactly one wins", async (t) => {
+  const race = new LockRace(t.signal);
   try {
     race.writeLock("dead-runner", 120_000);
     await race.start({ name: "a", op: "acquire", owner: "runner-a", pauseOn: "readFileSync" });
@@ -357,8 +519,8 @@ test("of two processes taking over a stale lock, exactly one wins", async () => 
 
 test("a takeover never displaces a lock its owner refreshes in the meantime", async (t) => {
   for (const first of ["owner", "taker"] as const) {
-    await t.test(`${first} reaches the lock first`, async () => {
-      const race = new LockRace();
+    await t.test(`${first} reaches the lock first`, async (t) => {
+      const race = new LockRace(t.signal);
       try {
         race.writeLock("runner-o", 120_000);
         const owner: ChildSpec = { name: "o", op: "refresh", owner: "runner-o", pauseOn: "readFileSync" };
@@ -379,8 +541,8 @@ test("a takeover never displaces a lock its owner refreshes in the meantime", as
   }
 });
 
-test("a takeover is never removed by the stale owner releasing in the meantime", async () => {
-  const race = new LockRace();
+test("a takeover is never removed by the stale owner releasing in the meantime", async (t) => {
+  const race = new LockRace(t.signal);
   try {
     race.writeLock("runner-o", 120_000);
     await race.start({ name: "t", op: "acquire", owner: "runner-t", pauseOn: "readFileSync" });
@@ -400,8 +562,8 @@ test("a takeover is never removed by the stale owner releasing in the meantime",
 
 test("an acquirer that stalled while publishing a free lock never owns it alongside a later taker", async (t) => {
   for (const variant of ["linked", "no hard links", "no hard links, takeover pending"] as const) {
-    await t.test(variant, async () => {
-      const race = new LockRace();
+    await t.test(variant, async (t) => {
+      const race = new LockRace(t.signal);
       try {
         // A stalls mid-publication long enough for its lock to look stale once it lands.
         await race.start(variant === "linked"
@@ -444,8 +606,8 @@ test("an acquirer that stalled while publishing a free lock never owns it alongs
 
 test("a free lock's lease starts after publication, however short the stall before linking (CR-E2-2.1)", async (t) => {
   for (const variant of ["second stall after the acquire", "second stall before the confirmation"] as const) {
-    await t.test(variant, async () => {
-      const race = new LockRace();
+    await t.test(variant, async (t) => {
+      const race = new LockRace(t.signal);
       try {
         // A writes its lock temp file and stalls 29 s: less than half the stale window.
         await race.start({
@@ -485,8 +647,8 @@ test("a free lock's lease starts after publication, however short the stall befo
   }
 });
 
-test("a free acquirer stalled while confirming its lock holds the guard, so no takeover interleaves", async () => {
-  const race = new LockRace();
+test("a free acquirer stalled while confirming its lock holds the guard, so no takeover interleaves", async (t) => {
+  const race = new LockRace(t.signal);
   try {
     // A has linked its lock and read it back while confirming; the read is its only check before the touch.
     await race.start({ name: "a", op: "acquire", owner: "runner-a", pauseOn: "readFileSync" });
@@ -502,8 +664,8 @@ test("a free acquirer stalled while confirming its lock holds the guard, so no t
   }
 });
 
-test("an acquirer that stalled right after publishing finds a takeover instead of claiming the lock", async () => {
-  const race = new LockRace();
+test("an acquirer that stalled right after publishing finds a takeover instead of claiming the lock", async (t) => {
+  const race = new LockRace(t.signal);
   try {
     await race.start({
       name: "a", op: "acquire", owner: "runner-a",
@@ -522,8 +684,8 @@ test("an acquirer that stalled right after publishing finds a takeover instead o
   }
 });
 
-test("a takeover that stalled before its rename publishes a fresh lease", async () => {
-  const race = new LockRace();
+test("a takeover that stalled before its rename publishes a fresh lease", async (t) => {
+  const race = new LockRace(t.signal);
   try {
     race.writeLock("dead-runner", 120_000);
     // A's second lock temp file is its replacement (the first was its free attempt).
@@ -545,8 +707,8 @@ test("a takeover that stalled before its rename publishes a fresh lease", async 
 
 /* ---- guards abandoned by a dead process; only the runner breaks them ---- */
 
-test("a guard holder killed mid-section is recovered by the runner, and the race still has one winner", async () => {
-  const race = new LockRace();
+test("a guard holder killed mid-section is recovered by the runner, and the race still has one winner", async (t) => {
+  const race = new LockRace(t.signal);
   try {
     race.writeLock("dead-runner", 120_000);
     await race.start({ name: "k", op: "acquire", owner: "runner-k", pauseOn: "readFileSync" });
@@ -569,8 +731,8 @@ test("a guard holder killed mid-section is recovered by the runner, and the race
   }
 });
 
-test("a stale guard left by a dead pid is broken only by the runner", async () => {
-  const race = new LockRace();
+test("a stale guard left by a dead pid is broken only by the runner", async (t) => {
+  const race = new LockRace(t.signal);
   try {
     race.writeLock("dead-runner", 120_000);
     writeFileSync(race.guardPath, JSON.stringify({ pid: await deadPid(), start: "1", token: "dead" }));
@@ -589,8 +751,8 @@ test("a stale guard left by a dead pid is broken only by the runner", async () =
   }
 });
 
-test("a guard is never visible empty, so a live creator's old guard is never broken", async () => {
-  const race = new LockRace();
+test("a guard is never visible empty, so a live creator's old guard is never broken", async (t) => {
+  const race = new LockRace(t.signal);
   try {
     race.writeLock("runner-o", 120_000);
     await race.start({
@@ -613,8 +775,8 @@ test("a guard is never visible empty, so a live creator's old guard is never bro
   }
 });
 
-test("without hard links, a creator stalled before writing its guard is never broken", async () => {
-  const race = new LockRace();
+test("without hard links, a creator stalled before writing its guard is never broken", async (t) => {
+  const race = new LockRace(t.signal);
   try {
     race.writeLock("dead-runner", 120_000);
     await race.start({
@@ -647,8 +809,8 @@ test("without hard links, a partly written owner that names another owner is nev
     ["acquire", "acquire"], ["acquire", "refresh"], ["acquire", "release"], ["acquireFree", "acquire"],
   ] as const;
   for (const [writerOp, readerOp] of cases) {
-    await t.test(`${writerOp} mid-write, then ${readerOp} by the prefix owner`, async () => {
-      const race = new LockRace();
+    await t.test(`${writerOp} mid-write, then ${readerOp} by the prefix owner`, async (t) => {
+      const race = new LockRace(t.signal);
       try {
         await race.start({
           name: "a", op: writerOp, owner: history, noHardLinks: true,
@@ -989,8 +1151,8 @@ function tempWritten(race: LockRace, { file, writer, fn }: TempWriter): Pause {
 
 test("a temp file left by a writer killed before its rename is swept once past the grace period", async (t) => {
   for (const temp of TEMP_WRITERS) {
-    await t.test(`${temp.file} (${temp.writer})`, async () => {
-      const race = new LockRace();
+    await t.test(`${temp.file} (${temp.writer})`, async (t) => {
+      const race = new LockRace(t.signal);
       try {
         temp.setup?.(race);
         await race.start({ name: "w", op: temp.op, owner: "runner-w", pauses: [tempWritten(race, temp)] });
@@ -1017,8 +1179,8 @@ test("a temp file left by a writer killed before its rename is swept once past t
 test("the sweep never removes a temp file whose writer is still alive, however old", async (t) => {
   // A paused replaceLockFile holds the guard, which keeps maintenance (and so the sweep) out.
   for (const temp of TEMP_WRITERS.filter(({ op, writer }) => (op === "meta" || op === "acquire") && writer !== "replaceLockFile")) {
-    await t.test(`${temp.file} (${temp.writer})`, async () => {
-      const race = new LockRace();
+    await t.test(`${temp.file} (${temp.writer})`, async (t) => {
+      const race = new LockRace(t.signal);
       try {
         temp.setup?.(race);
         await race.start({ name: "w", op: temp.op, owner: "runner-w", pauses: [tempWritten(race, temp)] });
