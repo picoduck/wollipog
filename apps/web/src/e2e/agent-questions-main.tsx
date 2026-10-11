@@ -295,6 +295,8 @@ function Fixture() {
           ? paragraphQuestions
       : params.get("set") === "long-note"
         ? formQuestions.map((question) => question.id === "note" ? { ...question, maxLength: 8000 } : question)
+      : params.get("set") === "budget-note"
+        ? [{ id: "note", header: "Note", question: "Add a note.", options: [], allowOther: true, maxLength: 250000 }]
       : params.get("set") === "forms"
         ? formQuestions
         : params.get("set") === "notes"

@@ -163,3 +163,40 @@ test("invalid over-length edits remain correctable in this page but never enter 
   assert.deepEqual(storedQuestionDrafts("over-length", key), { note: { kind: "entry", value } });
   assert.doesNotMatch([...data.values()].join(""), /x{4001}/);
 });
+
+for (const replacement of [false, true]) {
+  test(`an individually oversized ${replacement ? "replacement" : "new draft"} preserves unrelated persisted answers`, () => {
+    const scope = `budget-${replacement}`;
+    const fields: AgentQuestion[] = [{ id: "note", question: "Add a note.", options: [], allowOther: true, maxLength: 250000 }];
+    const keys = ["first", "second", "large"].map((id) => questionDraftIdentity(id, fields, `epoch-${id}`, undefined, scope));
+    storeQuestionDrafts("first", keys[0]!, { note: { kind: "entry", value: "First saved answer" } });
+    storeQuestionDrafts("second", keys[1]!, { note: { kind: "entry", value: "Second saved answer" } });
+    if (replacement) storeQuestionDrafts("large", keys[2]!, { note: { kind: "entry", value: "Stale saved answer" } });
+    const value = "x".repeat(210000);
+    storeQuestionDrafts("large", keys[2]!, { note: { kind: "entry", value } });
+    assert.deepEqual(storedQuestionDrafts("large", keys[2]!), { note: { kind: "entry", value } });
+    const raw = data.get(`wollipog:question-drafts:v1:${scope}`)!;
+    assert.ok(raw && raw.length <= 200000);
+    const entries = JSON.parse(raw);
+    assert.deepEqual(entries.map((entry: { sessionId: string }) => entry.sessionId), ["first", "second"]);
+    assert.equal(entries[0].values.note.value, "First saved answer");
+    assert.equal(entries[1].values.note.value, "Second saved answer");
+    assert.doesNotMatch(raw, /Stale saved answer/);
+    storeQuestionDrafts("large", keys[2]!, { note: { kind: "entry", value: "Edited down" } });
+    assert.equal(JSON.parse(data.get(`wollipog:question-drafts:v1:${scope}`)!).length, 3);
+  });
+}
+
+test("serialized escaping and metadata count toward the individual and total storage budget", () => {
+  const scope = "serialized-budget";
+  const fields: AgentQuestion[] = [{ id: "note", question: "Add a note.", options: [], allowOther: true, maxLength: 250000 }];
+  const key = (id: string) => questionDraftIdentity(id, fields, `epoch-${id}`, undefined, scope);
+  storeQuestionDrafts("first", key("first"), { note: { kind: "entry", value: "a".repeat(110000) } });
+  storeQuestionDrafts("escaped", key("escaped"), { note: { kind: "entry", value: '"'.repeat(100000) } });
+  let raw = data.get(`wollipog:question-drafts:v1:${scope}`)!;
+  assert.deepEqual(JSON.parse(raw).map((entry: { sessionId: string }) => entry.sessionId), ["first"]);
+  storeQuestionDrafts("second", key("second"), { note: { kind: "entry", value: "b".repeat(110000) } });
+  raw = data.get(`wollipog:question-drafts:v1:${scope}`)!;
+  assert.ok(raw.length <= 200000);
+  assert.deepEqual(JSON.parse(raw).map((entry: { sessionId: string }) => entry.sessionId), ["second"]);
+});
