@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   terminalSearchCountLabel,
   type ShellTabView,
@@ -105,20 +105,35 @@ export function TerminalSearch({
   disabled?: boolean;
   onOpen: () => void;
 }) {
-  const autoFocus = useSearchOpenedHere(open);
+  const focus = useSearchFocus(open, "head");
   if (!open) return <TerminalSearchButton disabled={disabled} onClick={onOpen} />;
-  return <TerminalSearchControls {...controls} autoFocus={autoFocus} />;
+  return <TerminalSearchControls {...controls} autoFocus={focus.autoFocus} onFieldFocus={focus.onFieldFocus} />;
 }
 
 /**
- * Whether the open search was opened while this host showed it, so its field should take focus. A host
- * mounted with search already open (the dock shown again, #2867) leaves focus where it was until search
- * is closed and opened again.
+ * Whether search controls mounting now take focus. Search opened while the host showed it puts the
+ * caret in the field. A host mounted with search already open (the dock shown again, #2867) leaves
+ * focus where it was. Controls that move to another `placement` while open (the phone dock's own row,
+ * across the 760px breakpoint, #2866) take focus only if their field had it, so rotating a phone
+ * neither drops the caret nor steals it from the terminal. The controls report their field's focus
+ * through `onFieldFocus`.
  */
-export function useSearchOpenedHere(open: boolean): boolean {
-  const openAtMount = useRef(open);
-  if (!open) openAtMount.current = false;
-  return !openAtMount.current;
+export function useSearchFocus(open: boolean, placement: string): {
+  autoFocus: boolean;
+  onFieldFocus: (focused: boolean) => void;
+} {
+  // The last committed state, read during render, so a render React repeats decides the same way.
+  const committed = useRef<{ open: boolean; placement: string } | null>(null);
+  const fieldFocused = useRef(false);
+  useLayoutEffect(() => {
+    committed.current = { open, placement };
+    if (!open) fieldFocused.current = false;
+  });
+  const last = committed.current;
+  const autoFocus = last !== null && open &&
+    (!last.open || (last.placement !== placement && fieldFocused.current));
+  const onFieldFocus = useRef((focused: boolean) => { fieldFocused.current = focused; }).current;
+  return { autoFocus, onFieldFocus };
 }
 
 /**
@@ -148,8 +163,7 @@ export function TerminalSearchButton({ disabled = false, pressed, onClick }: {
 
 /**
  * The open search: the field, its match count, Previous Match, Next Match and Close Search. The field
- * takes focus when the controls appear, so opening search puts the caret in it; a host that mounts
- * them with search already open (a dock shown again) keeps focus where it was through `autoFocus`.
+ * takes focus when the controls appear unless `autoFocus` is false (`useSearchFocus` decides).
  */
 export function TerminalSearchControls({
   term,
@@ -159,7 +173,12 @@ export function TerminalSearchControls({
   onPrevious,
   onClose,
   autoFocus = true,
-}: TerminalSearchControlsProps & { autoFocus?: boolean }) {
+  onFieldFocus,
+}: TerminalSearchControlsProps & {
+  autoFocus?: boolean;
+  /** Told when the field gains and loses focus (`useSearchFocus`). */
+  onFieldFocus?: (focused: boolean) => void;
+}) {
   const inputRef = useRef<HTMLInputElement>(null);
   const focusOnMount = useRef(autoFocus);
   useEffect(() => {
@@ -191,6 +210,8 @@ export function TerminalSearchControls({
           autoComplete="off"
           spellCheck={false}
           onChange={(event) => onTermChange(event.target.value)}
+          onFocus={() => onFieldFocus?.(true)}
+          onBlur={() => onFieldFocus?.(false)}
           onKeyDown={(event) => {
             if (event.key !== "Enter") return;
             event.preventDefault();

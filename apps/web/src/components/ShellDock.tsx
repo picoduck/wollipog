@@ -24,12 +24,11 @@ import { runnerDisplay } from "../runners.js";
 import { ShellTerminal, type ShellTerminalHandle } from "./ShellTerminal.js";
 import {
   TerminalNewTab,
-  TerminalSearch,
   TerminalSearchButton,
   TerminalSearchControls,
   TerminalTabs,
   terminalTabId,
-  useSearchOpenedHere,
+  useSearchFocus,
   type TerminalTabKind,
 } from "./TerminalHead.js";
 import { TerminalNoticeSlot } from "./TerminalNoticeSlot.js";
@@ -139,7 +138,6 @@ export function ShellDock({
   };
   const terminalRef = useRef<ShellTerminalHandle | null>(null);
   const pipeInputRef = useRef<HTMLInputElement | null>(null);
-  const searchAutoFocus = useSearchOpenedHere(searchOpen);
 
   // The dock is open while mounted: the store loads or refreshes the shells, and releases on hide.
   useEffect(() => terminals?.openHost(), [terminals]);
@@ -287,7 +285,11 @@ export function ShellDock({
     else terminalRef.current?.focus();
   };
 
+  // On a phone the open search has its own row; elsewhere it replaces Search Output in the head.
+  const searchFocus = useSearchFocus(searchOpen, phone ? "row" : "head");
   const searchControls = {
+    autoFocus: searchFocus.autoFocus,
+    onFieldFocus: searchFocus.onFieldFocus,
     term: searchTerm,
     results: searchResults,
     onTermChange: terminals?.setSearchTerm ?? (() => undefined),
@@ -373,8 +375,10 @@ export function ShellDock({
               pressed={searchOpen}
               onClick={searchOpen ? closeSearch : terminals.openSearch}
             />
+          ) : searchOpen ? (
+            <TerminalSearchControls {...searchControls} />
           ) : (
-            <TerminalSearch open={searchOpen} disabled={!active} onOpen={terminals.openSearch} {...searchControls} />
+            <TerminalSearchButton disabled={!active} onClick={terminals.openSearch} />
           )}
           <TerminalNewTab
             id={`${tabsetId}-new`}
@@ -397,7 +401,7 @@ export function ShellDock({
       </div>
       {phone && searchOpen && (
         <div className="dock-search-row" onMouseDown={holdFieldFocus}>
-          <TerminalSearchControls {...searchControls} autoFocus={searchAutoFocus} />
+          <TerminalSearchControls {...searchControls} />
         </div>
       )}
 

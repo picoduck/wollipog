@@ -164,6 +164,27 @@ test.describe("at 390px with touch", () => {
     await expect(toggle).toHaveAttribute("aria-pressed", "false");
   });
 
+  test("crossing 760px with search open keeps the caret in the field, and leaves focus elsewhere alone", async ({ page }) => {
+    const dock = await openTerminal(page, 2);
+    await dock.getByRole("button", { name: "Search Output" }).click();
+    const field = dock.getByRole("textbox", { name: "Search Output" });
+    await expect(dock.locator(".dock-search-row").getByRole("textbox")).toBeFocused();
+
+    // A phone turned sideways: the search moves into the head with its caret.
+    await page.setViewportSize({ width: 844, height: 390 });
+    await expect(dock.locator(".dock-search-row")).toHaveCount(0);
+    await expect(head(dock).getByRole("textbox", { name: "Search Output" })).toBeFocused();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(dock.locator(".dock-search-row").getByRole("textbox")).toBeFocused();
+
+    // With focus in the terminal, the move leaves it there.
+    await dock.locator(".shell-term:not(.is-hidden) .xterm-helper-textarea").focus();
+    await page.setViewportSize({ width: 844, height: 390 });
+    await expect(head(dock).getByRole("textbox", { name: "Search Output" })).toBeVisible();
+    await expect(field).not.toBeFocused();
+    await expect(dock.locator(".shell-term:not(.is-hidden) .xterm-helper-textarea")).toBeFocused();
+  });
+
   test("with the search field focused and the keyboard up, the sheet ends above it with the search row in view", async ({ page }) => {
     // A short screen and a tall keyboard, where half the screen no longer fits under the session bar.
     await page.setViewportSize({ width: 390, height: 700 });
