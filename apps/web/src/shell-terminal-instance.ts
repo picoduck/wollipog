@@ -291,6 +291,8 @@ export class ShellTerminalInstance {
           this.searchResults = null;
           this.callbacks?.onSearchResults?.(null);
         } else {
+          // A search moves the terminal to its match: nothing holds it at the bottom any longer.
+          this.followBottomUntil = 0;
           search.findNext(next.searchTerm, { incremental: true, decorations: this.decorations() });
           this.markActiveMatch();
         }
@@ -300,12 +302,14 @@ export class ShellTerminalInstance {
 
   findNext(searchTerm: string): void {
     if (!searchTerm) return;
+    this.followBottomUntil = 0;
     this.search?.findNext(searchTerm, { decorations: this.decorations() });
     this.markActiveMatch();
   }
 
   findPrevious(searchTerm: string): void {
     if (!searchTerm) return;
+    this.followBottomUntil = 0;
     this.search?.findPrevious(searchTerm, { decorations: this.decorations() });
     this.markActiveMatch();
   }
@@ -434,7 +438,7 @@ export class ShellTerminalInstance {
    * Keep a terminal that was following its output at the bottom while it settles in a new host (a
    * move between the side panel and the dock, #2868): the scroller catches up with the new size a
    * frame or more later, so the terminal returns to the bottom on each render until the window ends.
-   * The person's own scrolling ends it at once.
+   * The person's own scrolling, and a search moving to a match, end it at once.
    */
   private followBottom(term: Terminal): void {
     this.followBottomUntil = Date.now() + FOLLOW_BOTTOM_MS;

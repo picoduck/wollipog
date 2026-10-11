@@ -111,8 +111,6 @@ export class SessionTerminals {
   private hosts = 0;
   /** Facts counting the shells now (`watchShells`). */
   private watchers = 0;
-  /** The newest host-less read of the list: an older one never lands after it. */
-  private peekSeq = 0;
   private everOpened = false;
   /**
    * Shells whose current history this store has loaded (or opened itself, which needs none). Every
@@ -530,17 +528,24 @@ export class SessionTerminals {
    */
   private peek(): void {
     if (this.disposed || this.hosts > 0 || this.watchers === 0) return;
+    // A host's read still in flight (the terminal was just hidden) predates this one, so it must not
+    // land after it; the next open reads again anyway.
+    this.supersedeLoads();
     const seq = this.loadSeq;
-    const peek = ++this.peekSeq;
-    const current = () => this.hosts === 0 && this.loadSeq === seq && this.peekSeq === peek;
+    const current = () => this.hosts === 0 && this.loadSeq === seq;
     this.api.listShells(this.sessionId).then(({ shells: registry }) => {
       if (!current()) return;
       const list = shellsVisibleAfterClose(registry, this.closingShellIds);
+      // As a host's reconcile does: a shell that left takes its queued work and, when it was the
+      // selected tab, its command draft, which must never reach the tab selected in its place.
+      const removed = shellsRemovedAfterReconnect(this.state.shells, list);
+      this.cancelRemovedShellWork(removed);
       const previous = this.state.active;
       this.setState({
         shells: list,
         active: previous && list.some((shell) => shell.shellId === previous) ? previous : list[0]?.shellId ?? null,
         listUnreadable: false,
+        ...(previous && removed.has(previous) ? { input: "" } : {}),
       });
     }, () => {
       if (current()) this.setState({ listUnreadable: true });

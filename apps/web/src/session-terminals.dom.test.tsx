@@ -986,6 +986,65 @@ test("watching the shell list reads it with no host open, loading no history and
   }
 });
 
+test("a watched list that drops the selected shell drops its command draft too, so the draft never reaches another shell", async () => {
+  const registry = [{ ...shell(1), pty: false }, { ...shell(2), pty: false }];
+  const sent: Array<[string, string]> = [];
+  const { terminals } = storeOver(registry);
+  (terminals as unknown as { api: { shellInput: (s: string, id: string, data: string) => Promise<void> } }).api.shellInput =
+    async (_sessionId, shellId, data) => { sent.push([shellId, data]); };
+  try {
+    const release = terminals.openHost();
+    await until(() => terminals.getSnapshot().shells?.length === 2, "the shells");
+    terminals.setInput("rm -rf build");
+    release();
+
+    const unwatch = terminals.watchShells();
+    registry.splice(0, 1); // Another dashboard closes Shell 1.
+    terminals.registryChanged();
+    await until(() => terminals.getSnapshot().active === "shell-2", "Shell 2 selected in its place");
+    assert.equal(terminals.getSnapshot().input, "", "Shell 1's draft went with it");
+    unwatch();
+
+    const reopen = terminals.openHost();
+    await settle(10);
+    await terminals.sendLine();
+    assert.deepEqual(sent, [["shell-2", "\n"]], "Enter on the empty row is a blank line, never Shell 1's command");
+    reopen();
+  } finally {
+    terminals.dispose();
+  }
+});
+
+test("a host's list still on its way when the terminal is hidden never lands after the watched list", async () => {
+  const answers: Array<(shells: ShellView[]) => void> = [];
+  const shellApi = {
+    ...client,
+    listShells: () => new Promise<{ shells: ShellView[] }>((resolve) => { answers.push((shells) => resolve({ shells })); }),
+    shellHistory: async (_sessionId: string, shellId: string) => ({ shellId, chunks: [], nextAfter: 0, hasMore: false, truncatedBefore: false }),
+  } as ApiClient;
+  const terminals = new SessionTerminals(session.id, shellApi, {
+    reconcileShellOutputs() {}, loadShellHistory() {}, removeShellOutput() {},
+  });
+  try {
+    // The tool opens and reads the list; the person switches to Session Tools before it answers.
+    const release = terminals.openHost();
+    release();
+    const unwatch = terminals.watchShells();
+    assert.equal(answers.length, 2, "the host's read and the watcher's");
+    // The watcher's read answers first with the current registry, then the host's older one lands.
+    answers[1]!([shell(2)]);
+    await settle(10);
+    assert.deepEqual(terminals.getSnapshot().shells?.map((listed) => listed.shellId), ["shell-2"]);
+    answers[0]!([shell(1)]);
+    await settle(10);
+    assert.deepEqual(terminals.getSnapshot().shells?.map((listed) => listed.shellId), ["shell-2"], "the older read is dropped");
+    assert.equal(terminals.getSnapshot().active, "shell-2");
+    unwatch();
+  } finally {
+    terminals.dispose();
+  }
+});
+
 interface ToolControls {
   setPlace(place: "none" | "panel" | "dock"): void;
   terminals: SessionTerminals | null;
