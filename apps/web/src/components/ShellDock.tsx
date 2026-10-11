@@ -1,8 +1,4 @@
 import { useEffect, useId, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
-import { Notice } from "./Notice.js";
-import { nativeTuiHasTrackedGuardrails, type ShellKind, type ShellView } from "@wollipog/protocol";
-import { useStoreSelector } from "../store.js";
-import { useSessionTerminals } from "../session-terminals.js";
 import {
   DOCK_DEFAULT_HEIGHT,
   DOCK_MIN_HEIGHT,
@@ -11,32 +7,14 @@ import {
   resolveDockDrag,
 } from "../dock.js";
 import {
-  PIPE_MODE_REASON,
-  READ_ONLY_SHELL_MESSAGE,
-  agentTuiUnavailableReason,
-  shellExitedMessage,
-  shellTabView,
-  supportsSessionAgentTui,
-  sessionHasHookGovernance,
-  terminalNoticeConditions,
-} from "../shells-panel.js";
-import { runnerDisplay } from "../runners.js";
-import { ShellTerminal, type ShellTerminalHandle } from "./ShellTerminal.js";
-import {
   TerminalNewTab,
   TerminalSearchButton,
   TerminalSearchControls,
   TerminalTabs,
-  terminalTabId,
-  useSearchFocus,
-  type TerminalTabKind,
 } from "./TerminalHead.js";
-import { TerminalNoticeSlot } from "./TerminalNoticeSlot.js";
+import { TerminalSurface, useTerminalHost } from "./TerminalSurface.js";
 import { holdFieldFocus } from "./requests/hold-field-focus.js";
-import type { SessionNoticeEntry } from "./SessionNoticeSlot.js";
-import { State } from "./State.js";
-import { BusyButton } from "./ui/BusyButton.js";
-import { ChevronDownIcon, TerminalIcon } from "./Icons.js";
+import { ChevronDownIcon } from "./Icons.js";
 import { useIsCoarsePointer, useIsMobile } from "./useIsMobile.js";
 import { shortcutAriaKeys, shortcutDisplay } from "../shortcuts.js";
 import type { ResolvedTheme } from "../theme.js";
@@ -68,9 +46,10 @@ function viewportDockMax(): number {
  * Its one 40px head (#2864; docs/design-system.md §4.6) is the tabs, then Search Output, New Tab and
  * Hide Terminal. The tabs, search and New Tab are TerminalHead's, which any terminal host renders.
  *
- * Its body (#2865; §4.6) is the flush terminal on --terminal-bg: the terminal's one notice
- * (`TerminalNoticeSlot`), one mounted `ShellTerminal` per shell with the others hidden, then an
- * exited shell's status row or a pipe shell's command row; with no shell, an empty state.
+ * Its body (#2865; §4.6) is the flush terminal on --terminal-bg (`TerminalSurface`, which the side
+ * panel's Terminal tool renders too, #2868): the terminal's one notice, one mounted `ShellTerminal`
+ * per shell with the others hidden, then an exited shell's status row or a pipe shell's command row;
+ * with no shell, an empty state.
  *
  * On a phone (#2866; §4.6, §15.1) the dock is a sheet in the composer's place, which the session hides
  * while it is open. Its head stays one row: Search Output stays in it, pressed while search is open,
@@ -90,32 +69,13 @@ export function ShellDock({
   scheme: string;
 }) {
   const tabsetId = `shell-dock-${useId().replace(/:/g, "")}`;
-  const sessionTerminals = useSessionTerminals(sessionId);
-  const terminals = sessionTerminals?.terminals ?? null;
-  const sessions = useStoreSelector((s) => s.sessions);
-  const runners = useStoreSelector((s) => s.runners);
-  const shellOutput = useStoreSelector((s) => s.shellOutput);
-  const session = sessions.get(sessionId);
-  const runner = session ? runners.get(session.runnerId) : undefined;
-  const box = useStoreSelector((s) => session
-    ? [...s.boxes.values()].find((candidate) => candidate.runnerId === session.runnerId)
-    : undefined);
   const coarsePointer = useIsCoarsePointer();
   const phone = useIsMobile();
-  const runnerOnline = runner?.status === "online";
-  const sessionAgent = runner?.agents.find((agent) => agent.id === session?.agentId);
-  const sessionAgentContextKind = sessionAgent
-    ? (sessionAgent.context?.kind ?? "native")
-    : undefined;
-  const tuiSupported = supportsSessionAgentTui(
-    session?.driver,
-    runner?.protocolVersion,
-    runner?.os,
-    session?.permissionMode,
-    sessionAgentContextKind,
-    session?.role,
-  );
-  const tuiGuardrailBlocked = nativeTuiHasTrackedGuardrails(session ?? {});
+  // On a phone the open search has its own row; elsewhere it replaces Search Output in the head.
+  const host = useTerminalHost(sessionId, tabsetId, {
+    searchPlacement: phone ? "row" : "head",
+    fallbackFocusIds: [`${tabsetId}-new`, `${tabsetId}-hide`],
+  });
 
   // `height` is the user's PREFERENCE — only explicit gestures (drag, keyboard, double-click)
   // change it, so a temporary viewport shrink while the dock is collapsed can never clobber
@@ -132,15 +92,6 @@ export function ShellDock({
   const [viewportMax, setViewportMax] = useState(() => viewportDockMax());
   const [dragging, setDragging] = useState(false);
   const dragRef = useRef<{ startY: number; startHeight: number } | null>(null);
-
-  const { shells, active, input, busy, error, searchOpen, searchTerm, searchResults } = sessionTerminals?.state ?? {
-    shells: null, active: null, input: "", busy: false, error: null, searchOpen: false, searchTerm: "", searchResults: null,
-  };
-  const terminalRef = useRef<ShellTerminalHandle | null>(null);
-  const pipeInputRef = useRef<HTMLInputElement | null>(null);
-
-  // The dock is open while mounted: the store loads or refreshes the shells, and releases on hide.
-  useEffect(() => terminals?.openHost(), [terminals]);
 
   // Persist prefs once values settle (not per pointermove). Visibility is persisted by the
   // app shell (which owns the mount); only the height pref lives here.
@@ -168,48 +119,6 @@ export function ShellDock({
     document.body.classList.toggle("shell-dock-dragging", dragging);
     return () => document.body.classList.remove("shell-dock-dragging");
   }, [dragging]);
-
-  const activeShell = shells?.find((s) => s.shellId === active) ?? null;
-  const hookGovernanceActive = sessionHasHookGovernance(session?.agentCapabilities);
-  const scrollback = active ? shellOutput.get(active) : undefined;
-  const isPty = activeShell?.pty === true;
-  /** A shell's terminal takes keystrokes: a running PTY on an online machine. */
-  const shellInteractive = (shell: ShellView) =>
-    shell.pty === true && shell.status === "running" && runnerOnline && !shellOutput.get(shell.shellId)?.exited;
-  const interactive = activeShell !== null && shellInteractive(activeShell);
-  const exited = Boolean(scrollback?.exited) || activeShell?.status === "exited";
-  const pipeInput = activeShell !== null && !isPty && !exited && activeShell.status === "running";
-  // A shell that is neither exited nor waiting on its machine, but takes no input here.
-  const readOnly = activeShell !== null && !interactive && !pipeInput && !exited && runnerOnline &&
-    activeShell.status !== "reconnecting";
-
-  const tuiRunning = shells?.some((shell) => shell.kind === "agent_tui" && shell.status !== "exited") ?? false;
-
-  const newShell = (kind: ShellKind = "shell") => {
-    void terminals?.newShell(kind);
-  };
-
-  const closeShell = (shellId: string) => {
-    if (!terminals) return;
-    // A tab's Close and the exited shell's Close Tab both leave with the shell they close.
-    const restoreTabFocus = document.activeElement instanceof HTMLElement
-      && document.activeElement.closest(".shell-tab, .term-status") != null;
-    const nextActive = terminals.closeShell(shellId);
-    if (restoreTabFocus) {
-      window.setTimeout(() => {
-        const nextTab = nextActive ? document.getElementById(terminalTabId(tabsetId, nextActive)) : null;
-        const newTabButton = document.getElementById(`${tabsetId}-new`) as HTMLButtonElement | null;
-        const hideButton = document.getElementById(`${tabsetId}-hide`);
-        (nextTab ?? (newTabButton && !newTabButton.disabled ? newTabButton : hideButton))?.focus();
-      }, 0);
-    }
-  };
-
-  /** Pipe-mode line input (Windows-native shells): a blank Enter is meaningful stdin. */
-  const sendLine = () => {
-    if (scrollback?.exited) return;
-    void terminals?.sendLine();
-  };
 
   // What actually renders: the preference clamped to the live viewport ceiling. Gestures start
   // from THIS (what the user sees), and only gestures write the preference back.
@@ -253,81 +162,8 @@ export function ShellDock({
     setDragging(false);
   };
 
-  const folderPath = session?.worktreePath ??
-    runner?.workspaces?.find((workspace) => workspace.id === session?.workspaceId)?.path ??
-    null;
-  const tabs = (shells ?? []).map((shell) => shellTabView(shell, {
-    exited: Boolean(shellOutput.get(shell.shellId)?.exited),
-    folderPath,
-  }));
-  const machineName = runnerDisplay(runner, box, session?.runnerId).name || "This machine";
-  const machineOffline = `${machineName} is offline.`;
-  const agentName = sessionAgent?.name || session?.agentName || "The agent";
-  const newTabKinds: TerminalTabKind[] = [
-    { label: "New Shell", unavailableReason: runnerOnline ? null : machineOffline, open: () => void newShell() },
-    ...(tuiSupported ? [{
-      label: "New Agent TUI",
-      description: `${agentName}'s own terminal interface, outside Wollipog's tracking.`,
-      unavailableReason: agentTuiUnavailableReason({
-        machineOnline: runnerOnline,
-        machineName,
-        tuiOpen: tuiRunning,
-        guardrailBlocked: tuiGuardrailBlocked,
-      }),
-      open: () => void newShell("agent_tui"),
-    }] : []),
-  ];
-
-  /** Escape or Close Search: the term goes, and focus returns to what types into the shell. */
-  const closeSearch = () => {
-    terminals?.closeSearch();
-    if (pipeInputRef.current) pipeInputRef.current.focus();
-    else terminalRef.current?.focus();
-  };
-
-  // On a phone the open search has its own row; elsewhere it replaces Search Output in the head.
-  const searchFocus = useSearchFocus(searchOpen, phone ? "row" : "head");
-  const searchControls = {
-    autoFocus: searchFocus.autoFocus,
-    onFieldFocus: searchFocus.onFieldFocus,
-    term: searchTerm,
-    results: searchResults,
-    onTermChange: terminals?.setSearchTerm ?? (() => undefined),
-    onNext: () => terminalRef.current?.findNext(searchTerm),
-    onPrevious: () => terminalRef.current?.findPrevious(searchTerm),
-    onClose: closeSearch,
-  };
-
-  // One notice above the terminal (§13.2): the most severe condition, the rest behind "+N More".
-  const noticeEntries: SessionNoticeEntry[] = terminalNoticeConditions({
-    machineOnline: runnerOnline,
-    machineName,
-    activeShell,
-    outputIncomplete: Boolean(scrollback?.incomplete),
-    agentTuiBlocked: tuiSupported && tuiGuardrailBlocked,
-    hookGovernance: hookGovernanceActive,
-    error,
-  }).map((condition) => ({
-    key: condition.key,
-    severity: condition.severity,
-    rank: condition.rank,
-    title: condition.title,
-    render: ({ trailing, onDismiss }) => (
-      <Notice
-        key={condition.key}
-        tone={condition.severity}
-        compact
-        role={condition.severity === "danger" ? "alert" : "status"}
-        trailing={trailing}
-        onDismiss={condition.key === "action-failed" ? () => terminals?.dismissError() : onDismiss}
-        dismissLabel={condition.key === "action-failed" ? "Dismiss Error" : "Dismiss"}
-      >
-        {condition.message}
-      </Notice>
-    ),
-  }));
-
-  if (!session || !terminals) return null;
+  if (!host) return null;
+  const { terminals, active, busy, searchOpen } = host;
 
   return (
     <div className={`shell-dock${dragging ? " is-dragging" : ""}`} role="region" aria-label="Terminal">
@@ -360,10 +196,10 @@ export function ShellDock({
         <TerminalTabs
           tabsetId={tabsetId}
           panelId={`${tabsetId}-panel`}
-          tabs={tabs}
+          tabs={host.tabs}
           activeId={active}
           onSelect={terminals.select}
-          onClose={(shellId) => void closeShell(shellId)}
+          onClose={host.closeShell}
         />
         {/* On a touch phone a focused field (the shell, search) is the keyboard, and its blur would bring
             the tab bar back and move the sheet between press and click: these controls keep it focused
@@ -373,18 +209,18 @@ export function ShellDock({
             <TerminalSearchButton
               disabled={!active}
               pressed={searchOpen}
-              onClick={searchOpen ? closeSearch : terminals.openSearch}
+              onClick={searchOpen ? host.closeSearch : terminals.openSearch}
             />
           ) : searchOpen ? (
-            <TerminalSearchControls {...searchControls} />
+            <TerminalSearchControls {...host.searchControls} />
           ) : (
             <TerminalSearchButton disabled={!active} onClick={terminals.openSearch} />
           )}
           <TerminalNewTab
             id={`${tabsetId}-new`}
-            kinds={newTabKinds}
+            kinds={host.newTabKinds}
             busy={busy}
-            disabledReason={runnerOnline ? null : machineOffline}
+            disabledReason={host.offlineReason}
           />
           <button
             id={`${tabsetId}-hide`}
@@ -401,7 +237,7 @@ export function ShellDock({
       </div>
       {phone && searchOpen && (
         <div className="dock-search-row" onMouseDown={holdFieldFocus}>
-          <TerminalSearchControls {...searchControls} />
+          <TerminalSearchControls {...host.searchControls} />
         </div>
       )}
 
@@ -413,103 +249,7 @@ export function ShellDock({
         // The body's height on desktop; on a phone the terminal's, so a notice grows the sheet (#2866).
         style={{ "--dock-body-height": `${effectiveHeight}px` } as CSSProperties}
       >
-        <TerminalNoticeSlot sessionId={sessionId} entries={noticeEntries} onFocusLost={() => terminalRef.current?.focus()} />
-        {shells !== null && shells.length > 0 && (
-          // One mounted terminal per shell, the inactive ones hidden at the same size, so a tab
-          // switch keeps each terminal's scroll position and no shell is resized by it.
-          <div className="shell-term-stack">
-            {shells.map((shell) => {
-              const selected = shell.shellId === active;
-              const output = shellOutput.get(shell.shellId);
-              return (
-                <ShellTerminal
-                  key={shell.shellId}
-                  instance={terminals.terminal(shell.shellId)}
-                  hidden={!selected}
-                  theme={theme}
-                  scheme={scheme}
-                  text={output?.text ?? ""}
-                  total={output?.total ?? 0}
-                  revision={output?.revision ?? 0}
-                  historyExpired={Boolean(output?.truncated)}
-                  pty={shell.pty === true}
-                  interactive={shellInteractive(shell)}
-                  searchTerm={selected && searchOpen ? searchTerm : ""}
-                  onSearchResults={selected ? terminals.setSearchResults : undefined}
-                  handleRef={selected ? terminalRef : undefined}
-                  onData={(d) => terminals.sendKeys(shell.shellId, d)}
-                  onResize={(cols, rows) => terminals.sendResize(shell.shellId, cols, rows)}
-                />
-              );
-            })}
-          </div>
-        )}
-        {activeShell && exited && (
-          <div className="term-status">
-            <span className="term-status-text" role="status">{shellExitedMessage(activeShell.kind, scrollback?.exitCode ?? activeShell.exitCode)}</span>
-            <BusyButton
-              className="btn sm"
-              busy={busy}
-              progress="Starting a new shell…"
-              disabled={!runnerOnline}
-              onClick={() => void newShell()}
-            >
-              Start New Shell
-            </BusyButton>
-            <button type="button" className="btn sm ghost" onClick={() => void closeShell(activeShell.shellId)}>
-              Close Tab
-            </button>
-          </div>
-        )}
-        {readOnly && <div className="term-status"><span className="term-status-text">{READ_ONLY_SHELL_MESSAGE}</span></div>}
-        {active && pipeInput && (
-          <div className="pipe-row">
-            <span className="shell-prompt" aria-hidden="true">$</span>
-            <input
-              ref={pipeInputRef}
-              className="shell-input"
-              value={input}
-              aria-label="Command"
-              aria-describedby={`${tabsetId}-tty`}
-              placeholder="Type a command"
-              disabled={!runnerOnline}
-              onChange={(e) => terminals.setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  sendLine();
-                } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
-                  if (terminals.stepCommandHistory(e.key === "ArrowUp" ? "previous" : "next")) e.preventDefault();
-                }
-              }}
-            />
-            {/* A meta item (§11.3) with the reason as its tooltip; the field reads both as its description. */}
-            <span className="pipe-row-meta" title={PIPE_MODE_REASON}>
-              <span aria-hidden="true">No TTY</span>
-              <span className="sr-only" id={`${tabsetId}-tty`}>{`No TTY. ${PIPE_MODE_REASON}`}</span>
-            </span>
-          </div>
-        )}
-        {shells !== null && shells.length === 0 && (
-          <State
-            compact
-            icon={<TerminalIcon />}
-            title="No Shells Open"
-            actions={(
-              <BusyButton
-                className="btn"
-                busy={busy}
-                progress="Starting a new shell…"
-                disabled={!runnerOnline}
-                onClick={() => void newShell()}
-              >
-                New Shell
-              </BusyButton>
-            )}
-          >
-            {`Run commands in this session's ${session.worktreePath ? "worktree" : "folder"} on ${machineName}.`}
-          </State>
-        )}
+        <TerminalSurface host={host} theme={theme} scheme={scheme} />
       </div>
     </div>
   );

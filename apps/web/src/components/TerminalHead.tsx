@@ -137,26 +137,39 @@ export function useSearchFocus(open: boolean, placement: string): {
 }
 
 /**
- * The Search Output button alone, for a host that shows the open search on a row of its own (the phone
- * dock, #2866): there it stays in the head, pressed while the row is open, and a press closes it.
+ * A head's icon buttons: "sm" in the dock's 40px head (28px), "md" in the side panel's 48px header
+ * (32px, #2868), each 44px on touch.
  */
-export function TerminalSearchButton({ disabled = false, pressed, onClick }: {
+export type TerminalHeadButtonSize = "sm" | "md";
+const headButton = (size: TerminalHeadButtonSize) => ({
+  className: size === "sm" ? "icon-btn sm" : "icon-btn",
+  iconSize: size === "sm" ? 14 : 16,
+});
+
+/**
+ * The Search Output button alone, for a host that shows the open search on a row of its own (the phone
+ * dock, #2866, and the side panel's Terminal tool, #2868): there it stays in the head, pressed while
+ * the row is open, and a press closes it.
+ */
+export function TerminalSearchButton({ disabled = false, pressed, size = "sm", onClick }: {
   disabled?: boolean;
   /** Set only by a host whose button stays while search is open. */
   pressed?: boolean;
+  size?: TerminalHeadButtonSize;
   onClick: () => void;
 }) {
+  const { className, iconSize } = headButton(size);
   return (
     <button
       type="button"
-      className="icon-btn sm"
+      className={className}
       aria-label="Search Output"
       title="Search Output"
       aria-pressed={pressed}
       disabled={disabled}
       onClick={onClick}
     >
-      <SearchIcon size={14} />
+      <SearchIcon size={iconSize} />
     </button>
   );
 }
@@ -264,24 +277,26 @@ export interface TerminalTabKind {
  * (below only when there is no room above), each item with its second line; with only a shell it
  * opens one directly. It is busy while a tab opens.
  */
-export function TerminalNewTab({ id, kinds, busy, disabledReason }: {
+export function TerminalNewTab({ id, kinds, busy, disabledReason, size = "sm" }: {
   /** The button's id, so a host can return focus to it. */
   id: string;
   kinds: readonly TerminalTabKind[];
   busy: boolean;
   /** Why nothing can open at all (the machine is offline); only used without a menu. */
   disabledReason?: string | null;
+  size?: TerminalHeadButtonSize;
 }) {
   const [open, setOpen] = useState(false);
   const menu = useAccessibleMenu(open, setOpen, "terminal-new-tab", "item", { reachUnavailable: true });
   const single = kinds.length === 1 ? kinds[0] : null;
+  const { className, iconSize } = headButton(size);
 
   if (single) {
     return (
       <BusyButton
         id={id}
-        className="icon-btn sm"
-        icon={<PlusIcon size={14} />}
+        className={className}
+        icon={<PlusIcon size={iconSize} />}
         busy={busy}
         progress="Opening a shell…"
         aria-label="New Tab"
@@ -307,8 +322,8 @@ export function TerminalNewTab({ id, kinds, busy, disabledReason }: {
       <BusyButton
         id={id}
         ref={menu.triggerRef}
-        className="icon-btn sm"
-        icon={<PlusIcon size={14} />}
+        className={className}
+        icon={<PlusIcon size={iconSize} />}
         busy={busy}
         progress="Opening a tab…"
         aria-label="New Tab"

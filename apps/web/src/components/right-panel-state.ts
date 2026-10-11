@@ -66,6 +66,20 @@ export function openSideChat(state: Pick<RightPanelState, "show">): void {
   requestSideChatFocus();
 }
 
+/**
+ * The Terminal tool's open-and-close call in Right Panel placement (#2868), which the session bar's
+ * Terminal toggle and Ctrl+` use there (#2869): it opens the panel on Terminal, and closes the panel
+ * already showing it. Closing keeps every shell running.
+ */
+export function toggleTerminalTool(state: Pick<RightPanelState, "openMode">): void {
+  state.openMode("terminal");
+}
+
+/** Whether the panel is showing the Terminal tool: the toggle's pressed state in Right Panel placement. */
+export function terminalToolShowing(state: Pick<RightPanelState, "open" | "mode">): boolean {
+  return state.open && state.mode === "terminal";
+}
+
 export function useRightPanelState(navigationScope: string | null = null, attentionNavigation = false): RightPanelState {
   const [open, setOpen] = useState(() => {
     try {

@@ -19,6 +19,7 @@ import {
   requestsFact,
   reviewFact,
   sessionToolAvailability,
+  terminalFact,
   type SessionToolContext,
 } from "./session-tools.js";
 
@@ -44,9 +45,9 @@ test("the tools run Session Tools, then Code, Work and Decisions, in the order t
   assert.deepEqual([...new Set(groups)], [...SESSION_TOOL_GROUPS]);
 });
 
-test("every panel mode is a tool, and Terminal is the one tool that is not a mode (#2843)", () => {
+test("every panel mode is a tool, Terminal included (#2843, #2868)", () => {
   const ids = SESSION_TOOLS.map((tool) => tool.id);
-  assert.deepEqual([...ids].filter((id) => id !== "terminal").sort(), [...RIGHT_PANEL_MODES].sort());
+  assert.deepEqual([...ids].sort(), [...RIGHT_PANEL_MODES].sort());
   assert.equal(new Set(ids).size, ids.length);
 });
 
@@ -72,6 +73,15 @@ test("each tool with a chord names it, for the keycap the switcher and Session T
 });
 
 /* --- Facts: each Session Tools row's second line (#2844) --- */
+
+test("Terminal's fact in Right Panel placement counts open shells and never names a command (#2868)", () => {
+  assert.equal(terminalFact(2), "2 shells open");
+  assert.equal(terminalFact(1), "1 shell open");
+  assert.equal(terminalFact(0), "No shells open");
+  assert.equal(terminalFact("checking"), "Checking for shells…");
+  assert.equal(terminalFact("unknown"), "Shells can't be listed right now");
+  assert.equal(TERMINAL_FACT, "Opens in the dock below the conversation");
+});
 
 test("Review's fact counts uncommitted changes as Review's summary does, then required findings (#2844)", () => {
   const changes = (files: number, staged = 0, truncated = false) => ({ files, staged, truncated });

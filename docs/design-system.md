@@ -836,6 +836,28 @@ or unreadable value means Bottom Dock.
   live. Moving never restarts a running shell; its tab and scrollback move with it.
 - The Terminal toggle and Ctrl+` open the terminal wherever it is placed.
 
+**The Terminal tool (#2868).** In Right Panel placement `terminal` is a panel mode (`TerminalTool.tsx`).
+The switcher's Terminal is then a `menuitemradio` like every tool, and the Session Tools row counts
+the open shells ("2 shells open", "No shells open"; an exited shell's tab is not counted, and no fact
+or tab names a command). The row watches the shell list (`watchShells()`), which lists the shells
+without loading history or opening one. In Bottom Dock placement Terminal stays a plain item that
+opens the dock, its row reads "Opens in the dock below the conversation", and a stored `terminal`
+mode reopens as Session Tools. Its header actions are **Search Output** (`aria-pressed` while the
+search row is open), **New Tab** and **More Terminal Actions** (⋯), whose one item is **Move to
+Bottom Dock** (`PanelBottomIcon`, "Show the terminal in the dock below the conversation on this
+device. Running shells keep running."), then the frame's Expand Panel and Close Panel; closing keeps
+every shell running. The body, `.rpanel-body.term-host` on `--terminal-bg`, holds the 40px tab strip
+(`.term-tabs`, 48px on touch, absent with no tab), the open search on its own row at every width
+(`.rpanel-toolbar.term-search`), then the terminal's body (`.term-body`, the same `TerminalSurface`
+the dock renders). Both hosts read one model (`useTerminalHost`), so neither builds tab, search or
+terminal logic of its own. Move to Bottom Dock writes `"dock"`, closes the panel and opens the dock
+on the same tab with focus in its terminal (`requestTerminalFocus`); each xterm is reparented, so the
+process, scrollback, scroll-to-bottom and search survive. Escape in a shell stays with the shell;
+Ctrl+Esc leaves it for the transcript, or for the switcher in a phone's sheet. In Right Panel
+placement the dock is not shown, and `toggleTerminalTool()` / `terminalToolShowing()`
+(`right-panel-state.ts`) are the open-and-close call and the pressed state for the toggle and
+Ctrl+` (#2869).
+
 **One terminal state, any host (#2867).** The open session's terminals live above the places that
 show them: `useSessionTerminals(sessionId)` (`session-terminals.tsx`, provided above the app's main
 area) owns the shell list, the active tab, the search (open, term and match count), the pipe rows'
@@ -923,7 +945,7 @@ A path trail, such as the Files panel's folder path.
 ### 4.9 Side Panel Frame
 
 Every session tool (Review, Files, Browser, Agents, Side Chat, Background Work, Campaign Status,
-Requests, Decision History, and Terminal once #2868 moves it) opens in one frame (#2843,
+Requests, Decision History, and Terminal in Right Panel placement, #2868) opens in one frame (#2843,
 `RightPanel.tsx`):
 
 - **Column.** `.rpanel` is docked and flush: no margin or radius (§2.5), one 1px `--border` hairline

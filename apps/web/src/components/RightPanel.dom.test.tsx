@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { register } from "node:module";
 import { after, before, beforeEach, test } from "node:test";
 import React, { act, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { DescendantRequestView, SessionView } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, type DescendantRequestView, type SessionView } from "@wollipog/protocol";
+import { setTerminalPlacement } from "../terminal-placement.js";
 import { sessionRequestPanelKey } from "./SessionRequestPanel.js";
 import type { TimelineItem } from "../timeline.js";
 import {
@@ -50,6 +52,19 @@ const client = {
   ...api,
   childSessions: () => Promise.reject(new ApiError("This fixture has no durable child-session registry.", 404)),
 } as ApiClient;
+
+// The Terminal tool (#2868) loads xterm lazily, as the bundler does: its ES module builds, and its
+// stylesheet as an empty module (session-terminals.dom.test.tsx loads it the same way).
+register(`data:text/javascript,${encodeURIComponent(`
+export async function resolve(specifier, context, nextResolve) {
+  const resolved = await nextResolve(specifier, context);
+  if (!specifier.startsWith("@xterm/") || !resolved.url.endsWith(".js")) return resolved;
+  return { ...resolved, url: resolved.url.slice(0, -".js".length) + ".mjs", format: "module" };
+}
+export async function load(url, context, nextLoad) {
+  return url.endsWith(".css") ? { format: "module", source: "", shortCircuit: true } : nextLoad(url, context);
+}
+`)}`, import.meta.url);
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -161,6 +176,7 @@ function PanelHarness({
   git: harnessGit = git,
   onState,
   onOpenTerminal = () => {},
+  runnerProtocolVersion = null,
 }: {
   initialSession?: SessionView;
   initialRunnerOnline?: boolean;
@@ -173,6 +189,8 @@ function PanelHarness({
   git?: GitStatus;
   onState: (state: RightPanelState) => void;
   onOpenTerminal?: () => void;
+  /** The session's runner; the default (null) predates session files and shells. */
+  runnerProtocolVersion?: number | null;
 }) {
   const state = useRightPanelState();
   const [session, setSession] = useState(initialSession);
@@ -206,7 +224,7 @@ function PanelHarness({
         state={state}
         session={session}
         runnerOnline={runnerOnline}
-        runnerProtocolVersion={null}
+        runnerProtocolVersion={runnerProtocolVersion}
         git={harnessGit}
         items={items}
         decisionHistory={decisionHistory}
@@ -590,9 +608,9 @@ test("a handle focused when the panel closed does not pull focus into a later ov
   }
 });
 
-test("a persisted terminal mode restores the launcher instead of an empty panel", async () => {
-  // Older builds reserved a "terminal" panel mode that nothing could open; the value can still
-  // sit in localStorage, and restoring it must land on the launcher (#1201).
+test("a persisted terminal mode restores the launcher in Bottom Dock placement, never an empty panel", async () => {
+  // Older builds reserved a "terminal" panel mode that nothing could open (#1201); since #2868 it is the
+  // Terminal tool, which exists only in Right Panel placement. Bottom Dock is the default.
   saveBrowserStorageValue("wollipog.rightpanel.mode", "terminal");
   saveBrowserStorageValue("wollipog.rightpanel.open", "1");
   let state!: RightPanelState;
@@ -1039,6 +1057,130 @@ test("Background Work's Open Terminal closes a phone's panel, which would cover 
     assert.equal(terminals, 2);
     assert.equal(state.open, true, "a desktop panel stays open");
     assert.equal(state.expanded, false, "but an expanded one restores, so the chat column and its dock show");
+  } finally {
+    phoneViewport = false;
+    await panel.dispose();
+  }
+});
+
+/* --- Terminal Placement (#2868): the Terminal tool in Right Panel placement, the dock otherwise --- */
+
+const terminalItem = () => [...(domWindow.document as unknown as Document).querySelectorAll<HTMLButtonElement>('[aria-label="Switch Tool"] .menu-item')]
+  .find((candidate) => candidate.querySelector(".menu-text")?.textContent === "Terminal")!;
+const terminalRow = (container: HTMLElement) => container.querySelector<HTMLButtonElement>('.session-tool[data-tool="terminal"]')!;
+
+test("in Right Panel placement Terminal is a tool: the switcher checks it and choosing it opens the tool, not the dock (#2868)", async () => {
+  setTerminalPlacement("panel");
+  let state!: RightPanelState;
+  let docks = 0;
+  const panel = await mountPanel(<PanelHarness runnerProtocolVersion={PROTOCOL_VERSION}
+    onState={(next) => { state = next; }} onOpenTerminal={() => { docks += 1; }} />);
+  try {
+    await act(async () => state.show("review"));
+    await act(async () => panel.container.querySelector<HTMLButtonElement>(".rpanel-switcher")!.click());
+    assert.equal(terminalItem().getAttribute("role"), "menuitemradio", "a tool like the rest");
+    assert.equal(terminalItem().getAttribute("aria-checked"), "false");
+    await act(async () => terminalItem().click());
+    assert.equal(state.mode, "terminal");
+    assert.equal(docks, 0, "the dock does not open");
+    const aside = panel.container.querySelector<HTMLElement>("#right-panel")!;
+    assert.equal(aside.dataset.mode, "terminal");
+    assert.equal(aside.querySelector(".rpanel-switcher-name")?.textContent, "Terminal");
+    assert.equal(aside.querySelector(".rpanel-body")?.className, "rpanel-body term-host", "the body is the terminal's ground");
+
+    await act(async () => panel.container.querySelector<HTMLButtonElement>(".rpanel-switcher")!.click());
+    assert.equal(terminalItem().getAttribute("aria-checked"), "true", "the current tool is checked");
+    await act(async () => panel.container.querySelector<HTMLButtonElement>(".rpanel-switcher")!.click());
+
+    // Session Tools' row opens it too, and its fact counts shells, never "Opens in the dock".
+    await act(async () => state.show("launcher"));
+    assert.doesNotMatch(terminalRow(panel.container).textContent ?? "", /Opens in the dock/);
+    await act(async () => terminalRow(panel.container).click());
+    assert.equal(state.mode, "terminal");
+    assert.equal(docks, 0);
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("in Bottom Dock placement Terminal's item and row open the dock, and the row says so (#2868)", async () => {
+  let state!: RightPanelState;
+  let docks = 0;
+  const panel = await mountPanel(<PanelHarness runnerProtocolVersion={PROTOCOL_VERSION}
+    onState={(next) => { state = next; }} onOpenTerminal={() => { docks += 1; }} />);
+  try {
+    await act(async () => state.show("launcher"));
+    assert.match(terminalRow(panel.container).textContent ?? "", /Opens in the dock below the conversation/);
+    await act(async () => terminalRow(panel.container).click());
+    assert.equal(docks, 1);
+    assert.equal(state.mode, "launcher", "the panel keeps its tool");
+
+    await act(async () => panel.container.querySelector<HTMLButtonElement>(".rpanel-switcher")!.click());
+    assert.equal(terminalItem().getAttribute("role"), "menuitem", "a plain item, never checked");
+    assert.equal(terminalItem().hasAttribute("aria-checked"), false);
+    await act(async () => terminalItem().click());
+    assert.equal(docks, 2);
+    assert.equal(state.mode, "launcher");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("a stored Terminal restores the tool in Right Panel placement, and Session Tools once the placement is the dock (#2868)", async () => {
+  setTerminalPlacement("panel");
+  saveBrowserStorageValue("wollipog.rightpanel.mode", "terminal");
+  saveBrowserStorageValue("wollipog.rightpanel.open", "1");
+  let state!: RightPanelState;
+  const panel = await mountPanel(<PanelHarness runnerProtocolVersion={PROTOCOL_VERSION} onState={(next) => { state = next; }} />);
+  try {
+    assert.equal(state.mode, "terminal");
+    assert.equal(panel.container.querySelector<HTMLElement>("#right-panel")?.dataset.mode, "terminal");
+
+    // Another tab (or Move to Bottom Dock) places the terminal in the dock: the panel stays open on
+    // Session Tools, and the stored mode follows.
+    await act(async () => setTerminalPlacement("dock"));
+    assert.equal(state.open, true);
+    assert.equal(state.mode, "launcher");
+    assert.ok(panel.container.querySelector(".session-tools"), "Session Tools shows in its place");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("an older runner shows Terminal unavailable with its reason, in the switcher and in a restored tool (#2868)", async () => {
+  setTerminalPlacement("panel");
+  saveBrowserStorageValue("wollipog.rightpanel.mode", "terminal");
+  saveBrowserStorageValue("wollipog.rightpanel.open", "1");
+  let state!: RightPanelState;
+  const panel = await mountPanel(<PanelHarness onState={(next) => { state = next; }} />);
+  try {
+    const body = panel.container.querySelector(".rpanel-body")!;
+    assert.equal(body.className, "rpanel-body", "no terminal ground without a terminal");
+    assert.match(body.textContent ?? "", /session terminal access/);
+    await act(async () => panel.container.querySelector<HTMLButtonElement>(".rpanel-switcher")!.click());
+    assert.equal(terminalItem().getAttribute("aria-disabled"), "true");
+    assert.equal(state.mode, "terminal");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("Background Work's Open Terminal opens the Terminal tool in Right Panel placement (#2868)", async () => {
+  setTerminalPlacement("panel");
+  let state!: RightPanelState;
+  let docks = 0;
+  const untracked = { ...liveSession, driver: "codex", backgroundWorkTracking: "untracked" } as unknown as SessionView;
+  const panel = await mountPanel(<PanelHarness initialSession={untracked} runnerProtocolVersion={PROTOCOL_VERSION}
+    onState={(next) => { state = next; }} onOpenTerminal={() => { docks += 1; }} />);
+  try {
+    phoneViewport = true;
+    await act(async () => state.show("background"));
+    const openTerminal = [...panel.container.querySelectorAll<HTMLButtonElement>("#right-panel button")]
+      .find((button) => button.textContent === "Open Terminal")!;
+    await act(async () => openTerminal.click());
+    assert.equal(docks, 0, "no dock");
+    assert.equal(state.open, true, "even a phone's sheet stays open, on Terminal");
+    assert.equal(state.mode, "terminal");
   } finally {
     phoneViewport = false;
     await panel.dispose();

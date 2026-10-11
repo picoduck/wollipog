@@ -40,6 +40,10 @@ import { ShellTerminalInstance } from "./shell-terminal-instance.js";
  * have opened or closed some) and opens a first shell when none runs, but fetches history only for
  * shells whose history it does not hold: new to it, a load that failed or was superseded, or every
  * shell after a reconnect.
+ *
+ * A fact that counts the shells while no host is open (Session Tools in Right Panel placement, #2868)
+ * watches the list instead (`watchShells`): that only lists the shells, so it loads no history and
+ * never opens one.
  */
 
 export interface SessionTerminalsState {
@@ -57,6 +61,8 @@ export interface SessionTerminalsState {
   readonly searchTerm: string;
   /** The selected terminal's match count for `searchTerm`. */
   readonly searchResults: TerminalSearchResults | null;
+  /** The last read of the shell list failed, so `shells` may be missing or out of date. */
+  readonly listUnreadable: boolean;
 }
 
 export type SessionTerminalsApi = Pick<
@@ -87,6 +93,7 @@ const INITIAL_STATE: SessionTerminalsState = {
   searchOpen: false,
   searchTerm: "",
   searchResults: null,
+  listUnreadable: false,
 };
 
 /** How long batched keystrokes and terminal sizes wait before they are sent. */
@@ -102,6 +109,10 @@ export class SessionTerminals {
   private readonly terminals = new Map<string, ShellTerminalInstance>();
   /** Hosts showing the terminal now. */
   private hosts = 0;
+  /** Facts counting the shells now (`watchShells`). */
+  private watchers = 0;
+  /** The newest host-less read of the list: an older one never lands after it. */
+  private peekSeq = 0;
   private everOpened = false;
   /**
    * Shells whose current history this store has loaded (or opened itself, which needs none). Every
@@ -173,6 +184,22 @@ export class SessionTerminals {
       if (released) return;
       released = true;
       this.hosts -= 1;
+    };
+  };
+
+  /**
+   * A fact counting the shells is shown: call on mount, and call the returned release on unmount.
+   * While no host is open, the list is read now and again whenever a host would read it (a reconnect,
+   * another dashboard's shell), so the count stays current; a host keeps it current itself.
+   */
+  watchShells = (): (() => void) => {
+    this.watchers += 1;
+    this.peek();
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.watchers -= 1;
     };
   };
 
@@ -333,6 +360,7 @@ export class SessionTerminals {
 
   /** The runner reconciled its shells after its own reconnect. */
   registryChanged(): void {
+    this.peek();
     if (!this.everOpened) return;
     // Every shell's history is reloaded: now if a host shows the terminal, otherwise on the next open.
     // A load still in flight read the registry before the reconnect, so it must not land and mark it.
@@ -345,6 +373,7 @@ export class SessionTerminals {
   /** Output for a live shell with no tab: another dashboard opened it. */
   unknownShellSeen(): void {
     if (this.hosts > 0) void this.loadShells({ reconcile: true });
+    else this.peek();
   }
 
   /**
@@ -474,6 +503,7 @@ export class SessionTerminals {
       this.setState({
         shells: list,
         active: previous && list.some((shell) => shell.shellId === previous) ? previous : list[0]?.shellId ?? null,
+        listUnreadable: false,
         ...(reconcile && previous && removed.has(previous) ? { input: "" } : {}),
       });
       for (const shell of list) {
@@ -488,8 +518,31 @@ export class SessionTerminals {
     } catch (e) {
       if (this.loadSeq !== seq) return;
       this.listPending = false;
-      this.setState({ error: (e as Error).message });
+      this.setState({ error: (e as Error).message, listUnreadable: true });
     }
+  }
+
+  /**
+   * Read the shell list for the facts watching it, while no host is open: the list only, never a
+   * history or a first shell. A host's load, a close or a newer read supersedes it.
+   */
+  private peek(): void {
+    if (this.disposed || this.hosts > 0 || this.watchers === 0) return;
+    const seq = this.loadSeq;
+    const peek = ++this.peekSeq;
+    const current = () => this.hosts === 0 && this.loadSeq === seq && this.peekSeq === peek;
+    this.api.listShells(this.sessionId).then(({ shells: registry }) => {
+      if (!current()) return;
+      const list = shellsVisibleAfterClose(registry, this.closingShellIds);
+      const previous = this.state.active;
+      this.setState({
+        shells: list,
+        active: previous && list.some((shell) => shell.shellId === previous) ? previous : list[0]?.shellId ?? null,
+        listUnreadable: false,
+      });
+    }, () => {
+      if (current()) this.setState({ listUnreadable: true });
+    });
   }
 
   /**

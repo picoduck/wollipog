@@ -17,10 +17,11 @@ export const RIGHT_PANEL_KEY_STEP = 16;
 
 /**
  * Panel contents. "launcher" is the empty state listing the other modes. Every entry here owns a
- * body in RightPanel.tsx; the terminal lives in the bottom dock, so there is deliberately no
- * "terminal" panel mode to restore into an empty column.
+ * body in RightPanel.tsx. "terminal" is the Terminal tool (#2868), which exists only while this
+ * device places the terminal in the right panel (`useTerminalPlacement()`); in Bottom Dock placement
+ * the panel shows Session Tools in its place.
  */
-export const RIGHT_PANEL_MODES = ["launcher", "requests", "campaign", "review", "files", "browser", "sidechat", "subagents", "background", "decisions"] as const;
+export const RIGHT_PANEL_MODES = ["launcher", "requests", "campaign", "review", "files", "browser", "terminal", "sidechat", "subagents", "background", "decisions"] as const;
 export type RightPanelMode = (typeof RIGHT_PANEL_MODES)[number];
 
 /** The least room the chat column keeps beside a docked panel (§15.2); with less the panel overlays. */
@@ -88,9 +89,9 @@ export function parseStoredRightPanelExpanded(raw: string | null): boolean {
 /**
  * Parse a persisted mode. Requests are session-scoped and may disappear while the panel is
  * closed or the browser is reloading, so they are restored through the stable launcher rather
- * than poisoning the generic toggle with a transient destination. Values this build no longer
- * knows — including "terminal", which older builds could persist — fall back the same way, so a
- * stale preference can never restore a panel with nothing in it.
+ * than poisoning the generic toggle with a transient destination. Values this build does not know
+ * fall back the same way, so a stale preference can never restore a panel with nothing in it. A
+ * stored "terminal" parses as itself; the panel shows Session Tools for it in Bottom Dock placement.
  */
 export function parseStoredRightPanelMode(raw: string | null): RightPanelMode {
   // Decision History was "governance" before #2213; a stored preference keeps opening it.

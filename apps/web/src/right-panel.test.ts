@@ -57,7 +57,7 @@ test("the panel opens 400px wide by default and never narrower than 320px (#2843
 });
 
 test("parseStoredRightPanelMode: valid modes pass through", () => {
-  for (const m of ["launcher", "review", "files", "browser", "sidechat", "subagents", "background", "decisions"] as const) {
+  for (const m of ["launcher", "review", "files", "browser", "terminal", "sidechat", "subagents", "background", "decisions"] as const) {
     assert.equal(parseStoredRightPanelMode(m), m);
   }
 });
@@ -66,17 +66,17 @@ test("parseStoredRightPanelMode: a stored Governance History reopens as Decision
   assert.equal(parseStoredRightPanelMode("governance"), "decisions");
 });
 
-test("parseStoredRightPanelMode: transient, retired, missing, and invalid modes fall back to the launcher", () => {
-  // "terminal" is the retired reserved mode (#1201): older builds could persist it, and it must
-  // restore the launcher rather than a panel with no body.
-  for (const raw of ["requests", "terminal", null, "", "shell", "Files", "0"]) {
+test("parseStoredRightPanelMode: transient, missing, and invalid modes fall back to the launcher", () => {
+  for (const raw of ["requests", null, "", "shell", "Files", "0"]) {
     assert.equal(parseStoredRightPanelMode(raw), "launcher", `raw=${JSON.stringify(raw)}`);
   }
 });
 
-test("every panel mode is a real destination — no reserved placeholder survives", () => {
-  assert.equal(RIGHT_PANEL_MODES.includes("terminal" as never), false,
-    "the terminal lives in the bottom dock; the panel must not reserve an unreachable mode");
+test("the Terminal tool is a panel mode, which the panel shows only in Right Panel placement (#2868)", () => {
+  assert.equal(RIGHT_PANEL_MODES.includes("terminal"), true);
+  // Whether a stored Terminal reopens as the tool or as Session Tools depends on the placement,
+  // which RightPanel reads live; the stored value itself survives.
+  assert.equal(parseStoredRightPanelMode("terminal"), "terminal");
 });
 
 test("resolveRightPanelDrag: dragging the left edge leftward grows the panel", () => {

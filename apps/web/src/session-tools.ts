@@ -6,10 +6,11 @@ import type { ShortcutId } from "./shortcuts.js";
 /**
  * The side panel's tools, in the one order the tool switcher (#2843) and the Session Tools list
  * (#2844) both render: Session Tools first, then the Code, Work and Decisions groups. Each tool is
- * a panel mode except Terminal, which opens the bottom dock until it becomes a panel tool (#2868).
+ * a panel mode. Terminal follows the device's Terminal Placement (#2868): in Right Panel placement it
+ * is the panel's Terminal tool, and in Bottom Dock placement choosing it opens the dock instead.
  * Each tool's one glyph is `SESSION_TOOL_ICONS` (SessionToolsList.tsx), keyed by the same ids.
  */
-export type SessionToolId = RightPanelMode | "terminal";
+export type SessionToolId = RightPanelMode;
 
 /** A group's heading, Title Case as written (§9.1). Session Tools itself is in no group. */
 export type SessionToolGroup = "Code" | "Work" | "Decisions";
@@ -97,6 +98,7 @@ function sentence(text: string): string {
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
+/** Terminal in Bottom Dock placement, where choosing it opens the dock. */
 export const TERMINAL_FACT = "Opens in the dock below the conversation";
 export const SIDE_CHAT_FACT = "Ask a question without interrupting the agent";
 
@@ -119,6 +121,16 @@ export function reviewFact(
     first = changes.staged > 0 ? `${changes.staged} of ${total} ${noun} staged` : `${total} uncommitted ${noun}`;
   }
   return requiredFindings > 0 ? `${first}, ${count(requiredFindings, "required finding", "required findings")}` : first;
+}
+
+/**
+ * Terminal in Right Panel placement (#2868): the shells the session has open, which never names the
+ * command any of them runs. "checking" while the list is read, "unknown" when it could not be.
+ */
+export function terminalFact(shells: number | "checking" | "unknown"): string {
+  if (shells === "checking") return "Checking for shells…";
+  if (shells === "unknown") return "Shells can't be listed right now";
+  return shells === 0 ? "No shells open" : `${count(shells, "shell", "shells")} open`;
 }
 
 export function filesFact(folderName: string): string {

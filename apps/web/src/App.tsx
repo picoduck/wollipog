@@ -31,6 +31,7 @@ import { sessionVisibleForReminderMode } from "./session-reminders.js";
 import { InboxView } from "./components/InboxView.js";
 import { openGoToFile, openSideChat, useRightPanelState, type RightPanelState } from "./components/right-panel-state.js";
 import { SessionTerminalsProvider } from "./session-terminals.js";
+import { terminalPlacement, useTerminalPlacement } from "./terminal-placement.js";
 import { usePinnedSummaryState } from "./components/pinned-summary-state.js";
 import { EditorSelect } from "./components/EditorSelect.js";
 import { DesktopCloseGuard } from "./components/DesktopCloseGuard.js";
@@ -439,6 +440,18 @@ export function Shell() {
   }, [dockVisible]);
   // Stable, so the memoized session does not re-render for it (#2872).
   const hideDock = useCallback(() => setDockVisible(false), []);
+  // Where this device shows the terminal (#2867, #2868): in Right Panel placement the side panel's
+  // Terminal tool hosts it and the dock is not shown, whatever its own visibility says.
+  const terminalInPanel = useTerminalPlacement() === "panel";
+  const dockShown = view.name === "session" && dockVisible && terminalSupported && !terminalInPanel;
+  /**
+   * Open the terminal wherever it is placed: the dock, or the side panel's Terminal tool. Reads the
+   * placement as it is now, since Move to Bottom Dock writes it in the same gesture.
+   */
+  const openTerminal = () => {
+    if (terminalPlacement() === "panel") rightPanel.show("terminal");
+    else setDockVisible(true);
+  };
 
   // Stable, because the identity chain runs all the way down: an inline arrow here rebuilds
   // InboxView's `expand`, which rebuilds `handleSelect`, which gives every mounted InboxRow unequal
@@ -868,9 +881,9 @@ export function Shell() {
               topbarControls={!isMobile ? sessionPanelControls : undefined}
               rightPanel={rightPanel}
               onOpenTerminal={() => {
-                if (terminalSupported) setDockVisible(true);
+                if (terminalSupported) openTerminal();
               }}
-              terminalOpen={view.name === "session" && dockVisible && terminalSupported}
+              terminalOpen={dockShown}
               onHideTerminal={hideDock}
               pinnedSummary={pinnedSummary}
               focusComposerSessionId={composerFocusSessionId}
@@ -969,8 +982,9 @@ export function Shell() {
           </ViewerIdentityProvider>
         </div>
         {/* Bottom shell dock: session-scoped terminals in the compact desktop layout. Mounted only
-            while toggled on; keyed by session so tab selection never bleeds across navigations. */}
-        {view.name === "session" && dockVisible && terminalSupported && (
+            while toggled on, and only in Bottom Dock placement (#2868); keyed by session so tab
+            selection never bleeds across navigations. */}
+        {dockShown && (
           <ErrorBoundary name="Terminal" resetKey={view.id}>
           <Suspense fallback={<State variant="loading" compact>Loading terminal…</State>}>
           <ShellDock
@@ -991,7 +1005,7 @@ export function Shell() {
       {dialog?.kind === "session" && (
         <NewSessionDialog
           onClose={() => setDialog(null)}
-          onOpenTerminal={() => setDockVisible(true)}
+          onOpenTerminal={openTerminal}
           preset={dialog.preset}
         />
       )}

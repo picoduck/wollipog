@@ -4774,6 +4774,66 @@ body.shell-dock-dragging * {
   }
 }
 
+/* --- Terminal tool (#2868; §4.6, §4.9). The side panel's Terminal in Right Panel placement. Its body is
+   the terminal's ground edge to edge: the tab strip, --control-h-lg tall (40px, 48px on touch) on the
+   panel's --bg over its hairline, the open search on its own row under it at every width, then the
+   terminal's body as the dock draws it. The terminal refits to the panel as it is dragged, expanded or
+   overlaid, with 12px text under 560px. --- */
+.rpanel-body.term-host {
+  overflow: hidden;
+  padding: 0;
+  background: var(--terminal-bg);
+}
+/* The header actions keep the header's own spacing; the wrapper only holds a focused field's focus. */
+.term-tool-actions { display: contents; }
+/* Five header buttons leave the switcher too little room in a panel at its 320px minimum (the overlay
+   on a tablet): the switcher's own spacing tightens there, so "Terminal" reads whole. */
+@container rp (max-width: 359px) {
+  .rpanel[data-mode="terminal"] .rpanel-switcher {
+    gap: var(--space-1);
+    padding-inline: var(--space-1);
+  }
+}
+.term-tabs {
+  display: flex;
+  flex: none;
+  height: var(--control-h-lg);
+  padding: 0 var(--space-3);
+  background: var(--bg);
+  box-shadow: inset 0 -1px 0 var(--border);
+}
+/* As in the dock's head: each tab keeps its Close's room, so tabs sit closer than §10.1's 24px. */
+.term-tabs > .shell-tabs {
+  flex: 1 1 0;
+  align-self: stretch;
+  gap: var(--space-2);
+}
+@media (pointer: coarse) {
+  .term-tabs > .shell-tabs { gap: var(--space-6); }
+}
+/* The open search: the field, its count, Previous Match, Next Match and Close Search. The field takes
+   what the rest leave. */
+.rpanel-toolbar.term-search {
+  display: flex;
+  align-items: center;
+  height: var(--control-h-lg);
+  padding: 0 var(--space-2) 0 var(--space-3);
+  background: var(--bg);
+}
+.term-search > .shell-search {
+  flex: 1;
+  min-width: 0;
+}
+.term-search .shell-search-field { flex: 1 1 auto; }
+.term-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 0;
+  padding: var(--space-2) var(--space-3);
+}
+
 /* The Requests panel (#2206; docs/design-system.md §6, §6.2): a list that opens each child request in
    a detail in its place, at every width. Each view is one scroller below the panel head. */
 .rpanel-body:has(> .request-panel) {

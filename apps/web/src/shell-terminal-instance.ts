@@ -73,6 +73,19 @@ const HISTORY_EXPIRED_LINE = "\u001b[2mOlder output expired.\u001b[22m\r\n";
 /** CAN, then ESC c: end any escape sequence in progress, then reset the terminal fully. */
 const FULL_RESET = "\u0018\u001bc";
 
+/** How long a terminal following its output is held at the bottom after a move (`followBottom`). */
+const FOLLOW_BOTTOM_MS = 750;
+
+/**
+ * Scroll to the last line. xterm scrolls by an offset from its scroller's position, which can trail
+ * the buffer's by a line after the terminal moves, so it goes to the top first, where both agree: in
+ * one task, so nothing is drawn in between.
+ */
+function scrollToEnd(term: Terminal): void {
+  term.scrollToTop();
+  term.scrollToBottom();
+}
+
 /** A terminal's inputs before a host passes its own. */
 const NO_INPUTS: ShellTerminalInputs = {
   text: "",
@@ -128,6 +141,8 @@ export class ShellTerminalInstance {
   private activeWash: IDecoration[] = [];
   /** Where the scrollback was when the terminal was last detached. */
   private keptViewport: { line: number; atBottom: boolean } | null = null;
+  /** Until when a terminal following its output is held at the bottom (`followBottom`). */
+  private followBottomUntil = 0;
   /** The addon's last count for the current term. */
   private searchResults: TerminalSearchResults | null = null;
 
@@ -135,6 +150,11 @@ export class ShellTerminalInstance {
     this.inputs = inputs;
     this.surface = doc.createElement("div");
     this.surface.className = "shell-term-surface";
+    // Scrolling by hand (the wheel, or a press on the scrollbar) is the person's: nothing holds it.
+    // Captured, since xterm stops the wheel event it scrolls by.
+    const release = () => { this.followBottomUntil = 0; };
+    this.surface.addEventListener("wheel", release, { passive: true, capture: true });
+    this.surface.addEventListener("pointerdown", release, { capture: true });
   }
 
   /** The host element the terminal is attached to, if any. */
@@ -163,14 +183,31 @@ export class ShellTerminalInstance {
       void this.open();
       return;
     }
-    const cols = term.cols;
+    const { cols, rows } = term;
     this.connectHost(term);
-    // Back where it was in the scrollback, unless the new host's width reflowed the lines.
+    // Back where it was in the scrollback: at the bottom whatever the new host's size (a move to
+    // another place, #2868), else on the same line unless the new host's width reflowed the lines.
     const kept = this.keptViewport;
     this.keptViewport = null;
-    if (kept && term.cols === cols) {
-      if (kept.atBottom) term.scrollToBottom();
-      else if (term.buffer.active.viewportY !== kept.line) term.scrollToLine(kept.line);
+    if (kept?.atBottom) this.followBottom(term);
+    else if (kept && term.cols === cols && term.buffer.active.viewportY !== kept.line) term.scrollToLine(kept.line);
+    // xterm defers a resize while the terminal is not yet seen on screen, as one just attached is, and
+    // its scroller then keeps the old host's height, so it cannot scroll to the bottom of a shorter
+    // one. Once it has drawn here, one row more and back is a resize it applies whole. The shell hears
+    // only the final size: the store sends the last of a burst.
+    if (term.cols !== cols || term.rows !== rows) {
+      const drawn = term.onRender(() => {
+        drawn.dispose();
+        if (this.term !== term || this.host !== host) return;
+        term.resize(term.cols, term.rows + 1);
+        term.resize(term.cols, term.rows - 1);
+        // The scroller takes the size on xterm's next frame; a terminal still held at the bottom goes
+        // there once it has.
+        host.ownerDocument.defaultView?.requestAnimationFrame(() => {
+          const buffer = term.buffer.active;
+          if (this.term === term && Date.now() <= this.followBottomUntil && buffer.viewportY < buffer.baseY) scrollToEnd(term);
+        });
+      });
     }
     term.refresh(0, term.rows - 1);
     // Output that arrived while no host showed it.
@@ -345,6 +382,11 @@ export class ShellTerminalInstance {
     });
     // A selection the person makes over the match is theirs: the active wash goes with the match.
     term.onSelectionChange(() => this.markActiveMatch());
+    term.onRender(() => {
+      if (Date.now() > this.followBottomUntil) return;
+      const buffer = term.buffer.active;
+      if (buffer.viewportY < buffer.baseY) scrollToEnd(term);
+    });
     this.term = term;
     this.fit = fit;
     this.search = search;
@@ -386,6 +428,18 @@ export class ShellTerminalInstance {
     } catch {
       /* zero-size during collapse — ignore */
     }
+  }
+
+  /**
+   * Keep a terminal that was following its output at the bottom while it settles in a new host (a
+   * move between the side panel and the dock, #2868): the scroller catches up with the new size a
+   * frame or more later, so the terminal returns to the bottom on each render until the window ends.
+   * The person's own scrolling ends it at once.
+   */
+  private followBottom(term: Terminal): void {
+    this.followBottomUntil = Date.now() + FOLLOW_BOTTOM_MS;
+    const buffer = term.buffer.active;
+    if (buffer.viewportY < buffer.baseY) scrollToEnd(term);
   }
 
   /** Report the terminal's size to an interactive shell, once per distinct size. */

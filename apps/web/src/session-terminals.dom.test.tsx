@@ -42,6 +42,9 @@ const { FitAddon } = await import("@xterm/addon-fit");
 const { SessionTerminals, SessionTerminalsProvider, useSessionTerminals } = await import("./session-terminals.js");
 const { ShellDock } = await import("./components/ShellDock.js");
 const { ShellTerminal } = await import("./components/ShellTerminal.js");
+const { TerminalTool, MOVE_TO_BOTTOM_DOCK_DESCRIPTION } = await import("./components/TerminalTool.js");
+const { PanelActionSlotContext } = await import("./components/RightPanel.js");
+const { requestTerminalFocus } = await import("./terminal-focus.js");
 type SessionTerminals = import("./session-terminals.js").SessionTerminals;
 
 /**
@@ -921,5 +924,210 @@ test("a shell's terminal has one host at a time, so a resize sends one resize st
     await act(async () => root.unmount());
     container.remove();
     terminals.dispose();
+  }
+});
+
+// --- The side panel's Terminal tool (#2868) ---
+
+test("watching the shell list reads it with no host open, loading no history and opening no shell", async () => {
+  const registry = [shell(1), shell(2)];
+  let failList = false;
+  let lists = 0;
+  const { terminals, history, opens } = storeOver(registry, {
+    holdList: async () => {
+      lists += 1;
+      if (failList) throw new Error("registry unavailable");
+    },
+  });
+  try {
+    assert.equal(terminals.getSnapshot().shells, null, "nothing is read until something asks");
+    const unwatch = terminals.watchShells();
+    await until(() => terminals.getSnapshot().shells?.length === 2, "the watched list");
+    assert.equal(terminals.getSnapshot().active, "shell-1");
+    assert.deepEqual(history, [], "watching loads no history");
+    assert.equal(opens.count, 0, "watching opens no shell");
+
+    // A reconnect, or another dashboard's shell, reads the list again.
+    registry.push(shell(3));
+    terminals.registryChanged();
+    await until(() => terminals.getSnapshot().shells?.length === 3, "the list after the registry changed");
+    registry.pop();
+    terminals.unknownShellSeen();
+    await until(() => terminals.getSnapshot().shells?.length === 2, "the list after another dashboard's shell");
+
+    failList = true;
+    terminals.registryChanged();
+    await until(() => terminals.getSnapshot().listUnreadable, "a list that could not be read");
+    failList = false;
+
+    // A host keeps the list current itself, and its load clears the failure.
+    const release = terminals.openHost();
+    await until(() => !terminals.getSnapshot().listUnreadable && history.length === 2, "the host's own load");
+    const before = lists;
+    terminals.registryChanged();
+    await settle(10);
+    assert.equal(lists, before + 1, "with a host open the host reloads the list, not a second read");
+    release();
+
+    unwatch();
+    const unwatched = lists;
+    terminals.registryChanged();
+    await settle(10);
+    assert.equal(lists, unwatched, "nothing reads the list once nothing watches it");
+  } finally {
+    terminals.dispose();
+  }
+});
+
+interface ToolControls {
+  setPlace(place: "none" | "panel" | "dock"): void;
+  terminals: SessionTerminals | null;
+  moves: number;
+}
+
+/** The panel's Terminal tool with its header slot, or the dock, over the session's terminals. */
+function ToolHarness({ controls }: { controls: ToolControls }) {
+  const [place, setPlace] = useState<"none" | "panel" | "dock">("none");
+  const [slot, setSlot] = useState<HTMLDivElement | null>(null);
+  controls.setPlace = setPlace;
+  return (
+    <ApiProvider client={client}>
+      <StoreProvider connection={connection} navigation={navigation}>
+        <SessionTerminalsProvider sessionId={session.id}>
+          <TerminalsProbe controls={controls as unknown as DockControls} />
+          <div className="rpanel-actions" ref={setSlot} />
+          {place === "panel" && (
+            <PanelActionSlotContext.Provider value={slot}>
+              <div className="rpanel-body term-host">
+                <TerminalTool
+                  sessionId={session.id}
+                  onMoveToDock={() => {
+                    // As the side panel does: the terminal's next host takes focus, then the dock opens.
+                    controls.moves += 1;
+                    requestTerminalFocus(session.id);
+                    setPlace("dock");
+                  }}
+                />
+              </div>
+            </PanelActionSlotContext.Provider>
+          )}
+          {place === "dock" && <ShellDock sessionId={session.id} onClose={() => setPlace("none")} theme="dark" scheme="wollipog" />}
+        </SessionTerminalsProvider>
+      </StoreProvider>
+    </ApiProvider>
+  );
+}
+
+async function mountTool() {
+  const container = domWindow.document.createElement("div") as unknown as HTMLElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const controls: ToolControls = { setPlace: () => {}, terminals: null, moves: 0 };
+  await act(async () => root.render(<ToolHarness controls={controls} />));
+  await settle(20);
+  await act(async () => controls.setPlace("panel"));
+  return {
+    container,
+    controls,
+    button: (name: string) => container.querySelector<HTMLButtonElement>(`.rpanel-actions button[aria-label="${name}"]`),
+    async unmount() {
+      await act(async () => root.unmount());
+      container.remove();
+    },
+  };
+}
+
+test("the Terminal tool's header has Search Output, New Tab and More Terminal Actions, and search opens on its own row", async () => {
+  const view = await mountTool();
+  try {
+    await until(() => tab(view.container, "Shell 2") !== undefined, "the tabs");
+    const actions = [...view.container.querySelectorAll<HTMLButtonElement>(".rpanel-actions button")].map((button) => button.getAttribute("aria-label"));
+    assert.deepEqual(actions, ["Search Output", "New Tab", "More Terminal Actions"]);
+    assert.equal(view.button("Search Output")?.className, "icon-btn", "the header's 32px buttons, not the dock's 28px ones");
+    assert.equal(view.button("Search Output")?.getAttribute("aria-pressed"), "false");
+    assertNoDomNode(view.container.querySelector(".term-search"), "no search row until Search Output");
+
+    await act(async () => fireDomEvent.click(view.button("Search Output")!));
+    assert.equal(view.button("Search Output")?.getAttribute("aria-pressed"), "true", "pressed while the row is open");
+    const row = view.container.querySelector(".rpanel-body > .rpanel-toolbar.term-search");
+    assert.ok(row, "the search row is the toolbar under the tabs");
+    assertSameDomNode(row!.previousElementSibling, view.container.querySelector(".term-tabs"), "it follows the tab strip");
+    const field = row!.querySelector<HTMLInputElement>('input[aria-label="Search Output"]')!;
+    assert.ok((domWindow.document.activeElement as unknown) === field, "the field takes focus");
+    await act(async () => fireDomEvent.change(field, { target: { value: "VITE" } }));
+    assert.equal(view.controls.terminals?.getSnapshot().searchTerm, "VITE", "the session's one search has the term");
+
+    // Pressing it again closes the row; the term goes with it, as Close Search does.
+    await act(async () => fireDomEvent.click(view.button("Search Output")!));
+    assertNoDomNode(view.container.querySelector(".term-search"), "the row closes");
+    assert.equal(view.controls.terminals?.getSnapshot().searchTerm, "");
+
+    await act(async () => fireDomEvent.click(view.button("More Terminal Actions")!));
+    const item = (domWindow.document as unknown as Document).querySelector<HTMLButtonElement>('[role="menu"] [role="menuitem"]')!;
+    assert.match(item.textContent ?? "", /^Move to Bottom Dock/);
+    assert.ok(item.textContent?.includes(MOVE_TO_BOTTOM_DOCK_DESCRIPTION), "the item has its second line");
+    assert.equal(MOVE_TO_BOTTOM_DOCK_DESCRIPTION, "Show the terminal in the dock below the conversation on this device. Running shells keep running.");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("Move to Bottom Dock moves the panel's terminals into the dock: same tab, xterm, scrollback and search, nothing fetched again", async () => {
+  const view = await mountTool();
+  try {
+    await until(() => requests.history.length === 2 && tab(view.container, "Shell 2") !== undefined, "the shells and their history");
+    const terminals = view.controls.terminals!;
+    const shell1 = terminals.terminal("shell-1");
+    const shell2 = terminals.terminal("shell-2");
+    await until(() => shell1.terminal !== null && shell2.terminal !== null, "both terminals to open");
+    const [term1, term2] = [shell1.terminal!, shell2.terminal!];
+    await until(() => bufferText(term1).includes("build step 120 of 120 done"), "Shell 1's history");
+    const disposals = [countDisposals(term1), countDisposals(term2)];
+    assert.ok(shell1.attachedHost?.closest(".term-host .term-body"), "the panel's body hosts the terminals");
+
+    await act(async () => fireDomEvent.click(tab(view.container, "Shell 2")!));
+    await act(async () => fireDomEvent.click(view.button("Search Output")!));
+    await act(async () => fireDomEvent.change(view.container.querySelector('input[aria-label="Search Output"]')!, { target: { value: "VITE" } }));
+    const scrollback = [bufferText(term1), bufferText(term2)];
+
+    await act(async () => fireDomEvent.click(view.button("More Terminal Actions")!));
+    await act(async () => fireDomEvent.click((domWindow.document as unknown as Document).querySelector('[role="menu"] [role="menuitem"]')!));
+    await settle(30);
+
+    assert.equal(view.controls.moves, 1);
+    assertNoDomNode(view.container.querySelector(".term-host"), "the panel's tool is gone");
+    const dock = view.container.querySelector(".shell-dock")!;
+    assert.ok(dock, "the dock shows the terminal");
+    assert.equal(tab(view.container, "Shell 2")?.getAttribute("aria-selected"), "true", "the same tab is selected");
+    assert.equal(dock.querySelector<HTMLInputElement>('input[aria-label="Search Output"]')?.value, "VITE", "the search moved with it");
+    assert.ok(shell1.terminal === term1 && shell2.terminal === term2, "each shell keeps its xterm");
+    assert.deepEqual(disposals.map((calls) => calls.count), [0, 0], "no terminal was disposed");
+    assert.deepEqual([bufferText(term1), bufferText(term2)], scrollback, "each keeps its scrollback");
+    const hosts = [...dock.querySelectorAll(".shell-term")];
+    assertSameDomNode(shell1.attachedHost, hosts[0], "Shell 1's terminal is in the dock");
+    assertSameDomNode(shell2.attachedHost, hosts[1], "Shell 2's terminal is in the dock");
+    assert.deepEqual(requests.history, ["shell-1", "shell-2"], "no history is fetched again");
+    assert.equal(requests.opens, 0, "no shell is opened, so none restarts");
+    await settle(30);
+    assert.ok(domWindow.document.activeElement?.closest(".shell-dock .xterm"), "focus followed the terminal into the dock");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("the Terminal tool with no shells shows the empty state with New Shell, and no tab strip", async () => {
+  fixtureShells = [];
+  openShellAnswer = () => new Promise<ShellView>(() => {});
+  const view = await mountTool();
+  try {
+    await until(() => view.container.querySelector(".term-body .state") !== null, "the empty state");
+    const state = view.container.querySelector(".term-body .state")!;
+    assert.match(state.textContent ?? "", /No Shells Open/);
+    assert.match(state.textContent ?? "", /Run commands in this session's worktree on Build Box\./);
+    assert.ok([...state.querySelectorAll("button")].some((button) => button.textContent?.includes("New Shell")));
+    assertNoDomNode(view.container.querySelector(".term-tabs"), "no strip without a tab");
+    assert.equal(view.button("Search Output")?.disabled, true, "nothing to search");
+  } finally {
+    await view.unmount();
   }
 });

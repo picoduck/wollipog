@@ -11,10 +11,59 @@ async function waitForHarness(page: Page): Promise<void> {
 }
 
 const SEARCH_DURING_FONT_LOAD_TEST = "applies search entered while the terminal font is still loading @production";
+/** Tests that drive the real Shell's terminal hosts rather than this fixture page. */
+const HOST_MOVES = "terminal hosts in the Shell";
 
 test.beforeEach(async ({ page }, testInfo) => {
-  if (testInfo.title === SEARCH_DURING_FONT_LOAD_TEST || testInfo.title.startsWith("the active search match")) return;
+  if (testInfo.title === SEARCH_DURING_FONT_LOAD_TEST || testInfo.title.startsWith("the active search match") ||
+    testInfo.titlePath.includes(HOST_MOVES)) return;
   await waitForHarness(page);
+});
+
+test.describe(HOST_MOVES, () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+
+  // #2868: the side panel's Terminal tool and the dock show the same session terminals, so moving
+  // between them reparents each xterm; the shell, its process and its scrollback never restart.
+  test("a process started in a panel shell is still running in the same dock tab after Move to Bottom Dock, with its scrollback", async ({ page }) => {
+    await page.addInitScript(() => localStorage.setItem("wollipog.terminal.placement", "panel"));
+    const response = await page.goto("/command-inbox-projects-e2e.html?fullShell=1&terminalShells=2");
+    expect(response?.ok(), "fixture page should be served").toBe(true);
+    await page.getByRole("button", { name: /Alpha Session/ }).first().click();
+    await page.getByRole("button", { name: "Open Session" }).click();
+    await page.getByRole("button", { name: "Side Panel", exact: true }).first().click();
+    const panel = page.locator("#right-panel");
+    await panel.locator('.session-tool[data-tool="terminal"]').click();
+    const panelRows = panel.locator(".shell-term:not(.is-hidden) .xterm-rows");
+    await expect(panelRows).toContainText("24 files passed");
+    const calls = () => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.shellCalls());
+
+    // `sleep 60` in Shell 1: the shell echoes it, so it is part of the scrollback.
+    await panel.locator(".shell-term:not(.is-hidden) .xterm-helper-textarea").focus();
+    await page.keyboard.type("sleep 60");
+    await page.keyboard.press("Enter");
+    await expect(panelRows).toContainText("sleep 60");
+    await expect.poll(async () => (await calls()).input.map((entry) => `${entry.shellId}:${entry.data}`).join(""))
+      .toBe("shell-1:sleep 60\r");
+
+    await panel.getByRole("button", { name: "More Terminal Actions" }).click();
+    await page.getByRole("menuitem", { name: /Move to Bottom Dock/ }).click();
+
+    const dock = page.getByRole("region", { name: "Terminal" });
+    await expect(dock).toBeVisible();
+    await expect(panel).toHaveCount(0);
+    expect(await page.evaluate(() => localStorage.getItem("wollipog.terminal.placement"))).toBe("dock");
+    await expect(dock.getByRole("tab", { name: /Shell 1/ })).toHaveAttribute("aria-selected", "true");
+    const dockTerminal = dock.locator(".shell-term:not(.is-hidden)");
+    await expect(dockTerminal.locator(".xterm-rows")).toContainText("sleep 60");
+    await expect(dockTerminal.locator(".xterm-rows")).toContainText("24 files passed");
+    // Focus moved with it, so the next key reaches the same shell: its process was never restarted.
+    await expect(dockTerminal.locator(".xterm-helper-textarea")).toBeFocused();
+    await page.keyboard.press("Control+c");
+    await expect.poll(async () => (await calls()).input.at(-1)).toEqual({ shellId: "shell-1", data: "\u0003" });
+    const { opens, closes } = await calls();
+    expect({ opens, closes }, "no shell was opened or closed by the move").toEqual({ opens: 0, closes: [] });
+  });
 });
 
 test(SEARCH_DURING_FONT_LOAD_TEST, async ({ page }) => {
