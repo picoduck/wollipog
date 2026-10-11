@@ -21,6 +21,7 @@ export const WORKER_DETAIL_COPY = {
   unavailableTitle: "Can't Show This Worker",
   ambiguous: "Two recorded subagents share the same ID, so Wollipog can't tell which one you picked.",
   missing: "This subagent is no longer available in this session.",
+  loading: "Loading this worker…",
   back: "Back to Agents",
   nested: "Nested Workers",
   activity: "Activity",
@@ -46,8 +47,8 @@ export interface WorkerDetailProps {
   worker?: WorkerRow;
   /** The subagent's lifecycle, which says whether its activity is still live. */
   lifecycle?: SubagentLifecycle;
-  /** Why the page cannot show its worker. */
-  unavailable?: "ambiguous" | "missing";
+  /** Why the page cannot show its worker, or that its registry entry is still loading. */
+  unavailable?: "ambiguous" | "missing" | "loading";
   /** The worker that started this one. */
   parent?: WorkerRow;
   /** The workers this one started. */
@@ -102,13 +103,16 @@ export function WorkerDetail({
   const requestRef = useRef<HTMLDivElement>(null);
   // Whether focus is in the request, so answering it (which removes the card) keeps focus on the page.
   const requestOwnsFocus = useRef(false);
+  // The intent waits while the worker is not shown yet (its registry entry still loading), so its
+  // request takes focus once it is. Shown, the intent is spent whether or not there is a request to
+  // land on, so a request that arrives later, or the page coming back after Back from a nested page,
+  // does not take focus.
+  const shown = worker !== undefined && unavailable === undefined;
   useEffect(() => {
-    if (requestFocus === undefined) return;
-    // With no request to land on, the title keeps focus. Either way the intent is spent, so a request
-    // that arrives later, or the page coming back after Back from a nested page, does not take focus.
+    if (requestFocus === undefined || !shown) return;
     requestRef.current?.focus();
     onRequestFocusHandled?.(requestFocus);
-  }, [requestFocus, onRequestFocusHandled]);
+  }, [requestFocus, shown, onRequestFocusHandled]);
   useLayoutEffect(() => {
     if (!requestOwnsFocus.current) return;
     const active = document.activeElement;
@@ -117,6 +121,7 @@ export function WorkerDetail({
     (requestRef.current ?? pageRef.current)?.focus();
   }, [request?.requestId]);
 
+  if (unavailable === "loading") return <State variant="loading" compact>{WORKER_DETAIL_COPY.loading}</State>;
   if (unavailable || !worker) {
     return (
       <State compact title={WORKER_DETAIL_COPY.unavailableTitle}

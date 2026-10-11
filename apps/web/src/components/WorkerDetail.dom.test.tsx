@@ -374,3 +374,51 @@ test("a request focus asked for a worker with no request is spent, so a request 
     await panel.unmount();
   }
 });
+
+const registryPage = (children: { id: string; name: string }[], nextAfter: number | null) => ({
+  children: children.map((child, index) => ({ toolCallId: child.id, name: child.name, status: "in_progress", lifecycle: "running",
+    sourceSeq: index + 1, startedAt: now - 30_000, lastActivityAt: now, toolCount: 0 })),
+  attentionOwners: [], unidentifiedChildren: 0, eventEpoch: 0, nextAfter, truncated: nextAfter !== null,
+}) as unknown as Awaited<ReturnType<ApiClient["childSessions"]>>;
+
+test("a worker's page lists a transcript child the registry has not listed yet under Nested Workers", async () => {
+  const many: TimelineItem[] = Array.from({ length: 51 }, (_, index) => agent(`worker-${index + 1}`, index + 1,
+    { title: `Worker ${index + 1}`, ...(index === 50 ? { parentToolUseId: "worker-50" } : {}) }));
+  const firstPage: ApiClient["childSessions"] = async () => registryPage(
+    Array.from({ length: 50 }, (_, index) => ({ id: `worker-${index + 1}`, name: `Worker ${index + 1}` })), 50);
+  const panel = await mount(<Harness initial={session} list={many} childSessions={firstPage} requestedId="worker-50" focusRequest={1} />);
+  try {
+    const page = panel.container.querySelector(".agents-page .worker-detail")!;
+    assert.equal(page.getAttribute("aria-label"), "Worker 50");
+    const child = page.querySelector<HTMLButtonElement>('[role="list"][aria-label="Nested Workers"] [data-panel-page-key="subagent:worker-51"]');
+    assert.ok(child, "Nested Workers lists the transcript child");
+    await panel.click(child);
+    const childPage = panel.container.querySelector(".agents-page .worker-detail")!;
+    assert.equal(childPage.getAttribute("aria-label"), "Worker 51");
+    assert.equal(text(childPage.querySelector(".worker-detail-meta .link")), "Worker 50", "its parent link names the listed parent");
+  } finally {
+    await panel.unmount();
+  }
+});
+
+test("a worker known only to the registry loads before its page shows, then its request takes the focus asked for", async () => {
+  let release!: () => void;
+  const registry: ApiClient["childSessions"] = () => new Promise((resolve) => {
+    release = () => resolve(registryPage([{ id: "durable", name: "Durable Worker" }], null));
+  });
+  const waiting = { ...session, status: "input_required", pendingApproval: {
+    requestId: "durable-run", ownerToolUseId: "durable", title: "Bash: npm test", options: [{ optionId: "yes", name: "Allow", kind: "allow_once" }],
+  } } as unknown as SessionView;
+  const panel = await mount(<Harness initial={waiting} list={[]} childSessions={registry} requestedId="durable" focusRequest={1}
+    focusPendingRequest />);
+  try {
+    assert.equal(text(panel.container.querySelector(".agents-page .state")), WORKER_DETAIL_COPY.loading,
+      "the page waits for the registry rather than calling the worker gone");
+    await act(async () => { release(); await new Promise((resolve) => setTimeout(resolve, 10)); });
+    const request = panel.container.querySelector(`.agents-page [aria-label="${WORKER_DETAIL_COPY.request}"]`);
+    assert.ok(request, "the worker's request shows on its page");
+    assert.ok(focused() === request, "and takes the focus asked for");
+  } finally {
+    await panel.unmount();
+  }
+});

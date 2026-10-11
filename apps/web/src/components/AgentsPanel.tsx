@@ -732,6 +732,17 @@ export function AgentsPanel(props: Props) {
       ? { ...agent, lifecycle: "unknown" as const, availability: "recorded" as const } : agent);
     return workerRoster(session, unambiguousAgents, members, (id) => id === session.runnerId ? runnerOnline : runners.get(id)?.status === "online", metadata);
   }, [session, agents, projection.ambiguousIds, runs, sessions, runners, pods, workflows, runnerOnline]);
+  // Workers the transcript holds that the registry has not listed yet (past its first page): not
+  // roster rows until Show More, but their own pages show them and their parents' pages list them,
+  // read from the transcript as their rows will be.
+  const unlistedRows = useMemo(() => {
+    const listed = new Set(agents.map((agent) => agent.id));
+    const unlisted = projection.descriptors.filter((agent) => !listed.has(agent.id) &&
+      !projection.ambiguousIds.has(agent.id) && !unresolvedOwnerIds.has(agent.id));
+    if (unlisted.length === 0) return [];
+    const ids = new Set(unlisted.map((agent) => subagentPageKey(agent.id)));
+    return workerRoster(session, [...agents, ...unlisted], [], () => runnerOnline).filter((row) => ids.has(row.id));
+  }, [session, agents, projection, unresolvedOwnerIds, runnerOnline]);
   const [filter, setFilter] = useState<"active" | "history" | "all">("active");
   const [limit, setLimit] = useState(PAGE_SIZE);
   const [chosen, setChosen] = useState<string | null>(null);
@@ -900,17 +911,11 @@ export function AgentsPanel(props: Props) {
       </> };
     }
     const ambiguous = projection.ambiguousIds.has(id);
-    // A worker the transcript holds whose registry page is not read yet (past the first 50) is not a
-    // roster row until Show More, but its page still shows it, read from the transcript as its row
-    // will be.
-    const loaded = ambiguous || unresolvedOwnerIds.has(id) ? undefined : projection.descriptors.find((agent) => agent.id === id);
-    const descriptor = ambiguous ? undefined : agents.find((agent) => agent.id === id) ?? loaded;
-    const loadedParent = loaded?.parentId ? projection.descriptors.find((agent) => agent.id === loaded.parentId) : undefined;
-    const unlisted = row || !loaded ? [] : workerRoster(session, loadedParent ? [loadedParent, loaded] : [loaded], [],
-      () => runnerOnline);
-    const rowOf = (rowId: string) => rows.find((candidate) => candidate.id === rowId) ??
-      unlisted.find((candidate) => candidate.id === rowId);
-    const worker = row ?? rowOf(key);
+    const descriptor = ambiguous ? undefined
+      : agents.find((agent) => agent.id === id) ?? projection.descriptors.find((agent) => agent.id === id);
+    const pageRows = unlistedRows.length === 0 ? rows : [...rows, ...unlistedRows];
+    const rowOf = (rowId: string) => pageRows.find((candidate) => candidate.id === rowId);
+    const worker = rowOf(key);
     const title = worker?.name ?? descriptor?.title ?? "Subagent";
     // The request an attention link or Worker Attention opened the page for, else the worker's most
     // urgent; never one another worker or the session owns.
@@ -920,9 +925,9 @@ export function AgentsPanel(props: Props) {
     return { key, title, body: <WorkerDetail session={session} runnerOnline={runnerOnline}
       earlierActivityUnloaded={props.earlierActivityUnloaded}
       worker={ambiguous ? undefined : worker} lifecycle={descriptor?.lifecycle}
-      unavailable={ambiguous ? "ambiguous" : worker ? undefined : "missing"}
+      unavailable={ambiguous ? "ambiguous" : worker ? undefined : registry === null && registryLoading ? "loading" : "missing"}
       parent={worker?.parentId ? rowOf(worker.parentId) : undefined}
-      nested={rows.filter((candidate) => candidate.parentId === key)} output={pageOutput} statusContext={statusContext}
+      nested={pageRows.filter((candidate) => candidate.parentId === key)} output={pageOutput} statusContext={statusContext}
       request={request} requestOwner={`${title}, a subagent`}
       requestFocus={pageRequest?.key === key ? pageRequest.focus : undefined} onRequestFocusHandled={spendRequestFocus}
       onOpenWorker={openRow} onOpenSubagent={openSubagentPage} onBack={pages.pop} /> };
