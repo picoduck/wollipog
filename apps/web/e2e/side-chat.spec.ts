@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { waitForSessionPreview } from "./session-readiness.js";
 
 /**
  * Side Chat (#2863; docs/design-system.md §4.9): a 40px context line with a Title Case badge, the
@@ -12,6 +13,7 @@ async function openSideChat(page: Page, width: number, height: number, state = "
   await page.reload();
   await page.getByRole("button", { name: /Alpha Session/ }).first().click();
   const open = page.getByRole("button", { name: "Open Session", exact: true });
+  await waitForSessionPreview(page);
   if (await open.isVisible()) await open.click();
   await expect(page.locator(".composer-input")).toBeAttached();
   await page.getByRole("button", { name: "Side Panel", exact: true }).click();
