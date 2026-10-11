@@ -1570,8 +1570,9 @@ function SessionDetailLoaded({
   // revealer, so every control that brings a request up (Jump to Question, an attention link, the
   // Agents and campaign panels) reaches it as it reaches the dock.
   const answerRevealRef = useRef<((requestId: string) => boolean) | null>(null);
-  useEffect(() => registerRequestRevealer(session.id, (requestId) => answerRevealRef.current?.(requestId) === true),
-    [session.id]);
+  // Not while a phone's terminal hides the composer (#2866): the question's dock card answers then.
+  useEffect(() => registerRequestRevealer(session.id, (requestId) =>
+    !phoneTerminalOpenRef.current && answerRevealRef.current?.(requestId) === true), [session.id]);
   const retitleReceiptRef = useRef<HTMLDivElement>(null);
   const rightPanelRef = useRef(rightPanel);
   rightPanelRef.current = rightPanel;

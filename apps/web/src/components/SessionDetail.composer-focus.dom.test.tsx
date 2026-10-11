@@ -238,6 +238,8 @@ interface FixtureOptions {
   onDeny?: () => void;
   /** Each Hide Terminal request the session makes (#2866). */
   hideTerminalCalls?: number[];
+  /** The terminal dock is open from the first render (#2866). */
+  terminalOpen?: boolean;
 }
 
 function EventSeeder({ sessionId, payloads }: { sessionId: string; payloads: SessionEvent["payload"][] }) {
@@ -343,7 +345,7 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
   let detailMount = 0;
   let detailMode: "expanded" | "preview" = "expanded";
   let currentLoader: ComposerDraftLoader = () => draft.promise;
-  let terminalOpen = false;
+  let terminalOpen = options.terminalOpen ?? false;
   const renderWithDraftLoader = (
     loader: ComposerDraftLoader,
     sessionId = currentSession.id,
@@ -7214,6 +7216,25 @@ test("a question answered in the composer stays on the dock under a phone's term
     assert.ok(field, "the answer field shows in the composer");
     assert.equal(field.ownerDocument.activeElement, field, "and takes focus");
   });
+});
+
+test("Jump to Question reaches the dock, not the hidden answer, when a phone session opens under its terminal (#2866)", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  try {
+    await withPhoneTerminal({ terminalOpen: true, sessionPatch: { pendingApproval: answerModeQuestion("ask-jump") } },
+      async (fixture) => {
+        await act(async () => { flushFrames(); });
+        let revealed = false;
+        await act(async () => { revealed = focusSessionRequest(fixture.sessionId, "ask-jump"); });
+        await act(async () => { flushFrames(); });
+        assert.equal(revealed, true);
+        const focused = fixture.container.ownerDocument.activeElement as HTMLElement | null;
+        assert.ok(focused?.closest(".request-dock"), "focus lands on the question's dock card");
+        assert.equal(focused?.closest(".composer"), null, "not in the hidden composer");
+      });
+  } finally {
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
 });
 
 test("Edit as a New Turn on a phone hides the terminal and shows the copy in the composer (#2866)", { timeout: 5_000 }, async () => {
