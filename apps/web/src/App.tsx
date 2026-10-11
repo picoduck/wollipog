@@ -437,6 +437,8 @@ export function Shell() {
       /* best-effort */
     }
   }, [dockVisible]);
+  // Stable, so the memoized session does not re-render for it (#2872).
+  const hideDock = useCallback(() => setDockVisible(false), []);
 
   // Stable, because the identity chain runs all the way down: an inline arrow here rebuilds
   // InboxView's `expand`, which rebuilds `handleSelect`, which gives every mounted InboxRow unequal
@@ -450,6 +452,8 @@ export function Shell() {
     // Reply lands in the composer, which an open expanded side panel hides (#2845). A closed panel
     // keeps its Expanded preference for its next open.
     if (focusComposer && rightPanelOpen && !isMobile) setRightPanelExpanded(false);
+    // On a phone the open terminal takes the composer's place (#2866): Reply hides it, shells running.
+    if (focusComposer && isMobile) setDockVisible(false);
     navigate({ name: "session", id: sessionId });
   }, [isMobile, navigate, rightPanelOpen, setRightPanelExpanded]);
   // The Pinned Summary: docked beside the reader, a drawer, or a phone sheet (#2147). Only one
@@ -867,6 +871,7 @@ export function Shell() {
                 if (terminalSupported) setDockVisible(true);
               }}
               terminalOpen={view.name === "session" && dockVisible && terminalSupported}
+              onHideTerminal={hideDock}
               pinnedSummary={pinnedSummary}
               focusComposerSessionId={composerFocusSessionId}
               onComposerFocusConsumed={() => setComposerFocusSessionId(null)}

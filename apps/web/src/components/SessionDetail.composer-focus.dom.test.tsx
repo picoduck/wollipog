@@ -236,6 +236,8 @@ interface FixtureOptions {
   onComposerFocusConsumed?: () => void;
   onApprove?: () => void;
   onDeny?: () => void;
+  /** Each Hide Terminal request the session makes (#2866). */
+  hideTerminalCalls?: number[];
 }
 
 function EventSeeder({ sessionId, payloads }: { sessionId: string; payloads: SessionEvent["payload"][] }) {
@@ -363,6 +365,7 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
                 rightPanel={rightPanel}
                 onOpenTerminal={() => {}}
                 terminalOpen={terminalOpen}
+                onHideTerminal={() => { options.hideTerminalCalls?.push(Date.now()); }}
                 composerFocusIntent={options.composerFocusIntent ?? "message"}
                 onComposerFocusConsumed={options.onComposerFocusConsumed}
                 onApprove={options.onApprove}
@@ -7108,6 +7111,49 @@ test("inserting a side-chat response restores an expanded side panel so the draf
     assert.equal(fixture.composer.value, "side-chat answer");
   } finally {
     await unmountFixture(fixture);
+  }
+});
+
+test("inserting a side-chat response on a phone hides the terminal that took the composer's place (#2866)", async () => {
+  const priorMatchMedia = domWindow.matchMedia;
+  domWindow.matchMedia = ((query: string) => ({
+    matches: query.includes("max-width: 760px"), media: query, onchange: null,
+    addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
+    dispatchEvent: () => false,
+  })) as never;
+  const draft = deferred<ComposerDraft | null>();
+  const child = session("side-chat-phone-terminal-child");
+  const relation: SideChatView = { parentSessionId: "unused-by-panel", session: child, createdAt: 1 };
+  const response: SessionEvent = {
+    id: 1,
+    sessionId: child.id,
+    seq: 1,
+    ts: 2,
+    payload: { kind: "agent_message", text: "side-chat answer", final: true },
+  };
+  const hideTerminalCalls: number[] = [];
+  const fixture = await mountFixture(draft, {
+    rightPanelMode: "sidechat",
+    hideTerminalCalls,
+    client: {
+      sideChat: async () => ({ sideChat: relation }),
+      session: async (id: string) => ({ session: id === child.id ? child : session(id) }),
+      getSessionEventPage: async () => ({ events: [response], eventEpoch: 0, nextAfter: 1, cacheComplete: true }),
+    },
+  });
+  try {
+    await resolveDraft(draft, "");
+    await fixture.setTerminalOpen(true);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
+    const insert = fixture.container.querySelector('button[aria-label="Insert into Draft"]') as HTMLButtonElement;
+    assert.ok(insert);
+    await act(async () => insert.click());
+    assert.equal(hideTerminalCalls.length, 1, "Insert hides the terminal so the draft can show");
+    await act(async () => { flushFrames(); });
+    assert.equal(fixture.composer.value, "side-chat answer");
+  } finally {
+    await unmountFixture(fixture);
+    domWindow.matchMedia = priorMatchMedia;
   }
 });
 

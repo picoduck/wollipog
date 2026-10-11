@@ -591,6 +591,8 @@ export type SessionDetailProps = {
   /** The bottom terminal dock is open (#2866). On a phone it takes the composer's place, so the
    * composer is hidden while it is. */
   terminalOpen?: boolean;
+  /** Hides the terminal dock, so an action whose result shows in the composer can show it (#2866). */
+  onHideTerminal?: () => void;
   /** The Pinned Summary's state (#2147). Only the expanded session shows the summary; without it,
    * none is shown. */
   pinnedSummary?: PinnedSummaryState;
@@ -1098,6 +1100,7 @@ function SessionDetailLoaded({
   rightPanel,
   onOpenTerminal,
   terminalOpen = false,
+  onHideTerminal,
   pinnedSummary: pinnedSummaryProp,
   composerFocusIntent,
   onComposerFocusConsumed,
@@ -1584,6 +1587,20 @@ function SessionDetailLoaded({
     flushSync(() => panel.setExpanded(false));
     return true;
   }, [isMobile]);
+  /**
+   * A phone's terminal sheet takes the composer's place (#2866). An action whose result shows in the
+   * composer (a draft, a reference chip) hides the terminal first, and commits it at once, as an
+   * expanded panel is restored. Its shells keep running.
+   */
+  const phoneTerminalOpen = isMobile && mode === "expanded" && terminalOpen;
+  const phoneTerminalOpenRef = useRef(phoneTerminalOpen);
+  phoneTerminalOpenRef.current = phoneTerminalOpen;
+  const hideTerminalRef = useRef(onHideTerminal);
+  hideTerminalRef.current = onHideTerminal;
+  const revealComposerFromTerminal = useCallback(() => {
+    const hide = hideTerminalRef.current;
+    if (phoneTerminalOpenRef.current && hide) flushSync(hide);
+  }, []);
   // Resolve attention only against this generation's known requests. Cold links stay on the
   // transcript while hydration catches up; they never guess an Agents overview first.
   const handledAttentionRef = useRef<string | null>(null);
@@ -2140,6 +2157,7 @@ function SessionDetailLoaded({
   }, [sessionId]);
   const insertSideChatDraft = useCallback((response: string) => {
     restoreExpandedPanel();
+    revealComposerFromTerminal();
     revealOrdinaryComposerRef.current("always");
     markDraftDirty();
     // The whole draft, attachments included: Undo gives back exactly this.
@@ -2154,7 +2172,7 @@ function SessionDetailLoaded({
       setProgrammaticComposerText(previous.text);
       replace(previous.images);
     });
-  }, [markDraftDirty, replace, restoreExpandedPanel, sessionId, setProgrammaticComposerText, showUndo]);
+  }, [markDraftDirty, replace, restoreExpandedPanel, revealComposerFromTerminal, sessionId, setProgrammaticComposerText, showUndo]);
   // Shared git status: the composer branch chip + the right panel's Review mode read one
   // fetch. Called before the !session guard — hooks must run unconditionally.
   // Inbox previews render neither the composer Git chip, pinned summary, nor Review panel. Do not
@@ -3515,7 +3533,6 @@ function SessionDetailLoaded({
   // takes the composer's place (#2866). A draft that changed while it was hidden had no width to
   // measure, so revealing it grows it again.
   const phonePanelOpen = isMobile && rightPanel.open;
-  const phoneTerminalOpen = isMobile && mode === "expanded" && terminalOpen;
   const composerHiddenOnPhone = phonePanelOpen || phoneTerminalOpen;
   useLayoutEffect(() => {
     autoGrowComposerRef.current();
@@ -5277,8 +5294,9 @@ function SessionDetailLoaded({
   // to Prompt restores an expanded panel to show it (#2845).
   const attachWorkspaceTargetFromPanel = useCallback((target: CreateWorkspaceReferenceRequest) => {
     restoreExpandedPanel();
+    revealComposerFromTerminal();
     return attachWorkspaceTarget(target);
-  }, [attachWorkspaceTarget, restoreExpandedPanel]);
+  }, [attachWorkspaceTarget, restoreExpandedPanel, revealComposerFromTerminal]);
 
   const selectWorkspaceCandidate = (candidate: WorkspaceReferenceCandidate) => {
     if (!workspaceTrigger) return;
