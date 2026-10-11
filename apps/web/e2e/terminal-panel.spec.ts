@@ -24,6 +24,8 @@ async function openSession(page: Page, placement: Placement, shells = 2): Promis
 const sidePanel = (page: Page) => page.locator("#right-panel");
 const dock = (page: Page) => page.locator(".shell-dock");
 const terminalRow = (page: Page) => sidePanel(page).locator('.session-tool[data-tool="terminal"]');
+/** The session bar's Terminal toggle (the phone's app bar has its own). */
+const terminalToggle = (page: Page) => page.getByRole("button", { name: "Terminal", exact: true }).first();
 const shellCalls = (page: Page) => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.shellCalls());
 
 /** Opens the side panel on Session Tools. */
@@ -95,8 +97,116 @@ for (const viewport of [
       // No tab or fact names the command a shell runs.
       await expect(sidePanel(page).getByRole("tablist", { name: "Terminal Tabs" })).not.toContainText("pnpm");
     });
+
+    // #2869: the session bar's Terminal toggle and Ctrl+` open the terminal wherever it is placed.
+    test("in Right Panel placement the Terminal toggle and Ctrl+` open and close the Terminal tool, and no dock renders", async ({ page }) => {
+      await openSession(page, "panel");
+      const toggle = terminalToggle(page);
+      await expect(toggle).toHaveAttribute("aria-pressed", "false");
+      await toggle.click();
+      await expect(sidePanel(page)).toHaveAttribute("data-mode", "terminal");
+      await expect(sidePanel(page).locator(".term-host .shell-term:not(.is-hidden) .xterm-rows")).toContainText("24 files passed");
+      await expect(dock(page)).toHaveCount(0);
+      if (viewport.presentation) {
+        // The toggle's pressed state is the tool's, not the dock's stored visibility.
+        await expect(toggle).toHaveAttribute("aria-pressed", "true");
+        await page.locator("body").press("Control+Backquote");
+        await expect(sidePanel(page)).toHaveCount(0);
+        await expect(toggle).toHaveAttribute("aria-pressed", "false");
+      } else {
+        // A phone's sheet covers the session bar; Back to Session leaves it.
+        await sidePanel(page).getByRole("button", { name: "Back to Session" }).click();
+        await expect(sidePanel(page)).toHaveCount(0);
+      }
+      await expect(dock(page)).toHaveCount(0);
+
+      await page.locator("body").press("Control+Backquote");
+      await expect(sidePanel(page)).toHaveAttribute("data-mode", "terminal");
+      await expect(sidePanel(page).locator(".term-host .shell-term:not(.is-hidden) .xterm-rows")).toContainText("24 files passed");
+      await expect(dock(page)).toHaveCount(0);
+      expect(await page.evaluate(() => localStorage.getItem("wollipog.shelldock.visible")),
+        "the dock's stored visibility is left for when the terminal moves back").not.toBe("1");
+    });
+
+    test("with the placement unset the Terminal toggle and Ctrl+` open the dock as before", async ({ page }) => {
+      await openSession(page, null);
+      const toggle = terminalToggle(page);
+      await toggle.click();
+      await expect(dock(page)).toBeVisible();
+      await expect(toggle).toHaveAttribute("aria-pressed", "true");
+      await expect(sidePanel(page)).toHaveCount(0);
+      await page.locator("body").press("Control+Backquote");
+      await expect(dock(page)).toHaveCount(0);
+      await expect(toggle).toHaveAttribute("aria-pressed", "false");
+      await page.locator("body").press("Control+Backquote");
+      await expect(dock(page)).toBeVisible();
+      await expect(sidePanel(page)).toHaveCount(0);
+    });
   });
 }
+
+test.describe("at 390px with touch, in Bottom Dock placement", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("More Terminal Actions opens as a bottom sheet with a 44px Move to Right Panel and its second line", async ({ page }) => {
+    await openSession(page, null);
+    await terminalToggle(page).click();
+    const more = dock(page).getByRole("button", { name: "More Terminal Actions" });
+    await expect(more).toHaveAttribute("title", "More Terminal Actions");
+    await more.click();
+    const menu = page.getByRole("menu", { name: "More Terminal Actions" });
+    await expect(menu).toBeVisible();
+    await expect(menu.locator(".sheet-grabber")).toBeVisible();
+    // Docked to the viewport's bottom edge, full width, once it has slid in.
+    await expect.poll(async () => {
+      const sheet = (await menu.boundingBox())!;
+      return [Math.round(sheet.x), Math.round(sheet.width), Math.round(sheet.y + sheet.height)];
+    }).toEqual([0, 390, 844]);
+    const item = menu.getByRole("menuitem", { name: "Move to Right Panel" });
+    await expect(item).toHaveAccessibleDescription(
+      "Show the terminal as a tool in the right panel on this device. Running shells keep running.");
+    expect((await item.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+
+    await item.click();
+    await expect(sidePanel(page)).toHaveAttribute("data-mode", "terminal");
+    await expect(dock(page)).toHaveCount(0);
+    await expect(sidePanel(page).locator(".term-host .shell-term:not(.is-hidden) .xterm-rows")).toContainText("24 files passed");
+  });
+});
+
+test.describe("at 1440px, across two windows", () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+
+  test("the Settings row and both menus write one key, and a change in one window reaches the other", async ({ page, context }) => {
+    await openSession(page, null);
+    await terminalToggle(page).click();
+    await expect(dock(page)).toBeVisible();
+
+    const settings = await context.newPage();
+    await settings.goto(`/command-inbox-projects-e2e.html?fullShell=1&path=${encodeURIComponent("/settings/appearance")}`);
+    const row = settings.getByRole("radiogroup", { name: "Terminal Placement" });
+    await expect(row.getByRole("radio", { name: "Bottom Dock" })).toHaveAttribute("aria-checked", "true");
+
+    // Settings → Right Panel: the session's window drops its dock, and its toggle opens the tool.
+    await row.getByRole("radio", { name: "Right Panel" }).click();
+    await expect(dock(page)).toHaveCount(0);
+    await terminalToggle(page).click();
+    await expect(sidePanel(page)).toHaveAttribute("data-mode", "terminal");
+
+    // Move to Bottom Dock in the session's window: the Settings row follows.
+    await sidePanel(page).getByRole("button", { name: "More Terminal Actions" }).click();
+    await page.getByRole("menuitem", { name: /Move to Bottom Dock/ }).click();
+    await expect(dock(page)).toBeVisible();
+    await expect(row.getByRole("radio", { name: "Bottom Dock" })).toHaveAttribute("aria-checked", "true");
+
+    // Move to Right Panel in the dock: the Settings row follows again.
+    await dock(page).getByRole("button", { name: "More Terminal Actions" }).click();
+    await page.getByRole("menuitem", { name: /Move to Right Panel/ }).click();
+    await expect(sidePanel(page)).toHaveAttribute("data-mode", "terminal");
+    await expect(row.getByRole("radio", { name: "Right Panel" })).toHaveAttribute("aria-checked", "true");
+    await settings.close();
+  });
+});
 
 test.describe("at 390px with touch", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });

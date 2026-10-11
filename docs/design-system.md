@@ -858,6 +858,20 @@ placement the dock is not shown, and `toggleTerminalTool()` / `terminalToolShowi
 (`right-panel-state.ts`) are the open-and-close call and the pressed state for the toggle and
 Ctrl+` (#2869).
 
+**Moving the terminal and choosing where it opens (#2869).** The dock's head has **More Terminal
+Actions** (`.icon-btn.sm`, `MoreHorizontalIcon`) between New Tab and Hide Terminal; its menu opens above
+the head (a sheet on phones, with 44px items) and has one item, **Move to Right Panel**
+(`PanelRightIcon`, "Show the terminal as a tool in the right panel on this device. Running shells keep
+running."). It writes `"panel"` and opens the side panel on its Terminal tool with the same tab and
+focus in its terminal; the dock's stored visibility and height are kept for when the terminal moves
+back. Both places render the one `TerminalMoreActions` (`TerminalHead.tsx`), each with its move. The
+session bar's Terminal toggle and Ctrl+` call `toggleTerminalTool()` in Right Panel placement, and the
+toggle's `aria-pressed` is then `terminalToolShowing()`; in Bottom Dock placement they show and hide
+the dock as before. Settings › Appearance › Display has **Terminal Placement**, a segmented row with
+**Bottom Dock** and **Right Panel**, described "Where terminal tabs open on this device. Running shells
+keep running when you switch." It reads and writes the same key as both menus and follows them and
+other windows live, as Sessions Layout does (§6.3).
+
 **One terminal state, any host (#2867).** The open session's terminals live above the places that
 show them: `useSessionTerminals(sessionId)` (`session-terminals.tsx`, provided above the app's main
 area) owns the shell list, the active tab, the search (open, term and match count), the pipe rows'

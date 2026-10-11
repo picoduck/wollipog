@@ -135,12 +135,16 @@ function fixtureShells(sessionId: string): ShellView[] {
   }
   return shells;
 }
-/** What the shell API was asked (#2868): each terminal size reported, what was typed, opens and closes. */
+/**
+ * What the shell API was asked (#2868, #2869): each terminal size reported, what was typed, opens and
+ * closes, and each shell whose history was read.
+ */
 const shellCalls = {
   resizes: [] as Array<{ shellId: string; cols: number; rows: number }>,
   input: [] as Array<{ shellId: string; data: string }>,
   opens: 0,
   closes: [] as string[],
+  histories: [] as string[],
 };
 const shellOutputSeq = new Map<string, number>();
 const LEGACY_WORKSPACES = FIXTURE_QUERY.get("legacyWorkspaces") === "1";
@@ -2657,15 +2661,18 @@ const client = {
     return structuredClone(resolved);
   },
   listShells: async (sessionId: string) => ({ shells: structuredClone(fixtureShells(sessionId)) }),
-  shellHistory: async (_sessionId: string, shellId: string) => ({
-    shellId,
-    chunks: TERMINAL_SHELLS > 0 && shellId === "shell-1"
-      ? [{ seq: 1, stream: "stdout" as const, data: TERMINAL_SHELL_OUTPUT }]
-      : [],
-    nextAfter: 0,
-    hasMore: false,
-    truncatedBefore: false,
-  }),
+  shellHistory: async (_sessionId: string, shellId: string) => {
+    shellCalls.histories.push(shellId);
+    return {
+      shellId,
+      chunks: TERMINAL_SHELLS > 0 && shellId === "shell-1"
+        ? [{ seq: 1, stream: "stdout" as const, data: TERMINAL_SHELL_OUTPUT }]
+        : [],
+      nextAfter: 0,
+      hasMore: false,
+      truncatedBefore: false,
+    };
+  },
   openShell: async (sessionId: string, request?: { kind?: "shell" | "agent_tui" }) => {
     shellCalls.opens += 1;
     const shells = fixtureShells(sessionId);
@@ -3714,6 +3721,8 @@ function FixtureSurface() {
             <ShellDock
               sessionId={view.id}
               onClose={() => setTerminalSessionId(null)}
+              // Only the full Shell (`fullShell=1`) has the side panel's Terminal tool to move to.
+              onMoveToPanel={() => {}}
               theme="dark" scheme="wollipog"
             />
           </SessionTerminalsProvider>
@@ -3743,6 +3752,7 @@ function FixtureSurface() {
           <ShellDock
             sessionId={view.id}
             onClose={() => setTerminalSessionId(null)}
+            onMoveToPanel={() => {}}
             theme="dark" scheme="wollipog"
           />
         </SessionTerminalsProvider>

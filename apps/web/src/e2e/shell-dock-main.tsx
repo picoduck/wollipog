@@ -180,13 +180,15 @@ const navigation: ViewNavigation = {
 };
 
 let hideCount = 0;
+let moveCount = 0;
 declare global {
   interface Window {
-    __WOLLIPOG_SHELL_DOCK_E2E__: { hideCount(): number; openRequests(): number; historyRequests(): number };
+    __WOLLIPOG_SHELL_DOCK_E2E__: { hideCount(): number; moveCount(): number; openRequests(): number; historyRequests(): number };
   }
 }
 window.__WOLLIPOG_SHELL_DOCK_E2E__ = {
   hideCount: () => hideCount,
+  moveCount: () => moveCount,
   openRequests: () => openRequests,
   historyRequests: () => historyRequests,
 };
@@ -215,6 +217,8 @@ function Fixture() {
                     hideCount += 1;
                     if (toggle) setDockOpen(false);
                   }}
+                  // This page has no side panel: Move to Right Panel is only counted.
+                  onMoveToPanel={() => { moveCount += 1; }}
                   theme={theme}
                   scheme="wollipog"
                 />

@@ -40,7 +40,7 @@ export async function load(url, context, nextLoad) {
 register(`data:text/javascript,${encodeURIComponent(XTERM_LOADER)}`, import.meta.url);
 const { FitAddon } = await import("@xterm/addon-fit");
 const { SessionTerminals, SessionTerminalsProvider, useSessionTerminals } = await import("./session-terminals.js");
-const { ShellDock } = await import("./components/ShellDock.js");
+const { ShellDock, MOVE_TO_RIGHT_PANEL_DESCRIPTION } = await import("./components/ShellDock.js");
 const { ShellTerminal } = await import("./components/ShellTerminal.js");
 const { TerminalTool, MOVE_TO_BOTTOM_DOCK_DESCRIPTION } = await import("./components/TerminalTool.js");
 const { PanelActionSlotContext } = await import("./components/RightPanel.js");
@@ -309,7 +309,7 @@ function DockHarness({ controls }: { controls: DockControls }) {
       <StoreProvider connection={connection} navigation={navigation}>
         <SessionTerminalsProvider sessionId={session.id}>
           <TerminalsProbe controls={controls} />
-          {dockOpen && <ShellDock sessionId={session.id} onClose={() => setDockOpen(false)} theme="dark" scheme="wollipog" />}
+          {dockOpen && <ShellDock sessionId={session.id} onClose={() => setDockOpen(false)} onMoveToPanel={() => {}} theme="dark" scheme="wollipog" />}
         </SessionTerminalsProvider>
       </StoreProvider>
     </ApiProvider>
@@ -1077,25 +1077,39 @@ function ToolHarness({ controls }: { controls: ToolControls }) {
               </div>
             </PanelActionSlotContext.Provider>
           )}
-          {place === "dock" && <ShellDock sessionId={session.id} onClose={() => setPlace("none")} theme="dark" scheme="wollipog" />}
+          {place === "dock" && (
+            <ShellDock
+              sessionId={session.id}
+              onClose={() => setPlace("none")}
+              onMoveToPanel={() => {
+                // As the app does: the terminal's next host takes focus, then the panel opens on Terminal.
+                controls.moves += 1;
+                requestTerminalFocus(session.id);
+                setPlace("panel");
+              }}
+              theme="dark"
+              scheme="wollipog"
+            />
+          )}
         </SessionTerminalsProvider>
       </StoreProvider>
     </ApiProvider>
   );
 }
 
-async function mountTool() {
+async function mountTool(start: "panel" | "dock" = "panel") {
   const container = domWindow.document.createElement("div") as unknown as HTMLElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
   const controls: ToolControls = { setPlace: () => {}, terminals: null, moves: 0 };
   await act(async () => root.render(<ToolHarness controls={controls} />));
   await settle(20);
-  await act(async () => controls.setPlace("panel"));
+  await act(async () => controls.setPlace(start));
   return {
     container,
     controls,
     button: (name: string) => container.querySelector<HTMLButtonElement>(`.rpanel-actions button[aria-label="${name}"]`),
+    dockButton: (name: string) => container.querySelector<HTMLButtonElement>(`.shell-dock-head button[aria-label="${name}"]`),
     async unmount() {
       await act(async () => root.unmount());
       container.remove();
@@ -1176,6 +1190,75 @@ test("Move to Bottom Dock moves the panel's terminals into the dock: same tab, x
     assert.equal(requests.opens, 0, "no shell is opened, so none restarts");
     await settle(30);
     assert.ok(domWindow.document.activeElement?.closest(".shell-dock .xterm"), "focus followed the terminal into the dock");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("the dock's head has More Terminal Actions before Hide Terminal, whose one item is Move to Right Panel", async () => {
+  const view = await mountTool("dock");
+  try {
+    await until(() => tab(view.container, "Shell 2") !== undefined, "the tabs");
+    const tools = [...view.container.querySelectorAll<HTMLButtonElement>(".shell-dock-tools > button, .shell-dock-tools > [aria-label]")]
+      .map((button) => button.getAttribute("aria-label"));
+    assert.deepEqual(tools, ["Search Output", "New Tab", "More Terminal Actions", "Hide Terminal"]);
+    const more = view.dockButton("More Terminal Actions")!;
+    assert.equal(more.className, "icon-btn sm", "the dock's 28px buttons");
+    assert.equal(more.title, "More Terminal Actions", "the tooltip matches the name");
+    assert.equal(more.getAttribute("aria-haspopup"), "menu");
+
+    await act(async () => fireDomEvent.click(more));
+    const menu = (domWindow.document as unknown as Document).querySelector<HTMLElement>('[role="menu"]')!;
+    assert.equal(menu.getAttribute("aria-label"), "More Terminal Actions", "the menu's name matches the button's");
+    const items = [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+    assert.equal(items.length, 1);
+    assert.equal(items[0]!.querySelector(".menu-text")?.textContent, "Move to Right Panel");
+    assert.equal(items[0]!.querySelector(".menu-desc")?.textContent, MOVE_TO_RIGHT_PANEL_DESCRIPTION, "the item has its second line");
+    assert.equal(MOVE_TO_RIGHT_PANEL_DESCRIPTION, "Show the terminal as a tool in the right panel on this device. Running shells keep running.");
+    assert.ok(items[0]!.querySelector(".menu-icon svg"), "with its icon");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("Move to Right Panel moves the dock's terminals into the panel's tool: same tab, xterm, scrollback and search, nothing fetched again", async () => {
+  const view = await mountTool("dock");
+  try {
+    await until(() => requests.history.length === 2 && tab(view.container, "Shell 2") !== undefined, "the shells and their history");
+    const terminals = view.controls.terminals!;
+    const shell1 = terminals.terminal("shell-1");
+    const shell2 = terminals.terminal("shell-2");
+    await until(() => shell1.terminal !== null && shell2.terminal !== null, "both terminals to open");
+    const [term1, term2] = [shell1.terminal!, shell2.terminal!];
+    await until(() => bufferText(term1).includes("build step 120 of 120 done"), "Shell 1's history");
+    const disposals = [countDisposals(term1), countDisposals(term2)];
+    assert.ok(shell1.attachedHost?.closest(".shell-dock"), "the dock hosts the terminals");
+
+    await act(async () => fireDomEvent.click(tab(view.container, "Shell 2")!));
+    await act(async () => fireDomEvent.click(view.dockButton("Search Output")!));
+    await act(async () => fireDomEvent.change(view.container.querySelector('input[aria-label="Search Output"]')!, { target: { value: "VITE" } }));
+    const scrollback = [bufferText(term1), bufferText(term2)];
+
+    await act(async () => fireDomEvent.click(view.dockButton("More Terminal Actions")!));
+    await act(async () => fireDomEvent.click((domWindow.document as unknown as Document).querySelector('[role="menu"] [role="menuitem"]')!));
+    await settle(30);
+
+    assert.equal(view.controls.moves, 1);
+    assertNoDomNode(view.container.querySelector(".shell-dock"), "the dock is gone");
+    const body = view.container.querySelector(".term-host")!;
+    assert.ok(body, "the panel's Terminal tool shows the terminal");
+    assert.equal(tab(view.container, "Shell 2")?.getAttribute("aria-selected"), "true", "the same tab is selected");
+    assert.equal(body.querySelector<HTMLInputElement>('input[aria-label="Search Output"]')?.value, "VITE", "the search moved with it");
+    assert.ok(shell1.terminal === term1 && shell2.terminal === term2, "each shell keeps its xterm");
+    assert.deepEqual(disposals.map((calls) => calls.count), [0, 0], "no terminal was disposed");
+    assert.deepEqual([bufferText(term1), bufferText(term2)], scrollback, "each keeps its scrollback");
+    const hosts = [...body.querySelectorAll(".shell-term")];
+    assertSameDomNode(shell1.attachedHost, hosts[0], "Shell 1's terminal is in the panel");
+    assertSameDomNode(shell2.attachedHost, hosts[1], "Shell 2's terminal is in the panel");
+    assert.deepEqual(requests.history, ["shell-1", "shell-2"], "no history is fetched again");
+    assert.equal(requests.opens, 0, "no shell is opened, so none restarts");
+    await settle(30);
+    assert.ok(domWindow.document.activeElement?.closest(".term-host .xterm"), "focus followed the terminal into the panel");
   } finally {
     await view.unmount();
   }

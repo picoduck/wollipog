@@ -1,9 +1,14 @@
-import { useId, useState } from "react";
-import { MoreHorizontalIcon, PanelBottomIcon } from "./Icons.js";
-import { useAccessibleMenu } from "./interactions.js";
-import { MenuItem, MenuSurface } from "./Menu.js";
+import { useId } from "react";
+import { PanelBottomIcon } from "./Icons.js";
 import { PanelHeaderActions } from "./RightPanel.js";
-import { TerminalNewTab, TerminalSearchButton, TerminalSearchControls, TerminalTabs, terminalTabId } from "./TerminalHead.js";
+import {
+  TerminalMoreActions,
+  TerminalNewTab,
+  TerminalSearchButton,
+  TerminalSearchControls,
+  TerminalTabs,
+  terminalTabId,
+} from "./TerminalHead.js";
 import { TerminalSurface, useTerminalHost } from "./TerminalSurface.js";
 import { useOptionalTheme } from "./ThemeProvider.js";
 import { holdFieldFocus } from "./requests/hold-field-focus.js";
@@ -58,7 +63,16 @@ export function TerminalTool({ sessionId, onMoveToDock }: {
             busy={busy}
             disabledReason={host.offlineReason}
           />
-          <MoreTerminalActions id={`${tabsetId}-more`} onMoveToDock={onMoveToDock} />
+          <TerminalMoreActions
+            id={`${tabsetId}-more`}
+            size="md"
+            action={{
+              label: "Move to Bottom Dock",
+              icon: <PanelBottomIcon />,
+              description: MOVE_TO_BOTTOM_DOCK_DESCRIPTION,
+              onChoose: onMoveToDock,
+            }}
+          />
         </span>
       </PanelHeaderActions>
       {tabs.length > 0 && (
@@ -86,54 +100,6 @@ export function TerminalTool({ sessionId, onMoveToDock }: {
       >
         <TerminalSurface host={host} theme={theme?.resolved ?? "dark"} scheme={theme?.scheme ?? ""} />
       </div>
-    </>
-  );
-}
-
-/** More Terminal Actions (⋯, §9.1): Move to Bottom Dock, with its second line. A sheet on a phone. */
-function MoreTerminalActions({ id, onMoveToDock }: { id: string; onMoveToDock: () => void }) {
-  const [open, setOpen] = useState(false);
-  const menu = useAccessibleMenu(open, setOpen, "terminal-more-actions", "item");
-  return (
-    <>
-      <button
-        id={id}
-        ref={menu.triggerRef}
-        type="button"
-        className="icon-btn"
-        aria-label="More Terminal Actions"
-        title="More Terminal Actions"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-controls={open ? menu.menuId : undefined}
-        onClick={menu.toggle}
-        onKeyDown={menu.onTriggerKeyDown}
-      >
-        <MoreHorizontalIcon />
-      </button>
-      {open && (
-        <MenuSurface
-          surfaceRef={menu.menuRef}
-          anchor={{ trigger: menu.triggerRef }}
-          id={menu.menuId}
-          label="More Terminal Actions"
-          align="end"
-          tabIndex={-1}
-          onDismiss={() => menu.close(true)}
-          onKeyDown={menu.onMenuKeyDown}
-        >
-          <MenuItem
-            icon={<PanelBottomIcon />}
-            description={MOVE_TO_BOTTOM_DOCK_DESCRIPTION}
-            onClick={() => {
-              menu.close(false);
-              onMoveToDock();
-            }}
-          >
-            Move to Bottom Dock
-          </MenuItem>
-        </MenuSurface>
-      )}
     </>
   );
 }

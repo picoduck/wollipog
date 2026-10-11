@@ -7,6 +7,7 @@ import {
   resolveDockDrag,
 } from "../dock.js";
 import {
+  TerminalMoreActions,
   TerminalNewTab,
   TerminalSearchButton,
   TerminalSearchControls,
@@ -14,11 +15,14 @@ import {
 } from "./TerminalHead.js";
 import { TerminalSurface, useTerminalHost } from "./TerminalSurface.js";
 import { holdFieldFocus } from "./requests/hold-field-focus.js";
-import { ChevronDownIcon } from "./Icons.js";
+import { ChevronDownIcon, PanelRightIcon } from "./Icons.js";
 import { useIsCoarsePointer, useIsMobile } from "./useIsMobile.js";
 import { shortcutAriaKeys, shortcutDisplay } from "../shortcuts.js";
 import type { ResolvedTheme } from "../theme.js";
 import { loadBrowserStorageValue, saveBrowserStorageValue } from "../instance-storage.js";
+
+export const MOVE_TO_RIGHT_PANEL_DESCRIPTION =
+  "Show the terminal as a tool in the right panel on this device. Running shells keep running.";
 
 /** Viewport-aware height ceiling: every height write (stored, drag, keyboard) goes through
  * this so the dock can never crush the transcript + composer, even after the window shrinks. */
@@ -43,8 +47,10 @@ function viewportDockMax(): number {
  * hiding and reopening the dock keeps all of them, scrollback and scroll position included. The dock
  * owns only its height.
  *
- * Its one 40px head (#2864; docs/design-system.md §4.6) is the tabs, then Search Output, New Tab and
- * Hide Terminal. The tabs, search and New Tab are TerminalHead's, which any terminal host renders.
+ * Its one 40px head (#2864; docs/design-system.md §4.6) is the tabs, then Search Output, New Tab, More
+ * Terminal Actions and Hide Terminal. The tabs, search, New Tab and More Terminal Actions are
+ * TerminalHead's, which any terminal host renders. More Terminal Actions' one item is Move to Right
+ * Panel (#2869), which the app carries out (`onMoveToPanel`).
  *
  * Its body (#2865; §4.6) is the flush terminal on --terminal-bg (`TerminalSurface`, which the side
  * panel's Terminal tool renders too, #2868): the terminal's one notice, one mounted `ShellTerminal`
@@ -59,11 +65,14 @@ function viewportDockMax(): number {
 export function ShellDock({
   sessionId,
   onClose,
+  onMoveToPanel,
   theme,
   scheme,
 }: {
   sessionId: string;
   onClose: () => void;
+  /** Move to Right Panel: writes the placement and opens the side panel on its Terminal tool. */
+  onMoveToPanel: () => void;
   theme: ResolvedTheme;
   /** Passed through so a mounted terminal recolours when the SCHEME changes, not only the theme. */
   scheme: string;
@@ -74,7 +83,7 @@ export function ShellDock({
   // On a phone the open search has its own row; elsewhere it replaces Search Output in the head.
   const host = useTerminalHost(sessionId, tabsetId, {
     searchPlacement: phone ? "row" : "head",
-    fallbackFocusIds: [`${tabsetId}-new`, `${tabsetId}-hide`],
+    fallbackFocusIds: [`${tabsetId}-new`, `${tabsetId}-more`, `${tabsetId}-hide`],
   });
 
   // `height` is the user's PREFERENCE — only explicit gestures (drag, keyboard, double-click)
@@ -221,6 +230,16 @@ export function ShellDock({
             kinds={host.newTabKinds}
             busy={busy}
             disabledReason={host.offlineReason}
+          />
+          <TerminalMoreActions
+            id={`${tabsetId}-more`}
+            prefer="above"
+            action={{
+              label: "Move to Right Panel",
+              icon: <PanelRightIcon />,
+              description: MOVE_TO_RIGHT_PANEL_DESCRIPTION,
+              onChoose: onMoveToPanel,
+            }}
           />
           <button
             id={`${tabsetId}-hide`}

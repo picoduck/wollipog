@@ -21,6 +21,7 @@ import {
 } from "../../theme.js";
 import { assertNoDomNode } from "../../dom-test-assertions.js";
 import { getSessionsPreviewLayout, resetSessionsPreviewLayoutForTest, setSessionsPreviewLayout } from "../../sessions-preview-layout.js";
+import { TERMINAL_PLACEMENT_STORAGE_KEY, setTerminalPlacement, terminalPlacement } from "../../terminal-placement.js";
 
 /** WCAG 2.1 relative luminance and contrast ratio, on hex colours. */
 function luminance(hex: string): number {
@@ -194,11 +195,11 @@ test("a settings panel is one row per setting, not one row per option", async ()
   );
   try {
     const rows = [...container.querySelectorAll(".ui-row")];
-    assert.equal(rows.length, 4, "Display is four settings, so it is four rows");
+    assert.equal(rows.length, 5, "Display is five settings, so it is five rows");
     assert.deepEqual(rows.map((row) => row.querySelector(".ui-row-title")?.textContent),
-      ["Theme", "Color Scheme", "Density", "Sessions Layout"]);
+      ["Theme", "Color Scheme", "Density", "Sessions Layout", "Terminal Placement"]);
     assert.ok(rows.every((row) => row.querySelector(":scope > .ui-row-choice-control")),
-      "all four controls occupy the same trailing alignment slot");
+      "all five controls occupy the same trailing alignment slot");
     assert.equal(container.querySelectorAll(".settings-group").length, 1,
       "and one group, since a heading per single-row setting restates the row beneath it");
 
@@ -248,6 +249,58 @@ test("Sessions Layout writes the Sessions preview layout and follows it live (#2
     assert.deepEqual(radios().map((radio) => radio.getAttribute("aria-checked")), ["true", "false"]);
   } finally {
     setSessionsPreviewLayout("below");
+    await cleanup();
+  }
+});
+
+test("Terminal Placement writes the per-device placement and follows both menus and other windows live (#2869)", async () => {
+  domWindow.localStorage.removeItem(TERMINAL_PLACEMENT_STORAGE_KEY);
+  const { container, cleanup } = await render(
+    <AppearancePanel
+      options={THEME_OPTIONS}
+      value="system"
+      onChange={() => undefined}
+      schemes={COLOR_SCHEMES}
+      scheme="wollipog"
+      onSchemeChange={() => undefined}
+      onSchemePreview={() => undefined}
+      resolvedTheme="dark"
+      densities={DENSITY_OPTIONS}
+      density="compact"
+      onDensityChange={() => undefined}
+    />,
+  );
+  try {
+    const group = container.querySelector('[role="radiogroup"][aria-label="Terminal Placement"]')!;
+    assert.ok(group, "the row's group is named Terminal Placement");
+    const row = group.closest(".ui-row")!;
+    assert.equal(row.querySelector(".ui-row-desc")?.textContent,
+      "Where terminal tabs open on this device. Running shells keep running when you switch.");
+    const radios = () => [...group.querySelectorAll<HTMLButtonElement>('[role="radio"]')];
+    const checked = () => radios().map((radio) => radio.getAttribute("aria-checked"));
+    assert.deepEqual(radios().map((radio) => [radio.textContent, radio.getAttribute("aria-checked")]),
+      [["Bottom Dock", "true"], ["Right Panel", "false"]], "an unset key means Bottom Dock");
+
+    await act(async () => { radios()[1]!.click(); });
+    assert.equal(domWindow.localStorage.getItem(TERMINAL_PLACEMENT_STORAGE_KEY), "panel",
+      "the row writes the key both More Terminal Actions menus read");
+    assert.deepEqual(checked(), ["false", "true"]);
+
+    // Move to Bottom Dock and Move to Right Panel write it in this window; the row follows.
+    await act(async () => { setTerminalPlacement("dock"); });
+    assert.deepEqual(checked(), ["true", "false"]);
+
+    // Another window's write arrives only as a `storage` event.
+    domWindow.localStorage.setItem(TERMINAL_PLACEMENT_STORAGE_KEY, "panel");
+    await act(async () => {
+      domWindow.dispatchEvent(new domWindow.StorageEvent("storage", { key: TERMINAL_PLACEMENT_STORAGE_KEY }));
+    });
+    assert.deepEqual(checked(), ["false", "true"], "a choice made in another window applies here");
+
+    await act(async () => { radios()[0]!.click(); });
+    assert.equal(terminalPlacement(), "dock");
+  } finally {
+    domWindow.localStorage.removeItem(TERMINAL_PLACEMENT_STORAGE_KEY);
     await cleanup();
   }
 });

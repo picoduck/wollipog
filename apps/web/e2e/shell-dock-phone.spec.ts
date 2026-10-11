@@ -118,8 +118,8 @@ test.describe("at 390px with touch", () => {
   test("every head control has a 44px target", async ({ page }) => {
     const dock = await openTerminal(page, 2);
     const controls = head(dock).locator("button:not([role=tab]):visible");
-    // Close Shell 1, Search Output, New Tab and Hide Terminal.
-    await expect(controls).toHaveCount(4);
+    // Close Shell 1, Search Output, New Tab, More Terminal Actions and Hide Terminal.
+    await expect(controls).toHaveCount(5);
     const boxes = await controls.evaluateAll((elements) => elements.map((element) => {
       const box = element.getBoundingClientRect();
       const after = getComputedStyle(element, "::after");

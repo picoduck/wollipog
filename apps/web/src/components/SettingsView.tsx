@@ -40,6 +40,7 @@ import { Select } from "./ui/ChoiceControls.js";
 import { SCHEME_SWATCHES, type ColorScheme, type ResolvedTheme } from "../theme.js";
 import type { SessionsPreviewLayout } from "../sessions-preview-layout.js";
 import { useSessionsPreviewLayout } from "../use-sessions-preview-layout.js";
+import { setTerminalPlacement, useTerminalPlacement, type TerminalPlacement } from "../terminal-placement.js";
 import { setEnterKeyBehavior, useEnterKeyBehavior, type EnterKeyBehavior } from "../enter-key.js";
 import { setShowAgentLogs, useShowAgentLogs } from "../agent-logs.js";
 import { SETTINGS_SECTIONS, type SettingsSection, type View } from "../navigation.js";
@@ -249,6 +250,9 @@ export function AppearancePanel({
       {/* Where the Sessions preview sits (§6.3, #2219). The Sessions header's Preview Layout control
           writes the same per-device key, and each follows the other live. */}
       <SessionsLayoutRow disabled={disabled} disabledReason={disabledReason} />
+      {/* Where terminal tabs open (§4.6, #2869). The dock's and the side panel tool's More Terminal
+          Actions write the same per-device key, and each follows the others live. */}
+      <TerminalPlacementRow disabled={disabled} disabledReason={disabledReason} />
     </SettingsGroup>
   );
 }
@@ -269,6 +273,26 @@ function SessionsLayoutRow({ disabled, disabledReason }: { disabled: boolean; di
       disabled={disabled}
       disabledReason={disabledReason}
       onChange={(value) => setLayout(value === "right" ? "right" : "below")}
+    />
+  );
+}
+
+const TERMINAL_PLACEMENT_OPTIONS: ReadonlyArray<{ value: TerminalPlacement; label: string }> = [
+  { value: "dock", label: "Bottom Dock" },
+  { value: "panel", label: "Right Panel" },
+];
+
+function TerminalPlacementRow({ disabled, disabledReason }: { disabled: boolean; disabledReason?: string }) {
+  const placement = useTerminalPlacement();
+  return (
+    <SegmentedRow
+      title="Terminal Placement"
+      description="Where terminal tabs open on this device. Running shells keep running when you switch."
+      options={TERMINAL_PLACEMENT_OPTIONS}
+      value={placement}
+      disabled={disabled}
+      disabledReason={disabledReason}
+      onChange={(value) => setTerminalPlacement(value === "panel" ? "panel" : "dock")}
     />
   );
 }
