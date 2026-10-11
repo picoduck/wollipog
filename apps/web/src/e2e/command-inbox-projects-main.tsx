@@ -32,6 +32,7 @@ import {
   type SessionEvent,
   type SessionReminderView,
   type SessionView,
+  type ShellView,
   type SteerDisposition,
   type SteerRequest,
   type SteerResultReason,
@@ -105,6 +106,43 @@ const TERMINAL_SHELL_OUTPUT = [
   " 24 files passed, 96 checks",
   "dev@build-box:~/alpha$ ",
 ].join("\r\n");
+/** A running shell of the fixture's registry: Shell 1 holds the test run's output. */
+function fixtureShell(sessionId: string, index: number): ShellView {
+  return {
+    shellId: `shell-${index}`,
+    sessionId,
+    name: `Shell ${index}`,
+    createdAt: index,
+    pty: true,
+    kind: "shell",
+    status: "running",
+    outputStartSeq: 0,
+    outputEndSeq: index === 1 && TERMINAL_SHELLS > 0 ? 1 : 0,
+    outputTruncated: false,
+  };
+}
+/** Each session's shell registry, which New Shell and a tab's Close change (#2868). */
+const fixtureShellRegistry = new Map<string, ShellView[]>();
+function fixtureShells(sessionId: string): ShellView[] {
+  let shells = fixtureShellRegistry.get(sessionId);
+  if (!shells) {
+    shells = TERMINAL_SHELLS > 0
+      ? Array.from({ length: TERMINAL_SHELLS }, (_, index) => fixtureShell(sessionId, index + 1))
+      : lastCreateSessionRequest?.launchSurface === "native_tui"
+      ? [{ ...fixtureShell(sessionId, 1), shellId: `agent-tui-${sessionId}`, name: "Agent TUI", kind: "agent_tui" }]
+      : [];
+    fixtureShellRegistry.set(sessionId, shells);
+  }
+  return shells;
+}
+/** What the shell API was asked (#2868): each terminal size reported, what was typed, opens and closes. */
+const shellCalls = {
+  resizes: [] as Array<{ shellId: string; cols: number; rows: number }>,
+  input: [] as Array<{ shellId: string; data: string }>,
+  opens: 0,
+  closes: [] as string[],
+};
+const shellOutputSeq = new Map<string, number>();
 const LEGACY_WORKSPACES = FIXTURE_QUERY.get("legacyWorkspaces") === "1";
 /** `scenario=session-tools` (#2844): Alpha's three background jobs, one still running. */
 const SESSION_TOOLS = SCENARIO === "session-tools";
@@ -2618,35 +2656,7 @@ const client = {
     pushSession(value);
     return structuredClone(resolved);
   },
-  listShells: async (sessionId: string) => ({
-    shells: TERMINAL_SHELLS > 0
-      ? Array.from({ length: TERMINAL_SHELLS }, (_, index) => ({
-          shellId: `shell-${index + 1}`,
-          sessionId,
-          name: `Shell ${index + 1}`,
-          createdAt: index + 1,
-          pty: true,
-          kind: "shell" as const,
-          status: "running" as const,
-          outputStartSeq: 0,
-          outputEndSeq: index === 0 ? 1 : 0,
-          outputTruncated: false,
-        }))
-      : lastCreateSessionRequest?.launchSurface === "native_tui"
-      ? [{
-          shellId: `agent-tui-${sessionId}`,
-          sessionId,
-          name: "Agent TUI",
-          createdAt: 1,
-          pty: true,
-          kind: "agent_tui" as const,
-          status: "running" as const,
-          outputStartSeq: 0,
-          outputEndSeq: 0,
-          outputTruncated: false,
-        }]
-      : [],
-  }),
+  listShells: async (sessionId: string) => ({ shells: structuredClone(fixtureShells(sessionId)) }),
   shellHistory: async (_sessionId: string, shellId: string) => ({
     shellId,
     chunks: TERMINAL_SHELLS > 0 && shellId === "shell-1"
@@ -2656,8 +2666,31 @@ const client = {
     hasMore: false,
     truncatedBefore: false,
   }),
-  resizeShell: async () => undefined,
-  shellInput: async () => undefined,
+  openShell: async (sessionId: string, request?: { kind?: "shell" | "agent_tui" }) => {
+    shellCalls.opens += 1;
+    const shells = fixtureShells(sessionId);
+    const index = shells.length + shellCalls.opens;
+    const shell = fixtureShell(sessionId, index);
+    if (request?.kind === "agent_tui") Object.assign(shell, { shellId: `agent-tui-${index}`, name: "Agent TUI", kind: "agent_tui" });
+    shells.push(shell);
+    return { shell: structuredClone(shell) };
+  },
+  closeShell: async (sessionId: string, shellId: string) => {
+    shellCalls.closes.push(shellId);
+    const shells = fixtureShells(sessionId);
+    const index = shells.findIndex((shell) => shell.shellId === shellId);
+    if (index >= 0) shells.splice(index, 1);
+  },
+  resizeShell: async (_sessionId: string, shellId: string, cols: number, rows: number) => {
+    shellCalls.resizes.push({ shellId, cols, rows });
+  },
+  // A PTY's echo: what is typed comes back as the shell's output, a carriage return as a new line.
+  shellInput: async (sessionId: string, shellId: string, data: string) => {
+    shellCalls.input.push({ shellId, data });
+    const seq = (shellOutputSeq.get(shellId) ?? (TERMINAL_SHELLS > 0 && shellId === "shell-1" ? 1 : 0)) + 1;
+    shellOutputSeq.set(shellId, seq);
+    socket?.push({ type: "shell_output", sessionId, shellId, stream: "stdout", seq, data: data.replace(/\r/g, "\r\n") });
+  },
   getSessionEventPage: async (sessionId: string, after = 0) => {
     sessionEventPageRequests.push({ sessionId, after });
     const syntheticTail = syntheticSessionTails.get(sessionId);
@@ -3130,6 +3163,8 @@ declare global {
       model(): FixtureModel;
       lastCreateSessionRequest(): CreateSessionRequest | null;
       terminalOpenCount(): number;
+      /** The shell API's calls (#2868): sizes reported per shell, input, opens and closes. */
+      shellCalls(): typeof shellCalls;
       cancelTurnCount(): number;
       /** The next prompt is recorded, then fails as a request that never got an answer (#2156). */
       failNextPrompt(): void;
@@ -3582,6 +3617,7 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
   model: () => structuredClone(model),
   lastCreateSessionRequest: () => structuredClone(lastCreateSessionRequest),
   terminalOpenCount: () => terminalOpenCount,
+  shellCalls: () => structuredClone(shellCalls),
   cancelTurnCount: () => cancelTurnCount,
   failNextPrompt: () => {
     failNextPromptRequest = true;

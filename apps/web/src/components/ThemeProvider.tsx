@@ -142,3 +142,8 @@ export function useTheme(): ThemeContextValue {
   if (!value) throw new Error("useTheme must be used inside ThemeProvider");
   return value;
 }
+
+/** The theme where a ThemeProvider is mounted, else null (a component rendered on its own). */
+export function useOptionalTheme(): ThemeContextValue | null {
+  return useContext(ThemeContext);
+}

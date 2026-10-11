@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { createContext, lazy, Suspense, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { ChevronDownIcon, ChevronLeftIcon, CloseIcon } from "./Icons.js";
 import { Maximize2Icon, Minimize2Icon } from "./Icons.js";
@@ -53,6 +53,10 @@ import { useIsCoarsePointer, useIsMobile } from "./useIsMobile.js";
 import type { CampaignStatusAvailability } from "../campaign-status.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { SessionToolIcon, SessionToolsList } from "./SessionToolsList.js";
+import { ErrorBoundary } from "./ErrorBoundary.js";
+import { State } from "./State.js";
+import { setTerminalPlacement, useTerminalPlacement } from "../terminal-placement.js";
+import { requestTerminalFocus } from "../terminal-focus.js";
 
 export { SESSION_TOOL_ICONS } from "./SessionToolsList.js";
 import { MenuItem, MenuLabel, MenuSeparator, MenuSurface } from "./Menu.js";
@@ -64,6 +68,9 @@ import {
   type SessionToolContext,
   type SessionToolId,
 } from "../session-tools.js";
+
+// xterm loads with the terminal's hosts, never with the session view (`entry-bundle-budget.ts`).
+const TerminalTool = lazy(() => import("./TerminalTool.js").then((module) => ({ default: module.TerminalTool })));
 
 const EMPTY_PARENT_TURNS: ReadonlyMap<string, BackgroundParentTurn> = new Map();
 const EMPTY_GOVERNANCE_DECISIONS: readonly GovernanceDecision[] = [];
@@ -157,16 +164,19 @@ import type { RightPanelState } from "./right-panel-state.js";
  * The header's title: the current tool's icon and name and a caret, opening a menu of every tool
  * (§9.1): Session Tools first, then the Code, Work and Decisions groups, the current tool checked.
  * An unavailable tool stays focusable, with its reason as its description, so it is announced.
- * Terminal opens the bottom dock rather than becoming the panel's tool, so it is a plain item.
+ * Terminal follows the placement (#2868): in Bottom Dock placement it opens the dock rather than
+ * becoming the panel's tool, so it is a plain item; in Right Panel placement it is a tool like the rest.
  */
 function ToolSwitcher({
   current,
   context,
+  terminalInPanel,
   triggerRef,
   onChoose,
 }: {
   current: RightPanelMode;
   context: SessionToolContext;
+  terminalInPanel: boolean;
   triggerRef: { current: HTMLButtonElement | null };
   /** `keyboard` when Enter or Space chose the tool, rather than a pointer. */
   onChoose: (tool: SessionToolId, keyboard: boolean) => void;
@@ -184,11 +194,12 @@ function ToolSwitcher({
     if (!availability.listed) return null;
     const entry = sessionTool(id);
     const reason = availability.unavailableReason;
+    const opensDock = id === "terminal" && !terminalInPanel;
     return (
       <MenuItem
         key={id}
-        role={id === "terminal" ? "menuitem" : "menuitemradio"}
-        checked={id === "terminal" ? undefined : id === current}
+        role={opensDock ? "menuitem" : "menuitemradio"}
+        checked={opensDock ? undefined : id === current}
         icon={<SessionToolIcon id={id} />}
         aria-disabled={reason ? "true" : undefined}
         description={reason ?? undefined}
@@ -310,7 +321,10 @@ export function RightPanel({
   forge?: GitForgeInfo | null;
   /** The branch's pull request and its checks, for Review's summary (#2846). */
   forgeFacts?: Pick<VisibleForgeFacts, "pr" | "checks"> | null;
-  /** The Terminal launcher row opens the bottom dock — the app's single terminal surface. */
+  /**
+   * Opens the bottom dock: the Terminal row and switcher item in Bottom Dock placement, and Move to
+   * Bottom Dock. In Right Panel placement Terminal is this panel's own tool (#2868).
+   */
   onOpenTerminal: () => void;
   /** Explicitly prepares the primary composer; never sends it. */
   onInsertSideChatDraft: (text: string) => void;
@@ -394,6 +408,8 @@ export function RightPanel({
       // same frame, and a failure that arrived under the sheet closes it and focuses its notice
       // (#2894). That completed focus transfer takes precedence over returning to the opener.
       if (document.activeElement?.closest("[data-session-request-focus], [data-session-condition-focus]")) return;
+      // Move to Bottom Dock put focus in the terminal's new place (#2868).
+      if (document.activeElement?.closest(".shell-dock")) return;
       if (target?.isConnected) target.focus();
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -488,12 +504,23 @@ export function RightPanel({
   /** Escape's step for the panel itself: Restore Panel while expanded, then Close Panel (#2845). */
   const dismiss = expanded ? () => state.setExpanded(false) : state.close;
 
+  // Terminal Placement (#2868): the Terminal tool exists only while this device places the terminal in
+  // the right panel. In Bottom Dock placement a panel on Terminal (a stored mode, or Move to Bottom
+  // Dock from another tab) shows Session Tools, before paint, and the stored mode follows.
+  const terminalInPanel = useTerminalPlacement() === "panel";
+  const terminalDisplaced = state.mode === "terminal" && !terminalInPanel;
+  const mode: RightPanelMode = terminalDisplaced ? "launcher" : state.mode;
+  useLayoutEffect(() => {
+    if (terminalDisplaced) state.setMode("launcher");
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [terminalDisplaced]);
+
   // The current tool's pushed pages (#2856). They belong to the tool that pushed them and to the
   // session generation whose items they name, so a switch never shows another tool's page or a page
   // from before the session's history was rebuilt; switching tools, a new generation or closing the
   // panel clears them. The update is functional: a tool's first effect can push before this one
   // runs for the same switch.
-  const pageScope = `${state.mode}:${session.eventEpoch ?? 0}`;
+  const pageScope = `${mode}:${session.eventEpoch ?? 0}`;
   const [pageStack, setPageStack] = useState(NO_PAGES);
   useEffect(() => {
     setPageStack((current) => !state.open || (current.scope !== pageScope && current.pages.length > 0) ? NO_PAGES : current);
@@ -691,6 +718,18 @@ export function RightPanel({
     else escapeStep();
   };
 
+  /**
+   * Move to Bottom Dock (#2868): this device places the terminal in the dock again, the panel closes
+   * (Terminal was its tool) and the dock opens on the same tab with focus in it. The session's
+   * terminals move with it, so no shell restarts and each keeps its scrollback and the search.
+   */
+  const moveTerminalToDock = () => {
+    setTerminalPlacement("dock");
+    requestTerminalFocus(session.id);
+    state.close();
+    onOpenTerminal();
+  };
+
   // The session's own requests are on its request dock (#2179); this panel lists its descendants'.
   // A request's detail has its own "‹ All Requests" inside the body (#2206).
   const ownRequests = dockRequests(pendingRequests(session.pendingApproval));
@@ -805,6 +844,17 @@ export function RightPanel({
         );
       case "browser":
         return <BrowserPanel session={session} />;
+      case "terminal":
+        return terminalSupported ? (
+          <ErrorBoundary name="Terminal" resetKey={session.id}>
+            <Suspense fallback={<State variant="loading" compact>Loading terminal…</State>}>
+              <TerminalTool key={session.id} sessionId={session.id} onMoveToDock={moveTerminalToDock} />
+            </Suspense>
+          </ErrorBoundary>
+        ) : (
+          // An older runner: the reason the switcher gives the tool, as Files does (#2844).
+          <Notice tone="neutral" compact role="status">{terminalHint}</Notice>
+        );
       case "sidechat":
         return (
           <SideChatPanel
@@ -863,6 +913,11 @@ export function RightPanel({
             machineName={machineName}
             runnerConnectedAt={runnerConnectedAt}
             onOpenTerminal={() => {
+              // In Right Panel placement the terminal is this panel's own tool (#2868).
+              if (terminalInPanel) {
+                state.setMode("terminal");
+                return;
+              }
               // The terminal docks under the chat column, which a phone's panel covers and an
               // expanded one replaces, so the panel gives way first (#2858).
               if (phone) state.close();
@@ -890,7 +945,8 @@ export function RightPanel({
     filesSupported, filesHint, terminalSupported, terminalHint, backgroundAvailable, campaignAvailability,
   };
   const chooseTool = (tool: SessionToolId, keyboard = false) => {
-    if (tool === "terminal") {
+    // In Bottom Dock placement Terminal opens the dock; in Right Panel placement it is a tool (#2868).
+    if (tool === "terminal" && !terminalInPanel) {
       onOpenTerminal();
       return;
     }
@@ -942,7 +998,7 @@ export function RightPanel({
         ref={asideRef}
         id="right-panel"
         className="rpanel"
-        data-mode={state.mode}
+        data-mode={mode}
         data-presentation={expanded ? "expanded" : overlay ? "overlay" : "docked"}
         style={expanded ? undefined : { width: effectiveWidth }}
         aria-label="Side Panel"
@@ -960,8 +1016,8 @@ export function RightPanel({
               type="button"
               className="icon-btn"
               onClick={pagesController.pop}
-              title={`Back to ${sessionTool(state.mode).name}`}
-              aria-label={`Back to ${sessionTool(state.mode).name}`}
+              title={`Back to ${sessionTool(mode).name}`}
+              aria-label={`Back to ${sessionTool(mode).name}`}
             >
               <ChevronLeftIcon />
             </button>
@@ -980,7 +1036,7 @@ export function RightPanel({
           <h2 ref={pageTitleRef} className="rpanel-page-title" tabIndex={-1} hidden={!page}>
             <span ref={setPageTitleSlot} />
           </h2>
-          {!page && <ToolSwitcher current={state.mode} context={toolContext} triggerRef={switcherRef} onChoose={chooseTool} />}
+          {!page && <ToolSwitcher current={mode} context={toolContext} terminalInPanel={terminalInPanel} triggerRef={switcherRef} onChoose={chooseTool} />}
           <div className="rpanel-actions" ref={setActionSlot} />
           {phoneRequests[0] && (
             <button
@@ -1020,7 +1076,7 @@ export function RightPanel({
         </div>
         <div className="rpanel-notices" ref={setNoticeRegion} />
         <PanelActionSlotContext.Provider value={actionSlot}>
-          {state.mode === "launcher" ? (
+          {mode === "launcher" ? (
             <SessionToolsList
               session={session}
               runnerOnline={runnerOnline}
@@ -1041,8 +1097,9 @@ export function RightPanel({
               <PanelPagesContext.Provider value={pagesController}>
                 <PanelPageTitleSlotContext.Provider value={pageTitleSlot}>
                   <PanelNoticeRegionContext.Provider value={noticeRegion ? { element: noticeRegion, focusHead } : null}>
-                    <div className="rpanel-body" ref={setBodyScroller}>
-                      <PanelScrollerContext.Provider value={bodyScroller}>{modeBody(state.mode)}</PanelScrollerContext.Provider>
+                    {/* The Terminal tool's body is the terminal's own ground, edge to edge (#2868). */}
+                    <div className={mode === "terminal" && terminalSupported ? "rpanel-body term-host" : "rpanel-body"} ref={setBodyScroller}>
+                      <PanelScrollerContext.Provider value={bodyScroller}>{modeBody(mode)}</PanelScrollerContext.Provider>
                     </div>
                   </PanelNoticeRegionContext.Provider>
                 </PanelPageTitleSlotContext.Provider>

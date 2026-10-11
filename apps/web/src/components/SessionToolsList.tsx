@@ -12,6 +12,8 @@ import { workspaceFolderName } from "../files-panel.js";
 import { runnerDisplay } from "../runners.js";
 import { shortcutDisplay } from "../shortcuts.js";
 import { useOptionalStoreSelector } from "../store.js";
+import { useSessionTerminals } from "../session-terminals.js";
+import { useTerminalPlacement } from "../terminal-placement.js";
 import { IncrementalSubagentProjector } from "../subagents.js";
 import type { TimelineItem } from "../timeline.js";
 import { workerRoster, workerStatusMeta } from "../worker-roster.js";
@@ -31,6 +33,7 @@ import {
   requestsFact,
   reviewFact,
   sessionToolAvailability,
+  terminalListFact,
   type SessionTool,
   type SessionToolContext,
   type SessionToolId,
@@ -154,6 +157,22 @@ function useArtifactCount(sessionId: string, observation: number): { count: numb
 }
 
 /**
+ * Terminal's fact (#2868): where it opens in Bottom Dock placement. In Right Panel placement, the
+ * shells the session has open, from its terminals, whose list is watched for the count while no
+ * terminal host is open, so the fact follows another dashboard's shells and a reconnect.
+ */
+function useTerminalFact(sessionId: string): string {
+  const placement = useTerminalPlacement();
+  const sessionTerminals = useSessionTerminals(sessionId);
+  const terminals = sessionTerminals?.terminals ?? null;
+  const counting = placement === "panel";
+  useEffect(() => (counting ? terminals?.watchShells() : undefined), [counting, terminals]);
+  const shellOutput = useOptionalStoreSelector((s) => s.shellOutput);
+  if (!counting) return TERMINAL_FACT;
+  return terminalListFact(sessionTerminals?.state ?? null, (shellId) => Boolean(shellOutput?.get(shellId)?.exited));
+}
+
+/**
  * The first page of the session's durable child-session registry, the Agents panel's authority for
  * subagents, including those whose launch is outside the loaded transcript. Read again whenever
  * `readKey` changes. Null until read, and on a control plane that has none, where the list counts
@@ -211,6 +230,7 @@ function SessionToolsListView({
   const coarsePointer = useIsCoarsePointer();
   const groupId = useId();
   const requiredFindings = useRequiredFindings(session.id, git.observation);
+  const terminal = useTerminalFact(session.id);
   const artifacts = useArtifactCount(session.id, git.observation);
 
   // The Agents panel's own agents and roster rules (AgentsPanel.tsx, worker-roster.ts), limited to
@@ -268,7 +288,7 @@ function SessionToolsListView({
       case "review": return { text: reviewFact(changes, requiredFindings) };
       case "files": return { text: filesFact(workspaceFolderName(session.worktreePath, session.workspaceName)) };
       case "browser": return { text: browserFact(artifacts) };
-      case "terminal": return { text: TERMINAL_FACT };
+      case "terminal": return { text: terminal };
       case "subagents": return { text: agentsFact(subagents.length, registry?.nextAfter != null), badge: agentsBadge };
       case "sidechat": return { text: SIDE_CHAT_FACT };
       case "background": {

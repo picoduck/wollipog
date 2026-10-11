@@ -1,4 +1,4 @@
-import type { DescendantRequestView, PendingApproval, SessionView } from "@wollipog/protocol";
+import type { DescendantRequestView, PendingApproval, SessionView, ShellView } from "@wollipog/protocol";
 import type { CampaignStatusAvailability } from "./campaign-status.js";
 import type { RightPanelMode } from "./right-panel.js";
 import type { ShortcutId } from "./shortcuts.js";
@@ -6,10 +6,11 @@ import type { ShortcutId } from "./shortcuts.js";
 /**
  * The side panel's tools, in the one order the tool switcher (#2843) and the Session Tools list
  * (#2844) both render: Session Tools first, then the Code, Work and Decisions groups. Each tool is
- * a panel mode except Terminal, which opens the bottom dock until it becomes a panel tool (#2868).
+ * a panel mode. Terminal follows the device's Terminal Placement (#2868): in Right Panel placement it
+ * is the panel's Terminal tool, and in Bottom Dock placement choosing it opens the dock instead.
  * Each tool's one glyph is `SESSION_TOOL_ICONS` (SessionToolsList.tsx), keyed by the same ids.
  */
-export type SessionToolId = RightPanelMode | "terminal";
+export type SessionToolId = RightPanelMode;
 
 /** A group's heading, Title Case as written (§9.1). Session Tools itself is in no group. */
 export type SessionToolGroup = "Code" | "Work" | "Decisions";
@@ -97,6 +98,7 @@ function sentence(text: string): string {
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
+/** Terminal in Bottom Dock placement, where choosing it opens the dock. */
 export const TERMINAL_FACT = "Opens in the dock below the conversation";
 export const SIDE_CHAT_FACT = "Ask a question without interrupting the agent";
 
@@ -119,6 +121,30 @@ export function reviewFact(
     first = changes.staged > 0 ? `${changes.staged} of ${total} ${noun} staged` : `${total} uncommitted ${noun}`;
   }
   return requiredFindings > 0 ? `${first}, ${count(requiredFindings, "required finding", "required findings")}` : first;
+}
+
+/**
+ * Terminal in Right Panel placement (#2868): the shells the session has open, which never names the
+ * command any of them runs. "checking" while the list is read, "unknown" when it could not be.
+ */
+export function terminalFact(shells: number | "checking" | "unknown"): string {
+  if (shells === "checking") return "Checking for shells…";
+  if (shells === "unknown") return "Shells can't be listed right now";
+  return shells === 0 ? "No shells open" : `${count(shells, "shell", "shells")} open`;
+}
+
+/**
+ * Terminal's fact from the session's shell list as its terminals hold it (`watchShells`): its open
+ * shells, where an exited shell's tab is not one; a list the last read failed to refresh is not
+ * counted as current. Null before the session has terminals.
+ */
+export function terminalListFact(
+  list: { shells: readonly Pick<ShellView, "shellId" | "status">[] | null; listUnreadable: boolean } | null,
+  exited: (shellId: string) => boolean,
+): string {
+  if (list?.listUnreadable) return terminalFact("unknown");
+  if (!list || list.shells === null) return terminalFact("checking");
+  return terminalFact(list.shells.filter((shell) => shell.status !== "exited" && !exited(shell.shellId)).length);
 }
 
 export function filesFact(folderName: string): string {

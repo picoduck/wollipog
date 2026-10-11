@@ -19,6 +19,8 @@ import {
   requestsFact,
   reviewFact,
   sessionToolAvailability,
+  terminalFact,
+  terminalListFact,
   type SessionToolContext,
 } from "./session-tools.js";
 
@@ -44,9 +46,9 @@ test("the tools run Session Tools, then Code, Work and Decisions, in the order t
   assert.deepEqual([...new Set(groups)], [...SESSION_TOOL_GROUPS]);
 });
 
-test("every panel mode is a tool, and Terminal is the one tool that is not a mode (#2843)", () => {
+test("every panel mode is a tool, Terminal included (#2843, #2868)", () => {
   const ids = SESSION_TOOLS.map((tool) => tool.id);
-  assert.deepEqual([...ids].filter((id) => id !== "terminal").sort(), [...RIGHT_PANEL_MODES].sort());
+  assert.deepEqual([...ids].sort(), [...RIGHT_PANEL_MODES].sort());
   assert.equal(new Set(ids).size, ids.length);
 });
 
@@ -72,6 +74,30 @@ test("each tool with a chord names it, for the keycap the switcher and Session T
 });
 
 /* --- Facts: each Session Tools row's second line (#2844) --- */
+
+test("Terminal's fact in Right Panel placement counts open shells and never names a command (#2868)", () => {
+  assert.equal(terminalFact(2), "2 shells open");
+  assert.equal(terminalFact(1), "1 shell open");
+  assert.equal(terminalFact(0), "No shells open");
+  assert.equal(terminalFact("checking"), "Checking for shells…");
+  assert.equal(terminalFact("unknown"), "Shells can't be listed right now");
+  assert.equal(TERMINAL_FACT, "Opens in the dock below the conversation");
+});
+
+test("Terminal's fact from the watched list counts open shells, and a failed refresh is never a current count (#2868)", () => {
+  const running = (id: string) => ({ shellId: id, status: "running" as const });
+  const none = () => false;
+  assert.equal(terminalListFact(null, none), "Checking for shells…", "no terminals for the session yet");
+  assert.equal(terminalListFact({ shells: null, listUnreadable: false }, none), "Checking for shells…");
+  assert.equal(terminalListFact({ shells: null, listUnreadable: true }, none), "Shells can't be listed right now");
+  assert.equal(terminalListFact({ shells: [running("a"), running("b")], listUnreadable: false }, none), "2 shells open");
+  // A list read before still holds shells, but the last read failed: the count may be stale.
+  assert.equal(terminalListFact({ shells: [running("a")], listUnreadable: true }, none), "Shells can't be listed right now");
+  // An exited shell keeps its tab until it is closed, but it is not open: by its status or its output.
+  assert.equal(terminalListFact({ shells: [running("a"), { shellId: "b", status: "exited" }], listUnreadable: false }, none), "1 shell open");
+  assert.equal(terminalListFact({ shells: [running("a"), running("b")], listUnreadable: false }, (id) => id === "a"), "1 shell open");
+  assert.equal(terminalListFact({ shells: [], listUnreadable: false }, none), "No shells open");
+});
 
 test("Review's fact counts uncommitted changes as Review's summary does, then required findings (#2844)", () => {
   const changes = (files: number, staged = 0, truncated = false) => ({ files, staged, truncated });
