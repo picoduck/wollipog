@@ -241,14 +241,15 @@ export function SideChatPanel({
   /**
    * What the relationship poll says about the held stop: over once the parent's side chat is
    * another child or has ended, or, with its machine online, runs no turn or a different one. A
-   * machine that is offline reports no turn at all, which is not the turn ending.
+   * machine that is offline reports no turn at all, which is not the turn ending, so a missing turn
+   * counts only from a poll the machine was online for, from asking to answer.
    */
-  const settleStop = useCallback((latest: SideChatView | null) => {
+  const settleStop = useCallback((latest: SideChatView | null, onlineWhenAsked: boolean) => {
     const held = stoppingRef.current;
     if (!held) return;
     const session = latest?.session;
     const over = !session || session.id !== held.childId || isTerminal(session.status) ||
-      (runnerOnlineRef.current && session.activeTurnId !== held.turn);
+      (onlineWhenAsked && runnerOnlineRef.current && session.activeTurnId !== held.turn);
     if (over) releaseStop(held);
   }, [releaseStop]);
   const settleStopRef = useRef(settleStop);
@@ -373,11 +374,12 @@ export function SideChatPanel({
         // chat, and a panel that watched only its own child stayed on the retired transcript for
         // good — its recovery action then failed with "the current side chat is still active"
         // forever, because it was still arguing about a child the parent had already let go.
+        const onlineWhenAsked = runnerOnlineRef.current;
         const { sideChat: latest } = await api.sideChat(session.id);
         if (!current || transcriptChildRef.current !== childId) return;
         // A different child means a new generation; this effect re-runs for it rather than merging
         // the two transcripts here.
-        settleStopRef.current(latest);
+        settleStopRef.current(latest, onlineWhenAsked);
         if (latest?.session.id !== childId) {
           resetTranscript(latest);
           setSideChat(latest);
@@ -653,8 +655,11 @@ export function SideChatPanel({
   // An ended child takes no message: its foot is one sentence and one way to start again, and while
   // a replacement is being created or failed to be, the composer it will take comes back.
   const showEnded = childEnded && !creating && !(failure?.replaceEnded);
-  const primary = composerPrimaryAction({ canStopTurn, hasContent: Boolean(text.trim()), stopping: stoppingTurn });
-  const canSend = sendBlocked === null && Boolean(text.trim()) && !sending;
+  // A held stop keeps the seat whatever the view says about the turn meanwhile (offline, or an answer
+  // without the live turn): Send would only look ready while send() refuses it.
+  const primary = stoppingTurn ? "stopping" as const
+    : composerPrimaryAction({ canStopTurn, hasContent: Boolean(text.trim()), stopping: false });
+  const canSend = sendBlocked === null && !stoppingTurn && Boolean(text.trim()) && !sending;
   // A start that failed created nothing, so there is no status to show.
   const badge = creating ? sideChatStatusMeta("creating", runnerOnline)
     : child ? sideChatStatusMeta(child.status, runnerOnline) : null;

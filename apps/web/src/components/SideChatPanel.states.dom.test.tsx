@@ -570,6 +570,68 @@ test("a held stop outlasts a machine blip and a create's late, older answer", as
   }
 });
 
+/**
+ * Cross-model review CR-6.1. A poll asked while the machine was offline answers with no turn (the
+ * control plane cannot see one); arriving after the machine is back, that is not the turn ending.
+ */
+test("a poll asked while offline and answered after reconnecting does not end a held stop", async () => {
+  const running = { ...child, status: "running", activeTurnId: "turn-z" } as SessionView;
+  let offlineAnswer: ((value: { sideChat: SideChatView }) => void) | undefined;
+  let holdNext = false;
+  const prompted: string[] = [];
+  Object.assign(api, {
+    sideChat: () => {
+      if (!holdNext) return Promise.resolve({ sideChat: { parentSessionId: parent.id, session: running, createdAt: 1 } });
+      holdNext = false;
+      return new Promise((resolve) => { offlineAnswer = resolve; });
+    },
+    getSessionEventPage: async () => ({ events: [], eventEpoch: 0, nextAfter: 0, cacheComplete: true }),
+    cancelTurn: () => new Promise<SessionView>(() => {}),
+    prompt: async (_id: string, text: string) => {
+      prompted.push(text);
+      return running;
+    },
+  } satisfies Partial<Api>);
+  const host = domWindow.document.createElement("div");
+  domWindow.document.body.append(host);
+  const root = createRoot(host as unknown as HTMLDivElement);
+  const show = async (online: boolean) => {
+    await act(async () => {
+      root.render(<SideChatPanel session={parent} runnerOnline={online} runnerProtocolVersion={PROTOCOL_VERSION} onInsertDraft={() => {}} />);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+  };
+  const field = () => host.querySelector("textarea") as unknown as HTMLTextAreaElement;
+  try {
+    await show(true);
+    await act(async () => {
+      field().dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", shiftKey: true, bubbles: true, cancelable: true }) as unknown as Event);
+    });
+    await show(false);
+    holdNext = true;
+    await tick(1_600);
+    assert.ok(offlineAnswer, "a poll went out while the machine was offline");
+    await show(true);
+    await act(async () => {
+      offlineAnswer!({ sideChat: { parentSessionId: parent.id, session: { ...running, activeTurnId: undefined } as SessionView, createdAt: 1 } });
+    });
+    await tick(10);
+    assert.ok(host.querySelector('button[aria-label="Stopping Turn"]'), "the offline answer did not end the stop");
+    await act(async () => {
+      field().value = "still stopping";
+      fireDomEvent.change(field());
+    });
+    await act(async () => {
+      field().dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }) as unknown as Event);
+    });
+    assert.equal(prompted.length, 0);
+  } finally {
+    await act(async () => { root.unmount(); });
+    host.remove();
+    Object.assign(api, ORIGINAL);
+  }
+});
+
 test("a refused start keeps the draft without claiming the machine didn't respond", async () => {
   const view = await render(<SideChatPanel session={parent} runnerOnline onInsertDraft={() => {}} />, {
     sideChat: async () => ({ sideChat: null }),
