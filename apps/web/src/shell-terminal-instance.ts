@@ -1,9 +1,26 @@
-import { Terminal, type IDecoration } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
-import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
+import type { IDecoration, Terminal } from "@xterm/xterm";
+import type { FitAddon } from "@xterm/addon-fit";
+import type { ISearchOptions, SearchAddon } from "@xterm/addon-search";
 import { TERMINAL_SEARCH_LIMIT, type TerminalSearchResults } from "./shells-panel.js";
 import { terminalSearchDecorations, terminalTheme, type ResolvedTheme } from "./theme.js";
 import { TERMINAL_FONT_FAMILY, loadTerminalFont, terminalFontMetrics } from "./terminal-font.js";
+
+/**
+ * xterm and its addons, loaded the first time a terminal opens. The session's terminal store, which
+ * imports this module, sits above the app's main area in the inbox entry; importing xterm here
+ * statically would put it there too, and the entry must stay without it (#2875,
+ * `entry-bundle-budget.ts`). A load that fails is tried again by the next open.
+ */
+let xterm: Promise<{ Terminal: typeof Terminal; FitAddon: typeof FitAddon; SearchAddon: typeof SearchAddon }> | null = null;
+function loadXterm() {
+  xterm ??= Promise.all([import("@xterm/xterm"), import("@xterm/addon-fit"), import("@xterm/addon-search")])
+    .then(([core, fit, search]) => ({ Terminal: core.Terminal, FitAddon: fit.FitAddon, SearchAddon: search.SearchAddon }))
+    .catch((error: unknown) => {
+      xterm = null;
+      throw error;
+    });
+  return xterm;
+}
 
 /** What a host's search controls drive (#2864): Next and Previous Match, and focus on Escape. */
 export interface ShellTerminalHandle {
@@ -275,8 +292,13 @@ export class ShellTerminalInstance {
     this.opening = true;
     // xterm measures character cells while opening. Settle the locally bundled face first so a
     // later font swap cannot change wrapping, cursor placement, or the PTY's rows and columns.
-    await loadTerminalFont(this.surface.ownerDocument.fonts);
-    this.opening = false;
+    let loaded: Awaited<ReturnType<typeof loadXterm>>;
+    try {
+      [loaded] = await Promise.all([loadXterm(), loadTerminalFont(this.surface.ownerDocument.fonts)]);
+    } finally {
+      this.opening = false;
+    }
+    const { Terminal, FitAddon, SearchAddon } = loaded;
     const host = this.host;
     // Opened only into a host, so the first measurement is a real one; a later attach opens it.
     if (this.disposed || this.term || !host) return;
