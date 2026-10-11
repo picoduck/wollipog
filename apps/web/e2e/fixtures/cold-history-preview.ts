@@ -63,7 +63,6 @@ export async function connectColdHistoryRunner(base: string, fixture: ReturnType
   let hydrating = false;
   const held: Array<{ reply: () => void; fail: () => void }> = [];
   let ordinaryReads = 0;
-  let diagnosticReads = 0;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   await new Promise<void>((done, reject) => {
     socket.addEventListener("error", () => reject(new Error("synthetic runner connection failed")));
@@ -79,16 +78,9 @@ export async function connectColdHistoryRunner(base: string, fixture: ReturnType
       if (message.type === "register_rejected") reject(new Error(message.reason));
       if (message.type !== "session_history_page" || ![COLD_SESSION_ID, COLD_NAV_SESSION_ID].includes(message.sessionId)) return;
       const reply = () => {
-        const readStarted = performance.now();
-        const cpuStarted = process.cpuUsage();
         const result = message.opening === "current-turn"
           ? fixture.store.readCurrentTurnPageForProtocol(message.sessionId, message.limit, PROTOCOL_VERSION, message.maxBytes)
           : fixture.store.readEventPageForProtocol(message.sessionId, message, PROTOCOL_VERSION, message.indexedOnly === true);
-        if (message.indexedOnly && diagnosticReads++ < 32) {
-          const cpu = process.cpuUsage(cpuStarted);
-          console.info(`Runner Read Diagnostic: ${JSON.stringify({ sessionId: message.sessionId,
-            opening: message.opening ?? null, wallMs: performance.now() - readStarted, cpuMs: (cpu.user + cpu.system) / 1_000 })}`);
-        }
         if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "session_history_page_result",
           requestId: message.requestId, sessionId: message.sessionId, ...result }));
       };
