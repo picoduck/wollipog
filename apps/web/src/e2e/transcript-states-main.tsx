@@ -6,8 +6,10 @@ import {
   type ProjectView,
   type RunnerView,
   type SessionEvent,
+  type SessionEventsResponse,
   type SessionStatus,
   type SessionView,
+  type UiToControlPlane,
 } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
@@ -32,6 +34,8 @@ import "../styles.css";
  * - `incomplete`: every read answers with a cache still filling from the machine, holding only a
  *   hidden Agent Log (#2773). `?runner=offline` shows that machine as offline.
  * - `agent-logs`: a stopped session whose complete history is one hidden Agent Log (#2773).
+ * - `empty-opening-race`: a held complete empty current-turn opening and acknowledged live
+ *   subscription; the browser controls delivery and response release to exercise recovery (#3042).
  *
  * `?theme=light|dark` picks the theme and `?mode=preview` renders the Inbox preview. The right
  * panel records the mode it was asked to show in `body[data-right-panel-mode]`. `?failed=1` adds a
@@ -40,6 +44,7 @@ import "../styles.css";
 const params = new URLSearchParams(window.location.search);
 document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
 const state = params.get("state") ?? "awaiting";
+const emptyOpeningRace = state === "empty-opening-race";
 const older = params.get("older") ?? "resolve";
 const mode = params.get("mode") === "preview" ? ("preview" as const) : ("expanded" as const);
 const count = Number(params.get("count") ?? "0");
@@ -157,7 +162,8 @@ const session = {
 
 const snapshotMessage: ControlPlaneToUi = {
   type: "snapshot",
-  capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+  capabilities: { sessionSubscriptions: emptyOpeningRace, boundedDelivery: emptyOpeningRace, paginatedSessionHistory: emptyOpeningRace, projects: true,
+    currentTurnOpening: emptyOpeningRace },
   runners: [runner],
   boxes: [],
   projects: [project],
@@ -178,7 +184,16 @@ class FixtureSocket implements UiSocket {
       this.onmessage?.({ data: JSON.stringify(snapshotMessage) });
     }, 0);
   }
-  send() {}
+  send(data: string) {
+    if (!emptyOpeningRace) return;
+    const message = JSON.parse(data) as UiToControlPlane;
+    if (message.type !== "session_subscriptions") return;
+    setTimeout(() => {
+      this.onmessage?.({ data: JSON.stringify({ type: "session_subscriptions_applied", revision: message.revision,
+        sessionIds: message.sessionIds, podIds: message.podIds }) });
+      document.body.dataset.subscriptionApplied = "true";
+    }, 0);
+  }
   close() {}
 }
 
@@ -196,11 +211,36 @@ const navigation: ViewNavigation = {
 };
 
 const never = () => new Promise<never>(() => {});
+let releaseOpening!: () => void;
+const openingHeld = new Promise<void>((resolve) => { releaseOpening = resolve; });
+const racingPayloads: SessionEvent["payload"][] = [
+  { kind: "user_message", text: "Current prompt: recover the empty opening.", images: [] },
+  { kind: "agent_message", text: "The first live response follows the current prompt.", messageId: "race-2", final: true },
+  { kind: "agent_message", text: "The second live response completes this synthetic turn.", messageId: "race-3", final: true },
+];
+const racingEvents: SessionEvent[] = racingPayloads.map((payload, index) => ({ id: index + 1, sessionId: SESSION_ID, seq: index + 1,
+  ts: 1_760_000_000_000 + index * 1000, payload }));
+declare global {
+  interface Window {
+    __emptyOpeningRace: { emit: (seqs: number[]) => void; release: () => void; sequences: () => number[] };
+  }
+}
 let tailRequestCount = 0;
 const pendingPromptActions: string[] = [];
 const client = {
   ...api,
-  getSessionEventPage: never,
+  getSessionEventPage: emptyOpeningRace
+    ? async () => ({ events: racingEvents, eventEpoch: 0, nextAfter: 3, hasMoreCached: false, cacheComplete: true })
+    : never,
+  getSessionTurnStartPage: async (): Promise<SessionEventsResponse> => {
+    if (!emptyOpeningRace) return never();
+    // Capture the complete empty log before live delivery, then hold only its response.
+    const page = { events: [], eventEpoch: 0, turnStartSeq: 0, nextAfter: 0, tailSeq: 0,
+      hasMoreLater: false, hasMoreOlder: false, cacheComplete: true };
+    document.body.dataset.openingRequested = "true";
+    await openingHeld;
+    return page;
+  },
   session: never,
   resolvePendingPrompt: async (_id: string, commandId: string, action: string) => {
     pendingPromptActions.push(`${action}:${commandId}`);
@@ -210,6 +250,8 @@ const client = {
   getSessionEventTailPage: (_id: string, before: number | undefined, eventEpoch: number) => {
     tailRequestCount += 1;
     document.body.dataset.tailRequestCount = String(tailRequestCount);
+    if (emptyOpeningRace) return Promise.resolve({ events: racingEvents, eventEpoch, nextBefore: 1,
+      hasMoreOlder: false, turnAligned: true, cacheComplete: true });
     if (state === "loading" || state === "unpaired") return never();
     if (state === "incomplete" || state === "agent-logs") {
       return Promise.resolve({
@@ -244,7 +286,18 @@ const client = {
  * unpaired device loses its connection once the session is known. */
 function EventSeeder() {
   const ready = useStoreSelector((current) => current.sessions.has(SESSION_ID));
+  const rendered = useStoreSelector((current) => current.events.get(SESSION_ID));
   const { dispatch } = useStoreActions();
+  React.useEffect(() => {
+    if (!ready || !emptyOpeningRace) return;
+    window.__emptyOpeningRace = {
+      emit: (seqs) => {
+        for (const seq of seqs) dispatch({ type: "msg", msg: { type: "session_event", event: racingEvents[seq - 1]! } });
+      },
+      release: releaseOpening,
+      sequences: () => (rendered ?? []).map((event) => event.seq),
+    };
+  }, [dispatch, ready, rendered]);
   React.useEffect(() => {
     if (!ready) return;
     if (state === "unpaired") dispatch({ type: "conn", conn: "unauthorized" });
