@@ -13,6 +13,11 @@ const repo = fileURLToPath(new URL("../../..", import.meta.url));
 const counters = new Int32Array(new SharedArrayBuffer(8));
 const workers = [];
 let child;
+let workerFailure;
+let terminating = false;
+function requireLoadHealthy() {
+  if (workerFailure) throw new Error(workerFailure);
+}
 const workerSource = `
 const { workerData, parentPort } = require("node:worker_threads");
 const fs = require("node:fs");
@@ -64,19 +69,28 @@ try {
       eval: true, workerData: { counters: counters.buffer, index, path: join(root, `load-${index}`) },
     });
     workers.push(worker);
+    worker.on("error", () => { workerFailure ??= `load worker ${index} runtime-error`; });
+    worker.on("exit", (code) => {
+      if (!terminating) workerFailure ??= `load worker ${index} unexpected-exit=${code}`;
+    });
     await new Promise((resolve, reject) => {
       worker.once("message", resolve);
-      worker.once("error", reject);
+      worker.once("error", () => reject(new Error(`load worker ${index} startup-error`)));
+      worker.once("exit", (code) => reject(new Error(`load worker ${index} startup-exit=${code}`)));
     });
   }
   for (let attempt = 1; attempt <= 10; attempt++) {
+    requireLoadHealthy();
     const before = [...counters];
     console.log(`Lock publication focused load run ${attempt} of 10`);
     await run();
+    requireLoadHealthy();
     for (let index = 0; index < 2; index++) assert.ok(counters[index] > before[index], `load worker ${index} made no progress`);
     console.log(`Load iterations: ${[...counters].join(", ")}`);
   }
+  requireLoadHealthy();
 } finally {
+  terminating = true;
   if (child) {
     const closed = new Promise((resolve) => child.once("close", resolve));
     child.kill("SIGKILL");
