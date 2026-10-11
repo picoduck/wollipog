@@ -213,7 +213,11 @@ export interface DiffFileNotice {
   refreshing?: boolean;
 }
 
-const NO_COLLAPSED: ReadonlySet<string> = new Set<string>();
+/** Large diffs start with a bounded line DOM; every remaining file is still in the file index. */
+const INITIAL_EXPANDED_FILES = 10;
+export function initiallyCollapsedDiffPaths(files: readonly GitDiffFile[]): ReadonlySet<string> {
+  return new Set(files.slice(INITIAL_EXPANDED_FILES).map((file) => file.path));
+}
 
 /** Added and removed line counts for one file's diffstat. */
 function fileStat(file: GitDiffFile): { added: number; removed: number } {
@@ -284,8 +288,9 @@ export function GitDiffViewer({
   useEffect(() => {
     if (focus && !focusedPath && focusSettled) onFocusHandled?.();
   }, [focus, focusedPath, focusSettled, onFocusHandled]);
-  const [ownCollapsed, setOwnCollapsed] = useState<ReadonlySet<string>>(NO_COLLAPSED);
-  const collapsed = collapsedPaths ?? ownCollapsed;
+  const initialCollapsed = useMemo(() => initiallyCollapsedDiffPaths(diff.files), [diff.files]);
+  const [ownCollapsed, setOwnCollapsed] = useState<ReadonlySet<string> | null>(null);
+  const collapsed = collapsedPaths ?? ownCollapsed ?? initialCollapsed;
   const collapsedRef = useRef(collapsed);
   collapsedRef.current = collapsed;
   const setCollapsed = onCollapsedPathsChange ?? setOwnCollapsed;

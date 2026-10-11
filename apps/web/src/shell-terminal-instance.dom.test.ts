@@ -81,11 +81,13 @@ class FakeFitAddon {
 /** A match is found 30 lines up: the search scrolls there. */
 const MATCH_LINE = 10;
 class FakeSearchAddon {
+  static last: FakeSearchAddon | null = null;
+  readonly calls: string[] = [];
   private term: FakeTerminal | null = null;
-  activate(term: FakeTerminal) { this.term = term; }
+  activate(term: FakeTerminal) { this.term = term; FakeSearchAddon.last = this; }
   onDidChangeResults() { return { dispose() {} }; }
-  findNext() { this.term!.buffer.active.viewportY = MATCH_LINE; }
-  findPrevious() { this.term!.buffer.active.viewportY = MATCH_LINE; }
+  findNext() { this.calls.push("next"); this.term!.buffer.active.viewportY = MATCH_LINE; }
+  findPrevious() { this.calls.push("previous"); this.term!.buffer.active.viewportY = MATCH_LINE; }
   clearDecorations() {}
   dispose() {}
 }
@@ -123,6 +125,32 @@ after(() => {
 });
 
 const frame = () => new Promise<void>((resolve) => domWindow.requestAnimationFrame(() => resolve()));
+
+test("100 output chunks do not invoke search navigation; term changes and match steps do (#2779)", async () => {
+  let inputs = {
+    text: "needle\r\n", total: 8, revision: 0, historyExpired: false, interactive: true, pty: true,
+    searchTerm: "needle", theme: "dark" as const, scheme: "",
+  };
+  const instance = new ShellTerminalInstance(inputs, domWindow.document as unknown as Document);
+  instance.attach(host("search", { cols: 80, rows: 24 }), {});
+  try {
+    for (let attempt = 0; attempt < 50 && !instance.terminal; attempt++) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.ok(instance.terminal);
+    const search = FakeSearchAddon.last!;
+    assert.deepEqual(search.calls, ["next"], "initial retained output is searched once");
+    for (let chunk = 0; chunk < 100; chunk++) {
+      inputs = { ...inputs, text: inputs.text + "needle\r\n", total: inputs.total + 8 };
+      instance.update(inputs);
+    }
+    assert.deepEqual(search.calls, ["next"], "output never steps the match");
+    instance.findNext("needle");
+    instance.findPrevious("needle");
+    instance.update({ ...inputs, searchTerm: "other" });
+    assert.deepEqual(search.calls, ["next", "next", "previous", "next"]);
+  } finally {
+    instance.dispose();
+  }
+});
 
 function host(id: string, size: { cols: number; rows: number }): HTMLElement {
   hostSizes.set(id, size);

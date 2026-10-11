@@ -23,6 +23,7 @@ for (const [name, value] of Object.entries({
   document: domWindow.document,
   navigator: domWindow.navigator,
   HTMLElement: domWindow.HTMLElement,
+  Element: domWindow.Element,
   HTMLButtonElement: domWindow.HTMLButtonElement,
   Node: domWindow.Node,
   Event: domWindow.Event,
@@ -277,6 +278,51 @@ const review = (open: boolean): DiffReviewControls => ({
   busyFindingId: null,
   onCreate: async () => open,
   onStatus: async () => {},
+});
+
+test("200 files initially mount ten bodies, and an opened tail file keeps staging, selection and review (#2779)", async () => {
+  const { container, render } = await mount();
+  const diff = diffOf(Array.from({ length: 200 }, (_, index) => file(`src/file-${index}.ts`)));
+  const staged: string[] = [];
+  const selected: string[] = [];
+  const controls = staging({ onHunk: (_direction, path) => { staged.push(path); } });
+  const props = {
+    diff, staging: controls, review: review(true),
+    selection: { selecting: true, selected: new Set<string>(), onLine: (line: { filePath: string }) => { selected.push(line.filePath); }, onSelectLine: () => {} },
+  };
+  const started = performance.now();
+  await render(<GitDiffViewer {...props} />);
+  console.log(JSON.stringify({ measurement: "200-file initial mount", bodies: container.querySelectorAll(".dfile-body").length, nodes: container.querySelectorAll("*").length, durationMs: Math.round(performance.now() - started) }));
+  assert.equal(container.querySelectorAll(".dfile").length, 200, "every file remains in the index");
+  assert.equal(container.querySelectorAll(".dfile-body").length, 10, "initial line DOM is bounded");
+  const section = container.querySelector<HTMLElement>('.dfile[data-path="src/file-199.ts"]')!;
+  await act(async () => { section.querySelector<HTMLButtonElement>(".dfile-toggle")!.click(); });
+  assert.equal(container.querySelectorAll(".dfile-body").length, 11);
+  await act(async () => { [...section.querySelectorAll("button")].find((button) => button.textContent === "Stage Hunk")!.click(); });
+  assert.deepEqual(staged, ["src/file-199.ts"]);
+  await act(async () => { section.querySelector<HTMLButtonElement>("button.diff-num")!.click(); });
+  assert.deepEqual(selected, ["src/file-199.ts"]);
+  await render(<GitDiffViewer {...props} selection={undefined} />);
+  await act(async () => { section.querySelector<HTMLButtonElement>('button[aria-label="Add Finding on Line 1"]')!.click(); });
+  assert.ok(section.querySelector(".dedit"), "review editor opens in a formerly collapsed file");
+  await render(<GitDiffViewer {...props} diff={{ ...diff, diffHash: "d".repeat(64) }} selection={undefined} />);
+  assert.equal(section.querySelector(".dfile-toggle")!.getAttribute("aria-expanded"), "true", "refresh preserves the user's expansion");
+  assert.ok(section.querySelector(".dedit"), "refresh preserves the draft");
+});
+
+test("a diff loaded after an empty pane is bounded, and Open in Review expands a tail file (#2779)", async () => {
+  const { container, render } = await mount();
+  await render(<GitDiffViewer diff={diffOf([])} />);
+  const diff = diffOf(Array.from({ length: 200 }, (_, index) => file(`src/file-${index}.ts`)));
+  await render(<GitDiffViewer diff={diff} />);
+  assert.equal(container.querySelectorAll(".dfile-body").length, 10);
+  let handled = 0;
+  await render(<GitDiffViewer diff={diff} focus={{ path: "src/file-199.ts", request: 1 }} onFocusHandled={() => { handled++; }} />);
+  assert.equal(container.querySelectorAll(".dfile-body").length, 11);
+  const head = container.querySelector('.dfile[data-path="src/file-199.ts"] .dfile-toggle');
+  assert.equal(head?.getAttribute("aria-expanded"), "true");
+  assert.equal(doc.activeElement, head);
+  assert.equal(handled, 1);
 });
 
 test("Side by Side is two columns that break around an open editor, and each pair is a row when wrapped", async () => {

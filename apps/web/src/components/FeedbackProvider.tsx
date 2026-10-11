@@ -18,6 +18,7 @@ import { StatusBadge } from "./StatusBadge.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import type { StatusMeta } from "../status-meta.js";
 import { useIsMobile } from "./useIsMobile.js";
+import { subscribeToastChrome, toastChromeElements } from "./useToastChrome.js";
 
 /** One thing a confirmation affects, drawn as a dense row under its body (§7.4). */
 export interface ConfirmationDetailRow {
@@ -531,7 +532,8 @@ function useToastClearance(active: boolean) {
     const measure = () => {
       const app = document.getElementById("root") ?? document.body;
       const bottom = app.getBoundingClientRect().bottom;
-      const boxes = [...document.querySelectorAll<HTMLElement>(".app-rail, .composer, .modal-foot")]
+      const chrome = toastChromeElements(document);
+      const boxes = chrome
         .map((element) => element.getBoundingClientRect())
         .filter((box) => box.width > 0 && box.height > 0 && box.height <= bottom / 2)
         .sort((left, right) => right.bottom - left.bottom);
@@ -541,7 +543,7 @@ function useToastClearance(active: boolean) {
         stackTop = Math.min(stackTop, box.top);
       }
       const column = document.querySelector(".toast-region")?.getBoundingClientRect();
-      for (const foot of document.querySelectorAll<HTMLElement>(".modal-foot")) {
+      for (const foot of chrome.filter((element) => element.classList.contains("modal-foot"))) {
         const box = foot.getBoundingClientRect();
         if (box.width === 0 || box.height === 0 || box.top < bottom / 2) continue;
         if (column && (box.right <= column.left || box.left >= column.right)) continue;
@@ -564,20 +566,21 @@ function useToastClearance(active: boolean) {
       if (!resizes) return;
       resizes.disconnect();
       resizes.observe(document.documentElement);
-      for (const element of document.querySelectorAll(".app-rail, .composer, .modal-foot")) resizes.observe(element);
+      for (const element of toastChromeElements(document)) resizes.observe(element);
+      const column = document.querySelector(".toast-region");
+      if (column) resizes.observe(column);
     };
-    const mutations = typeof MutationObserver === "undefined" ? null : new MutationObserver(() => {
+    const unsubscribe = subscribeToastChrome(() => {
       observeChrome();
       schedule();
     });
-    mutations?.observe(document.body, { childList: true, subtree: true });
     observeChrome();
     measure();
     window.addEventListener("resize", schedule);
     window.visualViewport?.addEventListener("resize", schedule);
     return () => {
       if (frame) window.cancelAnimationFrame(frame);
-      mutations?.disconnect();
+      unsubscribe();
       resizes?.disconnect();
       window.removeEventListener("resize", schedule);
       window.visualViewport?.removeEventListener("resize", schedule);

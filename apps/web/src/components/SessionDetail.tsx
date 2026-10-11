@@ -1,5 +1,6 @@
 import { browserRandomUUID } from "../browser-crypto.js";
 import { State } from "./State.js";
+import { useToastChrome } from "./useToastChrome.js";
 import {
   type ComponentProps,
   type KeyboardEvent,
@@ -3567,6 +3568,7 @@ function SessionDetailLoaded({
   // measure, so revealing it grows it again.
   const phonePanelOpen = isMobile && rightPanel.open;
   const composerHiddenOnPhone = phonePanelOpen || phoneTerminalOpen;
+  const toastComposerRef = useToastChrome<HTMLDivElement>();
   useLayoutEffect(() => {
     autoGrowComposerRef.current();
   }, [mode, composerHiddenOnPhone]);
@@ -7372,6 +7374,7 @@ function SessionDetailLoaded({
           {mode === "expanded" && (
             <div
               className="composer"
+              ref={toastComposerRef}
               hidden={composerHiddenOnPhone}
               onFocusCapture={() => setActivePane("composer")}
               onPointerDownCapture={() => setActivePane("composer")}

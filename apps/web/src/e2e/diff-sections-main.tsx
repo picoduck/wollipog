@@ -53,14 +53,16 @@ const NOW = Date.now();
 
 const status: GitStatusInfo = {
   branch: "agent/speed-up-checkout-totals",
-  files: DIFF_SECTIONS_STATUS_FILES,
+  files: params.get("files") === "200"
+    ? Array.from({ length: 200 }, (_, index) => ({ status: "M", path: `src/file-${index}.ts` }))
+    : DIFF_SECTIONS_STATUS_FILES,
   hasChanges: true,
   ahead: 1,
   remoteUrl: "https://github.com/acme/shop.git",
   baseRef: "origin/main",
-  stagedCount: 1,
-  addedLines: 14,
-  deletedLines: 5,
+  stagedCount: params.get("files") === "200" ? 0 : 1,
+  addedLines: params.get("files") === "200" ? 400 : 14,
+  deletedLines: params.get("files") === "200" ? 200 : 5,
 };
 
 const session: SessionView = {
@@ -87,6 +89,11 @@ let rewritten = false;
 /** The fixture diff, with line 21 rewritten once a `rewrite=1` stage has run. */
 function currentDiff() {
   const diff = diffSectionsDiff();
+  if (params.get("files") === "200") {
+    const files = Array.from({ length: 200 }, (_, index) => ({ ...diff.files[1]!, path: `src/file-${index}.ts` }));
+    const stats = { filesChanged: 200, insertions: 400, deletions: 200 };
+    return { ...diff, files, stats, unstagedFiles: files, unstagedStats: stats, stagedFiles: [], stagedStats: { filesChanged: 0, insertions: 0, deletions: 0 } };
+  }
   if (!rewritten) return diff;
   const file = diff.files[0]!;
   const hunk = file.hunks[0]!;
