@@ -135,10 +135,11 @@ function deliveryJobs(delivery: BackgroundDeliveryView, group: BackgroundJobGrou
     job.continuationRequired !== false && job.continuationId == null && job.assistantResultPersistedAt == null);
 }
 
-/** A recovery notice names its one job, or counts them. */
+/** A recovery notice names its one job, or counts them. The receipt's own count covers jobs the
+ * bounded list leaves out, so a job is named only when the receipt is about that job alone. */
 function recoverySubject(delivery: BackgroundDeliveryView, jobs: readonly ManagedBackgroundJobView[]): BackgroundRecoverySubject {
-  if (jobs.length === 1) return { job: backgroundJobSentenceName(jobs[0]!) };
-  return { count: jobs.length || Math.max(1, delivery.terminalCount) };
+  const count = Math.max(1, jobs.length, delivery.terminalCount);
+  return count === 1 && jobs.length === 1 ? { job: backgroundJobSentenceName(jobs[0]!) } : { count };
 }
 
 function latestFinish(jobs: readonly ManagedBackgroundJobView[]): number | undefined {
@@ -301,7 +302,8 @@ export function BackgroundWorkPanel({
           const watchdogHighlighted = watchdogDelivery !== undefined && watchdogDelivery === highlightedWatchdogDelivery;
           const states = new Map(group.jobs.map((job) => [job.id, backgroundJobCurrentState(
             job, session.backgroundWorkState, runnerOnline, inventorySupported, now)] as const));
-          const recoveries = group.deliveries.flatMap((delivery, deliveryIndex) => {
+          const lostCount = [...states.values()].filter((state) => state === "lost").length;
+          const recoveries =group.deliveries.flatMap((delivery, deliveryIndex) => {
             const state = deliveryRecoveryState(delivery, delivery.missingResultAcknowledgedAt != null ||
               locallyAcknowledgedDelivery(delivery));
             return state === null ? [] : [{ delivery, deliveryIndex, state }];
@@ -315,8 +317,12 @@ export function BackgroundWorkPanel({
                 <h3 id={headingId} className="background-work-turn-title" tabIndex={-1}>
                   {backgroundTurnLabel(group.parentTurnId, parentTurns.get(group.parentTurnId))}
                 </h3>
-                {/* Result Missing's notice says it; the badge returns once it is acknowledged. */}
-                {status.key !== "result_missing" && <StatusBadge meta={backgroundJobGroupBadge(status)} inline />}
+                {/* Result Missing's notice says it; the badge returns once it is acknowledged. A turn
+                    whose unfinished jobs were all lost is waiting for nothing: the Lost notice and the
+                    rows say what happened. */}
+                {status.key !== "result_missing" && !(status.key === "waiting" && lostCount >= status.unfinished) && (
+                  <StatusBadge meta={backgroundJobGroupBadge(status)} inline />
+                )}
                 {turnViewable(group.parentTurnId) && (
                   <button type="button" className="btn sm ghost background-work-view-turn" aria-describedby={headingId}
                     onClick={() => onViewTurn!(group.parentTurnId)}>

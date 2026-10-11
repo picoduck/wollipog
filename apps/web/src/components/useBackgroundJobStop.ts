@@ -43,9 +43,10 @@ export function useBackgroundJobStop({ sessionId, jobId, registeredAt, label, av
   const key = stopKey(sessionId, jobId, registeredAt);
   const feedback = useSyncExternalStore(subscribeStopFeedback, () => stopFeedback.get(key) ?? null);
   // What the surface shows now, read once the confirmation answers: it can stay open while the job
-  // ends, leaves the list, or is replaced by a new job under the same id after a restart (#1779).
-  const shown = useRef({ mounted: false, registeredAt, stoppable, available });
-  shown.current = { ...shown.current, registeredAt, stoppable, available };
+  // ends, leaves the list, or is replaced by a new job under the same id after a restart (#1779), and
+  // a Result Blocked notice can come to name another job altogether.
+  const shown = useRef({ mounted: false, key, stoppable, available });
+  shown.current = { ...shown.current, key, stoppable, available };
   useEffect(() => {
     shown.current.mounted = true;
     return () => { shown.current.mounted = false; };
@@ -62,7 +63,7 @@ export function useBackgroundJobStop({ sessionId, jobId, registeredAt, label, av
     // The request names only the session and the job id, so it is sent only while the surface still
     // shows the very job that was confirmed, still stoppable.
     const now = shown.current;
-    if (!now.mounted || now.registeredAt !== registeredAt || !now.stoppable || !now.available) return;
+    if (!now.mounted || now.key !== key || !now.stoppable || !now.available) return;
     // Another surface showing the same job may have sent it while this confirmation was open.
     if (stopFeedback.get(key)?.state === "pending") return;
     setStopFeedback(key, { state: "pending" });

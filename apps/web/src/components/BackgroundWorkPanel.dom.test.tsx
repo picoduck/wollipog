@@ -1321,3 +1321,98 @@ test("Result Blocked stops the one live unfinished job, not counting a job the r
     await panel.dispose();
   }
 });
+
+test("a Stop confirmed after the notice came to name another job stops nothing (#2859)", async () => {
+  const stops: string[] = [];
+  let answer: ((value: boolean) => void) | null = null;
+  const client = {
+    stopBackgroundJob: async (_sessionId: string, jobId: string) => {
+      stops.push(jobId);
+      return { sessionId: "session", jobId, outcome: "stopped", terminalStatus: "killed" } as BackgroundJobStopResponse;
+    },
+  } as unknown as ApiClient;
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const blocked = blockedSession("session-blocked-retarget");
+  const render = (session: SessionView) => act(async () => root.render(
+    <ApiProvider client={client}>
+      <FeedbackContext.Provider value={{
+        confirm: () => new Promise<boolean>((resolve) => { answer = resolve; }),
+        showToast: () => 1,
+        showUndo: () => 1,
+        dismissToast: () => undefined,
+      }}>
+        <BackgroundWorkPanel session={session} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION} parentTurns={new Map()} />
+      </FeedbackContext.Provider>
+    </ApiProvider>,
+  ));
+  try {
+    await render(blocked);
+    const stop = () => container.querySelector<HTMLButtonElement>('.notice[data-state="continuation_blocked"] .notice-actions button')!;
+    assert.equal(stop().textContent, "Stop Monitor Job 7be210…");
+    await act(async () => { stop().click(); await Promise.resolve(); });
+    // While the confirmation is open, the turn's unfinished job becomes another job that started at
+    // the same moment.
+    const [monitor, agent] = blocked.backgroundJobs!;
+    await render({ ...blocked, backgroundJobs: [{ ...monitor!, id: "bg-monitor-9c8b7a" }, agent!] } as SessionView);
+    assert.equal(stop().textContent, "Stop Monitor Job 9c8b7a…");
+    await act(async () => { answer!(true); await Promise.resolve(); await Promise.resolve(); });
+    assert.deepEqual(stops, [], "the confirmed job is no longer the one shown, so nothing is stopped");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("a receipt covering more jobs than are listed counts them rather than naming the listed one (#2859)", async () => {
+  const now = Date.now();
+  const panel = await mountBackgroundWork({
+    session: managedSession({
+      id: "session-truncated-subject",
+      backgroundWorkState: undefined,
+      backgroundJobsTruncated: true,
+      backgroundJobs: [{
+        ...baseJob, id: "task-a1f3c9", parentTurnId: "turn-4", launchType: "shell", registeredAt: now - 20 * MINUTE,
+        terminalStatus: "completed", terminalObservedAt: now - 15 * MINUTE, continuationRequired: true,
+        continuationId: "bgcont-truncated", continuationMissingResultAt: now - 12 * MINUTE,
+      }],
+      backgroundDeliveries: [{
+        continuationId: "bgcont-truncated", parentTurnId: "turn-4", jobCount: 2, terminalCount: 2,
+        acceptedAt: now - 14 * MINUTE, missingResultAt: now - 12 * MINUTE, watchdogState: "accepted_without_result",
+      }],
+    } as Partial<SessionView>),
+  });
+  try {
+    assert.equal(panel.container.querySelector('.notice[data-state="accepted_without_result"] .notice-body p')?.textContent,
+      "2 background jobs finished, but their result never reached this conversation. Wollipog won't retry on its own, " +
+      "so the step can't run twice.");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("a turn whose unfinished jobs were all lost doesn't say it is waiting for them (#2859)", async () => {
+  const now = Date.now();
+  const lost = { ...baseJob, id: "task-7be210", parentTurnId: "turn-4", launchType: "monitor" as const,
+    registeredAt: now - 30 * MINUTE, lastObservedAt: now - 12 * MINUTE, sourcePresent: true };
+  const panel = await mountBackgroundWork({
+    session: managedSession({ id: "session-lost-badge", backgroundWorkState: "orphaned", backgroundJobs: [lost] }),
+    parentTurns: new Map([["turn-4", { eventId: 40, turn: 4 }]]),
+  });
+  try {
+    assertNoDomNode(panel.container.querySelector(".background-work-turn-head .status"), "no Waiting for 1 Job");
+    assert.equal(panel.container.querySelector("button.background-job-row .status")?.textContent, "Lost");
+    // A turn with a lost job and one still running (as far as anyone can tell) keeps its count.
+    await panel.render({
+      session: managedSession({ id: "session-lost-badge", backgroundWorkState: "orphaned", backgroundJobs: [
+        lost, { ...lost, id: "task-8cf321", registeredAt: now - 29 * MINUTE, sourcePresent: false },
+      ] }),
+      parentTurns: new Map([["turn-4", { eventId: 40, turn: 4 }]]),
+    });
+    assert.equal(panel.container.querySelector(".background-work-turn-head .status")?.textContent, "Waiting for 2 Jobs");
+  } finally {
+    await panel.dispose();
+  }
+});
