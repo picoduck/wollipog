@@ -150,11 +150,13 @@ export class ShellTerminalInstance {
     this.inputs = inputs;
     this.surface = doc.createElement("div");
     this.surface.className = "shell-term-surface";
-    // Scrolling by hand (the wheel, or a press on the scrollbar) is the person's: nothing holds it.
-    // Captured, since xterm stops the wheel event it scrolls by.
+    // Scrolling by hand (the wheel, a press on the scrollbar, or a key such as Shift+PageUp, which
+    // xterm scrolls by itself) is the person's: nothing holds it. Captured, since xterm stops the
+    // events it handles.
     const release = () => { this.followBottomUntil = 0; };
     this.surface.addEventListener("wheel", release, { passive: true, capture: true });
     this.surface.addEventListener("pointerdown", release, { capture: true });
+    this.surface.addEventListener("keydown", release, { capture: true });
   }
 
   /** The host element the terminal is attached to, if any. */

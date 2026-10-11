@@ -190,14 +190,27 @@ test("Next or Previous Match, or a new search term, moves a just-moved terminal 
   }
 });
 
-test("scrolling by hand ends the hold at once", async () => {
-  const { instance, term } = await movedToDock();
-  try {
-    instance.surface.dispatchEvent(new domWindow.WheelEvent("wheel", { deltaY: -100, bubbles: true }) as unknown as Event);
-    term.buffer.active.viewportY = 20;
-    term.render();
-    assert.equal(term.buffer.active.viewportY, 20, "the person's scroll stays");
-  } finally {
-    instance.dispose();
+test("scrolling by hand, with the wheel, the scrollbar or a key such as Shift+PageUp, ends the hold at once", async () => {
+  const inputs = {
+    wheel: () => new domWindow.WheelEvent("wheel", { deltaY: -100, bubbles: true }),
+    pointer: () => new domWindow.PointerEvent("pointerdown", { bubbles: true }),
+    key: () => new domWindow.KeyboardEvent("keydown", { key: "PageUp", shiftKey: true, bubbles: true }),
+  };
+  for (const [name, input] of Object.entries(inputs)) {
+    const { instance, term } = await movedToDock();
+    try {
+      // On the element xterm listens on, which stops what it handles.
+      const target = domWindow.document.createElement("textarea");
+      (instance.surface as unknown as { append(node: unknown): void }).append(target);
+      target.addEventListener(name === "wheel" ? "wheel" : name === "pointer" ? "pointerdown" : "keydown", (event) => event.stopPropagation());
+      target.dispatchEvent(input());
+      term.buffer.active.viewportY = 20;
+      term.render();
+      await frame();
+      term.render();
+      assert.equal(term.buffer.active.viewportY, 20, `${name}: the person's scroll stays`);
+    } finally {
+      instance.dispose();
+    }
   }
 });
