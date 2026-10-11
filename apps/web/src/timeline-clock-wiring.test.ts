@@ -8,7 +8,7 @@ const expectedCallSites = new Map<string, RegExp>([
   ["RunsView.tsx", /sessionActive=\{isTimelineSessionActive\(session\.status\)\}/],
   ["SessionDetail.tsx", /sessionActive=\{isTimelineSessionActive\(session\.status\)\s*\|\|\s*\(eventWindow\?\.openingStartSeq !== undefined && eventWindow\.laterGap !== undefined\)\}/],
   ["SideChatPanel.tsx", /sessionActive=\{isTimelineSessionActive\(child\.status\)\}/],
-  ["SubagentsPanel.tsx", /sessionActive=\{\["starting", "running", "waiting"\]\.includes\(selected\.lifecycle\)\}/],
+  ["WorkerDetail.tsx", /sessionActive=\{\["starting", "running", "waiting"\]\.includes\(lifecycle \?\? "unknown"\)\}/],
 ]);
 
 test("every production EventTimeline call site supplies its live-updating lifecycle", () => {

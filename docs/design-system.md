@@ -1103,6 +1103,33 @@ and whether their result came back. It is one list of turn groups, never a card 
 - **About Background Work** (`InfoPopover`) says what the list shows and that commands, file paths,
   credentials and output stay on the machine. There is no privacy footnote under the list.
 
+### 4.11 Worker Page (Agents)
+
+A subagent row in Agents, or a subagent opened from the transcript, pushes its **Worker Page**
+(`WorkerDetail`, #2860) titled with the worker's name. It scrolls with the panel body, and every
+part starts on the panel's left edge:
+
+- **Header.** The row's own status badge (§11.1, read from the same `WorkerRow`, so the page and the
+  row never disagree), then neutral facts (§11.3): the worker's role or "Subagent", "In <parent>" as
+  an inline `.link` to the parent worker's page, Started, Tool Uses, and Tokens with the nested
+  total ("600 Tokens, 740 With Nested").
+- **Pending request.** While the worker owns a request, a compact warning notice says what it wants
+  ("Wants to run npm test -- storage and is waiting for your approval.") and the request's card sits
+  under it, answered here. Worker Attention and an attention link open this page with focus on the
+  request, as does `showSubagent(…, { request: true })`. The session's own request is never shown
+  here; it stays on the request dock. A request no page can carry (an ambiguous or unresolved owner,
+  or one preserved across a runner restart) stays in Worker Attention, so nothing becomes
+  unanswerable.
+- **Nested Workers.** The workers it started, as roster rows (§5.2), each pushing its own page.
+- **Activity.** The worker's own transcript, virtualized against the panel body. With none, the
+  sentence "No output recorded yet. Activity appears here as the subagent works."; a Codex session
+  shows a neutral compact notice instead, since Codex does not report subagent output.
+- **Can't Show This Worker.** A compact state with one sentence (two subagents share an ID, or the
+  subagent is gone) and **Back to Agents**.
+- A background job's row pushes the shared Job Detail page (§4.10) with **Open in Background Work**,
+  which switches the panel to Background Work with that job's page pushed. A member session's row
+  opens that session.
+
 ---
 
 ## 5. Lists, Rows and Cards

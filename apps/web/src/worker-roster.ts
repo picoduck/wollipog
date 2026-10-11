@@ -201,6 +201,29 @@ export function stepActivity(title: string, mode: "now" | "done" | "wait" | "see
   return `${phrase[mode]} ${object}`;
 }
 
+/** What a worker's request waits for, as the end of its page's notice ("…waiting for your approval."). */
+const REQUEST_WAITS_FOR: Record<SessionAttentionKind, string> = {
+  approval_required: "your approval",
+  answer_required: "your answer",
+  recovery_required: "you to recover it",
+  authentication_required: "you to sign in",
+  review_requested: "your review",
+  input_required: "your input",
+};
+
+/**
+ * The notice on a worker's page while it owns a pending request (#2860): what it wants to do and
+ * what it waits for. "Wants to run npm test -- storage and is waiting for your approval." A question,
+ * or a request whose title is not a step, says only what it waits for; the card under it says the rest.
+ */
+export function workerRequestSentence(request: PendingApproval, workspaceRoot?: string): string {
+  const waitsFor = REQUEST_WAITS_FOR[requestAttentionKind(request)];
+  if (request.kind === "question") return `Has a question and is waiting for ${waitsFor}.`;
+  const { verb, object } = splitStepTitle(request.title, workspaceRoot);
+  const phrase = object ? STEP_PHRASES[verb] : undefined;
+  return phrase ? `Wants to ${phrase.wait} ${object} and is waiting for ${waitsFor}.` : `Is waiting for ${waitsFor}.`;
+}
+
 const LAUNCH_NOUNS: Record<ManagedBackgroundJobView["launchType"], string> = {
   agent: "An agent",
   shell: "A shell command",

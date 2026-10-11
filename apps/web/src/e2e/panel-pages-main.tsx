@@ -36,11 +36,20 @@ const session = {
   archived: false, runId: null, parentSessionId: null, pendingApproval: null, createdAt: NOW - 60 * MINUTE,
   updatedAt: NOW, lastEventAt: NOW, messageCount: 80, tokensIn: 0, tokensOut: 0, costUsd: 0,
 } as SessionView;
-// `request=1`: the last worker asks the person something, answered in Worker Attention.
+// `request=1`: the last worker asks to run a command, answered on its page (#2860).
 if (params.get("request") === "1") session.pendingApproval = {
-  requestId: "permission-30", ownerToolUseId: "worker-30", title: "Run Payout Migrations?",
-  options: [{ optionId: "yes", name: "Allow", kind: "allow_once" }],
+  requestId: "permission-30", ownerToolUseId: "worker-30", title: "Bash: npm test -- payouts",
+  options: [{ optionId: "yes", name: "Allow", kind: "allow_once" }, { optionId: "no", name: "Deny", kind: "reject_once" }],
 } as SessionView["pendingApproval"];
+// `job=1`: a monitor the agent left running, listed in Agents beside the workers.
+if (params.get("job") === "1") Object.assign(session, {
+  backgroundWorkState: "running", backgroundWorkTracking: "managed", backgroundJobsAvailable: true,
+  backgroundJobs: [{ id: "job-monitor-7be210", parentTurnId: "turn-1", launchType: "monitor", registeredAt: NOW - 12 * MINUTE,
+    lastObservedAt: NOW, sourcePresent: true }],
+});
+// `codex=1`: a Codex session, which reports its workers but not their output.
+const codex = params.get("codex") === "1";
+if (codex) session.driver = "codex";
 
 const TASKS = ["Audit", "Migrate", "Review", "Test", "Document", "Profile"];
 const AREAS = ["Invoices", "Ledger", "Refunds", "Webhooks", "Payouts"];
@@ -49,14 +58,19 @@ const items: TimelineItem[] = Array.from({ length: 30 }, (_, index) => ({
   title: `${TASKS[index % TASKS.length]} ${AREAS[index % AREAS.length]} ${index + 1}`, text: "",
   toolKind: "agent", status: index < 24 ? "completed" : "in_progress",
   startedAt: NOW - (40 - index) * MINUTE, ...(index < 24 ? { completedAt: NOW - (30 - index) * MINUTE } : {}),
-}) as TimelineItem).flatMap((call, index) => [call, {
+  ...(index === 29 ? { subagentRollup: { inputTokens: 420, outputTokens: 180 } } : {}),
+}) as TimelineItem).flatMap((call, index) => codex ? [call] : [call, {
   kind: "agent_message", id: index * 2 + 2, parentToolUseId: `worker-${index + 1}`, createdAt: NOW - (20 - index) * MINUTE,
   text: `Checked ${index + 3} files in the ${AREAS[index % AREAS.length]!.toLowerCase()} module; two need a migration step.`,
 } as TimelineItem]);
+// `ambiguous=1`: the provider reused worker 27's id for a second worker, so neither can be told apart.
+if (params.get("ambiguous") === "1") items.push({ kind: "tool_call", id: 102, toolCallId: "worker-27",
+  title: "Migrate Refunds Again", text: "", toolKind: "agent", status: "in_progress", startedAt: NOW - 3 * MINUTE } as TimelineItem);
 // `nested=1`: the last worker started one of its own, whose Open sits in its activity.
 if (params.get("nested") === "1") items.push(
   { kind: "tool_call", id: 100, toolCallId: "worker-31", parentToolUseId: "worker-30", title: "Check Payout Fixtures",
-    text: "", toolKind: "agent", status: "in_progress", startedAt: NOW - 5 * MINUTE } as TimelineItem,
+    text: "", toolKind: "agent", status: "in_progress", startedAt: NOW - 5 * MINUTE,
+    subagentRollup: { inputTokens: 100, outputTokens: 40 } } as TimelineItem,
   { kind: "agent_message", id: 101, parentToolUseId: "worker-31", createdAt: NOW - MINUTE,
     text: "Fixtures for refunds are stale." } as TimelineItem,
 );

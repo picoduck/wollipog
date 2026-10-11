@@ -1,16 +1,18 @@
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ComponentProps } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { pendingRequests, sessionAttentionStatus, type ChildSessionAttentionOwner,
-  type ChildSessionRegistryEntry, type ChildSessionRegistryPage, type PodView, type RunView, type SessionView,
+  type ChildSessionRegistryEntry, type ChildSessionRegistryPage, type PendingApproval, type PodView, type RunView, type SessionView,
   type WorkflowInstanceView } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
-import { formatDuration, titleCaseLabel } from "../format.js";
+import { titleCaseLabel } from "../format.js";
 import { deriveSubagentLifecycle, IncrementalSubagentProjector, type SubagentDescriptor } from "../subagents.js";
 import { useLiveSession, useStoreActions, useStoreSelector } from "../store.js";
 import { useTimelineClock } from "../timeline-clock.js";
-import { isCurrentWorker, isLiveWorker, workerRoster, workerStatusMeta, type WorkerGroup, type WorkerMemberMetadata,
-  type WorkerRow } from "../worker-roster.js";
-import { SubagentsPanel } from "./SubagentsPanel.js";
+import type { TimelineItem } from "../timeline.js";
+import { isCurrentWorker, pendingRequestsByOwner, subagentStatusContext, workerRoster, type WorkerGroup,
+  type WorkerMemberMetadata, type WorkerRow } from "../worker-roster.js";
+import { WorkerDetail } from "./WorkerDetail.js";
+import { WorkerRowItem } from "./WorkerRowItem.js";
 import type { BackgroundWorkPanelProps } from "./BackgroundWorkPanel.js";
 import { JobDetail } from "./JobDetail.js";
 import { SessionQuestionBanner } from "./SessionApproval.js";
@@ -18,10 +20,9 @@ import { RequestCard } from "./requests/RequestCard.js";
 import { PanelPageTitle, usePanelPages } from "./PanelPages.js";
 import { SegmentedControl } from "./ui/ChoiceControls.js";
 import { BusyButton } from "./ui/BusyButton.js";
-import { ArrowUpRightIcon, BotIcon, ChevronRightIcon } from "./Icons.js";
+import { BotIcon } from "./Icons.js";
 import { ListFoot } from "./ListFoot.js";
 import { State } from "./State.js";
-import { StatusBadge } from "./StatusBadge.js";
 
 const PAGE_SIZE = 50;
 const REGISTRY_AUTO_RETRY_LIMIT = 2;
@@ -375,10 +376,7 @@ export function workerListFootLabel(shown: number, total: number, more: boolean)
   return `Showing ${shown} of ${total}${more ? "+" : ""}`;
 }
 
-/** The tooltip on a row that opens another session. */
-export function opensSessionLabel(title: string): string {
-  return `Opens ${title}`;
-}
+export { opensSessionLabel } from "./WorkerRowItem.js";
 
 export interface WorkerGroupView {
   group: WorkerGroup;
@@ -459,15 +457,35 @@ export function memberMetadata(
   return metadata;
 }
 
-type Props = ComponentProps<typeof SubagentsPanel> & Pick<BackgroundWorkPanelProps,
+type Props = Pick<BackgroundWorkPanelProps,
   "runnerProtocolVersion" | "parentTurns" | "onViewTurn" | "inventoryError" | "onRetryInventory"> & {
+    session: SessionView;
+    items: TimelineItem[];
+    runnerOnline: boolean;
+    /** True while the reader is showing a bounded window with older turns still unloaded. */
+    earlierActivityUnloaded?: boolean;
+    /** The subagent selected in the panel's shared state; the transcript's Open names it. */
+    requestedId?: string | null;
+    /** A request, from outside the panel, to open `requestedId`'s page. */
+    focusRequest?: number;
+    onFocusRequestHandled?: (request: number) => void;
+    /** With `focusRequest`, focus lands on the worker's pending request rather than the page title. */
+    focusPendingRequest?: boolean;
+    onSelect: (id: string) => void;
     onOpenPrimaryRequest?: (requestId: string) => void;
     attentionTarget?: import("../navigation.js").AttentionTarget;
+    /** Switch the panel to Background Work with this job's page open. */
+    onOpenInBackgroundWork?: (jobId: string) => void;
   };
+
+/** The worker page's key, as pushed onto the panel's pages: the transcript's Open and #2861 use it. */
+export const subagentPageKey = (id: string) => `subagent:${id}`;
 
 /**
  * One roster retains each transport's own detail and response boundary. A worker or a job opens as a
- * page inside the panel (#2856), and so does a subagent opened from the transcript.
+ * page inside the panel (#2856), and so does a subagent opened from the transcript. A subagent's
+ * pending request is answered on its page (#2860); a request no page can carry stays in Worker
+ * Attention.
  */
 export function AgentsPanel(props: Props) {
   const api = useApi();
@@ -714,6 +732,17 @@ export function AgentsPanel(props: Props) {
       ? { ...agent, lifecycle: "unknown" as const, availability: "recorded" as const } : agent);
     return workerRoster(session, unambiguousAgents, members, (id) => id === session.runnerId ? runnerOnline : runners.get(id)?.status === "online", metadata);
   }, [session, agents, projection.ambiguousIds, runs, sessions, runners, pods, workflows, runnerOnline]);
+  // Workers the transcript holds that the registry has not listed yet (past its first page): not
+  // roster rows until Show More, but their own pages show them and their parents' pages list them,
+  // read from the transcript as their rows will be.
+  const unlistedRows = useMemo(() => {
+    const listed = new Set(agents.map((agent) => agent.id));
+    const unlisted = projection.descriptors.filter((agent) => !listed.has(agent.id) &&
+      !projection.ambiguousIds.has(agent.id) && !unresolvedOwnerIds.has(agent.id));
+    if (unlisted.length === 0) return [];
+    const ids = new Set(unlisted.map((agent) => subagentPageKey(agent.id)));
+    return workerRoster(session, [...agents, ...unlisted], [], () => runnerOnline).filter((row) => ids.has(row.id));
+  }, [session, agents, projection, unresolvedOwnerIds, runnerOnline]);
   const [filter, setFilter] = useState<"active" | "history" | "all">("active");
   const [limit, setLimit] = useState(PAGE_SIZE);
   const [chosen, setChosen] = useState<string | null>(null);
@@ -727,6 +756,27 @@ export function AgentsPanel(props: Props) {
   }, [requestedId, unresolvedOwnerIds, props.onSelect]);
   const requests = pendingRequests(session.pendingApproval);
   const selectedRequest = requests.find((request) => request.requestId === requestId);
+  const ownerRequests = useMemo(() => pendingRequestsByOwner(session.pendingApproval), [session.pendingApproval]);
+  // The worker whose page answers a request (#2860): the one worker it names, listed here. A request
+  // preserved across a runner restart is the session's to recover, and an owner that is ambiguous or
+  // unresolved has no page; those stay in Worker Attention so nothing becomes unanswerable.
+  const requestPageOwner = (request: PendingApproval | undefined): string | null => {
+    const ownerId = request?.ownerToolUseId;
+    if (!ownerId || request.recoveryReason || projection.ambiguousIds.has(ownerId) || unresolvedOwnerIds.has(ownerId)) return null;
+    return agents.some((agent) => agent.id === ownerId) || projection.descriptors.some((agent) => agent.id === ownerId)
+      ? ownerId : null;
+  };
+  // A worker page opened for its request, which takes focus once the page shows it.
+  const [pageRequest, setPageRequest] = useState<{ key: string; requestId?: string; focus?: number } | null>(null);
+  const pageRequestFocus = useRef(0);
+  const openRequestPage = (ownerId: string, requestId: string | undefined, root: boolean) => {
+    const key = subagentPageKey(ownerId);
+    pages.push(key, root ? { root: true } : undefined);
+    setPageRequest({ key, ...(requestId ? { requestId } : {}), focus: ++pageRequestFocus.current });
+  };
+  // Focus goes to the request once; the page keeps showing the request it was opened for.
+  const spendRequestFocus = useCallback((focus: number) => setPageRequest((current) =>
+    current?.focus === focus ? { key: current.key, ...(current.requestId ? { requestId: current.requestId } : {}) } : current), []);
   const target = props.attentionTarget;
   const targetEpochMatches = !target || target.eventEpoch === (session.eventEpoch ?? 0);
   const linkedRequestMissing = target?.requestId !== undefined && !requests.some((request) => request.requestId === target.requestId);
@@ -741,12 +791,20 @@ export function AgentsPanel(props: Props) {
   useEffect(() => {
     if (!targetKey || handledTarget.current === targetKey) return;
     handledTarget.current = targetKey;
-    // The request is answered in the roster's Worker Attention section, so a page gives way to it.
-    pages.clear();
-    setRequestId(targetEpochMatches && !linkedRequestMissing ? target?.requestId ?? null : null);
     setChosen(null);
     setFilter("active");
     const request = targetEpochMatches ? requests.find((value) => value.requestId === target?.requestId) : undefined;
+    const pageOwner = requestPageOwner(request);
+    if (request && pageOwner) {
+      // A worker's request is answered on its page, with Back going to the roster (#2860).
+      setRequestId(null);
+      props.onSelect(pageOwner);
+      openRequestPage(pageOwner, request.requestId, true);
+      return;
+    }
+    // Any other request is answered in the roster's Worker Attention section, so a page gives way to it.
+    pages.clear();
+    setRequestId(targetEpochMatches && !linkedRequestMissing ? target?.requestId ?? null : null);
     const ownerId = request?.ownerToolUseId;
     props.onSelect(ownerId && !projection.ambiguousIds.has(ownerId) && !unresolvedOwnerIds.has(ownerId) ? ownerId : "");
     if (!request) (attentionRef.current ?? panelRef.current)?.focus();
@@ -754,10 +812,12 @@ export function AgentsPanel(props: Props) {
       (request.requestId === session.pendingApproval?.requestId ? primaryRequestRef.current : requestDetailRef.current)?.focus());
   }, [targetKey, targetEpochMatches, linkedRequestMissing, target, requests, projection.ambiguousIds, unresolvedOwnerIds,
     props.onSelect, session.pendingApproval?.requestId, pages]);
-  // The transcript's Open lands on that worker's page, with Back going to the list (#2856).
+  // The transcript's Open lands on that worker's page, with Back going to the list (#2856), and on
+  // its pending request when the caller asks for that (#2861).
   useEffect(() => {
     if (focusRequest === undefined) return;
-    if (requestedId) pages.push(`subagent:${requestedId}`, { root: true });
+    if (requestedId && props.focusPendingRequest) openRequestPage(requestedId, undefined, true);
+    else if (requestedId) pages.push(subagentPageKey(requestedId), { root: true });
     onFocusRequestHandled?.(focusRequest);
     // Each request is acted on once, when it arrives.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -811,18 +871,30 @@ export function AgentsPanel(props: Props) {
     if (!revealsLoadedRows && registryAfter !== null) loadRegistry(registryAfter);
     setLimit((value) => value + PAGE_SIZE);
   };
-  // The worker whose request is selected in Worker Attention, when it can be named safely: its
-  // activity stays beside the request while pages open and close over the roster.
-  const attentionOwnerId = (() => {
-    const ownerId = selectedRequest && !primaryInSession ? selectedRequest.ownerToolUseId : undefined;
-    if (!ownerId || projection.ambiguousIds.has(ownerId) || unresolvedOwnerIds.has(ownerId)) return null;
-    return agents.some((agent) => agent.id === ownerId) ? ownerId : null;
-  })();
   const openSubagentPage = (id: string) => {
     props.onSelect(id);
-    pages.push(`subagent:${id}`);
+    pages.push(subagentPageKey(id));
   };
-  // The page on top: a subagent's detail, or a background job's.
+  // A row, in the roster or a page's Nested Workers: a subagent or a job opens its page here, and a
+  // member session opens in its own place.
+  const openRow = (row: WorkerRow) => {
+    setChosen(row.id);
+    if (row.target.kind === "subagent") openSubagentPage(row.target.id);
+    else if (row.target.kind === "session") navigate({ name: "session", id: row.target.id });
+    else {
+      props.onSelect("");
+      pages.push(row.id);
+    }
+  };
+  const pageSubagentId = pages.current?.startsWith("subagent:") ? pages.current.slice("subagent:".length) : null;
+  const pageOutput = useMemo(() => pageSubagentId === null ? [] : projector.current.timeline(pageSubagentId),
+    // The projector's timeline moves with each projection.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [projection, pageSubagentId]);
+  const statusContext = useMemo(() => subagentStatusContext(session, runnerOnline, projection.ambiguousIds),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [session.status, session.pendingApproval, session.attentionOwners, runnerOnline, projection.ambiguousIds]);
+  // The page on top: a subagent's, or a background job's.
   const page = pages.current === null ? null : (() => {
     const key = pages.current;
     const separator = key.indexOf(":");
@@ -830,14 +902,35 @@ export function AgentsPanel(props: Props) {
     const id = key.slice(separator + 1);
     const row = rows.find((candidate) => candidate.id === key);
     if (kind === "background") {
-      return { key, title: row?.name ?? "Background Job",
-        body: <JobDetail session={session} jobId={id} runnerOnline={runnerOnline}
+      return { key, title: row?.name ?? "Background Job", body: <>
+        <JobDetail session={session} jobId={id} runnerOnline={runnerOnline}
           runnerProtocolVersion={props.runnerProtocolVersion} parentTurns={props.parentTurns}
-          earlierActivityUnloaded={props.earlierActivityUnloaded} onViewTurn={props.onViewTurn} /> };
+          earlierActivityUnloaded={props.earlierActivityUnloaded} onViewTurn={props.onViewTurn} />
+        {props.onOpenInBackgroundWork && <button type="button" className="btn sm"
+          onClick={() => props.onOpenInBackgroundWork?.(id)}>Open in Background Work</button>}
+      </> };
     }
-    const title = row?.name ?? (!projection.ambiguousIds.has(id) ? agents.find((agent) => agent.id === id)?.title : undefined) ?? "Subagent";
-    return { key, title, body: <SubagentsPanel {...props} detailOnly titled={false} requestedId={id}
-      focusRequest={undefined} onFocusRequestHandled={undefined} onSelect={openSubagentPage} /> };
+    const ambiguous = projection.ambiguousIds.has(id);
+    const descriptor = ambiguous ? undefined
+      : agents.find((agent) => agent.id === id) ?? projection.descriptors.find((agent) => agent.id === id);
+    const pageRows = unlistedRows.length === 0 ? rows : [...rows, ...unlistedRows];
+    const rowOf = (rowId: string) => pageRows.find((candidate) => candidate.id === rowId);
+    const worker = rowOf(key);
+    const title = worker?.name ?? descriptor?.title ?? "Subagent";
+    // The request an attention link or Worker Attention opened the page for, else the worker's most
+    // urgent; never one another worker or the session owns.
+    const named = pageRequest?.key === key && pageRequest.requestId
+      ? requests.find((request) => request.requestId === pageRequest.requestId) : undefined;
+    const request = [named, ownerRequests.get(id)].find((candidate) => candidate && requestPageOwner(candidate) === id);
+    return { key, title, body: <WorkerDetail session={session} runnerOnline={runnerOnline}
+      earlierActivityUnloaded={props.earlierActivityUnloaded}
+      worker={ambiguous ? undefined : worker} lifecycle={descriptor?.lifecycle}
+      unavailable={ambiguous ? "ambiguous" : worker ? undefined : registry === null && registryLoading ? "loading" : "missing"}
+      parent={worker?.parentId ? rowOf(worker.parentId) : undefined}
+      nested={pageRows.filter((candidate) => candidate.parentId === key)} output={pageOutput} statusContext={statusContext}
+      request={request} requestOwner={`${title}, a subagent`}
+      requestFocus={pageRequest?.key === key ? pageRequest.focus : undefined} onRequestFocusHandled={spendRequestFocus}
+      onOpenWorker={openRow} onOpenSubagent={openSubagentPage} onBack={pages.pop} /> };
   })();
   return (
     <>
@@ -855,6 +948,14 @@ export function AgentsPanel(props: Props) {
           const attention = sessionAttentionStatus({ status: session.status,
             pendingApproval: { ...request, ownerToolUseId: undefined } });
           return <button type="button" className="btn" key={request.requestId} onClick={() => {
+            const pageOwner = requestPageOwner(request);
+            if (pageOwner) {
+              setRequestId(null);
+              setChosen(subagentPageKey(pageOwner));
+              props.onSelect(pageOwner);
+              openRequestPage(pageOwner, request.requestId, false);
+              return;
+            }
             setRequestId(request.requestId);
             if (owner) props.onSelect(owner.id);
             else if (compactOwner?.resolved) props.onSelect(compactOwner.toolCallId);
@@ -924,42 +1025,11 @@ export function AgentsPanel(props: Props) {
           return <section key={group.id} aria-labelledby={headingId}>
             <h3 className="group-label" id={headingId}>{group.name}<span className="count">{count}</span></h3>
             <div role="list" aria-label={group.name}>
-              {groupRows.map(({ row, nested, lastNested }) => {
-                const end = row.completedAt ?? (isLiveWorker(row) ? now : row.lastActivityAt);
-                const elapsed = row.startedAt != null && end != null ? formatDuration(Math.max(0, end - row.startedAt)) : "";
-                const opensSession = row.target.kind === "session";
-                return <div key={row.id} role="listitem"
-                  className={`worker-row-item${nested ? " nested" : ""}${lastNested ? " nested-last" : ""}`}>
-                  <button type="button" className={`row row-2 worker-row${selected?.id === row.id ? " is-selected" : ""}`}
-                    aria-current={selected?.id === row.id ? "true" : undefined}
-                    title={row.target.kind === "session"
-                      ? opensSessionLabel(sessions.get(row.target.id)?.title ?? row.name) : undefined}
-                    data-panel-page-key={opensSession ? undefined : row.id}
-                    onClick={() => {
-                      setChosen(row.id);
-                      if (row.target.kind === "subagent") openSubagentPage(row.target.id);
-                      else if (row.target.kind === "session") navigate({ name: "session", id: row.target.id });
-                      else {
-                        props.onSelect("");
-                        pages.push(row.id);
-                      }
-                    }}>
-                    <span className="row-body">
-                      <span className="row-line">
-                        <span className="row-title">{row.name}</span>
-                        <StatusBadge meta={workerStatusMeta(row)} />
-                      </span>
-                      <span className="row-line">
-                        <span className="row-sub">{row.activity}</span>
-                        {elapsed && <span className="row-trail">{elapsed}</span>}
-                      </span>
-                    </span>
-                    <span className="row-icon" aria-hidden="true">
-                      {opensSession ? <ArrowUpRightIcon size={16} /> : <ChevronRightIcon size={16} />}
-                    </span>
-                  </button>
-                </div>;
-              })}
+              {groupRows.map(({ row, nested, lastNested }) => (
+                <WorkerRowItem key={row.id} row={row} now={now} selected={selected?.id === row.id} nested={nested}
+                  lastNested={lastNested} sessionTitle={row.target.kind === "session" ? sessions.get(row.target.id)?.title : undefined}
+                  onOpen={openRow} />
+              ))}
             </div>
           </section>;
         })}
@@ -969,10 +1039,6 @@ export function AgentsPanel(props: Props) {
         <BusyButton className="btn sm ghost" busy={!revealsLoadedRows && registryLoading}
           progress={AGENTS_ROSTER_COPY.loadingMore} onClick={showMore}>{AGENTS_ROSTER_COPY.showMore}</BusyButton>
       </ListFoot>}
-      {/* A worker's request is answered in Worker Attention, with that worker's activity beside it
-          for context, until the worker page carries its request (#2860). */}
-      {attentionOwnerId && <SubagentsPanel {...props} detailOnly requestedId={attentionOwnerId}
-        focusRequest={undefined} onFocusRequestHandled={undefined} onSelect={openSubagentPage} />}
     </div>
     {page && (
       <div key={page.key} className="agents-page">

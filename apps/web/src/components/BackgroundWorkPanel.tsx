@@ -79,7 +79,13 @@ export interface BackgroundWorkPanelProps {
   onOpenMachine?: () => void;
   inventoryError?: string | null;
   onRetryInventory?: () => void;
+  /** A job to open as this tool's page, from Agents' Open in Background Work (#2860). */
+  openJob?: BackgroundJobPageRequest | null;
+  onOpenJobHandled?: (seq: number) => void;
 }
+
+/** One request to open a job's page; `seq` tells a repeated request for the same job apart. */
+export interface BackgroundJobPageRequest { jobId: string; seq: number }
 
 function useDelayedFlag(active: boolean, delayMs: number): boolean {
   const [shown, setShown] = useState(false);
@@ -168,9 +174,19 @@ export function BackgroundWorkPanel({
   onOpenMachine,
   inventoryError,
   onRetryInventory,
+  openJob,
+  onOpenJobHandled,
 }: BackgroundWorkPanelProps) {
   const api = useApi();
   const pages = usePanelPages();
+  // Arriving from Agents with a job lands on its page, and Back goes to this list (#2860).
+  useEffect(() => {
+    if (!openJob) return;
+    pages.push(backgroundJobPageKey(openJob.jobId), { root: true });
+    onOpenJobHandled?.(openJob.seq);
+    // Each request is acted on once, when it arrives.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openJob?.seq]);
   const headingPrefix = useId();
   const [locallyAcknowledged, setLocallyAcknowledged] = useState<ReadonlySet<string>>(() => new Set());
   const [acknowledgementFeedback, setAcknowledgementFeedback] =
