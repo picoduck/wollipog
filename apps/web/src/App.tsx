@@ -29,6 +29,7 @@ import { parseStoredDockVisible } from "./dock.js";
 import { isInboxBlocked } from "./inbox.js";
 import { sessionVisibleForReminderMode } from "./session-reminders.js";
 import { InboxView } from "./components/InboxView.js";
+import { preloadTerminalTool } from "./components/RightPanel.js";
 import {
   openGoToFile,
   openSideChat,
@@ -125,7 +126,8 @@ const PodsView = lazy(() => import("./components/PodsView.js").then((module) => 
 const AutomationsView = lazy(() => import("./components/AutomationsView.js").then((module) => ({ default: module.AutomationsView })));
 const SkillsView = lazy(() => import("./components/SkillsView.js").then((module) => ({ default: module.SkillsView })));
 const UsageView = lazy(() => import("./components/UsageView.js").then((module) => ({ default: module.UsageView })));
-const ShellDock = lazy(() => import("./components/ShellDock.js").then((module) => ({ default: module.ShellDock })));
+const loadShellDock = () => import("./components/ShellDock.js");
+const ShellDock = lazy(() => loadShellDock().then((module) => ({ default: module.ShellDock })));
 const ProjectsView = lazy(() => import("./components/ProjectsView.js").then((module) => ({ default: module.ProjectsView })));
 const OrchestratorSettingsPanel = lazy(() => import("./components/OrchestratorSettingsPanel.js").then((module) => ({ default: module.OrchestratorSettingsPanel })));
 const ShortcutReference = lazy(() => import("./components/ShortcutReference.js").then((module) => ({ default: module.ShortcutReference })));
@@ -470,6 +472,13 @@ export function Shell() {
     else setDockVisible((v) => !v);
   };
   const terminalShowing = terminalInPanel ? terminalToolShowing(rightPanel) : dockVisible;
+  // Whichever place shows the terminal fetches the other's code (#2869): a move's focus request lasts a
+  // second (`requestTerminalFocus`), and a first move must not spend it loading the destination.
+  const terminalToolShown = view.name === "session" && terminalSupported && terminalInPanel && terminalToolShowing(rightPanel);
+  useEffect(() => {
+    if (dockShown) preloadTerminalTool();
+    else if (terminalToolShown) loadShellDock().catch(() => {});
+  }, [dockShown, terminalToolShown]);
   /**
    * Move to Right Panel (#2869), the dock's More Terminal Actions item: this device places the terminal
    * in the side panel, which opens on its Terminal tool with the same tab and focus in it. The session's

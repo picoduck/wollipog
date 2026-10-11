@@ -123,6 +123,30 @@ test.describe(HOST_MOVES, () => {
     expect({ opens, closes }, "no shell was opened or closed by either move").toEqual({ opens: 0, closes: [] });
     expect([...histories].sort(), "no history was read again by either move").toEqual(["shell-1", "shell-2"]);
   });
+
+  // A move's focus request lasts a second, so the dock fetches the Terminal tool's code while it shows:
+  // the first Move to Right Panel on a slow network still lands focus in the moved terminal.
+  test("the first Move to Right Panel focuses the moved terminal even when the Terminal tool's code is slow to arrive", async ({ page }) => {
+    let toolServed = false;
+    await page.route(/\/src\/components\/TerminalTool\.tsx/u, async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      await route.continue();
+      toolServed = true;
+    });
+    const response = await page.goto("/command-inbox-projects-e2e.html?fullShell=1&terminalShells=2");
+    expect(response?.ok(), "fixture page should be served").toBe(true);
+    await page.getByRole("button", { name: /Alpha Session/ }).first().click();
+    await page.getByRole("button", { name: "Open Session" }).click();
+    await page.getByRole("button", { name: "Terminal", exact: true }).first().click();
+    const dock = page.getByRole("region", { name: "Terminal" });
+    await expect(dock.locator(".shell-term:not(.is-hidden) .xterm-rows")).toContainText("24 files passed");
+    await expect.poll(() => toolServed, { message: "the dock fetches the Terminal tool's code" }).toBe(true);
+
+    await dock.getByRole("button", { name: "More Terminal Actions" }).click();
+    await page.getByRole("menuitem", { name: /Move to Right Panel/ }).click();
+    const panel = page.locator("#right-panel");
+    await expect(panel.locator(".shell-term:not(.is-hidden) .xterm-helper-textarea")).toBeFocused();
+  });
 });
 
 test(SEARCH_DURING_FONT_LOAD_TEST, async ({ page }) => {
