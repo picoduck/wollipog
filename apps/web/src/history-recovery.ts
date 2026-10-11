@@ -287,6 +287,9 @@ export interface SessionHistoryWindowOptions {
   wait?: (ms: number) => Promise<void>;
   idlePollMs?: number;
   maxIdlePolls?: number;
+  /** Signals an unavailable tail without supplying any unproven cached rows. A reconnect owner
+   * can select its separately buffered live rows while keeping recovery incomplete. */
+  onIncompleteTail?: () => void;
 }
 
 /** A control plane that predates backward reads ignores the unknown `direction` and answers with a
@@ -351,6 +354,7 @@ export async function recoverSessionHistoryWindow(
     // delivery supplies live rows in the meantime, and the reader keeps its loading state.
     if (++idlePolls > maxIdlePolls || options.cacheCannotFill?.() === true) {
       // Keep an explicit incomplete state. A forward-filled prefix cannot prove the current tail.
+      options.onIncompleteTail?.();
       return { supported: true, complete: false };
     }
     await wait(idlePollMs);
@@ -387,6 +391,14 @@ export async function recoverSessionHistoryGap(
     let deferred = false;
     const window = await recoverSessionHistoryWindow(request, {
       ...options.window,
+      onIncompleteTail: () => {
+        // Returning to live still selects the owner's proven buffered rows. Never send the
+        // incomplete cache prefix: an empty signal retains known earlier history in the Store.
+        if (options.canReplaceWithWindow()) {
+          options.window.applyWindow(request.sessionId, [], request.eventEpoch,
+            request.recoveryRevision, false, false);
+        }
+      },
       applyWindow: (...args) => {
         // The reader can detach while the tail request is in flight, after the budget boundary.
         // Keep the row they just chose; an owner can retain the current tail separately.

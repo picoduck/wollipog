@@ -1113,3 +1113,74 @@ test("a cancelled deferred tail never calls its owner", async () => {
     canReplaceWithWindow: () => false, deferWindow: () => { throw new Error("cancelled stage"); },
   }), false);
 });
+
+for (const cachedRows of [[], [event(1)]]) for (const resumed of [false, true]) {
+  test(`unavailable reconnect tail preserves ${resumed ? "live-only paging" : "the paused window"}, ignoring ${cachedRows.length} cached prefix rows`, async () => {
+    const store = new Store();
+    store.dispatch({ type: "msg", msg: {
+      type: "snapshot", capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+      runners: [], boxes: [], sessions: [{ id: "s1", eventEpoch: 3 } as SessionView], runs: [], pods: [],
+    } });
+    store.navigate({ name: "session", id: "s1" });
+    const generation = store.getState().snapshotRevision;
+    store.prepareSubscriptionRecovery(1, ["s1"]);
+    store.dispatch({ type: "msg", msg: {
+      type: "session_subscriptions_applied", revision: 1, sessionIds: ["s1"], podIds: [],
+    } });
+    store.beginEventHistoryLoad("s1", 3, 1, generation);
+    store.loadEvents("s1", [event(9), event(10)], 3, 1, true, generation, true);
+    store.prepareSubscriptionRecovery(2, ["s1"]);
+    store.dispatch({ type: "msg", msg: {
+      type: "session_subscriptions_applied", revision: 2, sessionIds: ["s1"], podIds: [],
+    } });
+    store.beginEventHistoryLoad("s1", 3, 2, generation);
+    let paused = true;
+    const fence = store.beginEventGapRecovery("s1", 3, 2, generation, () => paused)!;
+    let tailReads = 0;
+    let cursorBeforeTail = 0;
+    const result = await recoverSessionHistoryGap(
+      { sessionId: "s1", after: 10, eventEpoch: 3, recoveryRevision: 2 }, {
+        history: {
+          fetchPage: async (_id, after) => ({ events: [event(after + 1)], eventEpoch: 3,
+            nextAfter: after + 1, hasMoreCached: true, cacheComplete: true }),
+          applyPage: (id, rows, epoch, revision, complete) =>
+            store.loadEvents(id, rows, epoch, revision, complete, generation),
+          isCurrent: () => store.isEventGapRecoveryCurrent(fence),
+        },
+        window: {
+          fetchTailPage: async () => {
+            tailReads++;
+            cursorBeforeTail = store.recoveryAfter("s1");
+            store.dispatch({ type: "msg", msg: { type: "session_event", event: event(1001) } });
+            store.dispatch({ type: "msg", msg: { type: "session_event", event: event(1002) } });
+            paused = !resumed;
+            return { events: cachedRows, eventEpoch: 3, hasMoreOlder: false, cacheComplete: false };
+          },
+          applyWindow: (_id, rows, _epoch, _revision, complete, hasOlder, turnAligned) =>
+            store.loadEventGapWindow(fence, rows, complete, hasOlder, turnAligned),
+          isCurrent: () => store.isEventGapRecoveryCurrent(fence),
+          maxIdlePolls: 0,
+        },
+        canReplaceWithWindow: () => !paused,
+        deferWindow: (_id, rows, _epoch, _revision, complete, hasOlder, turnAligned) =>
+          store.deferEventTail(fence, rows, complete, hasOlder, turnAligned),
+      });
+    store.finishEventGapRecovery(fence);
+    assert.equal(result, false, "the unavailable cache remains incomplete");
+    assert.equal(tailReads, 1, "the existing bounded poll budget is preserved");
+    assert.equal(store.recoveryAfter("s1"), cursorBeforeTail, "unavailable cached rows cannot advance recovery");
+    assert.deepEqual(store.getState().events.get("s1")?.map(row => row.seq),
+      resumed ? [1001, 1002] : [9, 10, 11, 12, 13, 14, 1001, 1002]);
+    assert.equal(store.eventWindowBase("s1"), resumed ? 1001 : 9);
+    assert.equal(store.getState().eventWindows.get("s1")?.hasOlder, true);
+    let before: number | undefined;
+    const older = await loadOlderSessionEvents("s1", store.eventWindowBase("s1"), 3,
+      async (_id, cursor) => {
+        before = cursor;
+        return { events: [event(999), event(1000)], eventEpoch: 3,
+          hasMoreOlder: true, cacheComplete: true };
+      });
+    assert.equal(before, resumed ? 1001 : 9, "the active reading owner chooses the earlier cursor");
+    assert.ok(older);
+  });
+}
