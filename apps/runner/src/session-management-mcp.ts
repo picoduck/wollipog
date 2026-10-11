@@ -226,6 +226,17 @@ async function campaignIssueScopeCompatibilityError(deps: McpDeps): Promise<Tool
     ? null : errorResult("Campaign issue scope changes require control plane protocol v208; update Wollipog and reconnect");
 }
 
+async function workflowDecisionInspectionCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const compatibility = await cpFetch(deps, "GET", "/api/compatibility");
+    if (!compatibility.ok) return errorResult("Workflow decision inspection compatibility could not be verified; update Wollipog and reconnect");
+    actual = compatibility.data?.protocolVersion;
+  }
+  return Number.isInteger(actual) && actual! >= RUNNER_CAPABILITY_MIN_PROTOCOL.descendantWorkflowDecisionInspection
+    ? null : errorResult("Descendant reads and decision lists require control plane protocol v214; update Wollipog and reconnect. Self get_workflow_decision still works; list_descendant_requests shows pending requests only, and a 404 never proves consumption.");
+}
+
 async function issueClosureCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
   let actual = deps.controlPlaneProtocolVersion;
   if (!Number.isInteger(actual)) {
@@ -895,7 +906,7 @@ const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "l
   "request_github_issue_closure", "close_github_issue",
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question", "resolve_descendant_approval",
   "resolve_descendant_workflow_decision", "review_descendant_ui_evidence", "request_workflow_decision", "get_workflow_decision", "consume_workflow_decision",
-  "reconcile_workflow_decision",
+  "reconcile_workflow_decision", "list_workflow_decisions",
   "wait_session", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
   "list_steering_attempts", "get_steering_attempt", "resolve_steering_attempt", "handoff_session_result",
   "stop_session", "stop_background_job", "restart_session", "archive_session", "set_guardrails", "create_worktree",
@@ -1647,10 +1658,10 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "get_workflow_decision",
-    description: "Read the authoritative state of one exact workflow decision occurrence.",
+    description: "Read the authoritative state of one exact workflow decision occurrence, including terminal states. Omit sessionId for self; an Orchestrator may pass an accessible descendant. A 404 never proves consumption. Descendant reads require control plane v214; older runners can use the read-only HTTP endpoint or an updated CLI against a v214 control plane.",
     inputSchema: {
       type: "object",
-      properties: { occurrenceId: { type: "string" } },
+      properties: { occurrenceId: { type: "string" }, sessionId: { type: "string", minLength: 1, maxLength: 256 } },
       required: ["occurrenceId"],
       additionalProperties: false,
     },
@@ -1658,12 +1669,50 @@ export const TOOLS: McpTool[] = [
       if (!deps.selfSessionId || typeof args?.occurrenceId !== "string" || !args.occurrenceId) {
         return errorResult("occurrenceId and a session identity are required");
       }
+      const target = args?.sessionId ?? deps.selfSessionId;
+      if (typeof target !== "string" || !target) return errorResult("sessionId must be a nonempty string");
+      if (target !== deps.selfSessionId) {
+        const compatibilityError = await workflowDecisionInspectionCompatibilityError(deps);
+        if (compatibilityError) return compatibilityError;
+      }
       const r = await cpFetch(
         deps,
         "GET",
-        `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/workflow-decisions/${encodeURIComponent(args.occurrenceId)}`,
+        `/api/sessions/${encodeURIComponent(target)}/workflow-decisions/${encodeURIComponent(args.occurrenceId)}`,
       );
       return r.ok ? textResult({ decision: r.data }) : errorResult(r.message);
+    },
+  },
+  {
+    name: "list_workflow_decisions",
+    description: "List a session's nonterminal workflow decisions (pending and approved), including authority, resource key, category and timestamps. Omit sessionId for self; an Orchestrator may inspect an accessible descendant. Follow nextCursor until absent. Terminal decisions remain readable by exact occurrence. Requires control plane v214; older runners can use GET /api/sessions/:id/workflow-decisions?limit=50&cursor=<occurrence> or an updated CLI. Older control planes support only list_descendant_requests for pending requests; absence never proves consumption.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string", minLength: 1, maxLength: 256 },
+        cursor: { type: "string", minLength: 1, maxLength: 256 },
+        limit: { type: "integer", minimum: 1, maximum: 100 },
+      },
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId) return errorResult("a session identity is required");
+      const target = args?.sessionId ?? deps.selfSessionId;
+      if (typeof target !== "string" || !target) return errorResult("sessionId must be a nonempty string");
+      if (args?.limit !== undefined && (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > 100)) {
+        return errorResult("limit must be an integer from 1 to 100");
+      }
+      if (args?.cursor !== undefined && (typeof args.cursor !== "string" || !args.cursor || args.cursor.length > 256)) {
+        return errorResult("cursor must be a nonempty occurrence id of at most 256 characters");
+      }
+      const compatibilityError = await workflowDecisionInspectionCompatibilityError(deps);
+      if (compatibilityError) return compatibilityError;
+      const query = new URLSearchParams();
+      if (args?.cursor !== undefined) query.set("cursor", args.cursor);
+      if (args?.limit !== undefined) query.set("limit", String(args.limit));
+      const r = await cpFetch(deps, "GET",
+        `/api/sessions/${encodeURIComponent(target)}/workflow-decisions${query.size ? `?${query}` : ""}`);
+      return r.ok ? textResult(r.data) : errorResult(r.message);
     },
   },
   {
@@ -1688,6 +1737,7 @@ export const TOOLS: McpTool[] = [
       additionalProperties: false,
     },
     handler: async (args, deps) => {
+      if (args?.sessionId !== undefined) return errorResult("consume is self-scoped and does not accept sessionId");
       if (!deps.selfSessionId || typeof args?.occurrenceId !== "string" || !args.occurrenceId) {
         return errorResult("occurrenceId and a session identity are required");
       }
@@ -1720,6 +1770,7 @@ export const TOOLS: McpTool[] = [
       additionalProperties: false,
     },
     handler: async (args, deps) => {
+      if (args?.sessionId !== undefined) return errorResult("reconcile is self-scoped and does not accept sessionId");
       if (!deps.selfSessionId || typeof args?.occurrenceId !== "string" || !args.occurrenceId) {
         return errorResult("occurrenceId and a session identity are required");
       }

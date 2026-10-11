@@ -191,6 +191,67 @@ test("HTTP agent management scopes descendants and composes governance policy vi
     // Existing human dashboard resolution is still admitted and shares the exact same durable action.
     assert.equal((await steering(null, "normal", "/same-submission/resolve", "dismiss")).status, 202);
     assert.equal((await steering(null, "normal", "/same-submission")).body.attempt?.resolution?.action, "dismiss");
+    // Decision inspection uses durable rows rather than the pending-request projection.
+    liveDb.createSession({ id: "inspection", parentSessionId: "orchestrator-child", runnerId: "r",
+      workspaceId: null, agentId: null, title: "Inspection", useWorktree: false, driver: "codex", config: {},
+      scope: { organizationId: liveDb.localIdentityContext().organizationId, owner: { kind: "user", userId: ownerId } }, now: 2 });
+    const statuses = ["pending", "approved", "consumed", "revoked", "denied", "superseded"] as const;
+    for (const status of statuses) {
+      const occurrenceId = `inspect-${status}`;
+      assert.ok(liveDb.createWorkflowDecision({ requestId: occurrenceId, occurrenceId, sessionId: "inspection",
+        controllingSessionId: "orchestrator", category: "implementation_question", resourceKey: occurrenceId,
+        resourceSnapshot: { category: "implementation_question", question: "Choose", options: [{ optionId: "safe", label: "Safe" }] },
+        resourceDigest: "a".repeat(64), policyRevision: 1, authority: "orchestrator", createdAt: 10 }));
+      if (status === "approved" || status === "consumed") liveDb.resolveWorkflowDecision(occurrenceId, "orchestrator", "approved", 11);
+      if (status === "consumed") liveDb.consumeWorkflowDecision(occurrenceId, 12);
+      if (status === "revoked") liveDb.markWorkflowDecisionRevoked(occurrenceId, 11);
+      if (status === "denied") liveDb.resolveWorkflowDecision(occurrenceId, "orchestrator", "denied", 11);
+      if (status === "superseded") assert.ok(liveDb.createWorkflowDecision({ requestId: "inspect-replacement",
+        occurrenceId: "inspect-replacement", sessionId: "inspection", controllingSessionId: "orchestrator",
+        category: "implementation_question", resourceKey: occurrenceId,
+        resourceSnapshot: { category: "implementation_question", question: "Choose", options: [{ optionId: "safe", label: "Safe" }] },
+        resourceDigest: "a".repeat(64), policyRevision: 1, authority: "orchestrator", createdAt: 10 }));
+    }
+    const inspect = (target: string, suffix = "", token = "token-orchestrator", actor: string | undefined = "orchestrator") => fetch(
+      `http://127.0.0.1:${port}/api/sessions/${target}/workflow-decisions${suffix}`, {
+        signal: AbortSignal.timeout(3000), headers: { authorization: `Bearer ${token}`,
+          ...(actor ? { [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: actor } : {}) },
+      });
+    for (const status of statuses) {
+      const response = await inspect("inspection", `/inspect-${status}`);
+      assert.equal(response.status, 200, `an ancestor reads ${status}`);
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      assert.equal((await response.json() as { status: string }).status, status);
+    }
+    for (const suffix of ["", "/inspect-consumed"]) {
+      assert.equal((await inspect("inspection", suffix, "token-normal", "normal")).status, 404, "unrelated agent is concealed");
+      assert.equal((await inspect("inspection", suffix, "token-orchestrator-child", "orchestrator-child")).status, 404, "ordinary ancestors gain no cross-session read");
+      assert.equal((await inspect("orchestrator-hidden", suffix)).status, 404, "hidden descendants are concealed");
+      assert.equal((await inspect("normal-child", suffix)).status, 404, "same-audience unrelated sessions are concealed");
+      assert.equal((await inspect("inspection", suffix, "device-other-user", undefined)).status, 404);
+      assert.equal((await inspect("inspection", suffix, `device-${ownerId}`, undefined)).status, 200, "accessible humans can inspect");
+    }
+    assert.equal((await inspect("orchestrator-child", "/inspect-consumed")).status, 404, "occurrence must belong to target");
+    assert.equal((await inspect("inspection", "?limit=101")).status, 400);
+    assert.equal((await inspect("inspection", "?cursor=missing")).status, 400);
+    assert.equal((await inspect("orchestrator-child", "?cursor=inspect-consumed")).status, 400, "cursor must belong to target");
+    const firstPage = await (await inspect("inspection", "?limit=1")).json() as { decisions: Array<{ occurrenceId: string; status: string }>; nextCursor: string };
+    assert.deepEqual(firstPage.decisions.map((row) => row.status), ["approved"]);
+    assert.equal(firstPage.nextCursor, "inspect-approved");
+    // A cursor remains usable after its record becomes terminal, including equal timestamps.
+    liveDb.consumeWorkflowDecision("inspect-approved", 13);
+    const secondPage = await (await inspect("inspection", `?limit=1&cursor=${firstPage.nextCursor}`)).json() as typeof firstPage;
+    assert.equal(secondPage.decisions[0]?.occurrenceId, "inspect-pending");
+    const lastPage = await (await inspect("inspection", `?limit=1&cursor=${secondPage.nextCursor}`)).json() as typeof firstPage;
+    assert.equal(lastPage.decisions[0]?.occurrenceId, "inspect-replacement");
+    assert.equal(lastPage.nextCursor, undefined);
+    for (const operation of ["consume", "reconcile"]) {
+      const response = await fetch(`http://127.0.0.1:${port}/api/sessions/inspection/workflow-decisions/inspect-pending/${operation}`, {
+        method: "POST", headers: { authorization: "Bearer token-orchestrator", [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: "orchestrator", "content-type": "application/json" }, body: "{}",
+      });
+      assert.equal(response.status, 403, "ancestor cannot mutate child decision");
+    }
+    liveDb.deleteSession("inspection");
     await assertPolicies(`device-${ownerId}`, [...ordinary, ...humanQuestions, "fixture-unscoped-owner-question"]);
     await assertPolicies("device-policy-admin", [...ordinary, ...humanQuestions, "fixture-unscoped-admin-question"]);
     assert.equal((await policies("device-other-user")).status, 403, "ordinary human global-route admission is preserved");

@@ -77,6 +77,32 @@ function resultText(result: any): string {
   return result.content.map((c: { text: string }) => c.text).join("\n");
 }
 
+test("decision inspection targets descendants without changing mutation identity and fails closed on old control planes", async () => {
+  const { deps, calls } = makeDeps();
+  deps.orchestrator = true;
+  deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
+  assert.equal((await callTool(deps, "get_workflow_decision", { sessionId: "child/id", occurrenceId: "occ/id" })).isError, undefined);
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/child%2Fid/workflow-decisions/occ%2Fid`);
+  assert.equal((await callTool(deps, "list_workflow_decisions", { sessionId: "child/id", limit: 1, cursor: "occ/id" })).isError, undefined);
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/child%2Fid/workflow-decisions?cursor=occ%2Fid&limit=1`);
+  assert.equal((await callTool(deps, "list_workflow_decisions")).isError, undefined);
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/workflow-decisions`);
+  for (const name of ["consume_workflow_decision", "reconcile_workflow_decision"]) {
+    const before = calls.length;
+    assert.equal((await callTool(deps, name, { sessionId: "child", occurrenceId: "occ", resourceSnapshot: {} })).isError, true);
+    assert.equal(calls.length, before);
+  }
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.descendantWorkflowDecisionInspection - 1;
+  const before = calls.length;
+  for (const [name, args] of [["get_workflow_decision", { sessionId: "child", occurrenceId: "occ" }], ["list_workflow_decisions", {}]] as const) {
+    const result = await callTool(deps, name, args);
+    assert.equal(result.isError, true);
+    assert.match(resultText(result), /v214.*404 never proves consumption/);
+  }
+  assert.equal(calls.length, before);
+  assert.equal((await callTool(deps, "get_workflow_decision", { occurrenceId: "occ" })).isError, undefined, "old self read is preserved");
+});
+
 test("orchestrator MCP lists only management tools and leaves self-worktree policy to the control plane", async () => {
   const { deps, calls } = makeDeps();
   deps.orchestrator = true;
@@ -390,6 +416,7 @@ test("tools/list returns the curated session and workflow tools with schemas", a
       "get_session",
       "request_workflow_decision",
       "get_workflow_decision",
+      "list_workflow_decisions",
       "consume_workflow_decision",
       "reconcile_workflow_decision",
       "get_session_events",

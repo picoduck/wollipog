@@ -17375,6 +17375,16 @@ export class ControlPlaneDb {
     ).get(occurrenceId));
   }
 
+  /** Keyset pages keep a consumed/revoked cursor usable without retaining it in the result. */
+  workflowDecisionPage(sessionId: string, cursor: WorkflowDecisionView | undefined, limit: number): WorkflowDecisionView[] {
+    return (this.stmt(
+      `SELECT * FROM workflow_decisions WHERE session_id=? AND status IN ('pending','approved')
+       ${cursor ? "AND (created_at>? OR (created_at=? AND occurrence_id>?))" : ""}
+       ORDER BY created_at ASC, occurrence_id ASC LIMIT ?`,
+    ).all(sessionId, ...(cursor ? [cursor.createdAt, cursor.createdAt, cursor.occurrenceId] : []), limit) as unknown[])
+      .map(workflowDecisionFromRow).filter((decision): decision is WorkflowDecisionView => decision !== null);
+  }
+
   pendingWorkflowDecisionsForController(controllingSessionId: string): WorkflowDecisionView[] {
     return (this.stmt(
       `SELECT * FROM workflow_decisions WHERE controlling_session_id=? AND status='pending'

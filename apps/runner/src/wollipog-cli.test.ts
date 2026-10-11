@@ -914,6 +914,37 @@ test("CLI artifact help is discoverable and malformed artifact commands issue no
   assert.deepEqual(JSON.parse(missing.stdout), { error: "artifact attach requires --file" });
 });
 
+test("CLI decision reads forward target and pagination with the caller identity and reject old servers", async () => {
+  let version = PROTOCOL_VERSION;
+  const calls: Array<{ url: string; headers?: Record<string, string> }> = [];
+  const fetch: McpFetch = async (url, init) => {
+    calls.push({ url, headers: init?.headers });
+    return { ok: true, status: 200, text: async () => JSON.stringify(url.endsWith("/api/compatibility")
+      ? { protocolVersion: version } : { decisions: [], occurrenceId: "occ", status: "revoked" }) };
+  };
+  let stdout = "";
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "parent-token", WOLLIPOG_SESSION_ID: "parent" };
+  const run = (args: string[]) => {
+    stdout = "";
+    calls.length = 0;
+    return runWollipogCli(["node", "cli.js", "--wollipog-cli", ...args, "--json"], env,
+      { stdout: (text) => { stdout += text; }, stderr: () => {} }, fetch);
+  };
+  assert.equal(await run(["decision", "get", "occ/id", "--session", "child/id"]), 0);
+  assert.equal(calls.at(-1)?.url, "http://cp/api/sessions/child%2Fid/workflow-decisions/occ%2Fid");
+  assert.equal(await run(["decision", "list", "--session", "child", "--limit", "2", "--cursor", "occ/id"]), 0);
+  assert.equal(calls.at(-1)?.url, "http://cp/api/sessions/child/workflow-decisions?cursor=occ%2Fid&limit=2");
+  assert.ok(calls.every((call) => call.headers?.[WOLLIPOG_AGENT_ACTOR_SESSION_HEADER] === "parent"));
+  version = RUNNER_CAPABILITY_MIN_PROTOCOL.descendantWorkflowDecisionInspection - 1;
+  for (const args of [["decision", "list"], ["decision", "get", "occ", "--session", "child"]]) {
+    assert.equal(await run(args), 1);
+    assert.match(JSON.parse(stdout).error, /requires v214/);
+    assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")));
+  }
+  assert.equal(await run(["decision", "get", "occ"]), 0, "older self reads still work");
+  assert.equal(calls.at(-1)?.url, "http://cp/api/sessions/parent/workflow-decisions/occ");
+});
+
 test("CLI typed decisions preserve exact snapshots while confining a child to itself", async () => {
   const calls: Array<{ url: string; method?: string; body?: string; headers?: Record<string, string> }> = [];
   const decisions = [
@@ -1049,7 +1080,10 @@ test("CLI typed-decision help is discoverable and malformed or cross-session com
     ["decision", "reconcile", "workflow_1", "--snapshot", "not-json"],
     ["decision", "reconcile", "workflow_1", "--snapshot", "{}", "--action", "{}"],
     ["decision", "reconcile", "workflow_1", "--session", "other", "--snapshot", "{}"],
-    ["decision", "get", "workflow_1", "--session", "other"],
+    ["decision", "get", "workflow_1", "--session"],
+    ["decision", "list", "--limit", "101"],
+    ["decision", "list", "--limit", "1.5"],
+    ["decision", "list", "--cursor"],
   ]) {
     const result = await captureCli([...malformed, "--json"]);
     assert.equal(result.code, 2, malformed.join(" "));
