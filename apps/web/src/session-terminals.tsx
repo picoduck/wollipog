@@ -113,6 +113,8 @@ export class SessionTerminals {
   // and erase the just-opened tab. newShell bumps the token to invalidate in-flight loads; each load
   // applies only if it is still the newest.
   private loadSeq = 0;
+  /** A load whose registry read has not answered yet. */
+  private listPending = false;
   /**
    * Counts the events that can drop a shell's output from the app store: a reconnect, and a list
    * applied (it prunes the output of shells it does not hold). A shell created while one happened may
@@ -199,7 +201,8 @@ export class SessionTerminals {
     const outputDrops = this.outputDrops;
     try {
       const { shell } = await this.api.openShell(this.sessionId, { cols: 120, rows: 30, kind });
-      this.loadSeq++; // an in-flight list snapshot predates this shell — don't let it land
+      // An in-flight list snapshot predates this shell — don't let it land.
+      const listDropped = this.supersedeLoads();
       // A new shell needs no history, unless its first output may have been dropped meanwhile.
       if (this.outputDrops === outputDrops) this.historyLoaded.add(shell.shellId);
       // The registry lists a shell before its runner answers, so a list read while this request was
@@ -211,9 +214,9 @@ export class SessionTerminals {
           : [...shells, shell],
         active: shell.shellId,
       });
-      // The token bump above also stopped any history still loading; a shown terminal loads it again
-      // (a hidden one does on its next open).
-      if (this.hosts > 0 && this.state.shells?.some((listed) => !this.historyLoaded.has(listed.shellId))) {
+      // Dropping that load also dropped its registry read and any history still loading; a shown
+      // terminal reads them again (a hidden one does on its next open).
+      if (this.hosts > 0 && (listDropped || this.state.shells?.some((listed) => !this.historyLoaded.has(listed.shellId)))) {
         void this.loadShells({ reconcile: true });
       }
     } catch (e) {
@@ -228,7 +231,7 @@ export class SessionTerminals {
     // Invalidate registry reads that started before this close and cancel local work immediately:
     // DELETE returns before the runner's exit echo, so waiting would leave a window for a stale
     // list response, key batch, or resize batch to resurrect/target the closing shell.
-    this.loadSeq++;
+    const listDropped = this.supersedeLoads();
     this.closingShellIds.add(shellId);
     this.cancelRemovedShellWork(new Set([shellId]));
     const { active } = this.state;
@@ -236,6 +239,8 @@ export class SessionTerminals {
     const nextActive = active === shellId ? remaining[0]?.shellId ?? null : active;
     this.setState({ shells: remaining, active: nextActive, ...(active === shellId ? { input: "" } : {}) });
     this.output.removeShellOutput(shellId);
+    // The dropped registry read is read again, now that it leaves the closing shell out.
+    if (listDropped && this.hosts > 0) void this.loadShells({ reconcile: true });
     void this.api.closeShell(this.sessionId, shellId).catch((e: unknown) => {
       this.closingShellIds.delete(shellId);
       this.setState({ error: (e as Error).message });
@@ -329,7 +334,7 @@ export class SessionTerminals {
     if (!this.everOpened) return;
     // Every shell's history is reloaded: now if a host shows the terminal, otherwise on the next open.
     // A load still in flight read the registry before the reconnect, so it must not land and mark it.
-    this.loadSeq++;
+    this.supersedeLoads();
     this.outputDrops++;
     this.historyLoaded.clear();
     if (this.hosts > 0) void this.loadShells({ reconcile: this.initialShellLoadSettled });
@@ -450,9 +455,11 @@ export class SessionTerminals {
    */
   private async loadShells({ reconcile }: { reconcile: boolean }): Promise<void> {
     const seq = ++this.loadSeq;
+    this.listPending = true;
     try {
       const { shells: registry } = await this.api.listShells(this.sessionId);
       if (this.loadSeq !== seq) return; // superseded by a newer load or a newShell()
+      this.listPending = false;
       const list = shellsVisibleAfterClose(registry, this.closingShellIds);
       let removed = new Set<string>();
       if (reconcile) {
@@ -477,8 +484,21 @@ export class SessionTerminals {
         if (list.length > 0) this.autoOpened = true;
       }
     } catch (e) {
-      if (this.loadSeq === seq) this.setState({ error: (e as Error).message });
+      if (this.loadSeq !== seq) return;
+      this.listPending = false;
+      this.setState({ error: (e as Error).message });
     }
+  }
+
+  /**
+   * Stop every load in flight from landing (its registry read or history predates what the caller just
+   * did). Returns whether a registry read was among them, which the caller then reads again.
+   */
+  private supersedeLoads(): boolean {
+    const listDropped = this.listPending;
+    this.loadSeq++;
+    this.listPending = false;
+    return listDropped;
   }
 
   private async loadHistory(shell: ShellView, seq: number): Promise<void> {

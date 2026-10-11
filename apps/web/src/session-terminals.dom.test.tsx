@@ -593,6 +593,59 @@ test("a shell created while an older list lands has its history loaded on the ne
   }
 });
 
+test("New Shell answering before a reopen's list reads the registry again", async () => {
+  const registry = [shell(1)];
+  let hold: ReturnType<typeof gate> | null = null;
+  let answer!: (created: ShellView) => void;
+  const { terminals } = storeOver(registry, {
+    holdList: () => hold?.wait() ?? Promise.resolve(),
+    openShell: () => new Promise<ShellView>((resolve) => { answer = resolve; }),
+  });
+  try {
+    let release = terminals.openHost();
+    await until(() => terminals.getSnapshot().shells?.length === 1, "the first list");
+    const creating = terminals.newShell();
+    release();
+
+    // Another dashboard closes Shell 1; the terminal reopens; New Shell answers before the list does.
+    registry.splice(0, registry.length, shell(2));
+    hold = gate();
+    release = terminals.openHost();
+    answer(shell(2));
+    await creating;
+    hold.open();
+    await until(() => terminals.getSnapshot().shells?.length === 1, "the registry read again");
+    release();
+    assert.deepEqual(terminals.getSnapshot().shells?.map((listed) => listed.shellId), ["shell-2"]);
+  } finally {
+    terminals.dispose();
+  }
+});
+
+test("Close Tab during a reopen's list reads the registry again", async () => {
+  const registry = [shell(1), shell(2)];
+  let hold: ReturnType<typeof gate> | null = null;
+  const { terminals } = storeOver(registry, { holdList: () => hold?.wait() ?? Promise.resolve() });
+  try {
+    let release = terminals.openHost();
+    await until(() => terminals.getSnapshot().shells?.length === 2, "the first list");
+    release();
+
+    // Another dashboard opens Shell 3; the terminal reopens, and Shell 1 is closed before the list lands.
+    registry.push(shell(3));
+    hold = gate();
+    release = terminals.openHost();
+    terminals.closeShell("shell-1");
+    hold.open();
+    await until(() => terminals.getSnapshot().shells?.length === 2 &&
+      terminals.getSnapshot().shells?.some((listed) => listed.shellId === "shell-3") === true, "the registry read again");
+    release();
+    assert.deepEqual(terminals.getSnapshot().shells?.map((listed) => listed.shellId), ["shell-2", "shell-3"]);
+  } finally {
+    terminals.dispose();
+  }
+});
+
 test("a reopened terminal offers a first shell only once its own list has arrived", async () => {
   const registry: ShellView[] = [];
   let hold: ReturnType<typeof gate> | null = null;
