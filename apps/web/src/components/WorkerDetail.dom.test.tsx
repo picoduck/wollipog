@@ -193,12 +193,15 @@ test("the page's facts name the worker's kind, its parent as a link, and its tok
 });
 
 test("a waiting worker's page says what it wants and answers its request there; the session's own never shows", async () => {
-  const panel = await mount(<Harness initial={asking} />);
+  // The worker's request first, so the attention notice's Review in Session opens it.
+  const workerFirst = { ...asking, pendingApproval: { ...asking.pendingApproval!.additionalRequests![0]!,
+    additionalRequests: [{ ...asking.pendingApproval!, additionalRequests: undefined }] } } as SessionView;
+  const panel = await mount(<Harness initial={workerFirst} />);
   try {
-    // Worker Attention sends the worker's request to its page, with focus on the request.
-    const attention = panel.container.querySelector('[aria-label="Worker Attention"]')!;
-    const ask = [...attention.querySelectorAll<HTMLButtonElement>("button")].find((button) => text(button).startsWith("Inspect Parser"));
-    await panel.click(ask);
+    // Review in Session sends the worker's request to its page, with focus on the request.
+    const review = [...panel.container.querySelectorAll<HTMLButtonElement>(".panel-notice-slot button")]
+      .find((button) => text(button) === "Review in Session");
+    await panel.click(review);
     const page = panel.container.querySelector(".agents-page .worker-detail")!;
     assert.ok(panel.container.querySelector<HTMLElement>(".agents-panel")!.hidden, "the roster waits under the page");
     assert.equal(text(page.querySelector(".notice")), "Wants to run npm test -- storage and is waiting for your approval.");
@@ -228,13 +231,14 @@ test("a waiting worker's page says what it wants and answers its request there; 
   }
 });
 
-test("a request preserved across a restart, or with no listed owner, is still answered in Worker Attention", async () => {
+test("a request preserved across a restart, or with no listed owner, is still answered in the roster", async () => {
   const orphaned = { ...session, status: "input_required", pendingApproval: {
     requestId: "gone-run", ownerToolUseId: "gone", title: "Bash: ls", options: [{ optionId: "yes", name: "Allow", kind: "allow_once" }],
   } } as unknown as SessionView;
   const panel = await mount(<Harness initial={orphaned} />);
   try {
-    await panel.click(panel.container.querySelector('[aria-label="Worker Attention"] button'));
+    assert.equal(text(panel.container.querySelector(".panel-notice-slot .notice-body")), "A subagent is waiting for your approval.");
+    await panel.click([...panel.container.querySelectorAll(".panel-notice-slot button")].find((button) => text(button) === "Review in Session"));
     assertNoDomNode(panel.container.querySelector(".agents-page"));
     assert.ok(panel.container.querySelector('[aria-label="Selected Worker Request"] [data-session-request-id], [aria-label="Selected Worker Request"][data-session-request-id]'));
   } finally {

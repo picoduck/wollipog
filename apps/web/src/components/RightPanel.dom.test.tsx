@@ -1231,10 +1231,10 @@ test("an InfoPopover's Escape in the side panel leaves the panel open (#2856)", 
   }
 });
 
-function panelNotice(key: string, rank: number, title: string): SessionNoticeEntry {
+function panelNotice(key: string, rank: number, title: string, severity: SessionNoticeEntry["severity"] = "warning"): SessionNoticeEntry {
   return {
-    key, severity: "warning", rank, title,
-    render: ({ trailing }) => <Notice tone="warning" ariaLabel={title} title={title} trailing={trailing}>{title}.</Notice>,
+    key, severity, rank, title,
+    render: ({ trailing }) => <Notice tone={severity} ariaLabel={title} title={title} trailing={trailing}>{title}.</Notice>,
   };
 }
 
@@ -1278,6 +1278,22 @@ test("the panel notice slot sits under the header and shows one notice, the rest
       assert.equal(shown(), "identity", "and keeps showing while the set is the same");
       await act(async () => root.render(<Harness entries={three.filter((entry) => entry.key !== "inventory")} />));
       assert.equal(shown(), "offline", "until the set changes");
+
+      // The panel orders by its rank table alone (#2861): a warning that the machine is offline leads
+      // a danger load error, and a worker's request leads an inventory error.
+      const mixed = [
+        panelNotice("inventory", PANEL_NOTICE_RANK.inventoryError, "Couldn't Load Background Work", "danger"),
+        panelNotice("earlier", PANEL_NOTICE_RANK.earlierActivityUnloaded, "Earlier Activity Not Loaded", "info"),
+        panelNotice("attention", PANEL_NOTICE_RANK.attention, "2 Workers Need You"),
+        panelNotice("load", PANEL_NOTICE_RANK.loadError, "Couldn't Load Recorded Workers", "danger"),
+        panelNotice("offline", PANEL_NOTICE_RANK.runnerOffline, "Machine Offline"),
+      ];
+      await act(async () => root.render(<Harness entries={mixed} />));
+      assert.equal(shown(), "offline", "the lowest rank shows, whatever its severity");
+      await act(async () => region.querySelector<HTMLButtonElement>(".session-notice-more")!.click());
+      const ranked = [...domWindow.document.querySelectorAll('[role="menu"][aria-label="Panel Notices"] [role="menuitem"]')];
+      assert.deepEqual(ranked.map((item) => item.textContent),
+        ["Couldn't Load Recorded Workers", "2 Workers Need You", "Couldn't Load Background Work", "Earlier Activity Not Loaded"]);
     } finally {
       await act(async () => root.unmount());
       host.remove();

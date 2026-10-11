@@ -157,6 +157,9 @@ interface HarnessProps {
   descendantRequests?: readonly DescendantRequestView[];
   items?: TimelineItem[];
   session?: SessionView;
+  runnerOnline?: boolean;
+  /** The store's connection; by default one with no snapshot. */
+  store?: UiConnectionRuntime;
 }
 
 async function settle() {
@@ -179,10 +182,10 @@ async function mount(initial: HarnessProps) {
     update = (next) => setProps((current) => ({ ...current, ...next }));
     useEffect(() => { panel.show("launcher"); }, []); // eslint-disable-line react-hooks/exhaustive-deps
     return (
-      <ApiProvider client={client}><StoreProvider connection={connection}><RightPanel
+      <ApiProvider client={client}><StoreProvider connection={props.store ?? connection}><RightPanel
         state={panel}
         session={props.session ?? session}
-        runnerOnline
+        runnerOnline={props.runnerOnline ?? true}
         runnerProtocolVersion={props.runnerProtocolVersion === undefined ? CURRENT_RUNNER : props.runnerProtocolVersion}
         git={props.git}
         items={props.items ?? []}
@@ -301,6 +304,92 @@ test("an agent waiting on the user takes the Agents badge with the roster's atte
   const panel = await mount({ git: gitWith(0), items: runningAgent, session: asking });
   try {
     assert.match(row(panel.container, "subagents")?.querySelector(".status")?.textContent ?? "", /^1 Approval Required$/);
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("mixed attention kinds: the Agents badge and the Agents notice both count every kind (#2861)", async () => {
+  const agents: TimelineItem[] = ["audit", "parser", "docs"].map((id, index) => ({
+    kind: "tool_call", id: index + 1, toolCallId: id, title: `${id[0]!.toUpperCase()}${id.slice(1)} Agent`, text: "",
+    toolKind: "agent", status: "in_progress", startedAt: 10,
+  }));
+  const mixed = { ...session, status: "input_required", pendingApproval: {
+    requestId: "audit-edit", ownerToolUseId: "audit", title: "Edit: src/a.ts", options: [],
+    additionalRequests: [
+      { requestId: "parser-run", ownerToolUseId: "parser", title: "Bash: npm test", options: [] },
+      { requestId: "docs-ask", ownerToolUseId: "docs", kind: "question", title: "Which docs?", options: [],
+        questions: [{ id: "q", question: "Which docs?", options: [{ label: "API" }] }] },
+    ],
+  } } as unknown as SessionView;
+  const panel = await mount({ git: gitWith(0), items: agents, session: mixed });
+  try {
+    const badge = row(panel.container, "subagents")!.querySelector<HTMLElement>(".status")!;
+    assert.equal(badge.textContent, "3 Awaiting Input", "the badge counts every worker that needs you, not only the top kind");
+    assert.equal(badge.getAttribute("aria-label"), "3 Awaiting Input: 2 Approval Required, 1 Answer Required");
+    assert.equal(badge.getAttribute("title"), "2 Approval Required, 1 Answer Required");
+    assert.match(badge.className, /t-warning/);
+
+    await act(async () => row(panel.container, "subagents")!.click());
+    await settle();
+    const slot = panel.container.querySelector<HTMLElement>("#right-panel .rpanel-notices .panel-notice-slot")!;
+    assert.equal(slot.dataset.noticeKey, "agents-attention");
+    assert.equal(slot.querySelector(".notice-body")?.textContent, "3 workers need you: 2 approvals, 1 answer.");
+    // The rows keep their own words: two approvals and one answer.
+    const words = [...panel.container.querySelectorAll(".agents-list .worker-row .status")].map((status) => status.textContent).sort();
+    assert.deepEqual(words, ["Answer Required", "Approval Required", "Approval Required"]);
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("the Agents badge counts a waiting pod member as the Agents notice does (#2861 review)", async () => {
+  const asking = { ...session, status: "input_required", pendingApproval: {
+    requestId: "edit", ownerToolUseId: "agent", title: "Edit: src/a.ts", options: [] } } as SessionView;
+  const reviewer = { ...session, id: "member-review", title: "Parser Reviewer", status: "input_required", pendingApproval: {
+    requestId: "ask", kind: "question", title: "Which?", options: [], questions: [{ id: "q", question: "Which?", options: [{ label: "A" }] }] },
+  } as unknown as SessionView;
+  const store: UiConnectionRuntime = {
+    instanceId: "session-tools-pod", runtimeKey: "session-tools-pod",
+    createSocket: () => {
+      const socket = { readyState: UI_SOCKET_OPEN, onopen: null as (() => void) | null,
+        onmessage: null as ((event: { data: string }) => void) | null, onclose: null, onerror: null, send() {}, close() {} };
+      setTimeout(() => {
+        socket.onopen?.();
+        socket.onmessage?.({ data: JSON.stringify({ type: "snapshot", runners: [], boxes: [], runs: [], sessions: [reviewer], pods: [{
+          id: "pod-1", title: "Pod", objective: "", status: "active", createdAt: 1, updatedAt: 1,
+          members: [asking, reviewer].map((member) => ({ sessionId: member.id, joinedAt: 1, role: "worker", contextTokenBudget: null, lastContextSeq: 0 })),
+        }] }) });
+      }, 0);
+      return socket;
+    },
+    close() {},
+  };
+  const panel = await mount({ git: gitWith(0), items: runningAgent, session: asking, store });
+  try {
+    await settle();
+    const badge = row(panel.container, "subagents")!.querySelector<HTMLElement>(".status")!;
+    assert.equal(badge.textContent, "2 Awaiting Input");
+    assert.equal(badge.getAttribute("title"), "1 Answer Required, 1 Approval Required");
+    await act(async () => row(panel.container, "subagents")!.click());
+    await settle();
+    assert.equal(panel.container.querySelector("#right-panel .rpanel-notices .notice-body")?.textContent,
+      "2 workers need you: 1 answer, 1 approval.");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("offline, the Agents badge keeps the attention count in a neutral hollow badge that asks for nothing (#2861)", async () => {
+  const asking = { ...session, status: "input_required", pendingApproval: {
+    requestId: "edit", ownerToolUseId: "agent", title: "Edit: src/a.ts", options: [] } } as SessionView;
+  const panel = await mount({ git: gitWith(0), items: runningAgent, session: asking, runnerOnline: false });
+  try {
+    const badge = row(panel.container, "subagents")!.querySelector<HTMLElement>(".status")!;
+    assert.equal(badge.textContent, "1 Approval Required", "the count stays while the machine is offline");
+    assert.match(badge.className, /t-neutral/);
+    assert.doesNotMatch(badge.className, /t-warning/);
+    assert.match(badge.className, /hollow/);
   } finally {
     await panel.dispose();
   }

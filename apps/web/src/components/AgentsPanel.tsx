@@ -1,19 +1,21 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { pendingRequests, sessionAttentionStatus, type ChildSessionAttentionOwner,
+import { pendingRequests, type ChildSessionAttentionOwner,
   type ChildSessionRegistryEntry, type ChildSessionRegistryPage, type PendingApproval, type PodView, type RunView, type SessionView,
   type WorkflowInstanceView } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
-import { titleCaseLabel } from "../format.js";
 import { deriveSubagentLifecycle, IncrementalSubagentProjector, type SubagentDescriptor } from "../subagents.js";
 import { useLiveSession, useStoreActions, useStoreSelector } from "../store.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import type { TimelineItem } from "../timeline.js";
 import { isCurrentWorker, pendingRequestsByOwner, subagentStatusContext, workerRoster, type WorkerGroup,
   type WorkerMemberMetadata, type WorkerRow } from "../worker-roster.js";
+import { attentionAskers, attentionSentence, attentionTitle, memberAttentionAskers, memberSessions, offlineAttentionSentence,
+  type AttentionAsker } from "../worker-attention.js";
+import { runnerDisplay } from "../runners.js";
 import { WorkerDetail } from "./WorkerDetail.js";
 import { WorkerRowItem } from "./WorkerRowItem.js";
-import type { BackgroundWorkPanelProps } from "./BackgroundWorkPanel.js";
+import { useDelayedFlag, type BackgroundWorkPanelProps } from "./BackgroundWorkPanel.js";
 import { JobDetail } from "./JobDetail.js";
 import { SessionQuestionBanner } from "./SessionApproval.js";
 import { RequestCard } from "./requests/RequestCard.js";
@@ -22,6 +24,9 @@ import { SegmentedControl } from "./ui/ChoiceControls.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { BotIcon } from "./Icons.js";
 import { ListFoot } from "./ListFoot.js";
+import { Notice } from "./Notice.js";
+import { PanelNoticeSlot } from "./PanelNoticeSlot.js";
+import { PANEL_NOTICE_RANK, revealSessionNotice, type SessionNoticeEntry } from "./SessionNoticeSlot.js";
 import { State } from "./State.js";
 
 const PAGE_SIZE = 50;
@@ -369,7 +374,19 @@ export const AGENTS_ROSTER_COPY = {
   emptyAllTitle: "No Workers",
   emptyAllBody: "Workers this session starts appear here.",
   loadingMore: "Loading more workers…",
+  loading: "Loading recorded workers…",
 } as const;
+
+/** The attention notice's key in the panel's notice slot. */
+export const AGENTS_ATTENTION_NOTICE = "agents-attention";
+/** The notices' fixed words (#2861): titles and buttons Title Case, sentences sentence case (§17.1). */
+export const AGENTS_NOTICE_COPY = {
+  review: "Review in Session",
+  offlineAttention: "Requests Waiting",
+  registryError: "Couldn't Load Recorded Workers",
+  inventoryError: "Couldn't Load Background Work",
+} as const;
+const AGENTS_SKELETON_DELAY_MS = 300;
 
 /** The list foot's count: "Showing 7 of 23", "23+" while the registry has more pages to read. */
 export function workerListFootLabel(shown: number, total: number, more: boolean): string {
@@ -551,6 +568,7 @@ export function AgentsPanel(props: Props) {
   const [registryRetry, setRegistryRetry] = useState<RegistryRetry | null>(null);
   const [registryRetryAfter, setRegistryRetryAfter] = useState<number | null>(null);
   const [registryRetryExhausted, setRegistryRetryExhausted] = useState(false);
+  const [registryError, setRegistryError] = useState<string | null>(null);
   const registryRequest = useRef<string | null>(null);
   const registryRef = useRef<ChildSessionRegistryEntry[] | null>(null);
   const lastRegistryRefresh = useRef(0);
@@ -589,6 +607,7 @@ export function AgentsPanel(props: Props) {
         } else {
           setRegistryRetry(null);
           setRegistryRetryExhausted(true);
+          setRegistryError(cause.message);
         }
         return;
       }
@@ -720,18 +739,19 @@ export function AgentsPanel(props: Props) {
     if (!registry) return projection.descriptors.filter((agent) => !unresolvedOwnerIds.has(agent.id));
     return mergeDurableAgents(durableAgents, projection.descriptors, unresolvedOwnerIds);
   }, [durableAgents, projection.descriptors, registry, unresolvedOwnerIds]);
-  const rows = useMemo(() => {
+  const machineOnline = useCallback((id: string) => id === session.runnerId ? runnerOnline : runners.get(id)?.status === "online",
+    [session.runnerId, runnerOnline, runners]);
+  const { members, metadata } = useMemo(() => {
     const run = session.runId ? runs.get(session.runId) : undefined;
     const pod = [...pods.values()].find((value) => value.members.some((member) => member.sessionId === session.id));
     const metadata = memberMetadata(session, run, pod, workflows);
-    const members = [...new Set([...(run?.sessionIds ?? []), ...metadata.keys()])].flatMap((id) => {
-      const member = sessions.get(id);
-      return member ? [member] : [];
-    });
+    return { members: memberSessions(session, runs, pods, sessions, metadata.keys()), metadata };
+  }, [session, runs, sessions, pods, workflows]);
+  const rows = useMemo(() => {
     const unambiguousAgents = agents.map((agent) => projection.ambiguousIds.has(agent.id)
       ? { ...agent, lifecycle: "unknown" as const, availability: "recorded" as const } : agent);
-    return workerRoster(session, unambiguousAgents, members, (id) => id === session.runnerId ? runnerOnline : runners.get(id)?.status === "online", metadata);
-  }, [session, agents, projection.ambiguousIds, runs, sessions, runners, pods, workflows, runnerOnline]);
+    return workerRoster(session, unambiguousAgents, members, machineOnline, metadata);
+  }, [session, agents, projection.ambiguousIds, members, metadata, machineOnline]);
   // Workers the transcript holds that the registry has not listed yet (past its first page): not
   // roster rows until Show More, but their own pages show them and their parents' pages list them,
   // read from the transcript as their rows will be.
@@ -747,7 +767,6 @@ export function AgentsPanel(props: Props) {
   const [limit, setLimit] = useState(PAGE_SIZE);
   const [chosen, setChosen] = useState<string | null>(null);
   const [requestId, setRequestId] = useState<string | null>(null);
-  const [requestLimit, setRequestLimit] = useState(PAGE_SIZE);
   useEffect(() => {
     if (requestedId && unresolvedOwnerIds.has(requestedId)) {
       setChosen(null);
@@ -781,11 +800,14 @@ export function AgentsPanel(props: Props) {
   const targetEpochMatches = !target || target.eventEpoch === (session.eventEpoch ?? 0);
   const linkedRequestMissing = target?.requestId !== undefined && !requests.some((request) => request.requestId === target.requestId);
   const requestDetailRef = useRef<HTMLDivElement>(null);
-  const primaryRequestRef = useRef<HTMLButtonElement>(null);
   const selectedSecondaryRequestRef = useRef<string | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
-  const attentionRef = useRef<HTMLElement>(null);
   const requestOwnsFocus = useRef(false);
+  // Focus moves to the attention notice in the panel's notice slot, or to the roster without one.
+  // A frame later, so the slot holds the entry this commit added and no flush runs inside an effect.
+  const focusAttention = () => window.requestAnimationFrame(() => {
+    if (!revealSessionNotice(`panel:${session.id}`, AGENTS_ATTENTION_NOTICE, true)) panelRef.current?.focus();
+  });
   const targetKey = target ? JSON.stringify([session.id, target.eventEpoch, target.requestId, target.activationId ?? 0]) : null;
   const handledTarget = useRef<string | null>(null);
   useEffect(() => {
@@ -807,9 +829,10 @@ export function AgentsPanel(props: Props) {
     setRequestId(targetEpochMatches && !linkedRequestMissing ? target?.requestId ?? null : null);
     const ownerId = request?.ownerToolUseId;
     props.onSelect(ownerId && !projection.ambiguousIds.has(ownerId) && !unresolvedOwnerIds.has(ownerId) ? ownerId : "");
-    if (!request) (attentionRef.current ?? panelRef.current)?.focus();
-    else window.requestAnimationFrame(() =>
-      (request.requestId === session.pendingApproval?.requestId ? primaryRequestRef.current : requestDetailRef.current)?.focus());
+    // The session's own request is reviewed from the attention notice, which Review in Session opens
+    // on the request dock; any other is answered in the roster, where the request takes focus.
+    if (!request || shouldOpenPrimaryRequestInSession(request, Boolean(props.onOpenPrimaryRequest))) focusAttention();
+    else window.requestAnimationFrame(() => requestDetailRef.current?.focus());
   }, [targetKey, targetEpochMatches, linkedRequestMissing, target, requests, projection.ambiguousIds, unresolvedOwnerIds,
     props.onSelect, session.pendingApproval?.requestId, pages]);
   // The transcript's Open lands on that worker's page, with Back going to the list (#2856), and on
@@ -826,8 +849,9 @@ export function AgentsPanel(props: Props) {
   useLayoutEffect(() => {
     if ((!selectedRequest || primaryInSession) && requestOwnsFocus.current) {
       requestOwnsFocus.current = false;
-      (attentionRef.current ?? panelRef.current)?.focus();
+      focusAttention();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedRequest?.requestId, primaryInSession, requests.length]);
   useEffect(() => {
     if (!selectedRequest) {
@@ -842,9 +866,7 @@ export function AgentsPanel(props: Props) {
     if (selectedSecondaryRequestRef.current === selectedRequest.requestId) {
       selectedSecondaryRequestRef.current = null;
       props.onOpenPrimaryRequest?.(selectedRequest.requestId);
-      return;
     }
-    primaryRequestRef.current?.focus();
   }, [selectedRequest?.requestId, primaryInSession, requests.length]);
   // The worker that asks, as the Request Card's head line names it ("Plan Reviewer, a subagent").
   const selectedRequestOwner = (() => {
@@ -854,6 +876,116 @@ export function AgentsPanel(props: Props) {
       compactAttentionOwners.find((value) => value.requestId === selectedRequest.requestId && value.toolCallId === ownerId)?.name;
     return name ? `${name}, a subagent` : "A subagent";
   })();
+  // Who needs the person (#2861): the session for its own requests, each subagent for its most
+  // urgent, then each member session (a pod's, a run's) whose row reads an attention word.
+  const askers: AttentionAsker[] = [
+    ...attentionAskers(session.pendingApproval, (ownerId, request) =>
+      (!projection.ambiguousIds.has(ownerId) ? agents.find((agent) => agent.id === ownerId)?.title : undefined) ??
+        compactAttentionOwners.find((value) => value.requestId === request.requestId && value.toolCallId === ownerId)?.name),
+    ...memberAttentionAskers(members, machineOnline,
+      (member) => rows.find((row) => row.id === `session:${member.id}`)?.name ?? member.title),
+  ];
+  // Review in Session opens what the notice is about: the request an attention link chose, else this
+  // session's top request by the request dock's priority rule, else a waiting member's session whose
+  // machine is connected.
+  const reviewTarget: { request: PendingApproval } | { sessionId: string } | undefined = selectedRequest
+    ? { request: selectedRequest } : askers.find((asker) => asker.request) ?? askers.find((asker) => asker.online);
+  const review = (target: { request?: PendingApproval; sessionId?: string }) => {
+    if (target.request) reviewRequest(target.request);
+    else if (target.sessionId) navigate({ name: "session", id: target.sessionId });
+  };
+  const reviewRequest = (request: PendingApproval) => {
+    const pageOwner = requestPageOwner(request);
+    if (pageOwner) {
+      // A worker's request is answered on its page, with the request card on top (#2860).
+      setRequestId(null);
+      setChosen(subagentPageKey(pageOwner));
+      props.onSelect(pageOwner);
+      openRequestPage(pageOwner, request.requestId, false);
+      return;
+    }
+    if (shouldOpenPrimaryRequestInSession(request, Boolean(props.onOpenPrimaryRequest))) {
+      props.onOpenPrimaryRequest?.(request.requestId);
+      return;
+    }
+    // A request no page or dock can carry is answered here, in the roster, which a page gives way to.
+    pages.clear();
+    setRequestId(request.requestId);
+    const owner = request.ownerToolUseId;
+    const compactOwner = compactAttentionOwners.find((value) => value.requestId === request.requestId && value.toolCallId === owner);
+    if (owner && !projection.ambiguousIds.has(owner) && agents.some((agent) => agent.id === owner)) props.onSelect(owner);
+    else if (compactOwner?.resolved) props.onSelect(compactOwner.toolCallId);
+    else { props.onSelect(""); setChosen(null); }
+    window.requestAnimationFrame(() => requestDetailRef.current?.focus());
+  };
+  const machine = runnerDisplay(runners.get(session.runnerId), undefined, session.runnerId).name || "The machine";
+  const notices: SessionNoticeEntry[] = [];
+  if (!runnerOnline) notices.push({
+    key: "agents-runner-offline", severity: "warning", rank: PANEL_NOTICE_RANK.runnerOffline, title: "Machine Offline",
+    render: ({ trailing }) => <Notice tone="warning" title="Machine Offline" trailing={trailing}>
+      {machine} is offline. Workers are shown as Unverified until it reconnects.
+    </Notice>,
+  });
+  if (registryRetryExhausted) notices.push({
+    key: "agents-registry-error", severity: "danger", rank: PANEL_NOTICE_RANK.loadError, title: AGENTS_NOTICE_COPY.registryError,
+    render: ({ trailing }) => <Notice tone="danger" title={AGENTS_NOTICE_COPY.registryError} trailing={trailing}
+      actions={<button type="button" className="btn sm" onClick={() => {
+        setRegistryRetryExhausted(false);
+        loadRegistry(registryRetryAfter ?? 0);
+      }}>Retry</button>}
+      details={registryError && <div className="code-well">
+        <pre>{`GET /api/sessions/${session.id}/child-sessions\nHTTP 409: ${registryError}`}</pre>
+      </div>}>
+      The list of recorded workers kept changing while it loaded.
+    </Notice>,
+  });
+  // Offline, the count stays and no action is offered: nothing can be answered until the machine is
+  // back, and its workers read Unverified (#2861).
+  if (askers.length > 0) notices.push({
+    key: AGENTS_ATTENTION_NOTICE, severity: "warning", rank: PANEL_NOTICE_RANK.attention,
+    title: runnerOnline ? attentionTitle(askers) : AGENTS_NOTICE_COPY.offlineAttention,
+    render: ({ trailing }) => <Notice tone="warning" trailing={trailing}
+      actions={runnerOnline && reviewTarget && <button type="button" className="btn sm"
+        onClick={() => review(reviewTarget)}>{AGENTS_NOTICE_COPY.review}</button>}>
+      {runnerOnline ? attentionSentence(askers)
+        : offlineAttentionSentence(requests.length + askers.reduce((total, asker) => total + (asker.sessionId
+          ? Math.max(1, pendingRequests(members.find((member) => member.id === asker.sessionId)?.pendingApproval).length) : 0), 0),
+        machine)}
+    </Notice>,
+  });
+  if (session.backgroundJobsAvailable && !session.backgroundJobs && props.inventoryError) notices.push({
+    key: "agents-inventory-error", severity: "danger", rank: PANEL_NOTICE_RANK.inventoryError, title: AGENTS_NOTICE_COPY.inventoryError,
+    render: ({ trailing }) => <Notice tone="danger" title={AGENTS_NOTICE_COPY.inventoryError} trailing={trailing}
+      actions={props.onRetryInventory && <button type="button" className="btn sm" onClick={props.onRetryInventory}>Retry</button>}
+      details={<div className="code-well"><pre>{props.inventoryError}</pre></div>}>
+      The machine&apos;s list of background jobs didn&apos;t load.
+    </Notice>,
+  });
+  const info = (key: string, rank: number, title: string, sentence: string) => notices.push({
+    key, severity: "info", rank, title,
+    render: ({ trailing, onDismiss }) => <Notice tone="info" compact trailing={trailing} onDismiss={onDismiss}>{sentence}</Notice>,
+  });
+  if (props.earlierActivityUnloaded && (registryUnavailable || registry?.length === 0 || unidentifiedChildren > 0)) {
+    info("agents-earlier-activity", PANEL_NOTICE_RANK.earlierActivityUnloaded, "Earlier Activity Not Loaded",
+      "Earlier activity isn't loaded, so workers from those turns may be missing.");
+  }
+  if (unidentifiedChildren > 0) {
+    info("agents-ambiguous-identity", PANEL_NOTICE_RANK.ambiguousIdentity,
+      unidentifiedChildren === 1 ? "1 Worker Not Listed" : `${unidentifiedChildren} Workers Not Listed`,
+      unidentifiedChildren === 1 ? "1 worker can't be listed because its ID is ambiguous."
+        : `${unidentifiedChildren} workers can't be listed because their IDs are ambiguous.`);
+  }
+  if (workflowError) {
+    info("agents-workflow-details", PANEL_NOTICE_RANK.workflowDetailsUnavailable, "Workflow Details Unavailable",
+      "Workflow phase details aren't available. Each worker's status is still shown.");
+  }
+  if (!targetEpochMatches) {
+    info("agents-stale-link", PANEL_NOTICE_RANK.staleAttentionLink, "Attention Link Out of Date",
+      "This attention link belongs to an earlier version of the session, so no request was selected.");
+  } else if (linkedRequestMissing) {
+    info("agents-stale-link", PANEL_NOTICE_RANK.staleAttentionLink, "Request No Longer Pending",
+      "The linked request is no longer pending, so no request was selected.");
+  }
   const selectedKey = requestedId ? `subagent:${requestedId}` : chosen;
   const selected = rows.find((row) => row.id === selectedKey);
   const inFilter = (row: WorkerRow, value: typeof filter) =>
@@ -863,6 +995,7 @@ export function AgentsPanel(props: Props) {
     history: rows.filter((row) => inFilter(row, "history")).length, all: rows.length };
   const listed = groupWorkerRows(filtered, limit);
   const registryHasMore = registryAfter !== null && registry !== null;
+  const showSkeleton = useDelayedFlag(registryLoading && registry === null && filtered.length === 0, AGENTS_SKELETON_DELAY_MS);
   const now = useTimelineClock(rows.length > 0);
   const selectFilter = (value: typeof filter) => { setFilter(value); setLimit(PAGE_SIZE); };
   // Show More first reveals the rows already loaded, then reads the registry's next page.
@@ -934,82 +1067,38 @@ export function AgentsPanel(props: Props) {
   })();
   return (
     <>
+    {/* One notice for the tab's conditions, above the roster and a pushed page alike (#2861). */}
+    <PanelNoticeSlot sessionId={session.id} entries={notices} />
     {/* The roster stays mounted under a page, so its rows, filter and scroll are there on Back. */}
     <div className="agents-panel" ref={panelRef} tabIndex={-1} role="region" aria-label="Worker Roster" hidden={page !== null}>
-      {!targetEpochMatches && <p role="status">This attention link belongs to an earlier session version. No request was selected.</p>}
-      {targetEpochMatches && linkedRequestMissing && <p role="status">The linked request is no longer pending. No replacement request was selected.</p>}
-      {requests.length > 0 && <section ref={attentionRef} tabIndex={-1} aria-label="Worker Attention" className="agents-attention">
-        {requests.slice(0, requestLimit).map((request) => {
-          const owner = !projection.ambiguousIds.has(request.ownerToolUseId ?? "")
-            ? agents.find((agent) => agent.id === request.ownerToolUseId) : undefined;
-          const compactOwner = compactAttentionOwners.find((value) => value.requestId === request.requestId &&
-            value.toolCallId === request.ownerToolUseId);
-          const ownerRole = owner?.role ?? compactOwner?.role;
-          const attention = sessionAttentionStatus({ status: session.status,
-            pendingApproval: { ...request, ownerToolUseId: undefined } });
-          return <button type="button" className="btn" key={request.requestId} onClick={() => {
-            const pageOwner = requestPageOwner(request);
-            if (pageOwner) {
-              setRequestId(null);
-              setChosen(subagentPageKey(pageOwner));
-              props.onSelect(pageOwner);
-              openRequestPage(pageOwner, request.requestId, false);
-              return;
-            }
-            setRequestId(request.requestId);
-            if (owner) props.onSelect(owner.id);
-            else if (compactOwner?.resolved) props.onSelect(compactOwner.toolCallId);
-            else { props.onSelect(""); setChosen(null); }
-          }}>
-            {owner?.title ?? compactOwner?.name ?? (request.ownerToolUseId ? "Subagent" : "Session")}
-            {ownerRole ? ` · ${titleCaseLabel(ownerRole)}` : ""}
-            {` · ${attention?.label ?? "Input Required"}`}
-            {!owner && request.ownerToolUseId && compactOwner?.resolved !== true && " · Child Owner Unavailable"}
-          </button>;
-        })}
-        {requests.length > requestLimit && <button type="button" className="btn ghost sm" onClick={() => setRequestLimit((value) => value + PAGE_SIZE)}>Show More Requests</button>}
-        {selectedRequest && primaryInSession && <button ref={primaryRequestRef} type="button" className="btn"
-          onClick={() => props.onOpenPrimaryRequest?.(selectedRequest.requestId)}>Open Request in Session</button>}
-        {selectedRequest && !primaryInSession && <div ref={requestDetailRef} tabIndex={-1} role="region" aria-label="Selected Worker Request"
-          onFocusCapture={() => { requestOwnsFocus.current = true; }}
-          onBlurCapture={(event) => {
-            if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget as Node)) requestOwnsFocus.current = false;
-          }}
-          data-session-request-id={selectedRequest.requestId} data-session-request-session={session.id}>
-          {selectedRequest.kind === "question" ? <SessionQuestionBanner key={selectedRequest.requestId}
-            sessionId={session.id} requestId={selectedRequest.requestId} occurrenceId={selectedRequest.occurrenceId}
-            requestedAt={selectedRequest.requestedAt} recoveryId={selectedRequest.recoveryId}
-            questions={selectedRequest.questions ?? []} isAsync={selectedRequest.async}
-            recoveryReason={selectedRequest.recoveryReason} recoveryAction={selectedRequest.recoveryAction}
-            runnerOnline={runnerOnline} onSessionUpdate={loadSession} showKeyHints={false} />
-            : <RequestCard key={selectedRequest.requestId} session={{ ...session, pendingApproval: selectedRequest }}
-              request={selectedRequest} runnerOnline={runnerOnline} presentation="panel"
-              owner={selectedRequestOwner} onSessionUpdate={loadSession} />}
-        </div>}
-      </section>}
+      {selectedRequest && !primaryInSession && <div ref={requestDetailRef} tabIndex={-1} role="region" aria-label="Selected Worker Request"
+        onFocusCapture={() => { requestOwnsFocus.current = true; }}
+        onBlurCapture={(event) => {
+          if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget as Node)) requestOwnsFocus.current = false;
+        }}
+        data-session-request-id={selectedRequest.requestId} data-session-request-session={session.id}>
+        {selectedRequest.kind === "question" ? <SessionQuestionBanner key={selectedRequest.requestId}
+          sessionId={session.id} requestId={selectedRequest.requestId} occurrenceId={selectedRequest.occurrenceId}
+          requestedAt={selectedRequest.requestedAt} recoveryId={selectedRequest.recoveryId}
+          questions={selectedRequest.questions ?? []} isAsync={selectedRequest.async}
+          recoveryReason={selectedRequest.recoveryReason} recoveryAction={selectedRequest.recoveryAction}
+          runnerOnline={runnerOnline} onSessionUpdate={loadSession} showKeyHints={false} />
+          : <RequestCard key={selectedRequest.requestId} session={{ ...session, pendingApproval: selectedRequest }}
+            request={selectedRequest} runnerOnline={runnerOnline} presentation="panel"
+            owner={selectedRequestOwner} onSessionUpdate={loadSession} />}
+      </div>}
       <SegmentedControl className="block" label={AGENTS_ROSTER_COPY.filter} value={filter} onChange={selectFilter}
         options={(["active", "history", "all"] as const).map((value) => ({
           value,
           label: <>{AGENTS_ROSTER_COPY[value]}<span className="count">{filterCounts[value]}</span></>,
           ariaLabel: `${AGENTS_ROSTER_COPY[value]}, ${filterCounts[value]}`,
         }))} />
-      {props.earlierActivityUnloaded && (registryUnavailable || registry?.length === 0 || unidentifiedChildren > 0) && <p className="hint" role="status">Earlier transcript activity is not loaded. Workers recorded only in those turns may be missing.</p>}
-      {unidentifiedChildren > 0 && <p className="hint" role="status">{unidentifiedChildren} {unidentifiedChildren === 1 ? "worker has" : "workers have"} an ambiguous provider identity and cannot be listed safely.</p>}
-      {registryLoading && registry === null && <p className="hint" role="status">Loading recorded workers…</p>}
-      {registryRetry && !registryRetryExhausted && <p className="hint" role="status">Recorded worker inventory changed while loading. Retrying…</p>}
-      {registryRetryExhausted && <p className="hint" role="status">Recorded worker inventory kept changing.
-        <button type="button" className="btn sm" onClick={() => {
-          setRegistryRetryExhausted(false);
-          loadRegistry(registryRetryAfter ?? 0);
-        }}>Retry Recorded Workers</button>
-      </p>}
-      {workflowError && <p className="hint" role="status">Workflow phase details are unavailable. Session status remains visible.</p>}
-      {session.backgroundJobsAvailable && !session.backgroundJobs && <p className="hint" role="status">
-        {props.inventoryError || "Loading background work…"}
-        {props.inventoryError && <button type="button" className="btn sm" onClick={props.onRetryInventory}>Retry Background Work</button>}
-      </p>}
-      {session.backgroundWorkTracking === "untracked" && <p className="hint">This provider does not expose a managed background-job inventory. Detached work cannot be verified.</p>}
-      {session.backgroundJobsTruncated && <p className="hint">Older background-job history is outside the loaded inventory.</p>}
+      {showSkeleton && <div className="skeleton agents-skeleton" role="status" aria-live="polite">
+        <span className="sr-only">{AGENTS_ROSTER_COPY.loading}</span>
+        {[0, 1, 2].map((index) => <div className="row row-2" aria-hidden="true" key={index}>
+          <span className="row-body"><span className="skeleton-bar title" /><span className="skeleton-bar" /></span>
+        </div>)}
+      </div>}
       {filtered.length === 0 && !(registryLoading && registry === null) && (filter === "active"
         ? <State compact icon={<BotIcon size={24} />} title={AGENTS_ROSTER_COPY.emptyActiveTitle}
           actions={filterCounts.history > 0 ? <button type="button" className="btn sm ghost"
@@ -1036,7 +1125,7 @@ export function AgentsPanel(props: Props) {
       </div>}
       {(revealsLoadedRows || registryHasMore) && <ListFoot>
         <span className="worker-list-count">{workerListFootLabel(listed.shown, filtered.length, registryHasMore)}</span>
-        <BusyButton className="btn sm ghost" busy={!revealsLoadedRows && registryLoading}
+        <BusyButton className="btn sm ghost" busy={!revealsLoadedRows && (registryLoading || registryRetry !== null)}
           progress={AGENTS_ROSTER_COPY.loadingMore} onClick={showMore}>{AGENTS_ROSTER_COPY.showMore}</BusyButton>
       </ListFoot>}
     </div>
