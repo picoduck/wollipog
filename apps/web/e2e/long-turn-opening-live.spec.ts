@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { defaultLocalDeviceTokenPath, loadOrCreateLocalDeviceToken } from "../../control-plane/src/local-device-credential.js";
-import { COLD_SESSION_ID, seedColdHistoryPreview, connectColdHistoryRunner } from "./fixtures/cold-history-preview.js";
+import { COLD_SESSION_ID, COLD_NAV_SESSION_ID, COLD_NAV_PROMPT, seedColdHistoryPreview, connectColdHistoryRunner } from "./fixtures/cold-history-preview.js";
 import { viewPath } from "../src/navigation.js";
 import { LONG_TURN_SESSION_ID, LONG_TURN_START_SEQ, LONG_TURN_PROMPT, seedLongTurnOpening } from "./fixtures/long-turn-opening-seed.js";
 
@@ -289,6 +289,64 @@ for (const rate of [1, 4]) test(`an incomplete cache opens its real authoritativ
   await expect(page.getByRole("button", { name: "Load Later Activity", exact: true })).toBeEnabled();
   await expect(page.getByText(LONG_TURN_PROMPT, { exact: true })).toBeInViewport();
   await cdp.send("Emulation.setCPUThrottlingRate", { rate: 1 });
+});
+
+async function verifyColdBackgroundTurn(page: Page, paced = false) {
+  await signIn(page);
+  const before: number[] = [];
+  page.on("request", request => {
+    const url = new URL(request.url());
+    if (url.pathname === `/api/sessions/${COLD_NAV_SESSION_ID}/history-preview` && url.searchParams.has("beforeSeq")) {
+      before.push(Number(url.searchParams.get("beforeSeq")));
+    }
+  });
+  await page.goto(`${base}${viewPath({ name: "session", id: COLD_NAV_SESSION_ID })}`);
+  await expect(page.getByText("Synthetic navigation turn 3.", { exact: true })).toBeInViewport();
+  if (paced) await delay(2_500);
+  const pinned = page.getByRole("complementary", { name: "Pinned Summary" });
+  if (!await pinned.isVisible()) await page.getByRole("button", { name: "Pinned Summary", exact: true }).click();
+  const background = page.getByTitle("Open Background Work", { exact: true }).filter({ visible: true });
+  if (paced) { await background.focus(); await delay(1_500); }
+  await background.click();
+  const viewTurn = page.getByRole("button", { name: "View Turn", exact: true });
+  await expect(viewTurn).toBeVisible();
+  if (paced) {
+    mkdirSync(evidenceDir!, { recursive: true });
+    await page.screenshot({ path: join(evidenceDir!, "navigation-before.png") });
+    await delay(2_500);
+    await viewTurn.focus();
+    await delay(1_500);
+  }
+  await viewTurn.click();
+  await expect(page.getByText(COLD_NAV_PROMPT, { exact: true })).toBeInViewport();
+  await expect(page.locator('[data-virtual-key="item:user_message:1"]')).toHaveAttribute("data-virtual-target", "true");
+  await expect(page.locator('[data-virtual-key="item:user_message:1"]')).toBeFocused();
+  expect(before.length).toBeGreaterThan(1);
+  expect(before[0]).toBe(803);
+  expect(before.at(-1)).toBeLessThanOrEqual(203);
+  expect(new Set(before).size).toBe(before.length);
+  await expect(page.getByRole("button", { name: "Refresh Recent Activity", exact: true })).toBeVisible();
+  const response = await page.request.get(`${base}/api/sessions/${COLD_NAV_SESSION_ID}/events?opening=current-turn&limit=200&eventEpoch=0`,
+    { headers: { authorization: `Bearer ${token}` } });
+  expect((await response.json()).cacheComplete).toBe(false);
+  if (paced) {
+    await page.screenshot({ path: join(evidenceDir!, "navigation-after.png") });
+    await delay(4_500);
+  }
+}
+
+test("cold Background Work View Turn pages to its private prompt and reveals it", async ({ page }) => {
+  await verifyColdBackgroundTurn(page);
+});
+
+test("paced evidence of cold Background Work navigation across private pages", async ({ browser }) => {
+  test.skip(!evidenceDir || process.env.LONG_TURN_OPENING_NAV_RECORD_VIDEO !== "1", "Opt-in paced evidence capture only.");
+  const viewport = { width: Number(process.env.LONG_TURN_OPENING_NAV_WIDTH ?? 1280), height: 900 };
+  const context = await browser.newContext({ viewport, colorScheme: process.env.LONG_TURN_OPENING_NAV_DARK === "1" ? "dark" : "light",
+    recordVideo: { dir: join(evidenceDir!, "navigation-recordings"), size: viewport } });
+  const page = await context.newPage();
+  try { await verifyColdBackgroundTurn(page, true); } finally { await context.close(); }
+  copyFileSync(await page.video()!.path(), join(evidenceDir!, "cold-background-navigation.webm"));
 });
 
 test("cold preview retries interrupted hydration and retains loaded pages without moving its visible prompt", async ({ page }) => {

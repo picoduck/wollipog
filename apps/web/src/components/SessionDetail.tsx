@@ -1505,6 +1505,8 @@ function SessionDetailLoaded({
   const openingReadKey = `${instanceScope}:${sessionId}:${recoveryEventEpoch}:${recoveryGeneration}:${historyRetry}`;
   const [unsupportedOpeningKey, setUnsupportedOpeningKey] = useState<string | null>(null);
   const timelineHistoryKey = `${session.id}:${session.eventEpoch ?? 0}`;
+  const timelineRenderHistoryKey = historyPreview.active
+    ? `${timelineHistoryKey}:preview:${historyPreview.viewRevision}` : timelineHistoryKey;
   const timelineHistoryKeyRef = useRef(timelineHistoryKey);
   timelineHistoryKeyRef.current = timelineHistoryKey;
   const [olderRequestSettled, setOlderRequestSettled] = useState({
@@ -4179,7 +4181,7 @@ function SessionDetailLoaded({
     timelineRevealRestoreState.current = null;
     setTimelineRevealRequest(null);
     timelineRevealRequestId.current = 0;
-  }, [timelineHistoryKey]);
+  }, [timelineRenderHistoryKey]);
   const revealTranscriptEvent = useCallback((eventId: number, place: "operation" | "question") => {
     // Semantic navigation owns the viewport until the reader explicitly resumes following. A
     // question's place is read back to as the reader would scroll there, so the request dock takes
@@ -4191,13 +4193,13 @@ function SessionDetailLoaded({
     const request: TimelineRevealRequest = {
       eventId,
       requestId,
-      historyKey: timelineHistoryKey,
+      historyKey: timelineRenderHistoryKey,
       align: place === "question" ? "upper-third" : "center",
       focus: true,
     };
     timelineRevealRequestRef.current = request;
     setTimelineRevealRequest(request);
-  }, [followTail.pause, followTail.preview, followTail.state, timelineHistoryKey]);
+  }, [followTail.pause, followTail.preview, followTail.state, timelineRenderHistoryKey]);
   const revealCurrentOperation = useCallback((eventId: number) => revealTranscriptEvent(eventId, "operation"),
     [revealTranscriptEvent]);
   const handleTimelineReveal = useCallback((
@@ -4237,11 +4239,11 @@ function SessionDetailLoaded({
     }
     if (isMobile) rightPanelRef.current.close();
     else restoreExpandedPanel();
-    setPendingTurnView({ turnId, historyKey: timelineHistoryKey, requestedBase: null });
-  }, [backgroundParentTurns, isMobile, restoreExpandedPanel, revealTranscriptItemFromPanel, timelineHistoryKey]);
+    setPendingTurnView({ turnId, historyKey: timelineRenderHistoryKey, requestedBase: null });
+  }, [backgroundParentTurns, isMobile, restoreExpandedPanel, revealTranscriptItemFromPanel, timelineRenderHistoryKey]);
   useEffect(() => {
     if (!pendingTurnView) return;
-    if (pendingTurnView.historyKey !== timelineHistoryKey) {
+    if (pendingTurnView.historyKey !== timelineRenderHistoryKey) {
       setPendingTurnView(null);
       return;
     }
@@ -4251,7 +4253,15 @@ function SessionDetailLoaded({
       revealCurrentOperation(loaded.eventId);
       return;
     }
-    if (olderInFlightRef.current) return;
+    if (historyPreview.active) {
+      if (historyPreview.isLoadingOlder()) {
+        let cancelled = false;
+        void historyPreview.waitForOlder().then(() => {
+          if (!cancelled) setOlderReadReleases((count) => count + 1);
+        });
+        return () => { cancelled = true; };
+      }
+    } else if (olderInFlightRef.current) return;
     const base = eventWindow?.baseSeq;
     // A page that settled without moving the window's base failed; history without older events
     // has no such turn to show.
@@ -4262,7 +4272,8 @@ function SessionDetailLoaded({
     }
     setPendingTurnView({ ...pendingTurnView, requestedBase: base });
   }, [pendingTurnView, backgroundParentTurns, eventWindow?.baseSeq, eventWindow?.hasOlder, olderReadReleases,
-    timelineHistoryKey, loadOlder, revealCurrentOperation]);
+    timelineRenderHistoryKey, loadOlder, revealCurrentOperation,
+    historyPreview.active, historyPreview.isLoadingOlder, historyPreview.waitForOlder]);
   const previewNavigationControls = useMemo<PreviewNavigationControls>(() => ({
     beginProgrammaticScroll: followTail.beginProgrammaticScroll,
     follow: followTail.follow,
@@ -7210,7 +7221,7 @@ function SessionDetailLoaded({
                         onOpenSession={openSession}
                         workspaceRoot={session.worktreePath ?? runner?.workspaces.find((workspace) => workspace.id === session.workspaceId)?.path}
                         scrollRef={scrollRef}
-                        historyKey={historyPreview.active ? `${timelineHistoryKey}:preview:${historyPreview.viewRevision}` : timelineHistoryKey}
+                        historyKey={timelineRenderHistoryKey}
                         getInitialAnchor={followTail.getInitialAnchor}
                         preserveAnchor={!followTail.isFollowing}
                         anchorRecoveryPending={anchorRecoveryPending}
