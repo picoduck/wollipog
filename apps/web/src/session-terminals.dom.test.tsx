@@ -214,8 +214,13 @@ const OUTPUT: Record<string, string> = {
 };
 
 const requests = { lists: 0, history: [] as string[], opens: 0, resizes: [] as Array<[string, number, number]> };
+/** The fixture registry, and how New Shell is answered: refused unless a test holds the answer. */
+let fixtureShells: ShellView[] = [];
+let openShellAnswer: (() => Promise<ShellView>) | null = null;
 
 beforeEach(() => {
+  fixtureShells = [shell(1), shell(2)];
+  openShellAnswer = null;
   requests.lists = 0;
   requests.history = [];
   requests.opens = 0;
@@ -231,7 +236,7 @@ const client: ApiClient = {
   ...api,
   listShells: async () => {
     requests.lists += 1;
-    return { shells: [shell(1), shell(2)] };
+    return { shells: structuredClone(fixtureShells) };
   },
   shellHistory: async (_sessionId, shellId) => {
     requests.history.push(shellId);
@@ -239,6 +244,7 @@ const client: ApiClient = {
   },
   openShell: async () => {
     requests.opens += 1;
+    if (openShellAnswer) return { shell: await openShellAnswer() };
     throw new Error("the fixture has its shells");
   },
   closeShell: async () => undefined,
@@ -395,6 +401,28 @@ test("leaving the session disposes its terminals", async () => {
   assert.equal(disposals.count, 1, "the session's store ends its terminals when it goes");
 });
 
+test("a reopened empty dock offers a first shell once the last open's New Shell settles", async () => {
+  fixtureShells = [];
+  let refuse!: (error: Error) => void;
+  openShellAnswer = () => new Promise<ShellView>((_resolve, reject) => { refuse = reject; });
+  const view = await mountDock();
+  try {
+    // The empty dock offers a first shell, which is still being opened when the dock is hidden.
+    await until(() => requests.opens === 1, "the first shell offer");
+    await act(async () => view.controls.setDockOpen(false));
+    await act(async () => view.controls.setDockOpen(true));
+    await until(() => requests.lists === 2, "the reopened list");
+    await settle(10);
+    assert.equal(requests.opens, 1, "nothing more is offered while that shell is being opened");
+
+    openShellAnswer = null;
+    await act(async () => refuse(new Error("machine went away")));
+    await until(() => requests.opens === 2, "the reopened dock's own offer");
+  } finally {
+    await view.unmount();
+  }
+});
+
 // --- The store's loads, without a host rendering ---
 
 /** A store over a shell API whose registry, history answers and shell creation the test controls. */
@@ -461,6 +489,71 @@ test("history read before a reconnect does not count as loaded once it lands", a
     await until(() => loaded.length === 1, "the reload on the next open");
     release();
     assert.deepEqual(history, ["shell-1", "shell-1"]);
+  } finally {
+    terminals.dispose();
+  }
+});
+
+test("history New Shell interrupts is loaded again while the terminal shows", async () => {
+  let hold: ReturnType<typeof gate> | null = gate();
+  const { terminals, history, loaded } = storeOver([shell(1)], {
+    holdHistory: () => hold?.wait() ?? Promise.resolve(),
+    openShell: async () => shell(2),
+  });
+  const release = terminals.openHost();
+  try {
+    await until(() => history.length === 1, "Shell 1's history request");
+    // New Shell lands while that history is still on the way, which drops the answer.
+    const held = hold;
+    hold = null;
+    await terminals.newShell();
+    held.open();
+    await until(() => loaded.includes("shell-1"), "Shell 1's history, loaded again");
+    assert.deepEqual(history, ["shell-1", "shell-1"]);
+  } finally {
+    release();
+    terminals.dispose();
+  }
+});
+
+test("each open starts without the last open's failed-action notice", async () => {
+  let failHistory = true;
+  const { terminals, loaded } = storeOver([shell(1)], { failHistory: () => failHistory });
+  try {
+    let release = terminals.openHost();
+    await until(() => terminals.getSnapshot().error !== null, "the failed history load");
+    release();
+    failHistory = false;
+    release = terminals.openHost();
+    assert.equal(terminals.getSnapshot().error, null, "the reopened terminal shows no stale notice");
+    await until(() => loaded.length === 1, "the retried history");
+    release();
+  } finally {
+    terminals.dispose();
+  }
+});
+
+test("a shell created across a hidden reconnect has its history loaded on the next open", async () => {
+  const registry: ShellView[] = [];
+  let answer!: (created: ShellView) => void;
+  const { terminals, history } = storeOver(registry, {
+    openShell: () => new Promise<ShellView>((resolve) => { answer = resolve; }),
+  });
+  try {
+    let release = terminals.openHost();
+    await until(() => terminals.getSnapshot().shells !== null, "the first list");
+    const creating = terminals.newShell();
+    release();
+
+    // The connection drops and returns before the runner answers: the shell's first output may be lost.
+    terminals.reconnected();
+    registry.push(shell(2));
+    answer(shell(2));
+    await creating;
+
+    release = terminals.openHost();
+    await until(() => history.includes("shell-2"), "the new shell's history");
+    release();
   } finally {
     terminals.dispose();
   }

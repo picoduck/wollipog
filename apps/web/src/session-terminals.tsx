@@ -113,6 +113,8 @@ export class SessionTerminals {
   // and erase the just-opened tab. newShell bumps the token to invalidate in-flight loads; each load
   // applies only if it is still the newest.
   private loadSeq = 0;
+  /** Counts reconnects: a request that spans one must not mark history it read before it as current. */
+  private reconnects = 0;
   private readonly closingShellIds = new Set<string>();
   private initialShellLoadSettled = false;
   private autoOpened = false;
@@ -190,10 +192,12 @@ export class SessionTerminals {
 
   newShell = async (kind: ShellKind = "shell"): Promise<void> => {
     this.setState({ busy: true, error: null });
+    const reconnects = this.reconnects;
     try {
       const { shell } = await this.api.openShell(this.sessionId, { cols: 120, rows: 30, kind });
       this.loadSeq++; // an in-flight list snapshot predates this shell — don't let it land
-      this.historyLoaded.add(shell.shellId);
+      // A new shell needs no history, unless a reconnect meanwhile may have dropped its first output.
+      if (this.reconnects === reconnects) this.historyLoaded.add(shell.shellId);
       // The registry lists a shell before its runner answers, so a list read while this request was
       // out (the terminal reopened meanwhile) may already hold it: it keeps its tab.
       const shells = this.state.shells ?? [];
@@ -203,6 +207,11 @@ export class SessionTerminals {
           : [...shells, shell],
         active: shell.shellId,
       });
+      // The token bump above also stopped any history still loading; a shown terminal loads it again
+      // (a hidden one does on its next open).
+      if (this.hosts > 0 && this.state.shells?.some((listed) => !this.historyLoaded.has(listed.shellId))) {
+        void this.loadShells({ reconcile: true });
+      }
     } catch (e) {
       this.setState({ error: (e as Error).message });
     } finally {
@@ -317,6 +326,7 @@ export class SessionTerminals {
     // Every shell's history is reloaded: now if a host shows the terminal, otherwise on the next open.
     // A load still in flight read the registry before the reconnect, so it must not land and mark it.
     this.loadSeq++;
+    this.reconnects++;
     this.historyLoaded.clear();
     if (this.hosts > 0) void this.loadShells({ reconcile: this.initialShellLoadSettled });
   }
@@ -386,9 +396,11 @@ export class SessionTerminals {
   }
 
   private opened(): void {
-    // Each open starts the first-shell offer afresh, as each mount of the dock did.
+    // Each open starts the first-shell offer and the failed-action notice afresh, as each mount of the
+    // dock did.
     this.initialShellLoadSettled = false;
     this.autoOpened = false;
+    this.setState({ error: null });
     this.everOpened = true;
     void this.loadShells({ reconcile: this.state.shells !== null });
   }
@@ -543,7 +555,7 @@ function SessionTerminalsDriver({ terminals }: { terminals: SessionTerminals }) 
   const session = useStoreSelector((s) => s.sessions.get(sessionId));
   const runnerOnline = useStoreSelector((s) => session ? s.runners.get(session.runnerId)?.status === "online" : false);
   const sessionLive = !!session && !isTerminal(session.status);
-  const { shells } = useSyncExternalStore(terminals.subscribe, terminals.getSnapshot);
+  const { shells, busy } = useSyncExternalStore(terminals.subscribe, terminals.getSnapshot);
 
   // Refresh durable metadata/history after a dashboard reconnect. Runner-only reconnects use the
   // shell_registry_reconciled generation below while this UI socket stays online.
@@ -561,9 +573,10 @@ function SessionTerminalsDriver({ terminals }: { terminals: SessionTerminals }) 
     terminals.registryChanged();
   }, [terminals, shellRegistryRevision]);
 
+  // `busy` too: a shell still being opened from the last open holds the offer until it settles.
   useEffect(() => {
     terminals.offerFirstShell(runnerOnline, sessionLive);
-  }, [terminals, shells, runnerOnline, sessionLive]);
+  }, [terminals, shells, busy, runnerOnline, sessionLive]);
 
   // Output for an unknown live shell = another dashboard opened it — refresh the tab list.
   const unknownLiveShell = shells !== null && [...shellOutput.entries()].some(([shellId, scrollback]) =>
