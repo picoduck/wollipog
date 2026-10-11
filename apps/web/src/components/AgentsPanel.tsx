@@ -948,7 +948,9 @@ export function AgentsPanel(props: Props) {
       actions={runnerOnline && reviewTarget && <button type="button" className="btn sm"
         onClick={() => review(reviewTarget)}>{AGENTS_NOTICE_COPY.review}</button>}>
       {runnerOnline ? attentionSentence(askers)
-        : offlineAttentionSentence(requests.length + askers.filter((asker) => asker.sessionId).length, machine)}
+        : offlineAttentionSentence(requests.length + askers.reduce((total, asker) => total + (asker.sessionId
+          ? Math.max(1, pendingRequests(members.find((member) => member.id === asker.sessionId)?.pendingApproval).length) : 0), 0),
+        machine)}
     </Notice>,
   });
   if (session.backgroundJobsAvailable && !session.backgroundJobs && props.inventoryError) notices.push({

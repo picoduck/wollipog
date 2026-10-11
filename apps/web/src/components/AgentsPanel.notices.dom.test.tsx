@@ -392,7 +392,7 @@ test("Review in Session on a request no page carries gives the roster back while
 test("offline, a waiting member sharing the machine stays counted with no action (#2861 review)", async () => {
   const lead = { ...baseSession() } as SessionView;
   const reviewer = { ...baseSession(), id: "member-offline", runnerId: lead.runnerId, title: "Parser Reviewer", status: "input_required",
-    pendingApproval: permission("lint") } as unknown as SessionView;
+    pendingApproval: { ...permission("lint"), additionalRequests: [permission("format")] } } as unknown as SessionView;
   const panel = await mount(<Harness initial={lead} runnerOnline={false} store={podConnection(lead, [reviewer])} />);
   try {
     await settle(20);
@@ -401,7 +401,8 @@ test("offline, a waiting member sharing the machine stays counted with no action
     await panel.click(panel.slot()!.querySelector(".session-notice-more"));
     assert.deepEqual(panel.menuItems(), ["Requests Waiting"]);
     await panel.click(domWindow.document.querySelector('[role="menu"][aria-label="Panel Notices"] [role="menuitem"]') as unknown as Element);
-    assert.equal(panel.sentence(), "1 request is waiting. You can answer it when build-box reconnects.");
+    assert.equal(panel.sentence(), "2 requests are waiting. You can answer them when build-box reconnects.",
+      "every request the member holds is counted, not the member once");
     assert.equal(panel.button("Review in Session"), undefined);
   } finally {
     await panel.unmount();
