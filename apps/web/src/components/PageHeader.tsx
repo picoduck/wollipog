@@ -454,7 +454,7 @@ export function ActionsMenu({ className, overflow = "always", items }: { classNa
     // One element per listed item, in the order drawn; an item that has gone or become unavailable
     // since leaves focus where the menu put it.
     const index = ordered.findIndex((item) => item.label === label && !item.disabled);
-    const rows = menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"], [role="menuitemcheckbox"]');
+    const rows = menuRef.current?.querySelectorAll<HTMLElement>(".menu-item");
     if (index >= 0) rows?.[index]?.focus();
     // Only an opening reads the label, against that render's `ordered`.
   }, [open, menuRef]);

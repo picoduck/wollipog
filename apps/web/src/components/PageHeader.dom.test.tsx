@@ -18,6 +18,7 @@ const priorElementGlobals = {
   HTMLElement: (globalThis as Record<string, unknown>)["HTMLElement"],
   HTMLButtonElement: (globalThis as Record<string, unknown>)["HTMLButtonElement"],
   MutationObserver: (globalThis as Record<string, unknown>)["MutationObserver"],
+  React: (globalThis as Record<string, unknown>)["React"],
 };
 
 before(() => {
@@ -27,6 +28,8 @@ before(() => {
   Object.defineProperty(globalThis, "HTMLElement", { configurable: true, writable: true, value: domWindow.HTMLElement });
   Object.defineProperty(globalThis, "HTMLButtonElement", { configurable: true, writable: true, value: domWindow.HTMLButtonElement });
   Object.defineProperty(globalThis, "MutationObserver", { configurable: true, writable: true, value: domWindow.MutationObserver });
+  // SkillDetailHeader relies on the app's automatic JSX runtime, which a run from the repository root lacks.
+  Object.defineProperty(globalThis, "React", { configurable: true, writable: true, value: React });
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, writable: true, value: true });
 });
 
@@ -37,6 +40,7 @@ after(() => {
   Object.defineProperty(globalThis, "HTMLElement", { configurable: true, writable: true, value: priorElementGlobals.HTMLElement });
   Object.defineProperty(globalThis, "HTMLButtonElement", { configurable: true, writable: true, value: priorElementGlobals.HTMLButtonElement });
   Object.defineProperty(globalThis, "MutationObserver", { configurable: true, writable: true, value: priorElementGlobals.MutationObserver });
+  Object.defineProperty(globalThis, "React", { configurable: true, writable: true, value: priorElementGlobals.React });
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, writable: true, value: priorActEnvironment });
 });
 
