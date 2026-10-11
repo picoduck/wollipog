@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   terminalSearchCountLabel,
   type ShellTabView,
@@ -78,6 +78,16 @@ export function TerminalTabs({ tabsetId, panelId, tabs, activeId, onSelect, onCl
   );
 }
 
+interface TerminalSearchControlsProps {
+  term: string;
+  /** The addon's counts for `term`; null before the first count arrives. */
+  results: TerminalSearchResults | null;
+  onTermChange: (term: string) => void;
+  onNext: () => void;
+  onPrevious: () => void;
+  onClose: () => void;
+}
+
 /**
  * Search Output (#2864, refs #1265): an icon button that opens, in the head, a field with the match
  * count, Previous Match, Next Match and Close Search. Enter goes to the next match, Shift+Enter to the
@@ -86,48 +96,95 @@ export function TerminalTabs({ tabsetId, panelId, tabs, activeId, onSelect, onCl
  */
 export function TerminalSearch({
   open,
-  term,
-  results,
   disabled = false,
   onOpen,
+  ...controls
+}: TerminalSearchControlsProps & {
+  open: boolean;
+  /** No terminal to search (no tab open). */
+  disabled?: boolean;
+  onOpen: () => void;
+}) {
+  const focus = useSearchFocus(open, "head");
+  if (!open) return <TerminalSearchButton disabled={disabled} onClick={onOpen} />;
+  return <TerminalSearchControls {...controls} autoFocus={focus.autoFocus} onFieldFocus={focus.onFieldFocus} />;
+}
+
+/**
+ * Whether search controls mounting now take focus. Search opened while the host showed it puts the
+ * caret in the field. A host mounted with search already open (the dock shown again, #2867) leaves
+ * focus where it was. Controls that move to another `placement` while open (the phone dock's own row,
+ * across the 760px breakpoint, #2866) take focus only if their field had it, so rotating a phone
+ * neither drops the caret nor steals it from the terminal. The controls report their field's focus
+ * through `onFieldFocus`.
+ */
+export function useSearchFocus(open: boolean, placement: string): {
+  autoFocus: boolean;
+  onFieldFocus: (focused: boolean) => void;
+} {
+  // The last committed state, read during render, so a render React repeats decides the same way.
+  const committed = useRef<{ open: boolean; placement: string } | null>(null);
+  const fieldFocused = useRef(false);
+  useLayoutEffect(() => {
+    committed.current = { open, placement };
+    if (!open) fieldFocused.current = false;
+  });
+  const last = committed.current;
+  const autoFocus = last !== null && open &&
+    (!last.open || (last.placement !== placement && fieldFocused.current));
+  const onFieldFocus = useRef((focused: boolean) => { fieldFocused.current = focused; }).current;
+  return { autoFocus, onFieldFocus };
+}
+
+/**
+ * The Search Output button alone, for a host that shows the open search on a row of its own (the phone
+ * dock, #2866): there it stays in the head, pressed while the row is open, and a press closes it.
+ */
+export function TerminalSearchButton({ disabled = false, pressed, onClick }: {
+  disabled?: boolean;
+  /** Set only by a host whose button stays while search is open. */
+  pressed?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="icon-btn sm"
+      aria-label="Search Output"
+      title="Search Output"
+      aria-pressed={pressed}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      <SearchIcon size={14} />
+    </button>
+  );
+}
+
+/**
+ * The open search: the field, its match count, Previous Match, Next Match and Close Search. The field
+ * takes focus when the controls appear unless `autoFocus` is false (`useSearchFocus` decides).
+ */
+export function TerminalSearchControls({
+  term,
+  results,
   onTermChange,
   onNext,
   onPrevious,
   onClose,
-}: {
-  open: boolean;
-  term: string;
-  /** The addon's counts for `term`; null before the first count arrives. */
-  results: TerminalSearchResults | null;
-  /** No terminal to search (no tab open). */
-  disabled?: boolean;
-  onOpen: () => void;
-  onTermChange: (term: string) => void;
-  onNext: () => void;
-  onPrevious: () => void;
-  onClose: () => void;
+  autoFocus = true,
+  onFieldFocus,
+}: TerminalSearchControlsProps & {
+  autoFocus?: boolean;
+  /** Told when the field gains and loses focus (`useSearchFocus`). */
+  onFieldFocus?: (focused: boolean) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
-  const wasOpen = useRef(open);
+  const focusOnMount = useRef(autoFocus);
   useEffect(() => {
-    if (open && !wasOpen.current) inputRef.current?.focus();
-    wasOpen.current = open;
-  }, [open]);
+    if (focusOnMount.current) inputRef.current?.focus();
+  }, []);
 
-  if (!open) {
-    return (
-      <button
-        type="button"
-        className="icon-btn sm"
-        aria-label="Search Output"
-        title="Search Output"
-        disabled={disabled}
-        onClick={onOpen}
-      >
-        <SearchIcon size={14} />
-      </button>
-    );
-  }
   const canStep = term !== "" && (results?.count ?? 0) > 0;
   return (
     <div
@@ -153,6 +210,8 @@ export function TerminalSearch({
           autoComplete="off"
           spellCheck={false}
           onChange={(event) => onTermChange(event.target.value)}
+          onFocus={() => onFieldFocus?.(true)}
+          onBlur={() => onFieldFocus?.(false)}
           onKeyDown={(event) => {
             if (event.key !== "Enter") return;
             event.preventDefault();

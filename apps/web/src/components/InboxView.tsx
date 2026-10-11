@@ -174,6 +174,9 @@ export interface InboxViewProps {
   topbarControls?: ReactNode;
   rightPanel: RightPanelState;
   onOpenTerminal: () => void;
+  /** The bottom terminal dock is open; a phone's expanded session hides its composer for it (#2866). */
+  terminalOpen?: boolean;
+  onHideTerminal?: () => void;
   /** The Pinned Summary's state; the expanded session shows it. */
   pinnedSummary?: PinnedSummaryState;
   focusComposerSessionId?: string | null;
@@ -201,6 +204,8 @@ export function InboxView({
   topbarControls,
   rightPanel,
   onOpenTerminal,
+  terminalOpen = false,
+  onHideTerminal,
   pinnedSummary,
   focusComposerSessionId = null,
   onComposerFocusConsumed,
@@ -1634,6 +1639,8 @@ export function InboxView({
     topbarControls: expanded ? topbarControls : undefined,
     rightPanel,
     onOpenTerminal,
+    terminalOpen: expanded && terminalOpen,
+    onHideTerminal,
     pinnedSummary: expanded ? pinnedSummary : undefined,
     composerFocusIntent: focusComposerSessionId === surfaceSessionId ? "reply" : undefined,
     onComposerFocusConsumed,

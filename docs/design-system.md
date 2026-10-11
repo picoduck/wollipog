@@ -879,6 +879,20 @@ times. With a coarse pointer it is a 28px strip in the flow above the head whose
 up into the composer's bottom padding (44px in all), never over the tabs. ArrowUp and ArrowDown resize
 it in 16px steps, and Home or a double-click resets it to 220px.
 
+**On a phone (#2866).** At 760px and below the open dock is a sheet in the composer's place, with
+`--radius-lg` top corners and `--elev-3`, sitting on the tab bar with the grip on its top edge. The
+composer is hidden while it is open (still mounted, so its draft returns with it). The head stays one
+48px row: the tabs scroll with the edge fade and keep the active tab in view, and Search Output, New Tab
+and Hide Terminal keep 44px targets. Search Output stays in the head, pressed while search is open, and
+the open search takes its own row under the head (`.dock-search-row`: the field, the count, Previous
+Match, Next Match and Close Search). The height the person set is the terminal's, so the notice or a
+status row adds to the sheet rather than taking the terminal's lines. When the column is too short, the
+sheet gives way down to the session bar, and the session bar keeps its height. While the shell, search
+or a pipe row's field has focus, the tab bar leaves for the keyboard (§15.1) and the sheet sits on it
+(`--keyboard-inset`). Its tools and search row keep that field focused until a tap lands, so the
+returning tab bar never moves a control out from under the finger. The right panel's phone sheet
+covers it.
+
 ### 4.7 Toolbar
 
 A row of tools above the content they act on: search, filters, view switches and a result count.

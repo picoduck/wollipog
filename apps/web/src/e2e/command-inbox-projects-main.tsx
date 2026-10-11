@@ -94,6 +94,17 @@ const REVIEW_DIFF = FIXTURE_QUERY.get("reviewDiff") === "1";
 /** With `reviewDiff=1`, findings are held in memory, seeded with an open and a resolved one (#2851). */
 const REVIEW_FINDINGS = FIXTURE_QUERY.get("findings") === "1";
 const INCLUDE_SESSION_SHELL = FIXTURE_QUERY.get("sessionShell") === "1";
+/** `terminalShells=N` (#2866): every session has N running shells, Shell 1 with a test run's output. */
+const TERMINAL_SHELLS = Number(FIXTURE_QUERY.get("terminalShells") ?? 0);
+const TERMINAL_SHELL_OUTPUT = [
+  "dev@build-box:~/alpha$ pnpm test",
+  "> alpha@1.4.0 test",
+  "",
+  ...Array.from({ length: 24 }, (_, index) => ` ✓ src/checkout/step-${index + 1}.test.ts (4 checks) ${10 + index}ms`),
+  "",
+  " 24 files passed, 96 checks",
+  "dev@build-box:~/alpha$ ",
+].join("\r\n");
 const LEGACY_WORKSPACES = FIXTURE_QUERY.get("legacyWorkspaces") === "1";
 /** `scenario=session-tools` (#2844): Alpha's three background jobs, one still running. */
 const SESSION_TOOLS = SCENARIO === "session-tools";
@@ -2608,7 +2619,20 @@ const client = {
     return structuredClone(resolved);
   },
   listShells: async (sessionId: string) => ({
-    shells: lastCreateSessionRequest?.launchSurface === "native_tui"
+    shells: TERMINAL_SHELLS > 0
+      ? Array.from({ length: TERMINAL_SHELLS }, (_, index) => ({
+          shellId: `shell-${index + 1}`,
+          sessionId,
+          name: `Shell ${index + 1}`,
+          createdAt: index + 1,
+          pty: true,
+          kind: "shell" as const,
+          status: "running" as const,
+          outputStartSeq: 0,
+          outputEndSeq: index === 0 ? 1 : 0,
+          outputTruncated: false,
+        }))
+      : lastCreateSessionRequest?.launchSurface === "native_tui"
       ? [{
           shellId: `agent-tui-${sessionId}`,
           sessionId,
@@ -2625,7 +2649,9 @@ const client = {
   }),
   shellHistory: async (_sessionId: string, shellId: string) => ({
     shellId,
-    chunks: [],
+    chunks: TERMINAL_SHELLS > 0 && shellId === "shell-1"
+      ? [{ seq: 1, stream: "stdout" as const, data: TERMINAL_SHELL_OUTPUT }]
+      : [],
     nextAfter: 0,
     hasMore: false,
     truncatedBefore: false,

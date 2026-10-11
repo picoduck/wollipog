@@ -595,6 +595,11 @@ export type SessionDetailProps = {
   attentionTarget?: import("../navigation.js").AttentionTarget;
   rightPanel: RightPanelState;
   onOpenTerminal: () => void;
+  /** The bottom terminal dock is open (#2866). On a phone it takes the composer's place, so the
+   * composer is hidden while it is. */
+  terminalOpen?: boolean;
+  /** Hides the terminal dock, so an action whose result shows in the composer can show it (#2866). */
+  onHideTerminal?: () => void;
   /** The Pinned Summary's state (#2147). Only the expanded session shows the summary; without it,
    * none is shown. */
   pinnedSummary?: PinnedSummaryState;
@@ -1102,6 +1107,8 @@ function SessionDetailLoaded({
   attentionTarget,
   rightPanel,
   onOpenTerminal,
+  terminalOpen = false,
+  onHideTerminal,
   pinnedSummary: pinnedSummaryProp,
   composerFocusIntent,
   onComposerFocusConsumed,
@@ -1588,8 +1595,9 @@ function SessionDetailLoaded({
   // revealer, so every control that brings a request up (Jump to Question, an attention link, the
   // Agents and campaign panels) reaches it as it reaches the dock.
   const answerRevealRef = useRef<((requestId: string) => boolean) | null>(null);
-  useEffect(() => registerRequestRevealer(session.id, (requestId) => answerRevealRef.current?.(requestId) === true),
-    [session.id]);
+  // Not while a phone's terminal hides the composer (#2866): the question's dock card answers then.
+  useEffect(() => registerRequestRevealer(session.id, (requestId) =>
+    !phoneTerminalOpenRef.current && answerRevealRef.current?.(requestId) === true), [session.id]);
   const retitleReceiptRef = useRef<HTMLDivElement>(null);
   const rightPanelRef = useRef(rightPanel);
   rightPanelRef.current = rightPanel;
@@ -1605,6 +1613,22 @@ function SessionDetailLoaded({
     flushSync(() => panel.setExpanded(false));
     return true;
   }, [isMobile]);
+  /**
+   * A phone's terminal sheet takes the composer's place (#2866). Everything that puts the person in the
+   * composer or shows its result there (focusing it, Answer Mode, an edit or inserted draft, a reference
+   * chip) hides the terminal first, and commits it at once so focus in the same gesture lands, as an
+   * expanded panel is restored. Its shells keep running. Each caller acts for the person: nothing hides
+   * the terminal on its own.
+   */
+  const phoneTerminalOpen = isMobile && mode === "expanded" && terminalOpen;
+  const phoneTerminalOpenRef = useRef(phoneTerminalOpen);
+  phoneTerminalOpenRef.current = phoneTerminalOpen;
+  const hideTerminalRef = useRef(onHideTerminal);
+  hideTerminalRef.current = onHideTerminal;
+  const revealComposerFromTerminal = useCallback(() => {
+    const hide = hideTerminalRef.current;
+    if (phoneTerminalOpenRef.current && hide) flushSync(hide);
+  }, []);
   // Resolve attention only against this generation's known requests. Cold links stay on the
   // transcript while hydration catches up; they never guess an Agents overview first.
   const handledAttentionRef = useRef<string | null>(null);
@@ -1925,6 +1949,7 @@ function SessionDetailLoaded({
   }, [sessionId]);
 
   const focusComposerAtDraftEnd = useCallback(() => {
+    revealComposerFromTerminal();
     const element = inputRef.current;
     if (!element) return;
     setComposerExpanded(true);
@@ -1942,7 +1967,7 @@ function SessionDetailLoaded({
     // A collapsed phone composer hides its textarea. Retry after React commits the expanded
     // state; desktop and already-expanded composers retain the immediate focus path.
     if (!focus() && isMobile) window.requestAnimationFrame(focus);
-  }, [isMobile, sessionId]);
+  }, [isMobile, revealComposerFromTerminal, sessionId]);
 
   const focusComposerAfterRequestResolution = useCallback(() => {
     const element = inputRef.current;
@@ -2161,6 +2186,7 @@ function SessionDetailLoaded({
   }, [sessionId]);
   const insertSideChatDraft = useCallback((response: string) => {
     restoreExpandedPanel();
+    revealComposerFromTerminal();
     revealOrdinaryComposerRef.current("always");
     markDraftDirty();
     // The whole draft, attachments included: Undo gives back exactly this.
@@ -2175,7 +2201,7 @@ function SessionDetailLoaded({
       setProgrammaticComposerText(previous.text);
       replace(previous.images);
     });
-  }, [markDraftDirty, replace, restoreExpandedPanel, sessionId, setProgrammaticComposerText, showUndo]);
+  }, [markDraftDirty, replace, restoreExpandedPanel, revealComposerFromTerminal, sessionId, setProgrammaticComposerText, showUndo]);
   // Shared git status: the composer branch chip + the right panel's Review mode read one
   // fetch. Called before the !session guard — hooks must run unconditionally.
   // Inbox previews render neither the composer Git chip, pinned summary, nor Review panel. Do not
@@ -3536,12 +3562,14 @@ function SessionDetailLoaded({
     if (!el) return;
     resizeComposerToContent(el);
   };
-  // A phone's side panel sheet hides the composer (#2843). A draft that changed while it was hidden
-  // had no width to measure, so revealing it grows it again.
+  // A phone's side panel sheet hides the composer (#2843), and so does a phone's terminal sheet, which
+  // takes the composer's place (#2866). A draft that changed while it was hidden had no width to
+  // measure, so revealing it grows it again.
   const phonePanelOpen = isMobile && rightPanel.open;
+  const composerHiddenOnPhone = phonePanelOpen || phoneTerminalOpen;
   useLayoutEffect(() => {
     autoGrowComposerRef.current();
-  }, [mode, phonePanelOpen]);
+  }, [mode, composerHiddenOnPhone]);
   // A changed draft commits in the textarea alone, so what followed the draft here runs from the
   // textarea's layout phase instead: a pending focus restore, then the auto-grow, in the order their
   // effects above run.
@@ -3728,8 +3756,9 @@ function SessionDetailLoaded({
   const answerFocusRequestIdRef = useRef<string | null>(pendingQuestion?.requestId ?? null);
   const composerAnswerActive = canAnswerPendingQuestion && answerModeRequestId === pendingQuestion.requestId;
   // The composer, and with it Answer Mode, shows only in the expanded session; a preview keeps the
-  // question on the dock even while Answer Mode is open for it (#2212).
-  const answeringInComposer = composerAnswerActive && mode === "expanded";
+  // question on the dock even while Answer Mode is open for it (#2212), and so does a phone whose
+  // terminal has taken the composer's place (#2866): its Answer hides the terminal.
+  const answeringInComposer = composerAnswerActive && mode === "expanded" && !phoneTerminalOpen;
   const activeAnswerModeRequestRef = useRef<string | null>(composerAnswerActive ? answerModeRequestId : null);
   activeAnswerModeRequestRef.current = composerAnswerActive ? answerModeRequestId : null;
   const answerModeRegion = answerInputRef.current?.closest<HTMLElement>(".composer-answer") ?? null;
@@ -3737,6 +3766,7 @@ function SessionDetailLoaded({
     answerModeRegion.contains(answerInputRef.current!.ownerDocument.activeElement);
 
   const revealOrdinaryComposer = useCallback((focus: "always" | "answer-owned") => {
+    if (focus === "always") revealComposerFromTerminal();
     const input = answerInputRef.current;
     const activeElement = input?.ownerDocument.activeElement ?? null;
     const region = input?.closest<HTMLElement>(".composer-answer") ?? null;
@@ -3745,7 +3775,7 @@ function SessionDetailLoaded({
     answerModeFocusRequestRef.current = shouldFocus && composerAnswerActive ? "message" : null;
     setAnswerModeRequestId(null);
     if (!composerAnswerActive && shouldFocus) window.requestAnimationFrame(focusComposerAtDraftEnd);
-  }, [composerAnswerActive, focusComposerAtDraftEnd]);
+  }, [composerAnswerActive, focusComposerAtDraftEnd, revealComposerFromTerminal]);
   revealOrdinaryComposerRef.current = revealOrdinaryComposer;
 
   const exitAnswerMode = useCallback(() => {
@@ -3753,6 +3783,7 @@ function SessionDetailLoaded({
     revealOrdinaryComposer("always");
   }, [answerModeRequestId, revealOrdinaryComposer]);
   const enterAnswerMode = useCallback(() => {
+    revealComposerFromTerminal();
     if (!canAnswerPendingQuestion) {
       focusComposerAtDraftEnd();
       return;
@@ -3767,7 +3798,8 @@ function SessionDetailLoaded({
     }
     answerModeFocusRequestRef.current = "answer";
     setAnswerModeRequestId(pendingQuestion.requestId);
-  }, [canAnswerPendingQuestion, composerAnswerActive, focusComposerAtDraftEnd, pendingQuestion?.requestId]);
+  }, [canAnswerPendingQuestion, composerAnswerActive, focusComposerAtDraftEnd, pendingQuestion?.requestId,
+    revealComposerFromTerminal]);
 
   useLayoutEffect(() => {
     if (composerFocusIntent !== "reply") return;
@@ -5350,8 +5382,9 @@ function SessionDetailLoaded({
   // to Prompt restores an expanded panel to show it (#2845).
   const attachWorkspaceTargetFromPanel = useCallback((target: CreateWorkspaceReferenceRequest) => {
     restoreExpandedPanel();
+    revealComposerFromTerminal();
     return attachWorkspaceTarget(target);
-  }, [attachWorkspaceTarget, restoreExpandedPanel]);
+  }, [attachWorkspaceTarget, restoreExpandedPanel, revealComposerFromTerminal]);
 
   const selectWorkspaceCandidate = (candidate: WorkspaceReferenceCandidate) => {
     if (!workspaceTrigger) return;
@@ -5778,12 +5811,13 @@ function SessionDetailLoaded({
   // other one.
   const queuedEditPromptId = queuedEdit?.promptId ?? null;
   useEffect(() => cancelDictation, [queuedEditPromptId, cancelDictation]);
-  // A phone's side panel sheet hides the composer, mic included (#2843), and so does an expanded
-  // panel on desktop (#2845): either ends dictation, so no phrase lands in a draft nobody can see.
-  const composerHiddenByPanel = phonePanelOpen || (mode === "expanded" && rightPanel.open && rightPanel.expanded);
+  // A phone's side panel or terminal sheet hides the composer, mic included (#2843, #2866), and so does
+  // an expanded panel on desktop (#2845): each ends dictation, so no phrase lands in a draft nobody can
+  // see.
+  const composerHidden = composerHiddenOnPhone || (mode === "expanded" && rightPanel.open && rightPanel.expanded);
   useEffect(() => {
-    if (composerHiddenByPanel) cancelDictation();
-  }, [composerHiddenByPanel, cancelDictation]);
+    if (composerHidden) cancelDictation();
+  }, [composerHidden, cancelDictation]);
   // Live context and cost sit in the composer bar's trailing cluster, or in Model Settings when the
   // bar has no room for them (#2166).
   const [composerBoxRef, composerColumnNarrow] = useNarrowerThanRem<HTMLDivElement>(COMPOSER_USAGE_MIN_COLUMN_REM);
@@ -6725,9 +6759,11 @@ function SessionDetailLoaded({
     const had = dockHadRequestsRef.current;
     dockHadRequestsRef.current = dockShownRequests.length > 0;
     if (!dockFocusRemoved() || !had || dockShownRequests.length > 0) return;
-    if (mode === "expanded" && focusComposerAfterRequestResolution()) return;
+    // A phone's terminal has the composer's place (#2866): the reader above it takes focus instead.
+    const composerShown = mode === "expanded" && !phoneTerminalOpen;
+    if (composerShown && focusComposerAfterRequestResolution()) return;
     const composer = inputRef.current;
-    (composer && !composer.disabled && mode === "expanded" ? composer : scrollRef.current)?.focus();
+    (composer && !composer.disabled && composerShown ? composer : scrollRef.current)?.focus();
   });
 
   // The request dock (#2179), as the notice slot's lead while the session has a request of its own.
@@ -7330,11 +7366,13 @@ function SessionDetailLoaded({
 
           {/* A phone's side panel is a full-screen sheet; while it is open the composer is hidden
               (no box, out of the accessibility tree), so nothing covers a field the panel is editing
-              (#2843). It stays mounted: Answer Mode keeps a secret answer only in its own state. */}
+              (#2843). A phone's terminal sheet takes the composer's place, so it hides it too (#2866).
+              It stays mounted: the draft returns with it, and Answer Mode keeps a secret answer only
+              in its own state. */}
           {mode === "expanded" && (
             <div
               className="composer"
-              hidden={phonePanelOpen}
+              hidden={composerHiddenOnPhone}
               onFocusCapture={() => setActivePane("composer")}
               onPointerDownCapture={() => setActivePane("composer")}
             >
