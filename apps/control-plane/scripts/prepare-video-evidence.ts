@@ -17,7 +17,7 @@ if (!values.source || Boolean(values.output) === Boolean(values["verify-director
 const sourcePath = resolve(values.source);
 const outputPath = resolve(values.output ?? values["verify-directory"]!);
 async function boundedFile(path: string, limit: number): Promise<Buffer> {
-  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const before = await file.stat();
     if (!before.isFile() || before.size < 1 || before.size > limit) {

@@ -7,13 +7,30 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { test } from "node:test";
+import fc from "fast-check";
 import { PACED_VIDEO_PREPARATION_PROFILE as profile, prepareVideoEvidence,
-  videoPreparationDecoderAvailable } from "./video-evidence-preparation.js";
+  videoPreparationDecoderAvailable, videoPresentationTimeUs } from "./video-evidence-preparation.js";
 
 const fixture = (name: string) => readFileSync(new URL(`../test-fixtures/${name}`, import.meta.url));
 const paced = () => fixture("video-preparation-paced.webm");
 const hash = (bytes: Buffer | string) => createHash("sha256").update(bytes).digest("hex");
 const run = promisify(execFile);
+
+test("explicit PTS preserves every generated microsecond identically across FFmpeg field versions", () => {
+  const encode = (us: number) => `${Math.floor(us / 1_000_000)}.${String(us % 1_000_000).padStart(6, "0")}`;
+  fc.assert(fc.property(fc.integer({ min: 0, max: profile.durationUs }), (us) => {
+    const text = encode(us);
+    assert.equal(videoPresentationTimeUs({ pts_time: text }), us);
+    assert.equal(videoPresentationTimeUs({ pkt_pts_time: text }), us);
+    assert.equal(videoPresentationTimeUs({ pts_time: text, pkt_pts_time: text }), us);
+    assert.equal(videoPresentationTimeUs({ pts_time: text, pkt_pts_time: encode(us + 1) }), null);
+  }), { numRuns: 1_000 });
+  for (const raw of [undefined, null, 0, "N/A", "", "-1", "0.0000001", "1e2", " 0", "999999999999999999"]) {
+    assert.equal(videoPresentationTimeUs({ pts_time: raw }), null);
+    assert.equal(videoPresentationTimeUs({ pkt_pts_time: raw }), null);
+  }
+  assert.equal(videoPresentationTimeUs({}), null);
+});
 async function requireDecoder(t: { skip: (reason: string) => void }): Promise<boolean> {
   if (await videoPreparationDecoderAvailable()) return true;
   assert.notEqual(process.env.CI, "true", "CI must provision executable isolated FFmpeg");
@@ -147,16 +164,41 @@ test("long scenarios and excessive capture rates fail preflight without partial 
   }
 });
 
-test("two active jobs and two queued jobs serve FIFO while excess work gets a retryable busy result", async (t) => {
+test("bounded admission queues two waiters and rejects excess work, allowing declared deadline expiry", async (t) => {
   if (!await requireDecoder(t)) return;
   // Small valid sources finish preflight rapidly, so admitted waiters exercise the handoff
   // rather than hitting the deadline during a long PNG conversion.
   const source = fixture("video-review-max-profile.webm");
   const results = await Promise.all(Array.from({ length: 5 }, () => prepareVideoEvidence(source, "video/webm")));
-  assert.deepEqual(results.map((result) => result.ok ? "unexpected" : result.code),
-    ["recapture_resolution", "recapture_resolution", "recapture_resolution", "recapture_resolution", "decoder_busy"]);
+  assert.deepEqual(results.slice(0, 2).map((result) => result.ok ? "unexpected" : result.code),
+    ["recapture_resolution", "recapture_resolution"]);
+  for (const result of results.slice(2, 4)) {
+    assert.ok(!result.ok);
+    if (result.code !== "recapture_resolution") {
+      assert.equal(result.code, "decoder_busy");
+      assert.equal(result.retryable, true);
+      assert.match(result.reason, /deadline expired/, "admitted waiters may expire, but must not be refused as queue-full");
+    }
+  }
   const busy = results[4]!;
   assert.ok(!busy.ok && busy.retryable);
+  assert.equal(busy.code, "decoder_busy");
+  assert.match(busy.reason, /queue is full/);
+});
+
+test("the CLI refuses a FIFO before waiting for a writer", { skip: process.platform !== "linux" }, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "wollipog-video-fifo-test-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const fifo = join(root, "source.webm");
+  await run("/usr/bin/mkfifo", [fifo]);
+  await assert.rejects(run(process.execPath, ["--import", "tsx",
+    resolve("apps/control-plane/scripts/prepare-video-evidence.ts"), "--source", fifo,
+    "--output", join(root, "package"), "--media-type", "video/webm"], { timeout: 5_000 }),
+  (error: Error & { killed?: boolean }) => {
+    assert.equal(error.killed, false, "must refuse the FIFO rather than hang until the test kills it");
+    assert.match(error.message, /Input must be a nonempty regular file/);
+    return true;
+  });
 });
 
 test("the local CLI writes a private complete package and refuses symlinks or existing output", async (t) => {
