@@ -1,11 +1,11 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import {
   terminalSearchCountLabel,
   type ShellTabView,
   type TerminalSearchResults,
 } from "../shells-panel.js";
 import { statusMeta } from "../status-meta.js";
-import { ChevronDownIcon, ChevronUpIcon, CloseIcon, PlusIcon, SearchIcon } from "./Icons.js";
+import { ChevronDownIcon, ChevronUpIcon, CloseIcon, MoreHorizontalIcon, PlusIcon, SearchIcon } from "./Icons.js";
 import { handleRovingChoiceKeyDown, useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuSurface } from "./Menu.js";
 import { StatusBadge } from "./StatusBadge.js";
@@ -13,9 +13,10 @@ import { TabList } from "./Tabs.js";
 import { BusyButton } from "./ui/BusyButton.js";
 
 /**
- * The terminal head's controls (#2864; docs/design-system.md §4.6): the shell tabs, Search Output and
- * New Tab. They hold no placement logic, so the bottom dock and the right panel's Terminal tool render
- * the same controls, each in its own head.
+ * The terminal head's controls (#2864; docs/design-system.md §4.6): the shell tabs, Search Output,
+ * New Tab and More Terminal Actions. They hold no placement logic, so the bottom dock and the right
+ * panel's Terminal tool render the same controls, each in its own head, and each passes the move to
+ * the other place as its More Terminal Actions item.
  */
 
 /** The id of one terminal tab, which its tab panel names in `aria-labelledby`. */
@@ -359,6 +360,75 @@ export function TerminalNewTab({ id, kinds, busy, disabledReason, size = "sm" }:
               {kind.label}
             </MenuItem>
           ))}
+        </MenuSurface>
+      )}
+    </>
+  );
+}
+
+/** Each place's More Terminal Actions item: the move to the other place (§4.6). */
+export interface TerminalMoveAction {
+  label: string;
+  icon: ReactNode;
+  /** The item's second line (§9.1). */
+  description: string;
+  onChoose: () => void;
+}
+
+/**
+ * More Terminal Actions (⋯, §9.1): one item, the move to the terminal's other place (Move to Right
+ * Panel in the dock, #2869; Move to Bottom Dock in the panel's Terminal tool, #2868), with its second
+ * line. From the dock's head it opens above, as New Tab does; on a phone it is a sheet.
+ */
+export function TerminalMoreActions({ id, size = "sm", prefer, action }: {
+  /** The button's id, so a host can return focus to it. */
+  id: string;
+  size?: TerminalHeadButtonSize;
+  prefer?: "below" | "above";
+  action: TerminalMoveAction;
+}) {
+  const [open, setOpen] = useState(false);
+  const menu = useAccessibleMenu(open, setOpen, "terminal-more-actions", "item");
+  const { className, iconSize } = headButton(size);
+  return (
+    <>
+      <button
+        id={id}
+        ref={menu.triggerRef}
+        type="button"
+        className={className}
+        aria-label="More Terminal Actions"
+        title="More Terminal Actions"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? menu.menuId : undefined}
+        onClick={menu.toggle}
+        onKeyDown={menu.onTriggerKeyDown}
+      >
+        <MoreHorizontalIcon size={iconSize} />
+      </button>
+      {open && (
+        <MenuSurface
+          surfaceRef={menu.menuRef}
+          anchor={{ trigger: menu.triggerRef }}
+          id={menu.menuId}
+          label="More Terminal Actions"
+          align="end"
+          prefer={prefer}
+          tabIndex={-1}
+          onDismiss={() => menu.close(true)}
+          onKeyDown={menu.onMenuKeyDown}
+        >
+          <MenuItem
+            icon={action.icon}
+            description={action.description}
+            onClick={() => {
+              menu.close(false);
+              action.onChoose();
+            }}
+          >
+            {action.label}
+          </MenuItem>
         </MenuSurface>
       )}
     </>

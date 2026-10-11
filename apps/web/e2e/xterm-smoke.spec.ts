@@ -67,6 +67,165 @@ test.describe(HOST_MOVES, () => {
     const { opens, closes } = await calls();
     expect({ opens, closes }, "no shell was opened or closed by the move").toEqual({ opens: 0, closes: [] });
   });
+
+  // #2869: Move to Right Panel from the dock, then Move to Bottom Dock from the panel, is the same
+  // terminal the whole way: the process, its tab and scrollback, and no history is read again.
+  test("a process started in a dock shell is still running in the same tab after Move to Right Panel and Move to Bottom Dock, with no history read again", async ({ page }) => {
+    const response = await page.goto("/command-inbox-projects-e2e.html?fullShell=1&terminalShells=2");
+    expect(response?.ok(), "fixture page should be served").toBe(true);
+    await page.getByRole("button", { name: /Alpha Session/ }).first().click();
+    await page.getByRole("button", { name: "Open Session" }).click();
+    await page.getByRole("button", { name: "Terminal", exact: true }).first().click();
+    const dock = page.getByRole("region", { name: "Terminal" });
+    const dockRows = dock.locator(".shell-term:not(.is-hidden) .xterm-rows");
+    await expect(dockRows).toContainText("24 files passed");
+    const calls = () => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.shellCalls());
+    // Both shells' history, read once when the dock first showed them.
+    await expect.poll(async () => [...(await calls()).histories].sort()).toEqual(["shell-1", "shell-2"]);
+
+    await dock.locator(".shell-term:not(.is-hidden) .xterm-helper-textarea").focus();
+    await page.keyboard.type("sleep 60");
+    await page.keyboard.press("Enter");
+    await expect(dockRows).toContainText("sleep 60");
+    await expect.poll(async () => {
+      const { input } = await calls();
+      return { shells: [...new Set(input.map((entry) => entry.shellId))], typed: input.map((entry) => entry.data).join("") };
+    }).toEqual({ shells: ["shell-1"], typed: "sleep 60\r" });
+
+    await dock.getByRole("button", { name: "More Terminal Actions" }).click();
+    await page.getByRole("menuitem", { name: /Move to Right Panel/ }).click();
+
+    const panel = page.locator("#right-panel");
+    await expect(panel).toHaveAttribute("data-mode", "terminal");
+    await expect(dock).toHaveCount(0);
+    expect(await page.evaluate(() => localStorage.getItem("wollipog.terminal.placement"))).toBe("panel");
+    await expect(panel.getByRole("tab", { name: /Shell 1/ })).toHaveAttribute("aria-selected", "true");
+    const panelTerminal = panel.locator(".shell-term:not(.is-hidden)");
+    await expect(panelTerminal.locator(".xterm-rows")).toContainText("sleep 60");
+    await expect(panelTerminal.locator(".xterm-rows")).toContainText("24 files passed");
+    await expect(panelTerminal.locator(".xterm-helper-textarea")).toBeFocused();
+    await expect(page.getByRole("button", { name: "Terminal", exact: true }).first()).toHaveAttribute("aria-pressed", "true");
+
+    await panel.getByRole("button", { name: "More Terminal Actions" }).click();
+    await page.getByRole("menuitem", { name: /Move to Bottom Dock/ }).click();
+
+    await expect(dock).toBeVisible();
+    await expect(panel).toHaveCount(0);
+    expect(await page.evaluate(() => localStorage.getItem("wollipog.terminal.placement"))).toBe("dock");
+    await expect(dock.getByRole("tab", { name: /Shell 1/ })).toHaveAttribute("aria-selected", "true");
+    await expect(dockRows).toContainText("sleep 60");
+    await expect(dockRows).toContainText("24 files passed");
+    // Focus came back with it, so the next key reaches the same shell: its process never restarted.
+    await expect(dock.locator(".shell-term:not(.is-hidden) .xterm-helper-textarea")).toBeFocused();
+    await page.keyboard.press("Control+c");
+    await expect.poll(async () => (await calls()).input.at(-1)).toEqual({ shellId: "shell-1", data: "\u0003" });
+    const { opens, closes, histories } = await calls();
+    expect({ opens, closes }, "no shell was opened or closed by either move").toEqual({ opens: 0, closes: [] });
+    expect([...histories].sort(), "no history was read again by either move").toEqual(["shell-1", "shell-2"]);
+  });
+
+  // A move's focus request waits for its destination to mount, however long its code takes to arrive:
+  // the first Move to Right Panel on a slow network still lands focus in the moved terminal.
+  test("the first Move to Right Panel focuses the moved terminal even when the Terminal tool's code is slow to arrive", async ({ page }) => {
+    let toolRequested = false;
+    await page.route(/\/src\/components\/TerminalTool\.tsx/u, async (route) => {
+      toolRequested = true;
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      await route.continue();
+    });
+    const response = await page.goto("/command-inbox-projects-e2e.html?fullShell=1&terminalShells=2");
+    expect(response?.ok(), "fixture page should be served").toBe(true);
+    await page.getByRole("button", { name: /Alpha Session/ }).first().click();
+    await page.getByRole("button", { name: "Open Session" }).click();
+    await page.getByRole("button", { name: "Terminal", exact: true }).first().click();
+    const dock = page.getByRole("region", { name: "Terminal" });
+    await expect(dock.locator(".shell-term:not(.is-hidden) .xterm-rows")).toContainText("24 files passed");
+    expect(toolRequested, "nothing has asked for the Terminal tool's code before the move").toBe(false);
+
+    await dock.getByRole("button", { name: "More Terminal Actions" }).click();
+    await page.getByRole("menuitem", { name: /Move to Right Panel/ }).click();
+    const panel = page.locator("#right-panel");
+    await expect(panel.getByText("Loading terminal…")).toBeVisible();
+    expect(toolRequested).toBe(true);
+    await expect(panel.locator(".shell-term:not(.is-hidden) .xterm-helper-textarea")).toBeFocused();
+  });
+
+  // A move abandoned before its destination mounts takes no focus later: closing the panel while the
+  // Terminal tool loads, then typing in the composer, keeps the keys out of the shell when another window
+  // puts the terminal back in the dock.
+  test("an abandoned Move to Right Panel never moves focus later, so typing in the composer stays there", async ({ page, context }) => {
+    await page.route(/\/src\/components\/TerminalTool\.tsx/u, async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      await route.continue();
+    });
+    const response = await page.goto("/command-inbox-projects-e2e.html?fullShell=1&terminalShells=2");
+    expect(response?.ok(), "fixture page should be served").toBe(true);
+    await page.getByRole("button", { name: /Alpha Session/ }).first().click();
+    await page.getByRole("button", { name: "Open Session" }).click();
+    await page.getByRole("button", { name: "Terminal", exact: true }).first().click();
+    const dock = page.getByRole("region", { name: "Terminal" });
+    await expect(dock.locator(".shell-term:not(.is-hidden) .xterm-rows")).toContainText("24 files passed");
+
+    await dock.getByRole("button", { name: "More Terminal Actions" }).click();
+    await page.getByRole("menuitem", { name: /Move to Right Panel/ }).click();
+    const panel = page.locator("#right-panel");
+    await expect(panel.getByText("Loading terminal…")).toBeVisible();
+    await page.getByRole("button", { name: "Side Panel", exact: true }).first().click();
+    await expect(panel).toHaveCount(0);
+
+    const composer = page.locator(".composer-input");
+    await composer.click();
+    await page.keyboard.type("draft");
+    // Another window puts the terminal back in the dock, which shows again (its visibility was kept).
+    const other = await context.newPage();
+    await other.goto(`/command-inbox-projects-e2e.html?fullShell=1&path=${encodeURIComponent("/settings/appearance")}`);
+    await other.getByRole("radiogroup", { name: "Terminal Placement" }).getByRole("radio", { name: "Bottom Dock" }).click();
+    await expect(dock.locator(".shell-term:not(.is-hidden) .xterm-rows")).toContainText("24 files passed");
+    // Past the frame the dock's host would have moved focus in.
+    await page.waitForTimeout(500);
+    await expect(composer).toBeFocused();
+    await page.keyboard.type(" more");
+    await expect(composer).toHaveValue("draft more");
+    const { input } = await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.shellCalls());
+    expect(input, "no key reached a shell").toEqual([]);
+    await other.close();
+  });
+
+  // Turning to the composer while the moved terminal loads ends the move's claim on focus: the
+  // Terminal tool arriving afterwards leaves the composer focused, so its keys never reach the shell.
+  test("typing in the composer while a moved terminal loads keeps focus there when it arrives", async ({ page }) => {
+    let releaseTool!: () => void;
+    const toolGate = new Promise<void>((resolve) => { releaseTool = resolve; });
+    await page.route(/\/src\/components\/TerminalTool\.tsx/u, async (route) => {
+      await toolGate;
+      await route.continue();
+    });
+    const response = await page.goto("/command-inbox-projects-e2e.html?fullShell=1&terminalShells=2");
+    expect(response?.ok(), "fixture page should be served").toBe(true);
+    await page.getByRole("button", { name: /Alpha Session/ }).first().click();
+    await page.getByRole("button", { name: "Open Session" }).click();
+    await page.getByRole("button", { name: "Terminal", exact: true }).first().click();
+    const dock = page.getByRole("region", { name: "Terminal" });
+    await expect(dock.locator(".shell-term:not(.is-hidden) .xterm-rows")).toContainText("24 files passed");
+
+    await dock.getByRole("button", { name: "More Terminal Actions" }).click();
+    await page.getByRole("menuitem", { name: /Move to Right Panel/ }).click();
+    const panel = page.locator("#right-panel");
+    await expect(panel.getByText("Loading terminal…")).toBeVisible();
+
+    const composer = page.locator(".composer-input");
+    await composer.click();
+    await page.keyboard.type("draft");
+    releaseTool();
+    await expect(panel.locator(".shell-term:not(.is-hidden) .xterm-rows")).toContainText("24 files passed");
+    // Past the frame the tool's host would have moved focus in.
+    await page.waitForTimeout(500);
+    await expect(composer).toBeFocused();
+    await page.keyboard.type(" more");
+    await expect(composer).toHaveValue("draft more");
+    const { input } = await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.shellCalls());
+    expect(input, "no key reached a shell").toEqual([]);
+  });
 });
 
 test(SEARCH_DURING_FONT_LOAD_TEST, async ({ page }) => {

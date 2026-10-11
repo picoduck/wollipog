@@ -29,9 +29,16 @@ import { parseStoredDockVisible } from "./dock.js";
 import { isInboxBlocked } from "./inbox.js";
 import { sessionVisibleForReminderMode } from "./session-reminders.js";
 import { InboxView } from "./components/InboxView.js";
-import { openGoToFile, openSideChat, useRightPanelState, type RightPanelState } from "./components/right-panel-state.js";
+import {
+  openGoToFile,
+  openSideChat,
+  terminalToolShowing,
+  toggleTerminalTool,
+  useRightPanelState,
+  type RightPanelState,
+} from "./components/right-panel-state.js";
 import { SessionTerminalsProvider } from "./session-terminals.js";
-import { terminalPlacement, useTerminalPlacement } from "./terminal-placement.js";
+import { setTerminalPlacement, terminalPlacement, useTerminalPlacement } from "./terminal-placement.js";
 import { usePinnedSummaryState } from "./components/pinned-summary-state.js";
 import { EditorSelect } from "./components/EditorSelect.js";
 import { DesktopCloseGuard } from "./components/DesktopCloseGuard.js";
@@ -51,7 +58,7 @@ import {
   rovingChoiceTabIndex,
 } from "./components/interactions.js";
 import { cycleFocusZone, escapeOwner, focusZone, indicateFocusZone, sessionReadingTarget, shortcutScopeForFocus } from "./focus-zones.js";
-import { installTerminalExitBoundary } from "./terminal-focus.js";
+import { cancelTerminalFocusRequest, installTerminalExitBoundary, requestTerminalFocus } from "./terminal-focus.js";
 import {
   bareDigitPressed,
   isEditableShortcutTarget,
@@ -452,6 +459,36 @@ export function Shell() {
     if (terminalPlacement() === "panel") rightPanel.show("terminal");
     else setDockVisible(true);
   };
+  /**
+   * The session bar's Terminal toggle and Ctrl+` (#2869): the dock in Bottom Dock placement, the side
+   * panel's Terminal tool in Right Panel placement, where the dock's stored visibility and height are
+   * left as they are for when the terminal moves back.
+   */
+  const toggleTerminal = () => {
+    if (!terminalSupported) rightPanel.show("launcher");
+    else if (terminalPlacement() === "panel") toggleTerminalTool(rightPanel);
+    else setDockVisible((v) => !v);
+  };
+  const terminalShowing = terminalInPanel ? terminalToolShowing(rightPanel) : dockVisible;
+  /**
+   * Move to Right Panel (#2869), the dock's More Terminal Actions item: this device places the terminal
+   * in the side panel, which opens on its Terminal tool with the same tab and focus in it. The session's
+   * terminals move with it, so no shell restarts and each keeps its scrollback and the search.
+   */
+  const moveTerminalToPanel = (sessionId: string) => {
+    setTerminalPlacement("panel");
+    requestTerminalFocus(sessionId, "panel");
+    rightPanel.show("terminal");
+  };
+  // A move whose destination closes before its terminal mounts (the panel closed or switched tools, the
+  // dock hidden) is abandoned, so a later terminal never takes its focus request (#2869 review).
+  const panelTerminalOpen = terminalToolShowing(rightPanel);
+  const sessionId = view.name === "session" ? view.id : null;
+  useEffect(() => {
+    if (!sessionId) return;
+    if (!panelTerminalOpen) cancelTerminalFocusRequest(sessionId, "panel");
+    if (!dockVisible) cancelTerminalFocusRequest(sessionId, "dock");
+  }, [sessionId, panelTerminalOpen, dockVisible]);
 
   // Stable, because the identity chain runs all the way down: an inline arrow here rebuilds
   // InboxView's `expand`, which rebuilds `handleSelect`, which gives every mounted InboxRow unequal
@@ -719,8 +756,7 @@ export function Shell() {
       }
       if (matchesShortcut(e, "toggle-terminal")) {
         e.preventDefault();
-        if (terminalSupported) setDockVisible((v) => !v);
-        else rightPanel.show("launcher");
+        toggleTerminal();
       }
       // The Side Panel toggle's chord: closing keeps the tool, so it reopens on the last one (#1260).
       // Opening lands on the tool switcher, so the arrow keys reach every other tool (#2843).
@@ -788,11 +824,8 @@ export function Shell() {
           pinnedSummary.toggle();
         }}
         terminalSupported={terminalSupported}
-        terminalOpen={dockVisible}
-        onTerminal={() => {
-          if (terminalSupported) setDockVisible((v) => !v);
-          else rightPanel.show("launcher");
-        }}
+        terminalOpen={terminalShowing}
+        onTerminal={toggleTerminal}
         sidePanelOpen={rightPanel.open}
         onSidePanel={rightPanel.toggle}
       />
@@ -991,6 +1024,7 @@ export function Shell() {
             key={`dock-${view.id}`}
             sessionId={view.id}
             onClose={() => setDockVisible(false)}
+            onMoveToPanel={() => moveTerminalToPanel(view.id)}
             theme={theme.resolved}
             scheme={theme.scheme}
           />
