@@ -109,6 +109,8 @@ export class ShellTerminalInstance {
   private activeWash: IDecoration[] = [];
   /** Where the scrollback was when the terminal was last detached. */
   private keptViewport: { line: number; atBottom: boolean } | null = null;
+  /** The addon's last count for the current term. */
+  private searchResults: TerminalSearchResults | null = null;
 
   constructor(inputs: ShellTerminalInputs = NO_INPUTS, doc: Document = document) {
     this.inputs = inputs;
@@ -152,7 +154,12 @@ export class ShellTerminalInstance {
     }
     term.refresh(0, term.rows - 1);
     // Output that arrived while no host showed it.
+    const searched = this.applied?.searchTerm;
     this.sync(true);
+    // The addon may have recounted the matches while no host listened; a changed term counts afresh.
+    if (this.searchResults && this.inputs.searchTerm && this.inputs.searchTerm === searched) {
+      this.callbacks?.onSearchResults?.(this.searchResults);
+    }
   }
 
   /** Take the terminal out of `host`, if it is the attached one. The terminal keeps everything. */
@@ -224,6 +231,7 @@ export class ShellTerminalInstance {
           search.clearDecorations();
           term.clearSelection();
           this.markActiveMatch();
+          this.searchResults = null;
           this.callbacks?.onSearchResults?.(null);
         } else {
           search.findNext(next.searchTerm, { incremental: true, decorations: this.decorations() });
@@ -310,7 +318,9 @@ export class ShellTerminalInstance {
     search.onDidChangeResults(({ resultIndex, resultCount }) => {
       if (!this.inputs.searchTerm) return;
       this.markActiveMatch();
-      this.callbacks?.onSearchResults?.({ index: resultIndex, count: resultCount });
+      // Kept for the next host too: a count that changes while no host is attached is shown on attach.
+      this.searchResults = { index: resultIndex, count: resultCount };
+      this.callbacks?.onSearchResults?.(this.searchResults);
     });
     // A selection the person makes over the match is theirs: the active wash goes with the match.
     term.onSelectionChange(() => this.markActiveMatch());

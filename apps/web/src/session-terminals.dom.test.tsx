@@ -559,6 +559,40 @@ test("a shell created across a hidden reconnect has its history loaded on the ne
   }
 });
 
+test("a shell created while an older list lands has its history loaded on the next open", async () => {
+  const registry = [shell(1)];
+  let hold: ReturnType<typeof gate> | null = null;
+  let answer!: (created: ShellView) => void;
+  const { terminals, history } = storeOver(registry, {
+    holdList: () => hold?.wait() ?? Promise.resolve(),
+    openShell: () => new Promise<ShellView>((resolve) => { answer = resolve; }),
+  });
+  try {
+    let release = terminals.openHost();
+    await until(() => history.includes("shell-1"), "the first load");
+    release();
+
+    // Reopened with its list read but not yet answered, New Shell starts, and the dock is hidden.
+    hold = gate();
+    release = terminals.openHost();
+    const creating = terminals.newShell();
+    release();
+    registry.push(shell(2));
+    // The older list lands first: it prunes the new shell's output, which it does not list.
+    hold.open();
+    await settle(10);
+    answer(shell(2));
+    await creating;
+
+    hold = null;
+    release = terminals.openHost();
+    await until(() => history.includes("shell-2"), "the new shell's history");
+    release();
+  } finally {
+    terminals.dispose();
+  }
+});
+
 test("a reopened terminal offers a first shell only once its own list has arrived", async () => {
   const registry: ShellView[] = [];
   let hold: ReturnType<typeof gate> | null = null;
@@ -720,6 +754,50 @@ test("moving a running shell's terminal to another host keeps the same xterm and
     assert.ok(bufferText(term).join("\n").includes(scrollback.split("\n").filter(Boolean).at(-1)!), "the scrollback moved with it");
   } finally {
     await view.unmount();
+    terminals.dispose();
+  }
+});
+
+test("a match count that changes while no host is attached is shown when one attaches", async () => {
+  const terminals = new SessionTerminals(session.id, client, {
+    reconcileShellOutputs() {}, loadShellHistory() {}, removeShellOutput() {},
+  });
+  const instance = terminals.terminal("shell-1");
+  const counts: Array<number | null> = [];
+  const container = domWindow.document.createElement("div") as unknown as HTMLElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const render = (shown: boolean, text: string) => act(async () => root.render(
+    <div className="host-a">
+      {shown && (
+        <ShellTerminal
+          instance={instance}
+          text={text}
+          total={text.length}
+          interactive
+          searchTerm="needle"
+          theme="dark"
+          scheme="wollipog"
+          onSearchResults={(results) => counts.push(results?.count ?? null)}
+        />
+      )}
+    </div>,
+  ));
+  try {
+    await render(true, "haystack\r\n");
+    await until(() => counts.length > 0, "the first count");
+    assert.equal(counts.at(-1), 0);
+
+    // Matching output arrives just before the terminal is hidden: the addon recounts after it goes.
+    const more = "haystack\r\nneedle\r\n";
+    await render(true, more);
+    await render(false, more);
+    await settle(500);
+    await render(true, more);
+    await until(() => counts.at(-1) === 1, "the recount, shown on attach");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
     terminals.dispose();
   }
 });

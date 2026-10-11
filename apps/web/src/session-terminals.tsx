@@ -113,8 +113,12 @@ export class SessionTerminals {
   // and erase the just-opened tab. newShell bumps the token to invalidate in-flight loads; each load
   // applies only if it is still the newest.
   private loadSeq = 0;
-  /** Counts reconnects: a request that spans one must not mark history it read before it as current. */
-  private reconnects = 0;
+  /**
+   * Counts the events that can drop a shell's output from the app store: a reconnect, and a list
+   * applied (it prunes the output of shells it does not hold). A shell created while one happened may
+   * have lost its first output, so its history is loaded rather than assumed empty.
+   */
+  private outputDrops = 0;
   private readonly closingShellIds = new Set<string>();
   private initialShellLoadSettled = false;
   private autoOpened = false;
@@ -192,12 +196,12 @@ export class SessionTerminals {
 
   newShell = async (kind: ShellKind = "shell"): Promise<void> => {
     this.setState({ busy: true, error: null });
-    const reconnects = this.reconnects;
+    const outputDrops = this.outputDrops;
     try {
       const { shell } = await this.api.openShell(this.sessionId, { cols: 120, rows: 30, kind });
       this.loadSeq++; // an in-flight list snapshot predates this shell — don't let it land
-      // A new shell needs no history, unless a reconnect meanwhile may have dropped its first output.
-      if (this.reconnects === reconnects) this.historyLoaded.add(shell.shellId);
+      // A new shell needs no history, unless its first output may have been dropped meanwhile.
+      if (this.outputDrops === outputDrops) this.historyLoaded.add(shell.shellId);
       // The registry lists a shell before its runner answers, so a list read while this request was
       // out (the terminal reopened meanwhile) may already hold it: it keeps its tab.
       const shells = this.state.shells ?? [];
@@ -326,7 +330,7 @@ export class SessionTerminals {
     // Every shell's history is reloaded: now if a host shows the terminal, otherwise on the next open.
     // A load still in flight read the registry before the reconnect, so it must not land and mark it.
     this.loadSeq++;
-    this.reconnects++;
+    this.outputDrops++;
     this.historyLoaded.clear();
     if (this.hosts > 0) void this.loadShells({ reconcile: this.initialShellLoadSettled });
   }
@@ -455,6 +459,7 @@ export class SessionTerminals {
         removed = shellsRemovedAfterReconnect(this.state.shells, list);
         this.cancelRemovedShellWork(removed);
       }
+      this.outputDrops++;
       this.output.reconcileShellOutputs(this.sessionId, list.map((shell) => shell.shellId));
       const previous = this.state.active;
       this.setState({
