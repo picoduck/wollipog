@@ -423,6 +423,58 @@ test("a pending Stop Turn survives an earlier stop's late failure and a remount"
   }
 });
 
+/**
+ * Cross-model review CR-4.1 and CR-4.2. A send's late answer (the stored session, with no live turn)
+ * does not release a pending Stop Turn, and a stop that fails after a remount releases the reopened
+ * panel at once, with its failure shown there.
+ */
+test("a late send answer keeps a pending stop, and a stop's failure reaches a reopened panel", async () => {
+  const enter = async (field: HTMLTextAreaElement) => {
+    await act(async () => {
+      field.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }) as unknown as Event);
+    });
+  };
+  const running = { ...child, status: "running", activeTurnId: "turn-p" } as SessionView;
+  const prompts: Array<{ text: string; resolve: (session: SessionView) => void }> = [];
+  const cancels: Array<(cause: Error) => void> = [];
+  const stub: Partial<Api> = {
+    sideChat: async () => ({ sideChat: { parentSessionId: parent.id, session: running, createdAt: 1 } }),
+    getSessionEventPage: async () => ({ events: [], eventEpoch: 0, nextAfter: 0, cacheComplete: true }),
+    prompt: (_id: string, text: string) => new Promise<SessionView>((resolve) => { prompts.push({ text, resolve }); }),
+    cancelTurn: () => new Promise<SessionView>((_resolve, reject) => { cancels.push(reject); }),
+  };
+  const panel = <SideChatPanel session={parent} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION} onInsertDraft={() => {}} />;
+  const first = await render(panel, stub);
+  try {
+    await first.type("queued behind the turn");
+    await enter(first.textarea()!);
+    assert.equal(prompts.length, 1);
+    await act(async () => {
+      first.textarea()!.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", shiftKey: true, bubbles: true, cancelable: true }) as unknown as Event);
+    });
+    assert.equal(cancels.length, 1, "Shift+Esc stops the turn while the send is still on its way");
+    await act(async () => { prompts[0]!.resolve({ ...running, activeTurnId: undefined } as SessionView); });
+    await tick(10);
+    assert.equal(first.button("Stopping Turn")?.disabled, true, "the send's stored answer leaves the stop pending");
+    await first.type("not yet");
+    await enter(first.textarea()!);
+    assert.equal(prompts.length, 1, "Enter still waits for the stop");
+  } finally {
+    await first.dispose();
+  }
+
+  const second = await render(panel, stub);
+  try {
+    assert.equal(second.button("Stopping Turn")?.disabled, true);
+    await act(async () => { cancels[0]!(new Error("runner refused the stop")); });
+    assert.ok(second.button("Send") ?? second.button("Stop Turn"), "the reopened panel lets go at once");
+    assert.match(second.container.querySelector(".notice.t-danger")?.textContent ?? "",
+      /Couldn't stop the side chat's turn\. runner refused the stop/);
+  } finally {
+    await second.dispose();
+  }
+});
+
 test("a refused start keeps the draft without claiming the machine didn't respond", async () => {
   const view = await render(<SideChatPanel session={parent} runnerOnline onInsertDraft={() => {}} />, {
     sideChat: async () => ({ sideChat: null }),

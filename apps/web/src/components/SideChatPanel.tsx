@@ -83,6 +83,8 @@ interface StopAttempt {
  */
 const stopsInFlight = new Map<string, StopAttempt>();
 let stopAttempts = 0;
+/** Every mounted panel hears a stop that failed, so one reopened while it waited lets go at once. */
+const stopFailureListeners = new Set<(scope: string, attempt: number, cause: unknown) => void>();
 
 /** Prose, so sentence case: these complete the sentence "This side chat …". */
 const ENDED_PHRASE: Partial<Record<SessionStatus, string>> = {
@@ -227,6 +229,8 @@ export function SideChatPanel({
     const inherited = stopsInFlight.get(panelScratch);
     return inherited && inherited.deadline > Date.now() ? inherited : null;
   });
+  const stoppingRef = useRef(stopping);
+  stoppingRef.current = stopping;
   const [actionError, setActionError] = useState<{ kind: "send" | "stop"; message: string; status?: number } | null>(null);
   const [pollError, setPollError] = useState<string | null>(null);
   const enterKeySetting = useEnterKeyBehavior();
@@ -457,6 +461,17 @@ export function SideChatPanel({
     if (stopping !== null && child !== undefined && !stoppingTurn) releaseStop(stopping);
   }, [child, releaseStop, stopping, stoppingTurn]);
   useEffect(() => {
+    const listener = (scope: string, attempt: number, cause: unknown) => {
+      if (scope !== panelScratch || stoppingRef.current?.attempt !== attempt) return;
+      stoppingRef.current = null;
+      setStopping(null);
+      setActionError({ kind: "stop", message: (cause as Error).message,
+        status: cause instanceof ApiError ? cause.status : undefined });
+    };
+    stopFailureListeners.add(listener);
+    return () => { stopFailureListeners.delete(listener); };
+  }, [panelScratch]);
+  useEffect(() => {
     if (stopping === null) return;
     const timer = window.setTimeout(() => {
       releaseStop(stopping);
@@ -488,7 +503,9 @@ export function SideChatPanel({
       if (sendsInFlight.get(panelScratch) === settled) sendsInFlight.delete(panelScratch);
     });
     try {
-      const updated = await prompted;
+      await prompted;
+      // Polling reports what the send started. The prompt's own answer is the stored session, with
+      // no live turn coordinate, and adopting it would drop a pending Stop Turn's turn (#2863).
       // The send landed, so the draft it consumed must not come back — switching modes mid-flight
       // unmounts this panel before `setText("")` runs, and a restored copy of an already-sent
       // message invites sending it twice. Guarded on the revision as well as the text: a draft that
@@ -497,7 +514,6 @@ export function SideChatPanel({
       // a live composer.
       clearPanelScratchIf(panelScratch, SIDE_CHAT_DRAFT_KEY, sent, sentRevision);
       if (!mountedRef.current) return;
-      setSideChat((prior) => prior ? { ...prior, session: updated } : prior);
       setText("");
     } catch (cause) {
       if (mountedRef.current) {
@@ -524,13 +540,10 @@ export function SideChatPanel({
       await api.cancelTurn(child.id);
     } catch (cause) {
       // Only this press's own failure releases the seat: an earlier press failing late must not
-      // reopen Send under a newer stop that is still waiting.
+      // reopen Send under a newer stop that is still waiting. Whichever panel holds it now hears it.
       if (stopsInFlight.get(panelScratch)?.attempt !== attempt.attempt) return;
       stopsInFlight.delete(panelScratch);
-      if (!mountedRef.current) return;
-      setStopping((current) => current?.attempt === attempt.attempt ? null : current);
-      setActionError({ kind: "stop", message: (cause as Error).message,
-        status: cause instanceof ApiError ? cause.status : undefined });
+      for (const listener of stopFailureListeners) listener(panelScratch, attempt.attempt, cause);
     }
   };
 
