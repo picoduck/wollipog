@@ -1588,9 +1588,11 @@ function SessionDetailLoaded({
     return true;
   }, [isMobile]);
   /**
-   * A phone's terminal sheet takes the composer's place (#2866). An action whose result shows in the
-   * composer (a draft, a reference chip) hides the terminal first, and commits it at once, as an
-   * expanded panel is restored. Its shells keep running.
+   * A phone's terminal sheet takes the composer's place (#2866). Everything that puts the person in the
+   * composer or shows its result there (focusing it, Answer Mode, an edit or inserted draft, a reference
+   * chip) hides the terminal first, and commits it at once so focus in the same gesture lands, as an
+   * expanded panel is restored. Its shells keep running. Each caller acts for the person: nothing hides
+   * the terminal on its own.
    */
   const phoneTerminalOpen = isMobile && mode === "expanded" && terminalOpen;
   const phoneTerminalOpenRef = useRef(phoneTerminalOpen);
@@ -1921,6 +1923,7 @@ function SessionDetailLoaded({
   }, [sessionId]);
 
   const focusComposerAtDraftEnd = useCallback(() => {
+    revealComposerFromTerminal();
     const element = inputRef.current;
     if (!element) return;
     setComposerExpanded(true);
@@ -1938,7 +1941,7 @@ function SessionDetailLoaded({
     // A collapsed phone composer hides its textarea. Retry after React commits the expanded
     // state; desktop and already-expanded composers retain the immediate focus path.
     if (!focus() && isMobile) window.requestAnimationFrame(focus);
-  }, [isMobile, sessionId]);
+  }, [isMobile, revealComposerFromTerminal, sessionId]);
 
   const focusComposerAfterRequestResolution = useCallback(() => {
     const element = inputRef.current;
@@ -3723,8 +3726,9 @@ function SessionDetailLoaded({
   const answerFocusRequestIdRef = useRef<string | null>(pendingQuestion?.requestId ?? null);
   const composerAnswerActive = canAnswerPendingQuestion && answerModeRequestId === pendingQuestion.requestId;
   // The composer, and with it Answer Mode, shows only in the expanded session; a preview keeps the
-  // question on the dock even while Answer Mode is open for it (#2212).
-  const answeringInComposer = composerAnswerActive && mode === "expanded";
+  // question on the dock even while Answer Mode is open for it (#2212), and so does a phone whose
+  // terminal has taken the composer's place (#2866): its Answer hides the terminal.
+  const answeringInComposer = composerAnswerActive && mode === "expanded" && !phoneTerminalOpen;
   const activeAnswerModeRequestRef = useRef<string | null>(composerAnswerActive ? answerModeRequestId : null);
   activeAnswerModeRequestRef.current = composerAnswerActive ? answerModeRequestId : null;
   const answerModeRegion = answerInputRef.current?.closest<HTMLElement>(".composer-answer") ?? null;
@@ -3732,6 +3736,7 @@ function SessionDetailLoaded({
     answerModeRegion.contains(answerInputRef.current!.ownerDocument.activeElement);
 
   const revealOrdinaryComposer = useCallback((focus: "always" | "answer-owned") => {
+    if (focus === "always") revealComposerFromTerminal();
     const input = answerInputRef.current;
     const activeElement = input?.ownerDocument.activeElement ?? null;
     const region = input?.closest<HTMLElement>(".composer-answer") ?? null;
@@ -3740,7 +3745,7 @@ function SessionDetailLoaded({
     answerModeFocusRequestRef.current = shouldFocus && composerAnswerActive ? "message" : null;
     setAnswerModeRequestId(null);
     if (!composerAnswerActive && shouldFocus) window.requestAnimationFrame(focusComposerAtDraftEnd);
-  }, [composerAnswerActive, focusComposerAtDraftEnd]);
+  }, [composerAnswerActive, focusComposerAtDraftEnd, revealComposerFromTerminal]);
   revealOrdinaryComposerRef.current = revealOrdinaryComposer;
 
   const exitAnswerMode = useCallback(() => {
@@ -3748,6 +3753,7 @@ function SessionDetailLoaded({
     revealOrdinaryComposer("always");
   }, [answerModeRequestId, revealOrdinaryComposer]);
   const enterAnswerMode = useCallback(() => {
+    revealComposerFromTerminal();
     if (!canAnswerPendingQuestion) {
       focusComposerAtDraftEnd();
       return;
@@ -3762,7 +3768,8 @@ function SessionDetailLoaded({
     }
     answerModeFocusRequestRef.current = "answer";
     setAnswerModeRequestId(pendingQuestion.requestId);
-  }, [canAnswerPendingQuestion, composerAnswerActive, focusComposerAtDraftEnd, pendingQuestion?.requestId]);
+  }, [canAnswerPendingQuestion, composerAnswerActive, focusComposerAtDraftEnd, pendingQuestion?.requestId,
+    revealComposerFromTerminal]);
 
   useLayoutEffect(() => {
     if (composerFocusIntent !== "reply") return;
@@ -6671,9 +6678,11 @@ function SessionDetailLoaded({
     const had = dockHadRequestsRef.current;
     dockHadRequestsRef.current = dockShownRequests.length > 0;
     if (!dockFocusRemoved() || !had || dockShownRequests.length > 0) return;
-    if (mode === "expanded" && focusComposerAfterRequestResolution()) return;
+    // A phone's terminal has the composer's place (#2866): the reader above it takes focus instead.
+    const composerShown = mode === "expanded" && !phoneTerminalOpen;
+    if (composerShown && focusComposerAfterRequestResolution()) return;
     const composer = inputRef.current;
-    (composer && !composer.disabled && mode === "expanded" ? composer : scrollRef.current)?.focus();
+    (composer && !composer.disabled && composerShown ? composer : scrollRef.current)?.focus();
   });
 
   // The request dock (#2179), as the notice slot's lead while the session has a request of its own.

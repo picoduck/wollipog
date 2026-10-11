@@ -365,8 +365,13 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
                 rightPanel={rightPanel}
                 onOpenTerminal={() => {}}
                 terminalOpen={terminalOpen}
-                onHideTerminal={() => { options.hideTerminalCalls?.push(Date.now()); }}
-                composerFocusIntent={options.composerFocusIntent ?? "message"}
+                onHideTerminal={() => {
+                  options.hideTerminalCalls?.push(Date.now());
+                  // As the app shell does: the dock goes, and the composer comes back in the same commit.
+                  terminalOpen = false;
+                  renderWithDraftLoader(currentLoader);
+                }}
+                composerFocusIntent={options.composerFocusIntent === null ? undefined : options.composerFocusIntent ?? "message"}
                 onComposerFocusConsumed={options.onComposerFocusConsumed}
                 onApprove={options.onApprove}
                 onDeny={options.onDeny}
@@ -7155,6 +7160,76 @@ test("inserting a side-chat response on a phone hides the terminal that took the
     await unmountFixture(fixture);
     domWindow.matchMedia = priorMatchMedia;
   }
+});
+
+/** Each composer-directed action on a phone with the terminal open (#2866). */
+async function withPhoneTerminal(
+  options: FixtureOptions,
+  run: (fixture: Fixture, hideTerminalCalls: number[]) => Promise<void>,
+) {
+  const priorMatchMedia = domWindow.matchMedia;
+  domWindow.matchMedia = ((query: string) => ({
+    matches: query.includes("max-width: 760px"), media: query, onchange: null,
+    addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
+    dispatchEvent: () => false,
+  })) as never;
+  const hideTerminalCalls: number[] = [];
+  const draft = deferred<ComposerDraft | null>();
+  // No focus intent: only the action under test may ask for the composer.
+  const fixture = await mountFixture(draft, { composerFocusIntent: null, ...options, hideTerminalCalls });
+  try {
+    await resolveDraft(draft, "");
+    await fixture.setTerminalOpen(true);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
+    assert.equal(fixture.container.querySelector<HTMLElement>(".composer")?.hidden, true);
+    await run(fixture, hideTerminalCalls);
+  } finally {
+    await unmountFixture(fixture);
+    domWindow.matchMedia = priorMatchMedia;
+  }
+}
+
+test("a question answered in the composer stays on the dock under a phone's terminal, and Answer hides the terminal (#2866)", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  await withPhoneTerminal({}, async (fixture, hideTerminalCalls) => {
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-under-terminal",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Choose a target", options: [{ label: "Staging" }] }],
+      },
+    });
+    await act(async () => { flushFrames(); });
+    const answer = [...fixture.container.querySelectorAll<HTMLButtonElement>(".request-dock button")]
+      .find((button) => button.textContent?.trim() === "Answer");
+    assert.ok(answer, "the question keeps its card, with Answer, while the composer is hidden");
+
+    await act(async () => { answer.click(); });
+    await act(async () => { flushFrames(); });
+    assert.equal(hideTerminalCalls.length, 1, "Answer hides the terminal");
+    assert.equal(fixture.container.querySelector<HTMLElement>(".composer")?.hidden, false);
+    const field = fixture.container.querySelector<HTMLInputElement>(".composer-answer-input");
+    assert.ok(field, "the answer field shows in the composer");
+    assert.equal(field.ownerDocument.activeElement, field, "and takes focus");
+  });
+});
+
+test("Edit as a New Turn on a phone hides the terminal and shows the copy in the composer (#2866)", { timeout: 5_000 }, async () => {
+  await withPhoneTerminal({ mainEventPayloads: EDITABLE_TURN }, async (fixture, hideTerminalCalls) => {
+    const edit = fixture.container.querySelector('button[aria-label="Edit as a New Turn"]') as HTMLButtonElement | null;
+    assert.ok(edit);
+    await act(async () => { edit.click(); });
+    await act(async () => {
+      flushFrames();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      flushFrames();
+    });
+    assert.equal(hideTerminalCalls.length, 1, "editing a message hides the terminal");
+    assert.equal(fixture.container.querySelector<HTMLElement>(".composer")?.hidden, false);
+    assert.equal(fixture.composer.value, "original prompt");
+  });
 });
 
 test("the reader's keys are off while an expanded side panel hides the reader (#2845)", { timeout: 5_000 }, async () => {
