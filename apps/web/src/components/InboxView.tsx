@@ -1508,6 +1508,7 @@ export function InboxView({
   // divider stays where the stored ratio puts it. What the head leaves of its last row is space
   // under the last whole row, above the divider.
   const listHeadRef = useRef<HTMLDivElement>(null);
+  const listNoticesRef = useRef<HTMLDivElement>(null);
   const [listHeadHeight, setListHeadHeight] = useState(0);
   useLayoutEffect(() => {
     const head = listHeadRef.current;
@@ -1515,17 +1516,35 @@ export function InboxView({
       setListHeadHeight(0);
       return;
     }
-    const measure = () => setListHeadHeight(head.getBoundingClientRect().height);
+    const notices = listNoticesRef.current;
+    const measure = () => setListHeadHeight(head.getBoundingClientRect().height +
+      (notices?.getBoundingClientRect().height ?? 0));
     measure();
     if (typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(measure);
     observer.observe(head);
+    if (notices) observer.observe(notices);
     return () => observer.disconnect();
   }, [stacked]);
   // The epsilon keeps a head of exactly whole rows from taking one more through floating-point error.
   const listHeadRows = stacked && listHeadHeight > 0 && splitGeometry.rowHeight > 0
     ? Math.ceil(listHeadHeight / splitGeometry.rowHeight - 1e-6)
     : 0;
+  // A phone keyboard/rotation can shrink a notice that already holds focus. Keep that control
+  // inside the notice's own scroller without moving the list or taking focus elsewhere.
+  useLayoutEffect(() => {
+    const notices = listNoticesRef.current;
+    if (!isMobile || !notices || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      const focused = notices.ownerDocument.activeElement;
+      if (!(focused instanceof HTMLElement) || !notices.contains(focused)) return;
+      const bounds = notices.getBoundingClientRect(), control = focused.getBoundingClientRect();
+      if (control.bottom > bounds.bottom) notices.scrollTop += control.bottom - bounds.bottom;
+      else if (control.top < bounds.top) notices.scrollTop -= bounds.top - control.top;
+    });
+    observer.observe(notices);
+    return () => observer.disconnect();
+  }, [isMobile]);
   const orderLineId = `inbox-order-line-${useId().replace(/:/gu, "")}`;
   // A list notice that held focus and went (Dismiss All took the last skill) leaves focus in the list.
   const focusListZone = useCallback(() => {
@@ -1770,10 +1789,9 @@ export function InboxView({
         aria-hidden={expanded || undefined}
         inert={expanded || undefined}
       >
-        {/* What sits above the rows (§13.2, #2221): the one list notice, then the quiet new-order
-            line, then the Reconnecting… line. Stacked, it takes whole rows of the list's height, so
-            the divider stays put and no row is cut at it. */}
-        <div className="inbox-list-head" ref={listHeadRef}>
+        {/* One mounted notice slot: above the list on desktop, below its scroller on a phone so
+            asynchronously loaded recommendations cannot move the already rendered top rows. */}
+        <div className="inbox-list-notices" ref={listNoticesRef}>
           <SessionsListNotices
             signIns={machineProviderLogins}
             machineName={machineName}
@@ -1785,6 +1803,9 @@ export function InboxView({
             onSetupGenerated={openGeneratedWorktreeSetup}
             onFocusLost={focusListZone}
           />
+        </div>
+        {/* The quiet order and reconnecting lines stay above the rows in every layout. */}
+        <div className="inbox-list-head" ref={listHeadRef}>
           {/* Live activity would reorder the rows. Neutral and outside the slot, so no notice ever
               waits behind it, and nothing in the header or the tab row moves for it. */}
           {orderUpdateAvailable && (

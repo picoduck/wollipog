@@ -2853,7 +2853,7 @@ test("the list holds one notice: a machine sign-in first, then the Project's set
     });
   });
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
-  const head = () => container.querySelector<HTMLElement>(".inbox-list-pane > .inbox-list-head");
+  const head = () => container.querySelector<HTMLElement>(".inbox-list-pane > .inbox-list-notices");
   const notices = () => [...(head()?.querySelectorAll(".notice") ?? [])];
   const shownTitle = () => head()?.querySelector(".notice-title")?.textContent ?? null;
   const more = () => head()?.querySelector(".session-notice-more")?.textContent ?? null;
