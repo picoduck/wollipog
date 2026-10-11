@@ -125,6 +125,24 @@ test.describe("on a phone with a coarse pointer", () => {
     });
   });
 
+  test("the About sheet lists what is shared without the keyboard-only Open fact, and nothing is clipped (#2863)", async ({ page }) => {
+    await openSideChat(page, 390, 844);
+    await panel(page).getByRole("button", { name: "About Side Chat" }).click();
+    const sheet = page.getByRole("dialog", { name: "About Side Chat" });
+    await expect(sheet).toBeVisible();
+    await expect(sheet.locator("dt")).toHaveText(["Shared", "Not Shared", "Comes Back", "Send"]);
+    // The sheet slides up from below; measure it once it has settled.
+    await expect.poll(async () => (await sheet.boundingBox())!.y + (await sheet.boundingBox())!.height).toBeLessThanOrEqual(844);
+    const fits = await sheet.evaluate((element) => {
+      const scroller = [element, ...element.querySelectorAll<HTMLElement>("*")]
+        .find((candidate) => candidate.scrollHeight > candidate.clientHeight + 1 && getComputedStyle(candidate).overflowY !== "visible");
+      const box = element.getBoundingClientRect();
+      return { clipped: scroller?.className ?? null, bottom: box.bottom, viewport: window.innerHeight };
+    });
+    expect(fits.clipped).toBeNull();
+    expect(fits.bottom).toBeLessThanOrEqual(fits.viewport);
+  });
+
   test("ended at 390px stacks the sentence over a full-width 44px button (#2863)", async ({ page }) => {
     await openSideChat(page, 390, 844, "ended");
     const ended = await box(panel(page).locator(".sc-ended"));
