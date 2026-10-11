@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type CDPSession, type Page } from "@playwright/test";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
@@ -86,6 +86,78 @@ async function signIn(page: Page) {
   await page.goto(`${base}${viewPath({ name: "session", id: "opening-welcome" })}#pair=${token}`);
   await expect(page.getByText("Opening Benchmark Ready").first()).toBeVisible({ timeout: 30_000 });
   await expect(page.getByText("Warm the application before measuring navigation.", { exact: true })).toBeVisible();
+}
+
+// Temporary, approved diagnostic iteration. Profiling adds overhead, so these timings cannot
+// establish final acceptance. Remove this instrumentation before the final validation/review.
+function coldCpuDiagnostics(cdp: CDPSession, page: Page) {
+  let profiling = false;
+  let tracing = false;
+  let stream: string | undefined;
+  let complete!: () => void;
+  const completed = new Promise<void>(resolve => { complete = resolve; });
+  const traceComplete = (event: { stream?: string }) => { stream = event.stream; complete(); };
+  const pageClosed = () => complete();
+  cdp.on("Tracing.tracingComplete", traceComplete);
+  page.once("close", pageClosed);
+  async function stopTrace() {
+    if (!tracing) return;
+    try {
+      await cdp.send("Tracing.end");
+      await completed;
+    } finally { tracing = false; }
+  }
+  async function closeStream() {
+    const handle = stream;
+    stream = undefined;
+    if (handle) await cdp.send("IO.close", { handle }).catch(() => {});
+  }
+  return {
+    async start() {
+      await cdp.send("Profiler.enable");
+      profiling = true;
+      await cdp.send("Profiler.start");
+      tracing = true;
+      await cdp.send("Tracing.start", { categories: "devtools.timeline,v8,disabled-by-default-devtools.timeline", transferMode: "ReturnAsStream" });
+    },
+    async finish(rate: number, outputPath: (name: string) => string) {
+      await stopTrace();
+      let traceData = "";
+      if (stream) {
+        while (true) {
+          const chunk = await cdp.send("IO.read", { handle: stream });
+          traceData += chunk.data;
+          if (chunk.eof) break;
+        }
+      }
+      await closeStream();
+      const { profile } = await cdp.send("Profiler.stop");
+      profiling = false;
+      // Raw data stays on this test worker's disk; only bounded, payload-free summaries are logged.
+      writeFileSync(outputPath(`cold-cpu-trace-${rate}x.json`), traceData);
+      writeFileSync(outputPath(`cold-cpu-profile-${rate}x.json`), JSON.stringify(profile));
+      const events = JSON.parse(traceData).traceEvents as Array<{ name: string; ph?: string; tid: number; dur?: number; tdur?: number; args?: { name?: string } }>;
+      const rendererThreads = new Set(events.filter(event => event.name === "thread_name" && event.args?.name === "CrRendererMain").map(event => event.tid));
+      const longestRendererTasks = events.filter(event => rendererThreads.has(event.tid) && event.name === "RunTask" && event.ph === "X")
+        .sort((left, right) => (right.dur ?? 0) - (left.dur ?? 0)).slice(0, 8)
+        .map(event => ({ wallMs: (event.dur ?? 0) / 1_000, cpuMs: (event.tdur ?? 0) / 1_000 }));
+      const sampleCounts = new Map<number, number>();
+      for (const id of profile.samples ?? []) sampleCounts.set(id, (sampleCounts.get(id) ?? 0) + 1);
+      const sampledFunctions = profile.nodes.map(node => ({ samples: sampleCounts.get(node.id) ?? 0,
+        functionName: node.callFrame.functionName, lineNumber: node.callFrame.lineNumber, columnNumber: node.callFrame.columnNumber }))
+        .sort((left, right) => right.samples - left.samples).slice(0, 16);
+      console.info(`Cold CPU Diagnostic: ${JSON.stringify({ rate, longestRendererTasks, sampledFunctions })}`);
+    },
+    async cleanup() {
+      await stopTrace().catch(() => {});
+      await closeStream();
+      if (profiling) await cdp.send("Profiler.stop").catch(() => {});
+      await cdp.send("Profiler.disable").catch(() => {});
+      cdp.off("Tracing.tracingComplete", traceComplete);
+      page.off("close", pageClosed);
+      await cdp.detach().catch(() => {});
+    },
+  };
 }
 
 for (const rate of [1, 4]) test(`a 10,503-event production opening starts at the current turn at ${rate}x CPU`, async ({ page }, info) => {
@@ -227,85 +299,90 @@ for (const rate of [1, 4]) test(`an incomplete cache opens its real authoritativ
   await signIn(page);
   const cdp = await page.context().newCDPSession(page);
   await cdp.send("Emulation.setCPUThrottlingRate", { rate });
-  const requests: string[] = [];
-  page.on("request", request => {
-    const path = new URL(request.url()).pathname;
-    if (path === `/api/sessions/${COLD_SESSION_ID}/events`) requests.push(request.url());
-  });
-  await page.evaluate(path => {
-    const state = { started: performance.now(), interactiveMs: 0, firstVisibleKey: "", longTasks: [] as number[],
-      longTaskDetails: [] as Array<{ startTime: number; duration: number }>, longAnimationFrames: [] as unknown[] };
-    (window as unknown as { __coldOpening: typeof state }).__coldOpening = state;
-    const observer = new PerformanceObserver(list => {
-      for (const entry of list.getEntries()) if (entry.startTime >= state.started) {
-        state.longTasks.push(entry.duration);
-        if (state.longTaskDetails.length < 8) state.longTaskDetails.push({ startTime: entry.startTime, duration: entry.duration });
-      }
+  const cpuDiagnostics = coldCpuDiagnostics(cdp, page);
+  try {
+    await cpuDiagnostics.start();
+    const requests: string[] = [];
+    page.on("request", request => {
+      const path = new URL(request.url()).pathname;
+      if (path === `/api/sessions/${COLD_SESSION_ID}/events`) requests.push(request.url());
     });
-    observer.observe({ type: "longtask", buffered: true });
-    // Keep the existing budget intact; retain the task's frame/script attribution when available
-    // so a CI-only miss can be investigated without losing the diagnostic attachment with the VM.
-    const animationObserver = new PerformanceObserver(list => {
-      for (const entry of list.getEntries()) if (entry.startTime >= state.started && state.longAnimationFrames.length < 8) {
-        const frame = entry.toJSON();
-        if (Array.isArray(frame.scripts)) frame.scripts = frame.scripts.slice(0, 16);
-        state.longAnimationFrames.push(frame);
+    await page.evaluate(path => {
+      const state = { started: performance.now(), interactiveMs: 0, firstVisibleKey: "", longTasks: [] as number[],
+        longTaskDetails: [] as Array<{ startTime: number; duration: number }>, longAnimationFrames: [] as unknown[] };
+      (window as unknown as { __coldOpening: typeof state }).__coldOpening = state;
+      const observer = new PerformanceObserver(list => {
+        for (const entry of list.getEntries()) if (entry.startTime >= state.started) {
+          state.longTasks.push(entry.duration);
+          if (state.longTaskDetails.length < 8) state.longTaskDetails.push({ startTime: entry.startTime, duration: entry.duration });
+        }
+      });
+      observer.observe({ type: "longtask", buffered: true });
+      // Keep the existing budget intact; retain the task's frame/script attribution when available
+      // so a CI-only miss can be investigated without losing the diagnostic attachment with the VM.
+      const animationObserver = new PerformanceObserver(list => {
+        for (const entry of list.getEntries()) if (entry.startTime >= state.started && state.longAnimationFrames.length < 8) {
+          const frame = entry.toJSON();
+          if (Array.isArray(frame.scripts)) frame.scripts = frame.scripts.slice(0, 16);
+          state.longAnimationFrames.push(frame);
+        }
+      });
+      if (PerformanceObserver.supportedEntryTypes.includes("long-animation-frame")) {
+        animationObserver.observe({ type: "long-animation-frame", buffered: true });
       }
-    });
-    if (PerformanceObserver.supportedEntryTypes.includes("long-animation-frame")) {
-      animationObserver.observe({ type: "long-animation-frame", buffered: true });
-    }
-    const frame = () => {
-      const reader = document.querySelector<HTMLElement>(".detail-scroll");
-      const ready = reader?.querySelector('[data-virtual-measurements="ready"]');
-      const bounds = reader?.getBoundingClientRect();
-      const row = ready && bounds ? [...ready.querySelectorAll<HTMLElement>("[data-virtual-row]")].find(row => {
-        const rect = row.getBoundingClientRect();
-        return rect.height > 0 && rect.bottom > bounds.top && rect.top < bounds.bottom;
-      }) : undefined;
-      if (row) state.firstVisibleKey ||= row.dataset.virtualKey!;
-      const control = document.querySelector<HTMLButtonElement>("[data-later-activity-gap] button");
-      if (row && control && !control.disabled && reader?.getAttribute("aria-busy") !== "true") {
-        state.interactiveMs = performance.now() - state.started;
-        requestAnimationFrame(() => { observer.disconnect(); animationObserver.disconnect(); });
-        return;
-      }
+      const frame = () => {
+        const reader = document.querySelector<HTMLElement>(".detail-scroll");
+        const ready = reader?.querySelector('[data-virtual-measurements="ready"]');
+        const bounds = reader?.getBoundingClientRect();
+        const row = ready && bounds ? [...ready.querySelectorAll<HTMLElement>("[data-virtual-row]")].find(row => {
+          const rect = row.getBoundingClientRect();
+          return rect.height > 0 && rect.bottom > bounds.top && rect.top < bounds.bottom;
+        }) : undefined;
+        if (row) state.firstVisibleKey ||= row.dataset.virtualKey!;
+        const control = document.querySelector<HTMLButtonElement>("[data-later-activity-gap] button");
+        if (row && control && !control.disabled && reader?.getAttribute("aria-busy") !== "true") {
+          state.interactiveMs = performance.now() - state.started;
+          requestAnimationFrame(() => { observer.disconnect(); animationObserver.disconnect(); });
+          return;
+        }
+        requestAnimationFrame(frame);
+      };
       requestAnimationFrame(frame);
-    };
-    requestAnimationFrame(frame);
-    history.pushState(null, "", path);
-    dispatchEvent(new PopStateEvent("popstate"));
-  }, viewPath({ name: "session", id: COLD_SESSION_ID }));
-  if (process.env.LONG_TURN_OPENING_BASELINE === "1") {
-    await delay(2_000);
-    if (evidenceDir) await page.screenshot({ path: join(evidenceDir, `cold-before-${rate}x.png`) });
-  }
-  await expect.poll(() => page.evaluate(() => (window as unknown as { __coldOpening: { interactiveMs: number } }).__coldOpening.interactiveMs),
-    { timeout: 15_000 }).toBeGreaterThan(0);
-  const measured = await page.evaluate(() => (window as unknown as { __coldOpening: {
-    interactiveMs: number; firstVisibleKey: string; longTasks: number[] } }).__coldOpening);
-  const opening = await page.request.get(`${base}/api/sessions/${COLD_SESSION_ID}/events?opening=current-turn&limit=200&eventEpoch=0`, { headers: { authorization: `Bearer ${token}` } });
-  const body = await opening.json();
-  const report = { rate, ...measured, longestTaskMs: Math.max(0, ...measured.longTasks),
-    requestCount: requests.length, cacheComplete: body.cacheComplete, previewEvents: body.preview?.events.length ?? 0 };
-  console.info(`Cold Opening Diagnostic: ${JSON.stringify(report)}`);
-  await info.attach(`cold-opening-${rate}x.json`, { body: JSON.stringify(report, null, 2), contentType: "application/json" });
-  if (evidenceDir) {
-    mkdirSync(evidenceDir, { recursive: true });
-    writeFileSync(join(evidenceDir, `cold-opening-${rate}x.json`), JSON.stringify(report, null, 2));
-    await page.screenshot({ path: join(evidenceDir, `cold-after-${rate}x.png`) });
-  }
-  expect(body.cacheComplete).toBe(false);
-  expect(body.preview.events).toHaveLength(200);
-  expect(report.firstVisibleKey).toBe(`item:user_message:${LONG_TURN_START_SEQ}`);
-  expect(report.interactiveMs).toBeLessThan(1_000);
-  expect(report.longestTaskMs).toBeLessThanOrEqual(200);
-  expect(report.requestCount).toBeLessThanOrEqual(2);
-  await expect(page.getByText(LONG_TURN_PROMPT, { exact: true })).toBeInViewport();
-  await page.getByRole("button", { name: "Load Later Activity", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Load Later Activity", exact: true })).toBeEnabled();
-  await expect(page.getByText(LONG_TURN_PROMPT, { exact: true })).toBeInViewport();
-  await cdp.send("Emulation.setCPUThrottlingRate", { rate: 1 });
+      history.pushState(null, "", path);
+      dispatchEvent(new PopStateEvent("popstate"));
+    }, viewPath({ name: "session", id: COLD_SESSION_ID }));
+    if (process.env.LONG_TURN_OPENING_BASELINE === "1") {
+      await delay(2_000);
+      if (evidenceDir) await page.screenshot({ path: join(evidenceDir, `cold-before-${rate}x.png`) });
+    }
+    await expect.poll(() => page.evaluate(() => (window as unknown as { __coldOpening: { interactiveMs: number } }).__coldOpening.interactiveMs),
+      { timeout: 15_000 }).toBeGreaterThan(0);
+    const measured = await page.evaluate(() => (window as unknown as { __coldOpening: {
+      interactiveMs: number; firstVisibleKey: string; longTasks: number[] } }).__coldOpening);
+    await cpuDiagnostics.finish(rate, name => info.outputPath(name));
+    const opening = await page.request.get(`${base}/api/sessions/${COLD_SESSION_ID}/events?opening=current-turn&limit=200&eventEpoch=0`, { headers: { authorization: `Bearer ${token}` } });
+    const body = await opening.json();
+    const report = { rate, ...measured, longestTaskMs: Math.max(0, ...measured.longTasks),
+      requestCount: requests.length, cacheComplete: body.cacheComplete, previewEvents: body.preview?.events.length ?? 0 };
+    console.info(`Cold Opening Diagnostic: ${JSON.stringify(report)}`);
+    await info.attach(`cold-opening-${rate}x.json`, { body: JSON.stringify(report, null, 2), contentType: "application/json" });
+    if (evidenceDir) {
+      mkdirSync(evidenceDir, { recursive: true });
+      writeFileSync(join(evidenceDir, `cold-opening-${rate}x.json`), JSON.stringify(report, null, 2));
+      await page.screenshot({ path: join(evidenceDir, `cold-after-${rate}x.png`) });
+    }
+    expect(body.cacheComplete).toBe(false);
+    expect(body.preview.events).toHaveLength(200);
+    expect(report.firstVisibleKey).toBe(`item:user_message:${LONG_TURN_START_SEQ}`);
+    expect(report.interactiveMs).toBeLessThan(1_000);
+    expect(report.longestTaskMs).toBeLessThanOrEqual(200);
+    expect(report.requestCount).toBeLessThanOrEqual(2);
+    await expect(page.getByText(LONG_TURN_PROMPT, { exact: true })).toBeInViewport();
+    await page.getByRole("button", { name: "Load Later Activity", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Load Later Activity", exact: true })).toBeEnabled();
+    await expect(page.getByText(LONG_TURN_PROMPT, { exact: true })).toBeInViewport();
+    await cdp.send("Emulation.setCPUThrottlingRate", { rate: 1 });
+  } finally { await cpuDiagnostics.cleanup(); }
 });
 
 async function verifyColdBackgroundTurn(page: Page, paced = false) {
