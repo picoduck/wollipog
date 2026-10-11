@@ -436,9 +436,18 @@ export function SideChatPanel({
     return () => window.clearTimeout(timer);
   }, [stoppingTurn]);
 
+  // Why Send is closed, as the visible reason beside it, or null when it is open. Send, Enter and
+  // anything else that submits read this one answer, so a key never sends past a disabled button.
+  const startingSentence = `Creating a worktree on ${machine}. You can type your question now and send it when the side chat is ready.`;
+  const sendBlocked = childStarting ? startingSentence
+    : startFailed ? "Start the side chat to send."
+      : !runnerOnline ? `${machine} is offline.`
+        : null;
+
   const send = async () => {
     const outgoing = text.trim();
-    if (!child || !outgoing || sending || !runnerOnline || isTerminal(child.status) || sideChatStarting(child.status)) return;
+    // A pending Stop Turn holds the seat, as the main composer's does: nothing sends until it settles.
+    if (!child || !outgoing || sending || sendBlocked !== null || stoppingTurn || isTerminal(child.status)) return;
     const sent = text;
     const sentRevision = panelScratchRevision(panelScratch, SIDE_CHAT_DRAFT_KEY);
     setSending(true);
@@ -565,7 +574,6 @@ export function SideChatPanel({
     );
   }
 
-  const startingSentence = `Creating a worktree on ${machine}. You can type your question now and send it when the side chat is ready.`;
   const failure = startFailed;
   const failureNotice = failure && (
     <Notice tone="danger" role="alert" title="Couldn't Start Side Chat"
@@ -580,10 +588,6 @@ export function SideChatPanel({
   // An ended child takes no message: its foot is one sentence and one way to start again, and while
   // a replacement is being created or failed to be, the composer it will take comes back.
   const showEnded = childEnded && !creating && !(failure?.replaceEnded);
-  const sendBlocked = childStarting ? startingSentence
-    : failure ? "Start the side chat to send."
-      : !runnerOnline ? `${machine} is offline.`
-        : null;
   const primary = composerPrimaryAction({ canStopTurn, hasContent: Boolean(text.trim()), stopping: stoppingTurn });
   const canSend = sendBlocked === null && Boolean(text.trim()) && !sending;
   // A start that failed created nothing, so there is no status to show.

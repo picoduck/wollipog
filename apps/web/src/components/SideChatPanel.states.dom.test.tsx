@@ -306,6 +306,68 @@ test("a create that rejects after polling adopted its replacement leaves no fail
   }
 });
 
+/**
+ * Cross-model review CR-2.1. Enter used to call send past the disabled seat: during a pending Stop
+ * Turn, and while a replacement's create was still pending after polling had adopted it.
+ */
+test("Enter never sends past a pending Stop Turn or a pending start", async () => {
+  const pressEnter = async (field: HTMLTextAreaElement) => {
+    await act(async () => {
+      field.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }) as unknown as Event);
+    });
+  };
+  const prompted: string[] = [];
+  const running = { ...child, status: "running", activeTurnId: "turn-9" } as SessionView;
+  const stopping = await render(
+    <SideChatPanel session={parent} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION} onInsertDraft={() => {}} />,
+    {
+      sideChat: async () => ({ sideChat: { parentSessionId: parent.id, session: running, createdAt: 1 } }),
+      getSessionEventPage: async () => ({ events: [], eventEpoch: 0, nextAfter: 0, cacheComplete: true }),
+      cancelTurn: () => new Promise<SessionView>(() => {}),
+      prompt: async (_id: string, text: string) => {
+        prompted.push(text);
+        return running;
+      },
+    },
+  );
+  try {
+    await act(async () => { stopping.button("Stop Turn")!.click(); });
+    await stopping.type("wait for the stop");
+    await pressEnter(stopping.textarea()!);
+    assert.equal(prompted.length, 0, "a pending Stop Turn holds the seat for Enter too");
+    assert.equal(stopping.textarea()!.value, "wait for the stop");
+  } finally {
+    await stopping.dispose();
+  }
+
+  const ended = { ...child, status: "stopped" } as SessionView;
+  const replacement = { ...child, id: "side-session-pending", status: "idle" } as SessionView;
+  let related: SideChatView = { parentSessionId: parent.id, session: ended, createdAt: 1 };
+  const starting = await render(<SideChatPanel session={parent} runnerOnline onInsertDraft={() => {}} />, {
+    sideChat: async () => ({ sideChat: related }),
+    createSideChat: () => {
+      related = { parentSessionId: parent.id, session: replacement, createdAt: 2 };
+      return new Promise<SideChatView>(() => {});
+    },
+    getSessionEventPage: async () => ({ events: [], eventEpoch: 0, nextAfter: 0, cacheComplete: true }),
+    prompt: async (_id: string, text: string) => {
+      prompted.push(text);
+      return replacement;
+    },
+  });
+  try {
+    await act(async () => { starting.button("Start New Side Chat")!.click(); });
+    await starting.type("not yet");
+    await tick(1_700);
+    assert.equal(starting.button("Send")!.disabled, true, "the start is still in flight");
+    await pressEnter(starting.textarea()!);
+    assert.equal(prompted.length, 0, "Enter waits for the start as Send does");
+    assert.equal(starting.textarea()!.value, "not yet");
+  } finally {
+    await starting.dispose();
+  }
+});
+
 test("a refused start keeps the draft without claiming the machine didn't respond", async () => {
   const view = await render(<SideChatPanel session={parent} runnerOnline onInsertDraft={() => {}} />, {
     sideChat: async () => ({ sideChat: null }),
