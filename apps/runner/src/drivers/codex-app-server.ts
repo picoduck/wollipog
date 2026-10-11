@@ -26,6 +26,7 @@ import {
 import { createHash } from "node:crypto";
 import { isAbsolute, join, posix } from "node:path";
 import { JsonRpcPeer } from "../jsonrpc.js";
+import { campaignOperationEvidence } from "../campaign-operation-evidence.js";
 import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
 import {
   killTree,
@@ -1719,6 +1720,7 @@ export class CodexAppServerDriver implements Driver {
         this.pendingApprovals.set(id, { method, params, resolve });
         this.cb.onEvent({
           kind: "permission_request",
+          requestSource: "provider_tool",
           ...ownership,
           requestId: id,
           title: approvalTitle(params),
@@ -1760,7 +1762,7 @@ export class CodexAppServerDriver implements Driver {
           return resolve(normalized.response({}, "dismiss"));
         }
         this.pendingQuestions.set(id, { resolve, response: normalized.response, questions: normalized.questions });
-        this.cb.onEvent({ kind: "question_request", requestId: id, questions: normalized.questions, ...ownership });
+        this.cb.onEvent({ kind: "question_request", requestId: id, questions: normalized.questions, requestSource: "provider_question", ...ownership });
       }));
 
     peer.onRequest(MCP_ELICITATION_METHOD, (params: Json, rpcRequestId: number | string) =>
@@ -1781,6 +1783,7 @@ export class CodexAppServerDriver implements Driver {
           this.pendingApprovals.set(id, { method: MCP_ELICITATION_METHOD, params, resolve });
           this.cb.onEvent({
             kind: "permission_request",
+            requestSource: "provider_elicitation",
             ...ownership,
             requestId: id,
             title: `${serverName} requests a browser flow`,
@@ -1804,7 +1807,7 @@ export class CodexAppServerDriver implements Driver {
           return resolve(normalized.response({}, "dismiss"));
         }
         this.pendingQuestions.set(id, { resolve, response: normalized.response, questions: normalized.questions });
-        this.cb.onEvent({ kind: "question_request", requestId: id, questions: normalized.questions, ...ownership });
+        this.cb.onEvent({ kind: "question_request", requestId: id, questions: normalized.questions, requestSource: "provider_elicitation", ...ownership });
       }));
 
     peer.onNotification("skills/changed", () => this.refreshSkillCatalog());
@@ -2633,6 +2636,10 @@ export function approvalContext(
   // a path-scoped auto-allow rule fails closed instead of authorizing by only the first file.
   const onlyChange = changes?.length === 1 ? changes[0] : changes ? null : params?.fileChange;
   const path = params?.path ?? params?.filePath ?? onlyChange?.path ?? onlyChange?.filePath;
+  const changedPath = onlyChange?.path ?? onlyChange?.filePath;
+  const verifiedFilePath = changes && changes.length !== 1 ? null :
+    typeof changedPath === "string" && (path === undefined || path === changedPath) ? changedPath :
+      !changes && !params?.fileChange && typeof path === "string" ? path : null;
   const branch = params?.branch ?? params?.branchName;
   const providerCommand = typeof params?.command === "string" && params.command
     ? params.command : null;
@@ -2659,6 +2666,10 @@ export function approvalContext(
   const networkRequested = params?.permissions?.network;
   return {
     toolName,
+    ...(method === PERMISSIONS_METHOD ? { operation: { kind: "permission_grant" as const, lifetime: "session" as const } } :
+      commandInput && commandInput.length <= 2000 ? { operation: campaignOperationEvidence(toolName, { kind: "command", input: commandInput,
+      ...(typeof params?.cwd === "string" && params.cwd.length <= 1024 ? { cwd: params.cwd } : {}) }) } :
+      toolName === "fileChange" && verifiedFilePath && verifiedFilePath.length <= 1024 ? { operation: campaignOperationEvidence(toolName, { kind: "file", path: verifiedFilePath }) } : {}),
     ...(typeof input === "string" && input ? { input: truncate(input, 2000) } : {}),
     ...(commandIdentity ? { commandIdentity } : {}),
     ...(typeof path === "string" && path ? { path: truncate(path, 1024) } : {}),

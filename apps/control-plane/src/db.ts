@@ -7,6 +7,8 @@
 import { DatabaseSync } from "node:sqlite";
 import { attentionRequestRank } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
+import { evaluateCampaignAuthority, campaignBoundaryCurrent } from "./campaign-authority.js";
+import { validCampaignControl, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
 import { priceUsage, resolveCostSource, type RateTable } from "./usage-pricing.js";
 import { collapseAgentSpawnObservations, type StructuredAgentSpawnObservation } from "./child-session-registry.js";
@@ -42,7 +44,6 @@ import {
   isTerminal,
   pendingRequests,
   removePendingRequest,
-  parentControlRequestEligible,
   sessionHolds,
   BACKGROUND_JOB_STALL_MS,
   normalizeAgentHarnessIdentity,
@@ -767,6 +768,7 @@ CREATE TABLE IF NOT EXISTS workflow_decisions (
   evidence_reviewed     TEXT,
   rationale_digest      TEXT,
   human_fallback        TEXT,
+  authority_evaluation  TEXT,
   created_at            INTEGER NOT NULL,
   resolved_at           INTEGER,
   consumed_at           INTEGER,
@@ -2943,10 +2945,27 @@ interface CampaignRequestSummaryRow {
   type: "generic" | "typed";
   session_id: string;
   runner_id: string | null;
+  driver: SessionView["driver"];
+  workspace_id: string | null;
   pending_approval: string | null;
   controlling_session_id: string | null;
   authority: "human" | "orchestrator" | null;
   occurrence_id: string | null;
+}
+
+function campaignAuthorityFromRows(
+  controller: Pick<SessionRow, "id" | "driver" | "orchestrator_policy" | "parent_control" | "parent_control_policy" | "parent_control_policy_revision" | "runner_id" | "workspace_id">,
+  requester: Pick<SessionView, "id" | "driver"> & { repositoryRoot?: string } & Partial<Pick<SessionView, "runnerId" | "workspaceId">>,
+  protocol: number | null | undefined,
+  request: PendingApproval,
+  controllerProtocol: number | null | undefined = protocol,
+) {
+  return evaluateCampaignAuthority({ id: controller.id, driver: controller.driver as SessionView["driver"], runnerId: controller.runner_id, workspaceId: controller.workspace_id,
+    orchestratorPolicy: orchestratorCampaignPolicyFromJson(controller.orchestrator_policy) ?? undefined,
+    parentControl: controller.parent_control as ParentControlMode,
+    parentControlPolicy: { revision: controller.parent_control_policy_revision,
+      decisions: parentControlDecisionPolicyFromJson(controller.parent_control_policy) ?? { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } },
+  }, requester, protocol, request, undefined, controllerProtocol);
 }
 
 function addCampaignRequestSummary(
@@ -2954,6 +2973,9 @@ function addCampaignRequestSummary(
   request: CampaignRequestSummaryRow,
   parentControl: string | null,
   runnerProtocol: number | null,
+  controller?: Parameters<typeof campaignAuthorityFromRows>[0],
+  controllerProtocol?: number | null,
+  repositoryRoot?: string,
 ): void {
   if (request.type === "typed") {
     if (request.authority !== "human" && request.authority !== "orchestrator") return;
@@ -2963,10 +2985,12 @@ function addCampaignRequestSummary(
     return;
   }
   const mode = parentControl === "questions" || parentControl === "questions_and_approvals" ? parentControl : "off";
-  const supported = runnerSupportsProtocol(runnerProtocol, "delegatedParentControl");
   for (const pending of pendingRequests(parseJson<PendingApproval>(request.pending_approval))) {
     if (pending.kind === "workflow_decision") continue;
-    const authority = supported && parentControlRequestEligible(mode, pending) ? "orchestrator" : "human";
+    const authority = controller ? campaignAuthorityFromRows(controller,
+      { id: request.session_id, driver: request.driver, repositoryRoot, runnerId: request.runner_id ?? undefined, workspaceId: request.workspace_id }, runnerProtocol, pending, controllerProtocol).owner
+      : evaluateCampaignAuthority({ id: "controller", driver: request.driver, parentControl: mode },
+        { id: request.session_id, driver: request.driver }, runnerProtocol, pending).owner;
     counts[authority]++;
     if (authority === "human") counts.humanRequestTokens!.push(createHash("sha256")
       .update(`generic:${request.session_id}:${pending.occurrenceId ?? pending.requestId}`).digest("hex"));
@@ -6005,6 +6029,7 @@ export class ControlPlaneDb {
       "action_runner_history_epoch INTEGER",
       "child_message TEXT",
       "human_fallback TEXT",
+      "authority_evaluation TEXT",
       "issue_closure_result TEXT",
       "resume_state TEXT",
       "resume_command_id TEXT",
@@ -10576,15 +10601,17 @@ export class ControlPlaneDb {
     // Read only this root's bounded ancestry, not the installation's live/archive inventory.
     const ancestors = this.stmt(`WITH RECURSIVE ancestors AS (
       SELECT session.id,session.parent_session_id,session.session_role,session.permission_mode,
-        session.orchestrator_policy,session.parent_control,1 AS depth
+        session.orchestrator_policy,session.parent_control,session.parent_control_policy,session.parent_control_policy_revision,session.driver,session.runner_id,session.workspace_id,runner.protocol_version AS runner_protocol,1 AS depth
       FROM sessions session JOIN session_ownership ownership ON ownership.session_id=session.id
+      LEFT JOIN runners runner ON runner.runner_id=session.runner_id
       WHERE session.id=? AND (? OR session.archived=0) AND ${authorization.sql}
       UNION ALL SELECT parent.id,parent.parent_session_id,parent.session_role,parent.permission_mode,
-        parent.orchestrator_policy,parent.parent_control,ancestor.depth+1
+        parent.orchestrator_policy,parent.parent_control,parent.parent_control_policy,parent.parent_control_policy_revision,parent.driver,parent.runner_id,parent.workspace_id,parent_runner.protocol_version,ancestor.depth+1
       FROM sessions parent JOIN ancestors ancestor ON parent.id=ancestor.parent_session_id
+      LEFT JOIN runners parent_runner ON parent_runner.runner_id=parent.runner_id
       WHERE ancestor.depth<64
     ) SELECT * FROM ancestors ORDER BY depth`).all(sessionId,includeArchived ? 1 : 0,...authorization.params) as unknown as
-      Array<Pick<SessionRow,"id" | "parent_session_id" | "session_role" | "permission_mode" | "orchestrator_policy" | "parent_control">>;
+      Array<{ runner_protocol: number | null } & Pick<SessionRow,"id" | "parent_session_id" | "session_role" | "permission_mode" | "orchestrator_policy" | "parent_control" | "parent_control_policy" | "parent_control_policy_revision" | "driver" | "runner_id" | "workspace_id">>;
     // A missing parent, cycle or truncated chain has no trustworthy campaign boundary.
     if (!ancestors.length || ancestors.at(-1)!.parent_session_id !== null) return undefined;
     const root = ancestors.filter((row) => sessionRole({ role: row.session_role as SessionRole | null,
@@ -10596,19 +10623,20 @@ export class ControlPlaneDb {
     const requests = this.stmt(`WITH RECURSIVE descendants(id,depth) AS (
       SELECT ?,1 UNION ALL SELECT child.id,ancestor.depth+1 FROM sessions child
       JOIN descendants ancestor ON child.parent_session_id=ancestor.id WHERE ancestor.depth<?
-    ) SELECT 'generic' AS type,session.id AS session_id,session.runner_id,session.pending_approval,
+    ) SELECT 'generic' AS type,session.id AS session_id,session.runner_id,session.driver,session.workspace_id,session.pending_approval,
       NULL AS controlling_session_id,NULL AS authority,NULL AS occurrence_id,runner.protocol_version
       FROM descendants descendant JOIN sessions session ON session.id=descendant.id
       JOIN session_ownership ownership ON ownership.session_id=session.id
       LEFT JOIN runners runner ON runner.runner_id=session.runner_id
-      WHERE session.id!=? AND session.pending_approval IS NOT NULL AND ${authorization.sql}
-      UNION ALL SELECT 'typed',decision.session_id,NULL,NULL,decision.controlling_session_id,
+      WHERE (session.id!=? OR ?=1) AND session.pending_approval IS NOT NULL AND ${authorization.sql}
+      UNION ALL SELECT 'typed',decision.session_id,NULL,NULL,NULL,NULL,decision.controlling_session_id,
         decision.authority,decision.occurrence_id,NULL
       FROM workflow_decisions decision JOIN session_ownership ownership ON ownership.session_id=decision.session_id
       WHERE decision.controlling_session_id=? AND decision.status='pending' AND ${authorization.sql}`)
-      .all(sessionId,65-ancestors.length,sessionId,...authorization.params,sessionId,...authorization.params) as unknown as
+      .all(sessionId,65-ancestors.length,sessionId,orchestratorCampaignPolicyFromJson(root.orchestrator_policy)?.control?.mode === "full_control" ? 1 : 0,...authorization.params,sessionId,...authorization.params) as unknown as
       Array<CampaignRequestSummaryRow & { protocol_version: number | null }>;
-    for (const request of requests) addCampaignRequestSummary(counts,request,root.parent_control,request.protocol_version);
+    for (const request of requests) addCampaignRequestSummary(counts,request,root.parent_control,request.protocol_version,root, root.runner_protocol,
+      orchestratorCampaignPolicyFromJson(root.orchestrator_policy)?.control?.mode === "full_control" ? this.sessionRepositoryRoot(request.session_id) : undefined);
     counts.humanRequestTokens!.sort();
     return counts;
   }
@@ -10756,7 +10784,7 @@ export class ControlPlaneDb {
         principal?.organizationId ?? null, principal?.organizationId ?? null, userId, userId, userId,
         ...authorization.params,
       ) as Array<{ row_json: string }>).map((row) => JSON.parse(row.row_json) as SessionSummaryRow);
-    const ancestry = this.stmt(`SELECT id,parent_session_id,session_role,permission_mode,orchestrator_policy,parent_control
+    const ancestry = this.stmt(`SELECT id,parent_session_id,session_role,permission_mode,orchestrator_policy,parent_control,parent_control_policy,parent_control_policy_revision,driver,runner_id,workspace_id,workspace_path,worktree_path
       FROM sessions`).all() as unknown as SessionRow[];
     const context: SessionSummaryContext = {
       rows: new Map(ancestry.map((row) => [row.id,row])),
@@ -10797,11 +10825,11 @@ export class ControlPlaneDb {
       if (row.orchestrator_policy && campaignRoot(row.id) === row.id) context.campaignRequests.set(row.id,{ human: 0,orchestrator: 0,humanRequestTokens: [] });
     }
     if (context.campaignRequests.size) {
-      const requests=this.stmt(`SELECT 'generic' AS type,session.id AS session_id,session.runner_id,
+      const requests=this.stmt(`SELECT 'generic' AS type,session.id AS session_id,session.runner_id,session.driver,session.workspace_id,
         session.pending_approval,NULL AS controlling_session_id,NULL AS authority,NULL AS occurrence_id
         FROM sessions session JOIN session_ownership ownership ON ownership.session_id=session.id
         WHERE session.pending_approval IS NOT NULL AND ${authorization.sql}
-        UNION ALL SELECT 'typed',decision.session_id,NULL,NULL,decision.controlling_session_id,decision.authority,decision.occurrence_id
+        UNION ALL SELECT 'typed',decision.session_id,NULL,NULL,NULL,NULL,decision.controlling_session_id,decision.authority,decision.occurrence_id
         FROM workflow_decisions decision JOIN session_ownership ownership ON ownership.session_id=decision.session_id
         WHERE decision.status='pending' AND ${authorization.sql}`)
         .all(...authorization.params,...authorization.params) as unknown as CampaignRequestSummaryRow[];
@@ -10812,11 +10840,11 @@ export class ControlPlaneDb {
           continue;
         }
         const rootId=campaignRoot(request.session_id);
-        if (!rootId || rootId===request.session_id) continue;
+        if (!rootId || (rootId===request.session_id && orchestratorCampaignPolicyFromJson(context.rows.get(rootId)!.orchestrator_policy)?.control?.mode !== "full_control")) continue;
         const counts=context.campaignRequests.get(rootId);
         if (!counts) continue;
         const root=context.rows.get(rootId)!;
-        addCampaignRequestSummary(counts,request,root.parent_control,context.runnerProtocols.get(request.runner_id!) ?? null);
+        addCampaignRequestSummary(counts,request,root.parent_control,context.runnerProtocols.get(request.runner_id!) ?? null,root,context.runnerProtocols.get(root.runner_id) ?? null, orchestratorCampaignPolicyFromJson(root.orchestrator_policy)?.control?.mode === "full_control" ? this.repositoryRootFromRow(context.rows.get(request.session_id)!) : undefined);
       }
     }
     for (const counts of context.campaignRequests.values()) counts.humanRequestTokens!.sort();
@@ -16223,6 +16251,31 @@ export class ControlPlaneDb {
     return orchestratorCampaignPolicyFromJson(row?.orchestrator_policy ?? null);
   }
 
+  /** Internal human-admission persistence. Mode and boundary changes share the workflow policy
+   * revision and revoke every unconsumed occurrence atomically. The service verifies principal,
+   * scope and provider compatibility before calling; agent-facing APIs expose no such mutation. */
+  updateSessionCampaignControl(id: string, control: CampaignControl, expectedRevision: number, now: number): boolean {
+    const campaign = this.sessionOrchestratorPolicy(id);
+    const policy = this.parentControlPolicy(id);
+    if (!campaign || !policy || policy.revision !== expectedRevision || !validCampaignControl(control) ||
+        (control.mode === "full_control" && control.boundary.revision !== expectedRevision + 1)) return false;
+    campaign.control = structuredClone(control);
+    this.db.exec("BEGIN");
+    try {
+      const changed = this.stmt(`UPDATE sessions SET orchestrator_policy=?, parent_control_policy_revision=parent_control_policy_revision+1,
+        updated_at=? WHERE id=? AND parent_control_policy_revision=?`).run(JSON.stringify(campaign), now, id, expectedRevision);
+      if (Number(changed.changes) !== 1) { this.db.exec("ROLLBACK"); return false; }
+      for (const decision of this.unconsumedWorkflowDecisionsForController(id)) {
+        this.stmt(`UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?)
+          WHERE occurrence_id=? AND status IN ('pending','approved')`).run(now, decision.occurrenceId);
+        this.retireWorkflowDecisionResume(decision.occurrenceId, now);
+        this.revokeUiEvidenceReviewReceipts(decision.occurrenceId, now);
+      }
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
   campaignDescendantIds(campaignSessionId: string): string[] {
     return (this.stmt(`
       WITH RECURSIVE descendants(id) AS (
@@ -17061,11 +17114,11 @@ export class ControlPlaneDb {
     const resolvedCampaignId = campaign.id;
     const childIds = this.campaignDescendantIds(resolvedCampaignId);
     const rows = childIds.length ? (this.stmt(
-      `SELECT id, runner_id, status, archived, worktree_path, worktrees, pending_approval, worktree_recovery,
+      `SELECT id, runner_id, driver, workspace_id, status, archived, worktree_path, worktrees, pending_approval, worktree_recovery,
               queue_hold
        FROM sessions WHERE id IN (${childIds.map(() => "?").join(",")})`,
     ).all(...childIds) as unknown as Array<{
-      id: string; runner_id: string; status: SessionStatus; archived: number; worktree_path: string | null;
+      id: string; runner_id: string; driver: SessionView["driver"]; workspace_id: string | null; status: SessionStatus; archived: number; worktree_path: string | null;
       worktrees: string | null; pending_approval: string | null; worktree_recovery: string | null;
       queue_hold: string | null;
     }>) : [];
@@ -17078,9 +17131,6 @@ export class ControlPlaneDb {
     }>;
     const pendingHuman = pending.filter((decision) => decision.authority === "human");
     const pendingOrchestrator = pending.filter((decision) => decision.authority === "orchestrator");
-    const parentControl = campaign.parent_control === "questions" || campaign.parent_control === "questions_and_approvals"
-      ? campaign.parent_control
-      : "off";
     let pendingGenericHuman = 0;
     let pendingGenericOrchestrator = 0;
     const humanRequestKeys = pendingHuman.map((decision) =>
@@ -17094,17 +17144,27 @@ export class ControlPlaneDb {
     let cleanupPending = 0;
     const cleanupWorktrees: NonNullable<OrchestratorCampaignProjection["cleanupWorktrees"]> = [];
     const heldChildren: NonNullable<OrchestratorCampaignProjection["heldChildren"]> = [];
+    if (policy.control?.mode === "full_control") {
+      for (const request of pendingRequests(parseJson<PendingApproval>(campaign.pending_approval)).filter((item) => item.kind !== "workflow_decision")) {
+        const evaluation = campaignAuthorityFromRows(campaign, { id: campaign.id, driver: campaign.driver as SessionView["driver"],
+          runnerId: campaign.runner_id, workspaceId: campaign.workspace_id, repositoryRoot: this.sessionRepositoryRoot(campaign.id) },
+        this.getRunner(campaign.runner_id)?.protocolVersion, request);
+        if (evaluation.owner === "orchestrator") {
+          pendingGenericOrchestrator += 1;
+          orchestratorRequestKeys.push(`generic:${campaign.id}:${request.occurrenceId ?? request.requestId}`);
+        } else {
+          pendingGenericHuman += 1;
+          humanRequestKeys.push(`generic:${campaign.id}:${request.occurrenceId ?? request.requestId}`);
+        }
+      }
+    }
     for (const child of rows) {
       const childPending = pending.filter((decision) => decision.session_id === child.id);
       const approval = parseJson<PendingApproval>(child.pending_approval);
-      const delegatedGenericSupported = runnerSupportsProtocol(
-        this.getRunner(child.runner_id)?.protocolVersion,
-        "delegatedParentControl",
-      );
       const generic = pendingRequests(approval).filter((request) => request.kind !== "workflow_decision");
       let childHasHumanRequest = childPending.some((decision) => decision.authority === "human");
       for (const request of generic) {
-        if (delegatedGenericSupported && parentControlRequestEligible(parentControl, request)) {
+        if (campaignAuthorityFromRows(campaign, { id: child.id, driver: child.driver, runnerId: child.runner_id, workspaceId: child.workspace_id, repositoryRoot: policy.control?.mode === "full_control" ? this.sessionRepositoryRoot(child.id) : undefined }, this.getRunner(child.runner_id)?.protocolVersion, request, policy.control?.mode === "full_control" ? this.getRunner(campaign.runner_id)?.protocolVersion : undefined).owner === "orchestrator") {
           pendingGenericOrchestrator += 1;
           orchestratorRequestKeys.push(`generic:${child.id}:${request.occurrenceId ?? request.requestId}`);
         } else {
@@ -17139,6 +17199,12 @@ export class ControlPlaneDb {
        FROM orchestrator_campaign_follow_ups WHERE campaign_session_id=?`,
     ).get(resolvedCampaignId) as { unique_count: number | null; duplicate_count: number | null };
     const effectiveOwners = { ...policy.delegation.decisions };
+    if (policy.control?.mode === "full_control") {
+      const supported = campaignAuthorityPreflight(policy.control, campaign.driver,
+        this.getRunner(campaign.runner_id)?.protocolVersion).supported && campaignBoundaryCurrent({ orchestratorPolicy: policy,
+        parentControlPolicy: { revision: campaign.parent_control_policy_revision, decisions: policy.delegation.decisions } });
+      for (const category of WORKFLOW_DECISION_CATEGORIES) effectiveOwners[category] = campaignWorkflowOwner(policy.control, policy.delegation.decisions, category, supported);
+    }
     // Preserve the saved choice while routing the effective gate to the human whenever this
     // Orchestrator's runner, harness, or model cannot inspect evidence bytes. A supported client
     // can still see one decision fall back when that decision's own evidence is unreviewable.
@@ -17149,10 +17215,10 @@ export class ControlPlaneDb {
       driver: campaign.driver,
       model: campaign.model,
       agentCapabilities: parseJson<SessionCapabilities>(campaign.agent_capabilities) ?? undefined,
-    }, policy.delegation.decisions.ui_evidence_approval));
+    }, effectiveOwners.ui_evidence_approval));
     effectiveOwners.ui_evidence_approval = uiEvidenceReview.effectiveOwner;
     const total = rows.length;
-    const childStatus = waitingHuman > 0 ? "waiting_human" as const
+    const childStatus = waitingHuman > 0 || (policy.control?.mode === "full_control" && (pendingHuman.length > 0 || pendingGenericHuman > 0)) ? "waiting_human" as const
       : active > 0 || pendingOrchestrator.length > 0 || cleanupPending > 0 || total === 0 ? "active" as const
       : blocked > 0 ? "blocked" as const
       : fullyVerified === total ? "verified_complete" as const
@@ -17347,13 +17413,14 @@ export class ControlPlaneDb {
       this.stmt(
         `INSERT INTO workflow_decisions
          (request_id, occurrence_id, session_id, controlling_session_id, category, resource_key,
-          resource_snapshot, resource_digest, policy_revision, authority, status, human_fallback, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+          resource_snapshot, resource_digest, policy_revision, authority, status, human_fallback, authority_evaluation, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
       ).run(
         input.requestId, input.occurrenceId, input.sessionId, input.controllingSessionId,
         input.category, input.resourceKey, JSON.stringify(input.resourceSnapshot), input.resourceDigest,
         input.policyRevision, input.authority,
-        input.humanFallback ? JSON.stringify(input.humanFallback) : null, input.createdAt,
+        input.humanFallback ? JSON.stringify(input.humanFallback) : null,
+        input.authorityEvaluation ? JSON.stringify(input.authorityEvaluation) : null, input.createdAt,
       );
       this.db.exec("COMMIT");
     } catch (error) {
@@ -22069,27 +22136,46 @@ export class ControlPlaneDb {
     return view;
   }
 
+  private repositoryRootFromRow(row: Pick<SessionRow, "worktree_path" | "workspace_path" | "workspace_id" | "runner_id">): string | undefined {
+    return row.worktree_path ?? row.workspace_path ?? (row.workspace_id ? this.getWorkspacePath(row.runner_id, row.workspace_id) : undefined) ?? undefined;
+  }
+
+  sessionRepositoryRoot(sessionId: string): string | undefined {
+    const row = this.stmt("SELECT worktree_path,workspace_path,workspace_id,runner_id FROM sessions WHERE id=?").get(sessionId) as
+      Pick<SessionRow, "worktree_path" | "workspace_path" | "workspace_id" | "runner_id"> | undefined;
+    return row ? this.repositoryRootFromRow(row) : undefined;
+  }
+
   /** Resolve descendant request ownership from durable ancestry and the current root policy.
    * This keeps list counts, reminders, and notifications aligned after policy changes or reloads
    * without trusting a stale owner copied into a provider request. */
-  private parentedRequestOwner(
+  private parentedRequestAuthority(
     row: SessionRow,
     request: PendingApproval,
     summary?: SessionSummaryContext,
-  ): WorkflowDecisionAuthority | undefined {
+  ): CampaignAuthorityEvaluation | undefined {
+    if (!row.parent_session_id && orchestratorCampaignPolicyFromJson(row.orchestrator_policy)?.control?.mode === "full_control") {
+      if (request.kind === "workflow_decision") return request.workflowDecision?.authorityEvaluation ?? {
+        owner: request.workflowDecision?.authority ?? "human", basis: "custom_policy", reason: "custom_owner",
+        operation: request.workflowDecision?.category ?? "tool_approval",
+      };
+      return campaignAuthorityFromRows(row, { id: row.id, driver: row.driver as SessionView["driver"], runnerId: row.runner_id, workspaceId: row.workspace_id, repositoryRoot: this.repositoryRootFromRow(row) },
+        summary ? summary.runnerProtocols.get(row.runner_id) : this.getRunner(row.runner_id)?.protocolVersion, request);
+    }
     if (!row.parent_session_id) return undefined;
     const seen = new Set<string>([row.id]);
     let parentId: string | null = row.parent_session_id;
     let controller: Pick<SessionRow,
-      "id" | "parent_session_id" | "permission_mode" | "session_role" | "orchestrator_policy" | "parent_control"
+      "id" | "parent_session_id" | "permission_mode" | "session_role" | "orchestrator_policy" | "parent_control" | "parent_control_policy" | "parent_control_policy_revision" | "driver" | "runner_id" | "workspace_id"
     > | null = null;
     for (let depth = 0; parentId && depth < 64 && !seen.has(parentId); depth += 1) {
       seen.add(parentId);
       const parent = (summary ? summary.rows.get(parentId) : this.stmt(
-        `SELECT id, parent_session_id, permission_mode, session_role, orchestrator_policy, parent_control
+        `SELECT id, parent_session_id, permission_mode, session_role, orchestrator_policy, parent_control,
+                parent_control_policy,parent_control_policy_revision,driver,runner_id,workspace_id
          FROM sessions WHERE id=?`,
       ).get(parentId)) as unknown as Pick<SessionRow,
-        "id" | "parent_session_id" | "permission_mode" | "session_role" | "orchestrator_policy" | "parent_control"
+        "id" | "parent_session_id" | "permission_mode" | "session_role" | "orchestrator_policy" | "parent_control" | "parent_control_policy" | "parent_control_policy_revision" | "driver" | "runner_id" | "workspace_id"
       > | undefined;
       if (!parent) return undefined;
       if (sessionRole({ role: parent.session_role as SessionRole | null, permissionMode: parent.permission_mode }) === "orchestrator" &&
@@ -22098,14 +22184,17 @@ export class ControlPlaneDb {
     }
     // Broken or excessively deep ancestry cannot delegate authority.
     if (parentId || !controller) return undefined;
-    if (request.kind === "workflow_decision") return request.workflowDecision?.authority ?? "human";
-    const mode = controller.parent_control === "questions" || controller.parent_control === "questions_and_approvals"
-      ? controller.parent_control
-      : "off";
-    return runnerSupportsProtocol(
-      summary ? summary.runnerProtocols.get(row.runner_id) : this.getRunner(row.runner_id)?.protocolVersion,
-      "delegatedParentControl",
-    ) && parentControlRequestEligible(mode, request) ? "orchestrator" : "human";
+    if (request.kind === "workflow_decision") return request.workflowDecision?.authorityEvaluation ?? {
+      owner: request.workflowDecision?.authority ?? "human", basis: "custom_policy", reason: "custom_owner",
+      operation: request.workflowDecision?.category ?? "tool_approval",
+    };
+    return campaignAuthorityFromRows(controller, { id: row.id, driver: row.driver as SessionView["driver"], runnerId: row.runner_id, workspaceId: row.workspace_id, repositoryRoot: orchestratorCampaignPolicyFromJson(controller.orchestrator_policy)?.control?.mode === "full_control" ? this.repositoryRootFromRow(row) : undefined },
+      summary ? summary.runnerProtocols.get(row.runner_id) : this.getRunner(row.runner_id)?.protocolVersion, request,
+      summary ? summary.runnerProtocols.get(controller.runner_id) : orchestratorCampaignPolicyFromJson(controller.orchestrator_policy)?.control?.mode === "full_control" ? this.getRunner(controller.runner_id)?.protocolVersion : undefined);
+  }
+
+  private parentedRequestOwner(row: SessionRow, request: PendingApproval, summary?: SessionSummaryContext): WorkflowDecisionAuthority | undefined {
+    return this.parentedRequestAuthority(row, request, summary)?.owner;
   }
 
   private pendingRequestOwners(
@@ -22114,12 +22203,13 @@ export class ControlPlaneDb {
     summary?: SessionSummaryContext,
   ): NonNullable<SessionView["pendingRequestOwners"]> | undefined {
     const requests = pendingRequests(pending);
-    if (!row.parent_session_id || requests.length === 0) return undefined;
+    if ((!row.parent_session_id && orchestratorCampaignPolicyFromJson(row.orchestrator_policy)?.control?.mode !== "full_control") || requests.length === 0) return undefined;
     let human = 0;
     let orchestrator = 0;
     const owners: NonNullable<NonNullable<SessionView["pendingRequestOwners"]>["requests"]> = [];
     for (const request of requests) {
-      const owner = this.parentedRequestOwner(row, request, summary);
+      const authorityEvaluation = this.parentedRequestAuthority(row, request, summary);
+      const owner = authorityEvaluation?.owner;
       if (!owner) return undefined;
       if (owner === "orchestrator") orchestrator += 1;
       else human += 1;
@@ -22127,6 +22217,7 @@ export class ControlPlaneDb {
         requestId: request.requestId,
         ...(request.occurrenceId ? { occurrenceId: request.occurrenceId } : {}),
         owner,
+        authorityEvaluation,
       });
     }
     return { human, orchestrator, requests: owners };
@@ -27845,6 +27936,7 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
       typeof value.sources !== "object" || value.sources === null || Array.isArray(value.sources) ||
       typeof value.sources.behavior !== "object" || value.sources.behavior === null ||
       Array.isArray(value.sources.behavior)) return null;
+  if (value.control !== undefined && !validCampaignControl(value.control)) return null;
   // Pre-v157 policies had no harness bind. Preserve their automatic-harness semantics and mark
   // the source as legacy rather than silently making a fixed choice during migration.
   if (value.behavior.childHarness === undefined) value.behavior.childHarness = null;
@@ -27930,6 +28022,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     selected_option_id?: string | null;
     evidence_reviewed?: string | null;
     human_fallback?: string | null;
+    authority_evaluation?: string | null;
     created_at?: number;
     resolved_at?: number | null;
     consumed_at?: number | null;
@@ -27964,6 +28057,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     resourceDigest: row.resource_digest,
     policyRevision: row.policy_revision!,
     authority: row.authority,
+    ...(row.authority_evaluation ? { authorityEvaluation: JSON.parse(row.authority_evaluation) as NonNullable<WorkflowDecisionView["authorityEvaluation"]> } : {}),
     ...(humanFallback ? { humanFallback } : {}),
     status: row.status,
     ...(row.issue_closure_result ? { issueClosureResult: JSON.parse(row.issue_closure_result) as NonNullable<WorkflowDecisionView["issueClosureResult"]> } : {}),
