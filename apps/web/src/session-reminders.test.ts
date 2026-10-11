@@ -207,6 +207,19 @@ test("Someday stays in Snoozed with a no-timer label and sorts after timed remin
   );
 });
 
+test("Snoozed pins lead earlier wake times and keep schedule order within each pin group", () => {
+  const early = session("early");
+  const late = session("late");
+  const someday = session("someday");
+  const reminders = new Map([
+    [early.id, reminder(early.id, { scheduledFor: 1_000 })],
+    [late.id, reminder(late.id, { scheduledFor: 3_000 })],
+    [someday.id, somedayReminder(someday.id)],
+  ]);
+  assert.deepEqual(sortSessionsForReminders([early, someday, late], reminders, "snoozed",
+    new Set([late.id, someday.id])).map(({ id }) => id), ["late", "someday", "early"]);
+});
+
 test("fired reminders return to the top with a text-backed reason until dismissed", () => {
   const normal = session("normal");
   const due = session("due", "input_required");

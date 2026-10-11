@@ -89,8 +89,8 @@ export function sessionVisibleForReminderMode(
   return !pending;
 }
 
-/** Fired reminders precede every normal inbox item exactly once; their existing activity order is
- * preserved after that stable rank. Pending reminders in the Snoozed view sort by wake time. */
+/** Pins lead both views. Fired reminders join outstanding results in the ordinary inbox;
+ * pending reminders in Snoozed sort by wake time within each pin group. */
 export function sortSessionsForReminders(
   sessions: readonly SessionView[],
   reminders: ReadonlyMap<string, SessionReminderView>,
@@ -110,6 +110,9 @@ export function sortSessionsForReminders(
     return sortInboxSessions(withDueFollowUp, pins).map((session) => original.get(session.id)!);
   }
   return [...sessions].sort((left, right) => {
+    const leftPinned = pins.has(left.id);
+    const rightPinned = pins.has(right.id);
+    if (leftPinned !== rightPinned) return leftPinned ? -1 : 1;
     const leftReminder = reminders.get(left.id);
     const rightReminder = reminders.get(right.id);
     const leftSomeday = leftReminder?.scheduleKind === "someday";

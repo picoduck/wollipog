@@ -92,6 +92,14 @@ function session(
   };
 }
 
+test("a pinned quiet session leads an unpinned session ready for review", () => {
+  const review = session("review", { attention: { version: 1, meaningfulAt: 20,
+    humanActions: [], acknowledgedRevision: null,
+    result: { revision: "result", at: 20, owner: "human" } } });
+  assert.deepEqual(sortInboxSessions([review, session("pinned")], new Set(["pinned"]))
+    .map(({ id }) => id), ["pinned", "review"]);
+});
+
 test("sortInboxSessions pins within a priority group and ignores noisy event recency", () => {
   const sorted = sortInboxSessions([
     session("old", { lastEventAt: 10 }),
@@ -102,7 +110,7 @@ test("sortInboxSessions pins within a priority group and ignores noisy event rec
   assert.deepEqual(sorted.map(({ id }) => id), ["pinned", "new", "none", "old"]);
 });
 
-test("input, results, work, and quiet are independent of lifecycle and pins", () => {
+test("pins lead while input, results, work, and quiet remain independent of lifecycle", () => {
   const attention = (at: number, revision: string | null, acknowledgedRevision: string | null = null) => ({
     version: 1 as const, meaningfulAt: at, humanActions: [], acknowledgedRevision,
     result: revision ? { revision, at, owner: "human" as const } : null,
@@ -116,7 +124,7 @@ test("input, results, work, and quiet are independent of lifecycle and pins", ()
   const working = session("working", { status: "running", attention: attention(50, null) });
   assert.deepEqual(sortInboxSessions([quiet, reviewed, readyIdle, working, input, readyRunning],
     new Set(["quiet", "working"])).map(({ id }) => id),
-  ["input", "ready-running", "ready-idle", "working", "quiet", "reviewed"]);
+  ["working", "quiet", "input", "ready-running", "ready-idle", "reviewed"]);
   assert.equal(sessionFollowUp(input).group, "needs_input");
   assert.equal(outstandingSessionResult(reviewed), null);
   assert.equal(sessionFollowUp(session("legacy", { status: "idle", preview: "Old text", messageCount: 99 })).group, "quiet");
@@ -153,8 +161,10 @@ test("a due reminder surfaces follow-up but cannot outrank human input or split 
   const due = { reminderId: "due", sessionId: "child", state: "fired" as const, revision: 1,
     createdAt: 1, updatedAt: 2, firedAt: 2, originalExpression: "tomorrow", wakePolicy: "regardless" as const,
     scheduledFor: 2, timeZone: "UTC" };
+  assert.deepEqual(sortSessionsForReminders([parent, child, input], new Map([["child", due]]), "ordinary")
+    .map(({ id }) => id), ["input", "parent", "child"]);
   assert.deepEqual(sortSessionsForReminders([parent, child, input], new Map([["child", due]]), "ordinary",
-    new Set(["child"])).map(({ id }) => id), ["input", "parent", "child"]);
+    new Set(["child"])).map(({ id }) => id), ["parent", "child", "input"]);
 });
 
 test("sortInboxSessions ignores updated time and uses stable creation time and id for old peers", () => {
@@ -357,11 +367,11 @@ test("split counts include blocked sessions and every split uses inbox card orde
   for (const split of [splits[0]!, splits.find(({ key: candidate }) => candidate === key)!]) {
     assert.equal(split.count, 3);
     assert.equal(split.blockedCount, 1);
-    assert.deepEqual(split.sessions.map(({ id }) => id), ["blocked", "new", "pinned"]);
+    assert.deepEqual(split.sessions.map(({ id }) => id), ["pinned", "blocked", "new"]);
   }
 });
 
-test("sortInboxSessions puts input above work and quiet, independently of stalls and noisy recency", () => {
+test("sortInboxSessions puts pins first, then input above work and quiet, independently of stalls and noisy recency", () => {
   const sorted = sortInboxSessions([
     session("settled-new", { status: "completed", lastEventAt: 50 }),
     session("running", { status: "running", lastEventAt: 40 }),
@@ -371,7 +381,7 @@ test("sortInboxSessions puts input above work and quiet, independently of stalls
     session("pinned-settled", { status: "idle", lastEventAt: 1 }),
   ], new Set(["pinned-settled"]), new Set(["stalled-blocked", "running"]));
   assert.deepEqual(sorted.map(({ id }) => id),
-    ["blocked", "blocked-newer", "stalled-blocked", "running", "pinned-settled", "settled-new"]);
+    ["pinned-settled", "blocked", "blocked-newer", "stalled-blocked", "running", "settled-new"]);
   assert.equal(inboxUrgency(session("s", { status: "running" }), new Set(["s"])), 1, "a stalled RUNNING session is not blocked");
 });
 
@@ -395,7 +405,7 @@ test("sortInboxSessions keeps a family together, placed by its strongest member,
     session("parent", { status: "idle", lastEventAt: 1 }),
     session("child", { status: "idle", lastEventAt: 2, parentSessionId: "parent" }),
   ], new Set(["child"]));
-  assert.deepEqual(pinnedChild.map(({ id }) => id), ["lone", "parent", "child"], "a pinned child cannot override human input");
+  assert.deepEqual(pinnedChild.map(({ id }) => id), ["parent", "child", "lone"], "a pinned child promotes its whole family above unpinned input");
 });
 
 test("inboxPinnedAncestorIds finds every present ancestor without treating it as directly pinned", () => {
