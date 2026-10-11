@@ -3,7 +3,7 @@ import { chooseSessionGroup } from "./session-groups.js";
 import { expectGeometry } from "./geometry-margins.js";
 
 /**
- * #1977: the Project setup suggestion is one notice above that Project's Sessions tab and a compact
+ * #1977: the Project setup suggestion is one notice on that Project's Sessions tab and a compact
  * info condition in its session, never a card inside a list row; the skills-unavailable notice is a
  * dismissible info condition whose fact the Pinned Summary keeps. The harness's Payments Service is
  * eligible for the suggestion and its first session runs in a container with two skills assigned.
@@ -25,31 +25,41 @@ function row(page: Page, title: string) {
   return page.locator('[role="row"]', { hasText: title });
 }
 
-test("at phone width the Project's first row keeps its normal height, and one notice sits above the list", async ({ page }) => {
-  await page.setViewportSize(PHONE);
-  await openSessions(page);
-  await expect(page.getByRole("complementary", { name: /^Set Up/u })).toHaveCount(0);
-  await openProjectTab(page);
+for (const width of [390, 1440]) {
+  test(`at ${width}px the Project's first row keeps its normal height and one notice uses the responsive list slot`, async ({ page }) => {
+    await page.setViewportSize({ width, height: PHONE.height });
+    await openSessions(page);
+    await expect(page.getByRole("complementary", { name: /^Set Up/u })).toHaveCount(0);
+    await openProjectTab(page);
 
-  const notices = page.getByRole("complementary", { name: /^Set Up/u });
-  await expect(notices).toHaveCount(1);
-  await expect(notices).toHaveAccessibleName("Set Up Payments Service");
-  await expect(page.locator('[role="row"] .notice')).toHaveCount(0);
+    const notices = page.getByRole("complementary", { name: /^Set Up/u });
+    await expect(notices).toHaveCount(1);
+    await expect(notices).toHaveAccessibleName("Set Up Payments Service");
+    await expect(page.locator('[role="row"] .notice')).toHaveCount(0);
 
-  // The eligible session's row against a sibling with the same shape: no extra card under it.
-  const first = await row(page, "Add Refund Webhooks").boundingBox();
-  const second = await row(page, "Retry Failed Payouts").boundingBox();
-  expect(first && second).toBeTruthy();
-  expectGeometry(Math.abs(first!.height - second!.height), "the two rows have the same lines, so only a card could differ")
-    .toBeLessThanOrEqual(0.61);
+    // The eligible session's row against a sibling with the same shape: no extra card under it.
+    const first = await row(page, "Add Refund Webhooks").boundingBox();
+    const second = await row(page, "Retry Failed Payouts").boundingBox();
+    expect(first && second).toBeTruthy();
+    expect(first!.height).toBeGreaterThan(0);
+    expectGeometry(Math.abs(first!.height - second!.height), "the two rows have the same lines, so only a card could differ")
+      .toBeLessThanOrEqual(0.61);
 
-  const notice = (await notices.boundingBox())!;
-  expectGeometry(first!.y - (notice.y + notice.height), "the notice ends above the first row")
-    .toBeGreaterThanOrEqual(0);
-  expectGeometry(notice.x, "the notice stays inside the phone's left edge").toBeGreaterThanOrEqual(0);
-  expectGeometry(PHONE.width - (notice.x + notice.width), "the notice stays inside the phone's right edge")
-    .toBeGreaterThanOrEqual(0);
-});
+    const notice = (await notices.boundingBox())!;
+    if (width === PHONE.width) {
+      await expect(row(page, "Add Refund Webhooks")).toBeInViewport();
+      const list = (await page.locator(".inbox-list").boundingBox())!;
+      expectGeometry(notice.y - (list.y + list.height), "the phone notice follows the entire list scroller")
+        .toBeGreaterThanOrEqual(0);
+    } else {
+      expectGeometry(first!.y - (notice.y + notice.height), "the desktop notice ends above the first row")
+        .toBeGreaterThanOrEqual(0);
+    }
+    expectGeometry(notice.x, "the notice stays inside the viewport's left edge").toBeGreaterThanOrEqual(0);
+    expectGeometry(width - (notice.x + notice.width), "the notice stays inside the viewport's right edge")
+      .toBeGreaterThanOrEqual(0);
+  });
+}
 
 test("a failed Generate shows one sentence and no raw error", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });

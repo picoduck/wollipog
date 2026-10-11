@@ -10649,18 +10649,29 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   background: var(--bg-elev);
 }
 
-/* The Sessions list head (#2221, §13.2, §6.3): the one list notice, the quiet new-order line and
-   Reconnecting…, inset at the list's edges and 8px from the top as the rows are; the list below
-   brings its own top padding. A 104px notice and its pad are then exactly two 56px rows. */
-.inbox-list-head {
+/* The Sessions notice and quiet new-order/Reconnecting lines (#2221, §13.2, §6.3): inset at the
+   list's edges and 8px from the top as the rows are. Together they take whole stacked-list rows. */
+.inbox-list-head,
+.inbox-list-notices {
   display: grid;
   flex: none;
   gap: var(--space-2);
   padding: var(--space-2) var(--space-3) 0;
 }
-.inbox-list-head:empty { display: none; }
-.inbox-list-head > .list-notice-slot { margin: 0; }
+.inbox-list-head:empty,
+.inbox-list-notices:empty { display: none; }
+.inbox-list-notices > .list-notice-slot { margin: 0; }
 .inbox-list-head > .inbox-list-status { padding: 0; }
+/* Late library recommendations take space from the bottom, preserving the phone's top rows.
+   Cap and scroll the slot so the list/Board/state keeps room even with a short visual viewport. */
+@media (max-width: 760px) {
+  .inbox-list-notices {
+    order: 1;
+    max-height: 50%;
+    overflow: auto;
+    padding-bottom: var(--space-2);
+  }
+}
 /* New activity would reorder the rows: one neutral line with Apply, never a notice. */
 .inbox-order-line {
   display: flex;

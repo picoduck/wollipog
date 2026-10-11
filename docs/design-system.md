@@ -2537,9 +2537,12 @@ Replaces `.quarantine-banner`, `.skills-unavailable-notice`, `.worktree-setup-no
 `.queued-error`, `.form-error` (when used as a banner), `.settings-inline-error`, `.skills-git-held`
 and `PendingSetting`.
 
-**Sessions list notice slot (#2221).** The top of the Sessions list pane has one slot of its own:
-above the rows when stacked, at the top of the list column in Preview Right, and above the columns on
-the Board. `SessionsListNotices` (`apps/web/src/components/SessionsListNotices.tsx`) is a second
+**Sessions list notice slot (#2221, #2780).** The Sessions list pane has one slot of its own:
+above the rows on desktop/tablet, at the top of the list column in Preview Right, and above the
+Board's columns. On phones it is a visible sibling below the list/Board/state scroll area, so a
+late recommendation never moves already rendered top rows. The slot scrolls within at most half
+the pane's height, preserving usable content space on short screens and with the keyboard open.
+`SessionsListNotices` (`apps/web/src/components/SessionsListNotices.tsx`) is a second
 `SessionNoticeSlot`, so the ranking, the "+N More" menu (named "Sessions Notices") and the focus rules
 are the session slot's. Its ranks, in `LIST_NOTICE_RANK`: a machine sign-in that belongs to no
 session 1 (warning while pending, danger once failed or timed out), the open Project's setup
@@ -2578,8 +2581,9 @@ notices at the top of their scrollers.
   partial failure keeps what the server did not record and says "Could not dismiss {names}. Try
   again." in `--danger-text` with `role="alert"`. No confirmation: Show Recommendation in Skills undoes
   a dismissal.
-- **New order** is not a notice: when live activity would reorder the list, a neutral line under the
-  slot reads "New activity changed the order." with a ghost **Apply**, which the sentence describes.
+- **New order** is not a notice: when live activity would reorder the list, a neutral line above the
+  rows reads "New activity changed the order." with a ghost **Apply**, which the sentence describes.
+  It follows the notice slot on desktop/tablet; on phones the notice stays below the scroll area.
   Nothing in the header or the tab row moves for it.
 - **Budget.** The slot, the order line and Reconnecting… are the list head. Stacked, the head takes
   whole rows of the list's height (§6.3): the divider keeps its stored position, the rows start right
