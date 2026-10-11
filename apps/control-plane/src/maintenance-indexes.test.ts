@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { ControlPlaneDb } from "./db.js";
 import { installMaintenanceIndexes } from "./maintenance-indexes.js";
-import { captureMaintenanceQueries, seedMaintenanceFixture } from "../scripts/maintenance-benchmark-fixture.js";
+import { BENCHMARK_NOW, captureMaintenanceQueries, seedMaintenanceFixture } from "../scripts/maintenance-benchmark-fixture.js";
 
 const NEW_INDEXES = [
   "idx_workflow_attempts_deadline_active", "idx_session_stop_intents_pending",
@@ -197,6 +197,17 @@ test("six periodic sweeps and retry maintenance use indexes at 200,000 events an
   try {
     const counts = seedMaintenanceFixture(db);
     assert.equal(counts.session_events, 200_000); assert.equal(counts.sessions, 2_000);
+    assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM outbound_event_orphans").get()?.n, 20);
+    assert.equal(db.raw().prepare(`SELECT COUNT(*) AS n FROM outbound_event_deliveries
+      WHERE status='delivering' AND lease_expires_at<=?`).get(BENCHMARK_NOW)?.n, 20);
+    assert.equal(db.raw().prepare(`SELECT COUNT(*) AS n FROM outbound_event_deliveries
+      WHERE status IN ('delivered','failed','dropped') AND updated_at<?`)
+      .get(BENCHMARK_NOW - 30 * 86_400_000)?.n, 20);
+    const triggerPlan = (db.raw().prepare(`EXPLAIN QUERY PLAN SELECT event_id FROM outbound_events
+      WHERE event_id=? AND NOT EXISTS (SELECT 1 FROM outbound_event_deliveries WHERE event_id=?)`)
+      .all("outbound_events-0-event_id", "outbound_events-0-event_id") as Array<{ detail: string }>).map(row => row.detail).join("; ");
+    assert.match(triggerPlan, /SEARCH outbound_event_deliveries USING COVERING INDEX idx_outbound_event_deliveries_event/);
+    assert.doesNotMatch(triggerPlan, /SCAN outbound_event_deliveries/);
     const queries = captureMaintenanceQueries(db);
     assert.ok(queries.length >= 22);
     for (const query of queries) {

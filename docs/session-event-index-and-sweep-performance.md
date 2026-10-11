@@ -36,9 +36,11 @@ in every configuration. Choose a directory on the intended storage device; tmpfs
 Neither benchmark accepts an existing database path.
 
 The sweep fixture has 200,000 real event rows, 2,000 session rows and 20,000 rows in each relevant
-history table (2,000 Stop intents). One in 1,000 history items is eligible. Foreign-key enforcement
-is disabled only while generating synthetic maintenance references; correctness/upgrade tests
-use valid references with enforcement ON. The fixture captures SQL and arguments from actual DB
+history table (2,000 Stop intents; 19,980 outbound deliveries). Sparse eligible and deferred cases
+include due/expired commands, reminders and push retries, plus 20 orphan events, 20 expired
+outbound leases, 20 old terminal deliveries, future retries and unexpired leases. Foreign-key
+enforcement is disabled while generating synthetic maintenance references, then enabled for
+measurement; correctness/upgrade tests use valid references throughout. The fixture captures SQL and arguments from actual DB
 methods with empty results, then runs `EXPLAIN QUERY PLAN` and seven timed executions of each
 statement in rolled-back transactions. It does not dispatch network deliveries. This records the
 queries selected by the methods rather than duplicating their SQL in the plan tests.
@@ -87,27 +89,29 @@ indexes, so this evidence records a potential later removal without applying one
 ## Sweep Plans and Timings
 
 The upgrade adds eight indexes on maintenance tables, leaving streaming event indexes unchanged.
-Baseline/candidate pairs below were measured in the same synthetic disk fixture before code
-changes; the last column records the actual migration's in-memory SQL timing and plan.
+The initial measurements preceded implementation. Review identified empty eligible sets in three
+outbound scenarios, so the fixture was strengthened and the final baseline/installed comparison
+below uses that same nonempty synthetic workload in memory, with seven rolled-back samples.
+The baseline uses the original commit's DB methods; the installed run uses the actual migration.
 
-| Query | Baseline → Candidate, ms | Installed Plan / Median ms |
+| Query | Baseline → Installed, ms | Installed Plan |
 | --- | ---: | --- |
-| Workflow Deadlines | 3.827 → 0.052 | `deadline_active` range, no sort / 0.042 |
-| Timed Reminders | 0.107 → 0.090 | `reminders_due` range plus session PK / 0.057 |
-| Pending Stops | 0.132 → 0.023 | Eligible `stop_intents_pending` index / 0.005 |
-| Due Command Runners / Batches | 0.019 / 0.056 → 0.032 / 0.059 | State/expiry range / 0.012 / 0.037 |
-| Command Expiration IDs | 14.324 → 0.016 | Covering state/expiry range / 0.005 |
-| Command Expiration Updates | 7.394 / 10.072 → 0.021 / 0.033 | State/expiry range / 0.003 / 0.005 |
-| Prompt Retry | 0.182 → 0.152 | Due range plus session PK / 0.099 |
-| Prompt Expiration | 0.029 → 0.015 | Active expiry range / 0.001 |
-| Prompt Terminal Pruning | 7.936 → 0.925 | Terminal expiry range, indexed continuation probes / 1.047 |
-| Held / Settled Resume and Restart Notices | 0.012–0.026 → 0.008–0.019 | Compact partial indexes plus PK joins / 0.001–0.010 |
-| Campaign Discovery | 0.452 → 0.397 | Parent-session index / 0.574 |
-| Background Push Expiration / Retry | 0.035 / 0.082 → 0.039 / 0.085 | Active partial index / due range / 0.006 / 0.042 |
-| Outbound Lease Recovery | 3.165 → 0.043 | Delivering-only lease range / 0.002 |
-| Outbound Retry | 5.872 → 0.229 | Due range then subscription PK, ordered and limited / 0.086 |
-| Outbound Delivery Retention | 4.872 → 0.015 | Terminal updated-at range / 0.002 |
-| Outbound Orphan Cleanup | 8.893 → 0.011 | Event PKs from maintained orphan set / 0.001 |
+| Workflow Deadlines | 0.949 → 0.017 | `deadline_active` range, no sort |
+| Timed Reminders | 0.025 → 0.025 | `reminders_due` range plus session PK |
+| Pending Stops | 0.058 → 0.003 | Eligible `stop_intents_pending` index |
+| Due Command Runners / Batches | 0.008 / 0.024 → 0.006 / 0.020 | State/expiry range |
+| Command Expiration IDs | 3.483 → 0.010 | Covering state/expiry range |
+| Command Expiration Updates | 1.072 / 1.466 → 0.057 / 0.180 | State/expiry range |
+| Prompt Retry | 0.056 → 0.055 | Due range plus session PK |
+| Prompt Expiration | 0.116 → 0.087 | Active expiry range |
+| Prompt Terminal Pruning | 3.858 → 0.349 | Terminal expiry range, indexed continuation probes |
+| Held / Settled Resume and Restart Notices | 0.000–0.006 → 0.000–0.006 | Compact partial indexes plus PK joins |
+| Campaign Discovery | 0.189 → 0.182 | Parent-session index |
+| Background Push Expiration / Retry | 0.047 / 0.027 → 0.047 / 0.027 | Active partial index / due range |
+| Outbound Lease Recovery | 0.607 → 0.089 | Delivering-only lease range |
+| Outbound Retry | 1.539 → 0.040 | Due range then subscription PK, ordered and limited |
+| Outbound Delivery Retention | 1.497 → 0.088 | Terminal updated-at range |
+| Outbound Orphan Cleanup | 3.860 → 0.049 | Event PKs from maintained orphan set |
 
 The plan test rejects scans of retained tables. `SCAN ... USING INDEX` remains intentional for
 small partial indexes whose entire eligible set must be visited (held resumes, pending Stops and

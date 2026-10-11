@@ -1,5 +1,5 @@
 import type { SQLInputValue } from "node:sqlite";
-import { ControlPlaneDb } from "../src/db.js";
+import type { ControlPlaneDb } from "../src/db.js";
 import { LOCAL_OWNER_USER_ID, PERSONAL_ORGANIZATION_ID } from "../src/identity.js";
 
 export const BENCHMARK_NOW = 2_000_000_000_000;
@@ -42,17 +42,18 @@ export function seedMaintenanceFixture(db: ControlPlaneDb, historyRows = 20_000)
     },
     session_command_invocations: {
       session_id: i => `s${i % 2_000}`, runner_id: () => "bench",
-      state: i => i % 1_000 === 0 ? "pending" : "completed", execution_mode: () => "passthrough",
+      state: i => ["pending", "sent", "pending", "accepted", "queued", "started"][i % 1_000] ?? "completed", execution_mode: () => "passthrough",
       expires_at: i => now + (i % 1_000 === 0 ? 1_000 : -1_000), next_attempt_at: () => now - 1,
     },
     session_prompt_commands: {
       session_id: i => `s${i % 2_000}`, runner_id: () => "bench", payload_json: () => "{}",
-      state: i => i % 1_000 === 0 ? "pending" : "completed",
+      state: i => ["pending", "sent", "pending", "accepted", "queued", "started"][i % 1_000] ?? "completed",
       expires_at: i => now + (i % 1_000 === 0 ? 1_000 : -1_000), next_attempt_at: () => now - 1,
     },
     background_push_deliveries: {
       session_id: i => `s${i % 2_000}`, payload_json: () => "{}",
-      state: i => i % 1_000 === 0 ? "pending" : "shown", expires_at: () => now + 1_000,
+      state: i => ["pending", "retry", "pending"][i % 1_000] ?? "shown",
+      expires_at: i => i % 1_000 === 1 || i % 1_000 === 2 ? now - 1_000 : now + 1_000,
       next_attempt_at: () => now - 1, endpoint: () => "https://example.invalid/synthetic",
     },
     outbound_event_subscriptions: {
@@ -63,8 +64,12 @@ export function seedMaintenanceFixture(db: ControlPlaneDb, historyRows = 20_000)
     outbound_event_deliveries: {
       subscription_id: () => "outbound_event_subscriptions-0-subscription_id",
       event_id: i => `outbound_events-${i}-event_id`, kind: () => "session.idle",
-      status: i => i % 1_000 === 0 ? "pending" : "delivered", payload_json: () => "{}",
-      next_attempt_at: () => now - 1, lease_expires_at: () => now - 1, updated_at: () => now,
+      status: i => ["delivered", "pending", "retrying", "delivering"][i % 1_000]
+        ?? (i % 1_000 === 99 ? "delivering" : i % 1_000 === 200 ? "pending" : "delivered"),
+      payload_json: () => "{}",
+      next_attempt_at: i => i % 1_000 === 3 || i % 1_000 === 99 ? null : i % 1_000 === 200 ? now + 1_000 : now - 1,
+      lease_expires_at: i => i % 1_000 === 99 ? now + 1_000 : now - 1,
+      updated_at: i => i % 1_000 === 4 ? now - 31 * 86_400_000 : now,
     },
   };
   const counts: Record<string, number> = { sessions: 2_000, session_events: 200_000 };
@@ -78,12 +83,16 @@ export function seedMaintenanceFixture(db: ControlPlaneDb, historyRows = 20_000)
     const count = table === "session_stop_intents" ? 2_000 : table === "outbound_event_subscriptions" ? 1 : historyRows;
     raw.exec("BEGIN");
     for (let i = 0; i < count; i++) {
+      // One event per thousand deliberately has no delivery; other scenarios include both
+      // eligible and deferred work so indexed DELETE/UPDATE measurements execute real triggers.
+      if (table === "outbound_event_deliveries" && i % 1_000 === 0) continue;
       statement.run(...included.map(c => generators[c.name]
         ? generators[c.name]!(i) : c.type === "INTEGER" ? i + 1 : `${table}-${i}-${c.name}`));
     }
     raw.exec("COMMIT");
-    counts[table] = count;
+    counts[table] = Number((raw.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n);
   }
+  raw.exec("PRAGMA foreign_keys=ON");
   return counts;
 }
 
