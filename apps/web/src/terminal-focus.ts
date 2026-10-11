@@ -43,6 +43,32 @@ export function requestTerminalFocus(sessionId: string): void {
   terminalFocusRequest = { sessionId, at: Date.now() };
 }
 
+/**
+ * A lazy host's code arrived (#2869): a request made for the move that started loading it gets its
+ * second from now, so a slow network never spends it before the host can mount. `loadStartedAt` is when
+ * that load began; an older request belongs to an earlier move and is left to expire.
+ */
+export function renewTerminalFocusRequest(loadStartedAt: number): void {
+  const request = terminalFocusRequest;
+  if (request && request.at >= loadStartedAt - TERMINAL_FOCUS_WINDOW_MS) {
+    terminalFocusRequest = { ...request, at: Date.now() };
+  }
+}
+
+/**
+ * The code of a host that may be a move's destination, loaded once: when it arrives it renews the
+ * pending focus request (`renewTerminalFocusRequest`). For `React.lazy`.
+ */
+export function loadTerminalHost<T>(load: () => Promise<T>): () => Promise<T> {
+  return () => {
+    const startedAt = Date.now();
+    return load().then((module) => {
+      renewTerminalFocusRequest(startedAt);
+      return module;
+    });
+  };
+}
+
 export function takeTerminalFocusRequest(sessionId: string): boolean {
   const request = terminalFocusRequest;
   if (request?.sessionId !== sessionId) return false;

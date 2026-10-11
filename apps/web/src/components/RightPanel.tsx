@@ -56,7 +56,7 @@ import { SessionToolIcon, SessionToolsList } from "./SessionToolsList.js";
 import { ErrorBoundary } from "./ErrorBoundary.js";
 import { State } from "./State.js";
 import { setTerminalPlacement, useTerminalPlacement } from "../terminal-placement.js";
-import { requestTerminalFocus } from "../terminal-focus.js";
+import { loadTerminalHost, requestTerminalFocus } from "../terminal-focus.js";
 
 export { SESSION_TOOL_ICONS } from "./SessionToolsList.js";
 import { MenuItem, MenuLabel, MenuSeparator, MenuSurface } from "./Menu.js";
@@ -70,17 +70,9 @@ import {
 } from "../session-tools.js";
 
 // xterm loads with the terminal's hosts, never with the session view (`entry-bundle-budget.ts`).
-const loadTerminalTool = () => import("./TerminalTool.js");
-const TerminalTool = lazy(() => loadTerminalTool().then((module) => ({ default: module.TerminalTool })));
-
-/**
- * Fetches the Terminal tool's code while the dock shows the terminal (#2869), so Move to Right Panel
- * mounts the tool within its focus request's second (`requestTerminalFocus`) however slow the network
- * is. A failed fetch is left to the tool's own load, which reports it.
- */
-export function preloadTerminalTool(): void {
-  loadTerminalTool().catch(() => {});
-}
+// Move to Right Panel's focus request waits for it (`loadTerminalHost`, #2869).
+const TerminalTool = lazy(loadTerminalHost(() =>
+  import("./TerminalTool.js").then((module) => ({ default: module.TerminalTool }))));
 
 const EMPTY_PARENT_TURNS: ReadonlyMap<string, BackgroundParentTurn> = new Map();
 const EMPTY_GOVERNANCE_DECISIONS: readonly GovernanceDecision[] = [];

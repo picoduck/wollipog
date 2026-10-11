@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { mock } from "node:test";
 import { Window } from "happy-dom";
-import { installTerminalExitBoundary } from "./terminal-focus.js";
+import {
+  installTerminalExitBoundary,
+  loadTerminalHost,
+  requestTerminalFocus,
+  takeTerminalFocusRequest,
+} from "./terminal-focus.js";
 
 test("Ctrl+Escape exits before xterm capture while plain Escape remains terminal-owned", () => {
   const domWindow = new Window();
@@ -69,4 +74,48 @@ test("Ctrl+Escape lands on an expanded side panel's switcher, since the panel hi
   textarea.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", ctrlKey: true, bubbles: true }));
   assert.ok(domWindow.document.activeElement === reading, "focus lands on the transcript");
   cleanup();
+});
+
+/** A host's code, loaded on demand, that arrives when the test releases it. */
+function slowHost() {
+  let release!: () => void;
+  const arrived = new Promise<void>((resolve) => { release = resolve; });
+  return { load: loadTerminalHost(() => arrived.then(() => "host")), release };
+}
+
+test("a move's focus request lasts a second from when the destination's code arrives (#2869)", async () => {
+  mock.timers.enable({ apis: ["Date"], now: 10_000 });
+  try {
+    // The move asks for focus, then its destination's code takes 1.5s to arrive.
+    requestTerminalFocus("session-a");
+    const host = slowHost();
+    const loading = host.load();
+    mock.timers.tick(1_500);
+    host.release();
+    await loading;
+    mock.timers.tick(500);
+    assert.equal(takeTerminalFocusRequest("session-a"), true, "the request outlives the load");
+
+    // Without a load in between, a request still expires after its second.
+    requestTerminalFocus("session-a");
+    mock.timers.tick(1_500);
+    assert.equal(takeTerminalFocusRequest("session-a"), false);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("code that starts loading long after a request leaves that request to expire (#2869)", async () => {
+  mock.timers.enable({ apis: ["Date"], now: 50_000 });
+  try {
+    requestTerminalFocus("session-a");
+    mock.timers.tick(5_000);
+    const host = slowHost();
+    const loading = host.load();
+    host.release();
+    await loading;
+    assert.equal(takeTerminalFocusRequest("session-a"), false, "an earlier move's request is not revived");
+  } finally {
+    mock.timers.reset();
+  }
 });

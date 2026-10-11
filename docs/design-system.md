@@ -864,7 +864,9 @@ the head (a sheet on phones, with 44px items) and has one item, **Move to Right 
 (`PanelRightIcon`, "Show the terminal as a tool in the right panel on this device. Running shells keep
 running."). It writes `"panel"` and opens the side panel on its Terminal tool with the same tab and
 focus in its terminal; the dock's stored visibility and height are kept for when the terminal moves
-back. Both places render the one `TerminalMoreActions` (`TerminalHead.tsx`), each with its move. The
+back. A move's focus request lasts a second from when its destination's lazily loaded code arrives
+(`loadTerminalHost`), so a first move on a slow network still lands focus in the moved terminal.
+Both places render the one `TerminalMoreActions` (`TerminalHead.tsx`), each with its move. The
 session bar's Terminal toggle and Ctrl+` call `toggleTerminalTool()` in Right Panel placement, and the
 toggle's `aria-pressed` is then `terminalToolShowing()`; in Bottom Dock placement they show and hide
 the dock as before. Settings › Appearance › Display has **Terminal Placement**, a segmented row with
