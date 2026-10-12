@@ -444,3 +444,78 @@ test("native missing usage stops admission and retains the full outstanding rese
     assert.equal(h.db.campaignReviewJobs.view(job.jobId)!.costUsd,null);
   } finally {h.db.close();}
 });
+
+
+test("native reconnect repeats current admission and never dispatches to an unsupported peer",()=>{
+
+  const h=harness();
+  try {
+    const profile={profile:"native_opus_5_5_high_read_only",controllerSha256:"a".repeat(64),executableSha256:"b".repeat(64),cliVersion:"2.1.287",accounting:"provider_list_estimate",account:"runner_default_claude",agentId:"claude"} as const;
+    const grant=allowance({costUsd:100,toolCalls:1000,controlledReview:profile});
+    assert.equal(h.enable(grant).ok,false,"no supported profile may be advertised before discovery");
+    h.metadata.runtime={dataDir:"/runner",worktreeRoot:"/runner/worktrees",maxConcurrentSessions:4,campaignReview:profile};
+    h.db.registerRunner(h.metadata,10,PROTOCOL_VERSION);
+    assert.ok(h.enable(grant).ok);
+    h.make("worker","root");h.db.setWorktreePath("worker","/runner/worktrees/worker");
+    const plan=h.svc.recordCampaignPlan("root",{planComplete:true,items:[{key:"picoduck/wollipog#2936",issue:{repository:"picoduck/wollipog",number:2936}}]});
+    assert.ok(plan.ok,plan.error??"plan refused");
+    const workItemId=plan.data!.items[0]!.workItemId;
+    const assigned=h.svc.assignCampaignWorkItem("root",{workItemId,childSessionId:"worker"});
+    assert.ok(assigned.ok,assigned.error??"assignment refused");
+    assert.ok(h.svc.updateCampaignWorkItem("root",{workItemId,stage:{stage:"in_review",pullRequests:[{repository:"picoduck/wollipog",number:3065}]}}).ok);
+    const request={requestId:"native",workItemId,pullRequest:{repository:"picoduck/wollipog",number:3065},baseSha:"a".repeat(40),headSha:"b".repeat(40),costUsd:5,toolCalls:20,brief:"Review the exact head."};
+    assert.equal(h.svc.requestCampaignReviewJob("root",{...request,costJSON:{costUsd:0}} as any).ok,false);
+    assert.equal(h.svc.requestCampaignReviewJob("root",{...request,pullRequest:{...request.pullRequest,number:999}}).ok,false);
+    const result=h.svc.requestCampaignReviewJob("root",request);
+    assert.ok(result.ok,result.error??"review refused");
+    assert.equal(result.data!.state,"reserved");
+    assert.equal(h.db.campaignWorkLedger.accounting.costSummary("root",Date.now()).total.availability,"unavailable","an unpriced native attempt is not displayed as free review");
+    assert.ok(h.svc.campaignReviewJob("root",result.data!.jobId).ok);
+    const command=h.db.campaignReviewJobs.command(result.data!.jobId)!;
+
+    h.sent.length=0;h.svc.recoverCampaignReviewJobs("r");
+    assert.equal(h.sent.filter((m)=>(m as any).type==="campaign_review_job").length,1);
+    assert.equal(h.db.campaignReviewJobs.view(command.jobId)!.state,"reserved");
+    h.db.registerRunner(h.metadata,11,216);
+    h.sent.length=0;h.svc.recoverCampaignReviewJobs("r");
+    assert.equal(h.sent.some((m)=>["campaign_review_job","cancel_campaign_review_job"].includes((m as any).type)),false);
+    assert.equal(h.db.campaignBudgets.view("root")!.state,"accounting_unavailable");
+    assert.equal(h.db.campaignBudgets.active(command.jobId),true);
+    assert.equal(h.db.campaignReviewJobs.view(command.jobId)!.costUsd,null,"unsupported recovery does not fabricate zero spend");
+  } finally {h.db.close();}
+});
+
+test("supported native reconnect cancels after human revocation without new admission",()=>{
+
+  const h=harness();
+  try {
+    const profile={profile:"native_opus_5_5_high_read_only",controllerSha256:"a".repeat(64),executableSha256:"b".repeat(64),cliVersion:"2.1.287",accounting:"provider_list_estimate",account:"runner_default_claude",agentId:"claude"} as const;
+    const grant=allowance({costUsd:100,toolCalls:1000,controlledReview:profile});
+    assert.equal(h.enable(grant).ok,false,"no supported profile may be advertised before discovery");
+    h.metadata.runtime={dataDir:"/runner",worktreeRoot:"/runner/worktrees",maxConcurrentSessions:4,campaignReview:profile};
+    h.db.registerRunner(h.metadata,10,PROTOCOL_VERSION);
+    assert.ok(h.enable(grant).ok);
+    h.make("worker","root");h.db.setWorktreePath("worker","/runner/worktrees/worker");
+    const plan=h.svc.recordCampaignPlan("root",{planComplete:true,items:[{key:"picoduck/wollipog#2936",issue:{repository:"picoduck/wollipog",number:2936}}]});
+    assert.ok(plan.ok,plan.error??"plan refused");
+    const workItemId=plan.data!.items[0]!.workItemId;
+    const assigned=h.svc.assignCampaignWorkItem("root",{workItemId,childSessionId:"worker"});
+    assert.ok(assigned.ok,assigned.error??"assignment refused");
+    assert.ok(h.svc.updateCampaignWorkItem("root",{workItemId,stage:{stage:"in_review",pullRequests:[{repository:"picoduck/wollipog",number:3065}]}}).ok);
+    const request={requestId:"native",workItemId,pullRequest:{repository:"picoduck/wollipog",number:3065},baseSha:"a".repeat(40),headSha:"b".repeat(40),costUsd:5,toolCalls:20,brief:"Review the exact head."};
+    assert.equal(h.svc.requestCampaignReviewJob("root",{...request,costJSON:{costUsd:0}} as any).ok,false);
+    assert.equal(h.svc.requestCampaignReviewJob("root",{...request,pullRequest:{...request.pullRequest,number:999}}).ok,false);
+    const result=h.svc.requestCampaignReviewJob("root",request);
+    assert.ok(result.ok,result.error??"review refused");
+    assert.equal(result.data!.state,"reserved");
+    assert.equal(h.db.campaignWorkLedger.accounting.costSummary("root",Date.now()).total.availability,"unavailable","an unpriced native attempt is not displayed as free review");
+    assert.ok(h.svc.campaignReviewJob("root",result.data!.jobId).ok);
+    const command=h.db.campaignReviewJobs.command(result.data!.jobId)!;
+
+    h.sent.length=0;
+    assert.ok(h.svc.setCampaignControl("root",{mode:"custom"},2,h.principal).ok);
+    assert.ok(h.sent.some((m)=>(m as any).type==="cancel_campaign_review_job" && (m as any).jobId===command.jobId));
+    assert.equal(h.sent.some((m)=>(m as any).type==="campaign_review_job"),false);
+    assert.equal(h.db.campaignBudgets.active(command.jobId),true);
+  } finally {h.db.close();}
+});
