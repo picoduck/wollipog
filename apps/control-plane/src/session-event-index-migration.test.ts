@@ -135,7 +135,10 @@ test("a failed counter installation rolls back the legacy DROP and permits a hea
     try { assert.throws(() => ControlPlaneDb.open(location), /already exists/); }
     finally {
       DatabaseSync.prototype.exec = originalExec;
-      if (failedHandle?.isOpen) failedHandle.close();
+      if (failedHandle) {
+        try { failedHandle.close(); }
+        catch (error) { assert.match(String(error), /database is not open/); }
+      }
     }
     raw = new DatabaseSync(location);
     try {
