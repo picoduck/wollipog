@@ -123,14 +123,16 @@ export class OperatorVideoValidationPermits {
     return p;
   }
   mint(principal: AuthPrincipal, proposal: { identity: PreparedMediaIdentity;
-    subject: OperatorVideoValidationSubject; expiresAt: number }): OperatorVideoValidationPermit | null {
+    subject: OperatorVideoValidationSubject; expectedScopeSha256: string; expiresAt: number }): OperatorVideoValidationPermit | null {
     if (principal.kind !== "human" || !["owner", "admin"].includes(principal.role) || !proposal ||
-      Object.keys(proposal).length !== 3 || !["identity", "subject", "expiresAt"].every((k) => Object.hasOwn(proposal, k))) return null;
+      Object.keys(proposal).length !== 4 || !["identity", "subject", "expectedScopeSha256", "expiresAt"].every((k) => Object.hasOwn(proposal, k)) ||
+      !digest(proposal.expectedScopeSha256)) return null;
     const now = this.now();
     if (!Number.isSafeInteger(now) || now <= 0 || !Number.isSafeInteger(proposal.expiresAt) ||
       proposal.expiresAt <= now || proposal.expiresAt > now + 60 * 60 * 1000) return null;
     const scope = this.ports.current(proposal.identity, proposal.subject);
     if (!scope || !validScope(scope) || sha(scope.identity) !== sha(proposal.identity) || sha(scope.subject) !== sha(proposal.subject) ||
+      sha(scope) !== proposal.expectedScopeSha256 ||
       scope.authorizedByUserId !== principal.userId || scope.organizationId !== principal.organizationId) return null;
     const permit: OperatorVideoValidationPermit = { purpose: "operator_video_validation",
       permitId: "video_validation_" + randomUUID().replaceAll("-", ""), scope: structuredClone(scope), scopeSha256: sha(scope),

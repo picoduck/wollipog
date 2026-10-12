@@ -28,8 +28,11 @@ export interface PreparedMediaBinding {
   /** Current original gate, audience, scope, policy, disclosure and evidence authority binding. */
   authoritySha256: string;
 }
-export type PreparedMediaState = "prepared" | "bound" | "dispatching" | "active" | "uncertain" | "cancelled";
+export type PreparedMediaState = "prepared" | "bound" | "dispatching" | "active" | "uncertain" | "cancelling" | "cancelled";
 export interface PreparedMediaRecord extends PreparedMediaIdentity, MaterializedMediaSession {
+  /** Transaction-local cancellation claim. Unsent and authenticated runner-fenced proofs are
+   * distinct; a bare send/reconcile string never satisfies the concrete release adapter. */
+  cancellation?: { kind: "never_enqueued" | "terminal_fenced"; from: "prepared" | "bound" | "dispatching" | "uncertain" };
   commandSha256: string;
   dispatchSha256: string | null;
   state: PreparedMediaState;
@@ -222,6 +225,8 @@ export class PreparedMediaSessions {
       if (outcome === "never_dispatched" && !this.sameGeneration(record)) {
         record.state = "uncertain";
       } else if (outcome === "never_dispatched") {
+        record.cancellation = { kind: "terminal_fenced", from: record.state };
+        record.state = "cancelling"; this.save(record);
         this.ports.cancelNeverDispatched(structuredClone(record)); record.state = "cancelled";
       } else record.state = outcome === "accepted" ? "active" : "uncertain";
       this.save(record); return this.get(identity)!;
@@ -246,6 +251,8 @@ export class PreparedMediaSessions {
         throw new Error("Unknown or possibly dispatched capacity cannot be released.");
       }
       if (!this.sameGeneration(record)) throw new Error("Replacement generation capacity cannot be released.");
+      record.cancellation = { kind: "never_enqueued", from: record.state as "prepared" | "bound" };
+      record.state = "cancelling"; this.save(record);
       this.ports.cancelNeverDispatched(structuredClone(record));
       record.state = "cancelled"; this.save(record); return this.get(identity)!;
     });

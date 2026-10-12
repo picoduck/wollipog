@@ -11296,3 +11296,5 @@ export function isTerminal(status: SessionStatus): boolean {
 export type { PacedVideoReviewReceipt, PacedVideoReviewDelivery, PacedVideoReviewBatchDelivery, PacedVideoTransportGrant, DelegatedVideoEvidenceReference, OperatorVideoValidationPurpose } from "./paced-video-review.js";
 
 export { PACED_VIDEO_REVIEW_BATCH_LIMITS, PACED_VIDEO_REVIEW_MIN_PROTOCOL } from "./paced-video-review.js";
+export type { MediaDispatchFenceIdentity, MediaNeverDispatchedFence } from "./media-dispatch-fence.js";
+export { validMediaDispatchFenceIdentity, mediaDispatchFenceBody, validMediaNeverDispatchedFence } from "./media-dispatch-fence.js";
