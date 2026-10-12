@@ -107,7 +107,8 @@ export function attachWslAgentControlBroker(
   // `wait_pull_request` reads GitHub with the distro's own `gh` login, never the Windows host's.
   gh: GhRunner = contextGhRunner({ kind: "wsl", distro: config.distro }, "/"),
 ): () => void {
-  const connections = new Map<string, { input?: PassThrough; closed: boolean }>();
+  // `abort` cancels a bridged command still running when its connection closes.
+  const connections = new Map<string, { input?: PassThrough; abort?: AbortController; closed: boolean }>();
   let pending = "";
   let disposed = false;
   const send = (message: Record<string, unknown>) => {
@@ -119,6 +120,7 @@ export function attachWslAgentControlBroker(
     const connection = connections.get(id);
     if (connection?.closed) return;
     if (connection) connection.closed = true;
+    connection?.abort?.abort();
     if (message) send({ id, stream: "stderr", data: Buffer.from(`${message}\n`).toString("base64") });
     send({ id, exit });
     connection?.input?.end();
@@ -133,7 +135,7 @@ export function attachWslAgentControlBroker(
       if (id) close(id, 1, "Agent Control authentication failed");
       return;
     }
-    const connection: { input?: PassThrough; closed: boolean } = { closed: false };
+    const connection: { input?: PassThrough; abort?: AbortController; closed: boolean } = { closed: false };
     connections.set(id, connection);
     send({ id, accepted: true });
     if (frame.kind === "mcp") {
@@ -162,7 +164,8 @@ export function attachWslAgentControlBroker(
     };
     if (args[0] === "pr") {
       // The broker's working directory is not the agent's, so a bare number needs --repo here.
-      void runPullRequestCli(args, args.includes("--json"), io, gh)
+      connection.abort = new AbortController();
+      void runPullRequestCli(args, args.includes("--json"), io, gh, connection.abort.signal)
         .then((code) => close(id, code), (error) => close(id, 1, (error as Error).message));
       return;
     }
@@ -194,7 +197,10 @@ export function attachWslAgentControlBroker(
         else connection.input.write(Buffer.from(frame.data, "base64"));
       } else if (typeof frame.id === "string" && (frame.type === "end" || frame.type === "close")) {
         connections.get(frame.id)?.input?.end();
-        if (frame.type === "close") connections.delete(frame.id);
+        if (frame.type === "close") {
+          connections.get(frame.id)?.abort?.abort();
+          connections.delete(frame.id);
+        }
       }
     }
   };

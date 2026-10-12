@@ -164,6 +164,7 @@ export async function runPullRequestCli(
   json: boolean,
   io: { stdout: Write; stderr: Write },
   gh: GhRunner = contextGhRunner({ kind: "native" }, process.cwd()),
+  signal?: AbortSignal,
 ): Promise<number> {
   const fail = (message: string, code: number): number => {
     (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: message })}\n` : `${message}\n`);
@@ -189,7 +190,7 @@ export async function runPullRequestCli(
     ...(timeoutMs !== undefined ? { timeoutMs } : {}),
     ...(intervalMs !== undefined ? { intervalMs } : {}),
     ...(flag(args, "--any-failure") ? { returnOnAnyFailure: true } : {}),
-  }, { fetch: () => Promise.reject(new Error("no control plane")), cpUrl: "", selfSessionId: "", token: "", gh });
+  }, { fetch: () => Promise.reject(new Error("no control plane")), cpUrl: "", selfSessionId: "", token: "", gh, ...(signal ? { signal } : {}) });
   const data = payload(result);
   io.stdout(json ? `${JSON.stringify(data)}\n` : `${JSON.stringify(data, null, 2)}\n`);
   if (result.isError) return 1;

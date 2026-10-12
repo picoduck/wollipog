@@ -18,8 +18,10 @@ export const PULL_REQUEST_WAIT_DEFAULT_INTERVAL_MS = 30_000;
 export const PULL_REQUEST_WAIT_MIN_INTERVAL_MS = 10_000;
 export const PULL_REQUEST_WAIT_MAX_INTERVAL_MS = 600_000;
 
-/** Contexts read per commit. A required check beyond this page stays `pending`. */
+/** Contexts read per page, and pages read per commit. Past the last page a pass also needs GitHub's
+ * own merge state to confirm it. */
 const CONTEXTS_PER_COMMIT = 100;
+const MAX_CONTEXT_PAGES = 10;
 const MAX_LISTED_CHECKS = 30;
 const MAX_FAILED_JOBS = 20;
 const MAX_NAME = 120;
@@ -252,11 +254,12 @@ export async function requiredCheckNames(
   };
 }
 
-const CONTEXT_FIELDS = `contexts(first:${CONTEXTS_PER_COMMIT}){pageInfo{hasNextPage} nodes{
+const contextFields = (after: string) => `contexts(first:${CONTEXTS_PER_COMMIT}${after}){pageInfo{hasNextPage endCursor} nodes{
   __typename
   ... on CheckRun{databaseId name status conclusion startedAt detailsUrl checkSuite{app{databaseId}} isRequired(pullRequestNumber:$number)}
   ... on StatusContext{context state createdAt targetUrl isRequired(pullRequestNumber:$number)}
 }}`;
+const CONTEXT_FIELDS = contextFields("");
 
 export const PULL_REQUEST_WAIT_QUERY = `query($owner:String!,$name:String!,$number:Int!){
   repository(owner:$owner,name:$name){
@@ -267,6 +270,13 @@ export const PULL_REQUEST_WAIT_QUERY = `query($owner:String!,$name:String!,$numb
       mergeQueueEntry{position state enqueuedAt headCommit{oid statusCheckRollup{${CONTEXT_FIELDS}}}}
       commits(last:1){nodes{commit{oid statusCheckRollup{${CONTEXT_FIELDS}}}}}
     }
+  }
+}`;
+
+/** One further page of a commit's check contexts. */
+export const PULL_REQUEST_CONTEXTS_QUERY = `query($owner:String!,$name:String!,$number:Int!,$oid:GitObjectID!,$after:String!){
+  repository(owner:$owner,name:$name){
+    object(oid:$oid){... on Commit{statusCheckRollup{${contextFields(",after:$after")}}}}
   }
 }`;
 
@@ -344,29 +354,39 @@ export function evaluateCommitChecks(
   const contexts = record(record(rollup)?.contexts);
   const rawNodes = Array.isArray(contexts?.nodes) ? contexts.nodes : [];
   const moreContexts = record(contexts?.pageInfo)?.hasNextPage === true;
+  // Own properties only: a check may be named `constructor` or `__proto__`.
+  const appsFor = (name: string): readonly number[] | undefined =>
+    Object.hasOwn(requiredApps, name) ? requiredApps[name] : undefined;
   const latest = new Map<string, CheckNode>();
   for (const raw of rawNodes) {
     const node = checkNode(raw);
     if (!node) continue;
     // Restricted names keep each app's runs apart, so another app's run cannot replace them.
-    const app = node.kind === "CheckRun" && requiredApps[node.name] ? String(node.appId ?? "") : "";
+    const app = node.kind === "CheckRun" && appsFor(node.name) ? String(node.appId ?? "") : "";
     const key = `${node.kind}\0${app}\0${node.name}`;
     const previous = latest.get(key);
     if (!previous || newer(node, previous)) latest.set(key, node);
   }
   const counts = (node: CheckNode, name: string): boolean => {
-    const apps = requiredApps[name];
+    const apps = appsFor(name);
     return node.name === name &&
       (node.kind === "StatusContext" || !apps || (node.appId !== undefined && apps.includes(node.appId)));
   };
   // Rules are the authority; a check GitHub itself marks required is added, never removed.
   const required = new Set(requiredNames);
-  for (const node of latest.values()) if (node.isRequired && !requiredApps[node.name]) required.add(node.name);
+  for (const node of latest.values()) if (node.isRequired && !appsFor(node.name)) required.add(node.name);
   const requiredList: RequiredCheckSummary[] = [...required].sort().map((name) => {
-    const nodes = [...latest.values()].filter((node) => counts(node, name));
-    const state: CheckState = nodes.some((node) => node.state === "failed") ? "failed"
-      : nodes.length > 0 && nodes.every((node) => node.state === "passed") ? "passed" : "pending";
-    return { name: clip(name, MAX_NAME), state, reported: nodes.length > 0 };
+    const named = [...latest.values()].filter((node) => node.name === name);
+    const apps = appsFor(name);
+    // One result per requirement: every reported run of an unrestricted name, or each required
+    // app's own run; a status context (which names no app here) stands in for an app with no run.
+    const results: Array<CheckState | undefined> = apps
+      ? apps.map((app) => (named.find((node) => node.kind === "CheckRun" && node.appId === app) ??
+        named.find((node) => node.kind === "StatusContext"))?.state)
+      : named.length > 0 ? named.map((node) => node.state) : [undefined];
+    const state: CheckState = results.includes("failed") ? "failed"
+      : results.every((result) => result === "passed") ? "passed" : "pending";
+    return { name: clip(name, MAX_NAME), state, reported: results.every((result) => result !== undefined) };
   });
   const other = { passed: 0, failed: 0, pending: 0 };
   const failed: FailedJob[] = [];
@@ -416,6 +436,8 @@ interface Observation {
   mergeCommitSha: string | null;
   queue: null | { state: string; position: number | null; enqueuedAt: string | null; headSha: string | null; rollup: unknown };
   rollup: unknown;
+  /** The commit `rollup` belongs to. */
+  rollupSha: string | null;
 }
 
 function observation(data: unknown): Observation | null {
@@ -449,6 +471,29 @@ function observation(data: unknown): Observation | null {
         }
       : null,
     rollup: commit?.statusCheckRollup ?? null,
+    rollupSha: typeof commit?.oid === "string" && SHA.test(commit.oid) ? commit.oid : null,
+  };
+}
+
+type Read<T> = { ok: true; value: T } | { ok: false; retryable: boolean; error: string };
+
+/** One GraphQL read. An answer carrying any error is never trusted: a partial answer can null an
+ * outcome field such as mergeQueueEntry. Rate limits, transport failures, and partial answers are
+ * retryable. */
+async function graphqlRead<T>(gh: GhRunner, args: string[], what: string, parse: (data: unknown) => T | null): Promise<Read<T>> {
+  const outcome = await gh(["api", "graphql", "--hostname", "github.com", ...args]);
+  const response = record(parseJson(outcome.stdout));
+  const errors = Array.isArray(response?.errors) ? response.errors.map(record) : [];
+  const value = parse(response?.data);
+  if (value !== null && errors.length === 0) return { ok: true, value };
+  const retryable = errors.some((error) => error?.type === "RATE_LIMITED") || value !== null ||
+    (outcome.code !== null && transient(outcome));
+  const message = errors.map((error) => typeof error?.message === "string" ? error.message : "").find(Boolean);
+  return {
+    ok: false,
+    retryable,
+    error: message ? `${what}: ${clip(message, 200)}`
+      : outcome.code === null ? `${what}: unexpected response` : ghError(what, outcome),
   };
 }
 
@@ -534,33 +579,57 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
     return cancellableSleep(deps, Math.min(milliseconds, remaining));
   };
 
+  const what = `could not read ${repository}#${ref.number}`;
+  const variables = ["-f", `owner=${ref.owner}`, "-f", `name=${ref.name}`, "-F", `number=${ref.number}`];
+
+  /** Append further pages of one commit's contexts, up to MAX_CONTEXT_PAGES in all. */
+  const completeContexts = async (rollup: unknown, sha: string | null): Promise<Read<unknown>> => {
+    const contexts = record(record(rollup)?.contexts);
+    if (!sha || !contexts) return { ok: true, value: rollup };
+    const nodes = Array.isArray(contexts.nodes) ? [...contexts.nodes] : [];
+    let pageInfo = record(contexts.pageInfo);
+    for (let page = 1; page < MAX_CONTEXT_PAGES && pageInfo?.hasNextPage === true && typeof pageInfo.endCursor === "string"; page++) {
+      if (deps.signal?.aborted) break;
+      const read = await graphqlRead(deps.gh, [
+        "-f", `query=${PULL_REQUEST_CONTEXTS_QUERY}`, ...variables, "-f", `oid=${sha}`, "-f", `after=${pageInfo.endCursor}`,
+      ], what, (data) => {
+        const more = record(record(record(record(record(data)?.repository)?.object)?.statusCheckRollup)?.contexts);
+        return more && Array.isArray(more.nodes) && record(more.pageInfo) ? more : null;
+      });
+      if (!read.ok) return read;
+      nodes.push(...read.value.nodes as unknown[]);
+      pageInfo = record(read.value.pageInfo);
+    }
+    return { ok: true, value: { ...record(rollup), contexts: { pageInfo: { hasNextPage: pageInfo?.hasNextPage === true }, nodes } } };
+  };
+
+  const read = async (): Promise<Read<Observation>> => {
+    const main = await graphqlRead(deps.gh, ["-f", `query=${PULL_REQUEST_WAIT_QUERY}`, ...variables], what, observation);
+    if (!main.ok || main.value.state !== "open") return main;
+    const seen = main.value;
+    const head = await completeContexts(seen.rollup, seen.rollupSha);
+    if (!head.ok) return head;
+    const group = seen.queue ? await completeContexts(seen.queue.rollup, seen.queue.headSha) : null;
+    if (group && !group.ok) return group;
+    return {
+      ok: true,
+      value: { ...seen, rollup: head.value, ...(seen.queue && group ? { queue: { ...seen.queue, rollup: group.value } } : {}) },
+    };
+  };
+
   for (;;) {
     if (deps.signal?.aborted) return { ok: false, error: "request cancelled" };
     polls++;
-    const outcome = await deps.gh([
-      "api", "graphql", "--hostname", "github.com",
-      "-f", `query=${PULL_REQUEST_WAIT_QUERY}`,
-      "-f", `owner=${ref.owner}`, "-f", `name=${ref.name}`, "-F", `number=${ref.number}`,
-    ]);
+    const result = await read();
     if (deps.signal?.aborted) return { ok: false, error: "request cancelled" };
-    const response = record(parseJson(outcome.stdout));
-    const errors = Array.isArray(response?.errors) ? response.errors.map(record) : [];
-    const observed = observation(response?.data);
-    // A partial answer can null an outcome field such as mergeQueueEntry, so any error discards it.
-    const seen = errors.length === 0 ? observed : null;
-    if (!seen) {
-      const rateLimited = errors.some((error) => error?.type === "RATE_LIMITED");
-      const retryable = rateLimited || observed !== null || (outcome.code !== null && transient(outcome));
-      if (retryable && ++transientFailures <= MAX_TRANSIENT_FAILURES && now() < deadline) {
+    if (!result.ok) {
+      if (result.retryable && ++transientFailures <= MAX_TRANSIENT_FAILURES && now() < deadline) {
         if (!await pause(intervalMs)) return { ok: false, error: "request cancelled" };
         continue;
       }
-      const message = errors.map((error) => typeof error?.message === "string" ? error.message : "").find(Boolean);
-      if (message) return { ok: false, error: `could not read ${repository}#${ref.number}: ${clip(message, 200)}` };
-      return { ok: false, error: outcome.code === null
-        ? `could not read ${repository}#${ref.number}: unexpected response`
-        : ghError(`could not read ${repository}#${ref.number}`, outcome) };
+      return { ok: false, error: result.error };
     }
+    const seen = result.value;
 
     if (seen.state === "merged") return { ok: true, summary: summarize("merged", seen) };
     if (seen.state === "closed") return { ok: true, summary: summarize("closed", seen) };

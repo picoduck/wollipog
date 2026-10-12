@@ -9,6 +9,7 @@ import type { GhOutcome, GhRunner } from "./campaign-forge-status.js";
 import {
   evaluateCommitChecks,
   parsePullRequestRef,
+  PULL_REQUEST_CONTEXTS_QUERY,
   PULL_REQUEST_WAIT_QUERY,
   requiredCheckNames,
   waitForPullRequest,
@@ -55,11 +56,13 @@ const failed = (stderr: string, code: number | string = 1): GhOutcome => ({ stdo
 const RULESET = [{ type: "pull_request" }, { type: "required_status_checks", parameters: { required_status_checks: [{ context: AGGREGATOR }] } }];
 
 /** A scripted `gh`: each GraphQL read takes the next entry (the last one repeats). */
-function fakeGh(reads: GhOutcome[], options: { rules?: GhOutcome; branch?: GhOutcome } = {}) {
+function fakeGh(reads: GhOutcome[], options: { rules?: GhOutcome; branch?: GhOutcome; pages?: GhOutcome[] } = {}) {
   const calls: string[][] = [];
   let index = 0;
+  let page = 0;
   const gh: GhRunner = async (args) => {
     calls.push(args);
+    if (args.includes(`query=${PULL_REQUEST_CONTEXTS_QUERY}`)) return options.pages![Math.min(page++, options.pages!.length - 1)]!;
     if (args.includes("graphql")) return reads[Math.min(index++, reads.length - 1)]!;
     const path = args.find((arg) => arg.startsWith("repos/")) ?? "";
     if (path.includes("/rules/branches/")) return options.rules ?? ok(RULESET);
@@ -510,6 +513,63 @@ test("HTTP 403 rate limits and 5xx answers retry; an ordinary 403 does not", asy
   const forbidden = await waitForPullRequest({ repository: "o/r", number: 7 },
     { gh: fakeGh([ok(pr())], { rules: failed("gh: Resource not accessible by integration (HTTP 403)") }).gh, ...clock() });
   assert.deepEqual(forbidden, { ok: false, error: "could not read the rules for main: http_403 (gh: Resource not accessible by integration (HTTP 403))" });
+});
+
+test("a required check past the first page of contexts is read from the next page", async () => {
+  const optional = Array.from({ length: 100 }, (_, index) => run(`optional-${index}`, "SUCCESS"));
+  const first = ok(pr({ commits: { nodes: [{ commit: { oid: HEAD, statusCheckRollup: {
+    contexts: { pageInfo: { hasNextPage: true, endCursor: "cursor-1" }, nodes: optional },
+  } } }] } }));
+  const next = (conclusion: string) => ok({ data: { repository: { object: { statusCheckRollup: {
+    contexts: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [run(AGGREGATOR, conclusion)] },
+  } } } } });
+  const passed = fakeGh([first], { pages: [next("SUCCESS")] });
+  const result = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh: passed.gh, ...clock() });
+  assert.ok(result.ok);
+  assert.equal(result.summary.outcome, "checks_passed");
+  assert.equal(result.summary.checks.truncated, undefined);
+  const page = passed.calls.find((args) => args.includes(`query=${PULL_REQUEST_CONTEXTS_QUERY}`))!;
+  assert.ok(page.includes(`oid=${HEAD}`) && page.includes("after=cursor-1") && page.includes("number=7"));
+
+  const failing = await waitForPullRequest({ repository: "o/r", number: 7 },
+    { gh: fakeGh([first], { pages: [next("FAILURE")] }).gh, ...clock() });
+  assert.ok(failing.ok);
+  assert.equal(failing.summary.outcome, "checks_failed");
+  assert.equal(failing.summary.checks.failedJobs[0]!.name, AGGREGATOR);
+
+  // Pages are bounded: past the last one, a pass needs GitHub's merge state as before.
+  const endless = ok({ data: { repository: { object: { statusCheckRollup: {
+    contexts: { pageInfo: { hasNextPage: true, endCursor: "again" }, nodes: [run(AGGREGATOR, "SUCCESS")] },
+  } } } } });
+  const bounded = fakeGh([first], { pages: [endless] });
+  const capped = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 1 }, { gh: bounded.gh, ...clock() });
+  assert.ok(capped.ok);
+  assert.equal(capped.summary.outcome, "timeout");
+  assert.equal(bounded.calls.filter((args) => args.includes(`query=${PULL_REQUEST_CONTEXTS_QUERY}`)).length, 9 * capped.summary.polls,
+    "at most nine further pages per poll");
+});
+
+test("every app a required check is bound to must report", () => {
+  const appRun = (app: number, conclusion: string) => run("CI", conclusion, { databaseId: app, checkSuite: { app: { databaseId: app } } });
+  const one = evaluateCommitChecks(HEAD, rollup([appRun(123, "SUCCESS")]), ["CI"], { CI: [123, 456] });
+  assert.equal(one.requiredState, "pending");
+  assert.deepEqual(one.summary.required, [{ name: "CI", state: "pending", reported: false }]);
+  const both = evaluateCommitChecks(HEAD, rollup([appRun(123, "SUCCESS"), appRun(456, "SUCCESS")]), ["CI"], { CI: [123, 456] });
+  assert.equal(both.requiredState, "passed");
+  const status = evaluateCommitChecks(HEAD, rollup([
+    appRun(123, "SUCCESS"), { __typename: "StatusContext", context: "CI", state: "FAILURE", createdAt: "x" },
+  ]), ["CI"], { CI: [123, 456] });
+  assert.equal(status.requiredState, "failed", "a status context stands in for an app with no run");
+});
+
+test("check names that collide with object prototype keys evaluate normally", () => {
+  for (const name of ["constructor", "toString", "__proto__", "hasOwnProperty"]) {
+    const verdict = evaluateCommitChecks(HEAD, rollup([run(name, "SUCCESS", { checkSuite: { app: { databaseId: 9 } } })]), [name]);
+    assert.equal(verdict.requiredState, "passed", name);
+    const restricted = evaluateCommitChecks(HEAD, rollup([run(name, "SUCCESS", { checkSuite: { app: { databaseId: 9 } } })]), [name],
+      Object.fromEntries([[name, [9]]]));
+    assert.equal(restricted.requiredState, "passed", `${name} restricted`);
+  }
 });
 
 test("pull request references parse from numbers, short refs, and github.com URLs", () => {

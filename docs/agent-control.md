@@ -94,13 +94,13 @@ summary. It runs in the runner-side process, not the model: no model request hap
 waits. It reads GitHub through the local `gh` login and never writes, so it needs no control plane,
 session credential, or protocol bump; an older runner simply lacks the command. A Direct WSL
 Orchestrator's broker runs it with the distro's own `gh`, never the Windows host's, and its bridged
-CLI form needs `owner/name#number`, a URL, or `--repo`. Required checks are
+CLI form needs `owner/name#number`, a URL, or `--repo`; closing the bridged connection cancels it. Required checks are
 the union of the base branch's active ruleset `required_status_checks`, classic branch protection,
 and any reported check GitHub marks required; a check run and a status context sharing a required
 name must both pass, a name restricted to an app (`integration_id`, `app_id`) counts only that app's
-check runs, and the newest run of a name (by check run id) wins. When a commit has more than one
-page of check contexts, a pass also needs GitHub's `mergeStateStatus` to confirm it, because an
-unseen context could still fail. A required check with no reported run is `pending`
+check runs (every such app must report), and the newest run of a name (by check run id) wins.
+Check contexts are read in pages of 100, up to ten pages per commit; past that, a pass also needs
+GitHub's `mergeStateStatus` to confirm it, because an unseen context could still fail. A required check with no reported run is `pending`
 (`reported: false`), never passing, and a base whose rules require nothing returns
 `no_required_checks` at once. An unreadable base is an error, never an empty requirement, and a
 GraphQL answer carrying any error is retried rather than trusted. A queue

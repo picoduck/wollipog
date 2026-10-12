@@ -217,6 +217,33 @@ test("Direct WSL pull request waits read GitHub with the session's gh, through M
   dispose();
 });
 
+test("closing a bridged pull request wait cancels it before any further GitHub read", async () => {
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const calls: string[][] = [];
+  const gh: GhRunner = async (args) => {
+    calls.push(args);
+    await held;
+    return { stdout: JSON.stringify({ data: { repository: { defaultBranchRef: { name: "main" }, pullRequest: {
+      url: "https://github.com/o/r/pull/1", state: "OPEN", isDraft: false, headRefOid: "44579c6c25235598f1a28f8ccb0449cb8dbbc810",
+      baseRefName: "main", mergeStateStatus: "BLOCKED", mergeCommit: null, mergeQueueEntry: null, commits: { nodes: [] },
+    } } } }), stderr: "", code: null, timedOut: false };
+  };
+  const f = fixture();
+  const dispose = attachWslAgentControlBroker(f.fromHelper, f.toHelper, f.config, async () => {
+    throw new Error("no control plane");
+  }, gh);
+  f.fromHelper.write(`${JSON.stringify({ type: "open", id: "cli", v: 1, kind: "cli",
+    sessionId: f.config.sessionId, token: f.config.token, args: ["pr", "wait", "o/r#1", "--json"] })}\n`);
+  for (let attempt = 0; attempt < 50 && calls.length === 0; attempt++) await tick();
+  f.fromHelper.write(`${JSON.stringify({ type: "close", id: "cli" })}\n`);
+  await tick();
+  release();
+  for (let attempt = 0; attempt < 20; attempt++) await tick();
+  assert.equal(calls.length, 1, "no rules read after the connection closed");
+  dispose();
+});
+
 test("broker rejects wrong-session, wrong-token, and stale credentials before opening a route", async () => {
   const f = fixture();
   const dispose = attachWslAgentControlBroker(f.fromHelper, f.toHelper, f.config);
