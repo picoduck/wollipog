@@ -25,6 +25,7 @@ import { useApi } from "../api-context.js";
 import { formatClock } from "../format.js";
 import {
   GitDiffViewer,
+  useInitiallyCollapsedDiffPaths,
   StageRaceNotice,
   type DiffFileFocus,
   type DiffFileNotice,
@@ -306,11 +307,11 @@ export function ReviewPanel({
   const splitFits = usePanelAtLeast(scrollElement, SPLIT_MIN_PANEL_PX);
   const shownLayout: DiffLayout = splitFits ? layout : "unified";
   const selectLinesFits = usePanelAtLeast(scrollElement, SELECT_LINES_TOOLBAR_MIN_PANEL_PX);
-  // Collapsed files by path, so a refresh with the same files keeps them; another session starts open.
-  const [collapsed, setCollapsed] = useState<{ sessionId: string; paths: ReadonlySet<string> }>(
-    () => ({ sessionId: session.id, paths: new Set<string>() }),
+  // Collapsed files by path, so refreshes keep the person's choices. Until the first choice,
+  // another session or a newly loaded diff uses the bounded initial expansion below.
+  const [collapsed, setCollapsed] = useState<{ sessionId: string; paths: ReadonlySet<string> | null }>(
+    () => ({ sessionId: session.id, paths: null }),
   );
-  const collapsedPaths = collapsed.sessionId === session.id ? collapsed.paths : NO_COLLAPSED_FILES;
   const setCollapsedPaths = (paths: ReadonlySet<string>) => setCollapsed({ sessionId: session.id, paths });
   const [diff, setDiff] = useState<GitDiffInfo | null>(null);
   /** Completed diff reads, so a request can tell a read that landed after it from one before. */
@@ -980,6 +981,9 @@ export function ReviewPanel({
       : scopedDiff,
     [fineDiffSupported, pane, scope, scopedDiff],
   );
+
+  const initialCollapsedPaths = useInitiallyCollapsedDiffPaths(shownDiff?.files ?? [], `${session.id}:${scope}:${pane}`);
+  const collapsedPaths = (collapsed.sessionId === session.id ? collapsed.paths : null) ?? initialCollapsedPaths;
 
   // Which change set the findings and the unsent drafts belong to. A pane switch is a different
   // lineage even at the same line number: pane-local anchor identities exist so a finding authored

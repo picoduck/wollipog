@@ -37,6 +37,7 @@ import {
   type RailAttention,
 } from "../rail-attention.js";
 import { CountBadge } from "./CountBadge.js";
+import { useToastChrome } from "./useToastChrome.js";
 
 /** Shared with Settings → Appearance → Navigation, whose rows show the same glyphs (#385). */
 export const VIEW_ICONS: Record<GlobalViewName, (props: { size?: number; className?: string }) => ReactNode> = {
@@ -268,6 +269,7 @@ export function Rail({
   const moreAttention = overflowAttention(overflowItems, attentionState);
   // The labelled rail already shows every name, so it shows no tooltip.
   const tooltip = useRailTooltip(!isMobile && !labelled);
+  const toastChromeRef = useToastChrome();
   // The sheet is rendered for the whole phone breakpoint rather than only when a destination
   // overflows: Settings always lives there, so hiding every optional destination by experiment
   // must not strand it.
@@ -385,7 +387,7 @@ export function Rail({
   };
 
   return (
-    <nav className={`app-rail${labelled ? " labelled" : ""}`} aria-label="Primary Navigation" data-focus-zone="rail" tabIndex={-1} {...tooltip.handlers}>
+    <nav ref={toastChromeRef} className={`app-rail${labelled ? " labelled" : ""}`} aria-label="Primary Navigation" data-focus-zone="rail" tabIndex={-1} {...tooltip.handlers}>
       {/* In the desktop app the current instance's tile takes the brand's place (§4.1, #1970).
           Elsewhere the brand is decoration, not a second link to Sessions directly below it (#1958). */}
       {!isMobile && instanceControl ? (

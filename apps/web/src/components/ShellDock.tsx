@@ -20,6 +20,7 @@ import { useIsCoarsePointer, useIsMobile } from "./useIsMobile.js";
 import { shortcutAriaKeys, shortcutDisplay } from "../shortcuts.js";
 import type { ResolvedTheme } from "../theme.js";
 import { loadBrowserStorageValue, saveBrowserStorageValue } from "../instance-storage.js";
+import { useToastChrome } from "./useToastChrome.js";
 
 export const MOVE_TO_RIGHT_PANEL_DESCRIPTION =
   "Show the terminal as a tool in the right panel on this device. Running shells keep running.";
@@ -80,6 +81,7 @@ export function ShellDock({
   const tabsetId = `shell-dock-${useId().replace(/:/g, "")}`;
   const coarsePointer = useIsCoarsePointer();
   const phone = useIsMobile();
+  const toastLayoutRef = useToastChrome<HTMLDivElement>();
   // On a phone the open search has its own row; elsewhere it replaces Search Output in the head.
   const host = useTerminalHost(sessionId, tabsetId, {
     place: "dock",
@@ -176,7 +178,7 @@ export function ShellDock({
   const { terminals, active, busy, searchOpen } = host;
 
   return (
-    <div className={`shell-dock${dragging ? " is-dragging" : ""}`} role="region" aria-label="Terminal">
+    <div ref={toastLayoutRef} className={`shell-dock${dragging ? " is-dragging" : ""}`} role="region" aria-label="Terminal">
       <div
         className="shell-dock-grip"
         role="separator"

@@ -13,6 +13,7 @@ import { createPortal } from "react-dom";
 import { ChevronLeftIcon, CloseIcon, WarningIcon } from "./Icons.js";
 import { MOBILE_BREAKPOINT_PX } from "./useIsMobile.js";
 import { DialogReturnFocusContext } from "./dialog-return-focus.js";
+import { useToastChrome } from "./useToastChrome.js";
 
 /** Dialog widths (docs/design-system.md §7.1): confirmations, forms, review and pickers, rare long flows. */
 export type ModalSize = "sm" | "md" | "lg" | "full";
@@ -213,6 +214,7 @@ export function Modal({
   const layerRef = useRef<ModalLayer | null>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const footRef = useRef<HTMLDivElement>(null);
+  const toastFootRef = useToastChrome(footRef);
   // The tertiary's portal container: far left of the footer on desktop, the body's end on a phone.
   // Moved, never re-created, so a focused tertiary keeps focus across the breakpoint.
   const [tertiaryHost] = useState<HTMLElement | null>(() => {
@@ -418,7 +420,7 @@ export function Modal({
         {hasTertiary && !tertiaryPortable && phone && <div className="modal-tertiary">{tertiary}</div>}
       </div>
       {(footer || (hasTertiary && !phone)) && (
-        <div className="modal-foot" ref={footRef}>
+        <div className="modal-foot" ref={toastFootRef}>
           {hasTertiary && !tertiaryPortable && !phone && <div className="modal-tertiary">{tertiary}</div>}
           {footer}
         </div>

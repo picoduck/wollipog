@@ -21,6 +21,24 @@ async function viewOption(page: Page, name: string) {
   return page.getByRole("menu", { name: "View Options" }).locator(`[data-menu-label="${name}"]`);
 }
 
+test("200 files start with ten bodies; Expand All, Collapse All and an individual tail file still work (#2779)", async ({ page }) => {
+  await open(page, "files=200&expanded=1");
+  await expect(page.locator(".dfile")).toHaveCount(200);
+  await expect(page.locator(".dfile-body")).toHaveCount(10);
+  await (await viewOption(page, "Collapse All Files")).click();
+  await expect(page.locator(".dfile-body")).toHaveCount(0);
+  await (await viewOption(page, "Expand All Files")).click();
+  await expect(page.locator(".dfile-body")).toHaveCount(200);
+  await (await viewOption(page, "Collapse All Files")).click();
+  const tail = page.locator('.dfile[data-path="src/file-199.ts"]');
+  await tail.locator(".dfile-toggle").click();
+  await expect(page.locator(".dfile-body")).toHaveCount(1);
+  await expect(tail.locator(".dfile-toggle")).toHaveAttribute("aria-expanded", "true");
+  await tail.getByRole("button", { name: "Stage Hunk" }).click();
+  await expect.poll(() => page.evaluate(() => window.__DIFF_SECTIONS_E2E__.calls())).toContain("stage:src/file-199.ts#0");
+  await expect(tail.locator(".dfile-toggle")).toHaveAttribute("aria-expanded", "true");
+});
+
 test("at a 320px panel every hunk header is one line, and Stage Hunk shows on hover with a mouse", async ({ page }) => {
   await open(page, "width=320");
   const headers = page.locator(".diff-hunk-header");
