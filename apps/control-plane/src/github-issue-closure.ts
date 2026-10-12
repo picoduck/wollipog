@@ -47,11 +47,12 @@ const mentionsIssue = (text: string | null | undefined, issue: number) =>
 
 /** Live campaign children whose work can bear on the issue (#3084). A child is left out only when
  * the campaign work ledger attributes it elsewhere: its open attempt is on an item outside the
- * issue's lineage, no attempt of it was ever in that lineage, and none of its assignment or prompts
- * names the issue. Every other child stays included conservatively: a task can move between issues
- * in steering history, and a later "continue" prompt is not proof it is unrelated. A change to the
- * ledger that moves a child in or out of this set still changes the digest. Without an issue, as
- * for a campaign scope change, every live child is included. */
+ * issue's lineage, no attempt of it was ever in that lineage, its launch assignment is recorded,
+ * and no prompt in its history or queue names the issue. Every other child stays included
+ * conservatively: a task can move between issues in steering history, and a later "continue" prompt
+ * is not proof it is unrelated. A change to the ledger that moves a child in or out of this set
+ * still changes the digest. Without an issue, as for a campaign scope change, every live child is
+ * included. */
 export function issueClosureActiveChildren(db: ControlPlaneDb, sessionId: string, issue?: { repository: string; number: number }) {
   const attribution = issue ? db.campaignWorkLedger.issueLineageSessions(sessionId, issue.repository, issue.number) : null;
   return db.campaignDescendantIds(sessionId).flatMap((id) => {
@@ -60,8 +61,9 @@ export function issueClosureActiveChildren(db: ControlPlaneDb, sessionId: string
     const assignment = db.initialUserMessageText(id);
     const state = db.issueClosureAssignmentState(id);
     const prompts = [...(child.queued ?? []), ...(child.pendingPrompts ?? [])];
-    if (issue && attribution?.elsewhere.has(id) && !attribution.lineage.has(id) &&
-        ![assignment, state.latest?.text, state.command?.text, ...prompts.map((prompt) => prompt.text)]
+    // The runner echoes the launch prompt as the first user message; until then it is unknown.
+    if (issue && attribution?.elsewhere.has(id) && !attribution.lineage.has(id) && assignment !== null &&
+        ![...db.issueClosurePromptTexts(id, String(issue.number)), ...prompts.map((prompt) => prompt.text)]
           .some((text) => mentionsIssue(text, issue.number))) return [];
     return [{ sessionId: id, title: child.title,
       assignmentDigest: createHash("sha256").update(JSON.stringify({

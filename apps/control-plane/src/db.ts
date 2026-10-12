@@ -13995,6 +13995,17 @@ export class ControlPlaneDb {
     return { latest: latest ?? null, command: command ?? null };
   }
 
+  /** Every delivered or staged prompt text containing `needle`, for the issue-closure mention check
+   * (#3084). The substring match only narrows the candidates; the caller applies the exact pattern. */
+  issueClosurePromptTexts(sessionId: string, needle: string): string[] {
+    return (this.stmt(`SELECT json_extract(payload, '$.text') AS text FROM session_events
+        WHERE session_id=? AND kind='user_message' AND instr(json_extract(payload, '$.text'), ?) > 0
+      UNION ALL SELECT json_extract(payload_json, '$.text') FROM session_prompt_commands
+        WHERE session_id=? AND instr(json_extract(payload_json, '$.text'), ?) > 0`)
+      .all(sessionId, needle, sessionId, needle) as Array<{ text: string | null }>)
+      .flatMap((row) => typeof row.text === "string" ? [row.text] : []);
+  }
+
   /** One-time upgrade path for human-created root campaigns that predate protocol v158. A stored
    * non-empty scope is immutable, and ambiguous provenance or prompts remain unscoped. */
   backfillSessionOrchestratorIssueNumbers(id: string, issueNumbers: readonly number[], now: number): number[] | null {

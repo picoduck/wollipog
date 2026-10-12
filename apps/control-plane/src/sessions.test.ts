@@ -24763,7 +24763,7 @@ test("issue closure binds only children whose work bears on the issue (#3084)", 
   const executable = new Set(["unrelated_prompt", "unrelated_decision", "new_unrelated_child"]);
   for (const mode of ["unrelated_prompt", "unrelated_decision", "new_unrelated_child", "related_prompt",
     "related_decision", "unattributed_prompt", "mentioning_prompt", "earlier_attempt_prompt",
-    "follow_up_prompt", "reassigned_into_lineage"]) {
+    "follow_up_prompt", "reassigned_into_lineage", "steered_into_issue", "unechoed_launch"]) {
     const { db, svc, hub, parent, spawn } = stopAndArchiveCampaignFixture("retain");
     try {
       const plan = svc.recordCampaignPlan(parent.id, { items: [
@@ -24777,12 +24777,14 @@ test("issue closure binds only children whose work bears on the issue (#3084)", 
         const assigned = svc.assignCampaignWorkItem(parent.id, { workItemId, childSessionId });
         assert.ok(assigned.ok, assigned.error);
       };
+      // The runner echoes each prompt as a user message; the harness has no runner to do it.
+      const echo = (sessionId: string, text: string) => db.appendEvent(sessionId, { kind: "user_message", text }, Date.now());
       const related = spawn(parent.id, "Deliver the first item");
       assign(issueItem!, related);
-      const unrelated = spawn(parent.id, "Deliver issue 1441");
-      // The runner echoes the assignment as the child's first user message.
-      db.appendEvent(unrelated, { kind: "user_message",
-        text: mode === "mentioning_prompt" ? "Deliver issue 1441 after picoduck/wollipog#1440 lands." : "Deliver issue 1441." }, Date.now());
+      const launch = mode === "mentioning_prompt" ? "Deliver issue 1441 after picoduck/wollipog#1440 lands."
+        : mode === "unechoed_launch" ? "Implement issue 1440." : "Deliver issue 1441.";
+      const unrelated = spawn(parent.id, launch);
+      if (mode !== "unechoed_launch") echo(unrelated, launch);
       if (mode === "earlier_attempt_prompt") {
         assign(unrelatedItem!, unrelated);
         assign(issueItem!, unrelated);
@@ -24818,8 +24820,8 @@ test("issue closure binds only children whose work bears on the issue (#3084)", 
       assert.ok(decision.resourceSnapshot.category === "issue_closure");
       const bound = new Set(decision.resourceSnapshot.activeChildren.map((child) => child.sessionId));
       assert.ok(bound.has(related), `${mode}: the child assigned to the issue is bound`);
-      assert.equal(bound.has(unrelated), ["mentioning_prompt", "earlier_attempt_prompt"].includes(mode),
-        `${mode}: a child attributed elsewhere is bound only when it names the issue or once worked on it`);
+      assert.equal(bound.has(unrelated), ["mentioning_prompt", "earlier_attempt_prompt", "unechoed_launch"].includes(mode),
+        `${mode}: a child attributed elsewhere is bound only when it names the issue, once worked on it, or its launch is unknown`);
       if (unattributed) assert.ok(bound.has(unattributed), "a child without an open attempt stays bound");
       if (lineageChild) assert.ok(bound.has(lineageChild), "a child on a follow-up of the issue is bound");
       assert.ok(svc.approve(parent.id, decision.occurrenceId, "approve", { kind: "human", id: "reviewer" }).ok);
@@ -24831,9 +24833,17 @@ test("issue closure binds only children whose work bears on the issue (#3084)", 
         requestId: `ui-${sessionId}`, resourceKey: `ui-${sessionId}`, resourceSnapshot: { category: "ui_evidence_approval",
           evidence: [{ evidenceId: "after", uri: "https://evidence.example/after.png", sha256: "c".repeat(64) }] },
       }).ok);
-      if (["unrelated_prompt", "mentioning_prompt", "earlier_attempt_prompt"].includes(mode)) prompt(unrelated);
+      if (["unrelated_prompt", "mentioning_prompt", "earlier_attempt_prompt", "unechoed_launch"].includes(mode)) prompt(unrelated);
+      if (mode === "steered_into_issue") {
+        echo(unrelated, "Also implement issue 1440.");
+        echo(unrelated, "Continue.");
+      }
       if (mode === "unrelated_decision") raiseDecision(unrelated);
-      if (mode === "new_unrelated_child") assign(unrelatedItem!, spawn(parent.id, "Deliver the unrelated item"));
+      if (mode === "new_unrelated_child") {
+        const added = spawn(parent.id, "Deliver the unrelated item");
+        echo(added, "Deliver the unrelated item");
+        assign(unrelatedItem!, added);
+      }
       if (mode === "related_prompt") prompt(related);
       if (mode === "related_decision") raiseDecision(related);
       if (unattributed) prompt(unattributed);
