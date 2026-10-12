@@ -105,6 +105,10 @@ recommendation must reference the affected work. Both reasons must be in the hum
 Existing issue/PR inspection, audience, assignment digests, exact snapshot, expiry, scope synchronization,
 guardrails, durable dispatch fence and uncertain-result reconciliation continue to apply. Changed
 delivery/disposition invalidates execution. Inspect uncertain outcomes; never replay a close or comment.
+At the runner mutation fence, bounded closure rechecks its synchronized authority contract and
+launch identity after forge inspection. A change refuses the close before recording an attempt;
+`campaign_issue_closure_authority_changed` identifies the request, occurrence and revisions without
+logging the issue payload or authority contents.
 
 Operational questions: why was this admission refused, who established its boundary, and which
 scope revision was applied? `campaign_issue_admission`, `campaign_authority_evaluated`, and

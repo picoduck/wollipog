@@ -32,9 +32,11 @@ function fixture(t: TestContext, mode: CloseMode = "closed") {
     tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
     seq: 0, createdAt: 1000, updatedAt: 1000,
   });
-  let manager = new SessionManager(() => {}, () => {}, store, "test-runner");
+  const logs: string[] = [];
+  let manager = new SessionManager(() => {}, (line) => { logs.push(line); }, store, "test-runner");
   const commands: Command[] = [];
   let origin = "example/project";
+  let beforeNextInspection: (() => void) | undefined;
   const diskMeta = () => JSON.parse(readFileSync(join(store.sessionPath(sessionId), "meta.json"), "utf8")) as SessionMeta;
 
   // Only the OS command transport is replaced. The manager, context-command path, GitHub
@@ -48,6 +50,9 @@ function fixture(t: TestContext, mode: CloseMode = "closed") {
     if (file === "git" && args.join(" ") === "remote get-url origin") {
       stdout = `git@github.com:${origin}.git`;
     } else if (file === "gh" && args[0] === "api" && args[1] === "graphql") {
+      const before = beforeNextInspection;
+      beforeNextInspection = undefined;
+      before?.();
       stdout = JSON.stringify({ data: { repository } });
     } else if (file === "gh" && args[0] === "api" && args.includes("search/issues")) {
       stdout = JSON.stringify({ items: [], total_count: 0, incomplete_results: false });
@@ -92,14 +97,56 @@ function fixture(t: TestContext, mode: CloseMode = "closed") {
     manager.shutdownAll();
     // New instances have no previous in-memory metadata or occurrence state.
     store = new SessionStore(join(root, "sessions"));
-    manager = new SessionManager(() => {}, () => {}, store, "test-runner");
+    manager = new SessionManager(() => {}, (line) => { logs.push(line); }, store, "test-runner");
     return store;
   };
-  return { root, repository, commands, inspect, execute, snapshot, restart, diskMeta, scope: (message: Omit<Extract<import("@wollipog/protocol").CampaignIssueScopeMessage, {operation:"synchronize"}>, "sessionId" | "requestId" | "type">) => manager.campaignIssueScope({ type: "campaign_issue_scope", requestId: "scope", sessionId, ...message } as import("@wollipog/protocol").CampaignIssueScopeMessage),
-    setOrigin: (value: string) => { origin=value; }, manager: () => manager, store: () => store, mutations: () => commands.filter((command) => command.file === "gh" && command.args[0] === "issue") };
+  return { root, repository, commands, logs, inspect, execute, snapshot, restart, diskMeta, scope: (message: Omit<Extract<import("@wollipog/protocol").CampaignIssueScopeMessage, {operation:"synchronize"}>, "sessionId" | "requestId" | "type">) => manager.campaignIssueScope({ type: "campaign_issue_scope", requestId: "scope", sessionId, ...message } as import("@wollipog/protocol").CampaignIssueScopeMessage),
+    setOrigin: (value: string) => { origin=value; },
+    beforeNextInspection: (callback: () => void) => { beforeNextInspection=callback; },
+    manager: () => manager, store: () => store, mutations: () => commands.filter((command) => command.file === "gh" && command.args[0] === "issue") };
 }
 
 const digest = (snapshot: GithubIssueClosureSnapshot) => createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
+
+for (const change of ["unchanged", "custom", "revision", "operation", "reason", "launch"] as const) {
+  test(`bounded closure rechecks ${change} authority after forge inspection at its mutation fence`, async (t) => {
+    const f = fixture(t);
+    const original = await f.snapshot();
+    const scope = { repository: "example/project", issueNumbers: [issue], revision: 1,
+      authorizedByUserId: "owner", authorizedAt: 1000 };
+    const control: import("@wollipog/protocol").CampaignControl = { mode: "full_control", boundary: {
+      version: 1, revision: 2, issueScopeRevision: 1, repository: scope.repository, objective: "Retire scoped work",
+      authorizedByUserId: "owner", authorizedAt: 2000, operations: ["issue_closure"], delegatablePolicyIds: [],
+      issueAuthority: { epics: [], relatedFollowUps: false, maxIssues: 1, closureReasons: ["not_planned"] },
+    } };
+    assert.equal((await f.scope({ operation: "synchronize", scope, control })).ok, true);
+    f.store().patchMeta(sessionId, { controlPlaneLaunchId: "original-launch" });
+    const snapshot: GithubIssueClosureSnapshot = { ...original, scopeRevision: 1,
+      issueAdmission: { boundaryRevision: 2, evidenceDigest: "a".repeat(64) } };
+    f.beforeNextInspection(() => {
+      const updated = structuredClone(control);
+      if (change === "revision") updated.boundary.revision++;
+      if (change === "operation") updated.boundary.operations = [];
+      if (change === "reason") updated.boundary.issueAuthority!.closureReasons = ["completed"];
+      f.store().patchMeta(sessionId, {
+        orchestrator: { ...f.diskMeta().orchestrator!, control: change === "custom" ? { mode: "custom" } : updated },
+        ...(change === "launch" ? { controlPlaneLaunchId: "replacement-launch" } : {}),
+      });
+    });
+    const result = await f.execute(snapshot);
+    assert.equal(result.ok, true, result.error ?? "Expected an inspected refusal");
+    assert.equal(result.result?.outcome, change === "unchanged" ? "closed" : "refused");
+    assert.equal(f.mutations().length, change === "unchanged" ? 1 : 0);
+    assert.deepEqual(f.diskMeta().githubIssueClosureAttempts,
+      change === "unchanged" ? { "approved-once": digest(snapshot) } : undefined);
+    const refusal = f.logs.find((line) => line.includes('"campaign_issue_closure_authority_changed"'));
+    assert.deepEqual(refusal === undefined ? undefined : JSON.parse(refusal), change === "unchanged" ? undefined : {
+      event: "campaign_issue_closure_authority_changed", entryPoint: "closure_mutation_fence",
+      requestId: "execute", sessionId, occurrenceId: "approved-once", boundaryRevision: 2,
+      scopeRevision: 1, outcome: "refused",
+    });
+  });
+}
 
 test("publication inspection through the runner handler binds payload across distinct request IDs", async (t) => {
   const f=fixture(t);

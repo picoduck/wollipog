@@ -16471,12 +16471,17 @@ export class SessionManager {
     }
     const revision = message.operation === "inspect" ? message.scopeRevision : message.snapshot.scopeRevision;
     if (meta.orchestrator.issueScope && revision !== meta.orchestrator.issueScope.revision) return { ...base, ok: false, error: "Campaign scope revision is stale; synchronize and request renewed review" };
-    if (message.operation === "execute" && message.snapshot.issueAdmission) {
-      const control = meta.orchestrator.control;
-      if (control?.mode !== "full_control" || !validCampaignControl(control) || control.boundary.issueScopeRevision !== revision ||
-          control.boundary.revision !== message.snapshot.issueAdmission.boundaryRevision || !control.boundary.operations.includes("issue_closure") ||
-          !control.boundary.issueAuthority?.closureReasons.includes(message.snapshot.reason)) return { ...base, ok: false, error: "Bounded closure authority is unsynchronized" };
-    }
+    const boundedAuthorityCurrent = (current: SessionMeta): boolean => {
+      if (message.operation !== "execute" || !message.snapshot.issueAdmission) return true;
+      const control = current.orchestrator?.control;
+      return control?.mode === "full_control" && validCampaignControl(control) &&
+        control.boundary.issueScopeRevision === revision &&
+        control.boundary.revision === message.snapshot.issueAdmission.boundaryRevision &&
+        control.boundary.repository.toLowerCase() === message.snapshot.repository.toLowerCase() &&
+        control.boundary.operations.includes("issue_closure") &&
+        Boolean(control.boundary.issueAuthority?.closureReasons.includes(message.snapshot.reason));
+    };
+    if (!boundedAuthorityCurrent(meta)) return { ...base, ok: false, error: "Bounded closure authority is unsynchronized" };
     const run = issueClosureRun(meta.context, meta.repoPath);
     try {
       if (message.operation === "inspect") {
@@ -16492,6 +16497,14 @@ export class SessionManager {
         if (!fresh || attempts[message.occurrenceId] || Object.keys(attempts).length >= 1000 ||
             isTerminal(fresh.status) || !fresh.orchestrator?.issueNumbers?.includes(issue) ||
             (fresh.orchestrator.issueScope && revision !== fresh.orchestrator.issueScope.revision)) return false;
+        if (message.snapshot.issueAdmission && (!boundedAuthorityCurrent(fresh) ||
+            fresh.controlPlaneLaunchId !== meta.controlPlaneLaunchId ||
+            JSON.stringify(fresh.orchestrator.control) !== JSON.stringify(meta.orchestrator?.control))) {
+          this.log(JSON.stringify({ event: "campaign_issue_closure_authority_changed", entryPoint: "closure_mutation_fence",
+            requestId: message.requestId, sessionId: message.sessionId, occurrenceId: message.occurrenceId,
+            boundaryRevision: message.snapshot.issueAdmission.boundaryRevision, scopeRevision: revision, outcome: "refused" }));
+          return false;
+        }
         return this.store.patchMeta(message.sessionId, {
           githubIssueClosureAttempts: { ...attempts, [message.occurrenceId]: digest },
         }) !== null;
