@@ -40,13 +40,21 @@ export function normalizeIssueClosureSnapshot(value: Record<string, unknown>): G
     openPullRequests, activeChildren };
 }
 
-/** Any live campaign child can still hold related work. Include it conservatively: a task can
- * move between issues in steering history, and a later "continue" prompt is not proof it is unrelated. */
-export function issueClosureActiveChildren(db: ControlPlaneDb, sessionId: string) {
+/** Live campaign children whose work can bear on the issue (#3084). A child is left out only when
+ * its launch prompt is recorded (the runner echoes it as the first user message) and the campaign
+ * work ledger attributes it elsewhere: it has an open attempt, and every attempt it has ever had is
+ * on an item that has never tracked the issue and has no follow-up links. Every other child stays
+ * included: a task can move between issues in steering history, and a later "continue" prompt is
+ * not proof it is unrelated. Exclusion is decided from append-only history, so a child once
+ * connected to the issue is never excluded again, and bringing one into the set changes the
+ * digest. Without an issue, as for a campaign scope change, every live child is included. */
+export function issueClosureActiveChildren(db: ControlPlaneDb, sessionId: string, issue?: { repository: string; number: number }) {
+  const excludable = issue ? db.campaignWorkLedger.issueClosureExcludableSessions(sessionId, issue.repository, issue.number) : null;
   return db.campaignDescendantIds(sessionId).flatMap((id) => {
     const child = db.getSession(id);
     if (!child || isTerminal(child.status) || child.archived) return [];
     const assignment = db.initialUserMessageText(id);
+    if (excludable?.has(id) && assignment !== null) return [];
     const state = db.issueClosureAssignmentState(id);
     const prompts = [...(child.queued ?? []), ...(child.pendingPrompts ?? [])];
     return [{ sessionId: id, title: child.title,

@@ -7749,7 +7749,7 @@ export class SessionsService {
           ...(session.orchestratorPolicy.issueScope ? { scopeRevision: session.orchestratorPolicy.issueScope.revision } : {}),
           explanation: request.explanation, evidence: request.evidence,
           ...(request.comment === undefined ? {} : { comment: request.comment }),
-          activeChildren: issueClosureActiveChildren(this.db, sessionId) },
+          activeChildren: issueClosureActiveChildren(this.db, sessionId, { repository: inspection.repository, number: request.issue }) },
       }, canAccess, { trustedIssueClosure: true });
       return created.ok ? ok({ decision: created.data }, created.status) : failAs(created);
     } catch {
@@ -7780,7 +7780,8 @@ export class SessionsService {
         this.db.resolvedCampaignSessionId(sessionId) !== sessionId ||
         decision.authority !== "human" || decision.policyRevision !== session.parentControlPolicy?.revision ||
         decision.resourceDigest !== resourceDigest || !decision.resolvedAt || now - decision.resolvedAt > 30 * 60_000 ||
-        auditDigest(issueClosureActiveChildren(this.db, sessionId)) !== auditDigest(snapshot.activeChildren)) {
+        auditDigest(issueClosureActiveChildren(this.db, sessionId, { repository: snapshot.repository, number: snapshot.issue })) !==
+          auditDigest(snapshot.activeChildren)) {
       this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
       return fail("issue-closure approval expired or its scope, payload, policy, or active child work changed; request renewed human review", 409);
     }

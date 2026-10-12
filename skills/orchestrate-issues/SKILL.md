@@ -125,7 +125,12 @@ Finish with the initial and follow-up issue/PR links, delivered results, rejecte
 The root Orchestrator can propose closing an issue in its human-authorized campaign scope with
 `request_github_issue_closure` (`requestId`, `issue`, `reason`: `completed` or `not_planned`,
 `explanation`, `evidence`, and an optional exact `comment`). The runner derives the repository,
-current issue, and related open pull requests; the server includes active child assignments.
+current issue, and related open pull requests; the server includes the assignments of active
+children whose work can bear on the issue. A child is left out only when its launch prompt is
+recorded, it has an open `assign_campaign_work_item` attempt, and every attempt it has ever had is
+on a work item that has never tracked the issue and has no follow-up links. Record each child's
+assignment so unrelated activity does not revoke the approval; a prompt that mentions the issue
+does not bind an unassigned child by itself.
 Closure always requires a human-owned typed decision, regardless of Parent Control. Read it with
 `get_workflow_decision`, then use `close_github_issue` with its exact `occurrenceId` and
 `resourceDigest`. The CLI equivalents are:
@@ -136,8 +141,8 @@ wollipog decision get <occurrence-id> --json
 wollipog issue-closure execute <occurrence-id> --digest <resource-digest> --json
 ```
 
-Approval expires 30 minutes after the human resolves it. Changed issue evidence, policy, or child
-work requires renewed review. Never substitute a shell command or generic approval, and never
+Approval expires 30 minutes after the human resolves it. Changed issue evidence, policy, or
+included child work requires renewed review, as does a child moving into or out of the included set. Never substitute a shell command or generic approval, and never
 approve the Orchestrator's own request. Read `issueClosureResult`: `closed` and `already_closed`
 are verified outcomes, `refused` requires renewed review, and `uncertain` means GitHub may have
 accepted the action. Inspect uncertain outcomes without replaying the comment or closure.
