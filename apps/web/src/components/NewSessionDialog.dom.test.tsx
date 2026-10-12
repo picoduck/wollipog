@@ -883,8 +883,12 @@ test("unsupported Full Control preview prevents button and Enter launch; Custom 
     await act(async () => submitWithEnter(fixture.container));
     assert.equal(fixture.requests.length, 0);
     assert.match(fixture.container.textContent ?? "", /Full Control activation is unavailable/);
+    const permissionTerm = [...fixture.container.querySelectorAll("dt")].find((node) => node.textContent === "Provider Permissions")!;
+    assert.equal(permissionTerm.nextElementSibling?.textContent, "Orchestrator", "effective coupled preset replaces the saved provider default");
     await act(async () => fixture.container.querySelector<HTMLInputElement>('[data-control-mode="custom"]')!.click());
     assert.equal(createButton(fixture.container).disabled, false);
+    assert.equal([...fixture.container.querySelectorAll('[role="alert"]')]
+      .find((node) => node.textContent?.includes("Full Control activation is unavailable")), undefined, "returning to Custom clears stale unsupported validation");
     await act(async () => createButton(fixture.container).click());
     assert.equal(fixture.requests.length, 1);
     assert.equal((fixture.requests[0]?.orchestrator as unknown as Record<string, unknown>).control, undefined);

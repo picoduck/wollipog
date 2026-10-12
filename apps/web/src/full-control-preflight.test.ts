@@ -66,3 +66,11 @@ test("budget display separates immutable authority, original ceilings, generated
   assert.equal(result.supported, false, "an isolated capability fixture never authorizes live readiness");
   assert.deepEqual(budget, before);
 });
+
+test("legacy omitted isolation fields remain unknown instead of claiming they are disabled", () => {
+  const defaults = { ...DEFAULT_ORCHESTRATOR_DEFAULTS, execution: { strictProjectIsolation: false } } as typeof DEFAULT_ORCHESTRATOR_DEFAULTS;
+  const result = fullControlPreflight({ surface: "campaign", defaults });
+  const facts = Object.fromEntries(result.facts.map(({ label, value }) => [label, value]));
+  assert.equal(facts["Strict Project Isolation"], "Disabled");
+  assert.equal(facts["Integration Isolation"], "Not reported by this campaign");
+});

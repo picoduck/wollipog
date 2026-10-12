@@ -26,7 +26,7 @@ export function FullControlPreparation({ mode, onChange, disabled = false, ...in
       <h4 className="section-title">Full Control Preflight</h4>
       <Notice tone="neutral" role="status">Activation Unavailable</Notice>
       <dl className="facts orchestrator-facts">
-        {preflight.facts.map(({ label, value }) => <div className="orchestrator-fact" key={label}><dt>{label}</dt><dd>{value}</dd></div>)}
+        {preflight.facts.map(({ label, value }) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}
       </dl>
       <h4 className="section-title">Human Required and Unsupported Capabilities</h4>
       <ul>{preflight.blockers.map((reason) => <li key={reason}>{reason}</li>)}</ul>

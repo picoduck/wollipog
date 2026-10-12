@@ -162,10 +162,12 @@ test("Full Control cannot delegate persistent grants or Human Required provider 
   } finally { h.db.close(); }
 });
 
-test("Codex permission-profile requests retain human ownership in root and child Full Control", () => {
+test("Codex permission-profile requests retain human ownership in Custom and Full Control root and children", () => {
+  for (const fullControl of [false, true]) {
   const h = harness(PROTOCOL_VERSION, "/repos/test", "codex-app-server");
   try {
-    assert.ok(h.enable().ok);
+    if (fullControl) assert.ok(h.enable().ok);
+    else assert.ok(h.svc.setParentControl("root", "questions_and_approvals").ok);
     for (const sessionId of ["root", "child"]) {
       const driver = new CodexAppServerDriver({ command: "codex", args: [], cwd: "/repos/test", env: {}, context: { kind: "native" }, config: { permissionMode: "on-request" } }, {
         onEvent: (event) => h.svc.onSessionEvent(sessionId, event), onStderr() {}, onExit() {},
@@ -186,6 +188,7 @@ test("Codex permission-profile requests retain human ownership in root and child
       driver.dispose();
     }
   } finally { h.db.close(); }
+  }
 });
 
 test("trusted in-bound auth source inspection has the same owner in every server projection", () => {

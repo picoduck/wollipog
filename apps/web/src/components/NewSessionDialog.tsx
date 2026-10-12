@@ -1023,7 +1023,7 @@ export function NewSessionDialog({
   }, [
     projectSelection, selectedProject?.id, projectLocationId, projectLocationLaunchable,
     runnerId, workspaceId, browsedPath, agentId, selectedAgentOption?.disabled, providerAccountId,
-    defaultsReady, harnessDefaults?.error, roleOverride, orchestrator, orchestratorSupported,
+    defaultsReady, harnessDefaults?.error, roleOverride, orchestrator, orchestratorSupported, controlPreview,
     directWslRequiresSafeOrchestrator, launchSurface, nativeTuiSupported,
     executionTargetId, executionTarget?.id, executionTarget?.available,
     cloudBudgetUsd, cloudBudgetValid, retainedSessionId,
@@ -1697,7 +1697,8 @@ export function NewSessionDialog({
               <FullControlPreparation surface="launch" defaults={{ ...orchestratorDraft,
                 execution: { ...orchestratorDraft.execution, integrationIsolation: effectiveIntegrationIsolation } }} mode={controlPreview}
                 onChange={setControlPreview} disabled={busy}
-                root={{ driver: agent?.driver, permissionMode: savedPermissionMode }}
+                root={{ driver: agent?.driver, permissionMode: roleOverride === "orchestrator" &&
+                  (providerPermissionsPreset || !orchestratorRoleSupported) ? "orchestrator" : savedPermissionMode }}
                 workspace={workspaceId || browsedPath} />
               <fieldset className="orchestrator-policy-area">
                 <legend>Behavior</legend>

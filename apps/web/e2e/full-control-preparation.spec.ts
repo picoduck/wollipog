@@ -31,7 +31,8 @@ for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: 
         const full = page.getByRole("radio", { name: "Full Control", exact: true });
         await expect(full).toBeVisible();
         const group = page.getByRole("radiogroup", { name: "Orchestrator Control", exact: true });
-        await group.evaluate((node) => node.scrollIntoView({ block: "start", behavior: "instant" }));
+        const controlHeading = page.getByRole("heading", { name: "Orchestrator Control", exact: true });
+        await controlHeading.evaluate((node) => node.scrollIntoView({ block: "start", behavior: "instant" }));
         await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished)));
         const prefix = `test-results/full-control-preparation/${surface}-${viewport.name}-${theme}`;
         await page.screenshot({ path: `${prefix}-custom.png` });
@@ -46,12 +47,14 @@ for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: 
           await expect(page.getByRole("alert").filter({ hasText: "Full Control activation is unavailable" })).toBeVisible();
           expect(await page.evaluate(() => document.documentElement.dataset.createSessionCount)).toBeUndefined();
         }
-        await group.evaluate((node) => node.scrollIntoView({ block: "start", behavior: "instant" }));
+        await controlHeading.evaluate((node) => node.scrollIntoView({ block: "start", behavior: "instant" }));
         await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished)));
         await page.screenshot({ path: `${prefix}-preflight.png` });
         await page.getByRole("heading", { name: "Human Required and Unsupported Capabilities", exact: true })
           .evaluate((node) => node.scrollIntoView({ block: "start", behavior: "instant" }));
         await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished)));
+        // Finish the browser's paint following scroll/conditional layout, without recording delays.
+        await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
         await page.screenshot({ path: `${prefix}-exceptions.png` });
         // Layout engines, rather than DOM mocks, prove labels/facts fit the phone and desktop.
         const overflow = await group.evaluate((node) => node.scrollWidth - node.clientWidth);
