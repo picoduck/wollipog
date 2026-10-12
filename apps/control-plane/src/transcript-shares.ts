@@ -234,16 +234,8 @@ function parsePersistedProjection(raw: string, schemaVersion: number): Operation
   };
 }
 
-/** Invalid, unknown, expired, revoked, and corrupt capabilities intentionally collapse to null. */
-export function resolvePublicTranscriptShare(
-  db: ControlPlaneDb,
-  authorization: string | undefined | null,
-  now = Date.now(),
-): PublicTranscriptShare | null {
-  const capability = lookupPublicTranscriptShareCapability(db, authorization, now);
-  return capability ? loadPublicTranscriptShare(db, capability, now) : null;
-}
-
+/** A share that expired, was revoked, or holds a corrupt projection after lookup intentionally
+ * collapses to null. */
 export function loadPublicTranscriptShare(
   db: ControlPlaneDb,
   capability: PublicTranscriptShareCapability,

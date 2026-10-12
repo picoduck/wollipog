@@ -443,12 +443,6 @@ export function reconciliationRevision(db: ControlPlaneDb, sessionId: string): n
   return Number(db.raw().prepare("SELECT COALESCE(MAX(revision),0) AS n FROM usage_cost_reconciliations WHERE session_id=?").get(sessionId)?.n ?? 0);
 }
 
-export function reconciliationDeltaUsd(db: ControlPlaneDb, sessionId: string): number {
-  const sum = db.raw().prepare(`SELECT COALESCE(SUM(r.delta_microusd),0) AS delta, COALESCE(SUM(p.delta_remainder_picousd),0) AS remainder
-    FROM usage_cost_reconciliations r LEFT JOIN usage_cost_reconciliation_precision p ON p.digest=r.digest WHERE r.session_id=?`).get(sessionId);
-  return Number(sum?.delta ?? 0) / 1e6 + Number(sum?.remainder ?? 0) / 1e12;
-}
-
 /** Durable high-water mark for an authenticated owning runner's acknowledgement. */
 export function observedReconciliationRevision(db: ControlPlaneDb, sessionId: string): number {
   return Number(db.raw().prepare("SELECT acknowledged_revision FROM usage_cost_reconciliation_observations WHERE session_id=?").get(sessionId)?.acknowledged_revision ?? 0);

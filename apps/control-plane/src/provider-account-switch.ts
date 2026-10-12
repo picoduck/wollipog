@@ -114,16 +114,3 @@ export function providerAccountSwitchChoices(
   }
   return { accounts: offered, unavailable };
 }
-
-/** The accounts a switch may choose: same-Machine, same-provider, signed-in accounts whose latest
- * provider windows do not report exhaustion at `now`. */
-export function providerAccountSwitchOptions(
-  session: Pick<SessionView,
-    "driver" | "runnerId" | "providerAccountId" | "providerAccountSwitchFailure"
-  >,
-  accounts: ProviderAccountDefinition[],
-  sources: SubscriptionUsageSourceView[],
-  now: number,
-): SessionProviderAccountOption[] {
-  return providerAccountSwitchChoices(session, accounts, sources, { now }).accounts;
-}

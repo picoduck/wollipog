@@ -3,7 +3,6 @@ import { test } from "node:test";
 import type { SubscriptionUsageSourceView } from "@wollipog/protocol";
 import {
   providerAccountSwitchChoices,
-  providerAccountSwitchOptions,
   providerForSessionAccountSwitch,
 } from "./provider-account-switch.js";
 
@@ -41,7 +40,7 @@ function source(
 }
 
 test("account switch options require the same Machine, provider, authentication, and headroom", () => {
-  const options = providerAccountSwitchOptions({
+  const { accounts: options } = providerAccountSwitchChoices({
     runnerId: "runner-1",
     driver: "codex-app-server",
     providerAccountId: "work",
@@ -51,14 +50,14 @@ test("account switch options require the same Machine, provider, authentication,
     source("signed-out", 80),
     source("claude", 80),
     source("other-machine", 80, "runner-2"),
-  ], now);
+  ], { now });
   assert.deepEqual(options.map((option) => option.id), ["personal"]);
   assert.equal(providerForSessionAccountSwitch("claude-code"), "claude");
   assert.equal(providerForSessionAccountSwitch("acp"), null);
 });
 
 test("a parked failure may retry its selected account when usage still has headroom", () => {
-  const options = providerAccountSwitchOptions({
+  const { accounts: options } = providerAccountSwitchChoices({
     runnerId: "runner-1",
     driver: "codex-app-server",
     providerAccountId: "personal",
@@ -68,7 +67,7 @@ test("a parked failure may retry its selected account when usage still has headr
       reason: "resume failed",
       detectedAt: 1,
     },
-  }, accounts, [source("personal", 40)], now);
+  }, accounts, [source("personal", 40)], { now });
   assert.deepEqual(options.map((option) => option.id), ["personal"]);
 });
 
@@ -96,8 +95,14 @@ test("accounts a switch cannot choose are returned with a typed reason, and offe
     ] },
   ];
   const choices = providerAccountSwitchChoices(session, machine, sources, { now });
-  assert.deepEqual(choices.accounts, providerAccountSwitchOptions(session, machine, sources, now));
-  assert.deepEqual(choices.accounts.map((option) => option.id), ["personal"]);
+  assert.deepEqual(choices.accounts, [{
+    id: "personal",
+    label: "Personal",
+    authStatus: "authenticated",
+    usageState: "available",
+    freshness: "fresh",
+    buckets: [{ id: "five-hour", label: "5 Hour", remainingPercent: 45 }],
+  }]);
   assert.deepEqual(choices.unavailable.map(({ id, reason, exhaustedWindow }) => [id, reason, exhaustedWindow?.id]), [
     ["spent", "usage_exhausted", "five-hour"],
     ["signed-out", "signed_out", undefined],
@@ -150,8 +155,10 @@ test("a requester who cannot see the Machine's inventory gets no unavailable acc
   const session = { runnerId: "runner-1", driver: "codex-app-server" as const, providerAccountId: "work" };
   const sources = [source("personal", 45), source("spent", 0)];
   const hidden = providerAccountSwitchChoices(session, accounts, sources, { now, listUnavailable: false });
-  assert.deepEqual(hidden, { accounts: providerAccountSwitchOptions(session, accounts, sources, now), unavailable: [] });
-  assert.equal(providerAccountSwitchChoices(session, accounts, sources, { now }).unavailable.length, 2);
+  const listed = providerAccountSwitchChoices(session, accounts, sources, { now });
+  assert.deepEqual(hidden, { accounts: listed.accounts, unavailable: [] });
+  assert.deepEqual(hidden.accounts.map((option) => option.id), ["personal"]);
+  assert.equal(listed.unavailable.length, 2);
 });
 
 test("an exhausted window whose reset time has passed no longer keeps an account unavailable", () => {
