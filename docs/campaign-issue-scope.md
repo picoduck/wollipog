@@ -52,6 +52,13 @@ admission may establish or enlarge it. Nested Orchestrators inherit the root bou
 shadow it or admit their own scope. Initial authorized scope may be empty when the human establishes
 an intended epic; member resolution then populates that scope through an exact decision.
 
+Authenticated human proposals remain human-owned and do not require agent lineage. A human can
+narrow or expand issue scope directly; that fresh human revision invalidates the prior standing
+boundary and revokes its grants. The runner still durably stores the authoritative scope, disabling
+stale standing authority locally until it is reauthorized. Human scope and closure routes remain
+available. A closure outside delegated reasons, or without complete machine delivery/disposition
+proof, produces a human-owned exact decision instead of silently authorizing an agent.
+
 Scope proposals carry `lineage: {kind: "epic", epic}` for freshly inspected native/checklist members
 of a human-authorized epic, or `{kind: "follow_up", publicationOccurrenceId}` for one verified
 published issue. Dependencies, incidental references and cross-repository links remain excluded.
@@ -71,6 +78,8 @@ results plus the newest issues. Incomplete or duplicate evidence refuses admissi
 the exact payload review; it never rewrites content or proves arbitrary prose is free of private data.
 Fresh duplicate and lineage checks repeat immediately before one-shot consumption. Consumed
 publication grants remain reserved until the verified issue enters scope, and cannot be reissued.
+Only a consumed scope decision carrying server-verified publication lineage settles that reservation;
+editing a recommendation's resulting issue never frees capacity.
 After publication, read back the exact payload, record the resulting issue on its recommendation,
 then propose the scope addition against that publication occurrence. Ledger acceptance alone grants
 neither publication nor scope.

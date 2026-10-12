@@ -718,7 +718,7 @@ export function normalizeWorkflowDecisionSnapshot(
     const repo = repository();
     if (!repo || !boundedDecisionString(value.sanitizedTitle, 256) ||
         !boundedDecisionString(value.sanitizedBody, 65_536) || !Array.isArray(value.labels) ||
-        value.labels.length > 32 || new Set(value.labels).size !== value.labels.length || value.labels.some((label) => !boundedDecisionString(label, 128))) {
+        value.labels.length > 32 || value.labels.some((label) => !boundedDecisionString(label, 128))) {
       return fail("publication decisions require the exact sanitized repository, title, body, and labels");
     }
     if (!validIssueAdmission(value.issueAdmission) || value.recommendationId !== undefined && !boundedDecisionString(value.recommendationId, 256)) return fail("invalid publication lineage");
@@ -7644,7 +7644,7 @@ export class SessionsService {
     if (!root || !canAccess(sessionId) || this.db.campaignRootForMember(sessionId) !== sessionId || !issueBoundary(root) || scopeCompatibility(this.db, root)) return fail("Bounded publication requires a supported root Full Control issue boundary", 403);
     if (snapshot.issueAdmission) return fail("Publication admission is server-derived", 403);
     const evidence = publicationEvidence(this.db, root, snapshot);
-    if (!evidence) return fail("Publication requires a unique accepted related recommendation, sanitized exact payload, authorized origins and remaining scope capacity", 409);
+    if (!evidence || new Set(snapshot.labels).size !== snapshot.labels.length) return fail("Publication requires a unique accepted related recommendation, sanitized exact payload, unique labels, authorized origins and remaining scope capacity", 409);
     try {
       const requestId = `publication_inspect_${randomUUID()}`;
       const result = await this.hub.requestFromRunner(root.runnerId, requestId, { type: "campaign_issue_scope", operation: "publication_inspect",
@@ -7690,9 +7690,10 @@ export class SessionsService {
     } catch { return fail("Campaign scope inspection requires an online runner with GitHub access. Reconnect the runner and retry.", 409); }
   }
 
-  async proposeCampaignIssueScope(sessionId: string, request: CampaignIssueScopeRequest, canAccess: (id: string) => boolean = () => true): Promise<ServiceResult<WorkflowDecisionView>> {
+  async proposeCampaignIssueScope(sessionId: string, request: CampaignIssueScopeRequest, canAccess: (id: string) => boolean = () => true, human?: HumanPrincipal): Promise<ServiceResult<WorkflowDecisionView>> {
     const root = this.db.getSession(sessionId);
     if (!root?.orchestratorPolicy || this.db.campaignRootForMember(sessionId) !== sessionId || !canAccess(sessionId)) return fail("scope proposals require the root campaign", 403);
+    if (human && (human.kind !== "human" || !this.db.isSessionOwner(human, sessionId))) return fail("Only the authenticated campaign owner can propose human scope authority", 403);
     const unsupported = scopeCompatibility(this.db, root);
     if (unsupported) return fail(unsupported, 409);
     const view = await this.campaignIssueScope(sessionId, undefined, canAccess, false);
@@ -7716,7 +7717,7 @@ export class SessionsService {
       const latest = this.db.getSession(sessionId);
       if (!latest || (latest.orchestratorPolicy?.issueScope?.revision ?? 0) !== snapshot.expectedRevision) return fail("Campaign scope changed during inspection; refresh and propose again.", 409);
       const boundary = issueBoundary(latest);
-      if (boundary && boundary.operations.includes("campaign_issue_scope")) {
+      if (!human && boundary && boundary.operations.includes("campaign_issue_scope")) {
         const excludedReservation = snapshot.lineage?.kind === "follow_up" ? snapshot.lineage.publicationOccurrenceId : undefined;
         if (snapshot.before.length + snapshot.additions.length - snapshot.removals.length + reservedPublicationSlots(this.db, latest, excludedReservation) > boundary.issueAuthority!.maxIssues) return fail("Scope and publication reservations exceed the human-established issue limit", 409);
         let evidence: unknown = { removals: snapshot.removals };
@@ -7803,13 +7804,9 @@ export class SessionsService {
       if (session.orchestratorPolicy.issueScope && !await this.synchronizeCampaignIssueScope(sessionId)) return fail("Campaign scope synchronization is pending; reconnect every participating runner and retry.", 409);
       const requestId = `issue_closure_inspect_${randomUUID()}`;
       const fullBoundary = issueBoundary(session);
-      const work = fullBoundary && request.reason === "completed" ? issueWork(this.db, session, request.issue) : [];
-      const deliveryPullRequests = work.flatMap((item) => (item.observed.pullRequests ?? []).flatMap((pr) =>
-        pr.fact.availability === "fresh" && pr.fact.value.state === "merged" ? [{ number: pr.ref.number, headSha: pr.fact.value.headSha }] : []));
       const inspected = await this.hub.requestFromRunner(session.runnerId, requestId, {
         type: "github_issue_closure", operation: "inspect", requestId, sessionId, issue: request.issue,
         ...(session.orchestratorPolicy.issueScope ? { scopeRevision: session.orchestratorPolicy.issueScope.revision } : {}),
-        ...(fullBoundary && request.reason === "completed" ? { deliveryPullRequests } : {}),
       }, 60_000);
       if (inspected.type !== "github_issue_closure_result" || inspected.sessionId !== sessionId ||
           !inspected.ok || !inspected.inspection || inspected.inspection.issue !== request.issue) {
@@ -7827,14 +7824,31 @@ export class SessionsService {
         ...(request.dispositionRecommendationId === undefined ? {} : { dispositionRecommendationId: request.dispositionRecommendationId }),
         activeChildren: issueClosureActiveChildren(this.db, sessionId) };
       if (fullBoundary && fullBoundary.operations.includes("issue_closure")) {
+        // Inspect normal conflict evidence first. A missing ledger proof or a non-delegated
+        // reason must retain the existing human route, never become a rejected human request.
+        if (request.reason === "completed") {
+          const work = issueWork(this.db, this.db.getSession(sessionId)!, request.issue);
+          const delivery = work.flatMap((item) => (item.observed.pullRequests ?? []).flatMap((pr) =>
+            pr.fact.availability === "fresh" && pr.fact.value.state === "merged" && pr.fact.value.mergeCommitSha ?
+              [{ number: pr.ref.number, headSha: pr.fact.value.headSha, mergeCommitSha: pr.fact.value.mergeCommitSha }] : []));
+          if (closureEvidence(this.db, this.db.getSession(sessionId)!, { ...snapshot, delivery })) {
+            const verificationId = `issue_closure_delivery_${randomUUID()}`;
+            const verified = await this.hub.requestFromRunner(session.runnerId, verificationId, {
+              type: "github_issue_closure", operation: "inspect", requestId: verificationId, sessionId, issue: request.issue,
+              scopeRevision: snapshot.scopeRevision, deliveryPullRequests: delivery.map(({ number, headSha }) => ({ number, headSha })),
+            }, 60_000).catch(() => null);
+            if (verified?.type === "github_issue_closure_result" && verified.ok && verified.sessionId === sessionId &&
+                verified.inspection?.repository === snapshot.repository && verified.inspection.issue === snapshot.issue &&
+                verified.inspection.state === "OPEN" && verified.inspection.forgeDigest === snapshot.forgeDigest) snapshot.delivery = verified.inspection.delivery;
+          }
+        }
         const proof = closureEvidence(this.db, this.db.getSession(sessionId)!, snapshot);
         if (!proof) {
           this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "closure_proposal", sessionId, requestId: request.requestId,
-            boundaryRevision: fullBoundary.revision, scopeRevision: snapshot.scopeRevision, outcome: "refused", reason: "delivery_or_disposition_unverified" }));
-          return fail("Delegated closure requires verified delivered reports and actual merges, or a supported recorded not-planned/duplicate disposition, with no open PR conflicts", 409);
+            boundaryRevision: fullBoundary.revision, scopeRevision: snapshot.scopeRevision, outcome: "human_fallback", reason: "delivery_or_disposition_unverified" }));
         }
         if (request.comment && !campaignPublicationSafe("Closure", `## Problem\n${request.comment}\n## Proposed Behavior\nClose\n## Acceptance Criteria\n- Verified\n## Security and Compatibility\nNone`, [])) return fail("Closure comment requires sanitized public content", 400);
-        snapshot.issueAdmission = { boundaryRevision: fullBoundary.revision, evidenceDigest: issueEvidenceDigest(proof) };
+        if (proof) snapshot.issueAdmission = { boundaryRevision: fullBoundary.revision, evidenceDigest: issueEvidenceDigest(proof) };
       }
       const created = this.createWorkflowDecision(sessionId, {
         requestId: request.requestId,
@@ -8816,6 +8830,11 @@ export class SessionsService {
     policy: ParentControlPolicy,
     decision: WorkflowDecisionView,
   ): boolean {
+    // Human scope approval intentionally invalidates prior standing authorization. The
+    // independent human issue routes remain usable under the current workflow policy.
+    if (decision.authority === "human" && ["campaign_issue_scope", "issue_closure"].includes(decision.category)) {
+      return this.evaluateWorkflowDecisionAuthority(controller, policy, decision.sessionId, decision.resourceSnapshot).effectiveOwner === "human";
+    }
     const requester = this.db.getSession(decision.sessionId);
     if (decision.authorityEvaluation?.boundaryRevision !== undefined && (!requester ||
         evaluateCampaignAuthority(controller, requester, this.db.getRunner(requester.runnerId)?.protocolVersion,

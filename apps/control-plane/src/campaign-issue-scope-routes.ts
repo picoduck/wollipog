@@ -36,7 +36,7 @@ app.post("/api/sessions/:id/campaign/issue-scope/proposals", async (req, reply) 
     return reply.code(403).send({ error: "only the campaign owner or its root Orchestrator may propose a scope change" });
   }
   return respond(reply, await svc.proposeCampaignIssueScope(id, req.body as import("@wollipog/protocol").CampaignIssueScopeRequest,
-    (sessionId) => db.canAccessSession(principal, sessionId)));
+    (sessionId) => db.canAccessSession(principal, sessionId), principal.kind === "human" ? principal : undefined));
 });
 
 

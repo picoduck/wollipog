@@ -55,9 +55,9 @@ export function reservedPublicationSlots(db: ControlPlaneDb, root: SessionView, 
     if (d.occurrenceId === exceptOccurrence || d.resourceSnapshot.category !== "follow_up_issue_publication") continue;
     const id = d.resourceSnapshot.recommendationId;
     if (id && id === exceptRecommendation) continue;
-    const published = id && db.campaignWorkLedger.recommendation(root.id, id)?.resultingIssue;
-    if (!published || published.repository.toLowerCase() !== root.orchestratorPolicy?.issueScope?.repository.toLowerCase() ||
-        !root.orchestratorPolicy?.issueNumbers?.includes(published.number)) recommendations.add(id ?? d.occurrenceId);
+    // A recommendation's resultingIssue is mutable agent ledger prose. Only consumption of
+    // the independently inspected publication-lineage scope decision can settle this slot.
+    if (db.admittedCampaignPublicationIssue(root.id, d.occurrenceId) === null) recommendations.add(id ?? d.occurrenceId);
   }
   return recommendations.size;
 }

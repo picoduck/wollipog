@@ -14056,6 +14056,17 @@ export class ControlPlaneDb {
     });
   }
 
+  admittedCampaignPublicationIssue(rootId: string, publicationOccurrenceId: string): number | null {
+    const row = this.stmt(`SELECT json_extract(resource_snapshot, '$.additions[0]') AS issue FROM workflow_decisions
+      WHERE controlling_session_id=? AND category='campaign_issue_scope' AND status='consumed'
+        AND json_type(resource_snapshot, '$.issueAdmission')='object'
+        AND json_extract(resource_snapshot, '$.lineage.kind')='follow_up'
+        AND json_extract(resource_snapshot, '$.lineage.publicationOccurrenceId')=?
+        AND json_array_length(resource_snapshot, '$.additions')=1 LIMIT 1`)
+      .get(rootId, publicationOccurrenceId) as { issue: number } | undefined;
+    return row?.issue ?? null;
+  }
+
   campaignSharesRepositoryWorkspace(root: SessionView, member: Pick<SessionView, "id" | "runnerId" | "workspaceId">): boolean {
     const path = (s: Pick<SessionView, "id" | "runnerId" | "workspaceId">) => this.getAdHocWorkspacePath(s.id) ??
       (s.workspaceId ? this.getWorkspacePath(s.runnerId, s.workspaceId) : null);

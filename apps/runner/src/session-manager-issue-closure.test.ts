@@ -106,7 +106,11 @@ test("bounded Full Control scope synchronization persists the advanced boundary 
   assert.deepEqual(f.diskMeta().orchestrator!.control,control);
   f.restart();
   assert.deepEqual(f.store().readMeta(sessionId)!.orchestrator!.control,control);
-  assert.equal((await f.scope({operation:"synchronize",scope,control:{...control,boundary:{...control.boundary,issueScopeRevision:1}}})).ok,false);
+  const humanScope={...scope,revision:3,issueNumbers:[]};
+  assert.equal((await f.scope({operation:"synchronize",scope:humanScope,control})).ok,true,"a human revision persists even when it invalidates Full Control");
+  assert.deepEqual(f.diskMeta().orchestrator!.issueNumbers,[]);
+  assert.deepEqual(f.diskMeta().orchestrator!.control,{mode:"custom"},"stale standing authorization is disabled on the runner");
+  f.restart(); assert.equal(f.store().readMeta(sessionId)!.orchestrator!.issueScope!.revision,3);
 });
 
 for (const mode of ["closed", "lost_receipt", "still_open"] as const) {

@@ -16440,9 +16440,12 @@ export class SessionManager {
       if (!fresh?.orchestrator || current && (scope.revision < current.revision || scope.revision === current.revision && JSON.stringify(scope) !== JSON.stringify(current))) {
         return { ...base, ok: false, error: "Stale or conflicting campaign scope revision" };
       }
-      const control = message.control;
-      if (control && (!validCampaignControl(control) || control.mode === "full_control" &&
-          (control.boundary.repository.toLowerCase() !== repository || control.boundary.issueScopeRevision !== scope.revision))) return { ...base, ok: false, error: "Scope authority boundary is stale or invalid" };
+      let control = message.control;
+      if (control && (!validCampaignControl(control) || control.mode === "full_control" && control.boundary.repository.toLowerCase() !== repository)) return { ...base, ok: false, error: "Scope authority boundary is invalid or in another repository" };
+      // A human scope revision intentionally invalidates older standing authorization, but
+      // scope removal must still persist. Disable the stale runner diagnostic contract;
+      // the server independently retains its boundary and evaluates it as human-required.
+      if (control?.mode === "full_control" && control.boundary.issueScopeRevision !== scope.revision) control = { mode: "custom" };
       const updated = this.store.patchMeta(message.sessionId, { orchestrator: { ...fresh.orchestrator, issueNumbers: [...scope.issueNumbers], issueScope: scope,
         ...(control === undefined ? {} : { control }) } });
       if (!updated) return { ...base, ok: false, error: "Could not persist campaign scope" };

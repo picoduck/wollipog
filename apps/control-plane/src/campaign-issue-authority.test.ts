@@ -130,6 +130,8 @@ test("publication requires an accepted unique related recommendation, exact sani
     assert.equal((await h.svc.createWorkflowDecisionWithVideo("root",{requestId:"duplicate",resourceKey:"pub",resourceSnapshot:snapshot})).ok,false);
     h.state.publicationOk=true;
     const p = await h.svc.createWorkflowDecisionWithVideo("root",{requestId:"publication",resourceKey:"pub",resourceSnapshot:snapshot}); assert.ok(p.ok,p.error ?? "publication");
+    assert.equal(h.svc.createWorkflowDecision("root",{requestId:"spoof-admission",resourceKey:"spoof",resourceSnapshot:p.data!.resourceSnapshot}).status,403,
+      "an echo of server admission cannot be supplied to generic create");
     assert.equal(p.data!.authority,"orchestrator"); assert.ok(h.approve(p.data!).ok);
     h.state.publicationOk=false;
     assert.equal((await h.svc.consumeWorkflowDecision("root",p.data!.occurrenceId,{resourceSnapshot:p.data!.resourceSnapshot})).ok,false);
@@ -143,9 +145,12 @@ test("bounded not-planned closure needs a recorded supported disposition and kee
   const h = harness();
   const request = {requestId:"closure",issue:100,reason:"not_planned" as const,explanation:"Supported retirement",evidence:["Recorded cancellation"]};
   try {
-    assert.equal((await h.svc.requestGithubIssueClosure("root",request)).ok,false);
+    const fallback=await h.svc.requestGithubIssueClosure("root",{...request,requestId:"missing-disposition"});
+    assert.ok(fallback.ok); assert.equal(fallback.data!.decision!.authority,"human");
     assert.ok(h.svc.updateCampaignWorkItem("root",{workItemId:h.item.id,commitment:{state:"cancelled",reason:"Replaced by a verified alternative"}}).ok);
-    h.state.openPR=true; assert.equal((await h.svc.requestGithubIssueClosure("root",request)).ok,false); h.state.openPR=false;
+    h.state.openPR=true;
+    const conflict=await h.svc.requestGithubIssueClosure("root",{...request,requestId:"conflict"});
+    assert.ok(conflict.ok); assert.equal(conflict.data!.decision!.authority,"human"); h.state.openPR=false;
     const c = await h.svc.requestGithubIssueClosure("root",request); assert.ok(c.ok,c.error ?? "closure");
     const d = c.data!.decision!; assert.equal(d.authority,"orchestrator"); assert.ok(h.approve(d).ok);
     const executed = await h.svc.executeGithubIssueClosure("root",d.occurrenceId,d.resourceDigest); assert.ok(executed.ok,executed.error ?? "execution");
@@ -158,9 +163,11 @@ test("bounded not-planned closure needs a recorded supported disposition and kee
 test("pending and consumed publications reserve capacity against other publications and epic scope changes", async () => {
   const h=harness(true,2);
   try {
+    let firstRecommendation="";
     const make=async (title:string)=> {
       const rec=h.svc.recordCampaignFollowUp("root",{originSessionId:"child",repository:"team/repo",title,originWorkItemIds:[h.item.id]}); assert.ok(rec.ok);
       assert.ok(h.svc.adjudicateCampaignRecommendation("root",{recommendationId:rec.data!.id,disposition:"accepted",reason:"Observed related work",publicationRequired:true}).ok);
+      if(title==="First repair") firstRecommendation=rec.data!.id;
       return h.svc.createWorkflowDecisionWithVideo("root",{requestId:title,resourceKey:title,resourceSnapshot:{category:"follow_up_issue_publication",repository:"team/repo",sanitizedTitle:title,sanitizedBody:body,labels:[],recommendationId:rec.data!.id}});
     };
     const first=await make("First repair"); assert.ok(first.ok,first.error ?? "first reservation");
@@ -168,7 +175,81 @@ test("pending and consumed publications reserve capacity against other publicati
     assert.equal((await h.proposal("epic-slot")).ok,false);
     assert.ok(h.approve(first.data!).ok);
     assert.ok((await h.svc.consumeWorkflowDecision("root",first.data!.occurrenceId,{resourceSnapshot:first.data!.resourceSnapshot})).ok);
+    assert.ok(h.svc.adjudicateCampaignRecommendation("root",{recommendationId:firstRecommendation,disposition:"accepted",reason:"Unverified tracker claim",
+      resultingWorkItemKey:`followup:${firstRecommendation}`,resultingIssue:{repository:"team/repo",number:100}}).ok);
     assert.equal((await make("Third repair")).ok,false,"consumption cannot free an unpublished scope reservation");
+  } finally {h.db.close();}
+});
+
+test("authenticated human scope proposals preserve direct human narrowing and expansion under Full Control", async () => {
+  const h=harness();
+  try {
+    const proposed=await h.svc.proposeCampaignIssueScope("root",{requestId:"human-add",expectedRevision:1,additions:[{repository:"team/repo",number:999}],removals:[],explanation:"Fresh human scope expansion"},()=>true,h.principal);
+    assert.ok(proposed.ok,proposed.error ?? "human proposal"); assert.equal(proposed.data!.authority,"human");
+    assert.ok(h.approve(proposed.data!).ok);
+    const narrowed=await h.svc.proposeCampaignIssueScope("root",{requestId:"human-remove",expectedRevision:2,additions:[],removals:[{repository:"team/repo",number:999}],explanation:"Human narrowing"},()=>true,h.principal);
+    assert.ok(narrowed.ok,narrowed.error ?? "human narrowing"); assert.equal(narrowed.data!.authority,"human");
+    assert.ok(h.approve(narrowed.data!).ok);
+    const closure=await h.svc.requestGithubIssueClosure("root",{requestId:"human-exception",issue:100,reason:"completed",explanation:"Owner reviews umbrella completion",evidence:["Human review"]});
+    assert.ok(closure.ok,closure.error ?? "human closure"); assert.equal(closure.data!.decision!.authority,"human");
+    assert.ok(h.approve(closure.data!.decision!).ok);
+  } finally {h.db.close();}
+});
+
+test("a reservation settles only after exact inspected publication lineage is consumed into scope", async () => {
+  const h=harness(true,2);
+  try {
+    const rec=h.svc.recordCampaignFollowUp("root",{originSessionId:"child",repository:"team/repo",title:"Verified repair",originWorkItemIds:[h.item.id]}); assert.ok(rec.ok);
+    assert.ok(h.svc.adjudicateCampaignRecommendation("root",{recommendationId:rec.data!.id,disposition:"accepted",reason:"Related observed work",publicationRequired:true}).ok);
+    const publication=await h.svc.createWorkflowDecisionWithVideo("root",{requestId:"verified-publication",resourceKey:"pub",resourceSnapshot:{category:"follow_up_issue_publication",repository:"team/repo",
+      sanitizedTitle:"Verified repair",sanitizedBody:body,labels:[],recommendationId:rec.data!.id}}); assert.ok(publication.ok);
+    const d=publication.data!; assert.ok(h.approve(d).ok); assert.ok((await h.svc.consumeWorkflowDecision("root",d.occurrenceId,{resourceSnapshot:d.resourceSnapshot})).ok);
+    assert.ok(h.svc.adjudicateCampaignRecommendation("root",{recommendationId:rec.data!.id,disposition:"accepted",reason:"Read-back payload verified",resultingWorkItemKey:`followup:${rec.data!.id}`,
+      resultingIssue:{repository:"team/repo",number:101}}).ok);
+    assert.equal(h.db.admittedCampaignPublicationIssue("root",d.occurrenceId),null,"ledger read-back alone is still a claim");
+    const scope=await h.svc.proposeCampaignIssueScope("root",{requestId:"verified-published-scope",expectedRevision:1,additions:[{repository:"team/repo",number:101}],removals:[],
+      explanation:"Exact payload and related origin independently inspected",lineage:{kind:"follow_up",publicationOccurrenceId:d.occurrenceId}}); assert.ok(scope.ok,scope.error ?? "scope");
+    assert.ok(h.approve(scope.data!).ok);
+    assert.equal(h.db.admittedCampaignPublicationIssue("root",d.occurrenceId),101);
+  } finally {h.db.close();}
+});
+
+test("the actual Campaign Status HTTP route keeps a bounded Full Control human proposal human-owned", async () => {
+  const h=harness();
+  const {default:Fastify}=await import("fastify");
+  const {registerCampaignIssueScopeRoutes}=await import("./campaign-issue-scope-routes.js");
+  const app=Fastify();
+  try {
+    registerCampaignIssueScopeRoutes(app,{db:h.db,svc:h.svc,requestPrincipal:()=>h.principal});
+    const result=await app.inject({method:"POST",url:"/api/sessions/root/campaign/issue-scope/proposals",payload:{requestId:"human-http",expectedRevision:1,
+      additions:[{repository:"team/repo",number:999}],removals:[],explanation:"Human owner explicitly broadens scope"}});
+    assert.equal(result.statusCode,201,result.body); assert.equal(result.json().authority,"human");
+    assert.equal(result.json().resourceSnapshot.issueAdmission,undefined);
+  } finally {await app.close();h.db.close();}
+});
+
+test("non-delegated closure reasons and operations retain human review without demanding delivery inspection", async () => {
+  for (const operations of [["campaign_issue_scope"],["campaign_issue_scope","issue_closure"]] as const) {
+    const h=harness();
+    try {
+      assert.ok(h.svc.setCampaignControl("root",{mode:"full_control",objective:"Implement epic 100",operations:[...operations],delegatablePolicyIds:[],
+        issueAuthority:{epics:[100],relatedFollowUps:false,maxIssues:5,closureReasons:["not_planned"]}},2,h.principal).ok);
+      const result=await h.svc.requestGithubIssueClosure("root",{requestId:"human-reason",issue:100,reason:"completed",explanation:"Human reviews umbrella",evidence:["Current human review"]});
+      assert.ok(result.ok,result.error ?? "human exception"); assert.equal(result.data!.decision!.authority,"human");
+      assert.equal(result.data!.decision!.resourceSnapshot.category==="issue_closure" && result.data!.decision!.resourceSnapshot.delivery,undefined);
+      assert.ok(h.approve(result.data!.decision!).ok);
+      assert.ok((await h.svc.executeGithubIssueClosure("root",result.data!.decision!.occurrenceId,result.data!.decision!.resourceDigest)).ok);
+    } finally {h.db.close();}
+  }
+});
+
+test("legacy duplicate-label publication decisions still normalize and consume", async () => {
+  const h=harness(false);
+  try {
+    const snapshot={category:"follow_up_issue_publication" as const,repository:"team/repo",sanitizedTitle:"Legacy exact payload",sanitizedBody:body,labels:["feature","feature"]};
+    const p=h.svc.createWorkflowDecision("child",{requestId:"legacy-labels",resourceKey:"legacy-labels",resourceSnapshot:snapshot}); assert.ok(p.ok,p.error ?? "legacy request");
+    assert.ok(h.svc.resolveWorkflowDecision("root","child",p.data!.occurrenceId,{outcome:"approve"},"human",{kind:"human",id:h.principal.userId},()=>true).ok);
+    assert.ok((await h.svc.consumeWorkflowDecision("child",p.data!.occurrenceId,{resourceSnapshot:snapshot})).ok);
   } finally {h.db.close();}
 });
 
