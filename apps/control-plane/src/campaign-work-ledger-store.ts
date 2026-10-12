@@ -187,6 +187,35 @@ BEGIN
     VALUES (NEW.campaign_session_id) ON CONFLICT(campaign_session_id) DO NOTHING;
 END;
 
+-- Every issue an attempt's item has tracked while the attempt existed, so issue-closure attribution
+-- (#3084) survives a later edit or removal of the item's issue. Rows are only ever added; the
+-- trailing backfill covers attempts recorded before this table existed and is idempotent.
+CREATE TABLE IF NOT EXISTS campaign_work_attempt_issues (
+  attempt_id       TEXT NOT NULL,
+  issue_repository TEXT NOT NULL,
+  issue_number     INTEGER NOT NULL,
+  PRIMARY KEY (attempt_id, issue_repository, issue_number),
+  FOREIGN KEY (attempt_id) REFERENCES campaign_work_attempts(id) ON DELETE CASCADE
+);
+CREATE TRIGGER IF NOT EXISTS campaign_work_attempt_issue_assigned
+  AFTER INSERT ON campaign_work_attempts
+BEGIN
+  INSERT OR IGNORE INTO campaign_work_attempt_issues (attempt_id, issue_repository, issue_number)
+    SELECT NEW.id, lower(issue_repository), issue_number FROM campaign_work_items
+    WHERE id=NEW.work_item_id AND issue_number IS NOT NULL;
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_work_attempt_issue_changed
+  AFTER UPDATE OF issue_repository, issue_number ON campaign_work_items
+  WHEN NEW.issue_number IS NOT NULL
+BEGIN
+  INSERT OR IGNORE INTO campaign_work_attempt_issues (attempt_id, issue_repository, issue_number)
+    SELECT id, lower(NEW.issue_repository), NEW.issue_number FROM campaign_work_attempts WHERE work_item_id=NEW.id;
+END;
+INSERT OR IGNORE INTO campaign_work_attempt_issues (attempt_id, issue_repository, issue_number)
+  SELECT attempt.id, lower(item.issue_repository), item.issue_number
+  FROM campaign_work_attempts attempt JOIN campaign_work_items item ON item.id=attempt.work_item_id
+  WHERE item.issue_number IS NOT NULL;
+
 -- Delivery proof for one attempt. A later execution of the same child never invalidates it.
 CREATE TABLE IF NOT EXISTS campaign_work_verifications (
   id                     TEXT PRIMARY KEY,
@@ -622,11 +651,11 @@ export class CampaignWorkLedgerStore {
     return sessions;
   }
 
-  /** Attribution for an issue closure (#3084). The lineage is every item recorded for the issue plus
-   * the follow-up items it descends from and that descend from it, through adjudicated
-   * recommendations; siblings and dependencies are not lineage. `lineage` holds every session with
-   * any attempt in it, open or ended, so earlier work on the issue still counts. `elsewhere` holds
-   * sessions whose open attempt is on an item outside the lineage. */
+  /** Attribution for an issue closure (#3084). The lineage is every item that tracks the issue now or
+   * did while any attempt on it existed, plus the follow-up items it descends from and that descend
+   * from it, through adjudicated recommendations; siblings and dependencies are not lineage.
+   * `lineage` holds every session with any attempt in it, open or ended, so earlier work on the
+   * issue still counts. `elsewhere` holds sessions whose open attempt is on an item outside it. */
   issueLineageSessions(campaignId: string, repository: string, issueNumber: number): { lineage: Set<string>; elsewhere: Set<string> } {
     const rows = this.stmt(`
       WITH RECURSIVE
@@ -638,7 +667,10 @@ export class CampaignWorkLedgerStore {
         ),
         issue_items(id) AS (
           SELECT id FROM campaign_work_items
-          WHERE campaign_session_id=? AND lower(issue_repository)=lower(?) AND issue_number=?
+          WHERE campaign_session_id=?1 AND lower(issue_repository)=lower(?2) AND issue_number=?3
+          UNION SELECT attempt.work_item_id FROM campaign_work_attempts attempt
+          JOIN campaign_work_attempt_issues issue ON issue.attempt_id=attempt.id
+          WHERE attempt.campaign_session_id=?1 AND issue.issue_repository=lower(?2) AND issue.issue_number=?3
         ),
         descendants(id) AS (
           SELECT id FROM issue_items
@@ -652,8 +684,8 @@ export class CampaignWorkLedgerStore {
       SELECT attempt.session_id, attempt.ended_at IS NULL AS open,
         attempt.work_item_id IN (SELECT id FROM lineage) AS related
       FROM campaign_work_attempts attempt
-      WHERE attempt.campaign_session_id=? AND attempt.session_id IS NOT NULL
-    `).all(campaignId, repository, issueNumber, campaignId) as Array<{ session_id: string; open: number; related: number }>;
+      WHERE attempt.campaign_session_id=?1 AND attempt.session_id IS NOT NULL
+    `).all(campaignId, repository, issueNumber) as Array<{ session_id: string; open: number; related: number }>;
     const lineage = new Set<string>();
     const elsewhere = new Set<string>();
     for (const row of rows) {

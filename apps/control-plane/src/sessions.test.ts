@@ -47,6 +47,7 @@ import {
 } from "@wollipog/protocol";
 import { dispatch as dispatchManagerTool } from "../../runner/src/session-management-mcp.js";
 import { ControlPlaneDb } from "./db.js";
+import { CAMPAIGN_WORK_LEDGER_SCHEMA } from "./campaign-work-ledger-store.js";
 import { applyClaudeReconciliation, previewClaudeReconciliation, observeReconciliationRevision } from "./claude-cost-reconciliation.js";
 import { parseRateTable } from "./usage-pricing.js";
 import { automationCommandDigest, canonicalAutomationCommandJson } from "./automation-command-outbox.js";
@@ -24763,7 +24764,8 @@ test("issue closure binds only children whose work bears on the issue (#3084)", 
   const executable = new Set(["unrelated_prompt", "unrelated_decision", "new_unrelated_child"]);
   for (const mode of ["unrelated_prompt", "unrelated_decision", "new_unrelated_child", "related_prompt",
     "related_decision", "unattributed_prompt", "mentioning_prompt", "earlier_attempt_prompt",
-    "follow_up_prompt", "reassigned_into_lineage", "steered_into_issue", "unechoed_launch"]) {
+    "follow_up_prompt", "reassigned_into_lineage", "steered_into_issue", "unechoed_launch", "listed_issues",
+    "issue_cleared"]) {
     const { db, svc, hub, parent, spawn } = stopAndArchiveCampaignFixture("retain");
     try {
       const plan = svc.recordCampaignPlan(parent.id, { items: [
@@ -24789,6 +24791,14 @@ test("issue closure binds only children whose work bears on the issue (#3084)", 
         assign(unrelatedItem!, unrelated);
         assign(issueItem!, unrelated);
         assign(otherItem!, unrelated);
+      } else if (mode === "issue_cleared") {
+        // Clearing an item's issue later does not erase that an earlier attempt worked on it.
+        const track = (issue: { repository: string; number: number } | null) =>
+          assert.ok(svc.updateCampaignWorkItem(parent.id, { workItemId: unrelatedItem!, issue }).ok);
+        track({ repository: "picoduck/wollipog", number: 1440 });
+        assign(unrelatedItem!, unrelated);
+        assign(otherItem!, unrelated);
+        track(null);
       } else assign(otherItem!, unrelated);
       const unattributed = mode === "unattributed_prompt" ? spawn(parent.id, "Help with something") : null;
       // A follow-up recommended from the issue's item is part of its lineage.
@@ -24820,7 +24830,7 @@ test("issue closure binds only children whose work bears on the issue (#3084)", 
       assert.ok(decision.resourceSnapshot.category === "issue_closure");
       const bound = new Set(decision.resourceSnapshot.activeChildren.map((child) => child.sessionId));
       assert.ok(bound.has(related), `${mode}: the child assigned to the issue is bound`);
-      assert.equal(bound.has(unrelated), ["mentioning_prompt", "earlier_attempt_prompt", "unechoed_launch"].includes(mode),
+      assert.equal(bound.has(unrelated), ["mentioning_prompt", "earlier_attempt_prompt", "unechoed_launch", "issue_cleared"].includes(mode),
         `${mode}: a child attributed elsewhere is bound only when it names the issue, once worked on it, or its launch is unknown`);
       if (unattributed) assert.ok(bound.has(unattributed), "a child without an open attempt stays bound");
       if (lineageChild) assert.ok(bound.has(lineageChild), "a child on a follow-up of the issue is bound");
@@ -24833,7 +24843,11 @@ test("issue closure binds only children whose work bears on the issue (#3084)", 
         requestId: `ui-${sessionId}`, resourceKey: `ui-${sessionId}`, resourceSnapshot: { category: "ui_evidence_approval",
           evidence: [{ evidenceId: "after", uri: "https://evidence.example/after.png", sha256: "c".repeat(64) }] },
       }).ok);
-      if (["unrelated_prompt", "mentioning_prompt", "earlier_attempt_prompt", "unechoed_launch"].includes(mode)) prompt(unrelated);
+      if (["unrelated_prompt", "mentioning_prompt", "earlier_attempt_prompt", "unechoed_launch", "issue_cleared"].includes(mode)) prompt(unrelated);
+      if (mode === "listed_issues") {
+        echo(unrelated, "Implement issues 1441 and 1440.");
+        echo(unrelated, "Continue.");
+      }
       if (mode === "steered_into_issue") {
         echo(unrelated, "Also implement issue 1440.");
         echo(unrelated, "Continue.");
@@ -24862,6 +24876,31 @@ test("issue closure binds only children whose work bears on the issue (#3084)", 
       }
     } finally { db.close(); }
   }
+});
+
+test("issue-closure attribution backfills attempts recorded before their issue history (#3084)", () => {
+  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+  try {
+    const plan = svc.recordCampaignPlan(parent.id, { items: [
+      { key: "issue", issue: { repository: "Picoduck/Wollipog", number: 1440 } }, { key: "other" },
+    ], planComplete: true });
+    assert.ok(plan.ok && plan.data, plan.error);
+    const [issueItem, otherItem] = plan.data.items.map((item) => item.workItemId);
+    const child = spawn(parent.id, "Deliver the item");
+    assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId: issueItem!, childSessionId: child }).ok);
+    assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId: otherItem!, childSessionId: child }).ok);
+    const history = () => db.db.prepare("SELECT issue_repository, issue_number FROM campaign_work_attempt_issues").all().map((row) => ({ ...row }));
+    assert.deepEqual(history(), [{ issue_repository: "picoduck/wollipog", issue_number: 1440 }]);
+    // An upgraded database starts without history; reapplying the schema backfills it.
+    db.db.exec("DELETE FROM campaign_work_attempt_issues");
+    db.db.exec(CAMPAIGN_WORK_LEDGER_SCHEMA);
+    db.db.exec(CAMPAIGN_WORK_LEDGER_SCHEMA);
+    assert.deepEqual(history(), [{ issue_repository: "picoduck/wollipog", issue_number: 1440 }]);
+    assert.ok(svc.updateCampaignWorkItem(parent.id, { workItemId: issueItem!, issue: null }).ok);
+    const attribution = db.campaignWorkLedger.issueLineageSessions(parent.id, "picoduck/wollipog", 1440);
+    assert.deepEqual([[...attribution.lineage], [...attribution.elsewhere]], [[child], [child]],
+      "the earlier attempt keeps the child in the lineage after the item stops tracking the issue");
+  } finally { db.close(); }
 });
 
 /* ------------------------- Campaign work ledger (#2417) ------------------------- */

@@ -40,10 +40,11 @@ export function normalizeIssueClosureSnapshot(value: Record<string, unknown>): G
     openPullRequests, activeChildren };
 }
 
-/** Text that names the issue: `#123`, `owner/repo#123`, `.../issues/123`, or `issue 123`. A match
- * only ever adds a child; prose can show a task bears on an issue but never that it does not. */
+/** Text containing the issue number as a standalone number, in any phrasing (`#123`, `issues 122 and
+ * 123`, `.../issues/123`). Matching the bare number over-includes on purpose: a match only ever
+ * adds a child, and prose can show a task bears on an issue but never that it does not. */
 const mentionsIssue = (text: string | null | undefined, issue: number) =>
-  typeof text === "string" && new RegExp(`(?:#|/issues/|\\bissues?\\s+)${issue}(?!\\d)`, "iu").test(text);
+  typeof text === "string" && new RegExp(`(?<!\\d)${issue}(?!\\d)`, "u").test(text);
 
 /** Live campaign children whose work can bear on the issue (#3084). A child is left out only when
  * the campaign work ledger attributes it elsewhere: its open attempt is on an item outside the
