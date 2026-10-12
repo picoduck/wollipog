@@ -153,6 +153,20 @@ export function SettingsView({ section, onNavigate, panels }: SettingsViewProps)
     (heading && heading.getClientRects().length > 0 ? heading : document.getElementById("page-title"))
       ?.focus({ preventScroll: section === undefined });
   }, [section]);
+  // Crossing a breakpoint swaps the side nav, the header's tabs and the index, so a focused link in
+  // the one that goes leaves focus on <body>; the shell's own rescue watches only the phone
+  // breakpoint, not 1100px. Focus moves to the current section's link in whatever replaced it, else
+  // to the page title.
+  const previousLayout = useRef({ phone, compact });
+  useEffect(() => {
+    const before = previousLayout.current;
+    if (before.phone === phone && before.compact === compact) return;
+    previousLayout.current = { phone, compact };
+    const active = document.activeElement;
+    if (active && active !== document.body && (active as HTMLElement).isConnected) return;
+    (rootRef.current?.querySelector<HTMLElement>('a[aria-current="page"]') ?? document.getElementById("page-title"))
+      ?.focus({ preventScroll: true });
+  }, [phone, compact]);
   // On a phone the index and a section are two screens in one scroller, the shell's `.main-body`. A
   // section opens at its top, and Back puts the index where it was left (§6.2). The position is
   // recorded while the index is on screen, since by the time a section has replaced it the scroller
@@ -220,7 +234,7 @@ export function SettingsView({ section, onNavigate, panels }: SettingsViewProps)
           ) : undefined}
         />
       )}
-      {showIndex ? (
+      {showIndex && (
         // No row is ever selected here (§5.2): each one opens a page of its own.
         <nav className="settings-index" aria-label="Settings Sections">
           {settingsIndexGroups().map((group) => (
@@ -241,39 +255,40 @@ export function SettingsView({ section, onNavigate, panels }: SettingsViewProps)
             </div>
           ))}
         </nav>
-      ) : (
-        <div className="settings-view">
-          {!phone && !compact && (
-            <nav className="settings-nav" aria-label="Settings Sections">
-              {SETTINGS_SECTIONS.map((entry) => {
-                const Icon = SECTION_ICONS[entry.id];
-                const selected = entry.id === current.id;
-                return (
-                  <a
-                    key={entry.id}
-                    className={`row settings-nav-item${selected ? " is-selected" : ""}`}
-                    aria-current={selected ? "page" : undefined}
-                    {...linkTo({ name: "settings", section: entry.id })}
-                  >
-                    <span className="row-icon" aria-hidden="true"><Icon /></span>
-                    <span className="row-title">{entry.title}</span>
-                  </a>
-                );
-              })}
-            </nav>
-          )}
-          <section className="settings-panel" aria-labelledby="settings-panel-heading">
-            <div className="settings-panel-head">
-              <div className="settings-panel-heading">
-                <h2 id="settings-panel-heading" ref={headingRef} tabIndex={-1}>{current.title}</h2>
-                <p className="settings-panel-desc">{current.description}</p>
-              </div>
-              {current.scope && <span className="settings-panel-scope">{current.scope}</span>}
-            </div>
-            {panels[current.id]}
-          </section>
-        </div>
       )}
+      {/* Hidden rather than removed under the index: `/settings` shows Appearance at wider widths,
+          and a window narrowed past 760px and widened again gets it back as it was left. */}
+      <div className="settings-view" hidden={showIndex}>
+        {!phone && !compact && (
+          <nav className="settings-nav" aria-label="Settings Sections">
+            {SETTINGS_SECTIONS.map((entry) => {
+              const Icon = SECTION_ICONS[entry.id];
+              const selected = entry.id === current.id;
+              return (
+                <a
+                  key={entry.id}
+                  className={`row settings-nav-item${selected ? " is-selected" : ""}`}
+                  aria-current={selected ? "page" : undefined}
+                  {...linkTo({ name: "settings", section: entry.id })}
+                >
+                  <span className="row-icon" aria-hidden="true"><Icon /></span>
+                  <span className="row-title">{entry.title}</span>
+                </a>
+              );
+            })}
+          </nav>
+        )}
+        <section className="settings-panel" aria-labelledby="settings-panel-heading">
+          <div className="settings-panel-head">
+            <div className="settings-panel-heading">
+              <h2 id="settings-panel-heading" ref={headingRef} tabIndex={-1}>{current.title}</h2>
+              <p className="settings-panel-desc">{current.description}</p>
+            </div>
+            {current.scope && <span className="settings-panel-scope">{current.scope}</span>}
+          </div>
+          {panels[current.id]}
+        </section>
+      </div>
     </div>
   );
 }

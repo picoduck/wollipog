@@ -171,7 +171,8 @@ test("phone: /settings is an index of two-line rows in three groups, none of the
   try {
     const page = view.scroller;
     assert.equal(page.querySelector("#page-title")?.textContent, "Settings");
-    assertNoDomNode(page.querySelector(".settings-panel"), "the index is a screen of its own");
+    assert.equal(page.querySelector(".settings-view")?.hasAttribute("hidden"), true,
+      "the index is a screen of its own; the default section waits hidden for a wider window");
     assertNoDomNode(page.querySelector(".detail-bar"));
     const surfaces = [...page.querySelectorAll('nav.settings-index[aria-label="Settings Sections"] > .surface')];
     assert.deepEqual(
@@ -243,6 +244,42 @@ test("a panel keeps its state when the width crosses a breakpoint", async () => 
       assert.equal(body().textContent, "Behavior content 2", `still open after crossing to ${at}`);
     }
     assert.ok(view.scroller.querySelector(".settings-nav"), "and the layout did change");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("/settings keeps its default section's state through a phone's index and back", async () => {
+  const view = await render("desktop");
+  try {
+    const body = () => view.scroller.querySelector<HTMLButtonElement>(".panel-body")!;
+    await act(async () => { body().click(); });
+    assert.equal(body().textContent, "Appearance content 1");
+    tier = "phone";
+    await view.show(undefined);
+    assert.ok(view.scroller.querySelector(".settings-index"), "a phone shows the index");
+    tier = "desktop";
+    await view.show(undefined);
+    assert.equal(body().textContent, "Appearance content 1", "Appearance comes back as it was left");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("crossing 1100px moves a focused section link's focus to the current link that replaced it", async () => {
+  const view = await render("desktop", "network");
+  try {
+    const current = () => view.scroller.querySelector<HTMLElement>('a[aria-current="page"]')!;
+    current().focus();
+    assert.ok(current().classList.contains("settings-nav-item"));
+    tier = "compact";
+    await view.show("network");
+    assert.ok(current().classList.contains("tab"), "the side nav became the header's tabs");
+    assert.equal(document.activeElement, current(), "focus moved to the current tab, not <body>");
+    tier = "desktop";
+    await view.show("network");
+    assert.ok(current().classList.contains("settings-nav-item"));
+    assert.equal(document.activeElement, current(), "and back to the current nav item");
   } finally {
     await view.unmount();
   }

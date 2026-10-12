@@ -18308,6 +18308,8 @@ a.tab { text-decoration: none; }
  * as link tabs; a phone shows them as an index of their own, and each section under a detail bar.
  * ---------------------------------------------------------------------------------------------- */
 .settings-view { display: flex; gap: var(--space-6); min-height: 0; }
+/* Under a phone's index, `/settings` keeps its default section mounted for the wider layouts. */
+.settings-view[hidden] { display: none; }
 /* The section list stays in view while the panel scrolls under it. */
 .settings-nav {
   display: flex;
