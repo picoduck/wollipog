@@ -88,3 +88,20 @@ test("issue closure reports partial failures and unverified final state as uncer
     assert.equal(f.calls.filter((call) => call.args[0] === "issue").length, 1);
   }
 });
+
+test("completed closure verifies the delivered head, actual default-branch merge and commit containment", async () => {
+  for (const mode of ["merged","queued","changed-head","feature-base","not-contained"]) {
+    const f=fixture();
+    const run=async(command:string,args:string[])=> {
+      const path=args.at(-1)!;
+      if(path==="repos/team/repo") return JSON.stringify({default_branch:"main"});
+      if(path==="repos/team/repo/pulls/10") return JSON.stringify({number:10,state:mode==="queued"?"open":"closed",merged:mode!=="queued",merge_commit_sha:"c".repeat(40),
+        head:{sha:(mode==="changed-head"?"d":"b").repeat(40)},base:{ref:mode==="feature-base"?"feature":"main",repo:{full_name:"team/repo"}}});
+      if(path.includes("/compare/")) return JSON.stringify({status:mode==="not-contained"?"diverged":"ahead"});
+      return f.run(command,args);
+    };
+    const inspect=inspectGithubIssueClosure(123,run,[{number:10,headSha:"b".repeat(40)}]);
+    if(mode==="merged") assert.deepEqual((await inspect).delivery,[{number:10,headSha:"b".repeat(40),mergeCommitSha:"c".repeat(40)}]);
+    else await assert.rejects(inspect);
+  }
+});

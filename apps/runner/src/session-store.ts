@@ -191,7 +191,7 @@ export interface SessionMeta {
   githubIssueClosureAttempts?: Record<string, string>;
   /** Effective Orchestrator restriction. Missing legacy metadata remains strict at launch, and a
    * missing `integrationIsolation` matches that: a strict launch never carried user integrations. */
-  orchestrator?: { strictProjectIsolation: boolean; integrationIsolation?: boolean; issueNumbers?: number[]; issueScope?: import("@wollipog/protocol").CampaignIssueScope };
+  orchestrator?: { strictProjectIsolation: boolean; integrationIsolation?: boolean; issueNumbers?: number[]; issueScope?: import("@wollipog/protocol").CampaignIssueScope; control?: import("@wollipog/protocol").CampaignControl };
   /** Exact provider model resolved from the selected alias for the active session. */
   resolvedModel?: string | null;
   /** Secret references only; actual MCP credentials are never written to meta.json. */

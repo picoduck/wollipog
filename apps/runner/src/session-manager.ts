@@ -2,8 +2,8 @@ import { artifactGuidance } from "./artifact-guidance.js";
 import { campaignOperationEvidenceCurrent } from "./campaign-operation-evidence.js";
 import { effectiveProjectMemoryKey, prepareProjectMemory, prepareProjectMemoryArgs, projectMemoryKey, projectMemoryUnavailable } from "./project-memory.js";
 import { isTerminal } from "@wollipog/protocol";
-import { inspectCampaignIssueScope } from "./campaign-issue-scope.js";
-import { boundedIssueNumbers, titleFromPrompt } from "@wollipog/protocol";
+import { inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
+import { boundedIssueNumbers, titleFromPrompt, validCampaignControl } from "@wollipog/protocol";
 import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
 import type { GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
 import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage } from "@wollipog/protocol";
@@ -567,7 +567,7 @@ interface SteeringOperation {
 }
 
 interface ActiveSession {
-  orchestratorLaunchPolicy?: Pick<import("@wollipog/protocol").OrchestratorLaunchPolicy, "issueNumbers" | "issueScope">;
+  orchestratorLaunchPolicy?: Pick<import("@wollipog/protocol").OrchestratorLaunchPolicy, "issueNumbers" | "issueScope" | "control">;
   projectMemoryKey?: string;
   projectMemoryFailureKey?: string;
   sessionId: string;
@@ -16421,10 +16421,11 @@ export class SessionManager {
     }
     try {
       const run = issueClosureRun(meta.context, meta.repoPath);
+      if (message.operation === "publication_inspect") return { ...base, ok: true, ...await inspectCampaignPublication(run, message) };
       if (message.operation === "inspect") {
         if (message.epic !== undefined && (!Number.isSafeInteger(message.epic) || message.epic < 1) ||
             message.issues !== undefined && !boundedIssueNumbers(message.issues)) return { ...base, ok: false, error: "Invalid bounded issue selection" };
-        return { ...base, ok: true, ...await inspectCampaignIssueScope(run, message.epic, message.issues) };
+        return { ...base, ok: true, ...await inspectCampaignIssueScope(run, message.epic, message.issues, message.publication) };
       }
       const live = this.active.get(message.sessionId)?.orchestratorLaunchPolicy;
       if (live && message.scope?.revision >= (live.issueScope?.revision ?? 0)) live.issueNumbers = [];
@@ -16439,11 +16440,15 @@ export class SessionManager {
       if (!fresh?.orchestrator || current && (scope.revision < current.revision || scope.revision === current.revision && JSON.stringify(scope) !== JSON.stringify(current))) {
         return { ...base, ok: false, error: "Stale or conflicting campaign scope revision" };
       }
-      const updated = this.store.patchMeta(message.sessionId, { orchestrator: { ...fresh.orchestrator, issueNumbers: [...scope.issueNumbers], issueScope: scope } });
+      const control = message.control;
+      if (control && (!validCampaignControl(control) || control.mode === "full_control" &&
+          (control.boundary.repository.toLowerCase() !== repository || control.boundary.issueScopeRevision !== scope.revision))) return { ...base, ok: false, error: "Scope authority boundary is stale or invalid" };
+      const updated = this.store.patchMeta(message.sessionId, { orchestrator: { ...fresh.orchestrator, issueNumbers: [...scope.issueNumbers], issueScope: scope,
+        ...(control === undefined ? {} : { control }) } });
       if (!updated) return { ...base, ok: false, error: "Could not persist campaign scope" };
       // The Claude auto-approval closure reads this exact object on each ask. Update it in place
       // so removals apply to the current process, as well as the next restart.
-      if (live) { live.issueNumbers = [...scope.issueNumbers]; live.issueScope = scope; }
+      if (live) { live.issueNumbers = [...scope.issueNumbers]; live.issueScope = scope; if (control !== undefined) live.control = control; }
       this.log(JSON.stringify({ event: "campaign_issue_scope_synchronized", sessionId: message.sessionId, revision: scope.revision }));
       return { ...base, ok: true, repository, revision: scope.revision };
     } catch { return { ...base, ok: false, error: "Cannot inspect or synchronize campaign scope; verify origin and gh authentication" }; }
@@ -16463,10 +16468,16 @@ export class SessionManager {
     }
     const revision = message.operation === "inspect" ? message.scopeRevision : message.snapshot.scopeRevision;
     if (meta.orchestrator.issueScope && revision !== meta.orchestrator.issueScope.revision) return { ...base, ok: false, error: "Campaign scope revision is stale; synchronize and request renewed review" };
+    if (message.operation === "execute" && message.snapshot.issueAdmission) {
+      const control = meta.orchestrator.control;
+      if (control?.mode !== "full_control" || !validCampaignControl(control) || control.boundary.issueScopeRevision !== revision ||
+          control.boundary.revision !== message.snapshot.issueAdmission.boundaryRevision || !control.boundary.operations.includes("issue_closure") ||
+          !control.boundary.issueAuthority?.closureReasons.includes(message.snapshot.reason)) return { ...base, ok: false, error: "Bounded closure authority is unsynchronized" };
+    }
     const run = issueClosureRun(meta.context, meta.repoPath);
     try {
       if (message.operation === "inspect") {
-        const inspection = await inspectGithubIssueClosure(issue, run);
+        const inspection = await inspectGithubIssueClosure(issue, run, message.deliveryPullRequests);
         if (meta.orchestrator.issueScope && inspection.repository.toLowerCase() !== meta.orchestrator.issueScope.repository) return { ...base, ok: false, error: "Repository differs from the authorized scope" };
         return { ...base, ok: true, inspection };
       }

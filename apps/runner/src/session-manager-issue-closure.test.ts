@@ -97,6 +97,18 @@ function fixture(t: TestContext, mode: CloseMode = "closed") {
 
 const digest = (snapshot: GithubIssueClosureSnapshot) => createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
 
+test("bounded Full Control scope synchronization persists the advanced boundary for restart", async (t) => {
+  const f=fixture(t);
+  const scope={repository:"example/project",issueNumbers:[issue],revision:2,authorizedByUserId:"owner",authorizedAt:1000};
+  const control: import("@wollipog/protocol").CampaignControl={mode:"full_control",boundary:{version:1,revision:3,issueScopeRevision:2,repository:"example/project",objective:"Implement scoped work",
+    authorizedByUserId:"owner",authorizedAt:2000,operations:["campaign_issue_scope","issue_closure"],delegatablePolicyIds:[],issueAuthority:{epics:[issue],relatedFollowUps:false,maxIssues:3,closureReasons:["completed"]}}};
+  assert.equal((await f.scope({operation:"synchronize",scope,control})).ok,true);
+  assert.deepEqual(f.diskMeta().orchestrator!.control,control);
+  f.restart();
+  assert.deepEqual(f.store().readMeta(sessionId)!.orchestrator!.control,control);
+  assert.equal((await f.scope({operation:"synchronize",scope,control:{...control,boundary:{...control.boundary,issueScopeRevision:1}}})).ok,false);
+});
+
 for (const mode of ["closed", "lost_receipt", "still_open"] as const) {
   test(`runner persists the closure attempt before ${mode} and refuses replay after recreation`, async (t) => {
     const f = fixture(t, mode);

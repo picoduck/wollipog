@@ -2,8 +2,8 @@
 
 Campaign issue authority is independent of the campaign work ledger. Initial explicit issue lists retain
 their existing finite authorization. Epic wording and requests for an issue's children seed membership
-proposals, never automatic authorization. An epic campaign cannot create delegated sessions until a
-human confirms its issue scope.
+proposals, never automatic authorization. An epic campaign cannot create delegated sessions until
+its issue scope is authorized. Custom campaigns require the existing human approval.
 
 Campaign Status exposes Authorized Issue Scope, revision, and recorded work outside authority. A campaign
 owner can inspect an epic's umbrella and members, select candidates, and request exact additions/removals.
@@ -31,3 +31,63 @@ Operational questions: which human approved the change, which revision is author
 active participant synchronize? Workflow audit plus `campaign_issue_scope_approved`,
 `campaign_issue_scope_synchronized`, and `campaign_issue_scope_sync_pending` answer these with session,
 occurrence, and revision identifiers, without logging prompts, credentials, or issue bodies.
+
+## Bounded Full Control Issue Authority
+
+The authenticated human admission may additionally establish `control.boundary.issueAuthority`:
+
+```typescript
+{
+  epics: number[],              // Exact intended umbrella issues in the authorized repository
+  relatedFollowUps: boolean,    // Evidence-based work related to authorized origin issues
+  maxIssues: number,            // Maximum current scope plus reserved publication slots (1–100)
+  closureReasons: ("completed" | "not_planned")[]
+}
+```
+
+Omission preserves human scope/closure ownership, including older Full Control boundaries. This
+contract requires protocol v216 on every participant. It does not expand the repository, objective,
+operation list, provider permissions or aggregate spending limits. Only authenticated human
+admission may establish or enlarge it. Nested Orchestrators inherit the root boundary and cannot
+shadow it or admit their own scope. Initial authorized scope may be empty when the human establishes
+an intended epic; member resolution then populates that scope through an exact decision.
+
+Scope proposals carry `lineage: {kind: "epic", epic}` for freshly inspected native/checklist members
+of a human-authorized epic, or `{kind: "follow_up", publicationOccurrenceId}` for one verified
+published issue. Dependencies, incidental references and cross-repository links remain excluded.
+The server binds lineage evidence, rationale, expected revision, affected assignments, active
+children and outstanding grants into the snapshot. Root standing authorization resolves and
+consumes that exact occurrence atomically; all incompatible grants and evidence receipts are revoked
+in the same transaction. Agent disposition records name the acting session, occurrence and boundary
+revision separately from the original authorizing human and timestamp. Scope revisions advance the
+bounded contract without altering its objective, permitted effects or limits. Custom approval still
+establishes new human provenance and invalidates an older Full Control boundary.
+
+For related publication, record and adjudicate a unique recommendation with authorized origin work
+items. Submit its `recommendationId` with the exact sanitized repository/title/body/labels through
+the usual workflow request. The server verifies accepted lineage and scope capacity; the runner
+screens public content against the issue-reporting format and inspects both open and closed search
+results plus the newest issues. Incomplete or duplicate evidence refuses admission. This supplements
+the exact payload review; it never rewrites content or proves arbitrary prose is free of private data.
+Fresh duplicate and lineage checks repeat immediately before one-shot consumption. Consumed
+publication grants remain reserved until the verified issue enters scope, and cannot be reissued.
+After publication, read back the exact payload, record the resulting issue on its recommendation,
+then propose the scope addition against that publication occurrence. Ledger acceptance alone grants
+neither publication nor scope.
+
+Completed delegated closure requires a delivered work-item verification with an exact report digest
+and fresh observed PR evidence. The root's verification attests delivery against acceptance criteria;
+the runner independently verifies actual merges at the verified heads into the repository's default
+branch and containment of every merge commit there. An enqueued PR, a reported stage, missing report,
+stale forge fact, feature-branch merge or open related PR refuses closure. Not-planned closure requires
+a recorded cancellation/scope-removal rationale with no active attempt; an optional rejected/duplicate
+recommendation must reference the affected work. Both reasons must be in the human-established contract.
+Existing issue/PR inspection, audience, assignment digests, exact snapshot, expiry, scope synchronization,
+guardrails, durable dispatch fence and uncertain-result reconciliation continue to apply. Changed
+delivery/disposition invalidates execution. Inspect uncertain outcomes; never replay a close or comment.
+
+Operational questions: why was this admission refused, who established its boundary, and which
+scope revision was applied? `campaign_issue_admission`, `campaign_authority_evaluated`, and
+`campaign_issue_scope_approved` provide entry point, request/occurrence, owner, reason and revision
+fields; workflow audit and stored scope disposition retain the distinct human/agent identities.
+No issue bodies, comments, prompts or credentials enter these diagnostic events.

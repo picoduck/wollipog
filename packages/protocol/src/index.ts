@@ -666,14 +666,16 @@
 // 214: read-only descendant workflow decision inspection and nonterminal keyset pages.
 // 215: human-authorized Full Control boundary and shared, reasoned campaign authority; trusted
 //      provider request-source envelopes. Omission preserves Custom and older-peer behavior.
-export const PROTOCOL_VERSION = 215;
+// 216: bounded Full Control issue lineage, publication admission and verified closure.
+export const PROTOCOL_VERSION = 216;
 
 export * from "./campaign-authority.js";
+export * from "./campaign-issue-publication.js";
 import type { CampaignControl, CampaignRequestSource, CampaignAuthorityEvaluation } from "./campaign-authority.js";
 export const SESSION_SUMMARY_UI_PROTOCOL = 212;
 export const SKILL_REPORT_REQUEST_LIFETIME_MS = 30_000;
 export const MAX_SKILL_REPORT_REQUESTS = 64;
-export { boundedIssueNumbers, epicChecklistMembers, normalizeCampaignIssueScopeSnapshot } from "./campaign-issue-scope.js";
+export { boundedIssueNumbers, epicChecklistMembers, normalizeCampaignIssueScopeSnapshot, validIssueAdmission, validIssueLineage } from "./campaign-issue-scope.js";
 export const UNIVERSAL_QUESTION_TEXT_MIN_PROTOCOL = 202;
 
 export type ArtifactUploadPreference = "manual" | "wollipog_automatic" | "external_hosting";
@@ -2385,6 +2387,8 @@ export interface OrchestratorExecutionDefaults {
 export interface OrchestratorLaunchPolicy extends OrchestratorExecutionDefaults {
   issueNumbers?: number[];
   issueScope?: CampaignIssueScope;
+  /** Server-synchronized diagnostic boundary; never a provider permission grant. */
+  control?: CampaignControl;
 }
 
 export interface OrchestratorDefaults {
@@ -4142,6 +4146,8 @@ export interface CampaignIssueScope {
   revision: number;
   authorizedByUserId: string;
   authorizedAt: number;
+  /** Human provenance remains immutable across agent dispositions. */
+  disposition?: { bySessionId: string; at: number; occurrenceId: string; boundaryRevision: number };
 }
 
 import type { CampaignIssueRef } from "./campaign-work-ledger.js";
@@ -4151,6 +4157,7 @@ export interface CampaignIssueScopeRequest {
   additions: CampaignIssueRef[];
   removals: CampaignIssueRef[];
   explanation: string;
+  lineage?: { kind: "epic"; epic: number } | { kind: "follow_up"; publicationOccurrenceId: string };
 }
 
 export interface CampaignIssueScopeSnapshot {
@@ -4164,6 +4171,8 @@ export interface CampaignIssueScopeSnapshot {
   affectedAssignments: Array<{ sessionId: string; issue: number }>;
   affectedDecisions: string[];
   activeChildren: Array<{ sessionId: string; title: string; assignmentDigest: string }>;
+  lineage?: CampaignIssueScopeRequest["lineage"];
+  issueAdmission?: { boundaryRevision: number; evidenceDigest: string };
 }
 
 export interface CampaignIssueScopeView {
@@ -4184,8 +4193,9 @@ export type CampaignIssueScopeMessage = {
   type: "campaign_issue_scope";
   requestId: string;
   sessionId: string;
-} & ({ operation: "inspect"; epic?: number; issues?: number[] } |
-     { operation: "synchronize"; scope: CampaignIssueScope });
+} & ({ operation: "inspect"; epic?: number; issues?: number[]; publication?: { sanitizedTitle: string; sanitizedBody: string; labels: string[] } } |
+     { operation: "publication_inspect"; sanitizedTitle: string; sanitizedBody: string; labels: string[] } |
+     { operation: "synchronize"; scope: CampaignIssueScope; control?: CampaignControl });
 
 export interface CampaignIssueScopeResultMessage {
   type: "campaign_issue_scope_result";
@@ -4196,6 +4206,7 @@ export interface CampaignIssueScopeResultMessage {
   revision?: number;
   candidates?: CampaignIssueScopeView["candidates"];
   error?: string;
+  publicationDigest?: string;
 }
 
 export interface GithubIssueClosureInspection {
@@ -4207,6 +4218,7 @@ export interface GithubIssueClosureInspection {
   /** Digest of issue identity, contents, updatedAt, labels, assignees, and relevant open PRs. */
   forgeDigest: string;
   openPullRequests: Array<{ number: number; title: string; url: string; headSha: string }>;
+  delivery?: Array<{ number: number; headSha: string; mergeCommitSha: string }>;
 }
 
 export interface GithubIssueClosureRequest {
@@ -4216,6 +4228,7 @@ export interface GithubIssueClosureRequest {
   explanation: string;
   evidence: string[];
   comment?: string;
+  dispositionRecommendationId?: string;
 }
 
 export interface GithubIssueClosureSnapshot extends Omit<GithubIssueClosureInspection, "state"> {
@@ -4226,6 +4239,8 @@ export interface GithubIssueClosureSnapshot extends Omit<GithubIssueClosureInspe
   evidence: string[];
   comment?: string;
   activeChildren: Array<{ sessionId: string; title: string; assignmentDigest: string }>;
+  issueAdmission?: { boundaryRevision: number; evidenceDigest: string };
+  dispositionRecommendationId?: string;
 }
 
 export interface GithubIssueClosureResult {
@@ -4272,6 +4287,8 @@ export type WorkflowDecisionResourceSnapshot =
       sanitizedTitle: string;
       sanitizedBody: string;
       labels: string[];
+      recommendationId?: string;
+      issueAdmission?: { boundaryRevision: number; evidenceDigest: string };
     }
   | {
       category: "ui_evidence_approval";
@@ -8147,7 +8164,7 @@ export type GithubIssueClosureMessage = {
   requestId: string;
   sessionId: string;
 } & (
-  | { operation: "inspect"; issue: number; scopeRevision?: number }
+  | { operation: "inspect"; issue: number; scopeRevision?: number; deliveryPullRequests?: Array<{ number: number; headSha: string }> }
   | { operation: "execute"; occurrenceId: string; snapshot: GithubIssueClosureSnapshot }
 );
 

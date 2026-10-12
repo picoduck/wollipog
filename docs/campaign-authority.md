@@ -136,8 +136,10 @@ records and occurrence status show whether a revoked grant could be consumed.
 
 ## Separate Enforced Contracts
 
-Scope changes and issue closure remain human-only in this foundation, even if named among boundary
-operations. Their bounded delegation is #2935. Campaign spending/allocations are #2936. UI evidence
+Scope changes and issue closure require a separate optional `boundary.issueAuthority` contract,
+described in [Campaign Issue Scope](campaign-issue-scope.md). Listing their operation without that
+human-established contract keeps them human-owned. Its protocol-v216 lineage, publication,
+delivery and scope-revision checks compose with this resolver. Campaign spending/allocations are #2936. UI evidence
 still requires the existing compatible provider, exact artifact ownership/digests and server-recorded
 review receipts; external or unsupported evidence keeps its human fallback. Production evidence
 review is #1321. Native TUI, legacy Codex exec, Pi/ACP and external elicitation cannot claim Full
