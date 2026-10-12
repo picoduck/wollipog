@@ -1,4 +1,4 @@
-import type { SessionUsageResponse, SessionView } from "@wollipog/protocol";
+import type { AgentDriverKind, SessionUsageResponse, SessionView } from "@wollipog/protocol";
 import { safeExternalHref } from "./external-href.js";
 import { formatCost } from "./format.js";
 
@@ -11,6 +11,32 @@ export interface SessionCostLabel {
   /** Accessible name for the control, matching the visible Title Case convention. */
   ariaLabel: string;
 }
+
+/**
+ * What a session's `tokensIn` counts (#3086). Anthropic reports only the uncached part of each
+ * request's input; Codex reports a total that already includes its cache reads. The ledger's
+ * breakdown separates the two for every driver, but the running counters keep the provider's
+ * meaning, so wherever they are shown alone the difference is labelled. Unknown for other drivers.
+ */
+export type InputTokenBasis = "excludesCached" | "includesCached";
+
+export function inputTokenBasis(driver: AgentDriverKind | undefined): InputTokenBasis | undefined {
+  if (driver === "claude-code") return "excludesCached";
+  if (driver === "codex" || driver === "codex-app-server") return "includesCached";
+  return undefined;
+}
+
+/** The fact that names the basis beside a token count. */
+export const INPUT_TOKEN_BASIS_LABEL: Record<InputTokenBasis, string> = {
+  excludesCached: "Excludes Cached Input",
+  includesCached: "Includes Cached Input",
+};
+
+/** The Session Usage note while its figures are the running counters rather than the breakdown. */
+export const RUNNING_COUNTERS_BASIS_NOTE: Record<InputTokenBasis, string> = {
+  excludesCached: "Until the breakdown loads, these totals leave out cached input.",
+  includesCached: "Until the breakdown loads, Input includes cached tokens.",
+};
 
 /** Stands in for an amount we cannot state. Never render a priced-looking `$0.00` instead. */
 const UNKNOWN_COST = "$—";

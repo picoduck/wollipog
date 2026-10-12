@@ -383,6 +383,33 @@ test("a lagging ledger drives nothing in the panel, not just the token rows", as
   await view.cleanup();
 });
 
+test("running counters say whether their input includes cached tokens until the breakdown separates them", async () => {
+  const lagging = {
+    sessionId: "s1",
+    totals: amount({ inputTokens: 100, outputTokens: 10, processedTokens: 110, costUsd: 0.01, costSource: "modelPriced" as const }),
+    byModel: [],
+  };
+  const notes = (popover: Element) => [...popover.querySelectorAll(".session-usage-note")].map((note) => note.textContent);
+  for (const [driver, note] of [
+    ["claude-code", "Until the breakdown loads, these totals leave out cached input."],
+    ["codex-app-server", "Until the breakdown loads, Input includes cached tokens."],
+  ] as const) {
+    const view = await mount(session({ driver, tokensIn: 9_000, tokensOut: 1_000 }), lagging);
+    await view.open();
+    assert.ok(notes(view.popover()!).includes(note), `${driver}: ${notes(view.popover()!).join(" | ")}`);
+    await view.cleanup();
+  }
+  // A caught-up breakdown reports uncached Input for every driver, so it needs no note.
+  const current = await mount(session({ driver: "claude-code", tokensIn: 100, tokensOut: 10 }), {
+    ...lagging,
+    totals: amount({ inputTokens: 100, uncachedInputTokens: 100, cachedInputTokens: 4_000, outputTokens: 10,
+      processedTokens: 4_110, costUsd: 0.01, costSource: "modelPriced" }),
+  });
+  await current.open();
+  assert.equal(notes(current.popover()!).some((text) => text?.startsWith("Until the breakdown loads")), false);
+  await current.cleanup();
+});
+
 test("a session with an unknown context window still shows its cost", async () => {
   const view = await mount(
     session({ contextWindow: undefined, contextTokensUsed: undefined }),

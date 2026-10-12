@@ -1043,6 +1043,7 @@ test("get_session redacts pendingApproval to its title and caps the preview (no 
         tokensIn: 10,
         tokensOut: 20,
         costUsd: 0.5,
+        liveUsage: { tokensIn: 3, tokensOut: 2, costUsd: 0.01 },
         // The credential a tool could one day replay against /approve — must never surface.
         pendingApproval: {
           requestId: "req-secret-77",
@@ -1069,6 +1070,10 @@ test("get_session redacts pendingApproval to its title and caps the preview (no 
   assert.equal(s.workspaceName, "demo");
   assert.equal(s.messageCount, 4);
   assert.equal(s.tokensOut, 20);
+  // Agents read the same token meanings people do (#3086): Claude's tokensIn leaves out cached input,
+  // and a running turn's usage that no total includes yet is reported beside the totals.
+  assert.equal(s.tokensInIncludesCachedInput, false);
+  assert.deepEqual(s.liveUsage, { tokensIn: 3, tokensOut: 2, costUsd: 0.01 });
 });
 
 /** A control plane that serves `GET /api/sessions/:id` and the bounded and unbounded events routes
