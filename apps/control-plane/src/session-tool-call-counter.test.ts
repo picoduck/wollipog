@@ -256,7 +256,7 @@ test("each counter trigger finds a duplicate id through the tool-call index, not
       `EXPLAIN QUERY PLAN SELECT 1 FROM session_events WHERE session_id='s-a' AND kind='tool_call'
          AND json_extract(payload,'$.toolCallId')='call-1' AND id<>1`,
     ).all() as Array<{ detail: string }>).map((row) => row.detail).join("\n");
-    assert.match(plan, /USING (COVERING )?INDEX idx_session_events_tool_call/);
+    assert.match(plan, /USING (COVERING )?INDEX idx_session_events_tool_call_id\b/);
     assert.doesNotMatch(plan, /SCAN session_events/);
   } finally {
     db.close();

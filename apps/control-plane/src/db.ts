@@ -1549,12 +1549,6 @@ CREATE TABLE IF NOT EXISTS question_policy_answers (
 CREATE INDEX IF NOT EXISTS idx_sessions_runner ON sessions(runner_id);
 -- Run detail filters members by run id (partial: most sessions have none).
 CREATE INDEX IF NOT EXISTS idx_sessions_run ON sessions(run_id) WHERE run_id IS NOT NULL;
--- The tool-call counter's triggers probe this partial expression index for another row with the
--- same tool call id, and its first-open backfill counts through it. The expression text must match
--- those queries byte-for-byte.
-CREATE INDEX IF NOT EXISTS idx_session_events_tool_call
-  ON session_events(session_id, json_extract(payload,'$.toolCallId')) WHERE kind='tool_call';
-
 CREATE TABLE IF NOT EXISTS multi_agent_runs (
   id           TEXT PRIMARY KEY,
   title        TEXT NOT NULL DEFAULT '',
@@ -6476,6 +6470,10 @@ export class ControlPlaneDb {
     // it is counted first, in its own transaction with its triggers.
     db.exec("BEGIN IMMEDIATE");
     try {
+      // SCHEMA has created the wider tool_call_id index, with the same session/id prefix and
+      // partial predicate. Retire the redundant legacy prefix atomically with counter backfill:
+      // a failed installation restores it, and later opens do not recreate it.
+      db.exec("DROP INDEX IF EXISTS idx_session_events_tool_call");
       installToolCallCounter(db);
       db.exec("COMMIT");
     } catch (error) {

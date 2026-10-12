@@ -7,6 +7,7 @@ import { parseArgs } from "node:util";
 import { ControlPlaneDb } from "../src/db.js";
 
 const { values } = parseArgs({ options: {
+  "legacy-prefix": { type: "boolean" },
   disk: { type: "boolean" }, dir: { type: "string" }, repeats: { type: "string", default: "5" },
 } });
 const repeats = Number(values.repeats);
@@ -15,6 +16,13 @@ const root = mkdtempSync(join(values.dir ?? tmpdir(), "wollipog-event-indexes-")
 const schemaDb = ControlPlaneDb.open(":memory:");
 const indexes = schemaDb.raw().prepare(`SELECT name,sql FROM sqlite_master
   WHERE type='index' AND tbl_name='session_events' AND sql IS NOT NULL ORDER BY name`).all() as Array<{ name: string; sql: string }>;
+// Optional historical comparison, used only in this disposable event-table clone. Runtime
+// schema initialization never recreates the retired index.
+if (values["legacy-prefix"] && !indexes.some(index => index.name === "idx_session_events_tool_call")) {
+  indexes.push({ name: "idx_session_events_tool_call", sql: `CREATE INDEX idx_session_events_tool_call
+    ON session_events(session_id, json_extract(payload,'$.toolCallId')) WHERE kind='tool_call'` });
+  indexes.sort((a, b) => a.name.localeCompare(b.name));
+}
 const schema = (schemaDb.raw().prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='session_events'")
   .get() as { sql: string }).sql;
 schemaDb.close();
@@ -76,7 +84,7 @@ try {
   console.log(JSON.stringify({ node: process.version, cpu: cpus()[0]?.model,
     mode: values.disk ? "WAL NORMAL; autocommit; checkpoint 1000 pages" : "in-memory; one transaction per sample",
     secureDelete: db.prepare("PRAGMA secure_delete").get(), existingEvents: 200_000, sessionKeys: 2_000,
-    indexes, results }, null, 2));
+    includeLegacyPrefix: values["legacy-prefix"] ?? false, indexes, results }, null, 2));
 } finally {
   db.close();
   rmSync(root, { recursive: true, force: true });

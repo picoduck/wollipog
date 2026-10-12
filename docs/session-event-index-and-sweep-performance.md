@@ -13,14 +13,19 @@ From the repository root:
 ```sh
 node --import tsx apps/control-plane/scripts/session-event-index-benchmark.ts
 node --import tsx apps/control-plane/scripts/session-event-index-benchmark.ts --disk --dir /tmp
+node --import tsx apps/control-plane/scripts/session-event-index-benchmark.ts --legacy-prefix
+node --import tsx apps/control-plane/scripts/session-event-index-benchmark.ts --legacy-prefix --disk --dir /tmp
 node --import tsx apps/control-plane/scripts/maintenance-sweep-benchmark.ts --memory
 node --import tsx apps/control-plane/scripts/maintenance-sweep-benchmark.ts --dir /tmp
 node --import tsx --test apps/control-plane/src/maintenance-indexes.test.ts
+node --import tsx --test apps/control-plane/src/session-event-index-migration.test.ts apps/control-plane/src/session-tool-call-counter.test.ts
 ```
 
 Each command prints JSON with exact index definitions or sweep SQL, parameters, query plans and
 timings. The index benchmark defaults to five repetitions (`--repeats 1` gives a shorter smoke
-run). All/none/each omitted/each alone configurations rotate order between repetitions. JSON
+run). By default it measures the seven retained event indexes. `--legacy-prefix` adds the retired
+short prefix only to the disposable clone, reproducing the original eight-index comparison below.
+All/none/each omitted/each alone configurations rotate order between repetitions. JSON
 payloads and SQL statements are prepared outside insert timing; each sample warms up 400 inserts
 and measures 2,000. Small payloads contain 128 bytes of text; large ones contain 40,960 bytes, plus
 their JSON envelope. The mix is one quarter each agent message, tool call, tool update, and user
@@ -73,7 +78,8 @@ checkpoint/cache-spill and host I/O, so it cannot rank small differences reliabl
 | Only `tool_update_id` | 1.81 | 24.73 | 16.75 | 90.94 |
 | Only `turn_start` | 1.79 | 25.04 | 17.11 | 91.53 |
 
-All names above have the `idx_session_events_` prefix. Every current event index is retained.
+All names above have the `idx_session_events_` prefix. These are the original eight-index baseline
+measurements. The seven distinct access paths remain; only the redundant `tool_call` prefix is retired.
 The unique runner-sequence index enforces replay idempotency; the others support event ordering,
 turn starts, counter probes and child/attention projections. The parent-tool-use predicate adds
 JSON work to all event kinds, but child-event queries explicitly depend on that index. Its raw
@@ -83,12 +89,57 @@ The `tool_call` index is a prefix of `tool_call_id` with the same partial predic
 tool-call-only CPU experiment (seven trials in alternating order, 200,000 existing calls, 1,000
 warmup and 4,000 measured inserts) found p50 9.61→7.55 microseconds small and 53.57→48.36 large when
 omitting the prefix. Counter probes, distinct-ID reads and ordered sequence reads kept indexed
-plans and identical results through the wider index. The approved scope preserves all event
-indexes, so this evidence records a potential later removal without applying one here.
+plans and identical results through the wider index. No production query pins the shorter prefix.
+
+A second experiment exercised the real `appendEvent` API, including its counter triggers, FTS and
+other projections, with foreign keys and `secure_delete` ON. It used 200,000 mixed historical events
+across 2,000 real synthetic sessions, five alternating retained/omitted trials per mode, prepared
+128-byte/40,960-byte text payloads, 200 warmup and 800 measured inserts, and one quarter each of the
+four event kinds. Disk mode used production WAL/checkpoint behavior. Counter values for 1,000
+sessions were independently checked against `COUNT(DISTINCT)` after each sample; ordered caller
+results and foreign-key integrity matched in both configurations.
+
+| Actual Append Workload | Median Trial p50, Retained → Omitted, µs |
+| --- | ---: |
+| Memory, Small | 39.15 → 33.85 |
+| Memory, 40 KiB | 151.29 → 165.10 |
+| Disk, Small | 122.94 → 93.18 |
+| Disk, 40 KiB | 323.81 → 263.34 |
+
+Small disk p50 improved in all five paired trials (3.71–41.94 µs), and small memory in four of five.
+Both large workloads improved in only two of five paired trials. Cache, FTS, checkpoint and host
+load confound the large medians; they do **not** demonstrate a reliable large mixed end-to-end
+gain. Removal is justified by the identical prefix/predicate, preserved plans and results, isolated
+tool-call CPU savings and repeatable small-workload benefit. It is not a universal ingest speedup.
+
+## Redundant Prefix Migration
+
+Schema initialization creates `idx_session_events_tool_call_id` before the legacy prefix is dropped.
+The `DROP INDEX IF EXISTS idx_session_events_tool_call` runs in the existing `BEGIN IMMEDIATE`
+counter-install transaction. A pre-counter database backfills through the wider equivalent index;
+an existing counter is retained without recounting. Failure rolls back the DROP and counter changes,
+allowing a healthy retry. Later opens do not recreate the prefix. All seven other event index
+definitions, runner-sequence uniqueness and `secure_delete=ON` are preserved.
+
+`session-event-index-migration.test.ts` constructs persisted legacy files directly through raw
+SQLite before their first current-code open, covering both absence and presence of the wider index.
+It checks old history/backfill, installed counters, repeated reopen without recounting, failed-startup
+rollback/retry, distinct/duplicate/null/numeric IDs, row updates/deletes, transaction rollback and
+session cascades. The existing generated counter-operation suite runs against the retained indexes.
+
+The 200,000-event/2,000-session compatibility fixture captures SQL from the actual child caller
+methods, installed counter-trigger subqueries and real first-open backfill. Exact results and order
+match with and without the legacy prefix. Counter probes, backfill and distinct-count reads use
+`idx_session_events_tool_call_id`; SQLite VM checks verify these counter queries do not fetch event
+table columns even where SQLite omits the expression index's COVERING label. Child candidate and
+projection queries retain their existing agent-spawn/tool-call/tool-update/parent-tool-use indexes.
+Index scans of the eligible tool-call set for one-time backfill remain; no retained-table scan is
+introduced into the per-insert probes.
 
 ## Sweep Plans and Timings
 
-The upgrade adds eight indexes on maintenance tables, leaving streaming event indexes unchanged.
+The additive sweep upgrade adds eight indexes on maintenance tables. Its separately measured
+event-index migration retires only the redundant prefix described above.
 The initial measurements preceded implementation. Review identified empty eligible sets in three
 outbound scenarios, so the fixture was strengthened and the final baseline/installed comparison
 below uses that same nonempty synthetic workload in memory, with seven rolled-back samples.
