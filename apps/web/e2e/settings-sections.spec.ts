@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import { devices, expect, test, type Locator, type Page } from "@playwright/test";
 import { SETTINGS_SECTIONS, type SettingsSection } from "../src/navigation.js";
 import { pinWidestFace } from "./font-geometry";
 import { expectTextFits } from "./text-fit";
@@ -154,5 +154,33 @@ test("every Settings group is one surface with hairlines between its rows, and a
         }
       }
     }
+  }
+});
+
+/**
+ * Appearance › Navigation on a phone: with 44px buttons, a hidden destination's name shares its row
+ * with "Hidden", the shortcut digit and three controls. In the widest face "Automations" ran into
+ * its status at 360px and 375px, so every name is measured against its own box there.
+ */
+test.describe("on a touch phone", () => {
+  const phone = devices["Pixel 7"];
+  test.use({ hasTouch: phone.hasTouch, isMobile: phone.isMobile, userAgent: phone.userAgent });
+
+  for (const width of [320, 360, 375]) {
+    test(`every Navigation destination's name stays in its own box at ${width}px, hidden or shown`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 });
+      await openSection(page, "dark", "appearance");
+      const face = await pinWidestFace(page, page.locator("body"));
+      for (const name of ["Automations", "Multi-Agent Runs", "Archived Sessions", "Usage and Cost"]) {
+        await page.locator(".rail-order-row", { has: page.locator(".rail-order-title", { hasText: name }) })
+          .getByRole("button", { name: "Hide", exact: true })
+          .click();
+      }
+      const titles = page.locator(".rail-order-title");
+      expect(await titles.count(), "the destinations were measured").toBeGreaterThan(5);
+      for (const title of await titles.all()) {
+        await expectTextFits(title, `"${await title.innerText()}" at ${width}px with ${face}`);
+      }
+    });
   }
 });
