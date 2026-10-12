@@ -109,6 +109,8 @@ test("root, nested reviewers and replacements share reservations without double 
     h.make("replacement", "root", { maxToolCalls: 20, costBudgetUsd: 20 });
     assert.equal(h.db.campaignBudgets.view("root")!.occupied, 2);
     assert.ok(h.svc.campaignBudgetWorkerPreflight("root", { kind: "managed", sessionId: "reviewer" }).ok);
+    h.db.updateSessionStatus("reviewer", "completed", 8);
+    assert.equal(h.svc.campaignBudgetWorkerPreflight("root", { kind: "managed", sessionId: "reviewer" }).ok, false, "a completed worker is not a new admitted review launch");
     assert.equal(h.svc.campaignBudgetWorkerPreflight("root", { kind: "external" }).ok, false);
   } finally { h.db.close(); }
 });
