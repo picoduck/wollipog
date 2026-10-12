@@ -30,6 +30,7 @@ function harness(path = ":memory:", protocol = PROTOCOL_VERSION) {
   const make = (id: string, parentSessionId?: string, config: { costBudgetUsd?: number; maxToolCalls?: number } = {}) => {
     db.createSession({ id, parentSessionId, runnerId: "r", workspaceId: "w", agentId: "claude", title: id, useWorktree: false,
       creationActor: parentSessionId ? "agent" : "human",
+      scope:{organizationId:principal.organizationId,owner:{kind:"user",userId:principal.userId}},
       driver: "claude-code", config: { model: "claude-opus-5-5", ...config }, now: 2,
       ...(!parentSessionId ? { role: "orchestrator", orchestratorPolicy: policy,
         parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } } } : {}) });
@@ -346,6 +347,10 @@ test("native service binds authority, assigned scope, canonical PR and server-on
     const cost=h.db.campaignWorkLedger.accounting.costSummary("root",Date.now());
     assert.ok("value" in cost.total);
     assert.equal(cost.total.value.usd,2,"native review appears in total cost as well as the allowance ledger");
+    const ownerScope=h.db.sessionScope("root")!;
+    assert.equal(h.db.userCostTodayUsd(ownerScope.organizationId,h.principal.userId),2,"enabling a daily cap later cannot erase already recorded native spending");
+    h.svc.onCampaignReviewJobUpdate("r",{type:"campaign_review_job_update",jobId:command.jobId,nonce:command.nonce,state:"completed",costUsd:2,toolCalls:3,attemptValid:true,attemptConsumed:true,vote:"UPVOTE",receiptSha256:"c".repeat(64),report:"UPVOTE"});
+    assert.equal(h.db.userCostTodayUsd(ownerScope.organizationId,h.principal.userId),2,"receipt replay never charges a second time");
     const attemptCost=h.db.campaignWorkLedger.accounting.attemptUsage("root").get(command.lineage!.workItemAttemptId)!;
     assert.equal(attemptCost.costMicrousd,2_000_000);
   } finally {h.db.close();}

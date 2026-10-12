@@ -101,6 +101,9 @@ Each independent job contributes once to its original work-item attempt and the 
 summary as well as the allowance ledger. Replacement attempts and deleted workers cannot refund
 that charge. Pending/unpriced review usage remains unavailable rather than a zero-cost worker;
 a durable refusal before any provider launch is the distinct known-zero case.
+Server-owned positive cost deltas also persist against the dispatch owner's UTC day, surviving
+root deletion and receipt replay. A daily limit enabled later therefore cannot erase prior native
+spending. Enabling that unsupported boundary while a job runs cancels it and stops admission.
 
 This initial native path conservatively refuses organization daily limits and inherited tighter
 session limits, whose accounting adapters are not integrated into this job path. It never bypasses
