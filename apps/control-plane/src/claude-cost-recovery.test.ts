@@ -10,7 +10,7 @@ import type { HumanPrincipal } from "./identity.js";
 import type { SessionSnapshot } from "@wollipog/protocol";
 import { registerUsageRoutes } from "./usage-routes.js";
 import { applyClaudeReconciliation, previewClaudeReconciliation, exportClaudeReconciliations,
-  applyClaudeReconciliationRecovery, previewClaudeReconciliationRecovery, reconciliationDeltaUsd,
+  applyClaudeReconciliationRecovery, previewClaudeReconciliationRecovery,
   normalizeReconciledSnapshot, observeReconciliationRevision, observeReconciliationSnapshot, reconciliationCoordinate } from "./claude-cost-reconciliation.js";
 
 const principal: HumanPrincipal = { kind: "human", actorId: "owner", userId: "owner", userName: "Owner",
@@ -70,7 +70,7 @@ test("fractional carry correction preserves unrelated contributions, rollups, ex
     assert.equal(db.raw().prepare("SELECT SUM(cost_microusd) AS total FROM usage_daily").get()?.total, 23_002);
     assert.deepEqual(db.raw().prepare("SELECT * FROM usage_session_models WHERE model='other-model'").get(), beforeOther);
     assert.equal(db.raw().prepare("SELECT cost_microusd FROM usage_cost_receipts WHERE event_id=?").get(extra.id)?.cost_microusd, 3_001);
-    assert.equal(reconciliationDeltaUsd(db, "session"), -0.0100006);
+    assert.equal(reconciliationCoordinate(db, "session").deltaUsd, -0.0100006);
     assert.equal(normalizeReconciledSnapshot(db, snapshot(now, 0.0330025)).costUsd, 0.0230019);
     assert.equal(normalizeReconciledSnapshot(db, { ...snapshot(now, 0.0230019, 1), costReconciliationIdentity: reconciliationCoordinate(db, "session").identity, costReconciliationDeltaUsd: reconciliationCoordinate(db, "session").deltaUsd }).costUsd, 0.0230019);
     assert.equal(applyClaudeReconciliation(db, principal, evidence, preview.digest).applied, false);
@@ -215,7 +215,7 @@ test("restore recovery handles a full or partial multi-revision backup atomicall
         restored.raw().exec("DROP TRIGGER interrupt_restore");
         applyClaudeReconciliationRecovery(restored, principal, input, preview.digest);
         assert.equal(restored.sessionCostUsd("session"), 0.026);
-        assert.equal(reconciliationDeltaUsd(restored, "session"), -0.014);
+        assert.equal(reconciliationCoordinate(restored, "session").deltaUsd, -0.014);
         assert.equal(restored.raw().prepare("SELECT COUNT(*) AS n FROM usage_cost_reconciled_events").get()?.n, 4);
       } finally { restored.close(); }
     }

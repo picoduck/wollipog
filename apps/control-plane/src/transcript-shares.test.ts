@@ -17,8 +17,8 @@ import {
   createAuthorizedTranscriptShare,
   extractTranscriptShareToken,
   listAuthorizedTranscriptShares,
+  loadPublicTranscriptShare,
   lookupPublicTranscriptShareCapability,
-  resolvePublicTranscriptShare,
   revokeAuthorizedTranscriptShare,
 } from "./transcript-shares.js";
 
@@ -53,6 +53,13 @@ function rawDb(db: ControlPlaneDb): DatabaseSync {
   return (db as unknown as { db: DatabaseSync }).db;
 }
 
+/** The public read the share route performs, without its rate limit: look the capability up, then
+ * load its frozen projection. Any failure in either step collapses to null. */
+function readPublicShare(db: ControlPlaneDb, authorization: string | undefined, now: number) {
+  const capability = lookupPublicTranscriptShareCapability(db, authorization, now);
+  return capability ? loadPublicTranscriptShare(db, capability, now) : null;
+}
+
 test("share creation stores only a token hash and freezes one least-data projection", () => {
   const { db, principal } = fixture();
   db.appendEvent("session-share", { kind: "user_message", text: "before /private/repo secret" }, 2);
@@ -70,7 +77,7 @@ test("share creation stores only a token hash and freezes one least-data project
   assert.equal(row.snapshot_through_seq, 1);
 
   const authorization = `MAM-Share ${created.value.token}`;
-  const first = resolvePublicTranscriptShare(db, authorization, 10_001);
+  const first = readPublicShare(db, authorization, 10_001);
   assert.ok(first);
   assert.equal(first?.transcript.messages.length, 1);
   assert.equal(first?.transcript.messages[0]?.role, "user");
@@ -80,7 +87,7 @@ test("share creation stores only a token hash and freezes one least-data project
 
   db.appendEvent("session-share", { kind: "agent_message", text: "later answer", final: true }, 3);
   db.appendEvent("session-share", { kind: "user_message", text: "after" }, 4);
-  assert.deepEqual(resolvePublicTranscriptShare(db, authorization, 10_002), first, "later events cannot mutate the share");
+  assert.deepEqual(readPublicShare(db, authorization, 10_002), first, "later events cannot mutate the share");
 });
 
 test("public shares freeze distinct provider messages from the bounded projection", () => {
@@ -92,7 +99,7 @@ test("public shares freeze distinct provider messages from the bounded projectio
   assert.equal(created.ok, true);
   if (!created.ok) return;
 
-  const shared = resolvePublicTranscriptShare(db, `MAM-Share ${created.value.token}`, 10_001);
+  const shared = readPublicShare(db, `MAM-Share ${created.value.token}`, 10_001);
   assert.deepEqual(shared?.transcript.messages, [
     { role: "assistant", text: "first message" },
     { role: "assistant", text: "second" },
@@ -106,25 +113,32 @@ test("expiry, revocation, deletion, malformed credentials, and corrupt snapshots
   assert.equal(expiring.ok, true);
   if (!expiring.ok) return;
   const auth = `MAM-Share ${expiring.value.token}`;
-  assert.ok(resolvePublicTranscriptShare(db, auth, 300_999));
-  assert.equal(resolvePublicTranscriptShare(db, auth, 301_000), null, "expiry equality is inactive");
+  const beforeExpiry = lookupPublicTranscriptShareCapability(db, auth, 300_999);
+  assert.ok(beforeExpiry);
+  assert.ok(loadPublicTranscriptShare(db, beforeExpiry, 300_999));
+  assert.equal(loadPublicTranscriptShare(db, beforeExpiry, 301_000), null,
+    "a capability found before expiry cannot load once it has expired");
+  assert.equal(lookupPublicTranscriptShareCapability(db, auth, 301_000), null, "expiry equality is inactive");
   assert.equal(rawDb(db).prepare("SELECT projection_json FROM transcript_shares WHERE share_id=?")
     .get(expiring.value.share.shareId)?.projection_json, null, "expired sensitive bytes are erased");
 
   const live = createAuthorizedTranscriptShare(db, principal, "session-share", { expiresInSeconds: 3600 }, 400_000);
   assert.equal(live.ok, true);
   if (!live.ok) return;
-  assert.ok(resolvePublicTranscriptShare(db, `MAM-Share ${live.value.token}`, 400_001));
+  const beforeRevocation = lookupPublicTranscriptShareCapability(db, `MAM-Share ${live.value.token}`, 400_001);
+  assert.ok(beforeRevocation);
+  assert.ok(loadPublicTranscriptShare(db, beforeRevocation, 400_001));
   const revoked = revokeAuthorizedTranscriptShare(db, principal, "session-share", live.value.share.shareId, 400_002);
   assert.equal(revoked.ok, true);
-  assert.equal(resolvePublicTranscriptShare(db, `MAM-Share ${live.value.token}`, 400_003), null);
+  assert.equal(lookupPublicTranscriptShareCapability(db, `MAM-Share ${live.value.token}`, 400_003), null);
+  assert.equal(loadPublicTranscriptShare(db, beforeRevocation, 400_003), null,
+    "a capability found before revocation cannot load after it");
   assert.equal(revokeAuthorizedTranscriptShare(db, principal, "session-share", live.value.share.shareId, 400_004).ok, true,
     "revocation is idempotent");
 
-  assert.equal(resolvePublicTranscriptShare(db, undefined, 1), null);
-  assert.equal(resolvePublicTranscriptShare(db, "Bearer nope", 1), null);
-  assert.equal(resolvePublicTranscriptShare(db, "MAM-Share short", 1), null);
-  assert.equal(resolvePublicTranscriptShare(db, `MAM-Share ${"x".repeat(43)}`, 1), null);
+  for (const malformed of [undefined, "Bearer nope", "MAM-Share short", `MAM-Share ${"x".repeat(43)}`]) {
+    assert.equal(lookupPublicTranscriptShareCapability(db, malformed, 1), null);
+  }
 
   const corrupt = createAuthorizedTranscriptShare(db, principal, "session-share", { expiresInSeconds: 3600 }, 500_000);
   assert.equal(corrupt.ok, true);
@@ -132,13 +146,15 @@ test("expiry, revocation, deletion, malformed credentials, and corrupt snapshots
   const corruptJson = '{"messages":[{"role":"admin","text":"leak"}]}';
   rawDb(db).prepare("UPDATE transcript_shares SET projection_json=?, projection_bytes=? WHERE share_id=?")
     .run(corruptJson, Buffer.byteLength(corruptJson), corrupt.value.share.shareId);
-  assert.equal(resolvePublicTranscriptShare(db, `MAM-Share ${corrupt.value.token}`, 500_001), null);
+  const corruptCapability = lookupPublicTranscriptShareCapability(db, `MAM-Share ${corrupt.value.token}`, 500_001);
+  assert.ok(corruptCapability, "a corrupt projection is caught when it is loaded, not when it is looked up");
+  assert.equal(loadPublicTranscriptShare(db, corruptCapability, 500_001), null);
 
   const deleted = createAuthorizedTranscriptShare(db, principal, "session-share", { expiresInSeconds: 3600 }, 600_000);
   assert.equal(deleted.ok, true);
   if (!deleted.ok) return;
   db.deleteSession("session-share");
-  assert.equal(resolvePublicTranscriptShare(db, `MAM-Share ${deleted.value.token}`, 600_001), null);
+  assert.equal(readPublicShare(db, `MAM-Share ${deleted.value.token}`, 600_001), null);
 });
 
 test("authorization, expiry bounds, active ceiling, and terminal retention are bounded", () => {
@@ -250,7 +266,7 @@ test("active capabilities and immutable bytes survive a control-plane restart", 
   initial.db.close();
 
   reopened = ControlPlaneDb.open(path);
-  const shared = resolvePublicTranscriptShare(reopened, `MAM-Share ${created.value.token}`, now + 1_000);
+  const shared = readPublicShare(reopened, `MAM-Share ${created.value.token}`, now + 1_000);
   assert.deepEqual(shared?.transcript.messages, [{ role: "user", text: "restart-safe" }]);
 });
 
@@ -361,7 +377,7 @@ test("a link created without the title opt-in has no title field in its public r
     assert.equal(created.ok, true);
     if (!created.ok) return;
     assert.equal("includesTitle" in created.value.share, false);
-    const shared = resolvePublicTranscriptShare(db, `Wollipog-Share ${created.value.token}`, 10_001);
+    const shared = readPublicShare(db, `Wollipog-Share ${created.value.token}`, 10_001);
     assert.ok(shared);
     assert.equal(Object.hasOwn(shared, "title"), false, "the field is omitted, not empty");
     assert.equal(JSON.stringify(shared).includes("Private title"), false);
@@ -385,10 +401,10 @@ test("an opted-in link freezes the redacted display title at creation; a rename 
   if (!created.ok) return;
   assert.equal(created.value.share.includesTitle, true);
   const authorization = `Wollipog-Share ${created.value.token}`;
-  assert.equal(resolvePublicTranscriptShare(db, authorization, 10_001)?.title, "Fix the login bug");
+  assert.equal(readPublicShare(db, authorization, 10_001)?.title, "Fix the login bug");
 
   db.setSessionTitle("session-share", "Renamed afterwards", 10_002, "user");
-  assert.equal(resolvePublicTranscriptShare(db, authorization, 10_003)?.title, "Fix the login bug");
+  assert.equal(readPublicShare(db, authorization, 10_003)?.title, "Fix the login bug");
   const listed = listAuthorizedTranscriptShares(db, principal, "session-share", 10_004);
   assert.equal(listed.ok, true);
   if (!listed.ok) return;
@@ -404,7 +420,7 @@ test("an opted-in title is redacted like message text and bounded to 200 charact
   );
   assert.equal(secret.ok, true);
   if (!secret.ok) return;
-  const title = resolvePublicTranscriptShare(db, `Wollipog-Share ${secret.value.token}`, 10_001)?.title;
+  const title = readPublicShare(db, `Wollipog-Share ${secret.value.token}`, 10_001)?.title;
   assert.equal(title, "Rotate <redacted-secret> in <redacted-path>");
 
   db.setSessionTitle("session-share", "é".repeat(300), 4, "user");
@@ -413,7 +429,7 @@ test("an opted-in title is redacted like message text and bounded to 200 charact
   );
   assert.equal(long.ok, true);
   if (!long.ok) return;
-  const bounded = resolvePublicTranscriptShare(db, `Wollipog-Share ${long.value.token}`, 10_001)?.title;
+  const bounded = readPublicShare(db, `Wollipog-Share ${long.value.token}`, 10_001)?.title;
   assert.equal(Array.from(bounded ?? "").length, 200);
   assert.ok(bounded?.endsWith("…"));
 
@@ -425,7 +441,7 @@ test("an opted-in title is redacted like message text and bounded to 200 charact
   );
   assert.equal(control.ok, true);
   if (!control.ok) return;
-  assert.equal(resolvePublicTranscriptShare(db, `Wollipog-Share ${control.value.token}`, 10_001)?.title, "Fix the bug");
+  assert.equal(readPublicShare(db, `Wollipog-Share ${control.value.token}`, 10_001)?.title, "Fix the bug");
 
   // ...without gluing a secret to its neighbour, which would hide it from the redactors.
   db.setSessionTitle("session-share", `prefix\u0007${FAKE_TITLE_TOKEN}`, 5, "user");
@@ -434,7 +450,7 @@ test("an opted-in title is redacted like message text and bounded to 200 charact
   );
   assert.equal(glued.ok, true);
   if (!glued.ok) return;
-  const gluedShared = resolvePublicTranscriptShare(db, `Wollipog-Share ${glued.value.token}`, 10_001);
+  const gluedShared = readPublicShare(db, `Wollipog-Share ${glued.value.token}`, 10_001);
   assert.equal(gluedShared?.title, "prefix <redacted-secret>");
   assert.equal(JSON.stringify(gluedShared).includes(FAKE_TITLE_TOKEN.slice(4)), false);
 
@@ -446,7 +462,7 @@ test("an opted-in title is redacted like message text and bounded to 200 charact
   assert.equal(blank.ok, true);
   if (!blank.ok) return;
   assert.equal("includesTitle" in blank.value.share, false);
-  const blankShared = resolvePublicTranscriptShare(db, `Wollipog-Share ${blank.value.token}`, 10_001);
+  const blankShared = readPublicShare(db, `Wollipog-Share ${blank.value.token}`, 10_001);
   assert.ok(blankShared);
   assert.equal(Object.hasOwn(blankShared, "title"), false);
 });
@@ -489,7 +505,7 @@ test("revoking or expiring an opted-in link erases its stored title with the pro
   );
   assert.equal(expiring.ok, true);
   if (!expiring.ok) return;
-  assert.equal(resolvePublicTranscriptShare(db, `Wollipog-Share ${expiring.value.token}`, 320_000), null);
+  assert.equal(readPublicShare(db, `Wollipog-Share ${expiring.value.token}`, 320_000), null);
   assert.deepEqual(stored(expiring.value.share.shareId), { title: null, erased: 1 });
 
   // Listing erases an expired link's title too, so its row stops saying it includes one.
@@ -577,7 +593,7 @@ test("links that existed before the title column gain no title after the migrati
   const migrated = reopened;
   const columns = rawDb(migrated).prepare("PRAGMA table_info(transcript_shares)").all() as Array<{ name: string }>;
   assert.ok(columns.some((column) => column.name === "title"), "the migration adds the column");
-  const shared = resolvePublicTranscriptShare(migrated, `Wollipog-Share ${legacy.value.token}`, now + 1_000);
+  const shared = readPublicShare(migrated, `Wollipog-Share ${legacy.value.token}`, now + 1_000);
   assert.ok(shared);
   assert.deepEqual(shared.transcript.messages, [{ role: "user", text: "legacy message" }]);
   assert.equal(Object.hasOwn(shared, "title"), false);
@@ -593,7 +609,7 @@ test("links that existed before the title column gain no title after the migrati
   );
   assert.equal(optedIn.ok, true);
   if (!optedIn.ok) return;
-  assert.equal(resolvePublicTranscriptShare(migrated, `Wollipog-Share ${optedIn.value.token}`, now + 3_000)?.title,
+  assert.equal(readPublicShare(migrated, `Wollipog-Share ${optedIn.value.token}`, now + 3_000)?.title,
     "Private title");
   assert.throws(
     () => rawDb(migrated).prepare("UPDATE transcript_shares SET projection_json=NULL WHERE share_id=?")
