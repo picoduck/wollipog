@@ -7,12 +7,13 @@ export interface EvidenceReviewerBudgetAdmission {
   authorityRevision: number;
   allocationDigest: string;
   allocation: { sessionId: string; costUsd?: number; toolCalls?: number };
+  dispatch: { rootSessionId: string; generation: string };
   worker: { sessionId: string; driver: string; model: string | null; effort: string | null };
 }
 export function reviewerBudgetAdmissionDigest(snapshot: Omit<EvidenceReviewerBudgetAdmission, "allocationDigest">): string {
   return createHash("sha256").update(JSON.stringify({
     rootSessionId: snapshot.rootSessionId, authorityRevision: snapshot.authorityRevision,
-    allocation: snapshot.allocation, worker: snapshot.worker,
+    allocation: snapshot.allocation, dispatch: snapshot.dispatch, worker: snapshot.worker,
   })).digest("hex");
 }
 export function validReviewerBudgetAdmission(snapshot: EvidenceReviewerBudgetAdmission | null,
@@ -20,6 +21,9 @@ export function validReviewerBudgetAdmission(snapshot: EvidenceReviewerBudgetAdm
     reviewerModelId: string; boundaryRevision: number; workerAdmissionSha256: string }): snapshot is EvidenceReviewerBudgetAdmission {
   if (!snapshot || snapshot.rootSessionId !== expected.rootSessionId ||
     snapshot.authorityRevision !== expected.boundaryRevision ||
+    !snapshot.dispatch || snapshot.dispatch.rootSessionId !== expected.rootSessionId ||
+    typeof snapshot.dispatch.generation !== "string" || !snapshot.dispatch.generation ||
+    snapshot.dispatch.generation.length > 256 || /[\x00-\x1f\x7f]/u.test(snapshot.dispatch.generation) ||
     snapshot.worker.sessionId !== expected.reviewerSessionId || snapshot.allocation.sessionId !== expected.reviewerSessionId ||
     snapshot.worker.driver !== expected.reviewerDriver || snapshot.worker.model !== expected.reviewerModelId ||
     snapshot.allocationDigest !== expected.workerAdmissionSha256 ||

@@ -11286,3 +11286,5 @@ export const TERMINAL_STATUSES: SessionStatus[] = ["completed", "failed", "stopp
 export function isTerminal(status: SessionStatus): boolean {
   return TERMINAL_STATUSES.includes(status);
 }
+
+export type { PacedVideoReviewReceipt, PacedVideoReviewDelivery, PacedVideoTransportGrant } from "./paced-video-review.js";

@@ -16,6 +16,7 @@ export interface InspectedVideoValidationRun {
   modelDeliveryEvidenceSha256: string;
   usageEvidenceSha256: string;
   pricingEvidenceSha256: string;
+  oracleIsolationEvidenceSha256: string;
   frameCount: number;
   width: number;
   height: number;
@@ -29,6 +30,8 @@ export interface InspectedVideoValidationRun {
   allSourceFramesDelivered: boolean;
   blindOracleMatched: boolean;
   privateOracleExcludedFromReviewerContext: boolean;
+  /** Actual narrowed tool/filesystem namespace probes, not directory separation or a prompt. */
+  oracleNamespaceInaccessibleVerified: boolean;
   providerUsageVerified: boolean;
   currentOfficialPricingVerified: boolean;
   sourceAndArtifactsStillMatch: boolean;
@@ -60,12 +63,13 @@ export class VideoLiveValidationRegistry {
       if (!profile || !run.runId || run.runId.length > 256 ||
         JSON.stringify(run.target) !== JSON.stringify(target) || run.inspectedByUserId !== principal.userId ||
         !run.allSourceFramesDelivered || !run.blindOracleMatched || !run.privateOracleExcludedFromReviewerContext ||
-        !run.providerUsageVerified || !run.currentOfficialPricingVerified || !run.sourceAndArtifactsStillMatch ||
+        !run.oracleNamespaceInaccessibleVerified || !target.mediaOnlyNamespaceVerified ||
+        !digest(target.reviewerNamespaceSha256) || !run.providerUsageVerified || !run.currentOfficialPricingVerified || !run.sourceAndArtifactsStillMatch ||
         run.frameCount !== profile.frames || run.width !== profile.width || run.height !== profile.height ||
         run.durationUs !== profile.durationUs ||
         ![run.sourceSha256, run.manifestSha256, run.orderedReceiptSetSha256, run.privateOracleCommitmentSha256,
           run.blindTemporalVerdictSha256, run.modelDeliveryEvidenceSha256, run.usageEvidenceSha256,
-          run.pricingEvidenceSha256].every(digest) ||
+          run.pricingEvidenceSha256, run.oracleIsolationEvidenceSha256].every(digest) ||
         !Number.isSafeInteger(run.actualInputTokens) || run.actualInputTokens <= 0 ||
         !Number.isSafeInteger(run.actualOutputTokens) || run.actualOutputTokens <= 0 ||
         !Number.isFinite(run.actualCostUsd) || run.actualCostUsd <= 0 ||
@@ -77,6 +81,8 @@ export class VideoLiveValidationRegistry {
     const proof: VideoProfileLiveProof = {
       proofId: "video_live_proof_" + randomUUID().replaceAll("-", ""), driver: target.driver,
       modelId: target.modelId, providerId: target.providerId, capabilitiesSha256: target.capabilitiesSha256,
+      reviewerNamespaceSha256: target.reviewerNamespaceSha256,
+      oracleIsolationEvidenceSha256: maximum.oracleIsolationEvidenceSha256,
       profile: PACED_VIDEO_REVIEW_PROFILE, validatedAt: now, expiresAt: now + 30 * 24 * 60 * 60 * 1000,
       candidateValidationRunId: candidate.runId, pacedValidationRunId: paced.runId,
       maximumProfileValidationRunId: maximum.runId, sourceSha256: maximum.sourceSha256,

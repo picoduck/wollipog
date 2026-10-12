@@ -6370,6 +6370,7 @@ const artifactMaintenanceTimer = setInterval(() => {
     db.pruneSessionCommandInvocations(now - SESSION_COMMAND_INVOCATION_RETENTION_MS, 1_000);
     db.compactSteeringAttempts(now, 1_000);
     db.collectExpiredPreparedPromptImages(now, 1_000);
+    db.pruneExpiredTemporalVideoFrames(now, 1_000);
     const expiredAttachments = db.pruneExpiredSessionAttachments(now - SESSION_ARTIFACT_RETENTION_MS, 1_000);
     if (expiredAttachments) app.log.info({ event: "session_artifacts_expired", count: expiredAttachments }, "session attachments expired");
     db.collectOrphanedSteeringPromptImages(1_000);
