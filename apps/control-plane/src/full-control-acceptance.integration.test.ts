@@ -1,0 +1,246 @@
+/** #2939 preparation: real service/storage, synthetic runner/media, no model or forge effects.
+ * A passing suite proves these contract joins, never complete unattended release readiness. */
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { test } from "node:test";
+import {
+  DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
+  type ControlPlaneToRunner, type RunnerMetadata,
+  type WorkflowDecisionResourceSnapshot,
+} from "@wollipog/protocol";
+import { ControlPlaneDb } from "./db.js";
+import { Hub } from "./hub.js";
+import type { HumanPrincipal } from "./identity.js";
+import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
+import { SessionsService } from "./sessions.js";
+
+const REPOSITORY = "fixture-owner/full-control-acceptance";
+const question: WorkflowDecisionResourceSnapshot = {
+  category: "implementation_question", question: "Which button placement meets the issue?",
+  options: [{ optionId: "inline", label: "Inline" }, { optionId: "footer", label: "Footer" }],
+};
+
+function stack(driver: "codex-app-server" | "claude-code", protocol = PROTOCOL_VERSION) {
+  const directory = mkdtempSync(join(tmpdir(), "full-control-acceptance-"));
+  const path = join(directory, "control-plane.db");
+  let db = ControlPlaneDb.open(path);
+  const identity = db.localIdentityContext();
+  const human: HumanPrincipal = { ...identity, kind: "human", actorId: identity.userId };
+  const runner: RunnerMetadata = {
+    runnerId: "fixture-runner", hostname: "fixture", os: "linux", version: "fixture",
+    workspaces: [{ id: "workspace", name: "Acceptance", path: directory }],
+    agents: [{ id: "fixture-agent", name: "Synthetic Provider", command: "never-launched", args: [], env: {},
+      driver, available: true, context: { kind: "native" }, capabilities: {
+        models: [{ id: "fixture-vision", default: true, inputModalities: ["text", "image"] }],
+        effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true, imageToolResults: true,
+      } }],
+  };
+  db.registerRunner(runner, Date.now(), protocol);
+  const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
+  policy.issueScope = { repository: REPOSITORY, issueNumbers: [1], revision: 1,
+    authorizedByUserId: human.userId, authorizedAt: Date.now() };
+  policy.issueNumbers = [1];
+  const create = (id: string, parentSessionId?: string) => {
+    db.createSession({ id, runnerId: runner.runnerId, workspaceId: "workspace", agentId: "fixture-agent",
+      title: id, useWorktree: false, driver, now: Date.now(), parentSessionId, config: { model: "fixture-vision" },
+      ...(!parentSessionId ? { role: "orchestrator", orchestratorPolicy: policy,
+        parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } } } : {}) });
+    db.updateSessionStatus(id, "running", Date.now());
+  };
+  create("root"); create("worker", "root"); create("sibling", "root");
+  const sent: ControlPlaneToRunner[] = [];
+  const service = () => {
+    const hub = new Hub(db);
+    hub.isRunnerOnline = () => true;
+    hub.sessionChangedById = () => {};
+    hub.sendToRunner = (_runnerId, message) => { sent.push(message); return true; };
+    hub.requestFromRunner = async (_runnerId, requestId, message) => {
+      // No forge is contacted: only scope metadata for the deterministic refusal case.
+      if (message.type === "campaign_issue_scope") return { type: "campaign_issue_scope_result", requestId,
+        sessionId: message.sessionId, ok: true, repository: REPOSITORY, candidates: [] };
+      throw new Error("Unexpected synthetic runner request");
+    };
+    return new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
+  };
+  let svc = service();
+  const enable = () => svc.setCampaignControl("root", {
+    mode: "full_control", objective: "Implement the fixture button interaction for issue 1",
+    operations: ["implementation_question", "question", "tool_approval", "pr_merge", "merged_branch_deletion",
+      "ui_evidence_approval", "follow_up_issue_publication", "campaign_issue_scope", "issue_closure"],
+    delegatablePolicyIds: [],
+  }, 1, human);
+  const ask = (sessionId: string, requestId: string) => svc.createWorkflowDecision(sessionId,
+    { requestId, resourceKey: requestId, resourceSnapshot: question });
+  const approve = (sessionId: string, occurrenceId: string) => svc.resolveDescendantRequest("root", sessionId,
+    occurrenceId, { action: "resolve_workflow_decision", outcome: "approve", selectedOptionId: "inline" }, () => true);
+  const inspection = (sessionId: string, occurrenceId: string) => svc.onSessionEvent(sessionId, {
+    kind: "permission_request", requestId: occurrenceId, occurrenceId, requestSource: "provider_tool",
+    title: "Inspect Fixture", context: {
+      toolName: driver === "claude-code" ? "Bash" : "commandExecution", input: `git -C ${directory} status --short`,
+      operation: { kind: "command", input: `git -C ${directory} status --short`, cwd: directory,
+        filesystem: { cwd: directory, targets: [] } },
+    }, options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }],
+  });
+  return {
+    get db() { return db; }, get svc() { return svc; }, human, sent, enable, ask, approve, inspection,
+    reopen() { db.close(); db = ControlPlaneDb.open(path); svc = service(); },
+    close() { db.close(); rmSync(directory, { recursive: true, force: true }); },
+  };
+}
+
+for (const driver of ["codex-app-server", "claude-code"] as const) {
+  test(`${driver}: one fixture human admission joins root planning, generic permissions, exact child decisions and durable concurrent consumption`, async () => {
+    const h = stack(driver);
+    try {
+      const enabled = h.enable(); assert.ok(enabled.ok, enabled.error ?? "admission failed");
+      const boundary = h.db.getSession("root")!.orchestratorPolicy!.control!;
+      assert.equal(boundary.mode, "full_control");
+      assert.ok(boundary.mode === "full_control");
+      assert.equal(boundary.boundary.authorizedByUserId, h.human.userId);
+      h.svc.onSessionEvent("root", { kind: "question_request", requestId: "root-plan", occurrenceId: "root-plan",
+        requestSource: "provider_question", questions: [{ id: "placement", question: question.question,
+          options: [{ label: "Inline" }, { label: "Footer" }] }] });
+      h.inspection("root", "root-inspection");
+      assert.equal(h.db.getSession("root")!.pendingApproval, null);
+      assert.equal(h.sent.filter((m) => m.type === "answer_question").length, 1);
+      assert.equal(h.sent.filter((m) => m.type === "resolve_permission").length, 1);
+      h.inspection("worker", "worker-inspection");
+      assert.equal(h.db.getSession("worker")!.pendingRequestOwners!.orchestrator, 1);
+      assert.ok(h.svc.resolveDescendantRequest("root", "worker", "worker-inspection",
+        { action: "approve", optionId: "once" }, () => true).ok);
+      const requested = h.ask("worker", "placement"); assert.ok(requested.ok, requested.error ?? "request failed");
+      const decision = requested.data!;
+      assert.ok(h.approve("worker", decision.occurrenceId).ok);
+      h.reopen();
+      const resumed = h.db.workflowDecisionByOccurrence(decision.occurrenceId)!;
+      assert.deepEqual(resumed.resourceSnapshot, decision.resourceSnapshot);
+      assert.equal(resumed.resourceDigest, decision.resourceDigest);
+      const results = await Promise.all([0, 1].map(() => h.svc.consumeWorkflowDecision("worker", decision.occurrenceId,
+        { resourceSnapshot: question })));
+      assert.equal(results.filter((r) => r.ok).length, 1, "only one concurrent action consumes the grant");
+      h.reopen();
+      assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "consumed");
+      assert.equal((await h.svc.consumeWorkflowDecision("worker", decision.occurrenceId,
+        { resourceSnapshot: question })).ok, false);
+      assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.control, boundary,
+        "reopening storage never creates a new authorization or boundary revision");
+    } finally { h.close(); }
+  });
+
+  test(`${driver}: synthetic screenshot rejection, corrected capture, exact receipt acknowledgement and consumption share one UI gate`, async () => {
+    const h = stack(driver);
+    try {
+      assert.ok(h.enable().ok);
+      // Fixture PNG, not an implementation capture or a model-visible quality verdict.
+      const bytes = readFileSync(fileURLToPath(new URL("../../web/public/icons/icon-192.png", import.meta.url)));
+      const artifact = h.svc.createWorkflowArtifact({ sessionId: "worker", kind: "screenshot", name: "fixture.png",
+        mimeType: "image/png", encoding: "base64", data: bytes.toString("base64") }, { kind: "agent", id: "worker" });
+      assert.ok(artifact.ok, artifact.error ?? "attachment failed");
+      const evidence = { evidenceId: "fixture-capture", artifactId: artifact.data!.artifactId,
+        mediaType: "image/png", sha256: artifact.data!.sha256 };
+      let snapshot = { category: "ui_evidence_approval" as const, evidence: [evidence] };
+      const request = (requestId: string) => h.svc.createWorkflowDecision("worker", { requestId,
+        resourceKey: "interaction-capture", resourceSnapshot: snapshot });
+      const first = request("before-repair"); assert.ok(first.ok, first.error ?? "request failed");
+      const reject = h.svc.resolveDescendantRequest("root", "worker", first.data!.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "deny", rationale: "Fixture feedback: repair the interaction." }, () => true);
+      assert.ok(reject.ok, reject.error ?? "rejection failed");
+      assert.equal(h.db.workflowDecisionByOccurrence(first.data!.occurrenceId)!.status, "denied");
+      const repairedBytes = readFileSync(fileURLToPath(new URL("../../web/public/icons/icon-512.png", import.meta.url)));
+      const repairedArtifact = h.svc.createWorkflowArtifact({ sessionId: "worker", kind: "screenshot", name: "fixture-repaired.png",
+        mimeType: "image/png", encoding: "base64", data: repairedBytes.toString("base64") }, { kind: "agent", id: "worker" });
+      assert.ok(repairedArtifact.ok, repairedArtifact.error ?? "repair attachment failed");
+      snapshot = { category: "ui_evidence_approval", evidence: [{ ...evidence,
+        artifactId: repairedArtifact.data!.artifactId, sha256: repairedArtifact.data!.sha256 }] };
+      assert.notEqual(snapshot.evidence[0]!.sha256, evidence.sha256, "repair requires new immutable bytes");
+      const second = request("after-repair"); assert.ok(second.ok, second.error ?? "request failed");
+      assert.notEqual(second.data!.occurrenceId, first.data!.occurrenceId);
+      const resolve = () => h.svc.resolveDescendantRequest("root", "worker", second.data!.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: [evidence.evidenceId] }, () => true);
+      assert.equal(resolve().ok, false, "repeating IDs is insufficient");
+      const delivered = h.svc.reviewDescendantUiEvidence("root", "worker", second.data!.occurrenceId, evidence.evidenceId, () => true);
+      assert.ok(delivered.ok, delivered.error ?? "delivery failed");
+      assert.equal(createHash("sha256").update(Buffer.from(delivered.data!.data, "base64")).digest("hex"), snapshot.evidence[0]!.sha256);
+      assert.equal(resolve().ok, false, "delivery without acknowledgement is insufficient");
+      assert.equal(h.svc.acknowledgeDescendantUiEvidence("root", delivered.data!.receipt.receiptId, "0".repeat(64)).ok, false);
+      h.reopen();
+      assert.equal(h.svc.acknowledgeDescendantUiEvidence("root", delivered.data!.receipt.receiptId, evidence.sha256).ok, false,
+        "a previous capture digest cannot acknowledge repaired bytes");
+      assert.ok(h.svc.acknowledgeDescendantUiEvidence("root", delivered.data!.receipt.receiptId, snapshot.evidence[0]!.sha256).ok);
+      assert.ok(resolve().ok);
+      assert.ok((await h.svc.consumeWorkflowDecision("worker", second.data!.occurrenceId, { resourceSnapshot: snapshot })).ok);
+      assert.equal(resolve().ok, false);
+      assert.equal(h.svc.reviewDescendantUiEvidence("root", "worker", first.data!.occurrenceId, evidence.evidenceId, () => true).ok, false);
+      const audit = JSON.stringify(h.db.listGovernanceAudit("worker"));
+      assert.ok(audit.includes(snapshot.evidence[0]!.sha256));
+      assert.ok(!audit.includes(repairedBytes.toString("base64")), "audit holds references rather than image bytes");
+      assert.deepEqual(second.data!.resourceSnapshot, snapshot, "original artifact identity remains the UI gate snapshot");
+    } finally { h.close(); }
+  });
+
+  test(`${driver}: one actionable credential exception remains while unrelated authorized work consumes once; restart revokes stale grants`, async () => {
+    const h = stack(driver);
+    try {
+      assert.ok(h.enable().ok);
+      const event = { kind: "question_request" as const, requestId: "credential-value", occurrenceId: "credential-value",
+        requestSource: "provider_question" as const, questions: [{ id: "secret", question: "Which password should I use?",
+          options: [{ label: "A" }, { label: "B" }] }] };
+      for (let index = 0; index < 3; index++) h.svc.onSessionEvent("worker", event);
+      const humanRequests = h.svc.descendantRequests("root", () => true, "human");
+      assert.ok(humanRequests.ok);
+      assert.equal(humanRequests.data!.requests.length, 1, "replay retains one exception, not repeated override requests");
+      assert.equal(humanRequests.data!.requests[0]!.authorityEvaluation!.reason, "protected_request");
+      assert.equal(h.svc.resolveDescendantRequest("root", "worker", event.occurrenceId,
+        { action: "answer", answers: { secret: "A" } }, () => true).ok, false);
+      const unrelated = h.ask("sibling", "sibling-placement").data!;
+      assert.ok(h.approve("sibling", unrelated.occurrenceId).ok);
+      assert.ok((await h.svc.consumeWorkflowDecision("sibling", unrelated.occurrenceId, { resourceSnapshot: question })).ok);
+      const stale = h.ask("sibling", "pre-restart").data!;
+      assert.ok(h.approve("sibling", stale.occurrenceId).ok);
+      assert.ok(h.svc.restart("sibling").ok);
+      h.reopen();
+      assert.equal(h.db.workflowDecisionByOccurrence(stale.occurrenceId)!.status, "revoked");
+      assert.equal((await h.svc.consumeWorkflowDecision("sibling", stale.occurrenceId, { resourceSnapshot: question })).ok, false);
+      assert.equal(h.svc.descendantRequests("root", () => true, "human").data!.requests.length, 1);
+    } finally { h.close(); }
+  });
+}
+
+test("foundation scope and normal video remain genuine human exceptions rather than a synthetic complete positive campaign", async () => {
+  const h = stack("codex-app-server");
+  try {
+    assert.ok(h.enable().ok);
+    const scope = await h.svc.proposeCampaignIssueScope("root", { requestId: "fixture-scope", expectedRevision: 1,
+      additions: [], removals: [{ repository: REPOSITORY, number: 1 }], explanation: "Fixture scope withdrawal" });
+    assert.ok(scope.ok, scope.error ?? "scope request failed");
+    assert.equal(scope.data!.authority, "human");
+    assert.equal(h.svc.resolveDescendantRequest("root", "root", scope.data!.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok, false);
+    assert.equal((await h.svc.consumeWorkflowDecision("root", scope.data!.occurrenceId,
+      { resourceSnapshot: scope.data!.resourceSnapshot })).ok, false);
+    const bytes = readFileSync(fileURLToPath(new URL("../test-fixtures/video-review-one-frame-transient.webm", import.meta.url)));
+    const video = h.svc.attachSessionVideo("worker", { name: "fixture.webm",
+      mimeType: "video/webm", data: bytes.toString("base64") }, { kind: "agent", id: "worker" });
+    assert.ok(video.ok, video.error ?? "video attachment failed");
+    const decision = h.svc.createWorkflowDecision("worker", { requestId: "normal-video", resourceKey: "normal-video",
+      resourceSnapshot: { category: "ui_evidence_approval", evidence: [{ evidenceId: "video", artifactId: video.data!.artifactId,
+        mediaType: "video/webm", sha256: video.data!.sha256 }] } });
+    assert.ok(decision.ok, decision.error ?? "video request failed");
+    assert.equal(decision.data!.authority, "human");
+    assert.equal(decision.data!.humanFallback?.code, "media_video_unsupported");
+    assert.equal(h.svc.reviewDescendantUiEvidence("root", "worker", decision.data!.occurrenceId, "video", () => true).ok, false);
+    assert.equal(h.svc.resolveDescendantRequest("root", "worker", decision.data!.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: ["video"] }, () => true).ok, false);
+    assert.notEqual(h.db.campaignProjection("root")!.status, "verified_complete");
+  } finally { h.close(); }
+});
+
+test("older peers cannot admit the foundation even with fixture image capability", () => {
+  const h = stack("codex-app-server", 214);
+  try { assert.equal(h.enable().ok, false); assert.equal(h.db.getSession("root")!.orchestratorPolicy!.control, undefined); }
+  finally { h.close(); }
+});
