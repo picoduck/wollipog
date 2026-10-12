@@ -5896,6 +5896,7 @@ test("legacy lifetime child reservations are settled once and keep deleted child
 
     const legacy = new DatabaseSync(path);
     for (const trigger of [
+      "campaign_budget_session_usage",
       "sessions_settle_child_charge",
       "sessions_raise_child_cost_charge",
       "sessions_settle_grandchild_cost_charge",
