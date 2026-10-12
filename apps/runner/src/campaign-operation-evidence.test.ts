@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, symlinkSync, unlinkSync, rmSync, chmodSync, existsSync } from "node:fs";
 import { execFileSync, spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { campaignCodeOperationTargets } from "@wollipog/protocol";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 import { campaignOperationEvidence, campaignOperationEvidenceCurrent } from "./campaign-operation-evidence.js";
 
@@ -33,16 +33,16 @@ test("read evidence requires existing regular files while native writes retain m
     mkdirSync(folder);
     for (const path of [missing, folder]) {
       assert.equal(campaignOperationEvidence("Read", { kind: "file", path }).filesystem, undefined);
-      assert.equal(campaignOperationEvidence("Bash", { kind: "command", input: `cat ${path}` }).filesystem, undefined);
+      assert.equal(campaignOperationEvidence("Bash", { kind: "command", input: `cat ${basename(path)}`, cwd: directory }).filesystem, undefined);
     }
     assert.equal(campaignOperationEvidence("Write", { kind: "file", path: missing }).filesystem?.targets[0]?.resolvedPath, missing);
     writeFileSync(missing, "regular fixture\n");
     assert.equal(campaignOperationEvidence("Read", { kind: "file", path: missing }).filesystem?.targets[0]?.resolvedPath, missing);
-    assert.equal(campaignOperationEvidence("Bash", { kind: "command", input: `cat ${missing}` }).filesystem?.targets[0]?.resolvedPath, missing);
+    assert.equal(campaignOperationEvidence("Bash", { kind: "command", input: `cat ${basename(missing)}`, cwd: directory }).filesystem?.targets[0]?.resolvedPath, missing);
     if (process.platform === "linux") {
       const fifo = join(directory, "pipe.ts"); execFileSync("mkfifo", [fifo], { timeout: 10_000 });
       assert.equal(campaignOperationEvidence("Read", { kind: "file", path: fifo }).filesystem, undefined);
-      assert.equal(campaignOperationEvidence("Bash", { kind: "command", input: `cat ${fifo}` }).filesystem, undefined);
+      assert.equal(campaignOperationEvidence("Bash", { kind: "command", input: `cat ${basename(fifo)}`, cwd: directory }).filesystem, undefined);
     }
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
