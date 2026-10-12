@@ -184,3 +184,15 @@ frame, receipt expiry/revocation and current action/allowance denial. A complete
 reused as a replacement or spend from an old snapshot. Hard denial/exhaustion cannot be bypassed.
 Final usage must settle one time before unused reservation release. Campaign helper verification
 and stop/cleanup remain parent-owned; no helpers have been launched in this implementation session.
+
+## Prepared Managed Media Session Admission
+
+The owned prepared-media-sessions.ts coordinator is a private server implementation boundary; it is not a public Session option or pre-staged automation adapter. The current budget guard rejecting pre-staged automation remains required. Final Session-service wiring waits for the actual foundation, issue scope, and budget contracts to land.
+
+Its same-database materialization callback must run all existing Session creation checks and atomically create the actual Session and budget member with the exact unsent start command. The coordinator rejects mismatched model/effort, changed generations, wider launch ceilings, or a different database. Only then can trusted derivation bind the complete immutable media grant and the actual narrowed namespace launch. The dispatch digest covers that grant, namespace, command, and admitted generation together.
+
+Dispatch records intent before sending and claims it once in SQLite, including across separate coordinator instances. Lost replies and restarts reconcile the original command, runner, Session, and generation; they cannot replay or launch a replacement. Only an authoritative terminal never-dispatched receipt, or locally proven unsent preparation, can release that reservation. Runner absence from an in-memory process list is insufficient. Runner rejection receipts must fence that exact command permanently so a late network delivery cannot start it after cancellation. Final live usage and same-generation completed attestation remain owned by the campaign budget ledger; the media lifecycle cannot invent settlement or zero-cost live accounting.
+
+Offline lifecycle tests exercise atomic rollback, cross-instance dispatch claiming, changed generations, grant substitution, authority revocation and uncertain launch recovery. They establish no actual provider delivery, media Session identity, live usage or readiness. The integrated materializer, authenticated command transport and actual driver namespace enforcement remain required before production support can be advertised.
+
+The evidence-review-budget-provenance adapter separately checks active admission and completed quality provenance. It pins the immutable verdict to the exact original binding and actual worker model/effort/generation. Completed provenance requires the durable same-generation final checkpoint and usage digest, normal completion, and current owner/root action constraints. A code-review job, terminal status alone, changed generation, missing settlement, or overspent pinned allocation cannot stand in for media reviewer proof. Completed status grants no new media access.
