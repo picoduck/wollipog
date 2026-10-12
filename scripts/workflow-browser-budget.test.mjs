@@ -123,7 +123,7 @@ test("browser budget covers either bounded install path, measured remainder, enf
   assert.ok(timedOut.firstInstallSeconds - 360 <= enforcementSecondsPerAttempt,
     "the sizing assumption must cover the observed enforcement overrun");
   for (const row of evidence.samples) {
-    assert.ok(result.budget - result.install - result.enforcement - row.nonInstallSeconds >= reserveSeconds,
+    assert.ok(result.budget - result.install - result.enforcement - result.diagnostics - row.nonInstallSeconds >= reserveSeconds,
       `run ${row.runId} shard ${row.shard}: near-bound recovered setup must leave the full remaining workload its reserve`);
   }
 });

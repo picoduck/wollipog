@@ -115,6 +115,18 @@ class ArtifactTests(unittest.TestCase):
             self.skipTest("host cannot create symlinks")
         with self.assertRaises(ValueError):
             sanitizer.bounded_file(str(link), self.results)
+        root_link = self.base / "linked-results"
+        root_link.symlink_to(self.results, target_is_directory=True)
+        with self.assertRaises(ValueError):
+            sanitizer.bounded_file(str(root_link / "trace.zip"), root_link)
+
+    def test_unexpected_source_basenames_are_excluded(self):
+        unexpected = self.results / "unrelated.zip"
+        self.trace.rename(unexpected)
+        self.trace = unexpected
+        self.write_report()
+        self.assertEqual(self.collect()["rejected"], 1)
+        self.assertEqual(list(self.output.iterdir()), [])
 
     def test_count_and_archive_size_bounds(self):
         self.write_report(count=10)

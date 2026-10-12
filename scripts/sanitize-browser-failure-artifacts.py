@@ -194,6 +194,8 @@ def collect(report, results, output, outcome, receipt):
                             if attachment is None:
                                 raise ValueError("missing required attachment")
                             source = bounded_file(attachment["path"], results)
+                            if source.name != basename:
+                                raise ValueError("unexpected attachment basename")
                             target = directory / basename
                             if name == "trace":
                                 sanitize_trace(source, target)
@@ -222,7 +224,7 @@ def main():
     if not all(re.fullmatch(r"[0-9]{1,20}", value) for value in (args.run_id, args.attempt, args.shard)) or not re.fullmatch(r"[a-f0-9]{40}", args.head):
         parser.error("invalid synthetic receipt identity")
     try:
-        manifest = collect(args.report, args.results.resolve(), args.output, args.outcome,
+        manifest = collect(args.report, Path(os.path.abspath(args.results)), args.output, args.outcome,
                            {"runId": args.run_id, "attempt": args.attempt, "shard": args.shard, "headSha": args.head})
     except (ValueError, TypeError, AttributeError, OSError, RecursionError):
         print("Synthetic failure artifact sanitization failed closed")
