@@ -222,5 +222,30 @@ test("six periodic sweeps and retry maintenance use indexes at 200,000 events an
         }
       }
     }
+    // The new global expiry index must not turn each runner retry into a global active-queue
+    // range search. Give 20 registered runners 1,000 active commands each, only 20 due each.
+    const runner = db.raw().prepare(`INSERT INTO runners
+      (runner_id,hostname,os,version,status,protocol_version,created_at,updated_at)
+      VALUES(?,'synthetic','linux','test','online',213,1,1)`);
+    for (let i = 0; i < 20; i++) runner.run(`runner-${i}`);
+    db.raw().exec(`UPDATE sessions SET runner_id='runner-'||((CAST(substr(id,2) AS INTEGER)+1)%20)`);
+    db.raw().prepare(`UPDATE session_command_invocations
+      SET runner_id='runner-'||(rowid%20),state='pending',expires_at=?,
+        next_attempt_at=CASE WHEN rowid%1000<20 THEN ? ELSE ? END`)
+      .run(BENCHMARK_NOW + 1_000, BENCHMARK_NOW - 1, BENCHMARK_NOW + 1_000);
+    const batch = queries.find(query => query.method === "dueSessionCommandInvocationMessages")!;
+    const batchArgs = ["runner-0", BENCHMARK_NOW, BENCHMARK_NOW, 100];
+    const batchPlan = (db.raw().prepare(`EXPLAIN QUERY PLAN ${batch.sql}`).all(...batchArgs) as Array<{ detail: string }>)
+      .map(row => row.detail).join("; ");
+    assert.match(batchPlan, /idx_session_command_invocations_outbox \(runner_id=\? AND state=\?\)/);
+    assert.doesNotMatch(batchPlan, /idx_session_command_invocations_expiry/);
+    assert.deepEqual(db.raw().prepare(batch.sql).all(...batchArgs).map(row => row.invocation_id),
+      Array.from({ length: 20 }, (_, i) => `session_command_invocations-${999 + 1_000 * i}-invocation_id`));
+    const dueRunners = queries.find(query => query.method === "dueSessionCommandInvocationRunnerIds")!;
+    const duePlan = (db.raw().prepare(`EXPLAIN QUERY PLAN ${dueRunners.sql}`).all(BENCHMARK_NOW, BENCHMARK_NOW) as Array<{ detail: string }>)
+      .map(row => row.detail).join("; ");
+    assert.match(duePlan, /idx_session_command_invocations_due \(next_attempt_at<\?\)/);
+    assert.deepEqual(db.dueSessionCommandInvocationRunnerIds(BENCHMARK_NOW),
+      Array.from({ length: 20 }, (_, i) => `runner-${i}`).sort());
   } finally { db.close(); }
 });

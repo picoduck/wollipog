@@ -21181,7 +21181,9 @@ export class ControlPlaneDb {
     limit = 100,
   ): Array<{ message: InvokeSessionCommandMessage; attemptCount: number }> {
     const rows = this.stmt(
-      `SELECT invocation_id,attempt_count FROM session_command_invocations
+      // The expiry index serves the global expiration sweep. Keep a runner's retry batch on
+      // its runner/state index so it never reads every other runner's active commands.
+      `SELECT invocation_id,attempt_count FROM session_command_invocations INDEXED BY idx_session_command_invocations_outbox
        WHERE runner_id=? AND state IN ('pending','sent') AND expires_at>?
          AND next_attempt_at<=?
        ORDER BY next_attempt_at,created_at,invocation_id LIMIT ?`,
@@ -21197,7 +21199,7 @@ export class ControlPlaneDb {
 
   dueSessionCommandInvocationRunnerIds(now: number): string[] {
     return (this.stmt(
-      `SELECT DISTINCT runner_id FROM session_command_invocations
+      `SELECT DISTINCT runner_id FROM session_command_invocations INDEXED BY idx_session_command_invocations_due
        WHERE state IN ('pending','sent') AND expires_at>?
          AND next_attempt_at<=?
        ORDER BY runner_id`,

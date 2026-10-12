@@ -99,7 +99,7 @@ The baseline uses the original commit's DB methods; the installed run uses the a
 | Workflow Deadlines | 0.949 → 0.017 | `deadline_active` range, no sort |
 | Timed Reminders | 0.025 → 0.025 | `reminders_due` range plus session PK |
 | Pending Stops | 0.058 → 0.003 | Eligible `stop_intents_pending` index |
-| Due Command Runners / Batches | 0.008 / 0.024 → 0.006 / 0.020 | State/expiry range |
+| Due Command Runners / Batches | 0.008 / 0.024 → 0.007 / 0.024 | Due-time range / runner-state range |
 | Command Expiration IDs | 3.483 → 0.010 | Covering state/expiry range |
 | Command Expiration Updates | 1.072 / 1.466 → 0.057 / 0.180 | State/expiry range |
 | Prompt Retry | 0.056 → 0.055 | Due range plus session PK |
@@ -118,6 +118,15 @@ small partial indexes whose entire eligible set must be visited (held resumes, p
 active push expiration). No retained-history table scan is needed. Some due queries still sort
 their eligible rows to preserve existing ordering; they do not sort retained terminal history.
 These additions do not promise constant cost when the amount of eligible work itself grows.
+
+Adding an index can also change other query plans. A supplemental fixture with 20,000 active
+commands distributed over 20 runners (20 due commands per runner) exposed an introduced planner
+regression: the new expiration index was chosen for each runner's retry batch, examining active
+commands from every runner. Its p50 was 2.74 ms versus 0.17 ms before that index. Pinning the
+existing runner/state outbox index restores 0.18 ms and the same ordered results. Global due-runner
+discovery now uses the existing due-time index: 0.07 ms versus 2.74 ms through the new expiration
+index (3.23 ms before it). Expiration keeps its new matching index. The large-fixture test guards
+these distinct access paths and verifies both per-runner ordering and the complete due-runner set.
 
 ## Migration and Write Cost
 
