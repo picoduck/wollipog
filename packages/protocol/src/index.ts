@@ -1,3 +1,4 @@
+import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 /**
  * Shared protocol types for Wollipog.
  *
@@ -4421,6 +4422,8 @@ export interface WorkflowDecisionView {
   status: WorkflowDecisionStatus;
   selectedOptionId?: string;
   evidenceReviewed?: string[];
+  /** Exact non-self media proof; never an assertion that the owner inspected video frames. */
+  delegatedVideoEvidence?: DelegatedVideoEvidenceReference[];
   createdAt: number;
   resolvedAt?: number;
   consumedAt?: number;
@@ -4441,9 +4444,12 @@ export interface CreateWorkflowDecisionRequest {
 export interface ResolveWorkflowDecisionRequest {
   outcome: "approve" | "deny";
   selectedOptionId?: string;
-  /** Required to approve UI evidence and must exactly cover the requested evidence ids. Omit it when
-   * denying, and for every other category. */
+  /** Directly inspected evidence IDs. With admitted delegated video proof, includes only images;
+   * otherwise exactly covers all requested evidence. Omit when denying or for other categories. */
   evidenceReviewed?: string[];
+  /** Production managed-media provenance for original video IDs. Server verifies every reference.
+   * Only an admitted Orchestrator UI approval may supply it; human and legacy paths omit it. */
+  delegatedVideoEvidence?: DelegatedVideoEvidenceReference[];
   /** Audit-only: never retained, never shown to the child; only its digest reaches audit. */
   rationale?: string;
   /** v166: retained on the decision for the child to read and delivered as the prompt that resumes
@@ -11289,4 +11295,4 @@ export function isTerminal(status: SessionStatus): boolean {
 
 export type { PacedVideoReviewReceipt, PacedVideoReviewDelivery, PacedVideoReviewBatchDelivery, PacedVideoTransportGrant, DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 
-export { PACED_VIDEO_REVIEW_BATCH_LIMITS } from "./paced-video-review.js";
+export { PACED_VIDEO_REVIEW_BATCH_LIMITS, PACED_VIDEO_REVIEW_MIN_PROTOCOL } from "./paced-video-review.js";

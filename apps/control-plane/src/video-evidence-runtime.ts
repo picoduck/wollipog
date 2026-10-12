@@ -1,10 +1,10 @@
 import { validReviewerBudgetAdmission, type EvidenceReviewerBudgetAdmission } from "./evidence-review-admission.js";
 import { createHash, randomUUID } from "node:crypto";
-import { PACED_VIDEO_REVIEW_BATCH_LIMITS, type PacedVideoReviewReceipt } from "@wollipog/protocol";
+import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, PACED_VIDEO_REVIEW_BATCH_LIMITS, type PacedVideoReviewReceipt } from "@wollipog/protocol";
 import { prepareVideoEvidence, PACED_VIDEO_PREPARATION_PROFILE,
   type VideoPreparationManifest, type VideoPreparationResult } from "./video-evidence-preparation.js";
 
-export const PRODUCTION_VIDEO_REVIEW_PROTOCOL = 218;
+export const PRODUCTION_VIDEO_REVIEW_PROTOCOL = PACED_VIDEO_REVIEW_MIN_PROTOCOL;
 export const VIDEO_REVIEW_BATCH = PACED_VIDEO_REVIEW_BATCH_LIMITS;
 export const PACED_VIDEO_REVIEW_PROFILE = "paced-silent-complete-frames-v1" as const;
 const hash = (value: Buffer | string) => createHash("sha256").update(value).digest("hex");

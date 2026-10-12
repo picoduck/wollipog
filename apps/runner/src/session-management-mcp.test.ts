@@ -2504,3 +2504,26 @@ test("campaign work ledger tools require an Orchestrator and a v196 control plan
     childSessionId: "child", reportEventSeq: 3, followUpsAccounted: true, workItem: { id: "cwi_1", outcome: "delivered" },
   });
 });
+
+
+test("delegated media resolution preserves actual worker references and refuses old or unknown peers before approval", async () => {
+  const reference = { evidenceId: "original-video", reviewId: "review-1", verdictId: "verdict-1", reviewerSessionId: "media-worker" };
+  const args = { sessionId: "child", occurrenceId: "original-gate", outcome: "approve", evidenceReviewed: ["direct-image"],
+    delegatedVideoEvidence: [reference] };
+  const { deps, calls } = makeDeps(() => ({ status: 200, body: {} })); deps.orchestrator = true;
+  for (const version of [216, 217]) {
+    deps.controlPlaneProtocolVersion = version;
+    assert.equal((await callTool(deps, "resolve_descendant_workflow_decision", args)).isError, true);
+    assert.equal(calls.length, 0);
+  }
+  deps.controlPlaneProtocolVersion = undefined;
+  assert.equal((await callTool(deps, "resolve_descendant_workflow_decision", args)).isError, true);
+  assert.equal(calls.at(-1)?.method, "GET"); assert.equal(calls.some((call) => call.method === "POST"), false);
+  deps.controlPlaneProtocolVersion = 218;
+  assert.equal((await callTool(deps, "resolve_descendant_workflow_decision", args)).isError, undefined);
+  assert.deepEqual(calls.at(-1)?.body, { sessionId: "child", occurrenceId: "original-gate", resolution: {
+    action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: ["direct-image"], delegatedVideoEvidence: [reference] } });
+  const count = calls.length;
+  assert.equal((await callTool(deps, "resolve_descendant_workflow_decision", { ...args, outcome: "deny" })).isError, true);
+  assert.equal(calls.length, count);
+});

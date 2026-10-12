@@ -1,10 +1,15 @@
+import { readFileSync } from "node:fs";
+import { WorkflowVideoEvidenceApprovals } from "./workflow-video-evidence-approvals.js";
+import { createControlPlaneVideoReviewStore } from "./video-evidence-artifacts.js";
+import { VideoEvidenceRuntime, type VideoReviewBinding, type VideoReviewRuntimeAccess } from "./video-evidence-runtime.js";
+import { videoPreparationDecoderAvailable } from "./video-evidence-preparation.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, type RunnerMetadata } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
-import { SessionsService } from "./sessions.js";
+import { SessionsService, normalizeWorkflowDecisionSnapshot } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { mintCampaignEvidenceAuthority } from "./evidence-authority.js";
 import type { HumanPrincipal } from "./identity.js";
@@ -17,13 +22,16 @@ const sha = (value: string | Buffer) => createHash("sha256").update(value).diges
 
 /** In-memory concrete DB/service integration with explicitly synthetic proof/rates/source.
  * No actual managed provider, credential, live proof registration, media upload or usage occurs. */
-function harness() {
+function harness(sourceBytes?: Buffer) {
   const db = ControlPlaneDb.open(":memory:");
   const human: HumanPrincipal = { ...db.localIdentityContext(), kind: "human", actorId: "synthetic-human" };
   const audience = { organizationId: human.organizationId, owner: { kind: "user" as const, userId: human.userId } };
   const metadata: RunnerMetadata = { runnerId: "r", hostname: "synthetic", os: "linux", version: "test",
     workspaces: [{ id: "w", name: "Repo", path: "/synthetic-repo" }],
-    agents: [{ id: "claude", name: "Synthetic Claude", command: "claude", args: [], env: {}, driver: "claude-code", available: true }] };
+    agents: [{ id: "claude", name: "Synthetic Claude", command: "claude", args: [], env: {}, driver: "claude-code", available: true,
+      capabilities: { models: [{ id: "claude-opus-5-5", displayName: "Synthetic Image Model", default: true, inputModalities: ["text", "image"] }],
+        effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true, imageToolResults: true,
+        permissionModes: ["default"] } }] };
   db.registerRunner(metadata, 1, 218);
   db.setUsageRateTable(new Map([["claude-opus-5-5", { inputCostPerToken: 0.000001, outputCostPerToken: 0.000001,
     cacheReadCostPerToken: 0.000001, cacheCreationCostPerToken: 0.000001 }]]));
@@ -60,12 +68,14 @@ function harness() {
     title: "Synthetic Child", useWorktree: false, driver: "claude-code", scope: audience,
     config: { model: "claude-opus-5-5", costBudgetUsd: 2, maxToolCalls: 10 }, now: 4 });
   db.updateSessionStatus("child", "running", 5);
-  const source = Buffer.from("synthetic storage bytes, not real video evidence");
+  const source = sourceBytes ?? Buffer.from("synthetic storage bytes, not real video evidence");
   db.createWorkflowArtifactBytes({ artifactId: "source", sessionId: "child", kind: "video", name: "Synthetic.webm",
     mimeType: "video/webm", encoding: "base64", sha256: sha(source), sizeBytes: source.length,
     createdBy: { kind: "agent", id: "child" }, metadata: { purpose: "session_attachment" }, createdAt: 6 }, source);
-  const snapshot = { category: "ui_evidence_approval" as const, evidence: [{ evidenceId: "original-video",
+  const suppliedSnapshot = { category: "ui_evidence_approval" as const, evidence: [{ evidenceId: "original-video",
     artifactId: "source", sha256: sha(source), mediaType: "video/webm", description: "Synthetic storage test" }] };
+  const normalized = normalizeWorkflowDecisionSnapshot(suppliedSnapshot); assert.ok(normalized.ok && normalized.data);
+  const snapshot = normalized.data;
   assert.ok(db.createWorkflowDecision({ requestId: "synthetic-ui", occurrenceId: "original-gate", sessionId: "child",
     controllingSessionId: "root", category: "ui_evidence_approval", resourceKey: "synthetic", resourceSnapshot: snapshot,
     resourceDigest: sha(JSON.stringify(snapshot)), policyRevision: boundary.revision, authority: "orchestrator", createdAt: 7 }));
@@ -107,7 +117,7 @@ function harness() {
     reconcile: async () => null, cancelNeverDispatched: () => { throw new Error("Confirmed-unlaunched budget release adapter is not yet integrated."); },
   };
   const prepared = new PreparedMediaSessions(db.raw(), ports);
-  return { db, service, bootstrap, prepared, identity, subject, context, runtime, target, messages, ports,
+  return { db, hub, log, human, source, service, bootstrap, prepared, identity, subject, context, runtime, target, messages, ports,
     dropProof: () => { proof = null; } };
 }
 test("concrete createSession pipeline atomically materializes actual row/member/unsent command without provider dispatch", (t) => {
@@ -233,4 +243,180 @@ test("source audience changes refuse preparation before reserving or returning q
   assert.throws(() => h.prepared.prepare(h.identity), /scoped media profile/);
   assert.equal(h.db.raw().prepare("SELECT COUNT(*) AS n FROM media_session_purposes").get()!.n, 0);
   assert.deepEqual(h.messages, []);
+});
+
+/** Complete real native fixture derivation and private artifact/SQLite/provenance flow with a
+ * synthetic admitted, unsent Session. No model call, oracle, actual grant or live proof. */
+async function gateHarness(t: { skip(reason: string): void; after(fn: () => void): void }, withImage = false) {
+  if (!await videoPreparationDecoderAvailable()) {
+    assert.notEqual(process.env.CI, "true", "CI must provision isolated decoder"); t.skip("isolated decoder unavailable"); return null;
+  }
+  const source = readFileSync(new URL("../test-fixtures/video-preparation-paced.webm", import.meta.url));
+  const h = harness(source); t.after(() => h.db.close());
+  if (withImage) {
+    const image = readFileSync(new URL("../../web/public/icons/icon-192.png", import.meta.url));
+    h.db.createWorkflowArtifactBytes({ artifactId: "direct-image", sessionId: "child", kind: "screenshot", name: "Synthetic Test Image.png",
+      mimeType: "image/png", encoding: "base64", sha256: sha(image), sizeBytes: image.length,
+      createdBy: { kind: "agent", id: "child" }, metadata: { purpose: "session_attachment" }, createdAt: 8 }, image);
+    const original = h.db.workflowDecisionByOccurrence("original-gate")!;
+    assert.equal(original.resourceSnapshot.category, "ui_evidence_approval");
+    if (original.resourceSnapshot.category !== "ui_evidence_approval") throw new Error("No UI fixture");
+    const normalized = normalizeWorkflowDecisionSnapshot({ ...original.resourceSnapshot,
+      evidence: [...original.resourceSnapshot.evidence, { evidenceId: "direct-image", artifactId: "direct-image",
+        sha256: sha(image), mediaType: "image/png" }] });
+    assert.ok(normalized.ok && normalized.data);
+    // Fixture construction precedes admission/derivation; the original gate then remains immutable.
+    h.db.raw().prepare("UPDATE workflow_decisions SET resource_snapshot=?,resource_digest=? WHERE occurrence_id='original-gate'")
+      .run(JSON.stringify(normalized.data), sha(JSON.stringify(normalized.data)));
+  }
+  const reviewer = h.prepared.prepare(h.identity);
+  const original = h.db.workflowDecisionByOccurrence("original-gate")!;
+  const criteria = [{ criterionId: "transients", description: "Review all source frames for transient defects." }];
+  const binding: VideoReviewBinding = { rootSessionId: "root", childSessionId: "child", occurrenceId: original.occurrenceId,
+    resourceDigest: original.resourceDigest, policyRevision: original.policyRevision,
+    boundaryRevision: h.context.boundary!.revision, evidenceAuthorityRevision: h.context.evidenceAuthority!.revision,
+    reviewerSessionId: reviewer.sessionId, reviewerDriver: reviewer.admission.worker.driver,
+    reviewerModelId: reviewer.admission.worker.model!, providerId: h.target.providerId,
+    audienceSha256: h.context.audienceSha256, capabilitiesSha256: h.target.capabilitiesSha256,
+    sourceEvidenceId: "original-video", sourceArtifactId: "source", sourceSha256: sha(source),
+    workerAdmissionSha256: reviewer.admission.allocationDigest, criteriaSha256: sha(JSON.stringify(criteria)) };
+  let allowed = true;
+  const store = createControlPlaneVideoReviewStore(h.db);
+  const runtimeAccess: VideoReviewRuntimeAccess = { currentBinding: () => allowed ? binding : null,
+    normalCompletion: () => false, workerAdmission: () => h.service.campaignBudgetWorkerPreflight("root",
+      { kind: "managed", sessionId: reviewer.sessionId }).data ?? null,
+    readSource: (id) => h.db.readWorkflowArtifactBytes(id) };
+  const runtime = new VideoEvidenceRuntime(store, runtimeAccess);
+  const derived = await runtime.derive(binding, "video/webm", criteria); assert.ok(derived.ok);
+  if (!derived.ok) throw new Error("Fixture derivation refused");
+  const record = derived.review;
+  const approvalAccess = {
+    available: () => allowed, linkedReview: () => store.getReview(record.reviewId),
+    decisionCurrent: (decision: import("@wollipog/protocol").WorkflowDecisionView, phase: "resolve" | "consume") => allowed && h.db.workflowDecisionByOccurrence(decision.occurrenceId)?.status ===
+      (phase === "resolve" ? "pending" : "approved"),
+  };
+  const approvals = new WorkflowVideoEvidenceApprovals(h.db, runtime, approvalAccess);
+  const service = new SessionsService(h.db, h.hub, h.log, undefined, undefined, undefined, undefined, undefined, undefined,
+    false, undefined, h.runtime, approvals);
+  const reference = { evidenceId: "original-video", reviewId: record.reviewId, verdictId: "not-yet-attested",
+    reviewerSessionId: reviewer.sessionId };
+  const resolve = (resolution = { outcome: "approve" as const, evidenceReviewed: [] as string[], delegatedVideoEvidence: [reference] }) =>
+    service.resolveWorkflowDecision("root", "child", original.occurrenceId, resolution, "orchestrator",
+      { kind: "agent", id: "root" }, () => true);
+  const complete = () => {
+    for (let index = 0; index < record.manifest.frames.length;) {
+      const batch = runtime.deliverBatch(record.reviewId, reviewer.sessionId, index);
+      runtime.acknowledgeBatch(record.reviewId, reviewer.sessionId, batch.deliveries.map((delivery) => delivery.receipt));
+      index = batch.nextIndex;
+    }
+    const verdict = runtime.recordVerdict(record.reviewId, reviewer.sessionId, { outcome: "accept", criteria: [{
+      criterionId: "transients", outcome: "pass", observedFrameIndices: [157],
+      observation: "Disclosed deterministic fixture observation; not a blind model claim." }], rationale: "Synthetic contract test only." });
+    reference.verdictId = verdict.verdictId; return verdict;
+  };
+  return { ...h, preparedRuntime: h.runtime, service, approvals, approvalAccess, runtime, store, original, record, reference, resolve, complete,
+    revoke: () => { allowed = false; } };
+}
+
+test("original UI gate persists actual media actor separately and consumes complete current proof without parent frame receipts", async (t) => {
+  const h = await gateHarness(t); if (!h) return;
+  assert.equal(h.resolve().ok, false, "receipts without a criterion verdict cannot approve");
+  assert.equal(h.db.workflowDecisionByOccurrence(h.original.occurrenceId)?.status, "pending");
+  h.complete();
+  assert.equal(h.resolve({ outcome: "approve", evidenceReviewed: ["original-video"], delegatedVideoEvidence: [h.reference] }).ok, false,
+    "parent cannot claim the worker's inspected video as directly inspected");
+  const approved = h.resolve(); assert.ok(approved.ok, approved.error ?? "Approval refused");
+  assert.deepEqual(approved.data?.evidenceReviewed, []);
+  assert.deepEqual(approved.data?.delegatedVideoEvidence, [h.reference]);
+  assert.deepEqual(approved.data?.resourceSnapshot, h.original.resourceSnapshot);
+  assert.equal(approved.data?.resourceDigest, h.original.resourceDigest);
+  assert.equal(h.db.validUiEvidenceReviewReceipts(h.original.occurrenceId, "root", Date.now()).length, 0);
+  assert.equal(h.store.latestReceipts(h.record.reviewId).length, 360);
+  const consumed = await h.service.consumeWorkflowDecision("child", h.original.occurrenceId,
+    { resourceSnapshot: h.original.resourceSnapshot });
+  assert.ok(consumed.ok, consumed.error ?? "Consumption refused"); assert.equal(consumed.data?.status, "consumed");
+  assert.equal((await h.service.consumeWorkflowDecision("child", h.original.occurrenceId,
+    { resourceSnapshot: h.original.resourceSnapshot })).ok, false, "consumption cannot replay");
+});
+
+test("original media approval fails closed after durable provenance corruption, revocation and missing runtime", async (t) => {
+  const h = await gateHarness(t); if (!h) return; h.complete();
+  assert.ok(h.resolve().ok);
+  h.db.raw().prepare("UPDATE workflow_video_approvals SET record='{}'").run();
+  const consumed = await h.service.consumeWorkflowDecision("child", h.original.occurrenceId,
+    { resourceSnapshot: h.original.resourceSnapshot });
+  assert.equal(consumed.ok, false); assert.equal(h.db.workflowDecisionByOccurrence(h.original.occurrenceId)?.status, "revoked");
+  assert.equal(h.bootstrap.resolveWorkflowDecision("root", "child", "original-gate",
+    { outcome: "approve", evidenceReviewed: [], delegatedVideoEvidence: [h.reference] }, "orchestrator",
+    { kind: "agent", id: "root" }, () => true).ok, false);
+});
+
+
+test("mixed original evidence requires actual parent image inspection, atomic approval and durable restart provenance", async (t) => {
+  const h = await gateHarness(t, true); if (!h) return; h.complete();
+  const resolution = { outcome: "approve" as const, evidenceReviewed: ["direct-image"], delegatedVideoEvidence: [h.reference] };
+  assert.equal(h.resolve(resolution).ok, false, "an image ID alone is no proof");
+  const image = h.service.reviewDescendantUiEvidence("root", "child", h.original.occurrenceId, "direct-image", () => true);
+  assert.ok(image.ok && image.data, image.error ?? "Image delivery refused");
+  assert.ok(h.service.acknowledgeDescendantUiEvidence("root", image.data.receipt.receiptId, image.data.receipt.sha256).ok);
+  h.db.raw().exec("CREATE TRIGGER reject_media_approval BEFORE INSERT ON workflow_video_approvals BEGIN SELECT RAISE(ABORT,'synthetic disk failure'); END");
+  assert.equal(h.resolve(resolution).ok, false);
+  assert.equal(h.db.workflowDecisionByOccurrence(h.original.occurrenceId)?.status, "pending", "approval and proof commit atomically");
+  assert.equal(h.db.validUiEvidenceReviewReceipts(h.original.occurrenceId, "root", Date.now()).length, 1, "rollback preserves unused inspection receipt");
+  h.db.raw().exec("DROP TRIGGER reject_media_approval");
+  assert.ok(h.resolve(resolution).ok);
+  assert.deepEqual(h.db.workflowDecisionByOccurrence(h.original.occurrenceId)?.evidenceReviewed, ["direct-image"]);
+  const restartedApprovals = new WorkflowVideoEvidenceApprovals(h.db, h.runtime, h.approvalAccess);
+  const restarted = new SessionsService(h.db, h.hub, h.log, undefined, undefined, undefined, undefined, undefined, undefined,
+    false, undefined, h.preparedRuntime, restartedApprovals);
+  const consumed = await restarted.consumeWorkflowDecision("child", h.original.occurrenceId, { resourceSnapshot: h.original.resourceSnapshot });
+  assert.ok(consumed.ok, consumed.error ?? "Durable proof failed after restart");
+  assert.equal(consumed.data?.status, "consumed");
+});
+
+test("current media authority revocation invalidates approval before consume", async (t) => {
+  const h = await gateHarness(t); if (!h) return; h.complete(); assert.ok(h.resolve().ok); h.revoke();
+  const consumed = await h.service.consumeWorkflowDecision("child", h.original.occurrenceId, { resourceSnapshot: h.original.resourceSnapshot });
+  assert.equal(consumed.ok, false); assert.equal(h.db.workflowDecisionByOccurrence(h.original.occurrenceId)?.status, "revoked");
+});
+
+test("human campaign CAS derives evidence disclosure without replacing budget/scope or accepting agent provenance", (t) => {
+  const h = harness(); t.after(() => h.db.close());
+  let privacy: "private" | "public" = "private";
+  const disclosures = {
+    destination: () => ({ organizationId: h.human.organizationId, privacy, disclosureRevision: 1 }),
+    provider: () => ({ disclosureRevision: 1, retentionDisclosure: "Synthetic provider retention for this in-memory test.",
+      reviewers: [{ driver: "claude-code" as const, modelId: "claude-opus-5-5" }] }),
+  };
+  const service = new SessionsService(h.db, h.hub, h.log, undefined, undefined, undefined, undefined, undefined, undefined,
+    false, undefined, undefined, undefined, disclosures);
+  const before = h.db.getSession("root")!, policy = before.orchestratorPolicy!, control = policy.control!;
+  assert.equal(control.mode, "full_control"); if (control.mode !== "full_control") throw new Error("No test boundary");
+  const proposal = { mode: "full_control" as const, objective: control.boundary.objective,
+    operations: control.boundary.operations, delegatablePolicyIds: control.boundary.delegatablePolicyIds,
+    budgetAuthority: control.boundary.budgetAuthority, evidenceAuthority: {
+      destinationConfigurationId: "synthetic-private", destinationDisclosureRevision: 1,
+      providers: [{ providerId: "synthetic-provider", disclosureRevision: 1,
+        reviewers: [{ driver: "claude-code" as const, modelId: "claude-opus-5-5" }] }],
+    } };
+  const revision = before.parentControlPolicy!.revision;
+  assert.equal(service.setCampaignControl("root", proposal, revision, { ...h.human, kind: "agent" } as never).ok, false);
+  assert.equal(h.bootstrap.setCampaignControl("root", proposal, revision, h.human).ok, false, "unknown disclosure stays unsupported");
+  privacy = "public"; assert.equal(service.setCampaignControl("root", proposal, revision, h.human).ok, false);
+  privacy = "private";
+  assert.equal(service.setCampaignControl("root", { ...proposal, evidenceAuthority: { ...proposal.evidenceAuthority,
+    authorizedByUserId: "forged" } } as never, revision, h.human).ok, false);
+  assert.equal(h.db.getSession("root")!.parentControlPolicy!.revision, revision);
+  const allowed = service.setCampaignControl("root", proposal, revision, h.human); assert.ok(allowed.ok, allowed.error ?? "Human CAS refused");
+  const next = allowed.data!.orchestratorPolicy!.control!;
+  assert.equal(next.mode, "full_control"); if (next.mode !== "full_control") throw new Error("No resulting boundary");
+  assert.equal(next.boundary.evidenceAuthority?.authorizedByUserId, h.human.userId);
+  assert.equal(next.boundary.evidenceAuthority?.revision, revision + 1);
+  assert.equal(next.boundary.evidenceAuthority?.campaignRootSessionId, "root");
+  assert.equal(next.boundary.evidenceAuthority?.providers[0]?.retentionDisclosure, disclosures.provider().retentionDisclosure);
+  assert.deepEqual(next.boundary.budgetAuthority, control.boundary.budgetAuthority);
+  assert.deepEqual(allowed.data!.orchestratorPolicy!.issueScope, policy.issueScope);
+  assert.equal(h.db.workflowDecisionByOccurrence("original-gate")?.status, "revoked", "old occurrence loses the superseded envelope");
+  assert.equal(service.setCampaignControl("root", proposal, revision, h.human).ok, false, "stale CAS cannot replace new human authorization");
+  assert.deepEqual(h.messages.filter((message) => (message as { type?: string }).type === "start_session"), []);
 });
