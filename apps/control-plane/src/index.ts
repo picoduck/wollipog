@@ -1327,6 +1327,7 @@ app.register(async (instance) => {
         else svc.reconcileRunnerSessions(runnerId, msg.liveSessions ?? []);
         svc.reconcileArchivedCampaignWorktrees(runnerId);
         svc.recoverWorkflowRunner(runnerId);
+        svc.recoverCampaignBudgetAllocations(runnerId);
         svc.recoverCampaignReviewJobs(runnerId);
         automations.tick(Date.now());
         automations.commandOutbox.flush(Date.now(), runnerId);

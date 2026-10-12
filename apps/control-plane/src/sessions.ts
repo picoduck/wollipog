@@ -6831,7 +6831,7 @@ export class SessionsService {
     // Persist replacement identity before the ambiguous socket write. A false send leaves the
     // Stop fence and stopped lifecycle intact; a true/half-open send remains fenced until the
     // runner echoes this exact identity in status or snapshot evidence.
-    const wasBudgetActive = this.db.campaignBudgets.active(sessionId);
+    const priorBudgetDispatch = budgetRoot ? this.db.campaignBudgets.dispatchState(sessionId) : null;
     if (budgetRoot) {
       const unsupported = this.campaignBudgetConfigError(session, spec.config, launch.driver);
       if (unsupported) return fail(unsupported, 409);
@@ -6841,7 +6841,7 @@ export class SessionsService {
     }
     if (restartLaunchId) this.db.setSessionStopRestartLaunchId(sessionId, restartLaunchId);
     if (!this.hub.sendToRunner(session.runnerId, { type: "start_session", spec })) {
-      if (budgetRoot) this.db.campaignBudgets.restoreUnsentActivation(sessionId, wasBudgetActive);
+      if (priorBudgetDispatch) this.db.campaignBudgets.restoreUnsentDispatch(sessionId, priorBudgetDispatch);
       if (restartLaunchId) this.db.clearSessionStopRestartLaunchId(sessionId);
       return fail("runner is offline", 409);
     }
@@ -7849,6 +7849,21 @@ export class SessionsService {
     }
   }
 
+  recoverCampaignBudgetAllocations(runnerId:string):void {
+    for(const id of this.db.campaignBudgets.membersForRunner(runnerId)) {
+      const member=this.db.getSession(id);
+      if(!member) continue;
+      const error=this.campaignBudgetConfigError(member);
+      if(error) {
+        if(!isTerminal(member.status)) this.stopAtGuardrail(member,Date.now());
+        continue;
+      }
+      // Re-send the existing generation and absolute limits. This neither activates a settled
+      // member nor resets usage; terminal members can return their missing final checkpoint.
+      this.syncCampaignAllocation(id);
+    }
+  }
+
   private syncCampaignAllocation(sessionId: string): boolean {
     const allocation = this.db.campaignBudgets.allocation(sessionId);
     const session = this.db.getSession(sessionId);
@@ -7859,7 +7874,7 @@ export class SessionsService {
     const configured = this.db.getSession(sessionId)!;
     const holdFor = hasBlockingPendingRequest(configured.pendingApproval) ? "control_plane" as const
       : this.runnerHoldAfter(configured, this.guardrailFields(configured));
-    return isTerminal(session.status) || this.hub.sendToRunner(session.runnerId, { type: "rearm_governance", sessionId,
+    return this.hub.sendToRunner(session.runnerId, { type: "rearm_governance", sessionId,
       campaignBudgetDispatch: this.db.campaignBudgets.dispatch(sessionId),
       config: { ...(allocation.costUsd === undefined ? {} : { costBudgetUsd: allocation.costUsd }),
         ...(allocation.toolCalls === undefined ? {} : { maxToolCalls: allocation.toolCalls }) }, ...(holdFor ? { holdFor } : {}) });

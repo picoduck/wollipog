@@ -1424,6 +1424,7 @@ export class SessionManager {
    * released on stop/exit/failure. Oldest-eligible selection plus bounded bypass prevents both
    * head-of-line capacity waste and starvation. */
   private readonly admitted = new Set<string>();
+  private readonly controlledReviewAdmissions = new Map<string,string>();
   private readonly admissionQueue: Array<{
     request: AdmissionRequest;
     bypasses: number;
@@ -4444,14 +4445,17 @@ export class SessionManager {
   }
 
   reserveControlledReviewAdmission(jobId:string,agentId:string):boolean {
-    if(this.shuttingDown || this.executionIsolation.mode!=="provider" || this.admissionQueue.length) return false;
+    if(this.shuttingDown || this.executionIsolation.mode!=="provider") return false;
+    if(this.controlledReviewAdmissions.has(jobId)) return this.controlledReviewAdmissions.get(jobId)===agentId;
+    if(this.admissionQueue.length) return false;
     const admitted=this.boxAdmission.acquire({sessionId:jobId,agentId,weight:this.admissionPolicy.agentWeights[agentId]??1,
       ...(this.admissionPolicy.agentLimits[agentId]===undefined?{}:{agentLimit:this.admissionPolicy.agentLimits[agentId]})});
-    if(admitted) this.reportCapacity();
+    if(admitted) {this.controlledReviewAdmissions.set(jobId,agentId);this.reportCapacity();}
     return admitted;
   }
 
   releaseControlledReviewAdmission(jobId:string):void {
+    this.controlledReviewAdmissions.delete(jobId);
     this.boxAdmission.release(jobId);this.reportCapacity();this.drainAdmissionQueue();
   }
 
@@ -14226,6 +14230,17 @@ export class SessionManager {
       ...(campaignBudgetDispatch.generation!==meta.campaignBudgetDispatch?.generation?{campaignBudgetCheckpoint:undefined}:{}) });
     const costBudgetUsd = config.costBudgetUsd;
     const maxToolCalls = config.maxToolCalls;
+    if(campaignBudgetDispatch && ["completed","failed","stopped"].includes(meta.status)) {
+      // Reconnect can deliver the first allocation after the provider already ended. Persist its
+      // exact provenance and attest final history, without rearming any terminal recovery queue.
+      const merged={...meta.config};
+      if(typeof costBudgetUsd==="number" && Number.isFinite(costBudgetUsd) && costBudgetUsd>0) merged.costBudgetUsd=costBudgetUsd;
+      if(typeof maxToolCalls==="number" && Number.isSafeInteger(maxToolCalls) && maxToolCalls>0) merged.maxToolCalls=maxToolCalls;
+      this.store.patchMeta(sessionId,{config:merged});
+      const entry=this.active.get(sessionId);
+      if(!entry || !entry.running && !entry.providerInitiatedTurnActive) this.emitStatus(sessionId,meta.status,undefined,undefined,undefined,!entry);
+      return;
+    }
     // No live process: whatever the re-arm carries, the hold change applies to what recovery
     // holds for this session, and a release re-enters recovery. Thresholds ride into the queued
     // prompts' configs when the replacement process picks them up.

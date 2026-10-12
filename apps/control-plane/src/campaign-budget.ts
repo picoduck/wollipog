@@ -184,9 +184,23 @@ export class CampaignBudgetLedger {
     return Boolean((this.sql.prepare("SELECT active FROM campaign_budget_members WHERE session_id=?").get(sessionId) as Member | undefined)?.active);
   }
 
-  /** Only for a runner send that proved no command was enqueued. */
-  restoreUnsentActivation(sessionId: string, active: boolean): void {
-    this.sql.prepare("UPDATE campaign_budget_members SET active=? WHERE session_id=?").run(active ? 1 : 0, sessionId);
+  membersForRunner(runnerId:string):string[] {
+    return (this.sql.prepare(`SELECT m.session_id FROM campaign_budget_members m JOIN sessions s ON s.id=m.session_id
+      WHERE s.runner_id=? AND m.active=1`).all(runnerId) as Array<{session_id:string}>).map((r)=>r.session_id);
+  }
+
+  dispatchState(sessionId:string):{active:boolean;generation:string;checkpoint:string|null} {
+    const checkpoint=this.sql.prepare("SELECT checkpoint FROM campaign_budget_checkpoints WHERE session_id=?").get(sessionId) as {checkpoint:string}|undefined;
+    return {active:this.active(sessionId),generation:this.dispatch(sessionId)!.generation,checkpoint:checkpoint?.checkpoint??null};
+  }
+
+  /** Only for a runner send that proved no command was enqueued; preserve old final evidence. */
+  restoreUnsentDispatch(sessionId: string, state: ReturnType<CampaignBudgetLedger["dispatchState"]>): void {
+    this.atomic(()=>{
+      this.sql.prepare("UPDATE campaign_budget_members SET active=?,generation=? WHERE session_id=?").run(state.active?1:0,state.generation,sessionId);
+      this.sql.prepare("DELETE FROM campaign_budget_checkpoints WHERE session_id=?").run(sessionId);
+      if(state.checkpoint) this.sql.prepare("INSERT INTO campaign_budget_checkpoints VALUES (?,?)").run(sessionId,state.checkpoint);
+    });
   }
 
   /** Only the authenticated owning runner may supply a checkpoint. Do not accept agent JSON. */
