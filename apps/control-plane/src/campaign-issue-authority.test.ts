@@ -108,11 +108,13 @@ test("Custom scope and closure stay human-owned, and old peers cannot execute th
     const c = await h.svc.requestGithubIssueClosure("root",{requestId:"custom-closure",issue:100,reason:"completed",explanation:"Claim",evidence:["Claim"]});
     assert.ok(c.ok,c.error ?? "closure"); assert.equal(c.data!.decision!.authority,"human");
   } finally { h.db.close(); }
-  const older = harness();
-  try {
-    older.db.raw().prepare("UPDATE runners SET protocol_version=215 WHERE runner_id='r'").run();
-    assert.equal((await older.proposal("old")).ok,false);
-  } finally { older.db.close(); }
+  for (const version of [215, 216]) {
+    const older = harness();
+    try {
+      older.db.raw().prepare("UPDATE runners SET protocol_version=? WHERE runner_id='r'").run(version);
+      assert.equal((await older.proposal(`old-${version}`)).ok,false);
+    } finally { older.db.close(); }
+  }
 });
 
 const body = "## Problem\nRelated failure\n## Proposed Behavior\nRepair it\n## Acceptance Criteria\n- Verified repair\n## Security and Compatibility\nNone";

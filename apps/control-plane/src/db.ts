@@ -735,6 +735,9 @@ CREATE TABLE IF NOT EXISTS sessions (
   context_tokens_used INTEGER,
   context_window INTEGER,
   cost_usd       REAL NOT NULL DEFAULT 0,
+  live_input_tokens  INTEGER NOT NULL DEFAULT 0,
+  live_output_tokens INTEGER NOT NULL DEFAULT 0,
+  live_cost_usd      REAL NOT NULL DEFAULT 0,
   created_at     INTEGER NOT NULL,
   updated_at     INTEGER NOT NULL,
   last_event_at  INTEGER,
@@ -2882,6 +2885,9 @@ interface SessionRow {
   context_tokens_used: number | null;
   context_window: number | null;
   cost_usd: number;
+  live_input_tokens?: number;
+  live_output_tokens?: number;
+  live_cost_usd?: number;
   adopted: number;
   cost_budget_usd: number | null;
   parent_session_id: string | null;
@@ -6239,6 +6245,11 @@ export class ControlPlaneDb {
       "context_tokens_used INTEGER",
       "context_window INTEGER",
       "cost_usd REAL NOT NULL DEFAULT 0",
+      // Display-only usage of a running Claude turn's completed requests (#3086). No total or
+      // budget ledger accrues it; the record that closes the live window clears it.
+      "live_input_tokens INTEGER NOT NULL DEFAULT 0",
+      "live_output_tokens INTEGER NOT NULL DEFAULT 0",
+      "live_cost_usd REAL NOT NULL DEFAULT 0",
       // Phase 2: highest runner-owned event seq the cache has ingested (incremental hydration).
       "hydrated_seq INTEGER NOT NULL DEFAULT 0",
       // CP-owned event-log generation. Reprocess increments it so reconnecting dashboards can
@@ -10778,7 +10789,8 @@ export class ControlPlaneDb {
       use_worktree worktree_path archived preview pending_approval parent_control
       parent_control_policy parent_control_policy_revision orchestrator_policy session_role
       driver model resolved_model effort service_tier permission_mode input_tokens output_tokens
-      context_tokens_used context_window cost_usd adopted cost_budget_usd parent_session_id
+      context_tokens_used context_window cost_usd live_input_tokens live_output_tokens live_cost_usd
+      adopted cost_budget_usd parent_session_id
       max_child_sessions cost_budget_step_usd cost_checkpoints_usd cost_checkpoint_approved_usd
       cost_unpriced_ack max_tool_calls max_tool_calls_step workspace_path message_count
       created_at updated_at last_event_at event_epoch`.split(/\s+/).filter(Boolean);
@@ -12890,6 +12902,17 @@ export class ControlPlaneDb {
 
   /** Called only inside an existing write transaction after the owning event/snapshot is accepted. */
   /** The settled session cost after ledger pricing; cheaper than a full session view. */
+  /** A running Claude turn's requests that no total includes yet (#3086). Display-only: nothing
+   * that accounts, budgets, or acknowledges cost reads it. */
+  private static liveUsageView(row: Pick<SessionRow, "live_input_tokens" | "live_output_tokens" | "live_cost_usd">): Pick<SessionView, "liveUsage"> {
+    const tokensIn = row.live_input_tokens ?? 0, tokensOut = row.live_output_tokens ?? 0, costUsd = row.live_cost_usd ?? 0;
+    return tokensIn || tokensOut || costUsd ? { liveUsage: { tokensIn, tokensOut, costUsd } } : {};
+  }
+
+  private clearLiveUsageInTransaction(sessionId: string): void {
+    this.stmt("UPDATE sessions SET live_input_tokens=0, live_output_tokens=0, live_cost_usd=0 WHERE id=?").run(sessionId);
+  }
+
   sessionCostUsd(sessionId: string): number {
     const row = this.stmt("SELECT cost_usd FROM sessions WHERE id=?").get(sessionId) as { cost_usd: number } | undefined;
     return Number(row?.cost_usd ?? 0);
@@ -13035,12 +13058,36 @@ export class ControlPlaneDb {
             `UPDATE usage_session_state SET runner_history_epoch=?, covered_through_seq=?, updated_at=?
              WHERE session_id=?`,
           ).run(source.historyEpoch, source.runnerSeq, occurredAt, sessionId);
+          // A replaced history may have closed a live Claude window this cache never saw (#3086).
+          this.clearLiveUsageInTransaction(sessionId);
           return;
         }
       }
       if (source.runnerSeq <= state.covered_through_seq) return;
     }
-    if (payload.kind === "token_usage" && (!payload.parentToolUseId || payload.independentUsage === true)) {
+    const closesLiveUsage = payload.kind === "token_usage" && payload.liveUsage === "settled";
+    if (payload.kind === "token_usage" && payload.liveUsage !== undefined) {
+      // Live Claude usage (#3086). A provisional request is shown, rate-priced, but never accrued:
+      // the checkpoint or republished record that closes its window accounts the same request.
+      if (payload.liveUsage === "provisional") {
+        const dimensions = this.usageDimensions(sessionId);
+        const model = typeof payload.model === "string" ? payload.model.trim().slice(0, 128) : "";
+        const inputTokens = ControlPlaneDb.usageToken(payload.inputTokens);
+        const outputTokens = ControlPlaneDb.usageToken(payload.outputTokens);
+        const priced = priceUsage(this.usageRateTable, model || dimensions?.model, {
+          uncachedInputTokens: inputTokens, cachedInputTokens: ControlPlaneDb.usageToken(payload.cachedInputTokens),
+          cacheCreationTokens: ControlPlaneDb.usageToken(payload.cacheCreationInputTokens), outputTokens,
+        }, null, payload.pricingContext);
+        this.stmt(
+          `UPDATE sessions SET live_input_tokens=live_input_tokens+?, live_output_tokens=live_output_tokens+?,
+             live_cost_usd=live_cost_usd+?, updated_at=? WHERE id=?`,
+        ).run(inputTokens, outputTokens, priced.costUsd, occurredAt, sessionId);
+      }
+    }
+    if (payload.kind === "token_usage" && (!payload.parentToolUseId || payload.independentUsage === true) &&
+      payload.liveUsage !== "provisional" &&
+      !(closesLiveUsage && !payload.accountingIncomplete && payload.costUsd === undefined && !payload.inputTokens &&
+        !payload.outputTokens && !payload.cachedInputTokens && !payload.cacheCreationInputTokens)) {
       const sessionDimensions = this.usageDimensions(sessionId);
       // A v104 runner names the model that produced the record; that beats the session's current
       // model, which may already have moved on by the time a late usage event lands.
@@ -13100,6 +13147,13 @@ export class ControlPlaneDb {
          VALUES (?, 0, 0, 0, ?, 0, ?)
          ON CONFLICT(session_id) DO UPDATE SET cost_remainder_picousd=excluded.cost_remainder_picousd`,
       ).run(sessionId, combinedRemainder - carryMicrousd * 1_000_000, occurredAt);
+      if (payload.liveUsage === "republished") {
+        // The request it shows live is now accounted, at the same price (#3086).
+        this.stmt(
+          `UPDATE sessions SET live_input_tokens=MAX(0, live_input_tokens-?), live_output_tokens=MAX(0, live_output_tokens-?),
+             live_cost_usd=MAX(0, live_cost_usd-?) WHERE id=?`,
+        ).run(inputTokens, outputTokens, priced.costUsd, sessionId);
+      }
       this.stmt(
         `UPDATE sessions SET
            cost_usd=(SELECT (cost_microusd + cost_remainder_picousd / 1000000.0) / 1000000.0
@@ -13107,6 +13161,7 @@ export class ControlPlaneDb {
            updated_at=? WHERE id=?`,
       ).run(sessionId, occurredAt, sessionId);
     }
+    if (closesLiveUsage) this.clearLiveUsageInTransaction(sessionId);
     if (source) {
       this.stmt(
         `UPDATE usage_session_state SET covered_through_seq=?, updated_at=? WHERE session_id=?`,
@@ -13200,6 +13255,11 @@ export class ControlPlaneDb {
     const nextCovered = row?.runner_history_epoch === (snapshot.historyEpoch ?? null)
       ? Math.max(row.covered_through_seq, snapshot.seq)
       : snapshot.seq;
+    if (nextCovered > (row?.covered_through_seq ?? 0) || row?.runner_history_epoch !== (snapshot.historyEpoch ?? null)) {
+      // Events this snapshot covers will never be ingested, possibly including the record that
+      // closed a live Claude window (#3086). Show too little rather than count it twice.
+      this.clearLiveUsageInTransaction(sessionId);
+    }
     this.stmt(
       `UPDATE usage_session_state SET runner_history_epoch=?, covered_through_seq=?, updated_at=?
        WHERE session_id=?`,
@@ -21944,7 +22004,8 @@ export class ControlPlaneDb {
       effort: row.effort, serviceTier: row.service_tier ?? undefined, permissionMode: row.permission_mode,
       tokensIn: row.input_tokens ?? 0, tokensOut: row.output_tokens ?? 0,
       contextTokensUsed: row.context_tokens_used ?? undefined, contextWindow: row.context_window ?? undefined,
-      costUsd: row.cost_usd ?? 0, costSource: context.costSources.get(row.id), adopted: row.adopted === 1,
+      costUsd: row.cost_usd ?? 0, costSource: context.costSources.get(row.id), ...ControlPlaneDb.liveUsageView(row),
+      adopted: row.adopted === 1,
       importLocationReady: row.adopted === 1 ? Boolean(row.workspace_path?.trim()) : undefined,
       costBudgetUsd: row.cost_budget_usd ?? undefined, costBudgetStepUsd: row.cost_budget_step_usd ?? row.cost_budget_usd ?? undefined,
       costCheckpointsUsd: row.cost_checkpoints_usd ? ControlPlaneDb.parseCheckpoints(row.cost_checkpoints_usd) : undefined,
@@ -22206,6 +22267,7 @@ export class ControlPlaneDb {
       contextWindow: row.context_window ?? undefined,
       costUsd: row.cost_usd ?? 0,
       costSource,
+      ...ControlPlaneDb.liveUsageView(row),
       adopted: row.adopted === 1,
       costBudgetUsd: row.cost_budget_usd ?? null,
       costBudgetStepUsd: row.cost_budget_step_usd ?? row.cost_budget_usd ?? null,

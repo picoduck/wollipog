@@ -121,3 +121,15 @@ test("repository, operations and provider compatibility are bounded and disclose
     { ...control, boundary: { ...control.boundary, authorizedByUserId: "" } },
     { ...control, boundary: { ...control.boundary, operations: ["tool_approval", "tool_approval"] } }]) assert.equal(validCampaignControl(invalid), false);
 });
+
+test("bounded issue authority requires v217 while the foundation stays compatible with v215", () => {
+  const bounded: CampaignControl = { mode: "full_control", boundary: { ...control.boundary,
+    issueAuthority: { epics: [2935], relatedFollowUps: true, maxIssues: 3, closureReasons: ["completed"] },
+  } };
+  for (const driver of ["codex-app-server", "claude-code"]) {
+    assert.equal(campaignAuthorityPreflight(control, driver, 215).supported, true);
+    assert.equal(campaignAuthorityPreflight(bounded, driver, 216).supported, false,
+      "live usage v216 does not prove bounded issue-write support");
+    assert.equal(campaignAuthorityPreflight(bounded, driver, 217).supported, true);
+  }
+});

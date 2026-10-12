@@ -10,8 +10,8 @@ export function scopeParticipants(db: ControlPlaneDb, root: SessionView): Sessio
 
 export function scopeCompatibility(db: ControlPlaneDb, root: SessionView): string | null {
   if (root.orchestratorPolicy?.control?.mode === "full_control" && root.orchestratorPolicy.control.boundary.issueAuthority &&
-      scopeParticipants(db, root).some((s) => (db.getRunner(s.runnerId)?.protocolVersion ?? 0) < 216)) {
-    return "Bounded Full Control issue writes require protocol-v216 on every participating Orchestrator runner.";
+      scopeParticipants(db, root).some((s) => (db.getRunner(s.runnerId)?.protocolVersion ?? 0) < 217)) {
+    return "Bounded Full Control issue writes require protocol-v217 on every participating Orchestrator runner.";
   }
   return scopeParticipants(db, root).every((s) => runnerSupportsProtocol(db.getRunner(s.runnerId)?.protocolVersion, "campaignIssueScopeChanges"))
     ? null : "Campaign issue scope changes require protocol-v208 on every participating Orchestrator runner. Update the runners and reconnect before retrying.";

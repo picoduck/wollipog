@@ -26,6 +26,7 @@ import { contextGhRunner, observeForgeStatus, type GhRunner } from "./campaign-f
 import { buildConversationHandoff, handoffDestinationError, type ConversationHandoffDraft } from "@wollipog/protocol";
 import { transferClaudeAccountTranscript } from "./claude-account-transcript.js";
 import { transferCodexAccountTranscript } from "./codex-account-transcript.js";
+import type { ClaudeLiveUsage } from "./drivers/claude-usage-accounting.js";
 import type { PoisonedProviderHistory } from "./drivers/poisoned-provider-history.js";
 import { UnclassifiedRejectionJournal } from "./drivers/unclassified-rejection-journal.js";
 import type {
@@ -7780,8 +7781,8 @@ export class SessionManager {
           capabilities: meta.capabilities,
           resumeId,
           agentVersion: meta.agentVersion,
-          claudeUsageCheckpoint: (() => {
-            if (meta.driver !== "claude-code") return undefined;
+          ...(() => {
+            if (meta.driver !== "claude-code") return {};
             // An appended result can survive a crash before its metadata flush. Only read that
             // uncovered suffix, not the whole retained conversation on each launch.
             let checkpoint = meta.claudeUsageCheckpoint;
@@ -7794,21 +7795,30 @@ export class SessionManager {
               cursor = tail.seq;
               this.store.patchMeta(sessionId, { claudeUsageCheckpointSeq: cursor });
             }
-            if (tail.seq <= cursor) return checkpoint?.sessionId === resumeId ? checkpoint : undefined;
+            const resumed = () => checkpoint?.sessionId === resumeId ? { claudeUsageCheckpoint: checkpoint } : {};
+            if (tail.seq <= cursor) return resumed();
+            // Live requests published after the checkpoint are still open: a later baseline that
+            // cannot cover them must account them as observed (#3086).
+            let live: ClaudeLiveUsage = [];
             let frozen: { logEpoch: number; throughSeq: number } | undefined;
             while (true) {
               const page = this.store.readEventPage(sessionId, { afterSeq: cursor, limit: HISTORY_PAGE_MAX_EVENTS, ...frozen });
               if (!page.ok) throw new Error(`Cannot recover Claude usage checkpoint: ${page.code} (${page.error})`);
               for (const event of page.events) {
-                if (event.payload.kind === "token_usage" && event.payload.claudeUsageCheckpoint?.sessionId === resumeId) {
+                if (event.payload.kind !== "token_usage" || event.payload.parentToolUseId) continue;
+                if (event.payload.claudeUsageCheckpoint?.sessionId === resumeId) {
                   checkpoint = event.payload.claudeUsageCheckpoint;
                 }
+                if (event.payload.liveUsage === "settled") live = [];
+                else if (event.payload.liveUsage === "provisional") live.push(event.payload);
+                // Republished in order: a restart between two resumes after the last one written.
+                else if (event.payload.liveUsage === "republished") live.shift();
               }
               if (!page.page.hasMore) break;
               cursor = page.page.nextAfterSeq;
               frozen = { logEpoch: page.page.logEpoch, throughSeq: page.page.throughSeq };
             }
-            return checkpoint?.sessionId === resumeId ? checkpoint : undefined;
+            return { ...resumed(), ...(live.length > 0 ? { claudeLiveUsage: live } : {}) };
           })(),
           acpSessionContext: meta.acpSessionContext,
           isolation,
@@ -7823,6 +7833,7 @@ export class SessionManager {
         },
         this.coalesceTextDeltas(sessionId, {
         supportsWorkerAttention: () => runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "workerAttention"),
+        supportsLiveClaudeUsage: () => runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "claudeLiveUsage"),
         onEvent: (p) => this.onDriverEvent(sessionId, p),
         onClaudeUsageCheckpoint: (checkpoint) => {
           if (this.active.get(sessionId)?.client !== client) return;
@@ -13914,6 +13925,10 @@ export class SessionManager {
         costReconciliationDeltaUsd: undefined,
         costReconciliationIdentity: undefined,
         costReconciliationRepairId: undefined,
+        // The fork renumbers its own history and seeds its own baseline; a source cursor beyond the
+        // fork's tail would hide its first live requests from recovery (#3086).
+        claudeUsageCheckpoint: undefined,
+        claudeUsageCheckpointSeq: undefined,
         preview: null,
         pendingApproval: null,
         providerCredentialScopeId: undefined,
@@ -19073,9 +19088,11 @@ export class SessionManager {
           ? "input_required" : resolvedAsync && !live?.running && !live?.providerInitiatedTurnActive
             ? before?.status === "input_required" ? "idle" : before?.status ?? "idle" : "running",
       });
-    } else if (payload.kind === "token_usage" && (!payload.parentToolUseId || payload.independentUsage === true)) {
+    } else if (payload.kind === "token_usage" && (!payload.parentToolUseId || payload.independentUsage === true) &&
+      payload.liveUsage !== "provisional") {
       // Claude's per-model root records include children; Codex child threads are independent.
-      // Only explicitly independent parented records contribute to session billing.
+      // Only explicitly independent parented records contribute to session billing. A provisional
+      // live record is display-only: a later record accounts the same request (#3086).
       const m = this.store.readMeta(sessionId);
       if (!m) return;
       this.store.patchMeta(sessionId, {
@@ -19084,6 +19101,9 @@ export class SessionManager {
         costUsd: m.costUsd + (payload.costUsd ?? 0),
         ...(payload.claudeUsageCheckpoint ? { claudeUsageCheckpoint: payload.claudeUsageCheckpoint, claudeUsageCheckpointSeq: m.seq } : {}),
       });
+      // Usage counters normally flush lazily. A republished request has already left the open live
+      // window that recovery would rebuild, so its counters must be as durable as its event (#3086).
+      if (payload.liveUsage === "republished" || payload.liveUsage === "settled") this.store.flush(sessionId);
     }
   }
 }

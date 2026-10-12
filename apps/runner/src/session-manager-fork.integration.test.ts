@@ -59,6 +59,8 @@ for (const sourceDriver of ["codex-app-server", "claude-code"] as const) {
       status: "idle", title: "Source", config: {}, tokensIn: 123, tokensOut: 456, costUsd: 9,
       preview: null, pendingApproval: null, turnCount: 3, seq: 0, createdAt: 1, updatedAt: 1,
       forkPoints: { "1": { tree, baseCommit, agentTurnId: "private-turn-id", eventSeq: 3 } },
+      claudeUsageCheckpoint: { sessionId: "source-conversation", totalCostUsd: 0.5, models: {}, accountingScope: "process" },
+      claudeUsageCheckpointSeq: 99,
     };
     store.create(source);
     store.appendEvent(source.sessionId, { kind: "user_message", text: "Keep the checkpoint", final: true });
@@ -108,6 +110,8 @@ for (const sourceDriver of ["codex-app-server", "claude-code"] as const) {
       assert.equal(child.driver, destination.driver); assert.equal(child.agentSessionId, null);
       assert.equal(child.turnCount, 0); assert.deepEqual(child.env, {}); assert.deepEqual(child.args, []);
       assert.equal(child.tokensIn, 0); assert.equal(child.costUsd, 0);
+      assert.deepEqual([child.claudeUsageCheckpoint, child.claudeUsageCheckpointSeq], [undefined, undefined],
+        "the fork renumbers its history, so a source accounting cursor would hide its first live requests");
       assert.equal(readFileSync(join(child.worktreePath!, "file.txt"), "utf8"), "checkpoint");
       assert.equal(git(child.worktreePath!, ["rev-parse", "HEAD"]), baseCommit);
       assert.equal(readFileSync(join(worktree.path, "file.txt"), "utf8"), "later source state");

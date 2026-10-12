@@ -7349,7 +7349,7 @@ export class SessionsService {
     if (!control) return fail("Full Control requires authenticated repository scope and a valid boundary", 400);
     if (control.mode === "full_control") {
       if (control.boundary.issueAuthority && (scope!.issueNumbers.length + reservedPublicationSlots(this.db, session, undefined, undefined, true) > control.boundary.issueAuthority.maxIssues ||
-          scopeCompatibility(this.db, { ...session, orchestratorPolicy: { ...session.orchestratorPolicy!, control } }))) return fail("The issue boundary exceeds its human-set scope limit or requires protocol-v216 participants", 409);
+          scopeCompatibility(this.db, { ...session, orchestratorPolicy: { ...session.orchestratorPolicy!, control } }))) return fail("The issue boundary exceeds its human-set scope limit or requires protocol-v217 participants", 409);
       if (!session.workspaceId) return fail("Full Control requires a repository workspace binding", 409);
       for (const id of [sessionId, ...this.db.campaignDescendantIds(sessionId)]) {
         const participant = this.db.getSession(id);
@@ -7861,7 +7861,7 @@ export class SessionsService {
         explanation: request.explanation, evidence: request.evidence,
         ...(request.comment === undefined ? {} : { comment: request.comment }),
         ...(request.dispositionRecommendationId === undefined ? {} : { dispositionRecommendationId: request.dispositionRecommendationId }),
-        activeChildren: issueClosureActiveChildren(this.db, sessionId) };
+        activeChildren: issueClosureActiveChildren(this.db, sessionId, { repository: inspection.repository, number: request.issue }) };
       if (fullBoundary && fullBoundary.operations.includes("issue_closure")) {
         // Inspect normal conflict evidence first. A missing ledger proof or a non-delegated
         // reason must retain the existing human route, never become a rejected human request.
@@ -7923,7 +7923,8 @@ export class SessionsService {
         this.db.resolvedCampaignSessionId(sessionId) !== sessionId ||
         !this.workflowDecisionAuthorityCurrent(session, session.parentControlPolicy!, decision) || decision.policyRevision !== session.parentControlPolicy?.revision ||
         decision.resourceDigest !== resourceDigest || !decision.resolvedAt || now - decision.resolvedAt > 30 * 60_000 ||
-        auditDigest(issueClosureActiveChildren(this.db, sessionId)) !== auditDigest(snapshot.activeChildren)) {
+        auditDigest(issueClosureActiveChildren(this.db, sessionId, { repository: snapshot.repository, number: snapshot.issue })) !==
+          auditDigest(snapshot.activeChildren)) {
       this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
       return fail("issue-closure approval expired or its scope, payload, policy, or active child work changed; request renewed human review", 409);
     }
@@ -7940,7 +7941,7 @@ export class SessionsService {
     const freshSession = this.db.getSession(sessionId);
     if (!freshSession || isTerminal(freshSession.status) || (freshSession.orchestratorPolicy?.issueScope?.revision ?? 0) !== (snapshot.scopeRevision ?? 0) ||
         !this.workflowDecisionAuthorityCurrent(freshSession, freshSession.parentControlPolicy!, decision) ||
-        auditDigest(issueClosureActiveChildren(this.db, sessionId)) !== auditDigest(snapshot.activeChildren) ||
+        auditDigest(issueClosureActiveChildren(this.db, sessionId, { repository: snapshot.repository, number: snapshot.issue })) !== auditDigest(snapshot.activeChildren) ||
         decision.authority === "orchestrator" && (scopeCompatibility(this.db, freshSession) || issueEvidenceDigest(closureEvidence(this.db, freshSession, snapshot)) !== snapshot.issueAdmission?.evidenceDigest)) return fail("Campaign authority, work or delivery changed during synchronization; request renewed exact review.", 409);
     const consumed = this.db.consumeGithubIssueClosure(occurrenceId, now);
     if (!consumed) return fail("issue-closure approval was consumed concurrently", 409);

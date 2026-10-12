@@ -62,7 +62,7 @@ export function evaluateCampaignAuthority(
   const issueOperation = snapshot?.category === "campaign_issue_scope" || snapshot?.category === "issue_closure" ||
     snapshot?.category === "follow_up_issue_publication" && full && control.boundary.issueAuthority;
   const issueBound = !issueOperation || !full || !control.boundary.issueAuthority || Boolean(snapshot && "issueAdmission" in snapshot &&
-    snapshot.issueAdmission?.boundaryRevision === control.boundary.revision && (protocol ?? 0) >= 216 && (controllerProtocol ?? 0) >= 216);
+    snapshot.issueAdmission?.boundaryRevision === control.boundary.revision && (protocol ?? 0) >= 217 && (controllerProtocol ?? 0) >= 217);
   return full && (!campaignBoundaryCurrent({ ...controller, parentControlPolicy: policy }) || !repositoryBound || !issueBound)
     ? { ...evaluated, owner: "human", basis: "human_required", reason: "outside_boundary" }
     : evaluated;

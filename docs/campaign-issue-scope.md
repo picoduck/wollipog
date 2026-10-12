@@ -48,7 +48,7 @@ The authenticated human admission may additionally establish `control.boundary.i
 ```
 
 Omission preserves human scope/closure ownership, including older Full Control boundaries. This
-contract requires protocol v216 on every participant. It does not expand the repository, objective,
+contract requires protocol v217 on every participant. It does not expand the repository, objective,
 operation list, provider permissions or aggregate spending limits. Only authenticated human
 admission may establish or enlarge it. Nested Orchestrators inherit the root boundary and cannot
 shadow it or admit their own scope. Initial authorized scope may be empty when the human establishes

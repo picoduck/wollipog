@@ -47,6 +47,7 @@ import {
 } from "@wollipog/protocol";
 import { dispatch as dispatchManagerTool } from "../../runner/src/session-management-mcp.js";
 import { ControlPlaneDb } from "./db.js";
+import { CAMPAIGN_WORK_LEDGER_SCHEMA } from "./campaign-work-ledger-store.js";
 import { applyClaudeReconciliation, previewClaudeReconciliation, observeReconciliationRevision } from "./claude-cost-reconciliation.js";
 import { parseRateTable } from "./usage-pricing.js";
 import { automationCommandDigest, canonicalAutomationCommandJson } from "./automation-command-outbox.js";
@@ -12354,6 +12355,29 @@ test("live Codex usage updates session and model totals and can trip a budget be
 
   svc.onSessionStatus(id, "idle");
   assert.equal(db.getSession(id)!.costUsd, 0.252, "turn settlement adds no usage by itself");
+});
+
+test("live Claude requests show while running, but a runtime snapshot cannot turn them into accrued cost", () => {
+  const { db, hub, svc } = makeHarness();
+  db.setUsageRateTable(parseRateTable({
+    "claude-test": { input_cost_per_token: 0.001, output_cost_per_token: 0.002 },
+  }));
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-test", inputTokens: 10, outputTokens: 5,
+    pricingContext: { requestInputTokens: 10 }, liveUsage: "provisional" }, 1);
+  let session = db.getSession(id)!;
+  assert.deepEqual([session.tokensIn, session.costUsd, session.liveUsage], [0, 0, { tokensIn: 10, tokensOut: 5, costUsd: 0.02 }]);
+  assert.deepEqual(db.listSessionSummaries().find((candidate) => candidate.id === id)?.liveUsage, session.liveUsage,
+    "dashboard summaries show the same running usage");
+  // A runtime snapshot in step with the event stream floors at accrued cost, never the estimate.
+  svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({ id, status: "running", tokensIn: 0, tokensOut: 0, costUsd: 0, seq: 1 }));
+  assert.equal(db.sessionCostUsd(id), 0);
+  assert.deepEqual(db.getSession(id)!.liveUsage, { tokensIn: 10, tokensOut: 5, costUsd: 0.02 });
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-test", inputTokens: 10, outputTokens: 5,
+    costUsd: 0.01, costIsEstimate: true, liveUsage: "settled" }, 2);
+  session = db.getSession(id)!;
+  assert.deepEqual([session.tokensIn, session.costUsd, session.liveUsage], [10, 0.01, undefined]);
 });
 
 test("priced cost acknowledgements are not sent to pre-v106 runners", () => {
@@ -24763,6 +24787,182 @@ test("issue closure requires an exact human decision and executes one durable ac
       }
     } finally { db.close(); }
   }
+});
+
+test("issue closure binds only children whose work bears on the issue (#3084)", async () => {
+  // Each mode changes one child after the human approved closing issue 1440, then executes.
+  const executable = new Set(["unrelated_prompt", "unrelated_decision", "new_unrelated_child"]);
+  for (const mode of ["unrelated_prompt", "unrelated_decision", "new_unrelated_child", "related_prompt",
+    "related_decision", "unattributed_prompt", "unechoed_launch", "earlier_attempt_prompt", "issue_cleared",
+    "follow_up_prompt", "linked_unrelated_prompt", "reassigned_into_lineage", "issue_toggled", "readjudicated"]) {
+    const { db, svc, hub, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+    try {
+      const plan = svc.recordCampaignPlan(parent.id, { items: [
+        { key: "issue", issue: { repository: "picoduck/wollipog", number: 1440 } },
+        { key: "other", issue: { repository: "picoduck/wollipog", number: 1441 } },
+        { key: "unrelated" },
+      ], planComplete: true });
+      assert.ok(plan.ok && plan.data, plan.error);
+      const [issueItem, otherItem, unrelatedItem] = plan.data.items.map((item) => item.workItemId);
+      const assign = (workItemId: string, childSessionId: string) => {
+        const assigned = svc.assignCampaignWorkItem(parent.id, { workItemId, childSessionId });
+        assert.ok(assigned.ok, assigned.error);
+      };
+      const track = (workItemId: string, issue: { repository: string; number: number } | null) =>
+        assert.ok(svc.updateCampaignWorkItem(parent.id, { workItemId, issue }).ok);
+      const followUpOf = (originItem: string, originSessionId: string, key: string) => {
+        const recommended = svc.recordCampaignFollowUp(parent.id, { originSessionId, repository: "picoduck/wollipog",
+          title: `Follow-Up ${key}`, originWorkItemIds: [originItem] });
+        assert.ok(recommended.ok && recommended.data, recommended.error);
+        const accepted = svc.adjudicateCampaignRecommendation(parent.id, { recommendationId: recommended.data.id,
+          disposition: "accepted", reason: "Needed", resultingWorkItemKey: key });
+        assert.ok(accepted.ok && accepted.data?.workItem, accepted.error);
+        return accepted.data.workItem.id;
+      };
+      // The runner echoes each launch prompt as the first user message; the harness has no runner.
+      const launch = (prompt: string, echoed = true) => {
+        const id = spawn(parent.id, prompt);
+        if (echoed) db.appendEvent(id, { kind: "user_message", text: prompt }, Date.now());
+        return id;
+      };
+      const related = launch("Deliver the first item");
+      assign(issueItem!, related);
+      const unrelated = launch("Deliver issue 1441.", mode !== "unechoed_launch");
+      if (mode === "earlier_attempt_prompt") {
+        assign(issueItem!, unrelated);
+        assign(otherItem!, unrelated);
+      } else if (mode === "issue_cleared") {
+        // Clearing an item's issue later does not erase that the item once tracked it.
+        track(unrelatedItem!, { repository: "picoduck/wollipog", number: 1440 });
+        assign(unrelatedItem!, unrelated);
+        assign(otherItem!, unrelated);
+        track(unrelatedItem!, null);
+      } else assign(otherItem!, unrelated);
+      const unattributed = mode === "unattributed_prompt" ? launch("Help with something") : null;
+      // A follow-up of the issue's item, and of an unrelated item: any follow-up link keeps a child bound.
+      const lineageChild = mode === "follow_up_prompt" ? launch("Deliver the follow-up") : null;
+      if (lineageChild) assign(followUpOf(issueItem!, related, "followup:lineage"), lineageChild);
+      const linkedChild = mode === "linked_unrelated_prompt" ? launch("Deliver the plain follow-up") : null;
+      if (linkedChild) assign(followUpOf(unrelatedItem!, unrelated, "followup:plain"), linkedChild);
+
+      let executions = 0;
+      hub.requestHandler = (message) => {
+        if (message.type !== "github_issue_closure") throw new Error("unexpected runner command");
+        if (message.operation === "inspect") return { type: "github_issue_closure_result", requestId: message.requestId,
+          sessionId: parent.id, ok: true, inspection: { repository: "picoduck/wollipog", issue: message.issue, title: "Merged work",
+            url: `https://github.com/picoduck/wollipog/issues/${message.issue}`, state: "OPEN",
+            forgeDigest: "a".repeat(64), openPullRequests: [] } };
+        executions++;
+        return { type: "github_issue_closure_result", requestId: message.requestId, sessionId: parent.id,
+          ok: true, result: { outcome: "closed", completedAt: Date.now() } };
+      };
+      const requested = await svc.requestGithubIssueClosure(parent.id, { requestId: "closure-1440", issue: 1440,
+        reason: "completed", explanation: "The work merged.", evidence: ["Merged in the campaign."] });
+      assert.ok(requested.ok && requested.data?.decision, `${mode}: ${requested.error}`);
+      const decision = requested.data.decision;
+      assert.ok(decision.resourceSnapshot.category === "issue_closure");
+      const bound = new Set(decision.resourceSnapshot.activeChildren.map((child) => child.sessionId));
+      assert.ok(bound.has(related), `${mode}: the child assigned to the issue is bound`);
+      assert.equal(bound.has(unrelated), ["unechoed_launch", "earlier_attempt_prompt", "issue_cleared"].includes(mode),
+        `${mode}: a child attributed elsewhere is bound only when its launch is unknown or it was ever connected to the issue`);
+      if (unattributed) assert.ok(bound.has(unattributed), "a child without an open attempt stays bound");
+      if (lineageChild) assert.ok(bound.has(lineageChild), "a child on a follow-up of the issue is bound");
+      if (linkedChild) assert.ok(bound.has(linkedChild), "a child on any follow-up-linked item stays bound");
+      assert.ok(svc.approve(parent.id, decision.occurrenceId, "approve", { kind: "human", id: "reviewer" }).ok);
+
+      const prompt = (sessionId: string) => db.stageSessionPromptCommand({ commandId: `prompt-${sessionId}`, sessionId,
+        runnerId: RUNNER_ID, payloadJson: JSON.stringify({ text: "Continue." }), payloadSha256: "c".repeat(64),
+        expiresAt: Date.now() + 60_000, now: Date.now() });
+      const raiseDecision = (sessionId: string) => assert.ok(svc.createWorkflowDecision(sessionId, {
+        requestId: `ui-${sessionId}`, resourceKey: `ui-${sessionId}`, resourceSnapshot: { category: "ui_evidence_approval",
+          evidence: [{ evidenceId: "after", uri: "https://evidence.example/after.png", sha256: "c".repeat(64) }] },
+      }).ok);
+      if (["unrelated_prompt", "unechoed_launch", "earlier_attempt_prompt", "issue_cleared"].includes(mode)) prompt(unrelated);
+      if (mode === "unrelated_decision") raiseDecision(unrelated);
+      if (mode === "new_unrelated_child") assign(unrelatedItem!, launch("Deliver the unrelated item"));
+      if (mode === "related_prompt") prompt(related);
+      if (mode === "related_decision") raiseDecision(related);
+      if (unattributed) prompt(unattributed);
+      if (lineageChild) prompt(lineageChild);
+      if (linkedChild) prompt(linkedChild);
+      if (mode === "reassigned_into_lineage") assign(issueItem!, unrelated);
+      // Connecting a child after approval and disconnecting it again still revokes: history only grows.
+      if (mode === "issue_toggled") {
+        track(otherItem!, { repository: "picoduck/wollipog", number: 1440 });
+        prompt(unrelated);
+        track(otherItem!, { repository: "picoduck/wollipog", number: 1441 });
+      }
+      if (mode === "readjudicated") {
+        const rejoin = svc.recordCampaignFollowUp(parent.id, { originSessionId: related, repository: "picoduck/wollipog",
+          title: "Rejoin Follow-Up", originWorkItemIds: [issueItem!] });
+        assert.ok(rejoin.ok && rejoin.data, rejoin.error);
+        assert.ok(svc.adjudicateCampaignRecommendation(parent.id, { recommendationId: rejoin.data.id,
+          disposition: "duplicate", reason: "Same work", resultingWorkItemKey: "other" }).ok);
+        prompt(unrelated);
+        const rejected = svc.adjudicateCampaignRecommendation(parent.id, { recommendationId: rejoin.data.id,
+          disposition: "rejected", reason: "Changed course" });
+        assert.ok(rejected.ok, rejected.error);
+      }
+
+      const result = await svc.executeGithubIssueClosure(parent.id, decision.occurrenceId, decision.resourceDigest);
+      if (executable.has(mode)) {
+        assert.ok(result.ok && result.data, `${mode}: ${result.error}`);
+        assert.equal(result.data.issueClosureResult?.outcome, "closed");
+        assert.equal(executions, 1);
+      } else {
+        assert.equal(result.status, 409, `${mode}: related work changed`);
+        assert.equal(db.workflowDecisionByOccurrence(decision.occurrenceId)?.status, "revoked");
+        assert.equal(executions, 0);
+      }
+    } finally { db.close(); }
+  }
+});
+
+test("issue-closure attribution treats work recorded before its history as related (#3084)", () => {
+  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+  try {
+    // Emulate a database from before attribution history: no triggers, marker, or history rows.
+    db.db.exec(`DROP TRIGGER campaign_work_item_issue_recorded; DROP TRIGGER campaign_work_item_issue_changed;
+      DROP TRIGGER campaign_work_lineage_edge_origin; DROP TRIGGER campaign_work_lineage_edge_adjudicated;
+      DROP TRIGGER campaign_work_lineage_edge_readjudicated; DELETE FROM campaign_work_attribution_start;`);
+    const plan = svc.recordCampaignPlan(parent.id, { items: [
+      { key: "issue", issue: { repository: "Picoduck/Wollipog", number: 1440 } }, { key: "other" },
+    ], planComplete: true });
+    assert.ok(plan.ok && plan.data, plan.error);
+    const [issueItem, otherItem] = plan.data.items.map((item) => item.workItemId);
+    const earlier = spawn(parent.id, "Deliver the item");
+    assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId: issueItem!, childSessionId: earlier }).ok);
+    assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId: otherItem!, childSessionId: earlier }).ok);
+    assert.ok(svc.updateCampaignWorkItem(parent.id, { workItemId: issueItem!, issue: null }).ok);
+    const rows = (sql: string) => db.db.prepare(sql).all().map((row) => ({ ...row }));
+    assert.deepEqual(rows("SELECT * FROM campaign_work_item_issue_history"), [], "the old schema kept no history");
+
+    db.db.exec(CAMPAIGN_WORK_LEDGER_SCHEMA);
+    db.db.exec(CAMPAIGN_WORK_LEDGER_SCHEMA);
+    const legacy = () => rows("SELECT work_item_id FROM campaign_work_legacy_items ORDER BY work_item_id")
+      .map((row) => row.work_item_id);
+    assert.deepEqual(legacy(), [issueItem, otherItem].sort(), "every item that predates history is legacy, once");
+    const excludable = () => [...db.campaignWorkLedger.issueClosureExcludableSessions(parent.id, "picoduck/wollipog", 1440)];
+    assert.deepEqual(excludable(), [], "work recorded before history began is never treated as unrelated");
+
+    // Items created afterwards are tracked normally, and a reason-only re-adjudication is a no-op upsert.
+    const plain = svc.recordCampaignPlan(parent.id, { items: [{ key: "plain" }, { key: "origin" }], planComplete: true });
+    assert.ok(plain.ok && plain.data, plain.error);
+    const [plainItem, originItem] = plain.data.items.map((item) => item.workItemId);
+    const unrelated = spawn(parent.id, "Deliver the plain item");
+    assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId: plainItem!, childSessionId: unrelated }).ok);
+    assert.deepEqual(excludable(), [unrelated]);
+    assert.deepEqual(legacy(), [issueItem, otherItem].sort(), "a later application marks nothing");
+    const followUp = svc.recordCampaignFollowUp(parent.id, { originSessionId: unrelated, repository: "picoduck/wollipog",
+      title: "Tracked Follow-Up", originWorkItemIds: [originItem!] });
+    assert.ok(followUp.ok && followUp.data, followUp.error);
+    for (const reason of ["Needed", "Still needed"]) {
+      const accepted = svc.adjudicateCampaignRecommendation(parent.id, { recommendationId: followUp.data.id,
+        disposition: "accepted", reason, resultingWorkItemKey: "followup:tracked" });
+      assert.ok(accepted.ok, accepted.error);
+    }
+    assert.equal(rows("SELECT * FROM campaign_work_lineage_edges").length, 1);
+  } finally { db.close(); }
 });
 
 /* ------------------------- Campaign work ledger (#2417) ------------------------- */

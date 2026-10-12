@@ -29,11 +29,16 @@ const UNKNOWN_COST = "$—";
  * nobody managed to price.
  */
 export function sessionCostLabel(
-  session: Pick<SessionView, "tokensIn" | "tokensOut" | "costUsd" | "costSource">,
+  session: Pick<SessionView, "tokensIn" | "tokensOut" | "costUsd" | "costSource" | "liveUsage">,
   breakdown: SessionUsageResponse | null = null,
 ): SessionCostLabel | null {
-  const cost = formatCost(Math.max(session.costUsd, breakdown?.totals.costUsd ?? 0));
+  const live = session.liveUsage;
+  const cost = formatCost(Math.max(session.costUsd, breakdown?.totals.costUsd ?? 0) + (live?.costUsd ?? 0));
   if (cost) return { text: cost, priced: true, ariaLabel: `Session Usage: ${cost}` };
+  if (live && live.tokensIn + live.tokensOut > 0) {
+    // A live estimate of zero means the running turn's model has no rate yet, not that it is free.
+    return { text: UNKNOWN_COST, priced: false, ariaLabel: "Session Usage: Cost Unavailable" };
+  }
   if (session.tokensIn + session.tokensOut > 0) {
     // Callers normally reject stale detail wholesale, but keep this shared formatter safe on its
     // own: provenance from a ledger behind the session's live counters cannot price newer usage.
@@ -73,6 +78,29 @@ export interface SessionUsageTotals {
  * input.
  */
 export function sessionUsageTotals(
+  session: Pick<SessionView, "tokensIn" | "tokensOut" | "costUsd" | "liveUsage">,
+  breakdown: SessionUsageResponse | null,
+): SessionUsageTotals {
+  return withLiveUsage(settledUsageTotals(session, breakdown), session.liveUsage);
+}
+
+/**
+ * A running Claude turn's completed requests are in no total yet (#3086). They count as usage so
+ * far, beside whichever totals were chosen; the choice itself compares settled counters only, so
+ * live usage can never make a trailing ledger look current or a current one look stale.
+ */
+function withLiveUsage(totals: SessionUsageTotals, live: SessionView["liveUsage"]): SessionUsageTotals {
+  if (!live) return totals;
+  return {
+    ...totals,
+    inputTokens: totals.inputTokens + live.tokensIn,
+    outputTokens: totals.outputTokens + live.tokensOut,
+    processedTokens: totals.processedTokens + live.tokensIn + live.tokensOut,
+    costUsd: totals.costUsd + live.costUsd,
+  };
+}
+
+function settledUsageTotals(
   session: Pick<SessionView, "tokensIn" | "tokensOut" | "costUsd">,
   breakdown: SessionUsageResponse | null,
 ): SessionUsageTotals {
