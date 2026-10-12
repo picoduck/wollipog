@@ -187,35 +187,6 @@ BEGIN
     VALUES (NEW.campaign_session_id) ON CONFLICT(campaign_session_id) DO NOTHING;
 END;
 
--- Every issue an attempt's item has tracked while the attempt existed, so issue-closure attribution
--- (#3084) survives a later edit or removal of the item's issue. Rows are only ever added; the
--- trailing backfill covers attempts recorded before this table existed and is idempotent.
-CREATE TABLE IF NOT EXISTS campaign_work_attempt_issues (
-  attempt_id       TEXT NOT NULL,
-  issue_repository TEXT NOT NULL,
-  issue_number     INTEGER NOT NULL,
-  PRIMARY KEY (attempt_id, issue_repository, issue_number),
-  FOREIGN KEY (attempt_id) REFERENCES campaign_work_attempts(id) ON DELETE CASCADE
-);
-CREATE TRIGGER IF NOT EXISTS campaign_work_attempt_issue_assigned
-  AFTER INSERT ON campaign_work_attempts
-BEGIN
-  INSERT OR IGNORE INTO campaign_work_attempt_issues (attempt_id, issue_repository, issue_number)
-    SELECT NEW.id, lower(issue_repository), issue_number FROM campaign_work_items
-    WHERE id=NEW.work_item_id AND issue_number IS NOT NULL;
-END;
-CREATE TRIGGER IF NOT EXISTS campaign_work_attempt_issue_changed
-  AFTER UPDATE OF issue_repository, issue_number ON campaign_work_items
-  WHEN NEW.issue_number IS NOT NULL
-BEGIN
-  INSERT OR IGNORE INTO campaign_work_attempt_issues (attempt_id, issue_repository, issue_number)
-    SELECT id, lower(NEW.issue_repository), NEW.issue_number FROM campaign_work_attempts WHERE work_item_id=NEW.id;
-END;
-INSERT OR IGNORE INTO campaign_work_attempt_issues (attempt_id, issue_repository, issue_number)
-  SELECT attempt.id, lower(item.issue_repository), item.issue_number
-  FROM campaign_work_attempts attempt JOIN campaign_work_items item ON item.id=attempt.work_item_id
-  WHERE item.issue_number IS NOT NULL;
-
 -- Delivery proof for one attempt. A later execution of the same child never invalidates it.
 CREATE TABLE IF NOT EXISTS campaign_work_verifications (
   id                     TEXT PRIMARY KEY,
@@ -264,6 +235,72 @@ CREATE TABLE IF NOT EXISTS campaign_recommendation_dispositions (
   FOREIGN KEY (resulting_work_item_id) REFERENCES campaign_work_items(id) ON DELETE SET NULL,
   FOREIGN KEY (adjudicated_by_session_id) REFERENCES sessions(id) ON DELETE SET NULL
 );
+
+-- Issue-closure attribution history (#3084). Every issue an item has ever tracked, and every
+-- follow-up edge from an origin item to an accepted resulting item ever recorded. Rows are only
+-- ever added, so a later edit of an item's issue or a re-adjudication cannot disconnect a child
+-- from an issue it was once connected to. The backfills cover rows recorded before these tables
+-- existed and are idempotent.
+CREATE TABLE IF NOT EXISTS campaign_work_item_issue_history (
+  work_item_id     TEXT NOT NULL,
+  issue_repository TEXT NOT NULL,
+  issue_number     INTEGER NOT NULL,
+  PRIMARY KEY (work_item_id, issue_repository, issue_number),
+  FOREIGN KEY (work_item_id) REFERENCES campaign_work_items(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_campaign_work_item_issue_history_issue
+  ON campaign_work_item_issue_history(issue_repository, issue_number);
+CREATE TRIGGER IF NOT EXISTS campaign_work_item_issue_recorded
+  AFTER INSERT ON campaign_work_items WHEN NEW.issue_number IS NOT NULL
+BEGIN
+  INSERT OR IGNORE INTO campaign_work_item_issue_history (work_item_id, issue_repository, issue_number)
+    VALUES (NEW.id, lower(NEW.issue_repository), NEW.issue_number);
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_work_item_issue_changed
+  AFTER UPDATE OF issue_repository, issue_number ON campaign_work_items WHEN NEW.issue_number IS NOT NULL
+BEGIN
+  INSERT OR IGNORE INTO campaign_work_item_issue_history (work_item_id, issue_repository, issue_number)
+    VALUES (NEW.id, lower(NEW.issue_repository), NEW.issue_number);
+END;
+INSERT OR IGNORE INTO campaign_work_item_issue_history (work_item_id, issue_repository, issue_number)
+  SELECT id, lower(issue_repository), issue_number FROM campaign_work_items WHERE issue_number IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS campaign_work_lineage_edges (
+  origin_work_item_id TEXT NOT NULL,
+  result_work_item_id TEXT NOT NULL,
+  PRIMARY KEY (origin_work_item_id, result_work_item_id),
+  FOREIGN KEY (origin_work_item_id) REFERENCES campaign_work_items(id) ON DELETE CASCADE,
+  FOREIGN KEY (result_work_item_id) REFERENCES campaign_work_items(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_campaign_work_lineage_edges_result
+  ON campaign_work_lineage_edges(result_work_item_id);
+CREATE TRIGGER IF NOT EXISTS campaign_work_lineage_edge_origin
+  AFTER INSERT ON campaign_recommendation_origins
+BEGIN
+  INSERT OR IGNORE INTO campaign_work_lineage_edges (origin_work_item_id, result_work_item_id)
+    SELECT NEW.work_item_id, resulting_work_item_id FROM campaign_recommendation_dispositions
+    WHERE recommendation_id=NEW.recommendation_id AND resulting_work_item_id IS NOT NULL;
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_work_lineage_edge_adjudicated
+  AFTER INSERT ON campaign_recommendation_dispositions WHEN NEW.resulting_work_item_id IS NOT NULL
+BEGIN
+  INSERT OR IGNORE INTO campaign_work_lineage_edges (origin_work_item_id, result_work_item_id)
+    SELECT work_item_id, NEW.resulting_work_item_id FROM campaign_recommendation_origins
+    WHERE recommendation_id=NEW.recommendation_id;
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_work_lineage_edge_readjudicated
+  AFTER UPDATE OF resulting_work_item_id ON campaign_recommendation_dispositions
+  WHEN NEW.resulting_work_item_id IS NOT NULL
+BEGIN
+  INSERT OR IGNORE INTO campaign_work_lineage_edges (origin_work_item_id, result_work_item_id)
+    SELECT work_item_id, NEW.resulting_work_item_id FROM campaign_recommendation_origins
+    WHERE recommendation_id=NEW.recommendation_id;
+END;
+INSERT OR IGNORE INTO campaign_work_lineage_edges (origin_work_item_id, result_work_item_id)
+  SELECT origin.work_item_id, disposition.resulting_work_item_id
+  FROM campaign_recommendation_origins origin
+  JOIN campaign_recommendation_dispositions disposition ON disposition.recommendation_id=origin.recommendation_id
+  WHERE disposition.resulting_work_item_id IS NOT NULL;
 `;
 
 /** `details` carries machine-readable fields a client acts on, such as `revision_changed`. */
@@ -651,34 +688,29 @@ export class CampaignWorkLedgerStore {
     return sessions;
   }
 
-  /** Attribution for an issue closure (#3084). The lineage is every item that tracks the issue now or
-   * did while any attempt on it existed, plus the follow-up items it descends from and that descend
-   * from it, through adjudicated recommendations; siblings and dependencies are not lineage.
-   * `lineage` holds every session with any attempt in it, open or ended, so earlier work on the
-   * issue still counts. `elsewhere` holds sessions whose open attempt is on an item outside it. */
+  /** Attribution for an issue closure (#3084). The lineage is every item that has ever tracked the
+   * issue plus the follow-up items it descends from and that descend from it, through every edge
+   * ever adjudicated; siblings and dependencies are not lineage. Both inputs are append-only
+   * history, so the lineage only grows. `lineage` holds every session with any attempt in it, open
+   * or ended, so earlier work on the issue still counts. `elsewhere` holds sessions whose open
+   * attempt is on an item outside it. */
   issueLineageSessions(campaignId: string, repository: string, issueNumber: number): { lineage: Set<string>; elsewhere: Set<string> } {
     const rows = this.stmt(`
       WITH RECURSIVE
-        edges(origin_id, result_id) AS (
-          SELECT origin.work_item_id, disposition.resulting_work_item_id
-          FROM campaign_recommendation_origins origin
-          JOIN campaign_recommendation_dispositions disposition ON disposition.recommendation_id=origin.recommendation_id
-          WHERE disposition.resulting_work_item_id IS NOT NULL
-        ),
         issue_items(id) AS (
-          SELECT id FROM campaign_work_items
-          WHERE campaign_session_id=?1 AND lower(issue_repository)=lower(?2) AND issue_number=?3
-          UNION SELECT attempt.work_item_id FROM campaign_work_attempts attempt
-          JOIN campaign_work_attempt_issues issue ON issue.attempt_id=attempt.id
-          WHERE attempt.campaign_session_id=?1 AND issue.issue_repository=lower(?2) AND issue.issue_number=?3
+          SELECT history.work_item_id FROM campaign_work_item_issue_history history
+          JOIN campaign_work_items item ON item.id=history.work_item_id
+          WHERE item.campaign_session_id=?1 AND history.issue_repository=lower(?2) AND history.issue_number=?3
         ),
         descendants(id) AS (
           SELECT id FROM issue_items
-          UNION SELECT edges.result_id FROM edges JOIN descendants ON edges.origin_id=descendants.id
+          UNION SELECT edge.result_work_item_id FROM campaign_work_lineage_edges edge
+          JOIN descendants ON edge.origin_work_item_id=descendants.id
         ),
         ancestors(id) AS (
           SELECT id FROM issue_items
-          UNION SELECT edges.origin_id FROM edges JOIN ancestors ON edges.result_id=ancestors.id
+          UNION SELECT edge.origin_work_item_id FROM campaign_work_lineage_edges edge
+          JOIN ancestors ON edge.result_work_item_id=ancestors.id
         ),
         lineage(id) AS (SELECT id FROM descendants UNION SELECT id FROM ancestors)
       SELECT attempt.session_id, attempt.ended_at IS NULL AS open,

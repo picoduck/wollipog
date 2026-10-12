@@ -24765,7 +24765,7 @@ test("issue closure binds only children whose work bears on the issue (#3084)", 
   for (const mode of ["unrelated_prompt", "unrelated_decision", "new_unrelated_child", "related_prompt",
     "related_decision", "unattributed_prompt", "mentioning_prompt", "earlier_attempt_prompt",
     "follow_up_prompt", "reassigned_into_lineage", "steered_into_issue", "unechoed_launch", "listed_issues",
-    "issue_cleared"]) {
+    "issue_cleared", "ancestor_issue_toggled", "readjudicated"]) {
     const { db, svc, hub, parent, spawn } = stopAndArchiveCampaignFixture("retain");
     try {
       const plan = svc.recordCampaignPlan(parent.id, { items: [
@@ -24811,6 +24811,19 @@ test("issue closure binds only children whose work bears on the issue (#3084)", 
       const followUpItem = accepted.data.workItem.id;
       const lineageChild = mode === "follow_up_prompt" ? spawn(parent.id, "Deliver the follow-up") : null;
       if (lineageChild) assign(followUpItem, lineageChild);
+      // A child on a follow-up of an issue-less item, connected to the issue only after approval.
+      let descendant: string | null = null;
+      if (mode === "ancestor_issue_toggled") {
+        const recommended = svc.recordCampaignFollowUp(parent.id, { originSessionId: unrelated, repository: "picoduck/wollipog",
+          title: "Plain Follow-Up", originWorkItemIds: [unrelatedItem!] });
+        assert.ok(recommended.ok && recommended.data, recommended.error);
+        const plain = svc.adjudicateCampaignRecommendation(parent.id, { recommendationId: recommended.data.id,
+          disposition: "accepted", reason: "Needed", resultingWorkItemKey: "followup:plain" });
+        assert.ok(plain.ok && plain.data?.workItem, plain.error);
+        descendant = spawn(parent.id, "Deliver the plain follow-up");
+        echo(descendant, "Deliver the plain follow-up");
+        assign(plain.data.workItem.id, descendant);
+      }
 
       let executions = 0;
       hub.requestHandler = (message) => {
@@ -24834,6 +24847,7 @@ test("issue closure binds only children whose work bears on the issue (#3084)", 
         `${mode}: a child attributed elsewhere is bound only when it names the issue, once worked on it, or its launch is unknown`);
       if (unattributed) assert.ok(bound.has(unattributed), "a child without an open attempt stays bound");
       if (lineageChild) assert.ok(bound.has(lineageChild), "a child on a follow-up of the issue is bound");
+      if (descendant) assert.ok(!bound.has(descendant), "a child with no connection to the issue is not bound");
       assert.ok(svc.approve(parent.id, decision.occurrenceId, "approve", { kind: "human", id: "reviewer" }).ok);
 
       const prompt = (sessionId: string) => db.stageSessionPromptCommand({ commandId: `prompt-${sessionId}`, sessionId,
@@ -24863,6 +24877,24 @@ test("issue closure binds only children whose work bears on the issue (#3084)", 
       if (unattributed) prompt(unattributed);
       if (lineageChild) prompt(lineageChild);
       if (mode === "reassigned_into_lineage") assign(followUpItem, unrelated);
+      // Connecting a child after approval and disconnecting it again still revokes: history only grows.
+      if (mode === "ancestor_issue_toggled") {
+        assert.ok(svc.updateCampaignWorkItem(parent.id, { workItemId: unrelatedItem!,
+          issue: { repository: "picoduck/wollipog", number: 1440 } }).ok);
+        prompt(descendant!);
+        assert.ok(svc.updateCampaignWorkItem(parent.id, { workItemId: unrelatedItem!, issue: null }).ok);
+      }
+      if (mode === "readjudicated") {
+        const rejoin = svc.recordCampaignFollowUp(parent.id, { originSessionId: related, repository: "picoduck/wollipog",
+          title: "Rejoin Follow-Up", originWorkItemIds: [issueItem!] });
+        assert.ok(rejoin.ok && rejoin.data, rejoin.error);
+        assert.ok(svc.adjudicateCampaignRecommendation(parent.id, { recommendationId: rejoin.data.id,
+          disposition: "duplicate", reason: "Same work", resultingWorkItemKey: "other" }).ok);
+        prompt(unrelated);
+        const rejected = svc.adjudicateCampaignRecommendation(parent.id, { recommendationId: rejoin.data.id,
+          disposition: "rejected", reason: "Changed course" });
+        assert.ok(rejected.ok, rejected.error);
+      }
 
       const result = await svc.executeGithubIssueClosure(parent.id, decision.occurrenceId, decision.resourceDigest);
       if (executable.has(mode)) {
@@ -24878,7 +24910,7 @@ test("issue closure binds only children whose work bears on the issue (#3084)", 
   }
 });
 
-test("issue-closure attribution backfills attempts recorded before their issue history (#3084)", () => {
+test("issue-closure attribution backfills item issue and lineage history (#3084)", () => {
   const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
   try {
     const plan = svc.recordCampaignPlan(parent.id, { items: [
@@ -24889,13 +24921,23 @@ test("issue-closure attribution backfills attempts recorded before their issue h
     const child = spawn(parent.id, "Deliver the item");
     assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId: issueItem!, childSessionId: child }).ok);
     assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId: otherItem!, childSessionId: child }).ok);
-    const history = () => db.db.prepare("SELECT issue_repository, issue_number FROM campaign_work_attempt_issues").all().map((row) => ({ ...row }));
-    assert.deepEqual(history(), [{ issue_repository: "picoduck/wollipog", issue_number: 1440 }]);
+    const followUp = svc.recordCampaignFollowUp(parent.id, { originSessionId: child, repository: "picoduck/wollipog",
+      title: "Backfilled Follow-Up", originWorkItemIds: [issueItem!] });
+    assert.ok(followUp.ok && followUp.data, followUp.error);
+    const accepted = svc.adjudicateCampaignRecommendation(parent.id, { recommendationId: followUp.data.id,
+      disposition: "accepted", reason: "Needed", resultingWorkItemKey: "followup:backfilled" });
+    assert.ok(accepted.ok && accepted.data?.workItem, accepted.error);
+    const rows = (sql: string) => db.db.prepare(sql).all().map((row) => ({ ...row }));
+    const history = () => [rows("SELECT work_item_id, issue_repository, issue_number FROM campaign_work_item_issue_history"),
+      rows("SELECT origin_work_item_id, result_work_item_id FROM campaign_work_lineage_edges")];
+    const expected = [[{ work_item_id: issueItem, issue_repository: "picoduck/wollipog", issue_number: 1440 }],
+      [{ origin_work_item_id: issueItem, result_work_item_id: accepted.data.workItem.id }]];
+    assert.deepEqual(history(), expected);
     // An upgraded database starts without history; reapplying the schema backfills it.
-    db.db.exec("DELETE FROM campaign_work_attempt_issues");
+    db.db.exec("DELETE FROM campaign_work_item_issue_history; DELETE FROM campaign_work_lineage_edges;");
     db.db.exec(CAMPAIGN_WORK_LEDGER_SCHEMA);
     db.db.exec(CAMPAIGN_WORK_LEDGER_SCHEMA);
-    assert.deepEqual(history(), [{ issue_repository: "picoduck/wollipog", issue_number: 1440 }]);
+    assert.deepEqual(history(), expected);
     assert.ok(svc.updateCampaignWorkItem(parent.id, { workItemId: issueItem!, issue: null }).ok);
     const attribution = db.campaignWorkLedger.issueLineageSessions(parent.id, "picoduck/wollipog", 1440);
     assert.deepEqual([[...attribution.lineage], [...attribution.elsewhere]], [[child], [child]],
