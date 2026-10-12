@@ -46,3 +46,41 @@ test("media-only tool contract rejects generic filesystem tools and extra MCP ha
   }
   assert.equal(mediaOnlyToolSet(["review_video_evidence_frame", "review_video_evidence_frame"]), false);
 });
+
+test("existing network grant gets only bounded DNS/TLS runtime files while forbidden operator state remains inaccessible", (t) => {
+  if (process.platform !== "linux" || process.getuid?.() === 0) { t.skip("native non-root Linux namespace required"); return; }
+  const root = mkdtempSync(join(tmpdir(), "media-runtime-config-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const state = join(root, "state"), forbidden = join(root, "operator");
+  mkdirSync(state, { mode: 0o700 }); mkdirSync(forbidden, { mode: 0o700 });
+  writeFileSync(join(forbidden, "expected.json"), "synthetic private test truth", { mode: 0o600 });
+  const ns = prepareEvidenceReviewNamespace({ stateDirectory: state, providerExecutable: realpathSync("/usr/bin/python3"),
+    forbiddenRoots: [forbidden], network: "inherit" });
+  const script = "import os,ssl; assert len(ssl.create_default_context().get_ca_certs())>0; " +
+    "assert os.path.isfile('/etc/resolv.conf'); assert not os.path.exists('/etc/shadow'); " +
+    "assert not os.path.exists('/etc/passwd'); print('bounded DNS/TLS runtime only')";
+  assert.equal(execFileSync(ns.command, [...ns.args, "--", "/usr/bin/python3", "-I", "-c", script], {
+    env: {}, encoding: "utf8", timeout: 5_000,
+  }).trim(), "bounded DNS/TLS runtime only");
+  assert.equal(ns.args.some((arg, i) => arg === "--ro-bind" && ns.args[i + 1] === "/etc"), false);
+  const deny = prepareEvidenceReviewNamespace({ stateDirectory: state, providerExecutable: realpathSync("/usr/bin/python3"),
+    forbiddenRoots: [forbidden], network: "deny" });
+  assert.ok(deny.args.includes("--unshare-net"));
+  assert.equal(deny.args.includes("/etc/resolv.conf"), false);
+  assert.notEqual(deny.namespaceSha256, ns.namespaceSha256);
+});
+
+test("an installed executable outside runtime roots uses its exact private in-namespace mapping", (t) => {
+  if (process.platform !== "linux" || process.getuid?.() === 0) { t.skip("native non-root Linux namespace required"); return; }
+  const root = mkdtempSync(join(tmpdir(), "media-provider-mapping-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const state = join(root, "state"), forbidden = join(root, "operator"), executable = join(root, "provider");
+  mkdirSync(state, { mode: 0o700 }); mkdirSync(forbidden, { mode: 0o700 });
+  writeFileSync(executable, "#!/bin/sh\nprintf 'synthetic provider metadata\\n'\n", { mode: 0o700 });
+  const ns = prepareEvidenceReviewNamespace({ stateDirectory: state, providerExecutable: executable,
+    forbiddenRoots: [forbidden], network: "deny" });
+  assert.equal(ns.providerCommand, "/provider");
+  assert.equal(execFileSync(ns.command, [...ns.args, "--", ns.providerCommand, "--version"], {
+    env: {}, encoding: "utf8", timeout: 5_000,
+  }).trim(), "synthetic provider metadata");
+});

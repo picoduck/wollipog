@@ -222,3 +222,15 @@ test("replacement generation loses the old media credential surface without beco
   assert.equal(h.service.mediaSessionPurposes.owns(result.sessionId), true);
   assert.equal(h.service.restart(result.sessionId).ok, false);
 });
+
+test("source audience changes refuse preparation before reserving or returning quality to an unauthorized controller", (t) => {
+  const h = harness(); t.after(() => h.db.close()); h.messages.length = 0;
+  const read = h.db.sessionScope.bind(h.db);
+  h.db.sessionScope = (id) => {
+    const original = read(id);
+    return id === "child" && original ? { ...original, owner: { kind: "user", userId: "another-private-source-owner" } } : original;
+  };
+  assert.throws(() => h.prepared.prepare(h.identity), /scoped media profile/);
+  assert.equal(h.db.raw().prepare("SELECT COUNT(*) AS n FROM media_session_purposes").get()!.n, 0);
+  assert.deepEqual(h.messages, []);
+});

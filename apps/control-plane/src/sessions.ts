@@ -3553,7 +3553,7 @@ export class SessionsService {
       JSON.stringify(context.boundary) !== JSON.stringify(control.boundary) ||
       JSON.stringify(context.evidenceAuthority) !== JSON.stringify(control.boundary.evidenceAuthority) ||
       !scope || !scope.issueNumbers.includes(context.issue) || scope.revision !== context.issueScopeRevision ||
-      !rootAudience || !childAudience || !this.db.scopeAudienceContainedWithMembership(childAudience, rootAudience) ||
+      !rootAudience || !childAudience || !this.db.scopeAudienceContainedWithMembership(rootAudience, childAudience) ||
       request.runnerId !== root.runnerId || request.workspaceId !== root.workspaceId || request.workspacePath ||
       request.agentId !== target.agentId || target.runnerId !== root.runnerId ||
       this.db.getRunner(root.runnerId)?.protocolVersion !== context.controllerProtocolVersion ||
@@ -3575,7 +3575,9 @@ export class SessionsService {
     if (!bytes || bytes.length > MAX_SESSION_VIDEO_BYTES || createHash("sha256").update(bytes).digest("hex") !== item.sha256) {
       return fail("The original source artifact no longer matches its immutable digest.", 409);
     }
-    return ok({ resolved, childAudience });
+    // The controller can receive quality observations only within the source audience.
+    // Use its already narrower audience for the reviewer; never broaden either audience.
+    return ok({ resolved, childAudience: rootAudience });
   }
 
   /** Persist normal policy asks outside the Session/member/command transaction. Ordinary

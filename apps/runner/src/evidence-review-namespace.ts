@@ -18,6 +18,7 @@ export interface EvidenceReviewNamespaceInput {
 }
 export interface EvidenceReviewNamespace {
   command: "/usr/bin/bwrap";
+  providerCommand: string;
   args: string[];
   cwd: "/review";
   env: { HOME: "/reviewer-state"; TMPDIR: "/tmp"; PATH: "/usr/bin:/bin" };
@@ -55,6 +56,16 @@ export function prepareEvidenceReviewNamespace(input: EvidenceReviewNamespaceInp
   if (forbidden.some((root) => mountedRoots.some((mounted) => contains(mounted, root) || contains(root, mounted)) ||
       contains(state, root) || contains(root, state) || contains(root, executable)) ||
       mountedRoots.some((root) => contains(root, state))) throw new Error("Allowed namespace would expose forbidden oracle/source state.");
+  // Exact public runtime configuration needed by native DNS/TLS, never the whole /etc tree.
+  // The existing network grant is preserved; this does not turn deny into provider access.
+  const networkFiles = input.network === "inherit"
+    ? ["/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf", "/etc/ssl/certs/ca-certificates.crt"].map((target) => {
+        const source = canonical(realpathSync(target), "file");
+        const info = statSync(source);
+        if (info.size > 1024 * 1024 || info.uid === process.getuid?.() || (info.mode & 0o022) !== 0 ||
+          forbidden.some((root) => contains(root, source))) throw new Error("Network runtime configuration is unsafe or exposes forbidden state.");
+        return { source, target, sha256: createHash("sha256").update(readFileSync(source)).digest("hex") };
+      }) : [];
   const args = ["--die-with-parent", "--new-session", "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
     "--unshare-cgroup", "--cap-drop", "ALL", "--clearenv"];
   if (input.network === "deny") args.push("--unshare-net");
@@ -64,16 +75,20 @@ export function prepareEvidenceReviewNamespace(input: EvidenceReviewNamespaceInp
     if (actual === path) args.push("--ro-bind", path, path);
     else args.push("--symlink", actual, path);
   }
+  if (networkFiles.length) {
+    args.push("--dir", "/etc", "--dir", "/etc/ssl", "--dir", "/etc/ssl/certs");
+    for (const file of networkFiles) args.push("--ro-bind", file.source, file.target);
+  }
   args.push("--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--dir", "/review",
     "--bind", state, "/reviewer-state", "--setenv", "HOME", "/reviewer-state",
     "--setenv", "TMPDIR", "/tmp", "--setenv", "PATH", "/usr/bin:/bin");
   if (!mountedRoots.some((root) => contains(root, executable))) args.push("--ro-bind", executable, "/provider");
   args.push("--chdir", "/review");
   return {
-    command: "/usr/bin/bwrap", args, cwd: "/review",
+    command: "/usr/bin/bwrap", providerCommand: mountedRoots.some((root) => contains(root, executable)) ? executable : "/provider", args, cwd: "/review",
     env: { HOME: "/reviewer-state", TMPDIR: "/tmp", PATH: "/usr/bin:/bin" },
     namespaceSha256: sha(JSON.stringify({ version: 1, executableSha256: createHash("sha256").update(readFileSync(executable)).digest("hex"),
-      runtimeRoots: mountedRoots, stateTarget: "/reviewer-state", network: input.network,
+      runtimeRoots: mountedRoots, networkFiles: networkFiles.map(({ target, sha256 }) => ({ target, sha256 })), stateTarget: "/reviewer-state", network: input.network,
       tools: MEDIA_REVIEWER_TOOLS, hostRootMounted: false, projectMounted: false })),
     launchSha256: sha(JSON.stringify({ version: 1, executable, state, args })),
     prohibitedTools: ["Read", "Bash", "Grep", "Glob", "WebFetch", "WebSearch", "Task", "Agent", "Skill"],
