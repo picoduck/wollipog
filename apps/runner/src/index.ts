@@ -1,4 +1,5 @@
 import { projectMemoryAgentVersion } from "./project-memory.js";
+import { ControlledCampaignReviewer, discoverControlledReview } from "./campaign-review-jobs.js";
 /**
  * Runner daemon: connects outbound to the control plane, advertises this host's
  * workspaces + agents, sends heartbeats, reconnects automatically, and manages
@@ -537,6 +538,8 @@ const metadata: RunnerMetadata = {
       ),
     },
     maxConcurrentSessions: config.maxConcurrentSessions,
+    campaignReview: config.executionIsolation.mode==="provider"?await discoverControlledReview(configuredAgentDefinitions.find((a)=>
+      a.driver==="claude-code" && (!a.context || a.context.kind==="native") && a.command==="claude")?.id):undefined,
     admission: config.admission,
     executionIsolation: config.executionIsolation,
   },
@@ -1412,6 +1415,8 @@ function recoverStaleSessionCommands(): void {
 }
 
 sessions.setSend(sendUp);
+const campaignReviewer = new ControlledCampaignReviewer(resolve(config.dataDir,"campaign-review-jobs"),store,sendUp,
+  (jobId,agentId)=>sessions.reserveControlledReviewAdmission(jobId,agentId),(jobId)=>sessions.releaseControlledReviewAdmission(jobId));
 
 function startTrackedSession(
   command: StartSessionMessage,
@@ -2491,7 +2496,13 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       }
       break;
     case "rearm_governance":
-      sessions.rearmGovernance(msg.sessionId, msg.config, msg.holdFor);
+      sessions.rearmGovernance(msg.sessionId, msg.config, msg.holdFor, msg.campaignBudgetDispatch);
+      break;
+    case "campaign_review_job":
+      runCommandTask("campaign_review_job",campaignReviewer.dispatch(msg));
+      break;
+    case "cancel_campaign_review_job":
+      campaignReviewer.cancel(msg.jobId,msg.nonce);
       break;
     case "priced_session_cost":
       sessions.syncPricedSessionCost(msg.sessionId, msg.costUsd, msg.costReconciliationRevision, msg.costReconciliationDeltaUsd, msg);

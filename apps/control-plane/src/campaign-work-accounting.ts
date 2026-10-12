@@ -193,6 +193,7 @@ export function campaignCostMetric(
   amount: CampaignUsageAmount,
   historyGap: boolean,
 ): CampaignMetric<CampaignCostValue> {
+  if(amount.unpriced>0 && amount.providerReported+amount.modelPriced===0) return {availability:"unavailable",reason:"unpriced_usage"};
   const value: CampaignCostValue = {
     usd: amount.costMicrousd / 1_000_000,
     source: costSource(amount),
@@ -361,17 +362,31 @@ export class CampaignWorkAccounting {
   attemptUsage(campaignSessionId: string): Map<string, CampaignUsageAmount> {
     const usage = new Map<string, CampaignUsageAmount>();
     for (const row of this.rows(campaignSessionId)) {
-      if (row.attempt_id) usage.set(row.attempt_id, amountOf(row));
+      if (row.attempt_id) usage.set(row.attempt_id, addCampaignUsage(usage.get(row.attempt_id)??CAMPAIGN_USAGE_NONE,amountOf(row)));
     }
     return usage;
   }
 
   private rows(campaignSessionId: string): AttributionRow[] {
-    return this.stmt(
+    const rows=this.stmt(
       `SELECT bucket, attempt_id, session_id, cost_microusd, provider_reported_records, model_priced_records,
               unpriced_records
          FROM campaign_usage_attribution WHERE campaign_session_id=?`,
     ).all(campaignSessionId) as unknown as AttributionRow[];
+    // Native review jobs have no Session row; the trusted job receipt is their independent own
+    // usage. Read each durable job once, and bind it to the original attempt rather than a later
+    // replacement. Never attribute this again to the implementer's Session usage delta.
+    if(this.stmt("SELECT 1 FROM sqlite_master WHERE type='table' AND name='campaign_review_jobs'").get()) {
+      const native=this.stmt(`SELECT j.state,j.cost,a.id AS attempt_id,s.id AS session_id
+        FROM campaign_review_jobs j
+        LEFT JOIN campaign_work_attempts a ON a.id=json_extract(j.command,'$.lineage.workItemAttemptId') AND a.campaign_session_id=j.root_id
+        LEFT JOIN sessions s ON s.id=json_extract(j.command,'$.worktreeSessionId')
+        WHERE j.root_id=?`).all(campaignSessionId) as Array<{state:string;cost:number|null;attempt_id:string|null;session_id:string|null}>;
+      for(const job of native) rows.push({bucket:job.attempt_id?"attempt":"unattributed",attempt_id:job.attempt_id,session_id:job.session_id,
+        cost_microusd:(job.cost??0)*1_000_000,provider_reported_records:0,model_priced_records:job.cost===null || job.state==="not_launched"?0:1,
+        unpriced_records:job.cost===null || job.state==="accounting_unavailable"?1:0});
+    }
+    return rows;
   }
 
   /**

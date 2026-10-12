@@ -1,9 +1,9 @@
 import type { DatabaseSync } from "node:sqlite";
+import { createHash, randomUUID } from "node:crypto";
 import { validCampaignBudgetAuthority, type CampaignBudgetAllocation, type CampaignBudgetAuthority, type CampaignBudgetView } from "@wollipog/protocol";
 
 type Member = { session_id: string; root_id: string; cost: number; tools: number; cost_limit: number | null; tool_limit: number | null;
   user_cost_limit: number | null; user_tool_limit: number | null; active: number };
-const terminal = "('completed','failed','stopped')";
 
 /** No foreign keys: deletion, transcript replacement and retired attempts must not refund spend.
  * Usage is each session's own monotonic peak, never the recursively reserved child charge. */
@@ -24,11 +24,18 @@ export class CampaignBudgetLedger {
     CREATE TABLE IF NOT EXISTS campaign_budget_follow_ups (
       root_id TEXT NOT NULL, recommendation_id TEXT NOT NULL, PRIMARY KEY(root_id,recommendation_id)
     );
+    CREATE TABLE IF NOT EXISTS campaign_budget_checkpoints (
+      session_id TEXT PRIMARY KEY, checkpoint TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS campaign_budget_settlements (
+      session_id TEXT NOT NULL, checkpoint TEXT NOT NULL, cost REAL NOT NULL, tools INTEGER NOT NULL,
+      PRIMARY KEY(session_id,checkpoint)
+    );
     DROP TRIGGER IF EXISTS campaign_budget_session_usage;
     CREATE TRIGGER campaign_budget_session_usage AFTER UPDATE OF cost_usd, usage_peak_cost_usd, usage_peak_tool_calls, status ON sessions
     BEGIN
       UPDATE campaign_budget_members SET cost=MAX(cost, NEW.cost_usd, NEW.usage_peak_cost_usd),
-        tools=MAX(tools, NEW.usage_peak_tool_calls), active=CASE WHEN NEW.status IN ${terminal} AND NOT EXISTS(SELECT 1 FROM session_stop_intents WHERE session_id=NEW.id) THEN 0 ELSE 1 END
+        tools=MAX(tools, NEW.usage_peak_tool_calls)
       WHERE session_id=NEW.id;
     END;
     DROP TRIGGER IF EXISTS campaign_budget_tool_usage;
@@ -42,10 +49,13 @@ export class CampaignBudgetLedger {
       WHERE session_id=NEW.session_id;
     END;
     DROP TRIGGER IF EXISTS campaign_budget_stop_settled;
-    CREATE TRIGGER campaign_budget_stop_settled AFTER DELETE ON session_stop_intents
-    BEGIN
-      UPDATE campaign_budget_members SET active=CASE WHEN (SELECT status FROM sessions WHERE id=OLD.session_id) IN ${terminal} THEN 0 ELSE 1 END WHERE session_id=OLD.session_id;
-    END;`);
+    `);
+    if (!(sql.prepare("PRAGMA table_info(campaign_budget_members)").all() as Array<{name:string}>).some((c) => c.name === "generation")) {
+      sql.exec("ALTER TABLE campaign_budget_members ADD COLUMN generation TEXT NOT NULL DEFAULT ''");
+    }
+    for (const row of sql.prepare("SELECT session_id FROM campaign_budget_members WHERE generation=''").all() as Array<{session_id:string}>) {
+      sql.prepare("UPDATE campaign_budget_members SET generation=? WHERE session_id=?").run(randomUUID(),row.session_id);
+    }
   }
 
   private atomic<T>(work: () => T): T {
@@ -63,8 +73,9 @@ export class CampaignBudgetLedger {
       { authority: string; state: CampaignBudgetView["state"]; reason: string | null; accepted_follow_ups: number } | undefined;
     if (!header) return undefined;
     const authority = JSON.parse(header.authority) as CampaignBudgetAuthority;
-    if (authority.costUsd !== undefined && header.state === "active" && this.sql.prepare(`SELECT 1 FROM usage_session_state u
-      JOIN campaign_budget_members m ON m.session_id=u.session_id WHERE m.root_id=? AND u.unpriced_records>0 LIMIT 1`).get(rootId)) {
+    const unpriced = Boolean(this.sql.prepare(`SELECT 1 FROM usage_session_state u
+      JOIN campaign_budget_members m ON m.session_id=u.session_id WHERE m.root_id=? AND u.unpriced_records>0 LIMIT 1`).get(rootId));
+    if (header.state === "active" && unpriced) {
       this.stop(rootId, "accounting_unavailable", "Unpriced campaign usage detected; protected admission stopped without a continue prompt.");
       header.state = "accounting_unavailable"; header.reason = "Unpriced campaign usage detected; protected admission stopped without a continue prompt.";
     }
@@ -89,7 +100,9 @@ export class CampaignBudgetLedger {
       occupied: rows.filter((r) => r.active && r.session_id !== rootId).length,
       acceptedFollowUps: header.accepted_follow_ups,
       reachedCheckpointsUsd: authority.checkpointsUsd?.filter((v) => actual.costUsd >= v) ?? [],
-      enforcement: "admission_and_best_effort_cancellation", externalWorkers: "unsupported" };
+      enforcement: "admission_and_best_effort_cancellation", externalWorkers: "unsupported",
+      sessionLimits: this.userLimits(rootId), rootAllocation: this.allocation(rootId) ?? undefined,
+      costAccounting: unpriced || header.state==="accounting_unavailable" ? "unavailable" : "priced" };
   }
 
   authorize(rootId: string, authority: CampaignBudgetAuthority): void {
@@ -171,6 +184,74 @@ export class CampaignBudgetLedger {
     return Boolean((this.sql.prepare("SELECT active FROM campaign_budget_members WHERE session_id=?").get(sessionId) as Member | undefined)?.active);
   }
 
+  /** Only for a runner send that proved no command was enqueued. */
+  restoreUnsentActivation(sessionId: string, active: boolean): void {
+    this.sql.prepare("UPDATE campaign_budget_members SET active=? WHERE session_id=?").run(active ? 1 : 0, sessionId);
+  }
+
+  /** Only the authenticated owning runner may supply a checkpoint. Do not accept agent JSON. */
+  recordCheckpoint(sessionId: string, checkpoint: import("@wollipog/protocol").CampaignBudgetUsageCheckpoint): void {
+    if (!this.root(sessionId) || !checkpoint || !Number.isSafeInteger(checkpoint.historyEpoch) || checkpoint.historyEpoch < 0 ||
+        !Number.isSafeInteger(checkpoint.throughSeq) || checkpoint.throughSeq < 0 || !Number.isFinite(checkpoint.costUsd) || checkpoint.costUsd < 0 ||
+        checkpoint.generation !== this.dispatch(sessionId)?.generation) return;
+    this.sql.prepare("INSERT INTO campaign_budget_checkpoints VALUES (?,?) ON CONFLICT(session_id) DO UPDATE SET checkpoint=excluded.checkpoint")
+      .run(sessionId,JSON.stringify(checkpoint));
+  }
+
+  /** Persist priced final usage before releasing unused capacity. Replay cannot refund spend. */
+  settleCheckpoint(sessionId: string, history: { historyEpoch: number | null; hydratedSeq: number }): boolean {
+    return this.atomic(() => {
+      const record = this.sql.prepare("SELECT checkpoint FROM campaign_budget_checkpoints WHERE session_id=?").get(sessionId) as { checkpoint: string } | undefined;
+      if (!record || this.sql.prepare("SELECT 1 FROM session_stop_intents WHERE session_id=?").get(sessionId)) return false;
+      const checkpoint = JSON.parse(record.checkpoint) as import("@wollipog/protocol").CampaignBudgetUsageCheckpoint;
+      if (checkpoint.generation !== this.dispatch(sessionId)?.generation) return false;
+      const session = this.sql.prepare("SELECT status FROM sessions WHERE id=?").get(sessionId) as { status: string } | undefined;
+      if (!session || !["completed","failed","stopped"].includes(session.status) || history.historyEpoch !== checkpoint.historyEpoch ||
+          history.hydratedSeq < checkpoint.throughSeq) return false;
+      if (this.sql.prepare("SELECT 1 FROM usage_session_state WHERE session_id=? AND unpriced_records>0").get(sessionId)) {
+        this.stop(this.root(sessionId)!, "accounting_unavailable", "Final campaign usage is unpriced; reservation retained."); return false;
+      }
+      const member = this.sql.prepare("SELECT * FROM campaign_budget_members WHERE session_id=?").get(sessionId) as Member | undefined;
+      if (!member) return false;
+      // Runner cost can lag control-plane pricing; neither coordinate may lower the charge.
+      const cost = Math.max(member.cost,checkpoint.costUsd);
+      this.sql.prepare("INSERT OR IGNORE INTO campaign_budget_settlements VALUES (?,?,?,?)").run(sessionId,record.checkpoint,cost,member.tools);
+      this.sql.prepare("UPDATE campaign_budget_members SET cost=?,active=0 WHERE session_id=?").run(cost,sessionId);
+      this.sql.prepare("DELETE FROM campaign_budget_checkpoints WHERE session_id=?").run(sessionId);
+      return true;
+    });
+  }
+
+  dispatch(sessionId: string): import("@wollipog/protocol").CampaignBudgetDispatch | undefined {
+    const row = this.sql.prepare("SELECT root_id,generation FROM campaign_budget_members WHERE session_id=?").get(sessionId) as {root_id:string;generation:string} | undefined;
+    if (!row) return undefined;
+    if (!row.generation) {
+      row.generation = randomUUID();
+      this.sql.prepare("UPDATE campaign_budget_members SET generation=? WHERE session_id=?").run(row.generation,sessionId);
+    }
+    return { rootSessionId: row.root_id, generation: row.generation };
+  }
+
+  /** Each replacement invalidates old terminal receipts before any runner dispatch. */
+  replaceDispatch(sessionId: string): import("@wollipog/protocol").CampaignBudgetDispatch {
+    this.sql.prepare("UPDATE campaign_budget_members SET generation=? WHERE session_id=?").run(randomUUID(),sessionId);
+    this.sql.prepare("DELETE FROM campaign_budget_checkpoints WHERE session_id=?").run(sessionId);
+    return this.dispatch(sessionId)!;
+  }
+
+  completedAttestation(sessionId:string):{rootSessionId:string;sessionId:string;checkpoint:import("@wollipog/protocol").CampaignBudgetUsageCheckpoint;
+    actual:{costUsd:number;toolCalls:number};settlementDigest:string}|null {
+    const member=this.sql.prepare("SELECT * FROM campaign_budget_members WHERE session_id=?").get(sessionId) as Member|undefined;
+    if(!member || member.active) return null;
+    const row=this.sql.prepare("SELECT * FROM campaign_budget_settlements WHERE session_id=? ORDER BY rowid DESC LIMIT 1").get(sessionId) as
+      {checkpoint:string;cost:number;tools:number}|undefined;
+    if(!row || member.cost>row.cost || member.tools>row.tools) return null;
+    const checkpoint=JSON.parse(row.checkpoint) as import("@wollipog/protocol").CampaignBudgetUsageCheckpoint;
+    if(checkpoint.generation!==this.dispatch(sessionId)?.generation) return null;
+    const receipt={rootSessionId:member.root_id,sessionId,checkpoint,actual:{costUsd:row.cost,toolCalls:row.tools}};
+    return {...receipt,settlementDigest:createHash("sha256").update(JSON.stringify(receipt)).digest("hex")};
+  }
+
   admissionError(sessionId: string): string | null {
     const rootId = this.root(sessionId); if (!rootId) return null;
     const v = this.view(rootId)!;
@@ -200,6 +281,7 @@ export class CampaignBudgetLedger {
       this.sql.prepare(`INSERT INTO campaign_budget_members(session_id,root_id,cost,tools,cost_limit,tool_limit,user_cost_limit,user_tool_limit,active)
         VALUES (?,?,0,0,?,?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET cost_limit=excluded.cost_limit,tool_limit=excluded.tool_limit,active=excluded.active`)
         .run(allocation.sessionId,rootId,allocation.costUsd??null,allocation.toolCalls??null,userLimits.costUsd??null,userLimits.toolCalls??null,activate?1:0);
+      if (activate) this.sql.prepare("DELETE FROM campaign_budget_checkpoints WHERE session_id=?").run(allocation.sessionId);
     });
   }
 
