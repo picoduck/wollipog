@@ -87,6 +87,10 @@ boundary can admit that already-published issue under its current relationship, 
 this never republishes it. Reauthorization counts outstanding reservations. A human scope approval
 can settle an older publication only after the server independently verifies the exact issue payload.
 Each publication occurrence settles through scope once, even if another issue copies its payload.
+Settlement currently requires the publication's original title, body and label set. Editing that
+payload before settlement leaves its slot reserved, including after a human scope addition;
+restore the exact payload before verification or have the human account for the outstanding slot.
+The system cannot infer a publication receipt from an edited tracker issue or a ledger claim.
 After publication, read back the exact payload, record the resulting issue on its recommendation,
 then propose the scope addition against that publication occurrence. Ledger acceptance alone grants
 neither publication nor scope.

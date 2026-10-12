@@ -65,5 +65,6 @@ export async function inspectCampaignPublication(run: Run, publication: { saniti
       !row.html_url.toLowerCase().startsWith(`https://github.com/${repository}/issues/`))) throw new Error("Invalid duplicate evidence");
   if (matches.some((row) => campaignPublicationTitle(row.title) === campaignPublicationTitle(publication.sanitizedTitle))) throw new Error("An issue already has this normalized title");
   // Bind the payload, not volatile unrelated tracker rows. Inspection is repeated at consumption.
-  return { repository, publicationDigest: createHash("sha256").update(JSON.stringify(publication)).digest("hex") };
+  const payload = { sanitizedTitle: publication.sanitizedTitle, sanitizedBody: publication.sanitizedBody, labels: publication.labels };
+  return { repository, publicationDigest: createHash("sha256").update(JSON.stringify(payload)).digest("hex") };
 }

@@ -34,9 +34,9 @@ test("publication duplicate inspection covers open, closed, newest issues and se
 
 test("follow-up scope inspects exact title, body and labels rather than trusting its issue number", async () => {
   const publication={sanitizedTitle:"Exact",sanitizedBody:"Exact body",labels:["feature"]};
-  for(const changed of [false,true]) {
-    const run=async(command:string)=>command==="git"?"https://github.com/team/repo.git":JSON.stringify({number:10,title:changed?"Changed":"Exact",body:"Exact body",labels:[{name:"feature"}],html_url:"https://github.com/team/repo/issues/10"});
-    if(changed) await assert.rejects(inspectCampaignIssueScope(run,undefined,[10],publication));
+  for(const changed of ["none","title","body","labels"]) {
+    const run=async(command:string)=>command==="git"?"https://github.com/team/repo.git":JSON.stringify({number:10,title:changed==="title"?"Changed":"Exact",body:changed==="body"?"Changed body":"Exact body",labels:[{name:changed==="labels"?"bug":"feature"}],html_url:"https://github.com/team/repo/issues/10"});
+    if(changed!=="none") await assert.rejects(inspectCampaignIssueScope(run,undefined,[10],publication));
     else assert.equal((await inspectCampaignIssueScope(run,undefined,[10],publication)).candidates[0]!.issue.number,10);
   }
 });

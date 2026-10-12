@@ -49,10 +49,10 @@ export function publicationEvidence(db: ControlPlaneDb, root: SessionView,
   return { recommendation, origins, scopeRevision: boundary.issueScopeRevision, boundaryRevision: boundary.revision };
 }
 
-export function reservedPublicationSlots(db: ControlPlaneDb, root: SessionView, exceptOccurrence?: string, exceptRecommendation?: string): number {
+export function reservedPublicationSlots(db: ControlPlaneDb, root: SessionView, exceptOccurrence?: string, exceptRecommendation?: string, consumedOnly = false): number {
   const recommendations = new Set<string>();
   for (const d of db.campaignPublicationReservations(root.id)) {
-    if (d.occurrenceId === exceptOccurrence || d.resourceSnapshot.category !== "follow_up_issue_publication") continue;
+    if (d.occurrenceId === exceptOccurrence || d.resourceSnapshot.category !== "follow_up_issue_publication" || consumedOnly && d.status !== "consumed") continue;
     const id = d.resourceSnapshot.recommendationId;
     if (id && id === exceptRecommendation) continue;
     // A recommendation's resultingIssue is mutable agent ledger prose. Only consumption of

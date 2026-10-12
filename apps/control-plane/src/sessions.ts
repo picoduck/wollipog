@@ -7348,7 +7348,7 @@ export class SessionsService {
       authorizeFullControl(principal, scope, proposal, expectedRevision + 1, now);
     if (!control) return fail("Full Control requires authenticated repository scope and a valid boundary", 400);
     if (control.mode === "full_control") {
-      if (control.boundary.issueAuthority && (scope!.issueNumbers.length + reservedPublicationSlots(this.db, session) > control.boundary.issueAuthority.maxIssues ||
+      if (control.boundary.issueAuthority && (scope!.issueNumbers.length + reservedPublicationSlots(this.db, session, undefined, undefined, true) > control.boundary.issueAuthority.maxIssues ||
           scopeCompatibility(this.db, { ...session, orchestratorPolicy: { ...session.orchestratorPolicy!, control } }))) return fail("The issue boundary exceeds its human-set scope limit or requires protocol-v216 participants", 409);
       if (!session.workspaceId) return fail("Full Control requires a repository workspace binding", 409);
       for (const id of [sessionId, ...this.db.campaignDescendantIds(sessionId)]) {

@@ -49,6 +49,10 @@ function fixture(t: TestContext, mode: CloseMode = "closed") {
       stdout = `git@github.com:${origin}.git`;
     } else if (file === "gh" && args[0] === "api" && args[1] === "graphql") {
       stdout = JSON.stringify({ data: { repository } });
+    } else if (file === "gh" && args[0] === "api" && args.includes("search/issues")) {
+      stdout = JSON.stringify({ items: [], total_count: 0, incomplete_results: false });
+    } else if (file === "gh" && args[0] === "api" && args.some((arg) => arg.includes("issues?state=all"))) {
+      stdout = "[]";
     } else if (file === "gh" && args[0] === "issue" && args[1] === "close") {
       // Observe disk at the mutation boundary, before either success or failure is returned.
       // A store cache or a patch after the command cannot satisfy this observation.
@@ -96,6 +100,19 @@ function fixture(t: TestContext, mode: CloseMode = "closed") {
 }
 
 const digest = (snapshot: GithubIssueClosureSnapshot) => createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
+
+test("publication inspection through the runner handler binds payload across distinct request IDs", async (t) => {
+  const f=fixture(t);
+  const publication={sanitizedTitle:"Related repair",sanitizedBody:"## Problem\nFailure\n## Proposed Behavior\nRepair\n## Acceptance Criteria\n- Works\n## Security and Compatibility\nNone",labels:["feature"]};
+  const inspect=(requestId:string) => f.manager().campaignIssueScope({type:"campaign_issue_scope",operation:"publication_inspect",sessionId,requestId,...publication});
+  const proposal=await inspect("publication_inspect_first");
+  const consumption=await inspect("publication_consume_second");
+  assert.equal(proposal.ok,true,proposal.error); assert.equal(consumption.ok,true,consumption.error);
+  assert.equal(proposal.publicationDigest,consumption.publicationDigest,"transport request IDs cannot change payload evidence");
+  assert.equal(proposal.publicationDigest,createHash("sha256").update(JSON.stringify(publication)).digest("hex"));
+  const changed=await f.manager().campaignIssueScope({type:"campaign_issue_scope",operation:"publication_inspect",sessionId,requestId:"third",...publication,labels:["bug"]});
+  assert.notEqual(changed.publicationDigest,proposal.publicationDigest,"actual payload changes invalidate the exact grant");
+});
 
 test("bounded Full Control scope synchronization persists the advanced boundary for restart", async (t) => {
   const f=fixture(t);
