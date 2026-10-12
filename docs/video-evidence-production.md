@@ -160,6 +160,9 @@ installed executable/tool/namespace profile, audience and current action/allowan
 The original gate stays Human-owned and its resource digest remains unchanged.
 
 Human mint requires `expectedScopeSha256` for the exact independently reviewed action scope.
+A hash-only `privateOracleCommitmentSha256` is pinned in that scope **before** any dispatch;
+Human inspection must match the private oracle to this original commitment and source. Oracle
+bytes, generator and expected truth remain outside the actual reviewer's namespace and inputs.
 A changed profile/source/criterion/request between inspection and mint is rejected. The permit
 expires within one hour and pins finite cost/tool ceilings from the guarded Session
 request; it does not create grants or increase existing limits. The ordinary creation pipeline

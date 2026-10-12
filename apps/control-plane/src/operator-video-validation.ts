@@ -27,7 +27,8 @@ export interface OperatorVideoValidationScope {
   organizationId: string;
   gate: { authority: "human"; status: "pending"; resourceDigest: string; policyRevision: number };
   source: { artifactId: string; sha256: string; sizeBytes: number; manifestSha256: string;
-    orderedFramesSha256: string; criteriaSha256: string; frames: number; width: number; height: number; durationUs: number };
+    orderedFramesSha256: string; criteriaSha256: string; privateOracleCommitmentSha256: string;
+    frames: number; width: number; height: number; durationUs: number };
   context: ReviewerAdmissionContext;
   target: EvidenceReviewerTarget;
   request: CreateSessionRequest;
@@ -70,6 +71,7 @@ function validScope(scope: OperatorVideoValidationScope): boolean {
     scope.gate.authority === "human" && scope.gate.status === "pending" && scope.gate.policyRevision === c.policyRevision &&
     reviewerAdmissionPrerequisites(c, t, "human") === null &&
     [i.requestSha256, scope.gate.resourceDigest, s.sha256, s.manifestSha256, s.orderedFramesSha256, s.criteriaSha256,
+      s.privateOracleCommitmentSha256,
       scope.providerExecutableSha256, scope.nativeToolProfileSha256, scope.namespaceLaunchSha256, scope.authoritySha256].every(digest) &&
     Number.isSafeInteger(s.sizeBytes) && s.sizeBytes > 0 && s.sizeBytes <= 32 * 1024 * 1024 &&
     s.frames === expected.frames && s.width === expected.width && s.height === expected.height && s.durationUs === expected.durationUs &&
