@@ -48,12 +48,13 @@ managed budget reservations are required; do not disguise an ordinary CLI review
 The installed Codex cross-model-review runner currently launches its controlled Claude Opus 5.5
 high reviewer as a native subprocess outside managed Session accounting. This is an unsupported
 mandatory path for a declared zero-prompt Full Control campaign, not zero-cost review. Disclose
-it before dispatch. #2939 must provide or coordinate a trusted, accountable reviewer adapter that
+it before dispatch. #2936 owns the trusted, accountable required-review worker adapter that
 preserves the installed runner's strict read-only harness, pinned head/diff, exact effort, coverage
 validation and review limits while obtaining budget admission and reporting actual usage. Do not
 substitute a different harness because its model ID matches, edit installed skill guardrails or
-change fixed campaign policy to claim readiness. This policy alignment describes conditional
-support; it does not implement that adapter or authorize live configuration changes.
+change fixed campaign policy to claim readiness. #2939 must prove actual integrated delivery, cost
+and zero-prompt behavior after that adapter is verified. This policy alignment describes conditional
+support; it does not implement the adapter or authorize live configuration changes.
 
 Before merge, verify the reviewed head equals the pushed head and required CI passed on that SHA.
 The required check is `Typecheck, Test & Sidecar Bundle`; an empty required list into `main` with
