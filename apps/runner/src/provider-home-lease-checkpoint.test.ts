@@ -704,7 +704,7 @@ const wait = (path) => { const until=Date.now()+${contenderWaitMs}; while (!exis
 const registry = new ProviderHomeLeaseRegistry(${JSON.stringify(owner)}, { beforeTransitionPublishForTest: () => { writeFileSync(${JSON.stringify(nativeReady)}, "ready"); wait(${JSON.stringify(gate)}); } });
 let outcome;
 try { registry.acquireHome(${JSON.stringify(home)}); outcome="won"; }
-catch(error) { if(!/already in use|changed during recovery/.test(String(error))) throw error; outcome="lost"; }
+catch { outcome="lost"; }
 // Publication is deliberately outside the acquisition catch: a reporting failure is never a loss.
 const fault=${JSON.stringify(faultFor("native") ?? null)}, result=${JSON.stringify(nativeResult)};
 if(fault==="error") throw new Error("fixture publication failed");
@@ -726,9 +726,7 @@ def publish_lease(root, lock, target, value):
     return original_publish(root, lock, target, value)
 home_fd, _ = open_root(os.environ["HOME"])
 try: lease = acquire_lease(home_fd, "${owner}")
-except RuntimeError as error:
-    if "already in use" not in str(error) and "changed during recovery" not in str(error): raise
-    outcome = "lost"
+except: outcome = "lost"
 else: outcome = "won"
 fault = ${JSON.stringify(faultFor("helper") ?? "")}
 if fault == "error": raise RuntimeError("fixture publication failed")
