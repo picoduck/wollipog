@@ -81,7 +81,7 @@ export function campaignCodeOperationTargets(toolName: string | undefined, opera
   if (!["Bash", "commandExecution"].includes(toolName ?? "") || operation?.kind !== "command") return null;
   const command = operation.input;
   if (typeof command !== "string" || !command || command.length > 2000 ||
-      (operation.cwd !== undefined && typeof operation.cwd !== "string") || /[\n\r$`;&|<>()[\]{}'"\\]/u.test(command)) return null;
+      (operation.cwd !== undefined && typeof operation.cwd !== "string") || /[\n\r$`;&|<>()[\]{}'"\\*?~#!]/u.test(command)) return null;
   const words = command.trim().split(/\s+/u);
   if (words.length > 32) return null;
   // Git inspection can execute repository-configured helpers (including clean filters even
@@ -97,7 +97,7 @@ export function repositoryCodeToolIntent(request: PendingApproval, repositoryRoo
   const codePath = (value: string): boolean => {
     const path = value.replaceAll("\\", "/");
     return Boolean(normalizedRoot && path.startsWith(`${normalizedRoot}/`) &&
-      !/(?:^|\/)\.\.(?:\/|$)/u.test(path) && !/[\x00-\x20$`;&|<>()[\]{}~]/u.test(path) &&
+      !/(?:^|\/)\.\.(?:\/|$)/u.test(path) && !/[\x00-\x20$`;&|<>()[\]{}~*?]/u.test(path) &&
       !/(?:^|\/)(?:\.env[^/]*|\.ssh|\.aws|\.codex|\.claude|credentials|id_rsa|id_ed25519)(?:\/|$)/iu.test(path) &&
       /\.(?:tsx?|jsx?|mjs|cjs|rs|py|go|java|kt|swift|c|cpp|h|cs|rb|md|html|css)$/iu.test(path));
   };

@@ -288,6 +288,36 @@ test("root admission follows physical targets and refuses source symlinks escapi
   } finally { h.db.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
+test("shell patterns cannot hide a source symlink escape in root or child admission", () => {
+  const directory = mkdtempSync(join(tmpdir(), "campaign-glob-boundary-"));
+  const repo = join(directory, "repo"); mkdirSync(join(repo, "src"), { recursive: true });
+  writeFileSync(join(repo, "src/regular.ts"), "benign repository fixture\n");
+  writeFileSync(join(directory, "outside.ts"), "benign outside fixture\n");
+  symlinkSync(join(directory, "outside.ts"), join(repo, "src/link.ts"));
+  try {
+    for (const command of ["cat src/*.ts", "cat src/?ink.ts", `cat ${repo}/src/*.ts`, `cat ${repo}/src/?ink.ts`]) {
+      const h = harness(PROTOCOL_VERSION, repo, "codex-app-server");
+      try {
+        assert.ok(h.enable().ok);
+        const context = approvalContext("item/commandExecution/requestApproval", { command, cwd: repo }, false);
+        for (const id of ["root", "child"]) h.svc.onSessionEvent(id, {
+          kind: "permission_request", requestId: id, occurrenceId: id, requestSource: "provider_tool",
+          title: "Inspect Source", context, options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }],
+        });
+        assert.equal(h.sent.length, 0, "a shell pattern never settles the parked root callback");
+        assert.equal(h.db.campaignProjection("root")!.status, "waiting_human");
+        assert.equal(h.db.campaignRequestsForPrincipal(h.principal, "root")!.human, 2);
+        assert.equal(h.db.listSessionsForPrincipal(h.principal).find((s) => s.id === "root")!.campaignRequests!.human, 2);
+        assert.equal(h.svc.descendantRequests("root", () => true, "human").data!.requests.length, 2);
+        for (const id of ["root", "child"]) {
+          assert.equal(h.db.getSession(id)!.pendingRequestOwners!.human, 1);
+          assert.equal(h.svc.resolveDescendantRequest("root", id, id, { action: "approve", optionId: "once" }, () => true).ok, false);
+        }
+      } finally { h.db.close(); }
+    }
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("pending root requests settle on human admission; unavailable delivery becomes a disclosed human exception", () => {
   for (const available of [true, false]) {
     const h = harness();

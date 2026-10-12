@@ -81,6 +81,15 @@ test("verified repository code inspection is independent of authentication keywo
     operation: { kind: "file", path: "/repo/src/authentication.ts", filesystem: { targets: [{ path: "/repo/src/authentication.ts", resolvedPath: "/repo/src/authentication.ts" }] } } } }, { repositoryRoot: "/repo" }).owner, "orchestrator");
 });
 
+test("shell expansion and comment words cannot carry bounded read authority even with claimed evidence", () => {
+  for (const path of ["src/*.ts", "src/?ink.ts", "src/[ab].ts", "src/{a,b}.ts", "~fixture.ts", "#fixture.ts", "!fixture.ts"]) {
+    const input = `cat ${path}`;
+    const operation = { kind: "command" as const, input, cwd: "/repo", filesystem: { cwd: "/repo", targets: [{ path, resolvedPath: `/repo/${path}` }] } };
+    assert.equal(campaignCodeOperationTargets("commandExecution", operation), null, path);
+    assert.equal(evaluate({ ...tool, context: { ...tool.context, input, operation } }).owner, "human", path);
+  }
+});
+
 test("Git commands never qualify for automatic admission even with canonical evidence or helper flags", () => {
   for (const input of ["git status --short", "git diff -- src/implementation.ts", "git diff --cached -- src/implementation.ts",
     "git -C /repo status --porcelain", "git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv -- src/implementation.ts",

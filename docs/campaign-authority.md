@@ -68,7 +68,10 @@ Recognized native file inspection/edits and bounded `cat` reads require the camp
 target. Unrelated targets, composed shell commands, unknown effects and missing operation metadata
 stay human-owned. The runner constructs `operation.filesystem` using filesystem metadata, ignoring
 provider-authored evidence claims. Both lexical and canonical targets must stay in the repository;
-source symlinks pointing outside it, dangling links and inaccessible targets fail closed. A delegated
+source symlinks pointing outside it, dangling links and inaccessible targets fail closed. Reads
+require an existing regular file; shell patterns, expansion and comment characters cannot name
+bounded targets. Only native file mutations may prove a missing target through its canonical
+parent directory. A delegated
 callback rechecks the canonical evidence before granting it and cancels changed targets. This is
 additional evidence, rather than a replacement for provider filesystem enforcement at execution.
 Repository script commands such as test/typecheck/build do not prove their effects: their code is

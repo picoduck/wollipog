@@ -26,6 +26,27 @@ test("canonical operation evidence rejects dangling links and catches a replaced
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
+test("read evidence requires existing regular files while native writes retain missing-target support", () => {
+  const directory = mkdtempSync(join(tmpdir(), "campaign-read-target-"));
+  try {
+    const missing = join(directory, "missing.ts"), folder = join(directory, "folder.ts");
+    mkdirSync(folder);
+    for (const path of [missing, folder]) {
+      assert.equal(campaignOperationEvidence("Read", { kind: "file", path }).filesystem, undefined);
+      assert.equal(campaignOperationEvidence("Bash", { kind: "command", input: `cat ${path}` }).filesystem, undefined);
+    }
+    assert.equal(campaignOperationEvidence("Write", { kind: "file", path: missing }).filesystem?.targets[0]?.resolvedPath, missing);
+    writeFileSync(missing, "regular fixture\n");
+    assert.equal(campaignOperationEvidence("Read", { kind: "file", path: missing }).filesystem?.targets[0]?.resolvedPath, missing);
+    assert.equal(campaignOperationEvidence("Bash", { kind: "command", input: `cat ${missing}` }).filesystem?.targets[0]?.resolvedPath, missing);
+    if (process.platform === "linux") {
+      const fifo = join(directory, "pipe.ts"); execFileSync("mkfifo", [fifo], { timeout: 10_000 });
+      assert.equal(campaignOperationEvidence("Read", { kind: "file", path: fifo }).filesystem, undefined);
+      assert.equal(campaignOperationEvidence("Bash", { kind: "command", input: `cat ${fifo}` }).filesystem, undefined);
+    }
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("Git helper fixtures demonstrate why canonical inspection targets cannot authorize execution", {
   skip: process.platform !== "linux" ? "POSIX Git helper and util-linux PTY fixtures" : false,
 }, (t) => {

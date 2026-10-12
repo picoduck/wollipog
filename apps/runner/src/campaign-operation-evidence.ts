@@ -2,16 +2,21 @@ import { lstatSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { campaignCodeOperationTargets, type ApprovalContext } from "@wollipog/protocol";
 
-/** Metadata only: never opens file contents. Missing files can be placed from a proved parent;
- * dangling links, inaccessible ancestors and excessive depth cannot supply canonical evidence. */
-function canonicalTarget(path: string): string | null {
+/** Metadata only: never opens file contents. Reads require an existing regular file. Only
+ * native mutations may place missing targets from a proved directory; dangling links,
+ * inaccessible ancestors and excessive depth cannot supply canonical evidence. */
+function canonicalTarget(path: string, allowMissing: boolean): string | null {
   if (!isAbsolute(path) || /(?:^|[\\/])\.\.(?:[\\/]|$)/u.test(path)) return null;
   let current = path;
   const missing: string[] = [];
   for (let depth = 0; depth < 16; depth++) {
-    try { return join(realpathSync.native(current), ...missing); }
+    try {
+      const resolved = realpathSync.native(current);
+      if (missing.length ? !statSync(resolved).isDirectory() : !statSync(resolved).isFile()) return null;
+      return join(resolved, ...missing);
+    }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return null;
+      if (!allowMissing || (error as NodeJS.ErrnoException).code !== "ENOENT") return null;
       try { if (lstatSync(current).isSymbolicLink()) return null; }
       catch (statError) { if ((statError as NodeJS.ErrnoException).code !== "ENOENT") return null; }
       const parent = dirname(current);
@@ -35,9 +40,10 @@ export function campaignOperationEvidence(toolName: string, operation: NonNullab
   }
   if (selectors.cwd && !cwd) return concrete;
   const targets: Array<{ path: string; resolvedPath: string }> = [];
+  const allowMissing = concrete.kind === "file" && ["Write", "Edit", "MultiEdit", "applyPatch", "fileChange"].includes(toolName);
   for (const path of selectors.paths) {
     const located = isAbsolute(path) ? path : selectors.cwd ? join(selectors.cwd, path) : null;
-    const resolvedPath = located ? canonicalTarget(located) : null;
+    const resolvedPath = located ? canonicalTarget(located, allowMissing) : null;
     if (!resolvedPath) return concrete;
     targets.push({ path, resolvedPath });
   }
