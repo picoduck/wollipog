@@ -11,6 +11,20 @@ test("synthetic sanitizer regression suite", { skip: process.platform === "win32
   assert.equal(result.status, 0, result.stdout + result.stderr);
 });
 
+test("receipt metadata rejects synthetic sensitive sentinels before creating output", { skip: process.platform === "win32" && "Ubuntu browser CI" }, () => {
+  const base = ["-B", "scripts/sanitize-browser-failure-artifacts.py", "--report", "/missing/report.json",
+    "--results", "/missing/results", "--output", "/missing/output", "--outcome", "failure",
+    "--run-id", "1", "--attempt", "1", "--shard", "1", "--head", "a".repeat(40)];
+  for (const option of ["--run-id", "--attempt", "--shard", "--head"]) {
+    const args = [...base];
+    args[args.indexOf(option) + 1] = "SYNTHETIC_SECRET_SENTINEL SYNTHETIC_PRIVATE_URL_SENTINEL";
+    const result = spawnSync("python3", args, { encoding: "utf8", timeout: 5000 });
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /invalid synthetic receipt identity/);
+    assert.doesNotMatch(result.stdout + result.stderr, /SYNTHETIC_.*_SENTINEL/);
+  }
+});
+
 const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
 const config = readFileSync(new URL("../playwright.config.ts", import.meta.url), "utf8");
 const step = (name) => workflow.split(/^      - name: /m).slice(1).find((text) => text.startsWith(`${name}\n`));
