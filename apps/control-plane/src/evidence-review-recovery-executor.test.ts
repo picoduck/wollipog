@@ -6,7 +6,8 @@ import { EvidenceRecoveryExecutor, type RecoveryExecutionPorts, type RecoveryRep
 import { planEvidenceRecovery } from "./evidence-review-recovery.js";
 const digest = "a".repeat(64);
 const subject: RecoverySubject = { rootSessionId: "root", childSessionId: "child", occurrenceId: "original",
-  evidenceId: "video", sourceSha256: digest, resourceDigest: digest, policyRevision: 1 };
+  evidenceId: "video", sourceSha256: digest, resourceDigest: digest, policyRevision: 1,
+  criteriaSha256: digest, workerAdmissionSha256: digest };
 // Synthetic capture/derivation ports exercise the durable execution contract only. They do not
 // certify an actual capture, operator grant, provider launch, namespace or model-visible media.
 function harness(t: { after(fn: () => void): void }) {
@@ -29,7 +30,15 @@ test("exact duplicate and restart reuse the completed original capture operation
   const result = await h.executor.execute(subject, plan);
   assert.equal(result.state, "completed");
   assert.deepEqual(await new EvidenceRecoveryExecutor(h.db, h.ports).execute(subject, plan), result);
-  assert.deepEqual(h.counts(), { launches: 1, reconciles: 0, derives: 1 });
+  assert.deepEqual(h.counts(), { launches: 1, reconciles: 0, derives: 2 });
+});
+test("completed readback re-verifies actual replacement artifacts and excludes unbound input fields", async (t) => {
+  const h = harness(t), plan = planEvidenceRecovery("full_control", "split_capture", 0);
+  assert.equal((await h.executor.execute(subject, plan)).state, "completed");
+  h.ports.verifyReplacement = async () => null;
+  assert.equal((await h.executor.execute(subject, plan)).state, "rejected");
+  assert.equal((await h.executor.execute({ ...subject, extraInput: "private test sentinel" } as RecoverySubject, plan)).state, "unsupported");
+  assert.equal(h.counts().launches, 1);
 });
 test("unknown capture cannot replay or spend on a replacement; same operation only reconciles", async (t) => {
   const h = harness(t); h.unknown();

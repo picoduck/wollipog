@@ -6,6 +6,7 @@ import type { PreparedVideoFrame } from "./video-evidence-preparation.js";
 export interface RecoverySubject {
   rootSessionId: string; childSessionId: string; occurrenceId: string; evidenceId: string;
   resourceDigest: string; policyRevision: number; sourceSha256: string;
+  criteriaSha256: string; workerAdmissionSha256: string;
 }
 export interface RecoveryReplacement {
   /** New immutable artifacts/occurrences; the original gate is never rewritten. */
@@ -39,18 +40,23 @@ export class EvidenceRecoveryExecutor {
       "state TEXT NOT NULL, result TEXT, PRIMARY KEY(subject_sha256,attempt));");
   }
   private frames(subject: RecoverySubject): readonly PreparedVideoFrame[] | null {
-    if (![subject.rootSessionId, subject.childSessionId, subject.occurrenceId, subject.evidenceId].every(id) ||
-      ![subject.sourceSha256, subject.resourceDigest].every(digest) ||
+    if (!subject || Object.keys(subject).length !== 9 || Object.keys(subject).some((key) =>
+      !["rootSessionId", "childSessionId", "occurrenceId", "evidenceId", "resourceDigest", "policyRevision",
+        "sourceSha256", "criteriaSha256", "workerAdmissionSha256"].includes(key)) ||
+      ![subject.rootSessionId, subject.childSessionId, subject.occurrenceId, subject.evidenceId].every(id) ||
+      ![subject.sourceSha256, subject.resourceDigest, subject.criteriaSha256, subject.workerAdmissionSha256].every(digest) ||
       !Number.isSafeInteger(subject.policyRevision) || subject.policyRevision <= 0) return null;
     const frames = this.ports.current(subject);
     return frames && frames.length > 0 && frames.length <= 900 && frames.every((f, i) =>
       f.index === i && digest(f.sha256) && Number.isSafeInteger(f.ptsUs) && f.ptsUs >= 0 &&
       Number.isSafeInteger(f.durationUs) && f.durationUs > 0 && Number.isSafeInteger(f.sizeBytes) && f.sizeBytes > 0 &&
-      (i === 0 || f.ptsUs === frames[i - 1]!.ptsUs + frames[i - 1]!.durationUs)) ? frames : null;
+      (i === 0 || f.ptsUs === frames[i - 1]!.ptsUs + frames[i - 1]!.durationUs)) ? structuredClone(frames) : null;
   }
   private complete(original: readonly PreparedVideoFrame[], value: RecoveryReplacement | null): value is RecoveryReplacement {
     return Boolean(value && Array.isArray(value.subjects) && value.subjects.length > 0 && value.subjects.length <= 8 &&
-      value.subjects.every((s) => [s.occurrenceId, s.evidenceId, s.artifactId].every(id) && digest(s.sha256)) &&
+      value.subjects.every((s) => s && Object.keys(s).length === 4 && Object.keys(s).every((key) =>
+        ["occurrenceId", "evidenceId", "artifactId", "sha256"].includes(key)) &&
+        [s.occurrenceId, s.evidenceId, s.artifactId].every(id) && digest(s.sha256)) &&
       new Set(value.subjects.map((s) => s.artifactId)).size === value.subjects.length &&
       Array.isArray(value.frames) && value.frames.length === original.length && value.frames.every((f, i) =>
         f.originalIndex === i && f.originalPtsUs === original[i]!.ptsUs && f.durationUs === original[i]!.durationUs &&
@@ -72,8 +78,13 @@ export class EvidenceRecoveryExecutor {
     if (row.operation_id !== operationId || row.source_frames_sha256 !== frameDigest) return { state: "rejected" };
     if (row.state === "rejected") return { state: "rejected" };
     if (row.state === "completed") {
-      const replacement = row.result ? JSON.parse(row.result) as RecoveryReplacement : null;
-      return this.complete(frames, replacement) ? { state: "completed", replacement } : { state: "rejected" };
+      const saved = row.result ? JSON.parse(row.result) as RecoveryReplacement : null;
+      if (!this.complete(frames, saved)) return { state: "rejected" };
+      let replacement: RecoveryReplacement | null;
+      try { replacement = await this.ports.verifyReplacement(saved.subjects); } catch { return { state: "uncertain" }; }
+      const current = this.frames(subject);
+      return current && sha(current) === frameDigest && this.complete(frames, replacement) && sha(replacement) === sha(saved)
+        ? { state: "completed", replacement } : { state: "rejected" };
     }
     let replacement: RecoveryReplacement | null;
     try {

@@ -115,7 +115,8 @@ export class EvidenceReviewService {
         const execution = this.adapter.recovery && (recovery.action === "split" || recovery.action === "recapture")
           ? await this.adapter.recovery.execute({ rootSessionId: b.rootSessionId, childSessionId: b.childSessionId,
             occurrenceId: b.occurrenceId, evidenceId: b.sourceEvidenceId, resourceDigest: b.resourceDigest,
-            policyRevision: b.policyRevision, sourceSha256: b.sourceSha256 }, recovery) : undefined;
+            policyRevision: b.policyRevision, sourceSha256: b.sourceSha256,
+            criteriaSha256: b.criteriaSha256, workerAdmissionSha256: b.workerAdmissionSha256 }, recovery) : undefined;
         // Replacement subjects start new exact occurrences; this original snapshot cannot be
         // rewritten or approved with substituted media. Unknown operations reconcile only.
         return { ok: false, code: "preparation", recovery, ...(execution ? { execution } : {}) };
