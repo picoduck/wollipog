@@ -2104,6 +2104,8 @@ test("a prompt event behind a full delivery slice still wakes the Orchestrator p
     const first = deliver(start + CAMPAIGN_CONTINUATION_FAN_IN_MS + 500);
     assert.ok(first, "the queue, not the 64-event slice, decides the deadline");
     assert.match(first, /durable event range 1-64\./u);
+    assert.match(first, /Action needed: yes/u,
+      "settled requests alone would need nothing, but the undescribed backlog still asks for the sweep");
     assert.match(deliver(start + CAMPAIGN_CONTINUATION_FAN_IN_MS + 600) ?? "", /durable event range 65-65\..*"kind":"child_ready"/su);
   } finally {
     db.close();

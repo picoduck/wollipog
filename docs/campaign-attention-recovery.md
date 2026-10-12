@@ -70,13 +70,17 @@ has something to learn or do (#3083):
   - for a settled request, its outcome and the resolver that caused the removal.
 
   The prompt also carries compact campaign counts and an `Action needed` line.
-  - **Titles** appear only where the Orchestrator can list the request at delivery: while it is
-    still pending and Orchestrator-owned, or when an Orchestrator-owned request was settled. They
-    are written by child sessions, so they are flattened to one line, stripped of brackets, and
-    labeled as data.
+  - **Titles** add nothing the Orchestrator cannot already read: it may read every descendant's
+    event history. They appear only where it can act on the request, which keeps the summary
+    aligned with `list_descendant_requests`: while the request is still pending and
+    Orchestrator-owned, or when an Orchestrator-owned request was settled. They are written by
+    child sessions, so they are flattened to one line, stripped of brackets, and labeled as data.
   - **`Action needed: no`** requires nothing pending for the Orchestrator, no held child, no report
-    to verify, no required cleanup, and no human or unattributed resolution. It lets the turn end
-    without the `get_campaign` and `list_descendant_requests` sweep.
+    to verify, no required cleanup, no human or unattributed resolution, and no undelivered events
+    beyond the bounded 64-event slice. It lets the turn end without the `get_campaign` and
+    `list_descendant_requests` sweep.
+  - **Cost.** The delivery deadline comes from one query over the queue. Event details are built
+    only when a continuation is actually staged, and session views are read once per pass.
 
   The prompt is control-plane text that the runner forwards verbatim, so no protocol change is
   involved.
