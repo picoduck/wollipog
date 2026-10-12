@@ -3,8 +3,10 @@ import type { SessionEvent, SessionEventsResponse, SessionHistoryHandoff, Sessio
 import type { ApiClient } from "./api.js";
 import type { EventWindowState } from "./store.js";
 
+/** A preview always carries rows. An empty log has nothing to show as a snapshot and nothing to
+ * anchor a handoff on, so it opens through the ordinary empty-conversation path (#3075). */
 export function validHistoryPreview(page: SessionHistoryPreview): boolean {
-  if (!page || !Array.isArray(page.events)) return false;
+  if (!page || !Array.isArray(page.events) || !page.events.length) return false;
   const { events, eventEpoch, logEpoch, throughSeq, turnStartSeq, nextAfterSeq } = page;
   return [eventEpoch, logEpoch, throughSeq, turnStartSeq, nextAfterSeq].every(value => Number.isSafeInteger(value) && value >= 0) &&
     turnStartSeq <= throughSeq && nextAfterSeq <= throughSeq && page.hasMore === (nextAfterSeq < throughSeq) &&
@@ -41,7 +43,7 @@ export function useHistoryPreview(api: ApiClient, sessionId: string, eventEpoch:
   })), [sessionId]);
   const accept = useCallback((page: SessionHistoryPreview) => {
     if (currentKey.current !== key || page.eventEpoch !== eventEpoch || !validHistoryPreview(page) ||
-        (page.events.length && page.events[0]!.seq !== page.turnStartSeq)) return false;
+        page.events[0]!.seq !== page.turnStartSeq) return false;
     setState(prior => prior?.key === key ? prior : { key, viewRevision: 0, source: page, events: project(page), loading: null, error: null });
     return true;
   }, [eventEpoch, key, project]);
@@ -154,7 +156,7 @@ export function useHistoryPreview(api: ApiClient, sessionId: string, eventEpoch:
     currentRef.current = owned; setState(owned);
     void api.getSessionTurnStartPage(sessionId, eventEpoch).then(response => {
       if (currentKey.current !== key || currentRef.current !== owned) return;
-      const page = response.preview;
+      const page = response.preview?.events.length ? response.preview : undefined;
       if (!page) {
         if (response.eventEpoch === eventEpoch && response.cacheComplete === true && handlers.current.refreshOpening?.(response)) {
           setState(null); return;
@@ -164,7 +166,7 @@ export function useHistoryPreview(api: ApiClient, sessionId: string, eventEpoch:
         return;
       }
       if (page.eventEpoch !== eventEpoch || !validHistoryPreview(page) ||
-          (page.events.length && page.events[0]!.seq !== page.turnStartSeq)) throw new Error("unavailable snapshot");
+          page.events[0]!.seq !== page.turnStartSeq) throw new Error("unavailable snapshot");
       setState({ key, viewRevision: selected.viewRevision + 1, source: page, events: project(page), loading: null, error: null });
     }).catch(() => {
       if (currentKey.current === key && currentRef.current === owned) setState({ ...selected, loading: null,

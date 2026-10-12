@@ -287,6 +287,43 @@ test("an event-epoch replacement retires the preview and rejects its late frozen
   } finally { await unmountFixture(fixture); }
 });
 
+test("a new session's empty preview opens the empty conversation and follows its first prompt live (#3075)", async () => {
+  let openings = 0;
+  let previewReads = 0;
+  const fixture = await mountFixture(pageController(), 0, { acknowledgeSubscription: false, client: {
+    getSessionTurnStartPage: async (_id, epoch) => {
+      const empty = { events: [], eventEpoch: epoch, turnStartSeq: 0, tailSeq: 0, nextAfter: 0, hasMoreLater: false, hasMoreOlder: false };
+      // The runner answers its empty current turn before the CP's first hydration pass completes.
+      return ++openings === 1 ? { ...empty, cacheComplete: false, preview: { eventEpoch: epoch, logEpoch: 14,
+        throughSeq: 0, turnStartSeq: 0, nextAfterSeq: 0, hasMore: false, events: [] } } : { ...empty, cacheComplete: true };
+    },
+    getSessionHistoryPreview: async () => { previewReads++; return { handoff: null }; },
+  } });
+  try {
+    Object.defineProperties(fixture.scroller, { offsetHeight: { configurable: true, value: 500 },
+      offsetWidth: { configurable: true, value: 800 }, clientWidth: { configurable: true, value: 800 } });
+    setScrollerMetrics(fixture.scroller, { clientHeight: 500, scrollHeight: 500, scrollTop: 0 });
+    await flushAsyncWork(300);
+    const text = () => fixture.container.textContent ?? "";
+    assert.match(fixture.scroller.textContent ?? "", /Start the Conversation/u);
+    assertNoDomNode(fixture.container.querySelector(".transcript-skeleton"));
+    assertNoDomNode(fixture.container.querySelector(".transcript-history-band"));
+    for (const copy of ["Loading the conversation", "Recent activity is readable as a snapshot", "Showing a loaded snapshot.", "Refresh Recent Activity"]) {
+      assert.equal(text().includes(copy), false, copy);
+    }
+    assert.equal(previewReads, 0, "no snapshot handoff is ever polled");
+    assert.ok(openings >= 2, "rejecting the empty preview keeps polling until the cache completes");
+    await act(async () => fixture.socket.push({ type: "session_event", event: { id: 1, seq: 1, ts: 1,
+      sessionId: fixture.sessionId, payload: { kind: "user_message", text: "First prompt" } } }));
+    await act(async () => fixture.socket.push({ type: "session_event", event: { id: 2, seq: 2, ts: 2,
+      sessionId: fixture.sessionId, payload: { kind: "agent_message", text: "Live agent reply", final: true } } }));
+    await flushAsyncWork(30);
+    assert.ok(text().includes("First prompt"));
+    assert.ok(text().includes("Live agent reply"));
+    assert.equal(text().includes("Showing a loaded snapshot."), false);
+  } finally { await unmountFixture(fixture); }
+});
+
 test("a very long turn first renders its start and shares the opening across socket acknowledgement", async () => {
   const pages = pageController();
   let calls = 0;

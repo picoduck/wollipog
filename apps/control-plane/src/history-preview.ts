@@ -86,7 +86,8 @@ export class HistoryPreviewReader {
         if (result.events.some((event, index) => event.seq !== base + index + 1 ||
               !Number.isSafeInteger(event.ts) || event.ts < 0 || event.seq > page.throughSeq) ||
             page.nextAfterSeq !== (result.events.at(-1)?.seq ?? base) ||
-            (page.hasMore && !result.events.length)) return null;
+            // An empty log has no snapshot to read: the opening shows the empty conversation (#3075).
+            !result.events.length) return null;
         if (first && start! > 0 && (result.events[0]?.payload.kind !== "user_message" ||
             result.events[0].payload.deliveryIntent === "steer" || result.events[0].payload.commandInvocation !== undefined)) return null;
         // A byte-bounded forward read can stop before an older page's requested end. Shrink that
