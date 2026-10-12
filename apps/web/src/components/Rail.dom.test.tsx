@@ -459,8 +459,8 @@ test("the phone More trigger reads as current on the Settings route and the row 
     assert.equal(row.getAttribute("role"), "menuitem", "roving navigation must not skip it");
     assert.equal(row.getAttribute("aria-current"), "page");
     assert.ok(row.classList.contains("is-active"));
-    assert.equal(row.getAttribute("href"), "/settings/appearance",
-      "the row is a real link, so it survives middle-click and copy-link");
+    assert.equal(row.getAttribute("href"), "/settings",
+      "the row is a real link to the Settings index, so it survives middle-click and copy-link");
     assert.equal(domWindow.document.querySelectorAll('[aria-current="page"]').length, 1,
       "the row takes the current-page marker from the trigger while the sheet is open");
 

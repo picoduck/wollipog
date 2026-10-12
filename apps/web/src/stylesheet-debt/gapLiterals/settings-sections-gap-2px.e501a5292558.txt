@@ -1,1 +1,0 @@
-|.settings-sections|gap|2px

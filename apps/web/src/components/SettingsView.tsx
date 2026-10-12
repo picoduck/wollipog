@@ -16,9 +16,23 @@ import { useApi } from "../api-context.js";
 import { tailnetAccessDescription, type TailnetAccessSetting } from "../tailnet-access.js";
 import { availableUpdateMessage, type DesktopUpdateSetting } from "../desktop-updates.js";
 import { type PushSetting } from "../push.js";
-import { ArrowDownIcon, ArrowUpIcon, KeyboardIcon } from "./Icons.js";
+import {
+  AppearanceIcon,
+  ArrowDownIcon,
+  ArrowUpIcon,
+  ChevronRightIcon,
+  ExperimentIcon,
+  InfoIcon,
+  KeyboardIcon,
+  NetworkIcon,
+  NotificationsIcon,
+  OrchestratorControlsIcon,
+  ShieldCheckIcon,
+  TuningIcon,
+} from "./Icons.js";
 import { VIEW_ICONS } from "./Rail.js";
-import { PageHeader } from "./PageHeader.js";
+import { DetailBar, PageHeader } from "./PageHeader.js";
+import { TabList } from "./Tabs.js";
 import {
   REQUIRED_RAIL_VIEWS,
   moveRailView,
@@ -31,7 +45,7 @@ import {
 } from "../rail-preferences.js";
 import { useRailPreferences } from "../use-rail-preferences.js";
 import { useInstanceScope } from "../instance-scope.js";
-import { useIsMobile } from "./useIsMobile.js";
+import { useIsCompact, useIsMobile } from "./useIsMobile.js";
 import { EXPERIMENT_COPY, experimentForViewName } from "../experiments.js";
 import { useExperiments } from "../use-experiments.js";
 import { destination } from "../navigation.js";
@@ -42,7 +56,7 @@ import type { SessionsPreviewLayout } from "../sessions-preview-layout.js";
 import { useSessionsPreviewLayout } from "../use-sessions-preview-layout.js";
 import { setEnterKeyBehavior, useEnterKeyBehavior, type EnterKeyBehavior } from "../enter-key.js";
 import { setShowAgentLogs, useShowAgentLogs } from "../agent-logs.js";
-import { SETTINGS_SECTIONS, type SettingsSection, type View } from "../navigation.js";
+import { SETTINGS_SECTIONS, viewPath, type SettingsSection, type SettingsSectionEntry, type View } from "../navigation.js";
 import type { ExperimentFlags, ExperimentId } from "../experiments.js";
 import { effortLabel, permissionModeLabel, titleCaseLabel } from "../format.js";
 import { useFeedback } from "./FeedbackProvider.js";
@@ -56,80 +70,210 @@ import { useFeedback } from "./FeedbackProvider.js";
  * out of both layouts; and the shortcut reference had to CLOSE it and open a second modal, because
  * a dialog inside a dialog is a focus trap inside a focus trap.
  *
- * The master/detail shape is the one `ProjectsView` already establishes — a section list beside the
- * content, collapsing to a stack on a phone — so this is a layout the app already knows rather than
- * a new one.
+ * The master/detail shape is the one Agent Skills established (§6, #1987) — the sections are the
+ * list, and a phone gets the list and each section as two routes — so this is a layout the app
+ * already knows rather than a new one.
  */
 
 export interface SettingsViewProps {
-  section: SettingsSection;
+  /** Absent for `/settings` itself: the index on a phone, the first section elsewhere. */
+  section?: SettingsSection;
   onNavigate: (view: View) => void;
   onOpenShortcuts: (returnFocus: HTMLElement | null) => void;
   /** Each section's content, supplied by the shell that owns the underlying state. */
   panels: Record<SettingsSection, ReactNode>;
 }
 
+/** The page header's one line (§4.2), hidden on phones as every page description is. */
+export const SETTINGS_DESCRIPTION = "Preferences for this device and your account.";
+
+/** Each section's 16px glyph, one per meaning (§18, docs/icon-system.md). */
+const SECTION_ICONS: Record<SettingsSection, (props: { size?: number }) => ReactNode> = {
+  appearance: AppearanceIcon,
+  notifications: NotificationsIcon,
+  keyboard: KeyboardIcon,
+  behavior: TuningIcon,
+  approvals: ShieldCheckIcon,
+  orchestrator: OrchestratorControlsIcon,
+  network: NetworkIcon,
+  experimental: ExperimentIcon,
+  about: InfoIcon,
+};
+
+/** The sections that start a new group in the phone index; the rest follow the section before. */
+const INDEX_GROUP_STARTS: ReadonlySet<SettingsSection> = new Set(["approvals", "network"]);
+
+/** The phone index's groups (§5.1): preferences, then decisions, then the machine and the app. */
+export function settingsIndexGroups(): SettingsSectionEntry[][] {
+  const groups: SettingsSectionEntry[][] = [];
+  for (const entry of SETTINGS_SECTIONS) {
+    if (groups.length === 0 || INDEX_GROUP_STARTS.has(entry.id)) groups.push([]);
+    groups[groups.length - 1]!.push(entry);
+  }
+  return groups;
+}
+
+/**
+ * Settings is a master-detail destination (§6): the sections are the list, and each section is a
+ * route of its own. The list takes the shape of the width (§15):
+ *
+ * - **Desktop** (1100px and wider): a 192px column of section items beside the panel, the current
+ *   one in the §5.2 selected state.
+ * - **Compact** (761–1099px): link tabs in the page header (§10.1), so the panel keeps the width.
+ * - **Phone** (760px and below): two routes (§6.2). `/settings` is the section index, and each
+ *   section opens under a detail bar whose Back returns to the index where it was left.
+ *
+ * Without a section, desktop and compact widths open the first one (§6.1 rule 2), and the URL stays
+ * `/settings` so the same link shows a phone its index.
+ */
 export function SettingsView({ section, onNavigate, panels }: SettingsViewProps) {
+  const phone = useIsMobile();
+  const compact = useIsCompact();
+  const showIndex = phone && section === undefined;
+  const current = SETTINGS_SECTIONS.find((entry) => entry.id === section) ?? SETTINGS_SECTIONS[0]!;
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
   // Back/Forward between sections swaps `panels[current.id]`. If the focused control was inside the
   // outgoing panel it is now detached and focus is on <body>. Focusing the heading only in that
   // case keeps link-driven navigation as it is — the link keeps focus, and its `aria-current`
-  // change is what announces the move.
+  // change is what announces the move. Where the panel's heading is hidden (the current tab or the
+  // detail bar names the section), the page title takes it instead.
   //
   // And only on an actual section CHANGE. Arriving at /settings/network directly leaves focus on
-  // <body> legitimately; focusing the heading there put the first Tab after all six section links.
+  // <body> legitimately; focusing the heading there put the first Tab after all the section links.
   const previousSection = useRef(section);
   useEffect(() => {
     if (previousSection.current === section) return;
     previousSection.current = section;
     const active = document.activeElement;
     if (active && active !== document.body && (active as HTMLElement).isConnected) return;
-    headingRef.current?.focus();
+    const heading = headingRef.current;
+    // Back to a phone's index restores where it was scrolled (below), which focusing its title must
+    // not undo.
+    (heading && heading.getClientRects().length > 0 ? heading : document.getElementById("page-title"))
+      ?.focus({ preventScroll: section === undefined });
   }, [section]);
-  const current = SETTINGS_SECTIONS.find((entry) => entry.id === section) ?? SETTINGS_SECTIONS[0]!;
-  // On a phone the section list is one scrolling row, nine sections wide: the current one is
-  // scrolled into it, or a link to Approvals lands on a list that shows only the first four. The
-  // list scrolls itself; the page does not move.
-  const sectionsRef = useRef<HTMLElement>(null);
+  // On a phone the index and a section are two screens in one scroller, the shell's `.main-body`. A
+  // section opens at its top, and Back puts the index where it was left (§6.2). The position is
+  // recorded while the index is on screen, since by the time a section has replaced it the scroller
+  // has already clamped to the shorter page. Scroll events arrive a frame late, so one can land after
+  // a section has replaced the index; only a position the index itself was scrolled to counts.
+  const indexScrollTop = useRef(0);
+  useEffect(() => {
+    const scroller = rootRef.current?.closest(".main-body");
+    if (!showIndex || !scroller) return;
+    const record = () => {
+      if (scroller.querySelector(".settings-index")) indexScrollTop.current = scroller.scrollTop;
+    };
+    scroller.addEventListener("scroll", record, { passive: true });
+    return () => scroller.removeEventListener("scroll", record);
+  }, [showIndex]);
+  const previousShowIndex = useRef(showIndex);
   useLayoutEffect(() => {
-    const list = sectionsRef.current;
-    const active = list?.querySelector<HTMLElement>('[aria-current="page"]');
-    if (!list || !active || list.scrollWidth <= list.clientWidth) return;
-    const start = active.offsetLeft - list.offsetLeft;
-    if (start < list.scrollLeft || start + active.offsetWidth > list.scrollLeft + list.clientWidth) {
-      list.scrollLeft = start - (list.clientWidth - active.offsetWidth) / 2;
-    }
-  }, [current.id]);
+    if (previousShowIndex.current === showIndex) return;
+    previousShowIndex.current = showIndex;
+    const scroller = rootRef.current?.closest(".main-body");
+    if (scroller) scroller.scrollTop = showIndex ? indexScrollTop.current : 0;
+  }, [showIndex]);
+
+  // These are ROUTES, and each one is a link a person can copy, bookmark, or open in a new tab: a
+  // plain click navigates in place, and any modified click is left to the browser.
+  const linkTo = (view: View) => ({
+    href: viewPath(view),
+    onClick: (event: React.MouseEvent<HTMLAnchorElement>) => {
+      if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      event.preventDefault();
+      onNavigate(view);
+    },
+  });
+
+  // A phone's section is a detail page (§4.3): its bar is full-bleed and the panel sits in the
+  // gutter under it. Every other screen is a page under the page header.
+  const phoneSection = phone && !showIndex;
   return (
+    // One tree at every width: crossing a breakpoint swaps the header and the list beside the panel,
+    // but the panel keeps its place, so whatever is open or half-typed in it survives the crossing.
     // One scroll container per column (§4.5): the shell's `.main-body` scrolls Settings, so this root
     // neither reuses that class nor scrolls on its own.
-    <div className="page full">
-    <PageHeader title="Settings" />
-    <div className="settings-view">
-      {/* A `tablist` would be wrong: these are ROUTES, and each one is a link a person can copy,
-          bookmark, or open in a new tab. A tab swaps a panel; this navigates. */}
-      <nav className="settings-sections" aria-label="Settings Sections" ref={sectionsRef}>
-        {SETTINGS_SECTIONS.map((entry) => (
-          <a
-            key={entry.id}
-            className={`settings-section-link${entry.id === current.id ? " active" : ""}`}
-            href={`/settings/${entry.id}`}
-            aria-current={entry.id === current.id ? "page" : undefined}
-            onClick={(event) => {
-              if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-              event.preventDefault();
-              onNavigate({ name: "settings", section: entry.id });
-            }}
-          >
-            {entry.title}
-          </a>
-        ))}
-      </nav>
-      <section className="settings-panel" aria-labelledby="settings-panel-heading">
-        <h2 id="settings-panel-heading" ref={headingRef} tabIndex={-1}>{current.title}</h2>
-        {panels[current.id]}
-      </section>
-    </div>
+    <div ref={rootRef} className={phoneSection ? "settings-detail" : "page full"}>
+      {phoneSection ? (
+        <DetailBar title={current.title} backLabel="Back to Settings" onBack={() => onNavigate({ name: "settings" })} />
+      ) : (
+        <PageHeader
+          title="Settings"
+          description={SETTINGS_DESCRIPTION}
+          tabs={compact ? (
+            // Link tabs (§10.1): they change the URL, so they are links marked `aria-current`, not a
+            // `tablist`. A tab swaps a panel in place; these navigate.
+            <TabList label="Settings Sections" links>
+              {SETTINGS_SECTIONS.map((entry) => (
+                <a
+                  key={entry.id}
+                  className="tab"
+                  aria-current={entry.id === current.id ? "page" : undefined}
+                  {...linkTo({ name: "settings", section: entry.id })}
+                >
+                  {entry.title}
+                </a>
+              ))}
+            </TabList>
+          ) : undefined}
+        />
+      )}
+      {showIndex ? (
+        // No row is ever selected here (§5.2): each one opens a page of its own.
+        <nav className="settings-index" aria-label="Settings Sections">
+          {settingsIndexGroups().map((group) => (
+            <div key={group[0]!.id} className="surface">
+              {group.map((entry) => {
+                const Icon = SECTION_ICONS[entry.id];
+                return (
+                  <a key={entry.id} className="row row-2" {...linkTo({ name: "settings", section: entry.id })}>
+                    <span className="row-icon" aria-hidden="true"><Icon /></span>
+                    <span className="row-body">
+                      <span className="row-title">{entry.title}</span>
+                      <span className="row-sub">{entry.description}</span>
+                    </span>
+                    <span className="settings-index-chevron" aria-hidden="true"><ChevronRightIcon /></span>
+                  </a>
+                );
+              })}
+            </div>
+          ))}
+        </nav>
+      ) : (
+        <div className="settings-view">
+          {!phone && !compact && (
+            <nav className="settings-nav" aria-label="Settings Sections">
+              {SETTINGS_SECTIONS.map((entry) => {
+                const Icon = SECTION_ICONS[entry.id];
+                const selected = entry.id === current.id;
+                return (
+                  <a
+                    key={entry.id}
+                    className={`row settings-nav-item${selected ? " is-selected" : ""}`}
+                    aria-current={selected ? "page" : undefined}
+                    {...linkTo({ name: "settings", section: entry.id })}
+                  >
+                    <span className="row-icon" aria-hidden="true"><Icon /></span>
+                    <span className="row-title">{entry.title}</span>
+                  </a>
+                );
+              })}
+            </nav>
+          )}
+          <section className="settings-panel" aria-labelledby="settings-panel-heading">
+            <div className="settings-panel-head">
+              <div className="settings-panel-heading">
+                <h2 id="settings-panel-heading" ref={headingRef} tabIndex={-1}>{current.title}</h2>
+                <p className="settings-panel-desc">{current.description}</p>
+              </div>
+              {current.scope && <span className="settings-panel-scope">{current.scope}</span>}
+            </div>
+            {panels[current.id]}
+          </section>
+        </div>
+      )}
     </div>
   );
 }

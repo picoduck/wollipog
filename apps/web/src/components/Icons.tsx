@@ -9,6 +9,7 @@ import {
   ArrowUpRight as LucideArrowUpRight,
   AtSign as LucideAtSign,
   Ban as LucideBan,
+  Bell as LucideBell,
   BookOpen as LucideBookOpen,
   Bot as LucideBot,
   Braces as LucideBraces,
@@ -107,6 +108,7 @@ import {
   PanelRight as LucidePanelRight,
   Maximize2 as LucideMaximize2,
   Minimize2 as LucideMinimize2,
+  Palette as LucidePalette,
   Paperclip as LucidePaperclip,
   Pencil as LucidePencil,
   Pin as LucidePin,
@@ -143,6 +145,7 @@ import {
   UsersRound as LucideUsersRound,
   WandSparkles as LucideWandSparkles,
   Waypoints as LucideWaypoints,
+  Wifi as LucideWifi,
   Workflow as LucideWorkflow,
   Wrench as LucideWrench,
   WrapText as LucideWrapText,
@@ -942,6 +945,18 @@ export function HeldIcon(props: IconProps) {
 
 export function ExperimentIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideFlaskConical} {...props} />;
+}
+
+export function AppearanceIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucidePalette} {...props} />;
+}
+
+export function NotificationsIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideBell} {...props} />;
+}
+
+export function NetworkIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideWifi} {...props} />;
 }
 
 export function VersionIcon(props: IconProps) {

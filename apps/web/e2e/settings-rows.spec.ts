@@ -746,13 +746,13 @@ test("an unavailable tailnet does not take the rest of Network with it", async (
 
 test("a fresh load leaves the tab order at the top of the page", async ({ page }) => {
   // The focus rescue fired on MOUNT, so the first Tab started after the panel heading and skipped
-  // all six section links. Nothing was dropped on a fresh load; there was nothing to rescue.
+  // all the section links. Nothing was dropped on a fresh load; there was nothing to rescue.
   await useHarness(page, "dark", { section: "network" });
   expect(await page.evaluate(() => document.activeElement?.tagName ?? null),
     "nothing may take focus on a fresh load").toBe("BODY");
   await page.keyboard.press("Tab");
   expect(await page.evaluate(() => document.activeElement?.className ?? ""),
-    "the first stop must be the section list, not something after it").toContain("settings-section-link");
+    "the first stop must be the section list, not something after it").toContain("settings-nav-item");
 });
 
 test("every section renders its own panel", async ({ page }) => {
@@ -760,7 +760,7 @@ test("every section renders its own panel", async ({ page }) => {
     await useHarness(page, "dark", { section: id });
     await expect(page.locator(".settings-panel .ui-row, .settings-panel .facts").first(),
       `the ${title} panel must render something`).toBeVisible();
-    await expect(page.locator(`.settings-section-link[aria-current="page"]`)).toHaveText(title);
+    await expect(page.locator(`.settings-nav-item[aria-current="page"]`)).toHaveText(title);
   }
 });
 
@@ -859,11 +859,16 @@ test.describe("on a touch device", () => {
     });
     expect(reaches, "the switch's hit area is 44x44").toBe(true);
 
-    // The section list is a touch target too, and it is the only way to move between panels here.
-    const links = page.locator(".settings-section-link");
+    // The way between sections is a touch target too: on a phone, the section page's Back and the
+    // index's rows (#3018).
+    const back = await page.getByRole("button", { name: "Back to Settings" }).boundingBox();
+    expect(back?.height ?? 0, "Back is below the 44px touch target").toBeGreaterThanOrEqual(44);
+    await page.goto("/settings-rows-e2e.html?theme=dark&route=/settings");
+    const links = page.locator(".settings-index a.row");
+    await expect(links).toHaveCount(SETTINGS_SECTIONS.length);
     for (let index = 0; index < await links.count(); index += 1) {
       const box = await links.nth(index).boundingBox();
-      expect(box?.height ?? 0, "a section link is below the 44px touch target").toBeGreaterThanOrEqual(44);
+      expect(box?.height ?? 0, "a section row is below the 44px touch target").toBeGreaterThanOrEqual(44);
     }
   });
 });

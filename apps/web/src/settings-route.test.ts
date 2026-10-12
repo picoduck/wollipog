@@ -62,9 +62,26 @@ test("a policy link is a route to its row in Settings › Approvals (#2158)", ()
   assert.equal(viewPath({ name: "settings", section: "behavior", policyId: "x" }), "/settings/behavior");
 });
 
-test("/settings alone is a section, not a dead route", () => {
-  assert.deepEqual(viewFromPath("/settings"), { name: "settings", section: "appearance" });
-  assert.equal(viewPath({ name: "settings" }), "/settings/appearance");
+test("/settings alone keeps no section, so a phone can show the index (#3018)", () => {
+  // Wider layouts open Appearance for it (§6.1 rule 2); resolving it to Appearance in the route
+  // would leave a phone no URL for its section index.
+  assert.deepEqual(viewFromPath("/settings"), { name: "settings" });
+  assert.equal(viewPath({ name: "settings" }), "/settings");
+  assert.deepEqual(viewFromPath("/settings/"), { name: "settings" });
+});
+
+test("every section has an icon-free one-line description and at most one scope (#3018)", () => {
+  for (const section of SETTINGS_SECTIONS) {
+    // 48 characters is what a 390px index row shows before its ellipsis.
+    assert.ok(section.description.length > 0 && section.description.length <= 48,
+      `${section.title}: one untruncated line on a 390px phone row`);
+    assert.match(section.description, /^[A-Z][^.]*\.$/, `${section.title}: one sentence, in sentence case`);
+    assert.ok(section.scope === undefined || section.scope === "This Device" || section.scope === "Your Account");
+  }
+  // Sections whose groups are kept in different places say so per group, never as a whole.
+  for (const mixed of ["behavior", "approvals", "network"]) {
+    assert.equal(SETTINGS_SECTIONS.find((section) => section.id === mixed)?.scope, undefined, mixed);
+  }
 });
 
 test("an unknown section is not a settings route at all", () => {

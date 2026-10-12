@@ -6,20 +6,26 @@ import React, { useEffect, useLayoutEffect, useRef, type HTMLAttributes, type Re
  * and scrolls the selected tab into view whenever the selection changes, including a tab chosen by
  * a link or Back after mount. Keyboard behavior stays with the owner, which knows how its tabs move
  * (roving arrows, Home and End).
+ *
+ * With `links`, the tabs are routes rather than panels: the row is a `nav` landmark holding `a.tab`
+ * links, the current one `aria-current="page"`, and Tab moves through them as through any links.
  */
 export function TabList({
   label,
   className,
+  links = false,
   children,
   ...rest
-}: Omit<HTMLAttributes<HTMLDivElement>, "role"> & { label: string; children: ReactNode }) {
-  const rowRef = useRef<HTMLDivElement>(null);
+}: Omit<HTMLAttributes<HTMLElement>, "role"> & { label: string; links?: boolean; children: ReactNode }) {
+  const rowRef = useRef<HTMLElement>(null);
 
   // After every render, since the owner decides the selection: only a change of selected tab
   // scrolls, so a re-render never pulls the row back from where the user scrolled it.
   const shownTab = useRef<Element | null>(null);
   useLayoutEffect(() => {
-    const selected = rowRef.current?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]') ?? null;
+    const selected = rowRef.current?.querySelector<HTMLElement>(
+      links ? '.tab[aria-current="page"]' : '[role="tab"][aria-selected="true"]',
+    ) ?? null;
     if (selected === shownTab.current) return;
     shownTab.current = selected;
     selected?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
@@ -46,10 +52,13 @@ export function TabList({
   }, []);
   useEffect(() => updateClip.current());
 
+  if (links) {
+    return <nav {...rest} ref={rowRef} aria-label={label} className={className ? `tabs ${className}` : "tabs"}>{children}</nav>;
+  }
   return (
     <div
       {...rest}
-      ref={rowRef}
+      ref={rowRef as React.RefObject<HTMLDivElement>}
       role="tablist"
       aria-label={label}
       className={className ? `tabs ${className}` : "tabs"}

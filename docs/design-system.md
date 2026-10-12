@@ -1385,6 +1385,16 @@ variant by default and offers side by side as a user preference (§6.3).
   detail's `scrollTop` on each route, and on a phone it restores the list's position on Back. The
   side-by-side resize handle is built for Sessions' Preview Right (#2219, §6.3), and its stacked
   divider (#2217); Agent Skills' list pane does not resize yet.
+- **Settings (#3018).** Each section is a route, and the list takes the width's shape. Desktop: a
+  sticky 192px `nav.settings-nav` of `.row.settings-nav-item` links at `--control-h`, each a 16px
+  icon and the section name; the current one is `aria-current="page"` with the §5.2 selected state
+  and its icon in `--accent`. Compact: the same links as the page header's link tabs (§10.1,
+  `TabList` with `links`). Phone: `/settings` is the section index (`.row.row-2` links in three
+  `.surface` groups, each with its one-line description and a chevron), and a section opens under a
+  `DetailBar` with "Back to Settings". `/settings` keeps no section, so wider layouts open the first
+  one (§6.1 rule 2). The panel's head is the section title, its description and, when every setting
+  in it is kept in one place, "This Device" or "Your Account" as §11.3 meta; the title is hidden
+  where the current tab or the detail bar already names the section.
 
 ### 6.1 The Default Detail State (No Selection)
 

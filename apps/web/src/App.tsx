@@ -915,7 +915,7 @@ export function Shell() {
           {view.name === "archived" && <ArchivedSessionsView />}
           {view.name === "settings" && (
             <SettingsView
-              section={view.section ?? "appearance"}
+              section={view.section}
               onNavigate={navigate}
               onOpenShortcuts={openShortcutReference}
               panels={{

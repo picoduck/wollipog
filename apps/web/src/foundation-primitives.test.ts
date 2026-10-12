@@ -22,7 +22,7 @@ function ruleBody(selector: string): Map<string, string> {
 
 test("tabs are 40px on a fine pointer and 48px on touch, through --control-h-lg (§10.1)", () => {
   assert.equal(ruleBody(".tab").get("height"), "var(--control-h-lg)");
-  assert.equal(ruleBody('.tab[aria-selected="true"]::after').get("height"), "2px", "the selected underline is 2px");
+  assert.equal(ruleBody('.tab:is([aria-selected="true"], [aria-current="page"])::after').get("height"), "2px", "the selected underline is 2px");
 });
 
 test("rows read their height from the row tokens, never from padding (§5.2)", () => {

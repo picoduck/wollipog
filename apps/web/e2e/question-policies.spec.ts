@@ -60,11 +60,17 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
 
     test("Approvals sits between Behavior and Orchestrator and holds the three groups", async ({ page }) => {
       await page.goto(`${APPROVALS}&custom`);
-      await expect(page.locator(".settings-section-link")).toContainText(["Behavior", "Approvals", "Orchestrator"]);
-      const titles = await page.locator(".settings-section-link").allTextContents();
-      expect(titles.indexOf("Approvals")).toBe(titles.indexOf("Behavior") + 1);
-      expect(titles.indexOf("Orchestrator")).toBe(titles.indexOf("Approvals") + 1);
-      await expect(page.locator(".settings-section-link[aria-current=page]")).toHaveText("Approvals");
+      if (viewport.width > 760) {
+        await expect(page.locator(".settings-nav-item")).toContainText(["Behavior", "Approvals", "Orchestrator"]);
+        const titles = await page.locator(".settings-nav-item").allTextContents();
+        expect(titles.indexOf("Approvals")).toBe(titles.indexOf("Behavior") + 1);
+        expect(titles.indexOf("Orchestrator")).toBe(titles.indexOf("Approvals") + 1);
+        await expect(page.locator(".settings-nav-item[aria-current=page]")).toHaveText("Approvals");
+      } else {
+        // A phone opens the section as a page of its own, under a bar with Back to the index (#3018).
+        await expect(page.locator(".detail-bar #page-title")).toHaveText("Approvals");
+        await expect(page.getByRole("button", { name: "Back to Settings" })).toBeVisible();
+      }
       await expect(page.locator("#settings-panel-heading")).toHaveText("Approvals");
       await expect(page.locator(".settings-group > h3")).toHaveText(["Answering Questions", "Routine Questions", "Tool Policies"]);
       await expect(routine(page).locator(".ui-row-title")).toHaveText([
