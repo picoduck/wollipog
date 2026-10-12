@@ -29,7 +29,6 @@ import {
   parseDiff,
   parseGitHubReviewPage,
   parseGitLabMergeRequest,
-  parseGitLabReviewPage,
   parseForgeRemote,
   parsePorcelain,
   parsePorcelainCategories,
@@ -824,40 +823,59 @@ test("GitLab MR and pipeline parsers validate revision and URL provenance", () =
   assert.throws(() => summarizeGitLabPipeline({ ...value.head_pipeline, web_url: "https://evil.test/pipeline" }, remote), /invalid pipeline/);
 });
 
-test("parseGitLabReviewPage retains exact anchors and marks unpositioned discussions remote-only", () => {
+test("GitLab review loading retains exact anchors and marks unpositioned discussions remote-only", async () => {
   const remote = parseForgeRemote("https://gitlab.com/group/repo.git")!;
   const mr = parseGitLabMergeRequest({
     iid: 17, title: "Add GitLab", web_url: "https://gitlab.com/group/repo/-/merge_requests/17", state: "opened",
     sha: "a".repeat(40), diff_refs: { head_sha: "a".repeat(40), base_sha: "b".repeat(40) }, head_pipeline: null,
   }, remote);
-  const page = parseGitLabReviewPage(JSON.stringify([
-    {
-      id: "system-discussion", notes: [{
-        id: 100, body: "added 1 commit", author: { username: "reviewer" },
-        created_at: "2026-09-04T09:59:00Z", updated_at: "2026-09-04T09:59:00Z", system: true,
-      }],
-    },
-    {
-      id: "discussion-1", resolved: false, notes: [{
-        id: 101, body: "Keep this check", author: { username: "reviewer" },
-        created_at: "2026-09-04T10:00:00Z", updated_at: "2026-09-04T10:01:00Z", system: false,
-        position: { position_type: "text", new_path: "src/a.ts", old_path: "src/a.ts", new_line: 12, old_line: null, head_sha: "a".repeat(40) },
-      }],
-    },
-    {
-      id: "discussion-2", resolved: true, notes: [{
-        id: 102, body: "General discussion", author: { username: "reviewer" },
-        created_at: "2026-09-04T10:00:00Z", updated_at: "2026-09-04T10:02:00Z", system: false,
-      }],
-    },
-  ]), remote, mr);
-  assert.deepEqual(page.map(({ subjectType, path, side, line, resolved, outdated }) => ({ subjectType, path, side, line, resolved, outdated })), [
+  const calls: number[] = [];
+  const threads = await loadGitLabReviewThreads(remote, mr, async (page) => {
+    calls.push(page);
+    return JSON.stringify([
+      {
+        id: "system-discussion", notes: [{
+          id: 100, body: "added 1 commit", author: { username: "reviewer" },
+          created_at: "2026-09-04T09:59:00Z", updated_at: "2026-09-04T09:59:00Z", system: true,
+        }],
+      },
+      {
+        id: "discussion-1", resolved: false, notes: [{
+          id: 101, body: "Keep this check", author: { username: "reviewer" },
+          created_at: "2026-09-04T10:00:00Z", updated_at: "2026-09-04T10:01:00Z", system: false,
+          position: { position_type: "text", new_path: "src/a.ts", old_path: "src/a.ts", new_line: 12, old_line: null, head_sha: "a".repeat(40) },
+        }],
+      },
+      {
+        id: "discussion-2", resolved: true, notes: [{
+          id: 102, body: "General discussion", author: { username: "reviewer" },
+          created_at: "2026-09-04T10:00:00Z", updated_at: "2026-09-04T10:02:00Z", system: false,
+        }],
+      },
+    ]);
+  });
+  assert.deepEqual(calls, [1], "a short first page is the complete snapshot");
+  assert.deepEqual(threads.map(({ subjectType, path, side, line, resolved, outdated }) => ({ subjectType, path, side, line, resolved, outdated })), [
     { subjectType: "line", path: "src/a.ts", side: "right", line: 12, resolved: false, outdated: false },
     { subjectType: "remote", path: "__remote__/gitlab-discussion-102", side: "left", line: 1, resolved: true, outdated: true },
   ]);
-  assert.throws(() => parseGitLabReviewPage(JSON.stringify([{
+  await assert.rejects(loadGitLabReviewThreads(remote, mr, async () => JSON.stringify([{
     id: "bad", notes: [{ id: 1, body: "x", author: { username: "u" }, created_at: "bad", updated_at: "bad" }],
-  }]), remote, mr), /invalid review-discussion anchor/);
+  }])), /invalid review-discussion anchor/);
+  const positioned = (position: Record<string, unknown>) => JSON.stringify([{
+    id: "bad-position", notes: [{
+      id: 2, body: "x", author: { username: "u" },
+      created_at: "2026-09-04T10:00:00Z", updated_at: "2026-09-04T10:00:00Z", system: false,
+      position: { position_type: "text", new_path: "src/a.ts", old_path: "src/a.ts", new_line: 3, old_line: null, head_sha: "a".repeat(40), ...position },
+    }],
+  }]);
+  for (const position of [{ new_path: null, old_path: null }, { head_sha: null }, { new_line: 0 }]) {
+    await assert.rejects(
+      loadGitLabReviewThreads(remote, mr, async () => positioned(position)),
+      /invalid review-discussion anchor/,
+      JSON.stringify(position),
+    );
+  }
 });
 
 test("GitLab merge-request creation sends all fields as literal strings", () => {

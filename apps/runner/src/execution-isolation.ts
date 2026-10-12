@@ -295,34 +295,6 @@ export function seatbeltWritableRoots(
   return [...paths];
 }
 
-/** A parameter-free Seatbelt profile. It intentionally grants read access for installed CLI,
- * credential, toolchain, and system compatibility while restricting writes to the declared
- * session roots and the provider's real transcript leaf. Unlike bwrap, Seatbelt cannot mount a
- * per-session transcript leaf over the provider's home path. */
-export function buildSeatbeltProfile(
-  state: IsolationStateOptions,
-  home: string,
-  network: "inherit" | "deny",
-  nativeTmp = tmpdir(),
-): string {
-  return renderSeatbeltProfile(
-    seatbeltWritableRoots(state, home, nativeTmp),
-    network,
-    state.readOnlyPaths ?? [],
-    state.guardStateMask
-      ? {
-        directories: [state.guardStateMask.directory],
-        readableFiles: state.guardStateMask.readable,
-        readableDirectories: [],
-        sockets: state.guardStateMask.socket ? [state.guardStateMask.socket] : [],
-        transportReadable: state.guardStateMask.managerTransport?.readable ?? [],
-        transportAtomicWritable: state.guardStateMask.managerTransport?.atomicWritable ?? [],
-        transportWritable: state.guardStateMask.managerTransport?.writable ?? [],
-      }
-      : undefined,
-  );
-}
-
 /** The mask as Seatbelt sees it, with every spelling of each path, so a path Seatbelt
  * canonicalizes differently from the runner (`/var` and `/private/var`) is still covered. */
 interface SeatbeltGuardStateMask {
@@ -337,6 +309,10 @@ interface SeatbeltGuardStateMask {
   transportWritable: string[];
 }
 
+/** A parameter-free Seatbelt profile. It intentionally grants read access for installed CLI,
+ * credential, toolchain, and system compatibility while restricting writes to the declared
+ * session roots and the provider's real transcript leaf. Unlike bwrap, Seatbelt cannot mount a
+ * per-session transcript leaf over the provider's home path. */
 function renderSeatbeltProfile(
   writableRoots: string[],
   network: "inherit" | "deny",

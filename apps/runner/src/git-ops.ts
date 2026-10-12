@@ -1895,10 +1895,6 @@ function parseGitLabReviewPageResult(
   return { threads, discussionCount: parsed.length };
 }
 
-export function parseGitLabReviewPage(raw: string, remote: ForgeRemote, mr: GitLabMergeRequest): ForgeReviewThread[] {
-  return parseGitLabReviewPageResult(raw, remote, mr).threads;
-}
-
 /** Load a bounded, complete sequence of GitLab discussion pages. The caller applies the returned
  * snapshot only after every page validates, so a late malformed/failed page cannot partially
  * reconcile durable findings. */
