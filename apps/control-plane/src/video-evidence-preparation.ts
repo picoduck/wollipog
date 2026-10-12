@@ -50,7 +50,7 @@ export interface VideoPreparationManifest {
 }
 export type VideoPreparationFailureCode = "source_limit" | "unsupported_media" | "decoder_busy" |
   "decoder_unavailable" | "decode_limit" | "unsupported_streams" | "recapture_resolution" |
-  "recapture_timing" | "split_capture" | "integrity";
+  "recapture_timing" | "split_capture" | "recapture_frame_size" | "integrity";
 export type VideoPreparationResult =
   | { ok: true; manifest: VideoPreparationManifest; manifestSha256: string; images: Buffer[] }
   | { ok: false; code: VideoPreparationFailureCode; reason: string; retryable: boolean };
@@ -146,29 +146,32 @@ export function videoPresentationTimeUs(frame: { pts_time?: unknown; pkt_pts_tim
 }
 
 const PNG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
-function imagesFromPipe(bytes: Buffer, width: number, height: number): Buffer[] | null {
+export function videoPreparationImagesFromPipe(bytes: Buffer, width: number, height: number)
+  : { ok: true; images: Buffer[] } | { ok: false; code: "integrity" | "recapture_frame_size" } {
   const images: Buffer[] = [];
   let start = 0;
   while (start < bytes.length) {
     if (images.length >= PROFILE.frames || !bytes.subarray(start, start + 8).equals(PNG) ||
         bytes.length - start < 33 || bytes.readUInt32BE(start + 8) !== 13 ||
         bytes.toString("ascii", start + 12, start + 16) !== "IHDR" ||
-        bytes.readUInt32BE(start + 16) !== width || bytes.readUInt32BE(start + 20) !== height) return null;
+        bytes.readUInt32BE(start + 16) !== width || bytes.readUInt32BE(start + 20) !== height) return { ok: false, code: "integrity" };
     let offset = start + 8;
     let complete = false;
     while (offset + 12 <= bytes.length) {
       const length = bytes.readUInt32BE(offset);
       const type = bytes.toString("ascii", offset + 4, offset + 8);
-      if (length > PROFILE.frameBytes || offset + length + 12 > bytes.length ||
-          offset + length + 12 - start > PROFILE.frameBytes) return null;
+      if (offset + length + 12 > bytes.length) return { ok: false, code: "integrity" };
+      if (length > PROFILE.frameBytes || offset + length + 12 - start > PROFILE.frameBytes) {
+        return { ok: false, code: "recapture_frame_size" };
+      }
       offset += length + 12;
-      if (type === "IEND") { if (length !== 0) return null; complete = true; break; }
+      if (type === "IEND") { if (length !== 0) return { ok: false, code: "integrity" }; complete = true; break; }
     }
-    if (!complete) return null;
+    if (!complete) return { ok: false, code: "integrity" };
     images.push(bytes.subarray(start, offset));
     start = offset;
   }
-  return images;
+  return { ok: true, images };
 }
 
 /** Derive a complete sequence from the source, preserving every source frame at its native
@@ -239,10 +242,14 @@ export async function prepareVideoEvidence(source: Buffer, mediaType: "video/web
       "-f", "image2pipe", "-vcodec", "png", "pipe:1",
     ], PROFILE.totalFrameBytes);
     if (!pipe) return failure("decode_limit", "Complete PNG conversion exceeded the decoder time or byte limits; split or recapture.");
-    const images = imagesFromPipe(pipe, Number(width), Number(height));
-    if (!images || images.length !== probe.frames.length) {
+    const parsed = videoPreparationImagesFromPipe(pipe, Number(width), Number(height));
+    if (!parsed.ok && parsed.code === "recapture_frame_size") {
+      return failure("recapture_frame_size", "A complete native PNG frame exceeds 2 MiB; recapture simpler content within the readable profile. Splitting duration cannot reduce a single frame, and sampling or downscaling is not permitted.");
+    }
+    if (!parsed.ok || parsed.images.length !== probe.frames.length) {
       return failure("integrity", "Decoded images do not match every source frame and its native dimensions.");
     }
+    const images = parsed.images;
     const frames = images.map((bytes, index) => ({
       index, ptsUs: pts[index]!, durationUs: durations[index]!, sha256: sha256(bytes), sizeBytes: bytes.length,
     }));

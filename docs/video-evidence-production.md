@@ -1,0 +1,139 @@
+# Production Video Evidence Integration
+
+This is the #1321 follow-on implementation stack. PR #3053 delivers offline preparation only.
+The stack starts at foundation commit 4d545faa2ba97cc9d865930bf9694eca76b39fdf plus the two
+exact reviewed preparation commits. Final main delivery must transplant only these owned changes
+after #2934, #2935, #2936 and #3053 actually merge, and repeat cross-model review and exact-head CI.
+
+## Owned Modules and Contracts
+
+- protocol/campaign-evidence-authority: optional human-minted narrowing envelope on
+  CampaignAuthorityBoundary.evidenceAuthority. Existing UI Evidence Approval remains the authority.
+- evidence-authority: derives provenance from the authenticated human and exact current private
+  destination/provider disclosures; a proposal cannot claim a public destination is private.
+- video-evidence-runtime: trusted complete source derivation, pinned acceptance criteria,
+  exact immutable context, ordered acknowledgements, separate criterion/defect verdict provenance.
+- evidence-review-service: authenticated owner/reviewer methods, post-decode revocation checks,
+  bounded retries and metadata-only lifecycle audit ports.
+- video-evidence-runtime-store: durable SQLite metadata with private artifact-storage ports;
+  no raw bytes, signed URLs, storage credentials, or oracle content enter audit records.
+- evidence-review-worker: admitted managed Session identity and allowance adapter, exact human
+  provider/model envelope, protected readiness, request digest and unknown-outcome reconciliation.
+- evidence-review-recovery: two busy retries or replacement captures, no sampling/downscaling,
+  recorded single-frame overflow recapture; Custom retains human fallback.
+- video-live-validation: durable human-inspected candidate/paced/maximum empirical proof,
+  bound to exact driver/model/provider/capability digest. No default record is supplied.
+- scripts/prepare-video-live-challenge.ts: offline fresh synthetic source/oracle preparation.
+
+These modules currently have no hosting entry-point caller. They do not advertise a current runner
+protocol revision or activate production. Protocol 218 is reserved for final production integration,
+after scope 216 and allowance 217. #2936 owns campaignBudgetWorkerPreflight and
+allocateCampaignBudget; the final adapter must use durable managed admission before dispatch and
+retain live reservations until cancellation/completion settles. An external process is unsupported.
+
+## Supported Admission Envelope
+
+The paced profile covers one silent VP8/VP9/H.264 WebM/MP4 stream, native 960x540–1280x720,
+up to 30 seconds / 900 frames at observed intervals of at least 33ms, source at most 32 MiB,
+PNG at most 2 MiB/frame and 128 MiB total. Native decoding remains network-isolated, bounded
+by memory/CPU/wall time and a two-active/two-queued decoder. Contiguous partitions preserve every
+source frame, presentation time and duration. Partitions are delivery boundaries, not sampled clips.
+
+The duration/resolution limits are conditional admission ceilings, not universal content guarantees.
+An offline maximum testsrc2 720p/30fps/30-second clip exceeded the existing PNG conversion envelope.
+That is a genuine refusal and original-issue feasibility evidence, not live validation. The bounded
+testsrc synthetic challenge fits all 16/360/900 frames; it does not establish that every detailed
+30-second capture fits. Splitting/recapture must preserve coverage and create new immutable artifacts
+and occurrences. A single-frame overflow specifically requires simpler readable recapture; splitting
+duration cannot repair it.
+
+## Exact Operator Validation Proposal
+
+No campaign agent has permission to perform this operation on the hosting stack. The proposal is
+for an authenticated human/operator to execute on a separately isolated disposable service/runner
+after the integrated code is reviewed. Before execution, freeze its reviewed commit, concrete
+campaign and Session IDs, actual provider/model, disclosed private artifact configuration, and the
+#2936 metered reservation. Those exact resources must be approved through their enforced routes.
+
+1. Create an isolated service using a new operator-owned temporary data directory, a new loopback
+   port, CONTROL_PLANE_DB pointing only to that temporary database, and CONTROL_PLANE_ARTIFACT_DIR
+   pointing only to its private temporary artifact directory. Use a separate managed runner state;
+   no hosting database, state directory, port, process, or settings are modified.
+2. The authenticated human creates a dedicated campaign, repository/issue scope limited to #1321
+   validation, UI Evidence Approval owner, private destination disclosure and exact provider retention
+   disclosure. Human-mint the Full Control boundary and metered managed reviewer allocation.
+   The live worker must already have a durable same-campaign ledger admission; external shell
+   reviewers and fabricated zero-cost accounting are refused.
+3. For the existing candidate, the operator selects only the exact isolated controlling Session via
+   CONTROL_PLANE_VIDEO_FRAME_REVIEW_VALIDATION_SESSION_ID before that disposable service startup.
+   This is not an agent-authorized environment change and never applies to the hosting service.
+   Normal-profile exercises additionally require a separate exact bounded experimental allowance;
+   image support alone does not authorize or establish temporal review.
+4. The human/operator runs the following from the reviewed worktree, using new absolute directories
+   outside reviewer workspace/context, with the oracle location excluded from reviewer access:
+
+   node --import tsx apps/control-plane/scripts/prepare-video-live-challenge.ts \
+     --capture-dir <new-private-capture-directory> \
+     --private-oracle-dir <separate-operator-only-oracle-directory>
+
+   Use a fresh run. The existing fixture recipe and local smoke-test oracles are disclosed test
+   material and cannot serve as blind challenges. The generator performs no model call or upload.
+   It prints only source/profile metadata and the oracle commitment; it never prints oracle bytes.
+5. Attach only the synthetic candidate/paced/maximum capture bytes through the authorized private
+   evidence path, with exact artifactId/mediaType/sizeBytes/sha256. Keep the oracle separate.
+   Feed every source frame in source order with exact timestamps and contiguous segment coverage
+   through the actual audited MCP tool-result transport to the managed reviewer. Do not replace
+   this with local verifier output, screenshots sampled from a recording, mocked transport,
+   a normal worker message, or a receipt merely asserted by a caller.
+6. Require an authenticated criterion/defect verdict and blind answer describing the random transient
+   overlays, geometry, order and exact source timestamps. The human compares the completed answer
+   against the private committed oracle only afterward. Preserve exact complete ordered receipt
+   sets and model-visible delivery evidence. A mismatch leaves production unsupported.
+7. Collect actual provider usage, latency and current official pricing/cost evidence for all three
+   runs, including the maximum admitted profile. Verify capability/context capacity and provider-local
+   retention, not only protocol acknowledgement. Record only digest/reference metadata after the human
+   independently inspects all evidence. No synthetic proof record or fake live receipt is permitted.
+8. Only the authenticated human ingress can register the inspected proof. The existing typed decision
+   owner must still review server-verifiable provenance and resolve/consume the exact UI gate.
+   A proof expires or revokes with changed capability/provider/model; it does not broaden the
+   upload destination, workflow ownership, scope, allowance or provider permissions.
+
+No real live delivery, model temporal recognition, model usage/cost, external transfer, human grant,
+or production activation has occurred in this implementation session. Until the final adapters,
+human-only empirical proof and preceding main dependencies are present, readiness fails closed.
+
+## Remaining Integration
+
+Wire private artifact storage, exact current workflow/policy/audience/capability lookup,
+accountable worker admission, protected media reading/verdict routes and typed owner resolution.
+Compose the evidence envelope through the human-only campaign CAS route without overwriting
+issueAuthority or budgetAuthority. Expose specific unavailable/recovery reasons; preserve Custom,
+mixed-peer and revocation behavior. Add authenticated service/runner end-to-end coverage after
+legitimate integration. Final review retains the prep ledger and its deferred findings.
+
+The frame-overflow recommendation is already recorded by the parent as duplicate of original
+#1321 recovery scope. No new follow-up issue is proposed or published.
+
+## Operational Questions
+
+Lifecycle audit events answer why preparation required recovery, whether the queue retried or exhausted,
+whether every frame was acknowledged before a quality verdict, and how long preparation took.
+The exact occurrence is the correlation ID and entryPoint distinguishes owner preparation, reviewer
+media/verdict and owner provenance. The final adapter must feed structured logs and bounded-label
+latency/failure histograms; raw bodies, images, signed URLs, oracle content and credentials are excluded.
+Human-inspected proof metadata supplies separate actual provider usage, price and latency evidence.
+
+## Completed Reviewer Provenance
+
+The historical-attestation lifecycle separates completed quality proof from fresh access.
+Current managed budget admission is required
+for dispatch, media access and verdict submission. The quality verdict durably stores the exact
+server worker/allocation/authority snapshot before normal terminal usage settlement.
+
+Normal completion removes fresh media/attestation access; it does not manufacture a new authority
+or automatically revoke an otherwise exact completed quality proof. Owner resolution rechecks the
+current controlling owner, occurrence/policy/boundary/scope, capability/disclosure, source and every
+frame, receipt expiry/revocation and current action/allowance denial. A completed worker cannot be
+reused as a replacement or spend from an old snapshot. Hard denial/exhaustion cannot be bypassed.
+Final usage must settle one time before unused reservation release. Campaign helper verification
+and stop/cleanup remain parent-owned; no helpers have been launched in this implementation session.
