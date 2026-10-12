@@ -663,7 +663,8 @@
 //      resolutions name nobody, as before.
 // 212: lightweight session summaries and byte-bounded dashboard snapshot pages (#2769).
 // 213: authoritative bounded history previews in an explicit runner coordinate space (#2881).
-export const PROTOCOL_VERSION = 213;
+// 214: read-only descendant workflow decision inspection and nonterminal keyset pages.
+export const PROTOCOL_VERSION = 214;
 export const SESSION_SUMMARY_UI_PROTOCOL = 212;
 export const SKILL_REPORT_REQUEST_LIFETIME_MS = 30_000;
 export const MAX_SKILL_REPORT_REQUESTS = 64;
@@ -917,6 +918,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   workflowDecisionActionReconciliation: 153,
   /** Control plane retains and delivers a resolver's child-facing workflow-decision message. */
   workflowDecisionChildMessage: 166,
+  /** Read exact descendant decisions and enumerate pending/approved decisions. */
+  descendantWorkflowDecisionInspection: 214,
   orchestratorCampaignManagement: 140,
   campaignContinuations: 149,
   orchestratorExecutionPolicy: 144,

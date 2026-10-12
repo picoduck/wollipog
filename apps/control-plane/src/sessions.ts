@@ -7830,6 +7830,16 @@ export class SessionsService {
     return decision?.sessionId === sessionId ? ok(decision) : fail("workflow decision not found", 404);
   }
 
+  workflowDecisions(sessionId: string, cursorId: string | undefined, limit: number): ServiceResult<{
+    decisions: WorkflowDecisionView[]; nextCursor?: string;
+  }> {
+    const cursor = cursorId === undefined ? undefined : this.db.workflowDecisionByOccurrence(cursorId);
+    if (cursorId !== undefined && cursor?.sessionId !== sessionId) return fail("invalid workflow decision cursor", 400);
+    const rows = this.db.workflowDecisionPage(sessionId, cursor ?? undefined, limit + 1);
+    const decisions = rows.slice(0, limit);
+    return ok({ decisions, ...(rows.length > limit ? { nextCursor: decisions.at(-1)!.occurrenceId } : {}) });
+  }
+
   resolveWorkflowDecision(
     parentSessionId: string,
     childSessionId: string,

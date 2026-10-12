@@ -220,8 +220,8 @@ test("machine skill adoption is capability-gated per platform", () => {
   assert.equal(machineSkillAdoptionRecoveryRequirement(undefined), null);
 });
 
-test("PROTOCOL_VERSION is 213", () => {
-  assert.equal(PROTOCOL_VERSION, 213);
+test("PROTOCOL_VERSION is 214", () => {
+  assert.equal(PROTOCOL_VERSION, 214);
   assert.equal(runnerSupportsProtocol(208, "skillRequestResumption"), false);
   assert.equal(runnerSupportsProtocol(209, "skillRequestResumption"), true);
   assert.equal(runnerSupportsProtocol(207, "campaignIssueScopeChanges"), false);
@@ -294,6 +294,8 @@ test("PROTOCOL_VERSION is 213", () => {
   assert.equal(runnerSupportsProtocol(169, "sessionArtifactFileAttach"), true);
   assert.equal(runnerSupportsProtocol(165, "workflowDecisionChildMessage"), false);
   assert.equal(runnerSupportsProtocol(166, "workflowDecisionChildMessage"), true);
+  assert.equal(runnerSupportsProtocol(213, "descendantWorkflowDecisionInspection"), false);
+  assert.equal(runnerSupportsProtocol(214, "descendantWorkflowDecisionInspection"), true);
   assert.equal(runnerSupportsProtocol(166, "orchestratorUiEvidenceReview"), false);
   assert.equal(runnerSupportsProtocol(167, "orchestratorUiEvidenceReview"), true);
   assert.equal(runnerSupportsProtocol(136, "capacityLockDiagnostics"), false);

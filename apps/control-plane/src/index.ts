@@ -4057,14 +4057,35 @@ app.post("/api/sessions/:id/workflow-decisions", async (req, reply) => {
   ));
 });
 
+// Read authority does not grant resolution or consumption authority. The target may be self,
+// or an accessible descendant of an Orchestrator's own credential session.
+function canInspectWorkflowDecisions(req: FastifyRequest, id: string): boolean {
+  const principal = requestPrincipal(req);
+  if (!principal || !db.canAccessSession(principal, id)) return false;
+  return principal.kind !== "agent" || principal.credentialSessionId === id ||
+    (principal.orchestrator === true && typeof principal.credentialSessionId === "string" &&
+      db.canAccessSession(principal, principal.credentialSessionId) &&
+      db.isSessionDescendant(principal.credentialSessionId, id));
+}
+
+app.get("/api/sessions/:id/workflow-decisions", async (req, reply) => {
+  const { id } = req.params as { id: string };
+  if (!canInspectWorkflowDecisions(req, id)) return reply.code(404).send({ error: "session not found" });
+  const query = req.query as { cursor?: string; limit?: string };
+  const limit = query.limit === undefined ? 50 : Number(query.limit);
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 ||
+      (query.cursor !== undefined && !validParentControlCoordinate(query.cursor))) {
+    return reply.code(400).send({ error: "invalid workflow decision page" });
+  }
+  reply.header("cache-control", "no-store");
+  return respond(reply, svc.workflowDecisions(id, query.cursor, limit));
+});
+
 app.get("/api/sessions/:id/workflow-decisions/:occurrenceId", async (req, reply) => {
   const { id, occurrenceId } = req.params as { id: string; occurrenceId: string };
-  const principal = requestPrincipal(req);
-  if (!principal || (principal.kind === "agent" && principal.credentialSessionId !== id)) {
-    return reply.code(403).send({ error: "a matching session credential or authenticated human is required" });
-  }
-  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  if (!canInspectWorkflowDecisions(req, id)) return reply.code(404).send({ error: "session not found" });
   if (!validParentControlCoordinate(occurrenceId)) return reply.code(400).send({ error: "invalid occurrenceId" });
+  reply.header("cache-control", "no-store");
   return respond(reply, svc.workflowDecision(id, occurrenceId));
 });
 

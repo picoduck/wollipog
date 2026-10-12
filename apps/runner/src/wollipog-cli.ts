@@ -72,7 +72,7 @@ function optionPresent(args: string[], name: string): boolean {
   return args.some((arg) => arg === name || arg.startsWith(`${name}=`));
 }
 
-function positional(args: string[]): string[] {
+function positional(args: string[], extraValueOptions: readonly string[] = []): string[] {
   const values: string[] = [];
   const valueOptions = new Set([
     "--url", "--token-file", "--runner", "--agent", "--workspace", "--path", "--prompt",
@@ -80,6 +80,7 @@ function positional(args: string[]): string[] {
     "--interval", "--cost-budget", "--max-tool-calls", "--session", "--branch", "--base", "--base-ref",
     "--max-child-sessions", "--offset", "--event-epoch",
     "--revision",
+    ...extraValueOptions,
   ]);
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
@@ -241,7 +242,7 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       ["decision", "decisions", "workflow-decision", "workflow-decisions"].includes(arg));
     const verb = args[groupIndex + 1];
     const occurrenceId = args[groupIndex + 2];
-    if (optionPresent(args, "--session")) {
+    if (optionPresent(args, "--session") && verb !== "get" && verb !== "list") {
       return { error: "decision commands act only on the injected session and do not accept --session" };
     }
     if (verb === "request") {
@@ -257,9 +258,31 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       };
     }
     if (verb === "get") {
+      const sessionId = option(args, "--session");
+      if (optionPresent(args, "--session") && (!sessionId || sessionId.startsWith("--"))) {
+        return { error: "--session requires a session id" };
+      }
       return occurrenceId && !occurrenceId.startsWith("--")
-        ? { tool: "get_workflow_decision", input: { occurrenceId } }
+        ? { tool: "get_workflow_decision", input: { occurrenceId, ...(sessionId ? { sessionId } : {}) } }
         : { error: "decision get requires an occurrence id" };
+    }
+    if (verb === "list") {
+      if (positional(args.slice(groupIndex), ["--cursor"]).length !== 2) {
+        return { error: "decision list does not accept an occurrence id; use decision get <occurrence-id>" };
+      }
+      const input: Record<string, unknown> = {};
+      for (const [optionName, key] of [["--session", "sessionId"], ["--cursor", "cursor"]] as const) {
+        if (!optionPresent(args, optionName)) continue;
+        const value = option(args, optionName);
+        if (!value || value.startsWith("--")) return { error: `${optionName} requires a value` };
+        input[key] = value;
+      }
+      if (optionPresent(args, "--limit")) {
+        const limit = numeric(option(args, "--limit"));
+        if (!Number.isInteger(limit) || limit! < 1 || limit! > 100) return { error: "--limit requires an integer from 1 to 100" };
+        input.limit = limit;
+      }
+      return { tool: "list_workflow_decisions", input };
     }
     if (verb === "consume") {
       if (!occurrenceId || occurrenceId.startsWith("--")) {
@@ -638,6 +661,9 @@ export async function runWollipogCli(
   ]);
   const requiredProtocol = parsed.tool === "create_session" && typeof parsed.input.effort === "string"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControlReasoningEffort
+    : parsed.tool === "list_workflow_decisions" || (parsed.tool === "get_workflow_decision" &&
+      typeof parsed.input.sessionId === "string" && parsed.input.sessionId !== sessionId)
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.descendantWorkflowDecisionInspection
     : parsed.tool === "discard_worktree"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRetirement
     : parsed.tool === "attach_session_artifact"
