@@ -104,6 +104,10 @@ capacity reserved and blocks protected admission. Host/provider slot admission i
 A replay of an already admitted live job retains its lease even when unrelated sessions are
 waiting. A restart in the durable pre-dispatch preparation phase reports known-zero `not_launched`
 without consuming an attempt or relaunching; persisted launch intent remains conservative.
+Recovery repeats the current dispatch admission checks against the same durable request. An
+unsupported peer receives neither native dispatch nor cancellation frames; possible charges stay
+reserved and protected admission stops. A supported peer cancels jobs whose authority, owner,
+scope, profile or applicable limits no longer admit them.
 Each independent job contributes once to its original work-item attempt and the campaign cost
 summary as well as the allowance ledger. Replacement attempts and deleted workers cannot refund
 that charge. Pending/unpriced review usage remains unavailable rather than a zero-cost worker;

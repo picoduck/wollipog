@@ -7595,11 +7595,20 @@ export class SessionsService {
   }
 
   recoverCampaignReviewJobs(runnerId:string):void {
+    const supported=runnerSupportsProtocol(this.db.getRunner(runnerId)?.protocolVersion,"campaignBudgetAdmission");
     for(const command of this.db.campaignReviewJobs.commands(runnerId)) {
-      const root=this.db.getSession(command.rootSessionId),control=root?.orchestratorPolicy?.control;
-      if(root && control?.mode==="full_control" && campaignBoundaryCurrent(root) && control.boundary.revision===command.authorityRevision &&
-          this.db.campaignBudgets.view(root.id)?.state==="active") this.hub.sendToRunner(runnerId,command);
-      else this.hub.sendToRunner(runnerId,{type:"cancel_campaign_review_job",jobId:command.jobId,nonce:command.nonce});
+      if(!supported) {
+        // A downgraded peer cannot receive either review dispatch or cancellation frames. Keep
+        // all possible charges reserved and stop protected admission rather than re-dispatching.
+        this.db.campaignBudgets.stop(command.rootSessionId,"accounting_unavailable",
+          "Required native review recovery needs a supported accounting peer; reservation retained and protected admission stopped.");
+        this.enforceCampaignBudget(command.rootSessionId,Date.now());
+        continue;
+      }
+      // Reuse the exact existing request, applying the same current profile/owner/scope/limits
+      // checks as first dispatch. Its durable request identity cannot admit another provider.
+      const admitted=this.requestCampaignReviewJob(command.rootSessionId,command.request);
+      if(!admitted.ok) this.hub.sendToRunner(runnerId,{type:"cancel_campaign_review_job",jobId:command.jobId,nonce:command.nonce});
     }
   }
 
