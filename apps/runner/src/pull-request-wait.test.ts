@@ -352,6 +352,85 @@ test("reads are GraphQL variables, never interpolated input", async () => {
   assert.equal(invalid.ok, false);
 });
 
+test("a check run and a status context sharing a required name must both pass", () => {
+  const verdict = evaluateCommitChecks(HEAD, rollup([
+    run("CI", "FAILURE", { startedAt: "2026-10-12T09:00:00Z" }),
+    { __typename: "StatusContext", context: "CI", state: "SUCCESS", createdAt: "2026-10-12T11:00:00Z", targetUrl: "https://ci.example/1" },
+  ]), ["CI"]);
+  assert.equal(verdict.requiredState, "failed");
+  assert.deepEqual(verdict.summary.failedJobs.map(({ name, required }) => ({ name, required })), [{ name: "CI", required: true }]);
+  const waiting = evaluateCommitChecks(HEAD, rollup([
+    run("CI", "SUCCESS"),
+    { __typename: "StatusContext", context: "CI", state: "PENDING", createdAt: "x" },
+  ]), ["CI"]);
+  assert.equal(waiting.requiredState, "pending");
+});
+
+test("a partial GraphQL answer is never trusted, so a nulled queue entry cannot read as unqueued", async () => {
+  const partial: GhOutcome = {
+    stdout: JSON.stringify({ ...pr({ mergeQueueEntry: null }, [run(AGGREGATOR, "SUCCESS")]),
+      errors: [{ type: "INTERNAL", message: "Something went wrong", path: ["repository", "pullRequest", "mergeQueueEntry"] }] }),
+    stderr: "gh: Something went wrong", code: 1, timedOut: false,
+  };
+  const queued = ok(pr({ mergeQueueEntry: { position: 1, state: "AWAITING_CHECKS", enqueuedAt: null, headCommit: null } }, [run(AGGREGATOR, "SUCCESS")]));
+  const fake = fakeGh([partial, queued, ok(pr({ state: "MERGED", mergeCommit: { oid: MERGE } }))]);
+  const recovered = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 600_000 }, { gh: fake.gh, ...clock() });
+  assert.ok(recovered.ok);
+  assert.equal(recovered.summary.outcome, "merged", "the partial read was retried, not taken as checks_passed");
+
+  const persistent = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 600_000 }, { gh: fakeGh([partial]).gh, ...clock() });
+  assert.deepEqual(persistent, { ok: false, error: "could not read o/r#7: Something went wrong" });
+});
+
+test("the full base branch name reaches GitHub even when the summary clips it", async () => {
+  const base = `release/${"b".repeat(140)}`;
+  const fake = fakeGh([ok(pr({ baseRefName: base }, [run(AGGREGATOR, null)]))]);
+  const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 1 }, { gh: fake.gh, ...clock() });
+  assert.ok(result.ok);
+  assert.ok(result.summary.baseRef.length <= 120);
+  const paths = fake.calls.flatMap((args) => args.filter((arg) => arg.startsWith("repos/")));
+  assert.deepEqual(paths, [
+    `repos/o/r/rules/branches/${encodeURIComponent(base)}?per_page=100`,
+    `repos/o/r/branches/${encodeURIComponent(base)}`,
+  ]);
+});
+
+test("while queued, a failing merge-group check returns queue_failed without waiting for the ejection", async () => {
+  const entry = (nodes: unknown[]) => ok(pr({
+    mergeQueueEntry: { position: 0, state: "AWAITING_CHECKS", enqueuedAt: null, headCommit: { oid: GROUP, statusCheckRollup: rollup(nodes) } },
+  }, [run(AGGREGATOR, "SUCCESS")]));
+  const required = await waitForPullRequest({ repository: "o/r", number: 7 },
+    { gh: fakeGh([entry([run(AGGREGATOR, "FAILURE")])]).gh, ...clock() });
+  assert.ok(required.ok);
+  assert.equal(required.summary.outcome, "queue_failed");
+
+  const optional = [run(AGGREGATOR, null), run("Platform Isolation", "FAILURE")];
+  const flagged = await waitForPullRequest({ repository: "o/r", number: 7, returnOnAnyFailure: true },
+    { gh: fakeGh([entry(optional)]).gh, ...clock() });
+  assert.ok(flagged.ok);
+  assert.equal(flagged.summary.outcome, "queue_failed");
+  const unflagged = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 60_000 },
+    { gh: fakeGh([entry(optional)]).gh, ...clock() });
+  assert.ok(unflagged.ok);
+  assert.equal(unflagged.summary.outcome, "timeout");
+});
+
+test("HTTP 403 rate limits and 5xx answers retry; an ordinary 403 does not", async () => {
+  for (const stderr of ["gh: API rate limit exceeded for user ID 1. (HTTP 403)", "gh: Bad Gateway (HTTP 502)"]) {
+    const fake = fakeGh([ok(pr({}, [run(AGGREGATOR, "SUCCESS")]))]);
+    let calls = 0;
+    const flaky: GhRunner = async (args) => args.some((arg) => arg.includes("/rules/branches/")) && calls++ === 0
+      ? failed(stderr)
+      : fake.gh(args);
+    const result = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh: flaky, ...clock() });
+    assert.ok(result.ok, stderr);
+    assert.equal(result.summary.outcome, "checks_passed");
+  }
+  const forbidden = await waitForPullRequest({ repository: "o/r", number: 7 },
+    { gh: fakeGh([ok(pr())], { rules: failed("gh: Resource not accessible by integration (HTTP 403)") }).gh, ...clock() });
+  assert.deepEqual(forbidden, { ok: false, error: "could not read the rules for main: http_403 (gh: Resource not accessible by integration (HTTP 403))" });
+});
+
 test("pull request references parse from numbers, short refs, and github.com URLs", () => {
   assert.deepEqual(parsePullRequestRef("3081", "picoduck/wollipog"), { repository: "picoduck/wollipog", number: 3081 });
   assert.deepEqual(parsePullRequestRef(3081, "picoduck/wollipog"), { repository: "picoduck/wollipog", number: 3081 });

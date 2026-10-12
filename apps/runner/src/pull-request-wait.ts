@@ -166,11 +166,13 @@ export function parsePullRequestRef(
 }
 
 /** `gh api` reports an HTTP error as `gh: Not Found (HTTP 404)`, which the shared classifier would
- * read as a missing `gh`, so a status code is classified first. */
+ * read as a missing `gh`, so a status code is classified first. GitHub also answers a rate limit
+ * with 403, so its wording is checked before the status. */
 function failureReason(outcome: GhOutcome): string {
   const status = /\(HTTP (\d{3})\)/u.exec(outcome.stderr)?.[1];
+  if (/rate limit/iu.test(outcome.stderr) || status === "429") return "forge_rate_limited";
   if (status === "401") return "forge_unauthenticated";
-  if (status === "429") return "forge_rate_limited";
+  if (status?.startsWith("5")) return "forge_unreachable";
   if (status) return `http_${status}`;
   return classifyGhFailure(outcome);
 }
@@ -256,6 +258,7 @@ export const PULL_REQUEST_WAIT_QUERY = `query($owner:String!,$name:String!,$numb
 }`;
 
 interface CheckNode {
+  kind: "CheckRun" | "StatusContext";
   name: string;
   state: CheckState;
   conclusion: string;
@@ -271,6 +274,7 @@ function checkNode(raw: unknown): CheckNode | null {
     const completed = node.status === "COMPLETED";
     const conclusion = typeof node.conclusion === "string" ? node.conclusion : "";
     return {
+      kind: "CheckRun",
       name: node.name,
       state: !completed ? "pending" : PASS_CONCLUSIONS.has(conclusion) ? "passed" : "failed",
       conclusion: completed ? conclusion || "UNKNOWN" : String(node.status ?? "PENDING"),
@@ -282,6 +286,7 @@ function checkNode(raw: unknown): CheckNode | null {
   if (node.__typename === "StatusContext" && typeof node.context === "string") {
     const state = String(node.state ?? "PENDING");
     return {
+      kind: "StatusContext",
       name: node.context,
       state: state === "SUCCESS" ? "passed" : state === "FAILURE" || state === "ERROR" ? "failed" : "pending",
       conclusion: state,
@@ -293,9 +298,10 @@ function checkNode(raw: unknown): CheckNode | null {
   return null;
 }
 
-/** Fold one commit's rollup into a bounded summary. Of several runs sharing a name (re-runs), the
- * latest started wins; a run that has not started yet counts as the latest. The verdict covers
- * every required check, including any cut from the bounded list. */
+/** Fold one commit's rollup into a bounded summary. Of several runs of one kind sharing a name
+ * (re-runs), the latest started wins; a run that has not started yet counts as the latest. A check
+ * run and a status context that share a required name must both pass. The verdict covers every
+ * required check, including any cut from the bounded list. */
 export function evaluateCommitChecks(
   sha: string,
   rollup: unknown,
@@ -308,15 +314,18 @@ export function evaluateCommitChecks(
   for (const raw of rawNodes) {
     const node = checkNode(raw);
     if (!node) continue;
-    const previous = latest.get(node.name);
-    if (!previous || (previous.at !== "" && (node.at === "" || node.at > previous.at))) latest.set(node.name, node);
+    const key = `${node.kind}\0${node.name}`;
+    const previous = latest.get(key);
+    if (!previous || (previous.at !== "" && (node.at === "" || node.at > previous.at))) latest.set(key, node);
   }
   // Rules are the authority; a check GitHub itself marks required is added, never removed.
   const required = new Set(requiredNames);
   for (const node of latest.values()) if (node.isRequired) required.add(node.name);
   const requiredList: RequiredCheckSummary[] = [...required].sort().map((name) => {
-    const node = latest.get(name);
-    return { name: clip(name, MAX_NAME), state: node?.state ?? "pending", reported: node !== undefined };
+    const nodes = [...latest.values()].filter((node) => node.name === name);
+    const state: CheckState = nodes.some((node) => node.state === "failed") ? "failed"
+      : nodes.length > 0 && nodes.every((node) => node.state === "passed") ? "passed" : "pending";
+    return { name: clip(name, MAX_NAME), state, reported: nodes.length > 0 };
   });
   const other = { passed: 0, failed: 0, pending: 0 };
   const failed: FailedJob[] = [];
@@ -379,7 +388,7 @@ function observation(data: unknown): Observation | null {
     state,
     isDraft: pr.isDraft === true,
     headSha: pr.headRefOid,
-    baseRef: clip(pr.baseRefName, MAX_NAME),
+    baseRef: pr.baseRefName,
     defaultBranch: typeof defaultBranch === "string" ? clip(defaultBranch, MAX_NAME) : null,
     mergeStateStatus: typeof pr.mergeStateStatus === "string" ? pr.mergeStateStatus : null,
     mergeCommitSha: typeof mergeCommit === "string" && SHA.test(mergeCommit) ? mergeCommit : null,
@@ -451,7 +460,7 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
     mergeCommitSha: seen.mergeCommitSha,
     isDraft: seen.isDraft,
     headSha: seen.headSha,
-    baseRef: seen.baseRef,
+    baseRef: clip(seen.baseRef, MAX_NAME),
     defaultBranch: seen.defaultBranch,
     mergeStateStatus: seen.mergeStateStatus,
     requiredCheckNames: required ? required.names.slice(0, MAX_LISTED_CHECKS).map((name) => clip(name, MAX_NAME)) : null,
@@ -485,10 +494,13 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
     ]);
     const response = record(parseJson(outcome.stdout));
     const errors = Array.isArray(response?.errors) ? response.errors.map(record) : [];
-    const seen = observation(response?.data);
+    const observed = observation(response?.data);
+    // A partial answer can null an outcome field such as mergeQueueEntry, so any error discards it.
+    const seen = errors.length === 0 ? observed : null;
     if (!seen) {
       const rateLimited = errors.some((error) => error?.type === "RATE_LIMITED");
-      if ((rateLimited || (outcome.code !== null && transient(outcome))) && ++transientFailures <= MAX_TRANSIENT_FAILURES && now() < deadline) {
+      const retryable = rateLimited || observed !== null || (outcome.code !== null && transient(outcome));
+      if (retryable && ++transientFailures <= MAX_TRANSIENT_FAILURES && now() < deadline) {
         if (!await pause(intervalMs)) return { ok: false, error: "request cancelled" };
         continue;
       }
@@ -520,7 +532,11 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
     if (seen.queue) {
       sawQueue = true;
       vanishedQueue = false;
-      if (seen.queue.state === "UNMERGEABLE") return { ok: true, summary: summarize("queue_failed", seen) };
+      const group = seen.queue.headSha ? evaluateCommitChecks(seen.queue.headSha, seen.queue.rollup, required.names) : null;
+      if (seen.queue.state === "UNMERGEABLE" || group?.requiredState === "failed" ||
+          (input.returnOnAnyFailure && (group?.summary.failedJobs.length ?? 0) > 0)) {
+        return { ok: true, summary: summarize("queue_failed", seen) };
+      }
     } else if (sawQueue) {
       // GitHub can drop the entry a moment before the pull request reads MERGED: confirm once.
       if (vanishedQueue) return { ok: true, summary: summarize("queue_ejected", seen) };

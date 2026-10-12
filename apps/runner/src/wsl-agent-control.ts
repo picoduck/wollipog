@@ -2,8 +2,9 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { PassThrough, type Readable, type Writable } from "node:stream";
 import type { WslBwrapPreparedPath } from "./wsl-bwrap-launcher.js";
+import { contextGhRunner, type GhRunner } from "./campaign-forge-status.js";
 import { serveSessionManagementMcp, type McpFetch } from "./session-management-mcp.js";
-import { runWollipogCli } from "./wollipog-cli.js";
+import { runPullRequestCli, runWollipogCli } from "./wollipog-cli.js";
 
 export const WSL_AGENT_CONTROL_PROTOCOL = 1 as const;
 export const WSL_AGENT_CONTROL_HELPER_PATH = "/usr/local/lib/wollipog/wsl-agent-control-v1.mjs";
@@ -76,7 +77,7 @@ export function validateWslAgentControlCliArgs(value: unknown): string[] {
     throw new Error("invalid bridge CLI arguments");
   }
   const args = value as string[];
-  if (!new Set(["session", "sessions", "worktree", "worktrees"]).has(args[0]!)) {
+  if (!new Set(["session", "sessions", "worktree", "worktrees", "pr"]).has(args[0]!)) {
     throw new Error("bridge CLI command is outside the Agent Control allowlist");
   }
   if (args.some((arg) => arg === "--url" || arg.startsWith("--url=") ||
@@ -103,6 +104,8 @@ export function attachWslAgentControlBroker(
   output: Writable,
   config: WslAgentControlLaunch,
   fetchImpl: McpFetch = globalThis.fetch,
+  // `wait_pull_request` reads GitHub with the distro's own `gh` login, never the Windows host's.
+  gh: GhRunner = contextGhRunner({ kind: "wsl", distro: config.distro }, "/"),
 ): () => void {
   const connections = new Map<string, { input?: PassThrough; closed: boolean }>();
   let pending = "";
@@ -146,12 +149,23 @@ export function attachWslAgentControlBroker(
         token: config.token,
         actorHeader: "x-wollipog-agent-session",
         orchestrator: true,
+        gh,
       });
       return;
     }
     let args: string[];
     try { args = validateWslAgentControlCliArgs(frame.args); }
     catch (error) { close(id, 2, (error as Error).message); return; }
+    const io = {
+      stdout: (text: string) => send({ id, stream: "stdout", data: Buffer.from(text).toString("base64") }),
+      stderr: (text: string) => send({ id, stream: "stderr", data: Buffer.from(text).toString("base64") }),
+    };
+    if (args[0] === "pr") {
+      // The broker's working directory is not the agent's, so a bare number needs --repo here.
+      void runPullRequestCli(args, args.includes("--json"), io, gh)
+        .then((code) => close(id, code), (error) => close(id, 1, (error as Error).message));
+      return;
+    }
     // Match Node's argv shape, including the script/executable slot at index 1.
     void runWollipogCli(["wollipog", "wollipog", ...args], {
       WOLLIPOG_CONTROL_PLANE_URL: config.cpUrl,
@@ -159,10 +173,7 @@ export function attachWslAgentControlBroker(
       WOLLIPOG_SESSION_TOKEN_FILE: config.tokenFile,
       WOLLIPOG_SESSION_CREDENTIAL_READY_FILE: config.readyFile,
       WOLLIPOG_PERMISSION_PRESET: "orchestrator",
-    }, {
-      stdout: (text) => send({ id, stream: "stdout", data: Buffer.from(text).toString("base64") }),
-      stderr: (text) => send({ id, stream: "stderr", data: Buffer.from(text).toString("base64") }),
-    }, fetchImpl).then((code) => close(id, code), (error) => close(id, 1, (error as Error).message));
+    }, io, fetchImpl).then((code) => close(id, code), (error) => close(id, 1, (error as Error).message));
   };
   const onData = (chunk: Buffer | string) => {
     pending += chunk.toString();

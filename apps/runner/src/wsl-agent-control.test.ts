@@ -7,6 +7,7 @@ import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
+import type { GhRunner } from "./campaign-forge-status.js";
 import {
   attachWslAgentControlBroker,
   validateWslAgentControlCliArgs,
@@ -167,6 +168,52 @@ test("broker dispatches a CLI command through the Node argv boundary", async () 
   assert.deepEqual(messages.filter((message) => message.data)
     .map((message) => Buffer.from(message.data, "base64").toString()).join(""), `${JSON.stringify({ sessions: [] })}\n`);
   assert.deepEqual(routes, ["http://127.0.0.1:4317/api/compatibility", "http://127.0.0.1:4317/api/sessions"]);
+  dispose();
+});
+
+test("Direct WSL pull request waits read GitHub with the session's gh, through MCP and the CLI bridge", async () => {
+  const head = "44579c6c25235598f1a28f8ccb0449cb8dbbc810";
+  const ghCalls: string[][] = [];
+  const gh: GhRunner = async (args) => {
+    ghCalls.push(args);
+    const json = (value: unknown) => ({ stdout: JSON.stringify(value), stderr: "", code: null, timedOut: false });
+    if (args.includes("graphql")) {
+      return json({ data: { repository: { defaultBranchRef: { name: "main" }, pullRequest: {
+        url: "https://github.com/o/r/pull/1", state: "MERGED", isDraft: false, headRefOid: head, baseRefName: "main",
+        mergeStateStatus: "UNKNOWN", mergeCommit: { oid: head }, mergeQueueEntry: null,
+        commits: { nodes: [{ commit: { oid: head, statusCheckRollup: null } }] },
+      } } } });
+    }
+    return json([]);
+  };
+  assert.deepEqual(validateWslAgentControlCliArgs(["pr", "wait", "o/r#1", "--json"]), ["pr", "wait", "o/r#1", "--json"]);
+
+  const f = fixture();
+  const fetched: string[] = [];
+  const dispose = attachWslAgentControlBroker(f.fromHelper, f.toHelper, f.config, async (url) => {
+    fetched.push(url);
+    throw new Error("a pull request wait never contacts the control plane");
+  }, gh);
+  f.fromHelper.write(`${JSON.stringify({ type: "open", id: "cli", v: 1, kind: "cli",
+    sessionId: f.config.sessionId, token: f.config.token, args: ["pr", "wait", "o/r#1", "--json"] })}\n`);
+  for (let attempt = 0; attempt < 50 && !f.lines.some((line) => JSON.parse(line).exit !== undefined); attempt++) await tick();
+  const cli = f.lines.map((line) => JSON.parse(line));
+  assert.equal(cli.find((message) => message.exit !== undefined)?.exit, 0);
+  assert.equal(JSON.parse(cli.filter((message) => message.data)
+    .map((message) => Buffer.from(message.data, "base64").toString()).join("")).outcome, "merged");
+
+  f.fromHelper.write(`${JSON.stringify({ type: "open", id: "mcp", v: 1, kind: "mcp", sessionId: f.config.sessionId, token: f.config.token })}\n`);
+  await tick();
+  const call = `${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call",
+    params: { name: "wait_pull_request", arguments: { pullRequest: "o/r#1" } } })}\n`;
+  const before = f.lines.length;
+  f.fromHelper.write(`${JSON.stringify({ type: "data", id: "mcp", data: Buffer.from(call).toString("base64") })}\n`);
+  for (let attempt = 0; attempt < 50 && !f.lines.slice(before).some((line) => JSON.parse(line).data); attempt++) await tick();
+  const response = JSON.parse(f.lines.slice(before).map((line) => JSON.parse(line)).filter((message) => message.data)
+    .map((message) => Buffer.from(message.data, "base64").toString()).join("").trim());
+  assert.equal(JSON.parse(response.result.content[0].text).outcome, "merged");
+  assert.equal(ghCalls.filter((args) => args.includes("graphql")).length, 2);
+  assert.deepEqual(fetched, []);
   dispose();
 });
 
