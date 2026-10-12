@@ -1872,6 +1872,30 @@ test.describe("the setting-row grid", () => {
     expect(described).toContain("Update Wollipog to choose a fixed Child Harness.");
   });
 
+  test("an open Select list stays above the next group's surface on a layout-contained floor engine", async ({ page }) => {
+    // Chrome 111–128 and older Safari also give a size container layout containment, which makes
+    // every group surface a stacking context; a later surface then painted over an earlier one's
+    // open list (§2.10). Forced here, as app-container.spec.ts forces it on `.main`.
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await useKinds(page, "dark");
+    await page.addStyleTag({ content: ".settings-group-surface { contain: layout !important; }" });
+    const trigger = group(page, "Errors").getByRole("button", { name: /^Color Scheme:/ });
+    await trigger.scrollIntoViewIfNeeded();
+    await page.evaluate(() => document.querySelector(".main-body")!.scrollBy(0, 200));
+    await trigger.click();
+    const list = page.getByRole("listbox", { name: "Color Scheme" });
+    await expect(list).toBeVisible();
+    const reach = await list.evaluate((element) => [...element.querySelectorAll('[role="option"]')].map((option) => {
+      const box = option.getBoundingClientRect();
+      return option.contains(document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2));
+    }));
+    const listBottom = (await list.boundingBox())!;
+    const nextSurface = (await group(page, "Long Copy").locator(".settings-group-surface").boundingBox())!;
+    expect(listBottom.y + listBottom.height, "the list reaches over the next group, or this proves nothing")
+      .toBeGreaterThan(nextSurface.y);
+    expect(reach, "every option is on top and can be clicked").toEqual(reach.map(() => true));
+  });
+
   test.describe("with a coarse pointer", () => {
     const phone = devices["Pixel 7"];
     test.use({ viewport: phone.viewport, hasTouch: phone.hasTouch, isMobile: phone.isMobile, userAgent: phone.userAgent });

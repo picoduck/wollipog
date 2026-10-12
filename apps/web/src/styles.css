@@ -17323,6 +17323,13 @@ button.setting-row { cursor: pointer; }
 /* The surface is the size container for the rows' 560px rule. Select lists stay in place inside it
    and correct for its containing block (§2.10), so it can be one. */
 .settings-group-surface { container-type: inline-size; }
+/* At the build floor a size container is also layout-contained, so each surface is a stacking
+   context and a later group's surface paints over an earlier one's open Select list. The surface
+   holding an open popup is raised above its siblings for as long as the popup is open. */
+.settings-group-surface:has([aria-haspopup][aria-expanded="true"]) {
+  position: relative;
+  z-index: var(--z-popover);
+}
 /* In a surface a setting row is a row of it: a hairline between rows (above anything that follows
    another child of a group's surface), and its corners follow the surface's where they meet. */
 .settings-group-surface > * + *,
