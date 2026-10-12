@@ -1,3 +1,7 @@
+import { MediaSessionPurposes } from "./media-session-purposes.js";
+import { MEDIA_SESSION_PURPOSE_ERROR, type PreparedMediaSessionRuntime, type PreparedMediaSubject } from "./prepared-media-session-runtime.js";
+import type { PreparedMediaIdentity, MaterializedMediaSession } from "./prepared-media-sessions.js";
+import { reviewerAdmissionReadiness } from "./evidence-review-worker.js";
 import { acknowledgementRepairFrame } from "./claude-cost-repair.js";
 import type { HumanPrincipal } from "./identity.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl } from "./campaign-authority.js";
@@ -1509,7 +1513,12 @@ function backgroundJobStopRefusal(reason: StopBackgroundJobRefusal | undefined):
   }
 }
 
+const PREPARED_MEDIA_CAPTURE = Symbol("private prepared media Session capture");
+type PreparedMediaCapture = { identity: PreparedMediaIdentity; subject: PreparedMediaSubject; decision: WorkflowDecisionView; command: Extract<DurableSessionCommand, { type: "start_session" }> | null };
+
 export class SessionsService {
+  readonly mediaSessionPurposes: MediaSessionPurposes;
+  private readonly preparedMediaCaptures = new WeakSet<PreparedMediaCapture>();
   /** Bound stored-video reads and derivation across all service instances in this process. */
   private static readonly videoReviewRequests = new Set<string>();
   private static readonly inFlightVideoDecisions = new Map<string, {
@@ -1561,7 +1570,9 @@ export class SessionsService {
     private readonly videoFrameReviewCandidateEnabled = false,
     /** Operator-selected controlling Session for the dogfood validation. Omitted only in tests. */
     private readonly videoFrameReviewValidationSessionId?: string,
+    private readonly preparedMediaRuntime?: PreparedMediaSessionRuntime,
   ) {
+    this.mediaSessionPurposes = new MediaSessionPurposes(this.db.raw());
     this.promptOutbox = new SessionPromptOutbox(this.db, this.hub, this.log);
     // Replayed events took new sequence numbers after a crash: the upsert's new epoch makes open
     // dashboards drop their transcript and recover it again.
@@ -3334,6 +3345,7 @@ export class SessionsService {
     request: { title?: string; agentId: string },
     childCount = 1,
   ): ServiceResult<null> {
+    if (this.mediaSessionPurposes.owns(parentSessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
     const parent = this.db.getSession(parentSessionId);
     if (!parent) return fail("parent session not found", 404);
     const now = Date.now();
@@ -3514,6 +3526,92 @@ export class SessionsService {
     return gate.ok ? ok(applied) : failAs(gate);
   }
 
+  /** Private server materialization, called only inside PreparedMediaSessions' transaction.
+   * Configuration and all authority come from the installed trusted resolver, never agent JSON.
+   * Creates the actual member and exact unsent command; no provider start is sent here. */
+  private resolvePreparedMediaAdmission(identity: PreparedMediaIdentity, subject: PreparedMediaSubject):
+    ServiceResult<{ resolved: NonNullable<ReturnType<PreparedMediaSessionRuntime["resolve"]>>; childAudience: ResourceScope }> {
+    if (!this.preparedMediaRuntime) return fail("Prepared media Session admission is unavailable.", 409);
+    const resolved = this.preparedMediaRuntime.resolve(identity, subject);
+    const root = this.db.getSession(identity.rootSessionId), child = this.db.getSession(identity.childSessionId);
+    const decision = this.db.workflowDecisionByOccurrence(subject.occurrenceId);
+    const control = root?.orchestratorPolicy?.control;
+    if (!resolved || !root || !child || control?.mode !== "full_control" || !control.boundary.evidenceAuthority ||
+      !campaignBoundaryCurrent(root) || !decision || decision.status !== "pending" || decision.authority !== "orchestrator" ||
+      decision.category !== "ui_evidence_approval" || decision.resourceSnapshot.category !== "ui_evidence_approval" ||
+      decision.controllingSessionId !== root.id || decision.sessionId !== child.id ||
+      decision.policyRevision !== root.parentControlPolicy?.revision ||
+      !this.workflowDecisionRelationship(root.id, child.id) || this.workflowDecisionChildEnded(child) ||
+      evaluateCampaignAuthority(root, child, this.db.getRunner(child.runnerId)?.protocolVersion,
+        decision.resourceSnapshot, root.parentControlPolicy, this.db.getRunner(root.runnerId)?.protocolVersion).owner !== "orchestrator") {
+      return fail("The exact original media gate has no current preparation authority.", 409);
+    }
+    const { context, target, liveProof, request } = resolved;
+    const scope = root.orchestratorPolicy?.issueScope;
+    const rootAudience = this.db.sessionScope(root.id), childAudience = this.db.sessionScope(child.id);
+    if (context.rootSessionId !== root.id || context.childSessionId !== child.id ||
+      JSON.stringify(context.boundary) !== JSON.stringify(control.boundary) ||
+      JSON.stringify(context.evidenceAuthority) !== JSON.stringify(control.boundary.evidenceAuthority) ||
+      !scope || !scope.issueNumbers.includes(context.issue) || scope.revision !== context.issueScopeRevision ||
+      !rootAudience || !childAudience || !this.db.scopeAudienceContainedWithMembership(childAudience, rootAudience) ||
+      request.runnerId !== root.runnerId || request.workspaceId !== root.workspaceId || request.workspacePath ||
+      request.agentId !== target.agentId || target.runnerId !== root.runnerId ||
+      this.db.getRunner(root.runnerId)?.protocolVersion !== context.controllerProtocolVersion ||
+      this.db.getRunner(child.runnerId)?.protocolVersion !== context.childProtocolVersion ||
+      this.db.getRunner(target.runnerId)?.protocolVersion !== target.runnerProtocolVersion ||
+      request.config?.model !== target.modelId || request.role === "orchestrator" || request.launchSurface === "native_tui" ||
+      request.images?.length || this.db.getAgentLaunch(request.runnerId, request.agentId)?.driver !== target.driver ||
+      reviewerAdmissionReadiness(context, target, liveProof, Date.now())) {
+      return fail("Current scoped media profile, destination, disclosure or allowance preparation is unsupported.", 409);
+    }
+    const item = decision.resourceSnapshot.evidence.find((e) => e.evidenceId === subject.evidenceId);
+    const source = item?.artifactId ? this.db.workflowArtifactExportPreflight(item.artifactId)?.artifact : null;
+    if (!item || !source || source.sessionId !== child.id || source.kind !== "video" || source.sha256 !== item.sha256 ||
+      source.mimeType !== item.mediaType || !["video/webm", "video/mp4"].includes(source.mimeType ?? "")) {
+      return fail("The original source artifact is unavailable or mismatched.", 409);
+    }
+    let bytes: Buffer | null;
+    try { bytes = this.db.readWorkflowArtifactBytes(source.artifactId); } catch { bytes = null; }
+    if (!bytes || bytes.length > MAX_SESSION_VIDEO_BYTES || createHash("sha256").update(bytes).digest("hex") !== item.sha256) {
+      return fail("The original source artifact no longer matches its immutable digest.", 409);
+    }
+    return ok({ resolved, childAudience });
+  }
+
+  /** Persist normal policy asks outside the Session/member/command transaction. Ordinary
+   * createSession repeats the same current gate inside it; no governance bypass or lost ask. */
+  preflightPreparedMediaSession(identity: PreparedMediaIdentity, subject: PreparedMediaSubject): ServiceResult<null> {
+    if (this.db.raw().isTransaction) return fail("Media governance preflight must precede atomic materialization.", 409);
+    const checked = this.resolvePreparedMediaAdmission(identity, subject);
+    return checked.ok && checked.data ? this.sessionSpawnGate(identity.rootSessionId, checked.data.resolved.request) : failAs(checked);
+  }
+
+  materializePreparedMediaSession(identity: PreparedMediaIdentity, subject: PreparedMediaSubject): ServiceResult<MaterializedMediaSession> {
+    if (!this.db.raw().isTransaction) return fail("Prepared media Session admission requires an atomic ledger transaction.", 409);
+    const checked = this.resolvePreparedMediaAdmission(identity, subject);
+    if (!checked.ok || !checked.data) return failAs(checked);
+    const { resolved, childAudience } = checked.data;
+    const request = resolved.request;
+    const root = this.db.getSession(identity.rootSessionId)!;
+    const decision = this.db.workflowDecisionByOccurrence(subject.occurrenceId)!;
+    const capture: PreparedMediaCapture = { identity: structuredClone(identity), subject: structuredClone(subject),
+      decision, command: null };
+    this.preparedMediaCaptures.add(capture);
+    let created: ServiceResult<SessionView>;
+    try {
+      created = this.createSession(request, undefined, childAudience, false, false, false,
+        { parentSessionId: root.id, [PREPARED_MEDIA_CAPTURE]: capture });
+    } finally { this.preparedMediaCaptures.delete(capture); }
+    if (!created.ok || !created.data) return failAs(created);
+    if (!capture.command) throw new Error("Actual prepared media command was not captured.");
+    const admission = this.campaignBudgetWorkerPreflight(root.id, { kind: "managed", sessionId: created.data.id });
+    if (!admission.ok || !admission.data) throw new Error("Actual post-materialization budget preflight failed.");
+    const again = this.preparedMediaRuntime!.resolve(identity, subject);
+    if (!again || JSON.stringify(again) !== JSON.stringify(resolved)) throw new Error("Media preparation authority changed during materialization.");
+    return ok({ sessionId: created.data.id, runnerId: created.data.runnerId,
+      command: structuredClone(capture.command), admission: admission.data });
+  }
+
   createSession(
     req: CreateSessionRequest,
     delivery?: PreStagedDeliveryOptions,
@@ -3526,9 +3624,12 @@ export class SessionsService {
       parentSessionId?: string;
       orchestratorDefaults?: OrchestratorSettingsView;
       validateOrchestratorDefaults?: (defaults: OrchestratorCampaignPolicy) => string | null;
+      [PREPARED_MEDIA_CAPTURE]?: PreparedMediaCapture;
     },
   ): ServiceResult<SessionView> {
     // Attribution is supplied only by the authenticated route, never by the request payload.
+    const capture = creationContext?.[PREPARED_MEDIA_CAPTURE];
+    if (capture && (!this.preparedMediaCaptures.has(capture) || delivery || !this.db.raw().isTransaction)) return fail("Private media preparation capability is unavailable.", 409);
     const spawnRequest = req;
     const configInputError = sessionGuardrailConfigError(req.config);
     if (configInputError) return fail(configInputError, 400);
@@ -3812,6 +3913,7 @@ export class SessionsService {
     const id = delivery?.sessionId ?? shortId("s_");
     const now = Date.now();
     const images = snapshotCommand?.type === "start_session" ? (snapshotCommand.initialImages ?? []) : (req.images ?? []);
+    if (capture && images.length) return fail("Initial media is delivered only through the exact prepared grant.", 409);
     const imageValidation = validateImagesForDriver(images, launch.driver);
     if (!imageValidation.ok) return fail(imageValidation.error ?? "invalid image attachment", 400);
     if (images.some(isWorkspaceReference)) {
@@ -4436,7 +4538,11 @@ export class SessionsService {
       } } : {}),
       acpSessionContext,
     };
-    if (delivery) {
+    if (capture) {
+      if (command.type !== "start_session") throw new Error("Prepared media command is malformed.");
+      capture.command = { ...command, spec };
+      this.mediaSessionPurposes.add({ sessionId: id, rootSessionId: capture.identity.rootSessionId, childSessionId: capture.identity.childSessionId, admissionId: capture.identity.admissionId, occurrenceId: capture.subject.occurrenceId, evidenceId: capture.subject.evidenceId, resourceDigest: capture.decision.resourceDigest, policyRevision: capture.decision.policyRevision, generation: spec.campaignBudgetDispatch!.generation, command: capture.command });
+    } else if (delivery) {
       delivery.activate(plan!);
     } else {
       if (command.type !== "start_session") return fail("session launch command is malformed", 409);
@@ -4651,6 +4757,7 @@ export class SessionsService {
     }
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    if (this.mediaSessionPurposes.owns(sessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
     const budgetError = this.db.campaignBudgets.admissionError(sessionId);
     if (budgetError) return fail(budgetError, 409);
     const requestedConfig = snapshotCommand?.type === "prompt_session" ? snapshotCommand.config : config;
@@ -5283,6 +5390,7 @@ export class SessionsService {
     if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before changing configuration", 409);
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    if (this.mediaSessionPurposes.owns(sessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
     const configInputError = sessionGuardrailConfigError(config);
     if (configInputError) return fail(configInputError, 400);
     const budgetConfigError = this.campaignBudgetConfigError(session, config);
@@ -6383,6 +6491,7 @@ export class SessionsService {
     if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before restarting", 409);
     let session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    if (this.mediaSessionPurposes.owns(sessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
     const budgetError = this.db.campaignBudgets.admissionError(sessionId) ?? this.campaignBudgetConfigError(session);
     if (budgetError) return fail(budgetError, 409);
     const budgetRoot = this.db.campaignBudgets.root(sessionId);

@@ -41,6 +41,9 @@ export interface PreparedMediaRecord extends PreparedMediaIdentity, Materialized
  * is obtained after materialization. Absence of this integrated adapter is unsupported readiness. */
 export interface PreparedMediaSessionPorts {
   database: DatabaseSync;
+  /** Persist any ordinary governance ask before entering the atomic materialization.
+   * Real Session-service adapter supplies this; no Session/member/provider is created here. */
+  preflightMaterialization?(identity: PreparedMediaIdentity): void;
   materialize(identity: PreparedMediaIdentity): MaterializedMediaSession;
   currentAdmission(sessionId: string): EvidenceReviewerBudgetAdmission | null;
   /** Actual durable Session/member generation even when current admission is revoked.
@@ -150,6 +153,7 @@ export class PreparedMediaSessions {
       identity.rootSessionId === identity.childSessionId || !digest(identity.requestSha256)) {
       throw new Error("Exact campaign and child media identity is required.");
     }
+    if (!this.get(identity)) this.ports.preflightMaterialization?.(identity);
     return this.transaction(() => {
       const existing = this.get(identity);
       if (existing) return existing;
