@@ -768,6 +768,7 @@ CREATE TABLE IF NOT EXISTS workflow_decisions (
   status                TEXT NOT NULL CHECK (status IN ('pending','approved','denied','consumed','revoked','superseded')),
   selected_option_id    TEXT,
   evidence_reviewed     TEXT,
+  delegated_video_evidence TEXT,
   rationale_digest      TEXT,
   human_fallback        TEXT,
   authority_evaluation  TEXT,
@@ -6053,6 +6054,7 @@ export class ControlPlaneDb {
       "action_provider_thread_id TEXT",
       "action_runner_history_epoch INTEGER",
       "child_message TEXT",
+      "delegated_video_evidence TEXT",
       "human_fallback TEXT",
       "authority_evaluation TEXT",
       "issue_closure_result TEXT",
@@ -17567,15 +17569,16 @@ export class ControlPlaneDb {
     rationaleDigest?: string,
     childMessage?: string,
     oweResume = false,
+    delegatedVideoEvidence?: WorkflowDecisionView["delegatedVideoEvidence"],
   ): WorkflowDecisionView | null {
     const owed = oweResume ? ", resume_state='held', resume_command_id=NULL, resume_updated_at=?" : "";
     const result = this.stmt(
       `UPDATE workflow_decisions SET status=?, selected_option_id=?, evidence_reviewed=?,
-       rationale_digest=?, child_message=?, resolved_at=?${owed}
+       rationale_digest=?, child_message=?, delegated_video_evidence=?, resolved_at=?${owed}
        WHERE occurrence_id=? AND status='pending' AND authority=?`,
     ).run(
       outcome, selectedOptionId ?? null, evidenceReviewed ? JSON.stringify(evidenceReviewed) : null,
-      rationaleDigest ?? null, childMessage ?? null, now, ...(oweResume ? [now] : []), occurrenceId, expectedAuthority,
+      rationaleDigest ?? null, childMessage ?? null, delegatedVideoEvidence ? JSON.stringify(delegatedVideoEvidence) : null, now, ...(oweResume ? [now] : []), occurrenceId, expectedAuthority,
     );
     return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
   }
@@ -28128,6 +28131,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     status?: WorkflowDecisionStatus;
     selected_option_id?: string | null;
     evidence_reviewed?: string | null;
+    delegated_video_evidence?: string | null;
     human_fallback?: string | null;
     authority_evaluation?: string | null;
     created_at?: number;
@@ -28152,6 +28156,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
   const resourceSnapshot = parseJson<WorkflowDecisionView["resourceSnapshot"]>(row.resource_snapshot);
   if (!resourceSnapshot) return null;
   const evidenceReviewed = parseJson<string[]>(row.evidence_reviewed ?? null);
+  const delegatedVideoEvidence = parseJson<NonNullable<WorkflowDecisionView["delegatedVideoEvidence"]>>(row.delegated_video_evidence ?? null);
   const humanFallback = parseJson<NonNullable<WorkflowDecisionView["humanFallback"]>>(row.human_fallback ?? null);
   return {
     requestId: row.request_id,
@@ -28170,6 +28175,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     ...(row.issue_closure_result ? { issueClosureResult: JSON.parse(row.issue_closure_result) as NonNullable<WorkflowDecisionView["issueClosureResult"]> } : {}),
     ...(row.selected_option_id ? { selectedOptionId: row.selected_option_id } : {}),
     ...(evidenceReviewed ? { evidenceReviewed } : {}),
+    ...(delegatedVideoEvidence ? { delegatedVideoEvidence } : {}),
     createdAt: row.created_at!,
     ...(row.resolved_at != null ? { resolvedAt: row.resolved_at } : {}),
     ...(row.consumed_at != null ? { consumedAt: row.consumed_at } : {}),

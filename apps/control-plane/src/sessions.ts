@@ -1,3 +1,6 @@
+import { mintCampaignEvidenceAuthority, type EvidenceAuthorityProposal, type EvidenceAuthorityDisclosures } from "./evidence-authority.js";
+import { PACED_VIDEO_REVIEW_MIN_PROTOCOL } from "@wollipog/protocol";
+import type { WorkflowVideoEvidenceApprovals } from "./workflow-video-evidence-approvals.js";
 import { MediaSessionPurposes } from "./media-session-purposes.js";
 import { MEDIA_SESSION_PURPOSE_ERROR, type PreparedMediaSessionRuntime, type PreparedMediaSubject } from "./prepared-media-session-runtime.js";
 import type { PreparedMediaIdentity, MaterializedMediaSession } from "./prepared-media-sessions.js";
@@ -1571,7 +1574,10 @@ export class SessionsService {
     /** Operator-selected controlling Session for the dogfood validation. Omitted only in tests. */
     private readonly videoFrameReviewValidationSessionId?: string,
     private readonly preparedMediaRuntime?: PreparedMediaSessionRuntime,
+    private readonly workflowVideoApprovals?: WorkflowVideoEvidenceApprovals,
+    private readonly evidenceAuthorityDisclosures?: EvidenceAuthorityDisclosures,
   ) {
+    if (workflowVideoApprovals && workflowVideoApprovals.database !== db) throw new Error("Media approvals require the same durable database.");
     this.mediaSessionPurposes = new MediaSessionPurposes(this.db.raw());
     this.promptOutbox = new SessionPromptOutbox(this.db, this.hub, this.log);
     // Replayed events took new sequence numbers after a crash: the upsert's new epoch makes open
@@ -7481,6 +7487,7 @@ export class SessionsService {
   setCampaignControl(sessionId: string, proposal: { mode: "custom" } | {
     mode: "full_control"; objective: string; operations: CampaignAuthorityBoundary["operations"];
     delegatablePolicyIds: string[]; budgetAuthority?: CampaignAuthorityBoundary["budgetAuthority"];
+    evidenceAuthority?: EvidenceAuthorityProposal;
   }, expectedRevision: number, principal: HumanPrincipal): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session || principal.kind !== "human" || !this.db.isSessionOwner(principal, sessionId)) return fail("campaign not found", 404);
@@ -7488,13 +7495,22 @@ export class SessionsService {
     if (!root || root === "refused" || root.id !== sessionId || isTerminal(session.status)) return fail("only a live root campaign can change control", 409);
     if (!proposal || typeof proposal !== "object" || Array.isArray(proposal) || !["custom", "full_control"].includes(proposal.mode)) return fail("invalid campaign control mode", 400);
     if (proposal.mode === "custom" && Object.keys(proposal).some((key) => key !== "mode")) return fail("Custom has no authority boundary", 400);
-    if (proposal.mode === "full_control" && Object.keys(proposal).some((key) => !["mode", "objective", "operations", "delegatablePolicyIds", "budgetAuthority"].includes(key))) return fail("invalid campaign authority fields", 400);
+    if (proposal.mode === "full_control" && Object.keys(proposal).some((key) => !["mode", "objective", "operations", "delegatablePolicyIds", "budgetAuthority", "evidenceAuthority"].includes(key))) return fail("invalid campaign authority fields", 400);
     const scope = session.orchestratorPolicy?.issueScope;
     const now = Date.now();
     const control = proposal.mode === "custom" ? { mode: "custom" as const } : scope &&
       authorizeFullControl(principal, scope, proposal, expectedRevision + 1, now);
     if (!control) return fail("Full Control requires authenticated repository scope and a valid boundary", 400);
     if (control.mode === "full_control") {
+      if (proposal.mode === "full_control" && proposal.evidenceAuthority !== undefined) {
+        if (!this.evidenceAuthorityDisclosures || !control.boundary.operations.includes("ui_evidence_approval")) {
+          return fail("Evidence authority requires an available private destination/provider disclosure and the existing UI evidence operation", 409);
+        }
+        const evidence = mintCampaignEvidenceAuthority(principal, control.boundary, sessionId,
+          proposal.evidenceAuthority, this.evidenceAuthorityDisclosures);
+        if (!evidence) return fail("Evidence destination/provider disclosure is unknown, public, stale or outside the authenticated human boundary", 400);
+        control.boundary.evidenceAuthority = evidence;
+      }
       if (!session.workspaceId) return fail("Full Control requires a repository workspace binding", 409);
       if(control.boundary.budgetAuthority?.controlledReview) {
         if(this.db.sessionScope(sessionId)?.owner.kind!=="user") return fail("Controlled native review requires a user-owned campaign charge scope.",409);
@@ -8414,19 +8430,24 @@ export class SessionsService {
     if ((decision.category === "issue_closure" || decision.category === "campaign_issue_scope") && (authority !== "human" || actor.kind !== "human")) {
       return fail("issue closure always requires an authenticated human response", 403);
     }
+    if (resolution?.delegatedVideoEvidence !== undefined && (authority !== "orchestrator" || !this.workflowVideoApprovals)) {
+      return fail("Delegated video approval requires an admitted current managed-media runtime and Orchestrator owner", 403);
+    }
     const checked = this.validateWorkflowDecisionResolution(decision, resolution);
     if (!checked.ok || !checked.data) return failAs(checked);
+    const normalizedResolution = checked.data;
     const now = Date.now();
     // Repeating evidence identifiers proves nothing. An Orchestrator approval is backed only by
     // receipts the server itself recorded when it delivered each exact artifact to this reviewer.
     let reviewReceipts: UiEvidenceReviewReceipt[] = [];
     if (decision.resourceSnapshot.category === "ui_evidence_approval" && authority === "orchestrator") {
       reviewReceipts = this.db.validUiEvidenceReviewReceipts(occurrenceId, parentSessionId, now);
-      const unreviewed = decision.resourceSnapshot.evidence.filter((item) => !reviewReceipts.some((receipt) =>
+      const unreviewed = decision.resourceSnapshot.evidence.filter((item) =>
+        !(normalizedResolution.delegatedVideoEvidence?.some((reference) => reference.evidenceId === item.evidenceId)) && !reviewReceipts.some((receipt) =>
         receipt.evidenceId === item.evidenceId && receipt.sha256 === item.sha256 &&
         receipt.artifactId === item.artifactId && receipt.childSessionId === childSessionId &&
         receipt.policyRevision === decision.policyRevision));
-      if (checked.data.outcome === "approve" && unreviewed.length) {
+      if (normalizedResolution.outcome === "approve" && unreviewed.length) {
         return fail(
           `UI evidence approval requires a current review receipt for every evidence item; review ${
             unreviewed.map((item) => JSON.stringify(item.evidenceId)).join(", ")
@@ -8435,7 +8456,7 @@ export class SessionsService {
         );
       }
       const video = decision.resourceSnapshot.videoReview;
-      if (checked.data.outcome === "approve" && video) {
+      if (normalizedResolution.outcome === "approve" && video) {
         let sourceBytes: Buffer | null;
         try { sourceBytes = this.db.readWorkflowArtifactBytes(video.sourceArtifactId); } catch { sourceBytes = null; }
         if (!sourceBytes || createHash("sha256").update(sourceBytes).digest("hex") !== video.sourceSha256) {
@@ -8463,7 +8484,7 @@ export class SessionsService {
     // it is staged cannot lose it, and a child whose worktree needs recovery (#1650) or whose
     // runner is offline keeps it until the first boundary that can deliver it. A guardrail card
     // still refuses it, leaving the outcome, and any message, on the decision record.
-    if (decision.resourceSnapshot.category === "campaign_issue_scope" && checked.data.outcome === "approve") {
+    if (decision.resourceSnapshot.category === "campaign_issue_scope" && normalizedResolution.outcome === "approve") {
       const snapshot = decision.resourceSnapshot;
       const audience = this.db.sessionScope(childSessionId);
       if (!actor.id || !audience || !this.db.isSessionOwner({ userId: actor.id, organizationId: audience.organizationId }, childSessionId)) {
@@ -8485,7 +8506,7 @@ export class SessionsService {
       if (!resolvedScope) return fail("Campaign scope changed concurrently. Refresh and propose again.", 409);
       for (const stale of this.db.unconsumedWorkflowDecisionsForController(childSessionId)) this.revokeWorkflowDecision(stale, actor);
       this.settleResolvedWorkflowDecision(resolvedScope, now, null);
-      this.recordWorkflowDecisionAudit(resolvedScope, "allowed", actor, now, checked.data.rationale);
+      this.recordWorkflowDecisionAudit(resolvedScope, "allowed", actor, now, normalizedResolution.rationale);
       this.recordWorkflowDecisionAudit(resolvedScope, "consumed", actor, now);
       this.log.info(JSON.stringify({ event: "campaign_issue_scope_approved", sessionId: childSessionId, occurrenceId,
         revision: snapshot.expectedRevision + 1, additions: snapshot.additions.length, removals: snapshot.removals.length }));
@@ -8494,26 +8515,32 @@ export class SessionsService {
       return ok(resolvedScope);
     }
     const oweResume = this.workflowDecisionResumeOwed(currentChild);
-    const resolved = this.db.resolveWorkflowDecision(
+    const commitResolution = () => this.db.resolveWorkflowDecision(
       occurrenceId,
       authority,
-      checked.data.outcome === "approve" ? "approved" : "denied",
+      normalizedResolution.outcome === "approve" ? "approved" : "denied",
       now,
-      checked.data.selectedOptionId,
-      checked.data.evidenceReviewed,
-      auditDigest(checked.data.rationale),
-      checked.data.childMessage,
+      normalizedResolution.selectedOptionId,
+      normalizedResolution.evidenceReviewed,
+      auditDigest(normalizedResolution.rationale),
+      normalizedResolution.childMessage,
       oweResume,
+      normalizedResolution.delegatedVideoEvidence,
     );
+    let resolved: WorkflowDecisionView | null;
+    try {
+      resolved = normalizedResolution.delegatedVideoEvidence
+        ? this.workflowVideoApprovals!.resolve(decision, normalizedResolution, now, commitResolution) : commitResolution();
+    } catch { return fail("Original video approval lacks current complete worker and image provenance", 409); }
     if (!resolved) return fail("workflow decision was resolved concurrently", 409);
     this.db.consumeUiEvidenceReviewReceipts(occurrenceId, now);
     this.settleResolvedWorkflowDecision(resolved, now, oweResume ? "held" : null);
     this.recordWorkflowDecisionAudit(
       resolved,
-      checked.data.outcome === "approve" ? "allowed" : "denied",
+      normalizedResolution.outcome === "approve" ? "allowed" : "denied",
       actor,
       now,
-      checked.data.rationale,
+      normalizedResolution.rationale,
       reviewReceipts.map((receipt) => receipt.receiptId),
     );
     this.hub.sessionChangedById(childSessionId);
@@ -8682,7 +8709,21 @@ export class SessionsService {
       this.hub.sessionChangedById(parent.id);
       return ok(armed);
     }
-    const consumed = this.db.consumeWorkflowDecision(occurrenceId, now);
+    const originalVideoApproval = decision.authority === "orchestrator" &&
+      decision.resourceSnapshot.category === "ui_evidence_approval" && !decision.resourceSnapshot.videoReview &&
+      decision.resourceSnapshot.evidence.some((item) => item.mediaType?.startsWith("video/"));
+    let consumed: WorkflowDecisionView | null;
+    try {
+      if (originalVideoApproval && (!this.workflowVideoApprovals || !decision.delegatedVideoEvidence?.length)) {
+        throw new Error("Original video approval is missing its durable managed-media provenance.");
+      }
+      consumed = originalVideoApproval
+        ? this.workflowVideoApprovals!.consume(decision, () => this.db.consumeWorkflowDecision(occurrenceId, now))
+        : this.db.consumeWorkflowDecision(occurrenceId, now);
+    } catch {
+      this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+      return fail("Original video provenance expired, changed or was revoked before consumption", 409);
+    }
     if (!consumed) return fail("workflow decision was already consumed", 409);
     this.recordWorkflowDecisionAudit(consumed, "consumed", { kind: "agent", id: sessionId }, now);
     this.hub.sessionChangedById(sessionId);
@@ -9067,12 +9108,41 @@ export class SessionsService {
       return { effectiveOwner: "human", fallback: { code: "artifact_mismatch",
         reason: "The derived video frames no longer match their complete source manifest." } };
     }
+    const child = this.db.getSession(childSessionId);
+    if (!snapshot.videoReview && child && this.productionVideoReviewAvailable(controller, child, snapshot)) {
+      const images = snapshot.evidence.filter((item) => item.mediaType?.startsWith("image/"));
+      return images.length ? evaluateUiEvidenceItems(controller.driver, childSessionId, images,
+        (artifactId) => this.db.workflowArtifactExportPreflight(artifactId)?.artifact ?? null) : { effectiveOwner: "orchestrator" };
+    }
     return evaluateUiEvidenceItems(
       controller.driver,
       childSessionId,
       snapshot.evidence,
       (artifactId) => this.db.workflowArtifactExportPreflight(artifactId)?.artifact ?? null,
     );
+  }
+
+  private productionVideoReviewAvailable(controller: SessionView, child: SessionView,
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "ui_evidence_approval" }>): boolean {
+    const control = controller.orchestratorPolicy?.control;
+    if (!this.workflowVideoApprovals || control?.mode !== "full_control" || !control.boundary?.evidenceAuthority ||
+      !campaignBoundaryCurrent(controller) || snapshot.videoReview ||
+      ![controller, child].every((session) => (this.db.getRunner(session.runnerId)?.protocolVersion ?? 0) >= PACED_VIDEO_REVIEW_MIN_PROTOCOL)) return false;
+    const videos = snapshot.evidence.filter((item) => item.mediaType?.startsWith("video/"));
+    const rootAudience = this.db.sessionScope(controller.id), sourceAudience = this.db.sessionScope(child.id);
+    if (!videos.length || !rootAudience || !sourceAudience ||
+      !this.db.scopeAudienceContainedWithMembership(rootAudience, sourceAudience) ||
+      snapshot.evidence.some((item) => !item.mediaType?.startsWith("image/") &&
+        item.mediaType !== "video/webm" && item.mediaType !== "video/mp4")) return false;
+    for (const item of videos) {
+      const source = item.artifactId ? this.db.workflowArtifactExportPreflight(item.artifactId)?.artifact : null;
+      if (!source || source.sessionId !== child.id || source.kind !== "video" ||
+        source.mimeType !== item.mediaType || source.sha256 !== item.sha256 || source.sizeBytes > MAX_SESSION_VIDEO_BYTES) return false;
+      let bytes: Buffer | null;
+      try { bytes = this.db.readWorkflowArtifactBytes(source.artifactId); } catch { return false; }
+      if (!bytes || createHash("sha256").update(bytes).digest("hex") !== item.sha256) return false;
+    }
+    return this.workflowVideoApprovals.available(controller, child, snapshot);
   }
 
   /** Second half of a delivery: the reviewer's runner re-hashed the bytes and is handing them to
@@ -9276,7 +9346,24 @@ export class SessionsService {
     }
     if (snapshot.category === "ui_evidence_approval") {
       if (resolution.outcome === "approve") {
-        const requested = snapshot.evidence.map((item) => item.evidenceId).sort();
+        const delegated = resolution.delegatedVideoEvidence;
+        if (delegated !== undefined) {
+          const videos = snapshot.evidence.filter((item) => item.mediaType === "video/webm" || item.mediaType === "video/mp4");
+          if (decision.authority !== "orchestrator" || snapshot.videoReview || !Array.isArray(delegated) ||
+            delegated.length < 1 || delegated.length > 32 || delegated.length !== videos.length ||
+            new Set(delegated.map((item) => item?.evidenceId)).size !== delegated.length ||
+            delegated.some((item) => !item || typeof item !== "object" || Array.isArray(item) ||
+              Object.keys(item).sort().join(",") !== "evidenceId,reviewId,reviewerSessionId,verdictId" ||
+              Object.values(item).some((value) => !boundedDecisionString(value, 256)) ||
+              !videos.some((video) => video.evidenceId === item.evidenceId))) {
+            return fail("Delegated video references must exactly identify each original video and actual review verdict", 400);
+          }
+        } else if (decision.authority === "orchestrator" && !snapshot.videoReview &&
+          snapshot.evidence.some((item) => item.mediaType?.startsWith("video/"))) {
+          return fail("Original video approval requires separate actual-worker provenance", 400);
+        }
+        const requested = snapshot.evidence.filter((item) => !delegated?.some((reference) => reference.evidenceId === item.evidenceId))
+          .map((item) => item.evidenceId).sort();
         const reviewed = Array.isArray(resolution.evidenceReviewed) &&
           resolution.evidenceReviewed.every((item): item is string => typeof item === "string")
           ? [...new Set(resolution.evidenceReviewed)].sort() : [];
@@ -9285,11 +9372,13 @@ export class SessionsService {
         }
         resolution = { ...resolution, evidenceReviewed: reviewed };
       }
-      if (resolution.outcome === "deny" && resolution.evidenceReviewed !== undefined) {
+      if (resolution.outcome === "deny" && (resolution.evidenceReviewed !== undefined || resolution.delegatedVideoEvidence !== undefined)) {
         return fail("a denied UI evidence decision cannot carry evidenceReviewed; omit it when denying", 400);
       }
-    } else if (resolution.evidenceReviewed !== undefined) {
-      return fail("evidenceReviewed is valid only for ui_evidence_approval decisions", 400);
+    } else if (resolution.evidenceReviewed !== undefined || resolution.delegatedVideoEvidence !== undefined) {
+      return fail(resolution.evidenceReviewed !== undefined
+        ? "evidenceReviewed is valid only for ui_evidence_approval decisions"
+        : "delegatedVideoEvidence is valid only for ui_evidence_approval decisions", 400);
     }
     return ok(resolution);
   }
