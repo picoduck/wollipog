@@ -13,6 +13,8 @@ after #2934, #2935, #2936 and #3053 actually merge, and repeat cross-model revie
   destination/provider disclosures; a proposal cannot claim a public destination is private.
 - video-evidence-runtime: trusted complete source derivation, pinned acceptance criteria,
   exact immutable context, ordered acknowledgements, separate criterion/defect verdict provenance.
+- video-evidence-artifacts: concrete private content-addressed frame storage, exact-source deletion
+  and bounded expiry cleanup for crashed staging, without trusting caller-authored metadata.
 - evidence-review-service: authenticated owner/reviewer methods, post-decode revocation checks,
   bounded retries and metadata-only lifecycle audit ports.
 - video-evidence-runtime-store: durable SQLite metadata with private artifact-storage ports;
@@ -21,11 +23,18 @@ after #2934, #2935, #2936 and #3053 actually merge, and repeat cross-model revie
   provider/model envelope, protected readiness, request digest and unknown-outcome reconciliation.
 - evidence-review-recovery: two busy retries or replacement captures, no sampling/downscaling,
   recorded single-frame overflow recapture; Custom retains human fallback.
+- video-evidence-review-routes: exact credential-to-path binding, bounded media/ack/verdict methods,
+  no-store responses and separate owner provenance; not yet registered in the hosting entry point.
+- runner/evidence-review-namespace: allowlist mount namespace with no host-root/project bind and
+  synthetic kernel probes denying oracle, generator, parent-path and symlink access.
+- runner/video-evidence-review-transport: pinned full-context/criterion/native-frame verification
+  before authenticated acknowledgement and model image handoff; never claims typed approval.
 - video-live-validation: durable human-inspected candidate/paced/maximum empirical proof,
   bound to exact driver/model/provider/capability digest. No default record is supplied.
 - scripts/prepare-video-live-challenge.ts: offline fresh synthetic source/oracle preparation.
 
-These modules currently have no hosting entry-point caller. They do not advertise a current runner
+The reviewer modules currently have no hosting entry-point caller. Artifact maintenance is
+prepared in the source tree only; the hosting process has not been changed or restarted. They do not advertise a current runner
 protocol revision or activate production. Protocol 218 is reserved for final production integration,
 after scope 216 and allowance 217. #2936 owns campaignBudgetWorkerPreflight and
 allocateCampaignBudget; the final adapter must use durable managed admission before dispatch and
@@ -70,7 +79,30 @@ campaign and Session IDs, actual provider/model, disclosed private artifact conf
    Normal-profile exercises additionally require a separate exact bounded experimental allowance;
    image support alone does not authorize or establish temporal review.
 4. The human/operator runs the following from the reviewed worktree, using new absolute directories
-   outside reviewer workspace/context, with the oracle location excluded from reviewer access:
+   outside reviewer workspace/context. Directory separation and prompt omission alone are not a
+   blind boundary. Before generating the fresh oracle, establish and test a narrowed media-only
+   reviewer tool or filesystem namespace. The actual reviewer must be unable to access the oracle,
+   source generator, recipe, expected truth, operator storage or other Sessions through generic
+   Read, shell, search, network/file tools, plugins, MCP resources or management APIs. Do not change
+   campaign isolation preferences or broaden provider grants to achieve this.
+
+   Preserve runner-owned evidence of the exact available tool set, namespace/mount allowlist and
+   capability digest. Probe forbidden paths/resources from the actual narrowed reviewer boundary
+   without displaying their contents; verify both direct and symlink/parent traversal access fail.
+   A policy prompt, read-only write sandbox, separate directory or cooperative reviewer assertion
+   is insufficient. If the installed managed harness cannot enforce this restriction, stop live
+   admission with a concrete unsupported-readiness reason.
+
+   Use an existing operator-only parent directory as the excluded root, then a new private
+   oracle subdirectory for each challenge. Seed fresh approved provider state; do not expose a
+   shared provider HOME containing old conversations, projects or expected truth. Enforce the
+   exact media-only tool set and strict MCP server configuration in the actual driver; the
+   standalone namespace builder and unit probes alone do not certify a launched reviewer.
+
+   Generate the private oracle only afterward in the operator namespace, outside all reviewer
+   accessible inputs. The narrowed reviewer receives the immutable synthetic capture through the
+   scoped audited media transport and unbiased criteria; capture transport/source/criterion/verdict/
+   usage evidence without leaking random overlay values, timestamps or oracle hints. Use:
 
    node --import tsx apps/control-plane/scripts/prepare-video-live-challenge.ts \
      --capture-dir <new-private-capture-directory> \
@@ -81,6 +113,7 @@ campaign and Session IDs, actual provider/model, disclosed private artifact conf
    It prints only source/profile metadata and the oracle commitment; it never prints oracle bytes.
 5. Attach only the synthetic candidate/paced/maximum capture bytes through the authorized private
    evidence path, with exact artifactId/mediaType/sizeBytes/sha256. Keep the oracle separate.
+   The operator must independently verify the narrowed namespace still holds at dispatch.
    Feed every source frame in source order with exact timestamps and contiguous segment coverage
    through the actual audited MCP tool-result transport to the managed reviewer. Do not replace
    this with local verifier output, screenshots sampled from a recording, mocked transport,
@@ -104,7 +137,8 @@ human-only empirical proof and preceding main dependencies are present, readines
 
 ## Remaining Integration
 
-Wire private artifact storage, exact current workflow/policy/audience/capability lookup,
+Private storage, bounded expiry, authenticated route definitions and runner transport are prepared.
+Wire exact current workflow/policy/audience/capability lookup,
 accountable worker admission, protected media reading/verdict routes and typed owner resolution.
 Compose the evidence envelope through the human-only campaign CAS route without overwriting
 issueAuthority or budgetAuthority. Expose specific unavailable/recovery reasons; preserve Custom,

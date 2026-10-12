@@ -14,7 +14,7 @@ const human: AuthPrincipal = {
 const target: EvidenceReviewerTarget = {
   agentId: "synthetic", driver: "codex-app-server", modelId: "synthetic-model", providerId: "synthetic-provider",
   runnerId: "isolated", runnerProtocolVersion: 218, capabilitiesSha256: digest("audited capability"),
-  auditedAllFrameDelivery: true,
+  auditedAllFrameDelivery: true, reviewerNamespaceSha256: digest("narrowed namespace"), mediaOnlyNamespaceVerified: true,
 };
 /** Fake inputs in an in-memory test database only; not actual validated runs or live receipts. */
 function runs(): InspectedVideoValidationRun[] {
@@ -29,6 +29,7 @@ function runs(): InspectedVideoValidationRun[] {
     blindTemporalVerdictSha256: digest("blind verdict " + profile.kind),
     modelDeliveryEvidenceSha256: digest("model visible proof " + profile.kind),
     usageEvidenceSha256: digest("usage " + profile.kind), pricingEvidenceSha256: digest("official pricing " + profile.kind),
+    oracleIsolationEvidenceSha256: digest("independent forbidden namespace probes"), oracleNamespaceInaccessibleVerified: true,
     actualInputTokens: 100, actualOutputTokens: 10, actualCostUsd: 0.1, latencyMs: 100,
     allSourceFramesDelivered: true, blindOracleMatched: true, privateOracleExcludedFromReviewerContext: true,
     providerUsageVerified: true, currentOfficialPricingVerified: true, sourceAndArtifactsStillMatch: true,
@@ -49,7 +50,7 @@ test("every run must establish complete actual delivery, blind oracle, actual us
   const db = new DatabaseSync(":memory:"); t.after(() => db.close());
   const registry = new VideoLiveValidationRegistry(db);
   for (const key of ["allSourceFramesDelivered", "blindOracleMatched", "privateOracleExcludedFromReviewerContext",
-    "providerUsageVerified", "currentOfficialPricingVerified", "sourceAndArtifactsStillMatch"] as const) {
+    "oracleNamespaceInaccessibleVerified", "providerUsageVerified", "currentOfficialPricingVerified", "sourceAndArtifactsStillMatch"] as const) {
     for (let index = 0; index < 3; index++) {
       const altered = runs(); altered[index]![key] = false;
       assert.equal(registry.recordInspectedRuns(human, target, altered, 1_000), null);
@@ -69,6 +70,8 @@ test("human-inspected metadata is bound to exact model/capability and expires or
   assert.ok(proof);
   assert.equal(registry.current(target, 1_000)?.proofId, proof.proofId);
   assert.equal(registry.current({ ...target, capabilitiesSha256: digest("replacement capability") }, 1_000), null);
+  assert.equal(registry.current({ ...target, reviewerNamespaceSha256: digest("changed namespace") }, 1_000), null);
+  assert.equal(registry.current({ ...target, mediaOnlyNamespaceVerified: false }, 1_000), null);
   assert.equal(registry.current({ ...target, modelId: "other-model" }, 1_000), null);
   assert.equal(registry.current(target, proof.expiresAt), null);
   assert.equal(registry.revoke(human, proof.proofId), true);

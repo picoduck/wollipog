@@ -15,7 +15,7 @@ const record: VideoReviewRecord = {
     policyRevision: 4, boundaryRevision: 4, evidenceAuthorityRevision: 4, reviewerSessionId: "worker",
     reviewerDriver: "codex-app-server", reviewerModelId: "synthetic-model", providerId: "synthetic-provider",
     audienceSha256: digest, capabilitiesSha256: digest, sourceArtifactId: "source", sourceSha256: digest,
-    workerAdmissionSha256: digest,
+    workerAdmissionSha256: digest, criteriaSha256: digest,
   },
   manifest: { schemaVersion: 1, purpose: "trusted_temporal_derivation", profile: "paced-silent-complete-frames-v1",
     sourceSha256: digest, sourceSizeBytes: 1, sourceMediaType: "video/webm", width: 1280, height: 720,
@@ -31,7 +31,7 @@ function fixture() {
   const pending: ResolvedVideoReviewRequest = {
     binding: record.binding, criteria: record.criteria, target: { agentId: "synthetic", driver: "codex-app-server",
       modelId: "synthetic-model", providerId: "synthetic-provider", runnerId: "runner", runnerProtocolVersion: 218,
-      capabilitiesSha256: digest, auditedAllFrameDelivery: true },
+      capabilitiesSha256: digest, auditedAllFrameDelivery: true, reviewerNamespaceSha256: digest, mediaOnlyNamespaceVerified: true },
     mediaType: "video/webm", mode: "full_control", sourceGrantVerified: true,
   };
   const verdict = { verdictId: "verdict", outcome: "accept", rationale: "PRIVATE_SENTINEL_DO_NOT_LOG" } as VideoReviewVerdict;

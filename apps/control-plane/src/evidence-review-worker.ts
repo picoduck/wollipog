@@ -12,6 +12,8 @@ export interface VideoProfileLiveProof {
   modelId: string;
   providerId: string;
   capabilitiesSha256: string;
+  reviewerNamespaceSha256: string;
+  oracleIsolationEvidenceSha256: string;
   profile: typeof PACED_VIDEO_REVIEW_PROFILE;
   validatedAt: number;
   expiresAt: number;
@@ -43,6 +45,9 @@ export interface EvidenceReviewerTarget {
   /** Digest of exact installed model/tool-result attestation, not prompt-image support. */
   capabilitiesSha256: string;
   auditedAllFrameDelivery: boolean;
+  /** Current runner-verified narrowed media-only namespace, not a read-only write sandbox. */
+  reviewerNamespaceSha256: string;
+  mediaOnlyNamespaceVerified: boolean;
 }
 export interface ReviewerAdmissionContext {
   mode: "custom" | "full_control";
@@ -72,7 +77,7 @@ export type ReviewerAdmissionResult =
       workerAdmission: EvidenceReviewerBudgetAdmission }
   | { ok: false; reason: "custom_fallback" | "human_required" | "boundary" | "destination" |
       "provider" | "scope" | "mixed_peer" | "capability" | "live_validation" |
-      "allowance_unsupported" | "allowance" | "launch_uncertain" | "launch_failed" };
+      "reviewer_namespace" | "allowance_unsupported" | "allowance" | "launch_uncertain" | "launch_failed" };
 
 export interface ReviewerReservation {
   reservationId: string;
@@ -115,6 +120,8 @@ export function validVideoLiveProof(proof: VideoProfileLiveProof | null,
   return Boolean(proof && proof.profile === PACED_VIDEO_REVIEW_PROFILE && proof.driver === target.driver &&
     proof.modelId === target.modelId && proof.providerId === target.providerId &&
     proof.capabilitiesSha256 === target.capabilitiesSha256 && digest(proof.capabilitiesSha256) &&
+    target.mediaOnlyNamespaceVerified && digest(target.reviewerNamespaceSha256) &&
+    proof.reviewerNamespaceSha256 === target.reviewerNamespaceSha256 && digest(proof.oracleIsolationEvidenceSha256) &&
     Number.isSafeInteger(proof.validatedAt) && proof.validatedAt > 0 && proof.validatedAt <= now &&
     Number.isSafeInteger(proof.expiresAt) && proof.expiresAt > now &&
     proof.verifiedByUserId && proof.proofId && proof.candidateValidationRunId && proof.pacedValidationRunId &&
@@ -148,6 +155,7 @@ export function reviewerAdmissionReadiness(context: ReviewerAdmissionContext | n
   if ([context.controllerProtocolVersion, context.childProtocolVersion, target.runnerProtocolVersion]
     .some((version) => !Number.isSafeInteger(version) || version < PRODUCTION_VIDEO_REVIEW_PROTOCOL)) return refuse("mixed_peer");
   if (!target.auditedAllFrameDelivery || !digest(target.capabilitiesSha256) || !digest(context.audienceSha256)) return refuse("capability");
+  if (!target.mediaOnlyNamespaceVerified || !digest(target.reviewerNamespaceSha256)) return refuse("reviewer_namespace");
   if (!validVideoLiveProof(proof, target, now)) return refuse("live_validation");
   return null;
 }

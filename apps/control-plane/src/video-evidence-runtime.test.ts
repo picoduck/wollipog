@@ -16,6 +16,7 @@ import { prepareVideoEvidence, videoPreparationDecoderAvailable } from "./video-
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 const source = readFileSync(new URL("../test-fixtures/video-preparation-paced.webm", import.meta.url));
 const admission = { rootSessionId: "root", authorityRevision: 4,
+  dispatch: { rootSessionId: "root", generation: "synthetic-dispatch-generation" },
   allocation: { sessionId: "reviewer", costUsd: 1, toolCalls: 1000 },
   worker: { sessionId: "reviewer", driver: "codex-app-server", model: "test-image-model", effort: "high" } };
 const workerAdmission = { ...admission, allocationDigest: reviewerBudgetAdmissionDigest(admission) };
@@ -25,6 +26,7 @@ const binding: VideoReviewBinding = {
   reviewerSessionId: "reviewer", reviewerDriver: "codex-app-server", reviewerModelId: "test-image-model",
   providerId: "test-provider", audienceSha256: hash("private-audience"), capabilitiesSha256: hash("exact-attestation"),
   sourceArtifactId: "art_video", sourceSha256: hash(source), workerAdmissionSha256: workerAdmission.allocationDigest,
+  criteriaSha256: hash(JSON.stringify([{ criterionId: "transition", description: "Inspect every frame for transient visual defects." }])),
 };
 let images: Buffer[] = [];
 let template: VideoReviewRecord | null = null;
@@ -79,10 +81,23 @@ const report = { outcome: "accept" as const, criteria: [{
 
 test("actual trusted runtime derivation snapshots source and rejects implementer self-review", async (t) => {
   const f = fixture(t); if (!f) return;
-  const result = await f.runtime.derive(binding, "video/webm", criteria);
+  const freshBinding = { ...binding, occurrenceId: "workflow_fresh" };
+  f.setCurrent(freshBinding);
+  const [result, concurrent] = await Promise.all([
+    f.runtime.derive(freshBinding, "video/webm", criteria),
+    f.runtime.derive(freshBinding, "video/webm", criteria),
+  ]);
+  assert.ok(concurrent.ok);
+  if (result.ok && concurrent.ok) assert.equal(result.review.reviewId, concurrent.review.reviewId);
   assert.ok(result.ok);
   if (result.ok) {
+    assert.notEqual(result.review.reviewId, "video_test");
     assert.equal(result.review.manifest.frames.length, 360);
+    const resumed = new VideoEvidenceRuntime(f.store, f.access, () => 1_000);
+    const recovered = await resumed.derive(freshBinding, "video/webm", criteria);
+    assert.ok(recovered.ok);
+    if (recovered.ok) assert.equal(recovered.review.reviewId, result.review.reviewId);
+    await assert.rejects(resumed.derive(freshBinding, "video/webm", [{ criterionId: "changed", description: "Changed criteria" }]), refused("criteria"));
     assert.equal(result.review.manifest.purpose, "trusted_temporal_derivation");
     assert.equal(Object.hasOwn(result.review, "verdict"), false);
     assert.equal(f.store.getVerdict(result.review.reviewId), null);
@@ -107,12 +122,17 @@ test("durable ordered all-frame acknowledgement is necessary but insufficient fo
     f.runtime.acknowledge("video_test", "reviewer", delivery.receipt.receiptId, delivery.receipt.sha256);
   }
   assert.throws(() => f.runtime.approvalProvenance("video_test", "reviewer"), refused("verdict"));
+  assert.throws(() => f.runtime.recordVerdict("video_test", "reviewer", { ...report, oracle: "unexpected truth" } as typeof report), refused("criteria"));
+  assert.throws(() => f.runtime.recordVerdict("video_test", "reviewer", { ...report, criteria: [{ ...report.criteria[0]!, secret: "extra input" } as typeof report.criteria[number]] }), refused("criteria"));
   const verdict = f.runtime.recordVerdict("video_test", "reviewer", report);
   assert.equal(verdict.receiptIds.length, 360);
   assert.equal(f.runtime.approvalProvenance("video_test", "reviewer").verdictId, verdict.verdictId);
   assert.throws(() => f.runtime.deliver("video_test", "reviewer", 359), refused("order"));
   assert.throws(() => f.runtime.recordVerdict("video_test", "reviewer", report), refused("verdict"));
   assert.throws(() => f.runtime.approvalProvenance("video_test", "child"), refused("stale"));
+  f.db.prepare("UPDATE temporal_video_verdicts SET verdict=json_set(verdict, '$.rationale', 'substituted') WHERE review_id=?").run("video_test");
+  assert.equal(f.store.getVerdict("video_test"), null);
+  assert.throws(() => f.runtime.approvalProvenance("video_test", "reviewer"), refused("verdict"));
 });
 
 test("a replaced delivery cannot acknowledge or stand in for a new frame", (t) => {
@@ -133,8 +153,9 @@ test("generated changes in every immutable context field fail closed and revoke 
   fc.assert(fc.property(fc.constantFrom(...keys), fc.integer({ min: 1, max: 100_000 }), (key, delta) => {
     const original = structuredClone(template!);
     original.reviewId = "review_" + sequence++;
+    original.binding = { ...binding, occurrenceId: original.reviewId };
     f.store.saveDerived(original, images);
-    const changed = { ...binding };
+    const changed = { ...original.binding };
     const value = changed[key];
     Object.assign(changed, { [key]: typeof value === "number" ? value + delta : value + "_" + delta });
     f.setCurrent(changed);
@@ -216,10 +237,13 @@ test("expired, replaced admission and removed source cannot reuse a completed ve
   const f = fixture(t); if (!f) return;
   f.setTime(3_601_000);
   assert.throws(() => f.runtime.deliver("video_test", "reviewer", 0), refused("stale"));
-  f.setTime(1_000);
-  f.access.workerAdmission = () => ({ ...workerAdmission, worker: { ...workerAdmission.worker, sessionId: "replacement" } });
-  assert.throws(() => f.runtime.deliver("video_test", "reviewer", 0), refused("stale"));
   assert.equal(f.store.getReview("video_test")?.status, "revoked");
+  f.setTime(1_000);
+  assert.throws(() => f.runtime.deliver("video_test", "reviewer", 0), refused("stale"));
+  const replacement = fixture(t); if (!replacement) return;
+  replacement.access.workerAdmission = () => ({ ...workerAdmission, worker: { ...workerAdmission.worker, sessionId: "replacement" } });
+  assert.throws(() => replacement.runtime.deliver("video_test", "reviewer", 0), refused("stale"));
+  assert.equal(replacement.store.getReview("video_test")?.status, "revoked");
 });
 
 test("current source removal and completed quality proof frame substitution fail closed", (t) => {

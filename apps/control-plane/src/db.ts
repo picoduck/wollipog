@@ -25362,8 +25362,9 @@ export class ControlPlaneDb {
       for (const row of ids) {
         if (row.kind === "video") {
           this.stmt(`DELETE FROM artifacts WHERE session_id=? AND kind='screenshot'
-            AND created_by_kind='system' AND created_by_id='video-review-v1' AND json_valid(metadata)
-            AND json_extract(metadata, '$.purpose')='video_review_frame'
+            AND created_by_kind='system' AND json_valid(metadata)
+            AND ((created_by_id='video-review-v1' AND json_extract(metadata, '$.purpose')='video_review_frame')
+              OR (created_by_id='video-review-v2' AND json_extract(metadata, '$.purpose')='temporal_video_review_frame'))
             AND json_extract(metadata, '$.sourceArtifactId')=?`).run(row.session_id, row.id);
         }
         this.stmt("DELETE FROM artifacts WHERE id=?").run(row.id);
@@ -25375,6 +25376,26 @@ export class ControlPlaneDb {
     }
     this.collectWorkflowArtifactBlobs();
     return ids.length;
+  }
+
+  /** Internal temporal-frame staging can outlive a crashed derivation. Expire only our exact
+   * server-authored format; caller-authored metadata cannot nominate pixels for deletion. */
+  pruneExpiredTemporalVideoFrames(now: number, limit = 1_000): number {
+    if (!Number.isSafeInteger(now) || now <= 0) return 0;
+    const bounded = Number.isSafeInteger(limit) ? Math.max(1, Math.min(limit, 10_000)) : 1_000;
+    const rows = this.stmt(`SELECT id FROM artifacts WHERE kind='screenshot'
+      AND created_by_kind='system' AND created_by_id='video-review-v2' AND json_valid(metadata)
+      AND json_extract(metadata,'$.purpose')='temporal_video_review_frame'
+      AND json_extract(metadata,'$.profile')='paced-silent-complete-frames-v1'
+      AND json_type(metadata,'$.expiresAt')='integer' AND json_extract(metadata,'$.expiresAt')>0
+      AND json_extract(metadata,'$.expiresAt')<=? ORDER BY created_at,id LIMIT ?`)
+      .all(now, bounded) as Array<{ id: string }>;
+    if (!rows.length) return 0;
+    this.atomic(() => {
+      for (const row of rows) this.stmt("DELETE FROM artifacts WHERE id=?").run(row.id);
+    });
+    this.collectWorkflowArtifactBlobs();
+    return rows.length;
   }
 
   /** How much agents have attached to one session. Sizes are summed per artifact, so identical
@@ -25420,8 +25441,9 @@ export class ControlPlaneDb {
       // Agent-provided metadata alone can never nominate another artifact for deletion.
       if (source.kind === "video" && source.session_id) {
         this.stmt(`DELETE FROM artifacts WHERE session_id=? AND kind='screenshot'
-          AND created_by_kind='system' AND created_by_id='video-review-v1' AND json_valid(metadata)
-          AND json_extract(metadata, '$.purpose')='video_review_frame'
+          AND created_by_kind='system' AND json_valid(metadata)
+          AND ((created_by_id='video-review-v1' AND json_extract(metadata, '$.purpose')='video_review_frame')
+            OR (created_by_id='video-review-v2' AND json_extract(metadata, '$.purpose')='temporal_video_review_frame'))
           AND json_extract(metadata, '$.sourceArtifactId')=?`).run(source.session_id, artifactId);
       }
       return Number(this.stmt("DELETE FROM artifacts WHERE id=?").run(artifactId).changes) > 0;

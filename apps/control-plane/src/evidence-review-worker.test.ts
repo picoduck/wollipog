@@ -9,7 +9,7 @@ const hash = (v: string) => createHash("sha256").update(v).digest("hex");
 const target: EvidenceReviewerTarget = {
   agentId: "synthetic-agent", driver: "codex-app-server", modelId: "synthetic-model", providerId: "synthetic-provider",
   runnerId: "isolated-runner", runnerProtocolVersion: 218, capabilitiesSha256: hash("all-frame-attestation"),
-  auditedAllFrameDelivery: true,
+  auditedAllFrameDelivery: true, reviewerNamespaceSha256: hash("narrowed namespace"), mediaOnlyNamespaceVerified: true,
 };
 const evidence = {
   version: 1 as const, revision: 4, authorizedByUserId: "synthetic-human", authorizedAt: 1_000,
@@ -33,6 +33,7 @@ const context: ReviewerAdmissionContext = {
 /** Test-only fake proof exercises admission guards. It is never written as a live validation record. */
 const proof = (): VideoProfileLiveProof => ({
   proofId: "synthetic-proof-not-live", driver: target.driver, modelId: target.modelId, providerId: target.providerId,
+  reviewerNamespaceSha256: target.reviewerNamespaceSha256, oracleIsolationEvidenceSha256: hash("independent oracle denial probes"),
   capabilitiesSha256: target.capabilitiesSha256, profile: PACED_VIDEO_REVIEW_PROFILE, validatedAt: Date.now() - 1_000, expiresAt: Date.now() + 60_000,
   candidateValidationRunId: "synthetic-candidate", pacedValidationRunId: "synthetic-paced",
   maximumProfileValidationRunId: "synthetic-maximum", sourceSha256: hash("source"), manifestSha256: hash("manifest"),
@@ -42,6 +43,7 @@ const proof = (): VideoProfileLiveProof => ({
   actualCostUsd: 0.1, latencyMs: 10, verifiedByUserId: "synthetic-human",
 });
 const workerBudget = { rootSessionId: "root", authorityRevision: 4,
+  dispatch: { rootSessionId: "root", generation: "synthetic-dispatch-generation" },
   allocation: { sessionId: "worker", costUsd: 1, toolCalls: 1000 },
   worker: { sessionId: "worker", driver: target.driver, model: target.modelId, effort: "high" } };
 const workerAdmission = { ...workerBudget, allocationDigest: reviewerBudgetAdmissionDigest(workerBudget) };
@@ -109,6 +111,16 @@ test("Custom, authority revocation, undisclosed provider/destination and mixed p
     { ok: false, reason: "provider" });
   assert.deepEqual(reviewerAdmissionReadiness(context, { ...target, auditedAllFrameDelivery: false }, proof(), Date.now()),
     { ok: false, reason: "capability" });
+});
+test("directory separation alone and changed namespace cannot admit a blind media reviewer", async () => {
+  const f = fixture();
+  assert.deepEqual(await admitEvidenceReviewer("admission", { ...target, mediaOnlyNamespaceVerified: false }, f.deps),
+    { ok: false, reason: "reviewer_namespace" });
+  assert.deepEqual(await admitEvidenceReviewer("admission", { ...target, reviewerNamespaceSha256: hash("changed namespace") }, f.deps),
+    { ok: false, reason: "live_validation" });
+  f.setProof({ ...proof(), oracleIsolationEvidenceSha256: "" });
+  assert.deepEqual(await admitEvidenceReviewer("admission", target, f.deps), { ok: false, reason: "live_validation" });
+  assert.deepEqual(f.counts(), { launches: 0, reservations: 0, releases: 0 });
 });
 test("reservation precedes authenticated managed dispatch and exact duplicate reconciles without replay", async () => {
   const f = fixture();
