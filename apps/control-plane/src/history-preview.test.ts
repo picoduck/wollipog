@@ -10,7 +10,7 @@ import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import { HistoryPreviewReader } from "./history-preview.js";
 
-function fixture(protocol = PROTOCOL_VERSION) {
+function fixture(protocol = PROTOCOL_VERSION, { empty = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), "wollipog-history-preview-"));
   const store = new SessionStore(root);
   store.create({ sessionId: "s1", agentId: "fixture", workspaceId: null, repoPath: root,
@@ -18,10 +18,12 @@ function fixture(protocol = PROTOCOL_VERSION) {
     context: { kind: "native" }, agentSessionId: null, status: "idle", title: "Synthetic",
     config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
     seq: 0, createdAt: 1, updatedAt: 1 });
-  store.appendEvent("s1", { kind: "user_message", text: "Old cached prompt" }, 1);
-  for (let i = 0; i < 20; i++) store.appendEvent("s1", { kind: "stderr", text: "Old activity" }, 2);
-  store.appendEvent("s1", { kind: "user_message", text: "Authoritative current prompt" }, 3);
-  for (let i = 0; i < 450; i++) store.appendEvent("s1", { kind: "agent_message", text: `Current activity ${i}`, final: true }, 4);
+  if (!empty) {
+    store.appendEvent("s1", { kind: "user_message", text: "Old cached prompt" }, 1);
+    for (let i = 0; i < 20; i++) store.appendEvent("s1", { kind: "stderr", text: "Old activity" }, 2);
+    store.appendEvent("s1", { kind: "user_message", text: "Authoritative current prompt" }, 3);
+    for (let i = 0; i < 450; i++) store.appendEvent("s1", { kind: "agent_message", text: `Current activity ${i}`, final: true }, 4);
+  }
   store.flush("s1");
   const first = store.readEventPageForProtocol("s1", { afterSeq: 0, limit: 1 }, PROTOCOL_VERSION);
   assert.ok(first.ok);
@@ -29,8 +31,11 @@ function fixture(protocol = PROTOCOL_VERSION) {
   db.registerRunner({ runnerId: "r1", hostname: "fixture", os: "linux", version: "test", workspaces: [], agents: [] }, 1, protocol);
   db.createSession({ id: "s1", title: "Synthetic", runnerId: "r1", workspaceId: null, agentId: "fixture",
     driver: "codex-app-server", useWorktree: false, config: {}, now: 1 });
-  db.reconcileRunnerHistory("s1", first.page.logEpoch, first.page.throughSeq);
-  db.appendHydratedPage("s1", { afterSeq: 0, historyEpoch: first.page.logEpoch, eventEpoch: 0 }, first.events);
+  // A brand-new session has not completed its first hydration pass yet.
+  if (!empty) {
+    db.reconcileRunnerHistory("s1", first.page.logEpoch, first.page.throughSeq);
+    db.appendHydratedPage("s1", { afterSeq: 0, historyEpoch: first.page.logEpoch, eventEpoch: 0 }, first.events);
+  }
   const hub = new Hub(db);
   const messages: ControlPlaneToRunner[] = [];
   let intercept: ((message: Extract<ControlPlaneToRunner, { type: "session_history_page" }>, reply: () => void) => void) | undefined;
@@ -74,6 +79,16 @@ test("real indexed runner supplies an authoritative turn before CP prefix hydrat
     assert.ok(older);
     assert.deepEqual(older.events.map(event => event.seq), Array.from({ length: 21 }, (_, index) => index + 1));
     assert.equal(f.messages.filter(message => message.type === "session_history_page" && message.opening).length, 1);
+  } finally { f.close(); }
+});
+
+test("a new session's empty runner log yields no preview, so it never opens as a snapshot (#3075)", async () => {
+  const f = fixture(PROTOCOL_VERSION, { empty: true });
+  try {
+    assert.equal(f.db.getRunnerHistoryState("s1")?.complete, false, "the cache is still hydrating");
+    assert.equal(await f.reader.read("s1", 0, { limit: 200 }), null);
+    assert.equal(f.messages.filter(message => message.type === "session_history_page" && message.opening).length, 1,
+      "the runner answered with its empty current turn");
   } finally { f.close(); }
 });
 

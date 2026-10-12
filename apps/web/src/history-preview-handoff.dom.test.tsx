@@ -8,7 +8,7 @@ import { TimelineBuilder } from "./timeline.js";
 import { EventTimeline, type TimelineReadingState, type TimelineRenderRow } from "./components/EventTimeline.js";
 import { convertPreviewReadingState, timelineRowSource } from "./history-preview-handoff.js";
 import { installDomTestCleanup } from "./dom-test-cleanup.js";
-import { useHistoryPreview } from "./use-history-preview.js";
+import { useHistoryPreview, validHistoryPreview } from "./use-history-preview.js";
 import type { ApiClient } from "./api.js";
 
 const dom = new Window({ url: "http://localhost/" });
@@ -42,6 +42,25 @@ test("navigation can wait for the actual preview older-read owner before inspect
   });
   assert.equal(reader.isLoadingOlder(), false);
   assert.equal(reader.events?.[0]?.seq, 1, "target discovery runs after the actual page is committed");
+});
+
+test("an empty authoritative preview is never a snapshot; a turn with rows still is (#3075)", async () => {
+  const api = { getSessionHistoryPreview: () => new Promise(() => {}) } as unknown as ApiClient;
+  let reader!: ReturnType<typeof useHistoryPreview>;
+  function Reader() { reader = useHistoryPreview(api, "s", 0, () => null, () => false, "empty-test"); return null; }
+  const container = document.createElement("div"); document.body.append(container);
+  const root = createRoot(container);
+  cleanup(async () => { await act(async () => root.unmount()); container.remove(); });
+  await act(async () => root.render(<Reader />));
+  const empty = { eventEpoch: 0, logEpoch: 1, throughSeq: 0, turnStartSeq: 0, nextAfterSeq: 0, hasMore: false, events: [] };
+  assert.equal(validHistoryPreview(empty), false);
+  await act(async () => { assert.equal(reader.accept(empty), false); });
+  assert.equal(reader.active, false, "a new session keeps its ordinary empty-conversation path");
+  const turn = { ...empty, throughSeq: 1, turnStartSeq: 1, nextAfterSeq: 1,
+    events: [{ seq: 1, ts: 1, payload: { kind: "user_message" as const, text: "Latest turn" } }] };
+  assert.equal(validHistoryPreview(turn), true);
+  await act(async () => { assert.equal(reader.accept(turn), true); });
+  assert.equal(reader.active, true);
 });
 
 test("proven handoff preserves expanded tool and nested agent anchors across CP-only work boundaries", async () => {
