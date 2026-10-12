@@ -11,9 +11,8 @@ import { approvalsPolicyAnchorId } from "../navigation.js";
 import { LockIcon } from "./Icons.js";
 import { Modal } from "./Modal.js";
 import { SkeletonRows } from "./QuestionPoliciesPanel.js";
-import { SettingsGroup } from "./SettingsView.js";
 import { StatusBadge } from "./StatusBadge.js";
-import { NavRow } from "./ui/SettingsRows.js";
+import { NavRow, SettingsGroup } from "./ui/SettingsRows.js";
 
 /**
  * Settings › Approvals › Tool Policies (#2158): the policies that allow, ask about or deny tool

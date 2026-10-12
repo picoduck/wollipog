@@ -261,7 +261,7 @@ test("Child Harness precedes and scopes model and effort while clearing incompat
   try {
     await act(async () => root.render(<ApiProvider client={createApiClient(transport)}><OrchestratorSettingsPanel /></ApiProvider>));
     await settle();
-    const titles = [...container.querySelectorAll(".ui-row-title")].map((node) => node.textContent);
+    const titles = [...container.querySelectorAll(".setting-row-title")].map((node) => node.textContent);
     assert.ok(titles.indexOf("Child Harness") < titles.indexOf("Child Model"));
     assert.ok(titles.indexOf("Child Model") < titles.indexOf("Child Effort"));
 

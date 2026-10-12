@@ -49,7 +49,7 @@ import { useIsCompact, useIsMobile } from "./useIsMobile.js";
 import { EXPERIMENT_COPY, experimentForViewName } from "../experiments.js";
 import { useExperiments } from "../use-experiments.js";
 import { destination } from "../navigation.js";
-import { NavRow, SegmentedRow, SelectRow, StaticRow, SwitchRow } from "./ui/SettingsRows.js";
+import { NavRow, SegmentedRow, SelectRow, SettingsGroup, StaticRow, SwitchRow } from "./ui/SettingsRows.js";
 import { Select } from "./ui/ChoiceControls.js";
 import { SCHEME_SWATCHES, type ColorScheme, type ResolvedTheme } from "../theme.js";
 import type { SessionsPreviewLayout } from "../sessions-preview-layout.js";
@@ -291,18 +291,6 @@ export function SettingsView({ section, onNavigate, panels }: SettingsViewProps)
         </section>
       </div>
     </div>
-  );
-}
-
-/** One group of rows inside a panel, with its own heading and, optionally, one dim sentence. */
-export function SettingsGroup({ title, intro, children }: { title: string; intro?: ReactNode; children: ReactNode }) {
-  const id = `settings-group-${title.toLowerCase().replace(/\W+/g, "-")}`;
-  return (
-    <section className="settings-group" aria-labelledby={id}>
-      <h3 id={id}>{title}</h3>
-      {intro && <p className="settings-group-intro">{intro}</p>}
-      <div className="settings-options">{children}</div>
-    </section>
   );
 }
 
@@ -583,7 +571,7 @@ export function KeyboardPanel({
         disabled={disabled}
         // Resolved from the DOM rather than a ref, as the dialog version did: the reference dialog
         // returns focus here, and this row is the thing to return it to.
-        onClick={() => onOpenShortcuts(document.querySelector<HTMLElement>(".settings-view .ui-row-nav"))}
+        onClick={() => onOpenShortcuts(document.querySelector<HTMLElement>(".settings-view .setting-row-link"))}
       />
     </SettingsGroup>
   );

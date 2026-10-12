@@ -69,7 +69,7 @@ test("a failed Tailnet change reads as an error, in a class the stylesheet color
   // failure rendered as ordinary helper text.
   const view = await render(tailnet({ error: "Tailscale refused the change." }));
   try {
-    const message = view.container.querySelector(".ui-row-desc .danger-text");
+    const message = view.container.querySelector(".setting-row-desc .danger-text");
     assert.equal(message?.textContent, "Tailscale refused the change.", "the error replaces the row description");
     assert.match(sheet, /\n\.danger-text\s*\{[^}]*color:\s*var\(--danger-text\);/);
   } finally {

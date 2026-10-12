@@ -821,7 +821,7 @@ test("turning off Automatic Updates for a held Git skill clears its Update Held 
     assert.deepEqual(status(), ["Update Held"]);
     await view.click(view.listItem("lint-rules"));
     const toggle = view.section("Source")!.querySelector<HTMLButtonElement>('[role="switch"]')!;
-    assert.equal(toggle.querySelector(".ui-row-title")?.textContent, "Automatic Updates");
+    assert.equal(toggle.querySelector(".setting-row-title")?.textContent, "Automatic Updates");
     assert.equal(toggle.getAttribute("aria-checked"), "true");
     await view.click(toggle);
     assert.equal(skill.gitAutoUpdate.enabled, false);
@@ -1181,7 +1181,7 @@ test("a held update the slot outranks is a notice in Source, and Review Updateâ€
     assert.equal(held?.querySelector(".notice-title")?.textContent, "Update Held for Review");
     assert.match(held?.textContent ?? "", /Commit 0123456789ab adds or changes fix\.sh\. Review it before it deploys\./);
     assert.equal(view.container.querySelectorAll('[aria-label="Update Held for Review"]').length, 1);
-    const description = view.section("Source")!.querySelector('[role="switch"] .ui-row-desc')?.textContent ?? "";
+    const description = view.section("Source")!.querySelector('[role="switch"] .setting-row-desc')?.textContent ?? "";
     assert.doesNotMatch(description, /held/, "the notice is right there, so the row doesn't repeat it");
     await view.click(view.button("Review Updateâ€¦", held!));
     assert.ok(view.container.querySelector('[role="dialog"]'));
@@ -1197,7 +1197,7 @@ test("a held update the slot shows is not repeated in Source, whose Automatic Up
     assert.equal(view.slot()?.dataset.notice, "git-held");
     assert.equal(view.container.querySelectorAll('[aria-label="Update Held for Review"]').length, 1, "one notice, in the slot");
     assertNoDomNode(view.section("Source")!.querySelector(".notice"));
-    assert.equal(view.section("Source")!.querySelector('[role="switch"] .ui-row-desc')?.textContent,
+    assert.equal(view.section("Source")!.querySelector('[role="switch"] .setting-row-desc')?.textContent,
       "Checks main every hour. Last checked 2h ago at commit c3d4e5f6a7b8. An update is held for review.");
   } finally {
     await view.unmount();
@@ -1248,9 +1248,9 @@ test("Automatic Updates is a switch: one click applies it, it shows busy, then S
   try {
     await view.click(view.listItem("lint-rules"));
     const toggle = () => view.section("Source")!.querySelector<HTMLButtonElement>('[role="switch"]')!;
-    const description = () => toggle().querySelector(".ui-row-desc")?.textContent;
+    const description = () => toggle().querySelector(".setting-row-desc")?.textContent;
     assertNoDomNode(view.section("Source")!.querySelector('input[type="checkbox"]'), "no checkbox for an instant setting");
-    assert.equal(toggle().querySelector(".ui-row-title")?.textContent, "Automatic Updates");
+    assert.equal(toggle().querySelector(".setting-row-title")?.textContent, "Automatic Updates");
     const byId = (attribute: string) => domWindow.document.getElementById(toggle().getAttribute(attribute)!)?.textContent;
     assert.equal(byId("aria-labelledby"), "Automatic Updates", "named by its title alone");
     assert.equal(byId("aria-describedby"), "Off. Use Check for Updates to review new commits.", "and described by its state");
@@ -1267,8 +1267,8 @@ test("Automatic Updates is a switch: one click applies it, it shows busy, then S
     await act(settle);
     assert.equal(toggle().getAttribute("aria-checked"), "true");
     assert.equal(toggle().getAttribute("aria-busy"), null);
-    assert.equal(toggle().querySelector(".ui-row-saved")?.textContent, "Saved");
-    assert.equal(view.section("Source")!.querySelector('.skill-source > [role="status"]')?.textContent, "Automatic Updates saved");
+    assert.equal(toggle().querySelector(".setting-row-saved")?.textContent, "Saved");
+    assert.equal(view.section("Source")!.querySelector('.skill-source > .setting-row-frame > [role="status"]')?.textContent, "Automatic Updates saved");
     assert.equal(description(), "Checks main every hour. Waiting for the first check.");
   } finally {
     await view.unmount();
@@ -1290,8 +1290,8 @@ test("a failed Automatic Updates change keeps the confirmed value, shows no Save
     assert.equal(toggle().getAttribute("aria-checked"), "false", "nothing changed, so nothing says it did");
     assert.equal(toggle().getAttribute("aria-busy"), null);
     assert.equal(toggle().disabled, false, "and it can be tried again");
-    assertNoDomNode(toggle().querySelector(".ui-row-saved"));
-    assert.equal(view.section("Source")!.querySelector('.skill-source > [role="status"]')?.textContent, "");
+    assertNoDomNode(toggle().querySelector(".setting-row-saved"));
+    assert.equal(view.section("Source")!.querySelector('.skill-source > .setting-row-frame > [role="status"]')?.textContent, "");
     assert.match(view.container.querySelector('[role="alert"]')?.textContent ?? "", /Automatic updates could not be saved\./);
   } finally {
     await view.unmount();

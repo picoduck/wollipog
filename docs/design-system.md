@@ -1781,11 +1781,51 @@ Title                                              [ control 240 ]
 Description, one line of --text-dim 12px.
 ```
 
-One grid for every setting row: `grid-template-columns: minmax(0, 1fr) var(--setting-control-w, 240px);
-gap: 24px; min-height: var(--row-h-2); padding: 12px 16px`, inside a Surface with hairlines between
-rows. Title `--type-body-strong`, description `--type-small` `--text-dim` (12px, never smaller). The
-control column is right-aligned; controls fill it (`width: 100%`) except switches (right-aligned).
-Under a 560px container the control drops below the text at full width.
+One grid for every setting row (`.setting-row`, `SettingRow` in `ui/SettingsRows.tsx`, #2947):
+`grid-template-columns: minmax(0, 1fr) var(--setting-control-w); gap: 8px 24px; min-height:
+var(--row-h-2); padding: 12px 16px`, with `--setting-control-w` declared once at 240px. There is no
+leading cell: the row is its text cell (`.setting-row-text`) and its control column
+(`.setting-row-control`), and an optional 16px icon sits inside the text cell, so every title in a
+group starts at one left edge. Title `--type-body-strong`; description `--type-small` in `--text-dim`
+(12px, never smaller or fainter). Controls fill the column (`width: 100%`) and every control in it is
+`--control-h` (32px, 44px on touch) on its `--control-outline` edge, a segmented control's track
+included; a switch, a link's chevron, an action button and a 96px number field sit at its right edge.
+Only a disabled row dims, and only its title (`--text-faint`, never opacity, §3.1).
+
+**Row kinds.** Thin wrappers over the grid, each with the affordance that says what it is:
+
+| Component | Control | Notes |
+| --- | --- | --- |
+| `SwitchRow` | The whole row is the `Switch` (`.setting-row-switch`); the track at the column's right edge. | `saved` and `failure` (in place, with Try Again) as before; `busy` keeps the confirmed value. |
+| `SegmentedRow` | `.seg` filling the column. | For two or three options whose labels fit the column (labels never wrap); a `Select` otherwise. `disabledReason` under the pills. |
+| `SelectRow` | `Select` filling the column. | Its `.menu.listbox` is at least as wide as the trigger and 280px, and 360px when options carry descriptions, by default. `disabledReason` is visible under the trigger and part of its description. |
+| `NumberRow` | A `.w-xs` (96px) field with its unit inside (§8.3). | Named by the title and unit; a long unit goes in the title or description. An invalid value is `aria-invalid` with a `FieldError` under the field (§8.5). |
+| `ValueRow` | A read-only value, right-aligned. | `mono` for addresses, versions and ids; `copy` adds Copy, an `.icon-btn.sm` named "Copy <Title>". |
+| `LinkRow` | Trailing `ChevronRight`, after an optional trailing word. | Navigation only; the whole row is the button. `NavRow` is its alias until its callers move. |
+| `ActionRow` | One `.btn` (`--control-h`), such as Edit…. | Named by its label and the row's title ("Edit… Claude Code"). |
+| `StaticRow` | None. | States something; its title is full contrast and it has no role. |
+
+**States.** A busy row (`busy`) keeps its control's confirmed value and leads its description with a
+12px spinner, or replaces it with `busyLabel` (the description stays underneath, hidden, so the row
+keeps its height). `saved` shows the §8.6 check: before the track on a switch row, at the end of the
+text cell otherwise, announced by a polite region beside the control. A failed instant save that is
+not a switch is the group's failure notice (below).
+
+**Narrow.** Under a 560px **container** the control drops below the text at full width; switch, link
+and action rows (`.setting-row-trailing`) keep their control trailing. The container is the group's
+surface, never the viewport, so the rule holds in the settings panel, a dialog and a detail pane
+alike.
+
+**Group.** `SettingsGroup` (also in `ui/SettingsRows.tsx`, exported for any screen) is a §5.1
+section: an optional head (the title in `--type-section`, written in Title Case with no
+`text-transform`; an optional scope label as §11.3 meta, such as "This Device", "Your Account", "This
+Window" or "This Machine"; at most one head action), an optional one-sentence description in
+`--type-small` `--text-dim`, one `.surface` (`.settings-group-surface`) with hairlines between its
+rows, and an optional foot line. The surface is the size container for the 560px rule. A failed
+instant save that is not a switch shows a compact danger `Notice` above the surface with Retry. Rows
+inside a surface never turn into cards: hover is a `--bg-elev-2` fill without a border, only on rows
+that are one link or button, on fine pointers. A switch row with `saved` or `failure` is one framed
+child of the surface (`.setting-row-frame`), its status region inside the frame.
 
 ### 8.3 Field Widths
 
@@ -3345,7 +3385,7 @@ Never use CSS `text-transform` to achieve either. Enum values pass through `stat
 | `ui/ChoiceControls` `Checkbox` (native 13px) | `.checkbox` + `.switch` |
 | `ChoiceCards` (`.ui-choice-cards`, `.ui-choice-card*`, trailing `.ui-choice-mark`), `.workflow-preset`, `.agent-pick`, `.pod-member-pick`, `.access-choice`, the People member checklist | `ChoiceRows` (`.choice-row`, leading `.radio-mark` / `.checkbox-mark`) or `ChoiceList` (`.choice-list`) (#1952) |
 | `.field` / `.access-form` (two systems) | `.field` (label, control, helper/error) |
-| `.ui-row`, `.ui-row-choice`, `.orchestrator-number-row`, `.orchestrator-policy-control`, `.rail-order-row`, `.agent-defaults-editor` grids | `.setting-row` |
+| `.ui-row`, `.ui-row-choice`, `.orchestrator-number-row`, `.orchestrator-policy-control`, `.rail-order-row`, `.agent-defaults-editor` grids | `.setting-row` (the row components moved with #2947; the remaining hand-built rows move with #3019) |
 | `.archive-table`, `.usage-table`, `.skills-table`, assignment matrix | `.table` (fixed layout) with phone row fallback |
 | `.shortcut-row kbd`, `.shortcut-hint kbd` (9px) | `kbd` (one recipe) |
 | `code` global chip | `:not(pre) > code` chip only |

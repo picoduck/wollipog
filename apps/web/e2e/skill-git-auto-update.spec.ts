@@ -60,13 +60,13 @@ test("Automatic Updates is a switch: one click turns it on, Saved shows for abou
   const toggle = page.getByRole("switch", { name: "Automatic Updates", exact: true });
   await expect(toggle).toHaveAttribute("aria-checked", "false");
   await expect(source(page).getByRole("checkbox")).toHaveCount(0);
-  await expect(toggle.locator(".ui-row-desc")).toHaveText("Off. Use Check for Updates to review new commits.");
+  await expect(toggle.locator(".setting-row-desc")).toHaveText("Off. Use Check for Updates to review new commits.");
   await page.screenshot({ path: info.outputPath("git-auto-update-off-1280.png"), fullPage: true });
   await toggle.click();
   await expect(toggle).toHaveAttribute("aria-checked", "true");
   expect(state.puts).toEqual([{ enabled: true }]);
-  await expect(toggle.locator(".ui-row-desc")).toHaveText("Checks main every hour. Waiting for the first check.");
-  const saved = toggle.locator(".ui-row-saved");
+  await expect(toggle.locator(".setting-row-desc")).toHaveText("Checks main every hour. Waiting for the first check.");
+  const saved = toggle.locator(".setting-row-saved");
   await expect(saved).toHaveText("Saved");
   const shownAt = Date.now();
   await expect(source(page).getByRole("status").filter({ hasText: "Automatic Updates saved" })).toHaveCount(1);
@@ -134,7 +134,7 @@ for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
     await expect(held).toHaveCount(1);
     await expect(page.locator(".skill-notice-slot")).toHaveAttribute("data-notice", "git-held");
     await expect(held).toContainText(`Commit ${"c".repeat(12)} adds or changes scripts/collect.sh and tool.py. Review it before it deploys.`);
-    await expect(source(page).getByRole("switch").locator(".ui-row-desc")).toContainText("An update is held for review.");
+    await expect(source(page).getByRole("switch").locator(".setting-row-desc")).toContainText("An update is held for review.");
     await source(page).scrollIntoViewIfNeeded();
     expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
     expect(await stretched(page)).toEqual([]);

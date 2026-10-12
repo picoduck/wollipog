@@ -1,1 +1,0 @@
-|.settings-group>h3|text-transform|uppercase

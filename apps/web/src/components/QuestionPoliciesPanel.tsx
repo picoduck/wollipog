@@ -7,9 +7,8 @@ import { approvalsPolicyAnchorId } from "../navigation.js";
 import { InfoIcon } from "./Icons.js";
 import { MenuSurface } from "./Menu.js";
 import { useDismissiblePopover } from "./interactions.js";
-import { SettingsGroup } from "./SettingsView.js";
 import { StatusBadge } from "./StatusBadge.js";
-import { SAVED_MS, SwitchRow } from "./ui/SettingsRows.js";
+import { SAVED_MS, SettingsGroup, SwitchRow } from "./ui/SettingsRows.js";
 
 export const QUESTION_POLICY_STARTERS = [
   { id: "review", title: "Review Sharing and Retries", description: "Approve sending a diff for review or retrying a review." },
