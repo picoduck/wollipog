@@ -69,18 +69,64 @@ test("deliberately clearing focus during delayed Dismiss All stays cleared @prod
   await expect.poll(() => page.evaluate(() => document.activeElement?.tagName)).toBe("BODY");
 });
 
-test("partial dismissal retains the failed skill and a keyboard retry recovers focus @production", async ({ page }) => {
-  const { notice, release, target } = await openDelayedDismissal(page, false, true);
-  release();
-  await expect(notice.getByRole("alert")).toHaveText("Could not dismiss orchestrate-issues. Try again.");
-  await expect(notice.getByRole("link")).toHaveText(["orchestrate-issues"]);
+for (const width of [390, 1440]) {
+  test(`partial dismissal at ${width}px keeps retry reachable by native Tab and Enter @production`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 844 });
+    const { notice, release, target } = await openDelayedDismissal(page, false, true);
+    release();
+    await expect(notice.getByRole("alert")).toHaveText("Could not dismiss orchestrate-issues. Try again.");
+    await expect(notice.getByRole("link")).toHaveText(["orchestrate-issues"]);
+    await expect(notice).toBeFocused();
+    const last = notice.getByRole("button", { name: "Dismiss orchestrate-issues", exact: true });
+    await expect(last).toBeEnabled();
+    // No focus() jump can mask an intercepted Tab from the region's new recovery target.
+    if (width === 1440) {
+      await page.keyboard.press("Shift+Tab");
+      await expect(page.getByRole("textbox", { name: "Search Sessions", exact: true })).toBeFocused();
+    }
+    await page.keyboard.press("Tab");
+    await expect(notice.getByRole("link")).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(last).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(notice).toBeHidden();
+    await expect(target).toBeFocused();
+  });
+}
+
+test("desktop pending dismissal allows native Tab and Shift+Tab without switching groups @production", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 844 });
+  const { notice, release } = await openDelayedDismissal(page);
+  const allGroup = page.getByRole("tab", { name: /^All/ });
+  await expect(allGroup).toHaveAttribute("aria-selected", "true");
   await expect(notice).toBeFocused();
-  const last = notice.getByRole("button", { name: "Dismiss orchestrate-issues", exact: true });
-  await expect(last).toBeEnabled();
-  await last.focus();
-  await page.keyboard.press("Enter");
+  await page.keyboard.press("Shift+Tab");
+  await expect(page.getByRole("textbox", { name: "Search Sessions", exact: true })).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(notice.getByRole("link", { name: "using-wollipog", exact: true })).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(notice.getByRole("link", { name: "orchestrate-issues", exact: true })).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(notice.getByRole("link", { name: "using-wollipog", exact: true })).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(page.getByRole("textbox", { name: "Search Sessions", exact: true })).toBeFocused();
+  await expect(allGroup).toHaveAttribute("aria-selected", "true");
+  const preserved = await page.evaluateHandle(() => document.activeElement);
+  release();
+  await expect(notice).toBeHidden();
+  expect(await preserved.evaluate(element => element === document.activeElement)).toBe(true);
+});
+
+test("Tab and Shift+Tab from the Sessions grid still switch groups @production", async ({ page }) => {
+  const { notice, release, target } = await openDelayedDismissal(page);
+  release();
   await expect(notice).toBeHidden();
   await expect(target).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(page.getByRole("tab", { name: /^Synthetic Project/ })).toHaveAttribute("aria-selected", "true");
+  await target.focus();
+  await page.keyboard.press("Shift+Tab");
+  await expect(page.getByRole("tab", { name: /^All/ })).toHaveAttribute("aria-selected", "true");
 });
 
 test("disconnecting while dismissal is pending hides the notice and keeps the Sessions target usable @production", async ({ page }) => {

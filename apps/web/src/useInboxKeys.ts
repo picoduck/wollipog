@@ -88,9 +88,10 @@ export function useInboxKeys(enabled: boolean, actions: InboxKeyActions): void {
         if (!matchesShortcut(event, shortcutId)) continue;
         // Fork acts on the Sessions list or reading pane, not on the page header around them.
         if (action === "fork" && !(active instanceof Element && active.closest(".inbox-view"))) return;
-        // Tab and Shift+Tab switch groups from the list only (#2180); in the preview they move focus,
-        // so Shift+Tab walks back through it to the list's divider (#2217).
-        if ((action === "nextSplit" || action === "previousSplit") && zone === "main") return;
+        // Tab and Shift+Tab switch groups from the list only (#2180). The preview and list notices
+        // keep native traversal: a notice's non-control recovery target must not trap focus here.
+        if ((action === "nextSplit" || action === "previousSplit") &&
+            (zone === "main" || (active instanceof Element && active.closest(".list-notice-slot")))) return;
         if (action === "resumeFollow") {
           if (!actions.resumeFollow()) return;
           event.preventDefault();
