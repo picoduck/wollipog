@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { AuthPrincipal } from "./identity.js";
 import { EvidenceReviewService } from "./evidence-review-service.js";
-import { VideoReviewRefused, type VideoReviewVerdict } from "./video-evidence-runtime.js";
+import { VIDEO_REVIEW_BATCH, VideoReviewRefused, type VideoReviewVerdict } from "./video-evidence-runtime.js";
 
 const text = (value: unknown, max = 256): value is string =>
   typeof value === "string" && value.length > 0 && value.length <= max && !/[\x00-\x1f\x7f]/u.test(value);
@@ -56,6 +56,37 @@ export function registerVideoEvidenceReviewRoutes(app: FastifyInstance, deps: {
     } catch {
       return reply.code(409).send({ error: "This credential has no current grant for this exact source frame." });
     }
+  });
+  app.post(prefix + "/frames", (req, reply) => {
+    const principal = principalFor(req);
+    if (!principal) return reply.code(403).send({ error: "A matching reviewer Session credential is required." });
+    if (!body(req.body, ["reviewId", "index"]) || !text(req.body.reviewId) ||
+      !Number.isSafeInteger(req.body.index) || Number(req.body.index) < 0 || Number(req.body.index) >= 900) {
+      return reply.code(400).send({ error: "A bounded review and source-frame index are required." });
+    }
+    reply.header("cache-control", "no-store");
+    try {
+      const result = deps.service.deliverBatch(principal, req.body.reviewId, Number(req.body.index));
+      return { deliveries: result.deliveries.map((delivery) => ({
+        receipt: delivery.receipt, mimeType: delivery.mimeType, sizeBytes: delivery.bytes.length,
+        data: delivery.bytes.toString("base64"),
+      })), nextIndex: result.nextIndex, frameCount: result.frameCount };
+    } catch { return reply.code(409).send({ error: "This credential has no current grant for this consecutive frame window." }); }
+  });
+  app.post(prefix + "/acknowledge-frames", (req, reply) => {
+    const principal = principalFor(req);
+    if (!principal) return reply.code(403).send({ error: "A matching reviewer Session credential is required." });
+    if (!body(req.body, ["reviewId", "receipts"]) || !text(req.body.reviewId) ||
+      !Array.isArray(req.body.receipts) || !req.body.receipts.length || req.body.receipts.length > VIDEO_REVIEW_BATCH.frames ||
+      req.body.receipts.some((r: unknown) => !body(r, ["receiptId", "sha256"]) || !text(r.receiptId) ||
+        typeof r.sha256 !== "string" || !/^[a-f0-9]{64}$/u.test(r.sha256))) {
+      return reply.code(400).send({ error: "A bounded consecutive set of exact receipts is required." });
+    }
+    reply.header("cache-control", "no-store");
+    try {
+      deps.service.acknowledgeBatch(principal, req.body.reviewId, req.body.receipts as Array<{ receiptId: string; sha256: string }>);
+      return { acknowledged: true };
+    } catch { return reply.code(409).send({ error: "The complete receipt window is stale, mismatched or unavailable." }); }
   });
   app.post(prefix + "/acknowledge", (req, reply) => {
     const principal = principalFor(req);

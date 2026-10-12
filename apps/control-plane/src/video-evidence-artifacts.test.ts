@@ -23,7 +23,7 @@ function review(): VideoReviewRecord {
       rootSessionId: "root", childSessionId: "child", occurrenceId: "occurrence", resourceDigest: hash("decision"),
       policyRevision: 1, boundaryRevision: 1, evidenceAuthorityRevision: 1, reviewerSessionId: "reviewer",
       reviewerDriver: "codex-app-server", reviewerModelId: "synthetic", providerId: "synthetic",
-      audienceSha256: hash("audience"), capabilitiesSha256: hash("capability"), sourceArtifactId: "source",
+      audienceSha256: hash("audience"), capabilitiesSha256: hash("capability"), sourceEvidenceId: "source_evidence", sourceArtifactId: "source",
       sourceSha256: hash("source"), workerAdmissionSha256: hash("admission"), criteriaSha256: hash(JSON.stringify(criteria)),
     }, manifest, manifestSha256: hash(JSON.stringify(manifest)), criteria, criteriaSha256: hash(JSON.stringify(criteria)),
     createdAt: 1_000, expiresAt: 3_601_000, status: "pending",

@@ -14,7 +14,7 @@ const record: VideoReviewRecord = {
     rootSessionId: "root", childSessionId: "child", occurrenceId: "workflow", resourceDigest: digest,
     policyRevision: 4, boundaryRevision: 4, evidenceAuthorityRevision: 4, reviewerSessionId: "worker",
     reviewerDriver: "codex-app-server", reviewerModelId: "synthetic-model", providerId: "synthetic-provider",
-    audienceSha256: digest, capabilitiesSha256: digest, sourceArtifactId: "source", sourceSha256: digest,
+    audienceSha256: digest, capabilitiesSha256: digest, sourceEvidenceId: "source_evidence", sourceArtifactId: "source", sourceSha256: digest,
     workerAdmissionSha256: digest, criteriaSha256: digest,
   },
   manifest: { schemaVersion: 1, purpose: "trusted_temporal_derivation", profile: "paced-silent-complete-frames-v1",

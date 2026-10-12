@@ -5,6 +5,7 @@ export type EvidenceRecoveryPlan =
   | { action: "retry"; delayMs: number; nextAttempt: number; reason: string }
   | { action: "split" | "recapture"; nextAttempt: number; reason: string;
       preserve: "all_source_frames_native_timing"; requiresNewArtifact: true }
+  | { action: "wait" | "reject"; reason: string }
   | { action: "human"; reason: string };
 
 /** One initial capture plus at most two replacements, and two bounded busy retries. In Custom
@@ -12,8 +13,13 @@ export type EvidenceRecoveryPlan =
 export function planEvidenceRecovery(mode: "custom" | "full_control", code: VideoPreparationFailureCode,
   attempt: number): EvidenceRecoveryPlan {
   if (mode !== "full_control") return { action: "human", reason: "Custom mode retains human evidence recovery." };
-  if (!Number.isSafeInteger(attempt) || attempt < 0 || attempt >= 2) {
-    return { action: "human", reason: "The bounded evidence recovery attempts are exhausted." };
+  if (!Number.isSafeInteger(attempt) || attempt < 0) {
+    return { action: "human", reason: "Invalid recovery state cannot establish trusted evidence coverage." };
+  }
+  if (attempt >= 2 && code !== "decoder_unavailable" && code !== "integrity") {
+    return code === "decoder_busy"
+      ? { action: "wait", reason: "The bounded busy retries are exhausted. Keep the exact request pending for decoder capacity; unrelated campaign work may continue." }
+      : { action: "reject", reason: "The bounded replacement captures are exhausted. The authorized owner should decline this inadequate evidence through the existing typed gate so the child can correct it." };
   }
   if (code === "decoder_busy") return { action: "retry", delayMs: attempt === 0 ? 100 : 200,
     nextAttempt: attempt + 1, reason: "Retry the bounded decoder queue; keep the same immutable source." };

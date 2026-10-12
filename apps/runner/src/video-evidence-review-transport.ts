@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
-import type { PacedVideoReviewDelivery, PacedVideoTransportGrant } from "@wollipog/protocol";
+import { PACED_VIDEO_REVIEW_BATCH_LIMITS, type PacedVideoReviewDelivery, type PacedVideoReviewBatchDelivery, type PacedVideoTransportGrant } from "@wollipog/protocol";
 import type { ToolResult } from "./session-management-mcp.js";
 
 export interface VideoReviewTransport {
   /** Server/runner-owned grant. No caller-selected source, review, Session, URL or filesystem. */
   grant: PacedVideoTransportGrant;
-  request(action: "frame" | "acknowledge" | "verdict", body: Record<string, unknown>): Promise<unknown>;
+  request(action: "frame" | "frames" | "acknowledge" | "acknowledge-frames" | "verdict", body: Record<string, unknown>): Promise<unknown>;
   now(): number;
 }
 const failure = (message: string): ToolResult => ({ content: [{ type: "text", text: message }], isError: true });
@@ -18,6 +18,42 @@ function validGrant(grant: PacedVideoTransportGrant, now: number): boolean {
       Number.isSafeInteger(frame.sizeBytes) && frame.sizeBytes > 0 && frame.sizeBytes <= 2 * 1024 * 1024 &&
       Number.isSafeInteger(frame.ptsUs) && frame.ptsUs >= 0 && Number.isSafeInteger(frame.durationUs) && frame.durationUs > 0));
 }
+function verifiedDelivery(candidate: unknown, grant: PacedVideoTransportGrant, index: number): candidate is PacedVideoReviewDelivery {
+  const delivery = candidate as PacedVideoReviewDelivery;
+  const frame = grant.frames[index]!;
+    const receipt = delivery?.receipt;
+    const exact = (value: unknown, keys: string[]) => !!value && typeof value === "object" && !Array.isArray(value) &&
+      Object.keys(value).length === keys.length && Object.keys(value).every((key) => keys.includes(key));
+    if (!exact(delivery, ["receipt", "mimeType", "sizeBytes", "data"]) ||
+      !exact(receipt, ["receiptId", "occurrenceId", "reviewerSessionId", "childSessionId", "policyRevision",
+        "evidenceId", "artifactId", "sha256", "deliveredAt", "deliveryOrder", "videoFrame", "bindingSha256", "criteriaSha256"]) ||
+      !exact(receipt.videoFrame, ["sourceArtifactId", "sourceSha256", "manifestSha256", "profile", "index", "ptsMs", "ptsUs", "durationUs"]) ||
+      !Number.isSafeInteger(receipt.deliveredAt) || receipt.deliveredAt <= 0 || receipt.deliveredAt >= grant.expiresAt) return false;
+    const temporal = receipt?.videoFrame;
+    if (!receipt || !temporal || delivery.mimeType !== "image/png" || delivery.sizeBytes !== frame.sizeBytes ||
+      typeof delivery.data !== "string" || delivery.data.length > Math.ceil(frame.sizeBytes / 3) * 4 ||
+      !/^[A-Za-z0-9+/]*={0,2}$/u.test(delivery.data) ||
+      receipt.reviewerSessionId !== grant.reviewerSessionId || receipt.childSessionId !== grant.childSessionId ||
+      receipt.occurrenceId !== grant.occurrenceId || receipt.policyRevision !== grant.policyRevision ||
+      receipt.bindingSha256 !== grant.bindingSha256 || receipt.criteriaSha256 !== grant.criteriaSha256 ||
+      receipt.artifactId !== grant.reviewId + ":frame:" + index ||
+      receipt.evidenceId !== grant.sourceEvidenceId ||
+      !receipt.receiptId || receipt.receiptId.length > 256 || receipt.sha256 !== frame.sha256 ||
+      !Number.isSafeInteger(receipt.deliveryOrder) || receipt.deliveryOrder <= 0 ||
+      temporal.profile !== "paced-silent-complete-frames-v1" || temporal.index !== index ||
+      temporal.sourceArtifactId !== grant.sourceArtifactId || temporal.sourceSha256 !== grant.sourceSha256 ||
+      temporal.manifestSha256 !== grant.manifestSha256 || temporal.ptsUs !== frame.ptsUs ||
+      temporal.ptsMs !== frame.ptsUs / 1000 || temporal.durationUs !== frame.durationUs) {
+      return false;
+    }
+    const bytes = Buffer.from(delivery.data, "base64");
+    if (bytes.length !== frame.sizeBytes || bytes.toString("base64") !== delivery.data ||
+      createHash("sha256").update(bytes).digest("hex") !== frame.sha256) {
+      return false;
+    }
+    return true;
+}
+
 /** The same digest-verified native frame handed to the model is acknowledged through this
  * exact Session's authenticated transport. Unit transport tests are not live model proof. */
 export async function reviewVideoEvidenceFrame(args: unknown, deps: VideoReviewTransport): Promise<ToolResult> {
@@ -27,32 +63,10 @@ export async function reviewVideoEvidenceFrame(args: unknown, deps: VideoReviewT
       !Object.hasOwn(args, "index")) return failure("Only a source-frame index is accepted.");
   const index = (args as { index: unknown }).index;
   if (!Number.isSafeInteger(index) || Number(index) < 0 || Number(index) >= grant.frames.length) return failure("The source-frame index is outside this grant.");
-  const frame = grant.frames[Number(index)]!;
   try {
     const delivery = await deps.request("frame", { reviewId: grant.reviewId, index }) as PacedVideoReviewDelivery;
-    const receipt = delivery?.receipt;
-    const temporal = receipt?.videoFrame;
-    if (!receipt || !temporal || delivery.mimeType !== "image/png" || delivery.sizeBytes !== frame.sizeBytes ||
-      typeof delivery.data !== "string" || delivery.data.length > Math.ceil(frame.sizeBytes / 3) * 4 ||
-      !/^[A-Za-z0-9+/]*={0,2}$/u.test(delivery.data) ||
-      receipt.reviewerSessionId !== grant.reviewerSessionId || receipt.childSessionId !== grant.childSessionId ||
-      receipt.occurrenceId !== grant.occurrenceId || receipt.policyRevision !== grant.policyRevision ||
-      receipt.bindingSha256 !== grant.bindingSha256 || receipt.criteriaSha256 !== grant.criteriaSha256 ||
-      receipt.artifactId !== grant.reviewId + ":frame:" + index ||
-      receipt.evidenceId !== grant.sourceArtifactId + ":frame:" + index ||
-      !receipt.receiptId || receipt.receiptId.length > 256 || receipt.sha256 !== frame.sha256 ||
-      !Number.isSafeInteger(receipt.deliveryOrder) || receipt.deliveryOrder <= 0 ||
-      temporal.profile !== "paced-silent-complete-frames-v1" || temporal.index !== index ||
-      temporal.sourceArtifactId !== grant.sourceArtifactId || temporal.sourceSha256 !== grant.sourceSha256 ||
-      temporal.manifestSha256 !== grant.manifestSha256 || temporal.ptsUs !== frame.ptsUs ||
-      temporal.ptsMs !== frame.ptsUs / 1000 || temporal.durationUs !== frame.durationUs) {
-      return failure("Delivered media does not match this exact temporal review grant.");
-    }
-    const bytes = Buffer.from(delivery.data, "base64");
-    if (bytes.length !== frame.sizeBytes || bytes.toString("base64") !== delivery.data ||
-      createHash("sha256").update(bytes).digest("hex") !== frame.sha256) {
-      return failure("Delivered native frame bytes do not match the pinned source derivation.");
-    }
+    if (!verifiedDelivery(delivery, grant, Number(index))) return failure("Delivered media does not match this exact temporal review grant.");
+    const receipt = delivery.receipt;
     if (!validGrant(grant, deps.now())) return failure("The exact grant expired before verified handoff.");
     const acknowledged = await deps.request("acknowledge", { reviewId: grant.reviewId,
       receiptId: receipt.receiptId, sha256: receipt.sha256 }) as { acknowledged?: boolean };
@@ -84,4 +98,44 @@ export async function submitVideoEvidenceVerdict(report: unknown, deps: VideoRev
     return { content: [{ type: "text", text: JSON.stringify({ verdictId: result.verdictId, reviewId: result.reviewId,
       outcome: result.outcome, typedDecisionResolved: false }) }] };
   } catch { return failure("The criterion verdict was not confirmed; reconcile its durable record before retrying."); }
+}
+
+/** Bounded consecutive multi-image handoff. Every image is independently verified and the
+ * complete window is atomically acknowledged before any image leaves this handler. */
+export async function reviewVideoEvidenceFrames(args: unknown, deps: VideoReviewTransport): Promise<ToolResult> {
+  const grant = deps.grant;
+  if (!validGrant(grant, deps.now()) || !args || typeof args !== "object" || Array.isArray(args) ||
+    Object.keys(args).length !== 1 || !Object.hasOwn(args, "index")) return failure("A current exact grant and source-frame index are required.");
+  const first = (args as { index: number }).index;
+  if (!Number.isSafeInteger(first) || first < 0 || first >= grant.frames.length) return failure("The source-frame index is outside this grant.");
+  try {
+    const batch = await deps.request("frames", { reviewId: grant.reviewId, index: first }) as PacedVideoReviewBatchDelivery;
+    if (!batch || typeof batch !== "object" || Object.keys(batch).length !== 3 ||
+      Object.keys(batch).some((key) => !["deliveries", "nextIndex", "frameCount"].includes(key)) ||
+      !Array.isArray(batch.deliveries) || !batch.deliveries.length || batch.deliveries.length > PACED_VIDEO_REVIEW_BATCH_LIMITS.frames ||
+      batch.nextIndex !== first + batch.deliveries.length || batch.nextIndex > grant.frames.length ||
+      batch.frameCount !== grant.frames.length) return failure("A complete consecutive bounded frame window is required.");
+    let responseBytes = 4096, order = 0;
+    for (const [offset, delivery] of batch.deliveries.entries()) {
+      if (!verifiedDelivery(delivery, grant, first + offset) || delivery.receipt.deliveryOrder <= order) {
+        return failure("The frame window has changed identity, pixels, timing or order; every image is withheld.");
+      }
+      order = delivery.receipt.deliveryOrder;
+      responseBytes += Buffer.byteLength(JSON.stringify(delivery)) + 1;
+      if (responseBytes > PACED_VIDEO_REVIEW_BATCH_LIMITS.responseBytes) return failure("The image response exceeds its disclosed bounded transport profile.");
+    }
+    if (!validGrant(grant, deps.now())) return failure("The exact grant expired before verified batch handoff.");
+    const acknowledged = await deps.request("acknowledge-frames", { reviewId: grant.reviewId,
+      receipts: batch.deliveries.map((d) => ({ receiptId: d.receipt.receiptId, sha256: d.receipt.sha256 })) }) as { acknowledged?: boolean };
+    if (acknowledged?.acknowledged !== true) return failure("The entire frame window was not acknowledged; every image is withheld.");
+    const content: ToolResult["content"] = [{ type: "text", text: JSON.stringify({
+      firstIndex: first, nextIndex: batch.nextIndex, frameCount: batch.frameCount,
+      manifestSha256: grant.manifestSha256, criteriaSha256: grant.criteriaSha256, qualityVerdictRecorded: false,
+    }) }];
+    for (const delivery of batch.deliveries) {
+      content.push({ type: "text", text: JSON.stringify({ receipt: delivery.receipt, sizeBytes: delivery.sizeBytes }) });
+      content.push({ type: "image", data: delivery.data, mimeType: delivery.mimeType });
+    }
+    return { content };
+  } catch { return failure("The exact batch handoff is unavailable; reconcile before retrying this source window."); }
 }

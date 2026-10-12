@@ -1,10 +1,11 @@
 import { validReviewerBudgetAdmission, type EvidenceReviewerBudgetAdmission } from "./evidence-review-admission.js";
 import { createHash, randomUUID } from "node:crypto";
-import type { PacedVideoReviewReceipt } from "@wollipog/protocol";
+import { PACED_VIDEO_REVIEW_BATCH_LIMITS, type PacedVideoReviewReceipt } from "@wollipog/protocol";
 import { prepareVideoEvidence, PACED_VIDEO_PREPARATION_PROFILE,
   type VideoPreparationManifest, type VideoPreparationResult } from "./video-evidence-preparation.js";
 
 export const PRODUCTION_VIDEO_REVIEW_PROTOCOL = 218;
+export const VIDEO_REVIEW_BATCH = PACED_VIDEO_REVIEW_BATCH_LIMITS;
 export const PACED_VIDEO_REVIEW_PROFILE = "paced-silent-complete-frames-v1" as const;
 const hash = (value: Buffer | string) => createHash("sha256").update(value).digest("hex");
 
@@ -24,6 +25,7 @@ export interface VideoReviewBinding {
   providerId: string;
   audienceSha256: string;
   capabilitiesSha256: string;
+  sourceEvidenceId: string;
   sourceArtifactId: string;
   sourceSha256: string;
   workerAdmissionSha256: string;
@@ -73,6 +75,8 @@ export interface VideoReviewStore {
   readFrame(reviewId: string, index: number): Buffer | null;
   latestReceipts(reviewId: string): Array<{ receipt: TemporalVideoReceipt; acknowledged: boolean }>;
   recordDelivery(reviewId: string, receipt: TemporalVideoReceipt): void;
+  recordBatch(reviewId: string, receipts: readonly TemporalVideoReceipt[]): void;
+  acknowledgeBatch(reviewId: string, receipts: readonly { receiptId: string; sha256: string }[]): boolean;
   acknowledge(reviewId: string, receiptId: string, sha256: string): boolean;
   saveVerdict(verdict: VideoReviewVerdict): void;
   getVerdict(reviewId: string): VideoReviewVerdict | null;
@@ -105,13 +109,13 @@ const fresh = (binding: VideoReviewBinding, access: VideoReviewRuntimeAccess,
 const scopedId = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 256 && !/[\x00-\x1f\x7f]/u.test(value);
 const digest = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
 function validBinding(b: VideoReviewBinding): boolean {
-  if (!b || typeof b !== "object" || Array.isArray(b) || Object.keys(b).length !== 17 ||
+  if (!b || typeof b !== "object" || Array.isArray(b) || Object.keys(b).length !== 18 ||
     Object.keys(b).some((key) => !["rootSessionId", "childSessionId", "occurrenceId", "resourceDigest",
       "policyRevision", "boundaryRevision", "evidenceAuthorityRevision", "reviewerSessionId",
       "reviewerDriver", "reviewerModelId", "providerId", "audienceSha256", "capabilitiesSha256",
-      "sourceArtifactId", "sourceSha256", "workerAdmissionSha256", "criteriaSha256"].includes(key))) return false;
+      "sourceEvidenceId", "sourceArtifactId", "sourceSha256", "workerAdmissionSha256", "criteriaSha256"].includes(key))) return false;
   return [b.rootSessionId, b.childSessionId, b.occurrenceId, b.reviewerSessionId,
-    b.reviewerDriver, b.reviewerModelId, b.providerId, b.sourceArtifactId].every(scopedId) &&
+    b.reviewerDriver, b.reviewerModelId, b.providerId, b.sourceEvidenceId, b.sourceArtifactId].every(scopedId) &&
     [b.resourceDigest, b.audienceSha256, b.capabilitiesSha256, b.sourceSha256, b.workerAdmissionSha256, b.criteriaSha256].every(digest) &&
     [b.policyRevision, b.boundaryRevision, b.evidenceAuthorityRevision].every((n) => Number.isSafeInteger(n) && n > 0);
 }
@@ -192,8 +196,10 @@ export class VideoEvidenceRuntime {
       this.store.settle(reviewId, "revoked");
       throw new VideoReviewRefused("stale");
     }
-    if (phase !== "resolve" && this.access.normalCompletion(review.binding) && this.store.getVerdict(reviewId)) {
-      // A normally settled worker has no fresh media/attestation grant. Its already recorded
+    if (phase !== "resolve" && this.store.getVerdict(reviewId) &&
+        (this.access.normalCompletion(review.binding) ||
+          !fresh(review.binding, this.access, phase) && fresh(review.binding, this.access, "resolve"))) {
+      // Normal worker completion or an already resolved gate has no fresh media/attestation grant. Its already recorded
       // quality proof remains subject to every current owner/authority/integrity check below.
       throw new VideoReviewRefused("stale");
     }
@@ -224,6 +230,15 @@ export class VideoEvidenceRuntime {
     if (this.store.getVerdict(reviewId) || receipts.some((r) => r.receipt.videoFrame.index > index) ||
       review.manifest.frames.slice(0, index).some((prior) => !receipts.some((r) =>
         r.acknowledged && this.matches(review, prior.index, r.receipt, bindingDigest)))) throw new VideoReviewRefused("order");
+    const delivery = this.frameDelivery(review, index, receipts.reduce((max, r) => Math.max(max, r.receipt.deliveryOrder), 0) + 1);
+    this.store.recordDelivery(reviewId, delivery.receipt);
+    return delivery;
+  }
+
+  private frameDelivery(review: VideoReviewRecord, index: number, deliveryOrder: number)
+    : { receipt: TemporalVideoReceipt; bytes: Buffer; mimeType: "image/png" } {
+    const frame = review.manifest.frames[index]!;
+    const reviewId = review.reviewId;
     const bytes = this.store.readFrame(reviewId, index);
     if (!bytes || bytes.length !== frame.sizeBytes || hash(bytes) !== frame.sha256 ||
       bytes.length > PACED_VIDEO_PREPARATION_PROFILE.frameBytes) {
@@ -236,15 +251,51 @@ export class VideoEvidenceRuntime {
       receiptId: "uireceipt_" + randomUUID().replaceAll("-", ""),
       occurrenceId: binding.occurrenceId, reviewerSessionId: binding.reviewerSessionId,
       childSessionId: binding.childSessionId, policyRevision: binding.policyRevision,
-      evidenceId: binding.sourceArtifactId + ":frame:" + index,
+      evidenceId: binding.sourceEvidenceId,
       artifactId: review.reviewId + ":frame:" + index, sha256: frame.sha256,
-      deliveredAt: this.clock(), deliveryOrder: receipts.reduce((max, r) => Math.max(max, r.receipt.deliveryOrder), 0) + 1,
+      deliveredAt: this.clock(), deliveryOrder,
       videoFrame: { sourceArtifactId: binding.sourceArtifactId, sourceSha256: binding.sourceSha256,
         manifestSha256: review.manifestSha256, profile: PACED_VIDEO_REVIEW_PROFILE,
         index, ptsMs: frame.ptsUs / 1000, ptsUs: frame.ptsUs, durationUs: frame.durationUs },
     };
-    this.store.recordDelivery(reviewId, receipt);
     return { receipt, bytes, mimeType: "image/png" };
+  }
+
+  /** Consecutive bounded complete frames, not sampled stills. Unacknowledged redelivery may
+   * replace only this exact window, never earlier provenance after a later window. */
+  deliverBatch(reviewId: string, reviewerSessionId: string, firstIndex: number): {
+    deliveries: Array<{ receipt: TemporalVideoReceipt; bytes: Buffer; mimeType: "image/png" }>;
+    nextIndex: number; frameCount: number;
+  } {
+    const review = this.current(reviewId, reviewerSessionId);
+    if (!Number.isSafeInteger(firstIndex) || firstIndex < 0 || firstIndex >= review.manifest.frames.length) throw new VideoReviewRefused("order");
+    const existing = this.store.latestReceipts(reviewId);
+    const bindingDigest = videoReviewBindingDigest(review.binding);
+    if (this.store.getVerdict(reviewId) || review.manifest.frames.slice(0, firstIndex).some((frame) =>
+      !existing.some((r) => r.acknowledged && this.matches(review, frame.index, r.receipt, bindingDigest)))) throw new VideoReviewRefused("order");
+    let deliveryOrder = existing.reduce((max, r) => Math.max(max, r.receipt.deliveryOrder), 0);
+    const deliveries: Array<{ receipt: TemporalVideoReceipt; bytes: Buffer; mimeType: "image/png" }> = [];
+    let responseBytes = 4096;
+    for (let index = firstIndex; index < review.manifest.frames.length && deliveries.length < VIDEO_REVIEW_BATCH.frames; index++) {
+      const delivery = this.frameDelivery(review, index, ++deliveryOrder);
+      const entryBytes = Buffer.byteLength(JSON.stringify({
+        receipt: delivery.receipt, mimeType: delivery.mimeType, sizeBytes: delivery.bytes.length, data: "",
+      })) + Math.ceil(delivery.bytes.length / 3) * 4 + 1;
+      if (responseBytes + entryBytes > VIDEO_REVIEW_BATCH.responseBytes) break;
+      responseBytes += entryBytes; deliveries.push(delivery);
+    }
+    if (!deliveries.length || existing.some((r) => r.receipt.videoFrame.index >= firstIndex + deliveries.length)) throw new VideoReviewRefused("order");
+    this.store.recordBatch(reviewId, deliveries.map((delivery) => delivery.receipt));
+    return { deliveries, nextIndex: firstIndex + deliveries.length, frameCount: review.manifest.frames.length };
+  }
+
+  acknowledgeBatch(reviewId: string, reviewerSessionId: string,
+    receipts: readonly { receiptId: string; sha256: string }[]): void {
+    this.current(reviewId, reviewerSessionId);
+    if (!Array.isArray(receipts) || !receipts.length || receipts.length > VIDEO_REVIEW_BATCH.frames ||
+      new Set(receipts.map((r) => r.receiptId)).size !== receipts.length ||
+      receipts.some((r) => !scopedId(r.receiptId) || !digest(r.sha256)) ||
+      !this.store.acknowledgeBatch(reviewId, receipts)) throw new VideoReviewRefused("receipt");
   }
 
   acknowledge(reviewId: string, authenticatedReviewerSessionId: string, receiptId: string, sha256: string): void {
@@ -259,7 +310,7 @@ export class VideoEvidenceRuntime {
     return Boolean(f && Number.isSafeInteger(receipt.deliveredAt) && receipt.deliveredAt >= review.createdAt &&
       receipt.deliveredAt <= this.clock() && receipt.deliveredAt < review.expiresAt && receipt.bindingSha256 === bindingDigest && receipt.criteriaSha256 === review.criteriaSha256 && receipt.occurrenceId === b.occurrenceId && receipt.reviewerSessionId === b.reviewerSessionId &&
       receipt.childSessionId === b.childSessionId && receipt.policyRevision === b.policyRevision &&
-      receipt.artifactId === review.reviewId + ":frame:" + index && receipt.evidenceId === b.sourceArtifactId + ":frame:" + index &&
+      receipt.artifactId === review.reviewId + ":frame:" + index && receipt.evidenceId === b.sourceEvidenceId &&
       receipt.sha256 === f.sha256 && v.sourceArtifactId === b.sourceArtifactId && v.sourceSha256 === b.sourceSha256 &&
       v.manifestSha256 === review.manifestSha256 && v.profile === PACED_VIDEO_REVIEW_PROFILE &&
       v.index === index && v.ptsUs === f.ptsUs && v.ptsMs === f.ptsUs / 1000 && v.durationUs === f.durationUs);

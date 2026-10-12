@@ -19,14 +19,24 @@ after #2934, #2935, #2936 and #3053 actually merge, and repeat cross-model revie
   bounded retries and metadata-only lifecycle audit ports.
 - video-evidence-runtime-store: durable SQLite metadata with private artifact-storage ports;
   no raw bytes, signed URLs, storage credentials, or oracle content enter audit records.
+- evidence-review-admission-store: durable dispatch intent and unknown-launch reconciliation,
+  immutable settled managed snapshots, no invented Session identity or transferable allowance.
+- video-evidence-decision-bridge: original snapshot/resource digest stays unchanged; direct owner
+  image inspection IDs remain separate from actual worker video references. Current authority and
+  full provenance are rechecked at resolution and consumption; no parent-received receipts are made.
 - evidence-review-worker: admitted managed Session identity and allowance adapter, exact human
   provider/model envelope, protected readiness, request digest and unknown-outcome reconciliation.
 - evidence-review-recovery: two busy retries or replacement captures, no sampling/downscaling,
-  recorded single-frame overflow recapture; Custom retains human fallback.
+  recorded single-frame overflow recapture. Busy exhaustion waits for capacity; inadequate capture
+  exhaustion recommends exact typed rejection for child correction, not a new human permission.
+  Custom and genuinely unavailable trusted capability/access retain human fallback.
 - video-evidence-review-routes: exact credential-to-path binding, bounded media/ack/verdict methods,
   no-store responses and separate owner provenance; not yet registered in the hosting entry point.
 - runner/evidence-review-namespace: allowlist mount namespace with no host-root/project bind and
   synthetic kernel probes denying oracle, generator, parent-path and symlink access.
+- runner/video-evidence-review-mcp: a two-handler registry enforces media-only names at discovery
+  and dispatch, with current actual Session/namespace checks; generic file, management, upload and
+  native code-review-job handlers are excluded. It is not yet registered in a live managed Session.
 - runner/video-evidence-review-transport: pinned full-context/criterion/native-frame verification
   before authenticated acknowledgement and model image handoff; never claims typed approval.
 - video-live-validation: durable human-inspected candidate/paced/maximum empirical proof,
@@ -46,7 +56,10 @@ The paced profile covers one silent VP8/VP9/H.264 WebM/MP4 stream, native 960x54
 up to 30 seconds / 900 frames at observed intervals of at least 33ms, source at most 32 MiB,
 PNG at most 2 MiB/frame and 128 MiB total. Native decoding remains network-isolated, bounded
 by memory/CPU/wall time and a two-active/two-queued decoder. Contiguous partitions preserve every
-source frame, presentation time and duration. Partitions are delivery boundaries, not sampled clips.
+source frame, presentation time and duration. Consecutive delivery batches include at most 32
+images and at most 8 MiB of encoded response data, shrinking the window when native frames are
+large. Every frame is independently verified; acknowledgements commit atomically before any
+image is handed to the model. A missing or changed frame withholds the entire window. Partitions are delivery boundaries, not sampled clips.
 
 The duration/resolution limits are conditional admission ceilings, not universal content guarantees.
 An offline maximum testsrc2 720p/30fps/30-second clip exceeded the existing PNG conversion envelope.
@@ -115,7 +128,7 @@ campaign and Session IDs, actual provider/model, disclosed private artifact conf
    evidence path, with exact artifactId/mediaType/sizeBytes/sha256. Keep the oracle separate.
    The operator must independently verify the narrowed namespace still holds at dispatch.
    Feed every source frame in source order with exact timestamps and contiguous segment coverage
-   through the actual audited MCP tool-result transport to the managed reviewer. Do not replace
+   through bounded consecutive multi-image batches in the actual audited MCP tool-result transport to the managed reviewer. Do not replace
    this with local verifier output, screenshots sampled from a recording, mocked transport,
    a normal worker message, or a receipt merely asserted by a caller.
 6. Require an authenticated criterion/defect verdict and blind answer describing the random transient

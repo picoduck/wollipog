@@ -1,3 +1,5 @@
+import { VideoEvidenceDecisionBridge } from "./video-evidence-decision-bridge.js";
+import type { WorkflowDecisionView } from "@wollipog/protocol";
 import { reviewerBudgetAdmissionDigest } from "./evidence-review-admission.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -25,7 +27,7 @@ const binding: VideoReviewBinding = {
   resourceDigest: hash("decision"), policyRevision: 4, boundaryRevision: 4, evidenceAuthorityRevision: 4,
   reviewerSessionId: "reviewer", reviewerDriver: "codex-app-server", reviewerModelId: "test-image-model",
   providerId: "test-provider", audienceSha256: hash("private-audience"), capabilitiesSha256: hash("exact-attestation"),
-  sourceArtifactId: "art_video", sourceSha256: hash(source), workerAdmissionSha256: workerAdmission.allocationDigest,
+  sourceEvidenceId: "source_evidence", sourceArtifactId: "art_video", sourceSha256: hash(source), workerAdmissionSha256: workerAdmission.allocationDigest,
   criteriaSha256: hash(JSON.stringify([{ criterionId: "transition", description: "Inspect every frame for transient visual defects." }])),
 };
 let images: Buffer[] = [];
@@ -259,5 +261,101 @@ test("current source removal and completed quality proof frame substitution fail
   f.runtime.recordVerdict("video_test", "reviewer", report);
   f.frameBytes.set(157, Buffer.from("transient substituted after model delivery"));
   assert.throws(() => f.runtime.approvalProvenance("video_test", "reviewer"), refused("frame_mismatch"));
+  assert.equal(f.store.getReview("video_test")?.status, "revoked");
+});
+
+test("bounded consecutive batches preserve all 360 native frames and acknowledge each window atomically", (t) => {
+  const f = fixture(t); if (!f || !template) return;
+  const seen: number[] = [];
+  let cursor = 0;
+  while (cursor < template.manifest.frames.length) {
+    const batch: ReturnType<VideoEvidenceRuntime["deliverBatch"]> = f.runtime.deliverBatch("video_test", "reviewer", cursor);
+    assert.ok(batch.deliveries.length > 0 && batch.deliveries.length <= 32);
+    const encoded = { deliveries: batch.deliveries.map((d) => ({
+      receipt: d.receipt, mimeType: d.mimeType, sizeBytes: d.bytes.length, data: d.bytes.toString("base64"),
+    })), nextIndex: batch.nextIndex, frameCount: batch.frameCount };
+    assert.ok(Buffer.byteLength(JSON.stringify(encoded)) <= 8 * 1024 * 1024);
+    const receipts = batch.deliveries.map((d) => ({ receiptId: d.receipt.receiptId, sha256: d.receipt.sha256 }));
+    if (cursor === 0) {
+      assert.throws(() => f.runtime.acknowledgeBatch("video_test", "reviewer",
+        receipts.map((r, i) => i === receipts.length - 1 ? { ...r, sha256: hash("wrong") } : r)), refused("receipt"));
+      assert.equal(f.store.latestReceipts("video_test").some((r) => r.acknowledged), false, "no partial acknowledgement survives");
+      assert.throws(() => f.runtime.deliverBatch("video_test", "reviewer", batch.nextIndex), refused("order"));
+      const replacement = f.runtime.deliverBatch("video_test", "reviewer", 0);
+      assert.throws(() => f.runtime.acknowledgeBatch("video_test", "reviewer", receipts), refused("receipt"));
+      f.runtime.acknowledgeBatch("video_test", "reviewer", replacement.deliveries.map((d) => ({
+        receiptId: d.receipt.receiptId, sha256: d.receipt.sha256,
+      })));
+    } else f.runtime.acknowledgeBatch("video_test", "reviewer", receipts);
+    for (const delivery of batch.deliveries) {
+      assert.equal(hash(delivery.bytes), template.manifest.frames[delivery.receipt.videoFrame.index]!.sha256);
+      assert.equal(delivery.receipt.evidenceId, binding.sourceEvidenceId, "original evidence ID retained with actual worker actor");
+      seen.push(delivery.receipt.videoFrame.index);
+    }
+    cursor = batch.nextIndex;
+  }
+  assert.deepEqual(seen, template.manifest.frames.map((frame) => frame.index));
+  assert.throws(() => f.runtime.deliverBatch("video_test", "reviewer", 0), refused("order"));
+  const verdict = f.runtime.recordVerdict("video_test", "reviewer", report);
+  assert.equal(verdict.receiptIds.length, 360);
+  assert.equal(f.runtime.approvalProvenance("video_test", "reviewer").verdictId, verdict.verdictId);
+});
+
+test("original gate distinguishes parent-inspected images from exact worker video provenance at resolution and consumption", (t) => {
+  const f = fixture(t); if (!f || !template) return;
+  let cursor = 0;
+  while (cursor < template.manifest.frames.length) {
+    const batch: ReturnType<VideoEvidenceRuntime["deliverBatch"]> = f.runtime.deliverBatch("video_test", "reviewer", cursor);
+    f.runtime.acknowledgeBatch("video_test", "reviewer", batch.deliveries.map((d) => ({
+      receiptId: d.receipt.receiptId, sha256: d.receipt.sha256,
+    })));
+    cursor = batch.nextIndex;
+  }
+  const verdict = f.runtime.recordVerdict("video_test", "reviewer", report);
+  const snapshot = { category: "ui_evidence_approval", evidence: [{
+    evidenceId: binding.sourceEvidenceId, artifactId: binding.sourceArtifactId, sha256: binding.sourceSha256, mediaType: "video/webm",
+  }] };
+  const decision = {
+    category: "ui_evidence_approval", authority: "orchestrator", status: "pending", resourceSnapshot: snapshot,
+    controllingSessionId: "root", sessionId: "child", occurrenceId: binding.occurrenceId,
+    resourceDigest: binding.resourceDigest, policyRevision: binding.policyRevision,
+  } as unknown as WorkflowDecisionView;
+  let current = true;
+  const phases: string[] = [];
+  const bridge = new VideoEvidenceDecisionBridge(f.runtime, {
+    decisionCurrent: (_decision, phase) => { phases.push(phase); return current; },
+    linkedReview: () => f.store.getReview("video_test"), directImageReviewed: () => false,
+  });
+  const reference = { evidenceId: binding.sourceEvidenceId, reviewId: "video_test",
+    verdictId: verdict.verdictId, reviewerSessionId: "reviewer" };
+  const original = JSON.stringify(snapshot);
+  assert.equal(bridge.approvalProvenance(decision, [], [reference], "resolve")[0]?.reviewerSessionId, "reviewer");
+  assert.throws(() => bridge.approvalProvenance(decision, [binding.sourceEvidenceId], [reference], "resolve"), /truthfully cover/u);
+  assert.throws(() => bridge.approvalProvenance(decision, [], [{ ...reference, reviewerSessionId: "root" }], "resolve"), /original evidence/u);
+  decision.status = "approved";
+  assert.equal(bridge.approvalProvenance(decision, [], [reference], "consume")[0]?.verdictId, verdict.verdictId);
+  current = false;
+  assert.throws(() => bridge.approvalProvenance(decision, [], [reference], "consume"), /no current delegated/u);
+  assert.ok(phases.includes("resolve") && phases.includes("consume"));
+  assert.equal(JSON.stringify(snapshot), original, "no source snapshot rewrite or synthetic parent receipt");
+});
+
+test("attempted fresh reads after typed resolution do not destroy otherwise current unconsumed quality provenance", (t) => {
+  const f = fixture(t); if (!f || !template) return;
+  let cursor = 0;
+  while (cursor < template.manifest.frames.length) {
+    const batch: ReturnType<VideoEvidenceRuntime["deliverBatch"]> = f.runtime.deliverBatch("video_test", "reviewer", cursor);
+    f.runtime.acknowledgeBatch("video_test", "reviewer", batch.deliveries.map((d) => ({
+      receiptId: d.receipt.receiptId, sha256: d.receipt.sha256,
+    }))); cursor = batch.nextIndex;
+  }
+  const verdict = f.runtime.recordVerdict("video_test", "reviewer", report);
+  // Exact gate is approved: its owner can consume current provenance, worker has no new access.
+  f.access.currentBinding = (_binding, phase) => phase === "resolve" ? binding : null;
+  assert.throws(() => f.runtime.deliverBatch("video_test", "reviewer", 0), refused("stale"));
+  assert.equal(f.store.getReview("video_test")?.status, "pending");
+  assert.equal(f.runtime.approvalProvenance("video_test", "reviewer").verdictId, verdict.verdictId);
+  f.access.currentBinding = () => null;
+  assert.throws(() => f.runtime.approvalProvenance("video_test", "reviewer"), refused("stale"));
   assert.equal(f.store.getReview("video_test")?.status, "revoked");
 });
