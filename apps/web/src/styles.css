@@ -3115,7 +3115,7 @@ button.status { cursor: pointer; }
 /* -------------------------------- Code well --------------------------------
    A read-only command, build or identifier beside its copy button (docs/design-system.md §11.7).
    The sunken ground marks it as a value, not an input; long values wrap anywhere rather than
-   clipping, because the whole value is what gets copied. */
+   clipping, because the whole value is what gets copied. `.one-line` is the exception below. */
 .code-well {
   display: flex;
   align-items: flex-start;
@@ -3138,6 +3138,16 @@ button.status { cursor: pointer; }
   font-family: var(--font-mono);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+/* The single-line form, for a secret, key or address: the value stays on one line and ends in an
+   ellipsis, and its `.icon-btn.sm` copy button is centered on it. Only the paint is clipped; the
+   whole value stays in the DOM for Copy and screen readers. */
+.code-well.one-line { align-items: center; }
+.code-well.one-line > code {
+  overflow: hidden;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  text-overflow: ellipsis;
 }
 
 /* ------------------------- Masked personal identifier -------------------------

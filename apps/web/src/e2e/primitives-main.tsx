@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { FieldError } from "../components/FieldError.js";
 import { FieldWarning } from "../components/FieldWarning.js";
 import { FeedbackProvider, useFeedback } from "../components/FeedbackProvider.js";
+import { CopyButton } from "../components/common.js";
 import { DetailBar } from "../components/PageHeader.js";
 import { SaveBar } from "../components/SaveBar.js";
 import "../styles.css";
@@ -24,6 +25,9 @@ import "../styles.css";
  * warning.
  * `?view=actions-menu` shows instead a detail bar whose ⋯ item confirms with the menu's `reopen` as
  * its Back (#2949, §7.5): on a phone the confirmation replaces the ⋯ sheet and Back brings it back.
+ * `?view=code-well` shows instead the single-line code well (#2950, §11.7): a short value and a
+ * 400-character one, each in a `.field` with its label above, beside a wrapping `.code-well` holding
+ * the same long value.
  * `?theme=light` switches theme.
  */
 
@@ -132,6 +136,38 @@ function SaveBarStates() {
   );
 }
 
+const SHORT_SECRET = "whsec_4f9a2c";
+/** 400 characters with no break opportunity, so only the ellipsis can keep it on one line. */
+const LONG_SECRET = `whsec_${"7Hq2Zx9KpL4mVb8NcR3tYw6UeJ5sGd1F".repeat(13)}`.slice(0, 400);
+
+function OneLineWell({ id, label, value }: { id: string; label: string; value: string }) {
+  return (
+    <div className="field" data-well={id}>
+      <span className="field-label">{label}</span>
+      <div className="code-well one-line">
+        <code>{value}</code>
+        <CopyButton text={value} iconOnly ariaLabel={`Copy ${label}`} className="icon-btn sm" />
+      </div>
+    </div>
+  );
+}
+
+function CodeWells() {
+  return (
+    <div className="form" style={{ maxWidth: 560, margin: "0 auto", padding: 24, borderRadius: "var(--radius-md)", background: "var(--bg-elev)" }}>
+      <OneLineWell id="short" label="Pairing Code" value={SHORT_SECRET} />
+      <OneLineWell id="long" label="Signing Secret" value={LONG_SECRET} />
+      <div className="field" data-well="wrapping">
+        <span className="field-label">Build Output</span>
+        <div className="code-well">
+          <code>{LONG_SECRET}</code>
+          <CopyButton text={LONG_SECRET} iconOnly ariaLabel="Copy Build Output" className="icon-btn sm" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Harness() {
   const params = new URLSearchParams(window.location.search);
   document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
@@ -142,6 +178,13 @@ function Harness() {
           <ConfirmingDetailBar />
         </div>
       </FeedbackProvider>
+    );
+  }
+  if (params.get("view") === "code-well") {
+    return (
+      <div style={{ minHeight: "100vh", padding: 24, background: "var(--bg)" }}>
+        <CodeWells />
+      </div>
     );
   }
   return (

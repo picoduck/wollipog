@@ -13,6 +13,7 @@ import { ListFoot } from "./ListFoot.js";
 import { SaveBar } from "./SaveBar.js";
 import { StaleContent } from "./StaleContent.js";
 import { Steps } from "./Steps.js";
+import { CopyButton } from "./common.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
 /*
@@ -370,4 +371,51 @@ test("Steps numbers a real sequence, and lays short steps side by side on reques
   } finally {
     await view.unmount();
   }
+});
+
+test("the single-line code well keeps the whole value for Copy and screen readers, with a 44px Copy on touch (§11.7)", async () => {
+  const value = `whsec_${"7Hq2Zx9KpL4mVb8NcR3tYw6UeJ5sGd1F".repeat(13)}`.slice(0, 400);
+  const copied: string[] = [];
+  const previousClipboard = Object.getOwnPropertyDescriptor(domWindow.navigator, "clipboard");
+  Object.defineProperty(domWindow.navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: async (text: string) => { copied.push(text); } },
+  });
+  // The recipe §11.7 documents: a `.field` label above, the value as `code`, Copy as `.icon-btn.sm`.
+  const view = await render(
+    <div className="field">
+      <span className="field-label">Signing Secret</span>
+      <div className="code-well one-line">
+        <code>{value}</code>
+        <CopyButton text={value} iconOnly ariaLabel="Copy Signing Secret" className="icon-btn sm" />
+      </div>
+    </div>,
+  );
+  try {
+    const well = view.container.querySelector(".code-well.one-line")!;
+    assert.equal(well.querySelector("code")?.textContent, value, "the ellipsis clips paint, not the DOM");
+    const copy = well.querySelector<HTMLButtonElement>("button")!;
+    assert.equal(copy.getAttribute("aria-label"), "Copy Signing Secret");
+    assert.deepEqual([...copy.classList].slice(0, 2), ["icon-btn", "sm"]);
+    await act(async () => { copy.click(); });
+    assert.deepEqual(copied, [value], "Copy copies all 400 characters");
+    assert.equal(copy.classList.contains("copy-status-copied"), true, "with the shared copy confirmation");
+  } finally {
+    await view.unmount();
+    if (previousClipboard) Object.defineProperty(domWindow.navigator, "clipboard", previousClipboard);
+    else delete (domWindow.navigator as unknown as Record<string, unknown>).clipboard;
+  }
+
+  // One rule set, beside `.code-well`: centered, and the value on one line ending in an ellipsis.
+  assert.equal(sheet.match(/\.code-well\.one-line\b/g)?.length, 2, "no second copy of the rules");
+  assert.match(rule(".code-well.one-line"), /align-items:\s*center;/);
+  const line = rule(".code-well.one-line > code");
+  for (const declaration of [/white-space:\s*nowrap;/, /overflow:\s*hidden;/, /text-overflow:\s*ellipsis;/]) {
+    assert.match(line, declaration);
+  }
+  assert.match(rule(".code-well > :is(code, pre)"), /white-space:\s*pre-wrap;/, "the wrapping well still wraps");
+  // On a coarse pointer `.icon-btn.sm` is 36px and borrows 4px on every side: a 44×44 target.
+  const coarse = sheet.slice(sheet.indexOf("Coarse-pointer sizes"));
+  assert.match(coarse, /@media \(pointer: coarse\)\s*\{[^]*?--control-h-sm:\s*36px;/);
+  assert.match(coarse, /:is\([^)]*\.icon-btn\.sm[^)]*\)::after\s*\{[^}]*inset:\s*-4px;/);
 });
