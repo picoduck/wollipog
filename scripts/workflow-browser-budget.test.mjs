@@ -59,12 +59,14 @@ function budgetAccounting(source, rows = evidence.samples) {
   // Cache hit/miss are mutually exclusive; each active path includes its own first AND retry.
   const install = Math.max(...attemptPaths.map((attempts) => attempts.reduce((sum, value) => sum + value, 0)));
   const remainder = Math.ceil(measuredRemainder(rows) / 10) * 10;
-  const enforcement = Math.max(...attemptPaths.map((attempts) => attempts.length)) * enforcementSecondsPerAttempt;
-  const required = install + remainder + enforcement + reserveSeconds;
+  const enforcement = (Math.max(...attemptPaths.map((attempts) => attempts.length)) + 2) * enforcementSecondsPerAttempt;
+  const diagnostics = ["Sanitize Synthetic Browser Failure Artifacts", "Upload Sanitized Synthetic Browser Failure Artifacts"]
+    .reduce((seconds, name) => seconds + stepSeconds(namedStep(job, name)), 0);
+  const required = install + remainder + enforcement + reserveSeconds + diagnostics;
   assert.ok(budget >= required,
     `browser: ${budget}s must cover ${install}s attempts + ${remainder}s measured remainder + ` +
-    `${enforcement}s timeout enforcement + ${reserveSeconds}s reserve (needs ${required}s)`);
-  return { budget, install, remainder, enforcement, required };
+    `${enforcement}s timeout enforcement + ${diagnostics}s diagnostics + ${reserveSeconds}s reserve (needs ${required}s)`);
+  return { budget, install, remainder, enforcement, diagnostics, required };
 }
 
 function withBudget(minutes) {
@@ -115,7 +117,7 @@ test("identified browser phases include every full-run shard and reconcile activ
 
 test("browser budget covers either bounded install path, measured remainder, enforcement and three minutes spare", () => {
   const result = budgetAccounting(workflow);
-  assert.deepEqual(result, { budget: 2400, install: 720, remainder: 1450, enforcement: 30, required: 2380 });
+  assert.deepEqual(result, { budget: 2580, install: 720, remainder: 1450, enforcement: 60, diagnostics: 120, required: 2530 });
   const timedOut = evidence.samples.find((row) => row.firstAttemptTimedOut);
   assert.ok(timedOut);
   assert.ok(timedOut.firstInstallSeconds - 360 <= enforcementSecondsPerAttempt,
@@ -127,7 +129,7 @@ test("browser budget covers either bounded install path, measured remainder, enf
 });
 
 test("lost margin is detected for reduced job budgets or longer first and retry limits on either path", () => {
-  for (const minutes of [25, 30, 35, 39]) {
+  for (const minutes of [25, 30, 35, 39, 40, 41, 42]) {
     assert.throws(() => budgetAccounting(withBudget(minutes)), /must cover/, `${minutes}m is insufficient`);
   }
   for (const name of paths.flatMap((name) => [name, `Retry ${name}`])) {

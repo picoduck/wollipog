@@ -7,12 +7,16 @@ export default defineConfig({
   testDir: "./apps/web/e2e",
   // Chunk interception requires emitted production assets, not Vite's source modules.
   testIgnore: "inbox-lazy.spec.ts",
+  // Opt-in synthetic dispatch validation; ordinary PR/main/merge-group runs use the full suite.
+  ...(process.env.SYNTHETIC_ARTIFACT_FAILURE === "true" ? { testMatch: "ci-failure-artifacts.spec.ts" } : {}),
   fullyParallel: false,
   retries: process.env.CI ? 2 : 0,
   // A retry-only pass is a regression signal, not a green build hidden behind the retry budget.
   failOnFlakyTests: Boolean(process.env.CI),
   workers: 1,
-  reporter: process.env.CI ? "github" : "list",
+  reporter: process.env.PLAYWRIGHT_JSON_OUTPUT_NAME
+    ? [[process.env.CI ? "github" : "list"], ["json"]]
+    : process.env.CI ? "github" : "list",
   use: {
     baseURL: `http://127.0.0.1:${port}`,
     trace: "retain-on-failure",

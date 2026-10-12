@@ -11,6 +11,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      synthetic_failure_artifacts:
+        description: Deliberately fail the isolated synthetic artifact fixture (separate validation run)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -252,7 +257,9 @@ jobs:
     # scripts/workflow-browser-budget.test.mjs derives the allowance from the actual steps and
     # recorded phase evidence. Remeasure when changing the workload; docs/ci-browser-budget.md
     # records the cold-cache uncertainty and the five-natural-run delivery requirement.
-    timeout-minutes: 40
+    # Failure sanitization/upload each have a one-minute cap. Include their timeout-enforcement
+    # allowance too, preserving the measured reserve within a finite forty-three-minute limit.
+    timeout-minutes: 43
     strategy:
       # Every shard reports. With fail-fast the first real failure cancels its siblings, and the
       # aggregator below reads a cancelled job as a budget hit — so one broken test would be
@@ -340,7 +347,44 @@ jobs:
           pnpm exec playwright install-deps chromium
 
       - name: Remote-Instance Browser End-to-End Tests
+        id: browser-tests
+        env:
+          PLAYWRIGHT_JSON_OUTPUT_NAME: ${{ runner.temp }}/synthetic-browser-report.json
+          SYNTHETIC_ARTIFACT_FAILURE: ${{ github.event_name == 'workflow_dispatch' && inputs.synthetic_failure_artifacts && 'true' || 'false' }}
         run: pnpm test:e2e --shard=${{ matrix.shard }}/5
+
+      # Upload only projected allowlisted captures from this failed shard. The original test step
+      # is never continued-on-error: missing captures, sanitizer failure and upload failure cannot
+      # turn its job or required aggregate green. No raw report/results directory is uploaded.
+      - name: Sanitize Synthetic Browser Failure Artifacts
+        id: sanitize-browser-artifacts
+        if: ${{ !cancelled() && steps.browser-tests.outcome == 'failure' }}
+        continue-on-error: true
+        timeout-minutes: 1
+        run: >-
+          python3 scripts/sanitize-browser-failure-artifacts.py
+          --report "${{ runner.temp }}/synthetic-browser-report.json"
+          --results test-results
+          --output "${{ runner.temp }}/sanitized-synthetic-browser"
+          --outcome failure
+          --run-id "${{ github.run_id }}" --attempt "${{ github.run_attempt }}"
+          --shard "${{ matrix.shard }}"
+          --head "${{ github.event.pull_request.head.sha || github.sha }}"
+
+      - name: Upload Sanitized Synthetic Browser Failure Artifacts
+        if: ${{ !cancelled() && steps.browser-tests.outcome == 'failure' && steps.sanitize-browser-artifacts.outcome == 'success' && steps.sanitize-browser-artifacts.outputs.retained == 'true' }}
+        continue-on-error: true
+        timeout-minutes: 1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: synthetic-browser-failure-${{ github.run_id }}-${{ github.run_attempt }}-shard-${{ matrix.shard }}
+          path: |
+            ${{ runner.temp }}/sanitized-synthetic-browser/manifest.json
+            ${{ runner.temp }}/sanitized-synthetic-browser/synthetic-failure-*/trace.zip
+            ${{ runner.temp }}/sanitized-synthetic-browser/synthetic-failure-*/error-context.md
+          retention-days: 3
+          if-no-files-found: error
+          include-hidden-files: false
 
       # The production pass is thirty-three seconds and does not shard: it builds the app once and
       # loads it once. Running it on every shard would be five copies of the same evidence.

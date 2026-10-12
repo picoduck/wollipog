@@ -250,15 +250,15 @@ test("the required CI check aggregates parallel jobs that each own a time budget
     "denominator does not cover, `max-parallel` serialises the legs back into one long job, and " +
     "`continue-on-error` reports a failed leg to the aggregator as a success.");
 
-  // Anchored on the NEXT step, so the shard command's step is exactly its name and its run line.
+  // Anchored on the NEXT step, so only the reviewed name, id, diagnostic env and run line fit.
   // YAML mapping order is irrelevant, so pinning only the first two lines let `if:` be appended
   // after `run:` and skip the suite on whichever legs it excluded — which those legs then reported
   // as success.
   const step = structural.match(
-    /^      - name: Remote-Instance Browser End-to-End Tests\n        run: pnpm test:e2e --shard=\$\{\{ matrix\.shard \}\}\/(\d+)\n      - name: /m,
+    /^      - name: Remote-Instance Browser End-to-End Tests\n        id: browser-tests\n        env:\n          PLAYWRIGHT_JSON_OUTPUT_NAME: \$\{\{ runner.temp \}\}\/synthetic-browser-report.json\n          SYNTHETIC_ARTIFACT_FAILURE: \$\{\{ github.event_name == 'workflow_dispatch' && inputs.synthetic_failure_artifacts && 'true' \|\| 'false' \}\}\n        run: pnpm test:e2e --shard=\$\{\{ matrix\.shard \}\}\/(\d+)\n      - name: /m,
   );
   assert.ok(step,
-    "browser: the shard command's step must be exactly its name and its run line, followed by the " +
+    "browser: the shard command's step must be exactly its reviewed name/id/env/run shape, followed by the " +
     "next step. A key on either side of `run:` — an `if:` most of all — skips the suite on the legs " +
     "it excludes, and each of those legs still reports success.");
 
