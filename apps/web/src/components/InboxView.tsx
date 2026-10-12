@@ -338,6 +338,34 @@ export function InboxView({
   sessionsRef.current = sessions;
   const selectedSessionIdRef = useRef(inbox.selectedSessionId);
   selectedSessionIdRef.current = inbox.selectedSessionId;
+  type TriageDetailRead = {
+    sessionId: string;
+    load: ReturnType<typeof beginSessionDetailLoad>;
+    selection: string | null;
+    expanded: string | null;
+  };
+  const triageDetailReadsRef = useRef(new Map<string, TriageDetailRead>());
+  const activeTriageDetailReadsRef = useRef(new Set<TriageDetailRead>());
+
+  useLayoutEffect(() => {
+    for (const pending of activeTriageDetailReadsRef.current) {
+      if (!pending.load.isCurrent()) {
+        pending.load.cancel();
+        activeTriageDetailReadsRef.current.delete(pending);
+        if (triageDetailReadsRef.current.get(pending.sessionId) === pending) triageDetailReadsRef.current.delete(pending.sessionId);
+      } else if (pending.selection !== inbox.selectedSessionId || pending.expanded !== expandedSessionId) {
+        // Moving through the list releases coordination, but preserves the action already issued.
+        // Keep its fence owned until settlement so leaving this component can still cancel it.
+        if (triageDetailReadsRef.current.get(pending.sessionId) === pending) triageDetailReadsRef.current.delete(pending.sessionId);
+      }
+    }
+  }, [sessions, inbox.selectedSessionId, expandedSessionId]);
+
+  useLayoutEffect(() => () => {
+    for (const pending of activeTriageDetailReadsRef.current) pending.load.cancel();
+    activeTriageDetailReadsRef.current.clear();
+    triageDetailReadsRef.current.clear();
+  }, [api, beginSessionDetailLoad, instanceScope]);
 
   const clearHeldOrder = useCallback(() => {
     if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
@@ -1331,11 +1359,35 @@ export function InboxView({
   const decide = useCallback(async (sessionId: string, intent: InboxApprovalIntent) => {
     let targetSession = sessions.get(sessionId);
     if (targetSession?.projection === "summary") {
-      const detailLoad=beginSessionDetailLoad(sessionId);
+      const reads = triageDetailReadsRef.current;
+      const previous = reads.get(sessionId);
+      // Refuse repeated keys only while this exact hydration fence and browsing target are current.
+      // A replaced request or selection can retry without waiting for an obsolete transport.
+      if (previous?.load.isCurrent() && previous.selection === selectedSessionIdRef.current &&
+          previous.expanded === expandedSessionIdRef.current) return;
+      // A new intent for this session supersedes any read released by earlier navigation.
+      for (const pending of activeTriageDetailReadsRef.current) {
+        if (pending.sessionId !== sessionId) continue;
+        pending.load.cancel();
+        activeTriageDetailReadsRef.current.delete(pending);
+      }
+      const pending = {
+        sessionId,
+        load: beginSessionDetailLoad(sessionId),
+        selection: selectedSessionIdRef.current,
+        expanded: expandedSessionIdRef.current,
+      };
+      reads.set(sessionId, pending);
+      activeTriageDetailReadsRef.current.add(pending);
       try {
         targetSession = (await api.session(sessionId)).session;
-        if (!detailLoad.apply(targetSession)) return;
-      } finally { detailLoad.cancel(); }
+        if (!pending.load.apply(targetSession)) return;
+      } finally {
+        pending.load.cancel();
+        activeTriageDetailReadsRef.current.delete(pending);
+        // An older response must never release a replacement read's ownership.
+        if (reads.get(sessionId) === pending) reads.delete(sessionId);
+      }
     }
     const approval = targetSession ? prioritizedPendingRequests(targetSession.pendingApproval)[0] : undefined;
     if (!targetSession || !approval) return;

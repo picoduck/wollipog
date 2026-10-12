@@ -76,6 +76,7 @@ import { staticPinnedSummary } from "../components/pinned-summary-state.js";
 import { DIFF_SECTIONS_STATUS_FILES, diffSectionsDiff } from "./diff-sections-fixture.js";
 import { checkoutFindings, inMemoryReviewFindings } from "./review-findings-fixture.js";
 import { SIDE_CHAT_STATES, installSideChatFixture, type SideChatFixtureState } from "./side-chat-fixture.js";
+import { installInboxTriageFixture } from "./inbox-triage-fixture.js";
 import type { WorkflowArtifactView } from "@wollipog/protocol";
 
 const FIXTURE_QUERY = new URLSearchParams(window.location.search);
@@ -3046,6 +3047,10 @@ const client = {
     return { path: at, parent, entries };
   },
 } as ApiClient;
+
+if (SCENARIO === "inbox-triage") {
+  installInboxTriageFixture(client, model.sessions, (message) => socket?.push(message));
+}
 
 /** `?sideChat=<state>` (#2863): the open session's side chat, in a state `side-chat-fixture.ts` names. */
 const SIDE_CHAT_STATE = FIXTURE_QUERY.get("sideChat") as SideChatFixtureState | null;
