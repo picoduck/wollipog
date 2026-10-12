@@ -109,7 +109,7 @@ test("pre-Project database migrates additively with exact ownership and reopen i
     raw.exec(`INSERT INTO sessions_legacy (${quotedColumns}) SELECT ${quotedColumns} FROM sessions`);
     // The current budget settlement trigger references sessions from another table. A genuine
     // pre-Project schema predates it; reopening reinstalls it after rebuilding the session schema.
-    raw.exec("DROP TRIGGER campaign_budget_stop_settled");
+    raw.exec("DROP TRIGGER IF EXISTS campaign_budget_stop_settled");
     raw.exec("DROP TABLE sessions");
     raw.exec("ALTER TABLE sessions_legacy RENAME TO sessions");
     raw.exec(`

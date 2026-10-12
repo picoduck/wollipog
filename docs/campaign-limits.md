@@ -28,9 +28,10 @@ view with its billing provenance.
 Outstanding allocations are the unspent portion of active workers' cumulative ceilings. Actual
 usage plus outstanding reservations must fit the envelope. Admission and session insertion share
 one SQLite transaction, so competing dispatches cannot reserve the same capacity. Deletion never
-removes accounting rows. Terminal settlement releases unspent capacity, but late reported spend
-continues raising the recorded charge. A Stop remains outstanding until the runner confirms
-terminal or absent state; sending a cancellation frame alone does not release capacity.
+removes accounting rows. Terminal status and absent inventory do not release capacity. A
+generation-bound runner checkpoint must cover durable final history and priced usage first;
+usage, a completed receipt and reservation release commit together. Replay cannot release a
+replacement's allocation. A cancellation without complete final usage retains its reservation.
 
 `allocate_campaign_budget` (CLI `campaign allocate --input '<json>'`) changes an existing managed
 worker's absolute cumulative limits, for example `{"sessionId":"s_worker","costUsd":12,"toolCalls":300}`.
@@ -48,9 +49,9 @@ Publishing and admitting follow-up work still require their own authority contra
 
 ## Unsupported Accounting and Overshoot
 
-Only managed Claude Code and Codex App Server workers can enter a protected campaign. Codex cost
+Only managed Claude Code and Codex App Server workers can enter a protected campaign. Session cost
 protection requires an available rate for the exact selected model. Native TUI, adopted/unmetered
-launches, Codex Exec and external reviewer subprocesses are unsupported. Mixed priced and unpriced
+launches, Codex Exec and unadmitted external reviewer subprocesses are unsupported. Mixed priced and unpriced
 records stop further protected admission, rather than displaying unknown cost as zero. An
 exhausted, revoked or accounting-unavailable envelope cannot be reset by toggling mode or restart.
 
@@ -62,6 +63,57 @@ must never be used as proof that a bounded production path is unattended-ready. 
 not intercept arbitrary shell subprocesses or turn their cost into managed usage; such launches
 are outside the supported protected-worker contract. Provider child usage already included in a
 parent total is not billed twice; independently reported managed sessions count separately.
+
+## Required Controlled Native Review
+
+The optional human-minted `budgetAuthority.controlledReview` binds the exact
+`native_opus_5_5_high_read_only` profile, audited installed controller SHA-256, native executable
+SHA-256, Claude CLI 2.1.287, existing runner-default Claude account, and provider admission agent
+identity. It requires finite campaign cost, tool and concurrency ceilings. Numeric protocol217
+alone does not establish this capability; the runner must advertise the matching `campaignReview`
+descriptor. Other versions, execution-isolation contexts and unknown pricing fail closed. No
+installed skill, account, hosting setting or permission is edited by this adapter.
+
+`run_campaign_review_job` (CLI `campaign review --input '<json>'`) accepts `requestId`, `workItemId`,
+`pullRequest: {repository,number}`, `baseSha`, `headSha`, `costUsd`, `toolCalls`, and an untrusted
+`brief`. The assigned work item, authorized issue scope, recorded PR, same runner/workspace,
+owned clean worktree and canonical GitHub REST base/head must match. Reservations and dispatch
+identity commit atomically before launching. A repeated identical request reads the existing job;
+it cannot launch another provider. `get_campaign_review_job` / `campaign review-job <job-id>`
+reads its receipt/report without new spending, including after the allowance stops.
+`list_campaign_review_jobs` / `campaign review-jobs` also reads terminal jobs, with keyset
+`afterJobId` pagination and a limit of 1–100 (default 25). Read authorization rechecks the current
+root audience, authorized repository/issue, durable work-item attempt and source-session lineage.
+Metadata contains the profile, epoch, round/attempt, validity/consumption facts and usage settlement,
+never a brief or provider transcript. Separate `get_campaign_review_report` / `campaign review-report`
+returns only a machine-valid controller report for independent adjudication, bound to its receipt.
+
+The runner invokes the unchanged installed controller with its exact model, high effort,
+Read-only tools, pinned patch, independent coverage validation and fresh provider session. Private
+runner artifacts hold raw stream bytes and lifecycle summaries. Only authenticated owning-runner
+messages can report cost; no agent route accepts usage JSON. Provider list-price totals and
+model/token/cache provenance must agree. These are **estimates**, not exact invoice amounts.
+Unsuccessful paid attempts also consume allowance. Durable per-PR/base epochs enforce four valid
+rounds and two launched attempts per round across replay/restart. Recovery validates the same
+completed transcript without relaunching a provider; ambiguous or unpriced termination keeps
+capacity reserved and blocks protected admission. Host/provider slot admission is also required.
+Each independent job contributes once to its original work-item attempt and the campaign cost
+summary as well as the allowance ledger. Replacement attempts and deleted workers cannot refund
+that charge. Pending/unpriced review usage remains unavailable rather than a zero-cost worker;
+a durable refusal before any provider launch is the distinct known-zero case.
+
+This initial native path conservatively refuses organization daily limits and inherited tighter
+session limits, whose accounting adapters are not integrated into this job path. It never bypasses
+them. The supported path is an explicitly authorized campaign envelope without those additional
+limits, the exact matching native profile, and available host/provider capacity. Integrated live
+cost, dispatch and zero-prompt proof remains a separate prerequisite before claiming production
+readiness; parser fixtures and manual legacy reviews do not establish it.
+
+Managed evidence workers retain the active preflight snapshot (including dispatch generation).
+After normal terminal usage settlement, `campaignBudgets.completedAttestation(sessionId)` returns
+an immutable server receipt/digest for historical quality proof. It grants no new admission,
+media access, verdict submission or owner resolution. Current owner, boundary, source, scope,
+expiry, revocation and applicable action allowance must still be checked separately.
 
 Reaching an allocation stops its worker without repeatedly asking to continue. Reaching an
 aggregate ceiling, losing pricing, or revoking the grant stops protected participants and reports

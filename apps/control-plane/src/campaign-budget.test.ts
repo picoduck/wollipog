@@ -23,13 +23,14 @@ function harness(path = ":memory:", protocol = PROTOCOL_VERSION) {
     workspaces: [{ id: "w", name: "Repo", path: "/repo" }],
     agents: [{ id: "claude", name: "Claude", command: "claude", args: [], env: {}, driver: "claude-code", available: true }] };
   db.registerRunner(metadata, 1, protocol);
+  db.setUsageRateTable(new Map([["claude-opus-5-5", { inputCostPerToken: 0.000001, outputCostPerToken: 0.000001, cacheReadCostPerToken: 0.000001, cacheCreationCostPerToken: 0.000001 }]])); // Fixture rates, never live pricing.
   const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
   policy.issueScope = { repository: "picoduck/wollipog", issueNumbers: [2936], revision: 1, authorizedByUserId: principal.userId, authorizedAt: 1 };
   policy.issueNumbers = [2936];
   const make = (id: string, parentSessionId?: string, config: { costBudgetUsd?: number; maxToolCalls?: number } = {}) => {
     db.createSession({ id, parentSessionId, runnerId: "r", workspaceId: "w", agentId: "claude", title: id, useWorktree: false,
       creationActor: parentSessionId ? "agent" : "human",
-      driver: "claude-code", config, now: 2,
+      driver: "claude-code", config: { model: "claude-opus-5-5", ...config }, now: 2,
       ...(!parentSessionId ? { role: "orchestrator", orchestratorPolicy: policy,
         parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } } } : {}) });
     db.updateSessionStatus(id, "running", 3);
@@ -43,14 +44,14 @@ function harness(path = ":memory:", protocol = PROTOCOL_VERSION) {
     mode: "full_control", objective: "Implement #2936", operations: ["implementation_question"], delegatablePolicyIds: [], budgetAuthority }, expectedRevision, principal);
   const tool = (id: string, toolCallId: string) => db.appendEvent(id, { kind: "tool_call", toolCallId, title: "Read", status: "completed" }, 5);
   const usage = (id: string, costUsd: number) => db.appendEvent(id, { kind: "token_usage", inputTokens: 1, costUsd }, 5, { accrueUsage: true });
-  return { db, hub, svc, make, tool, usage, enable, principal, sent, logs };
+  return { db, hub, svc, make, tool, usage, enable, principal, sent, logs,metadata };
 }
 
 test("service launches use the exact reservation and agent reallocations preserve tighter limits", () => {
   const h = harness();
   try {
     assert.ok(h.enable(allowance({ toolCalls: 120, costUsd: 120 })).ok);
-    const result = h.svc.createSession({ runnerId: "r", workspaceId: "w", agentId: "claude", prompt: "Implement authorized #2936" },
+    const result = h.svc.createSession({ runnerId: "r", workspaceId: "w", agentId: "claude", config: { model: "claude-opus-5-5" }, prompt: "Implement authorized #2936" },
       undefined, undefined, false, false, false, { parentSessionId: "root" });
     assert.ok(result.ok, result.error ?? "launch admission failed");
     const id = result.data!.id;
@@ -62,6 +63,7 @@ test("service launches use the exact reservation and agent reallocations preserv
     assert.ok(increase.ok, increase.error ?? "within-envelope allocation needs no human confirmation");
     const decrease = h.svc.allocateCampaignBudget("root", { sessionId: id, costUsd: allocation.costUsd! - 1, toolCalls: allocation.toolCalls! });
     assert.equal(decrease.ok, false, "in-flight capacity cannot be recycled without settlement");
+    assert.ok(h.svc.allocateCampaignBudget("root",{sessionId:id,toolCalls:allocation.toolCalls!+2}).ok,"omitting cost preserves the current reservation");
     assert.equal(h.svc.createSession({ runnerId: "r", workspaceId: "w", agentId: "claude", launchSurface: "native_tui" },
       undefined, undefined, false, false, false, { parentSessionId: "root" }).ok, false);
   } finally { h.db.close(); }
@@ -71,6 +73,32 @@ test("budget authority accepts bounded contracts and rejects clearing, unknown a
   assert.ok(validCampaignBudgetAuthority(allowance({ acceptedFollowUps: 0, costUsd: 10, checkpointsUsd: [2, 10] })));
   for (const value of [null, {}, allowance({ costUsd: 0 }), allowance({ toolCalls: 1.5 }), allowance({ concurrency: 0 }),
     allowance({ acceptedFollowUps: -1 }), allowance({ costUsd: 5, checkpointsUsd: [4, 3] }), { ...allowance(), accounting: "external" }, { ...allowance(), unknown: true }]) assert.equal(validCampaignBudgetAuthority(value), false);
+});
+
+test("run fanout carries exactly its admitted limits; downgraded peers refuse all new admission",()=>{
+  const h=harness();
+  try {
+    assert.ok(h.enable(allowance({costUsd:100})).ok);
+    const result=h.svc.createRun({runnerId:"r",workspaceId:"w",agentIds:["claude"],task:"Implement #2936",config:{model:"claude-opus-5-5"}},{parentSessionId:"root"});
+    assert.ok(result.ok,result.error??"run admission failed");
+    const member=result.data!.sessions[0]!;
+    const start=h.sent.find((m)=>(m as any).type==="start_session") as any;
+    assert.equal(start.spec.config.costBudgetUsd,h.db.campaignBudgets.allocation(member.id)!.costUsd);
+    assert.equal(start.spec.config.maxToolCalls,h.db.campaignBudgets.allocation(member.id)!.toolCalls);
+    h.db.registerRunner(h.metadata,10,216);
+    assert.equal(h.svc.prompt("root","continue").ok,false);
+    assert.equal(h.svc.campaignBudgetWorkerPreflight("root",{kind:"managed",sessionId:member.id}).ok,false);
+    assert.equal(h.svc.allocateCampaignBudget("root",{sessionId:member.id,toolCalls:1}).ok,false);
+  } finally {h.db.close();}
+});
+
+test("malformed control proposals refuse without changing the human revision",()=>{
+  const h=harness();
+  try {
+    assert.equal(h.svc.setCampaignControl("root",{mode:"other"} as any,1,h.principal).ok,false);
+    assert.equal(h.svc.setCampaignControl("root",{mode:"full_control",objective:"x",operations:["implementation_question"],delegatablePolicyIds:"invalid"} as any,1,h.principal).ok,false);
+    assert.ok(h.enable().ok);
+  } finally {h.db.close();}
 });
 
 test("human-only grant, CAS, runner compatibility, and revocation preserve usage", () => {
@@ -104,6 +132,8 @@ test("root, nested reviewers and replacements share reservations without double 
     assert.equal(v.actual.costUsd, 6); assert.equal(v.actual.toolCalls, 1);
     assert.equal(v.occupied, 2);
     h.db.updateSessionStatus("worker", "completed", 7);
+    h.db.campaignBudgets.recordCheckpoint("worker", { generation: h.db.campaignBudgets.dispatch("worker")!.generation, historyEpoch: 0, throughSeq: 0, costUsd: 2 });
+    assert.ok(h.db.campaignBudgets.settleCheckpoint("worker", { historyEpoch: 0, hydratedSeq: 0 }));
     h.db.deleteSession("worker");
     assert.equal(h.db.campaignBudgets.view("root")!.actual.costUsd, 6, "deletion never refunds spend or detaches reviewer accounting");
     h.make("replacement", "root", { maxToolCalls: 20, costBudgetUsd: 20 });
@@ -179,9 +209,19 @@ test("cancellation retains reservations until runner settlement; late spend stil
     assert.ok(h.svc.stop("worker").ok);
     assert.equal(h.db.campaignBudgets.view("root")!.occupied, 1);
     h.svc.onSessionStatus("worker", "stopped");
-    assert.equal(h.db.campaignBudgets.view("root")!.occupied, 0);
+    assert.equal(h.db.campaignBudgets.view("root")!.occupied, 1, "status alone does not prove final usage");
     h.tool("worker", "late");
     assert.equal(h.db.campaignBudgets.view("root")!.actual.toolCalls, 1);
+    const generation = h.db.campaignBudgets.dispatch("worker")!.generation;
+    h.db.campaignBudgets.recordCheckpoint("worker", { generation, historyEpoch: 0, throughSeq: 2, costUsd: 0 });
+    assert.equal(h.db.campaignBudgets.settleCheckpoint("worker", { historyEpoch: 0, hydratedSeq: 1 }), false);
+    assert.ok(h.db.campaignBudgets.settleCheckpoint("worker", { historyEpoch: 0, hydratedSeq: 2 }));
+    assert.equal(h.db.campaignBudgets.view("root")!.occupied, 0);
+    assert.equal(h.db.campaignBudgets.settleCheckpoint("worker", { historyEpoch: 0, hydratedSeq: 2 }), false, "settlement is one-shot");
+    h.db.campaignBudgets.admit("root", { sessionId: "worker", toolCalls: 20 }, {});
+    h.db.campaignBudgets.replaceDispatch("worker");
+    h.db.campaignBudgets.recordCheckpoint("worker", { generation, historyEpoch: 0, throughSeq: 2, costUsd: 0 });
+    assert.equal(h.db.campaignBudgets.settleCheckpoint("worker", { historyEpoch: 0, hydratedSeq: 2 }), false, "old completion cannot release replacement admission");
     assert.throws(() => h.db.campaignBudgets.admit("root", { sessionId: "worker", toolCalls: 0 }, {}), /spent/);
   } finally { h.db.close(); }
 });
@@ -230,4 +270,106 @@ test("generated competing tool reservations always conserve the immutable envelo
       });
     } finally { h.db.close(); }
   }), { numRuns: 40 });
+});
+
+test("native review reservations price failed attempts, survive replay and enforce exact review bounds",()=>{
+  const h=harness();
+  try {
+    assert.ok(h.enable(allowance({costUsd:100,toolCalls:1000})).ok);
+    const profile={profile:"native_opus_5_5_high_read_only",controllerSha256:"a".repeat(64),executableSha256:"b".repeat(64),cliVersion:"2.1.287",accounting:"provider_list_estimate",account:"runner_default_claude",agentId:"claude"} as const;
+    const request={requestId:"r1",workItemId:"item",pullRequest:{repository:"picoduck/wollipog",number:3065},baseSha:"a".repeat(40),headSha:"b".repeat(40),costUsd:5,toolCalls:20,brief:"Review the exact head."};
+    const job=h.db.campaignReviewJobs.reserve("root","r","root",2,profile,request);
+    assert.equal(h.db.campaignBudgets.view("root")!.occupied,1);
+    assert.deepEqual(h.db.campaignReviewJobs.reserve("root","r","root",2,profile,request),job);
+    assert.throws(()=>h.db.campaignReviewJobs.reserve("root","r","root",2,profile,{...request,requestId:"parallel"}),/unsettled/);
+    const receipt={type:"campaign_review_job_update",jobId:job.jobId,nonce:job.nonce,state:"completed",costUsd:2,toolCalls:3,
+      attemptValid:false,attemptConsumed:true,vote:"INVALID",receiptSha256:"c".repeat(64)} as const;
+    assert.equal(h.db.campaignReviewJobs.accept("foreign",receipt),false);
+    assert.equal(h.db.campaignReviewJobs.accept("r",{...receipt,nonce:"changed"}),false);
+    assert.ok(h.db.campaignReviewJobs.accept("r",receipt));
+    assert.ok(h.db.campaignReviewJobs.accept("r",receipt));
+    assert.equal(h.db.campaignReviewJobs.accept("r",{...receipt,costUsd:3}),false);
+    assert.equal(h.db.campaignBudgets.view("root")!.actual.costUsd,2);
+    assert.equal(h.db.campaignBudgets.view("root")!.occupied,0);
+    const retry=h.db.campaignReviewJobs.reserve("root","r","root",2,profile,{...request,requestId:"r2"});
+    assert.equal(h.db.campaignReviewJobs.view(retry.jobId)!.attempt,2);
+    assert.ok(h.db.campaignReviewJobs.accept("r",{...receipt,jobId:retry.jobId,nonce:retry.nonce}));
+    assert.throws(()=>h.db.campaignReviewJobs.reserve("root","r","root",2,profile,{...request,requestId:"r3"}),/limit reached/);
+    for(let round=1;round<=4;round++) {
+      const valid=h.db.campaignReviewJobs.reserve("root","r","root",2,profile,{...request,requestId:`valid${round}`,baseSha:"d".repeat(40)});
+      assert.equal(h.db.campaignReviewJobs.view(valid.jobId)!.round,round);
+      assert.ok(h.db.campaignReviewJobs.accept("r",{...receipt,jobId:valid.jobId,nonce:valid.nonce,attemptValid:true,vote:"DOWNVOTE"}));
+    }
+    assert.throws(()=>h.db.campaignReviewJobs.reserve("root","r","root",2,profile,{...request,requestId:"round5",baseSha:"d".repeat(40)}),/limit reached/);
+  } finally {h.db.close();}
+});
+
+test("native service binds authority, assigned scope, canonical PR and server-only usage",()=>{
+  const h=harness();
+  try {
+    const profile={profile:"native_opus_5_5_high_read_only",controllerSha256:"a".repeat(64),executableSha256:"b".repeat(64),cliVersion:"2.1.287",accounting:"provider_list_estimate",account:"runner_default_claude",agentId:"claude"} as const;
+    const grant=allowance({costUsd:100,toolCalls:1000,controlledReview:profile});
+    assert.equal(h.enable(grant).ok,false,"no supported profile may be advertised before discovery");
+    h.metadata.runtime={dataDir:"/runner",worktreeRoot:"/runner/worktrees",maxConcurrentSessions:4,campaignReview:profile};
+    h.db.registerRunner(h.metadata,10,PROTOCOL_VERSION);
+    assert.ok(h.enable(grant).ok);
+    h.make("worker","root");h.db.setWorktreePath("worker","/runner/worktrees/worker");
+    const plan=h.svc.recordCampaignPlan("root",{planComplete:true,items:[{key:"picoduck/wollipog#2936",issue:{repository:"picoduck/wollipog",number:2936}}]});
+    assert.ok(plan.ok,plan.error??"plan refused");
+    const workItemId=plan.data!.items[0]!.workItemId;
+    const assigned=h.svc.assignCampaignWorkItem("root",{workItemId,childSessionId:"worker"});
+    assert.ok(assigned.ok,assigned.error??"assignment refused");
+    assert.ok(h.svc.updateCampaignWorkItem("root",{workItemId,stage:{stage:"in_review",pullRequests:[{repository:"picoduck/wollipog",number:3065}]}}).ok);
+    const request={requestId:"native",workItemId,pullRequest:{repository:"picoduck/wollipog",number:3065},baseSha:"a".repeat(40),headSha:"b".repeat(40),costUsd:5,toolCalls:20,brief:"Review the exact head."};
+    assert.equal(h.svc.requestCampaignReviewJob("root",{...request,costJSON:{costUsd:0}} as any).ok,false);
+    assert.equal(h.svc.requestCampaignReviewJob("root",{...request,pullRequest:{...request.pullRequest,number:999}}).ok,false);
+    const result=h.svc.requestCampaignReviewJob("root",request);
+    assert.ok(result.ok,result.error??"review refused");
+    assert.equal(result.data!.state,"reserved");
+    assert.equal(h.db.campaignWorkLedger.accounting.costSummary("root",Date.now()).total.availability,"unavailable","an unpriced native attempt is not displayed as free review");
+    assert.ok(h.svc.campaignReviewJob("root",result.data!.jobId).ok);
+    const command=h.db.campaignReviewJobs.command(result.data!.jobId)!;
+    h.svc.onCampaignReviewJobUpdate("r",{type:"campaign_review_job_update",jobId:command.jobId,nonce:command.nonce,state:"completed",costUsd:2,toolCalls:3,attemptValid:true,attemptConsumed:true,vote:"UPVOTE",receiptSha256:"c".repeat(64),report:"UPVOTE"});
+    const completed=h.svc.campaignReviewJob("root",command.jobId).data!;
+    assert.equal(completed.attemptValid,true);
+    assert.equal(completed.attemptConsumed,true);
+    assert.equal(completed.usageSettlement,"settled");
+    assert.equal("report" in completed,false);
+    assert.equal(h.db.campaignReviewJobs.validatedReport(command.jobId),"UPVOTE");
+    const page=h.svc.campaignReviewJobs("root",{limit:1});
+    assert.ok(page.ok);assert.equal(page.data!.jobs.length,1);
+    assert.equal(page.data!.jobs[0]!.terminalOutcome,"valid_review");
+    assert.equal("brief" in page.data!.jobs[0]!.request,false);
+    assert.equal(h.svc.campaignReviewJobs("root",{limit:101}).ok,false);
+    assert.equal(h.svc.campaignReviewJob("root",command.jobId,(id)=>id!=="worker").ok,false);
+    assert.equal(h.svc.campaignReviewReport("root",command.jobId).data!.reviewReport,"UPVOTE");
+    const cost=h.db.campaignWorkLedger.accounting.costSummary("root",Date.now());
+    assert.ok("value" in cost.total);
+    assert.equal(cost.total.value.usd,2,"native review appears in total cost as well as the allowance ledger");
+    const attemptCost=h.db.campaignWorkLedger.accounting.attemptUsage("root").get(command.lineage!.workItemAttemptId)!;
+    assert.equal(attemptCost.costMicrousd,2_000_000);
+  } finally {h.db.close();}
+});
+
+test("recording a planned follow-up cannot bypass the accepted-work allowance",()=>{
+  const h=harness();
+  try {
+    assert.ok(h.enable(allowance({acceptedFollowUps:0})).ok);
+    const result=h.svc.recordCampaignPlan("root",{planComplete:false,items:[{key:"followup",origin:"follow_up",title:"Follow-Up"}]});
+    assert.equal(result.ok,false);
+    assert.equal(h.db.campaignBudgets.view("root")!.acceptedFollowUps,0);
+  } finally {h.db.close();}
+});
+
+test("native missing usage stops admission and retains the full outstanding reservation",()=>{
+  const h=harness();
+  try {
+    assert.ok(h.enable(allowance({costUsd:100,toolCalls:1000})).ok);
+    const p={profile:"native_opus_5_5_high_read_only",controllerSha256:"a".repeat(64),executableSha256:"b".repeat(64),cliVersion:"2.1.287",accounting:"provider_list_estimate",account:"runner_default_claude",agentId:"claude"} as const;
+    const job=h.db.campaignReviewJobs.reserve("root","r","root",2,p,{requestId:"unknown",workItemId:"item",pullRequest:{repository:"picoduck/wollipog",number:3065},baseSha:"a".repeat(40),headSha:"b".repeat(40),costUsd:5,toolCalls:20,brief:"Review."});
+    assert.ok(h.db.campaignReviewJobs.accept("r",{type:"campaign_review_job_update",jobId:job.jobId,nonce:job.nonce,state:"accounting_unavailable",toolCalls:1}));
+    assert.equal(h.db.campaignBudgets.view("root")!.state,"accounting_unavailable");
+    assert.equal(h.db.campaignBudgets.view("root")!.occupied,1);
+    assert.equal(h.db.campaignReviewJobs.view(job.jobId)!.costUsd,null);
+  } finally {h.db.close();}
 });

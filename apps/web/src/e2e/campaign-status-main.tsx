@@ -223,6 +223,7 @@ const projectionFor = (rev: number) => campaignProjection(
       state: "active" as const, actual: { costUsd: 12, toolCalls: 100 }, outstanding: { costUsd: 50, toolCalls: 900 },
       remaining: { costUsd: 38, toolCalls: 1000 }, occupied: 3, acceptedFollowUps: 1, reachedCheckpointsUsd: [],
       enforcement: "admission_and_best_effort_cancellation" as const, externalWorkers: "unsupported" as const,
+      sessionLimits: {costBudgetUsd:40,maxToolCalls:null},rootAllocation:{sessionId:"s_parent",costUsd:25,toolCalls:500},costAccounting:"priced" as const,
     } } : {}),
     heldChildren: [{
       sessionId: "s_child_3",

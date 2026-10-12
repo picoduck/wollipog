@@ -143,10 +143,14 @@ Commands:
   update-item <work-item-id> --input '<json>'    Update fields, commitment, stage, blocker, or endAttempt
   assign <work-item-id> <child-session-id>       Record that a descendant now works on the item
   adjudicate <recommendation-id> --input '<json>'
-  allocate --input '<json>'
-    Reserve managed-worker campaign allowance within the human ceiling.
                                                  Record {disposition, reason, resultingWorkItemKey?,
                                                  resultingIssue?, publicationRequired?}
+  allocate --input '<json>'                      Reserve a managed worker's allowance (protocol v217+)
+  review --input '<json>'                        Dispatch/read a bounded controlled native review job
+  review-job <job-id>                            Read a review receipt without new spending
+  review-jobs [--limit <n>] [--cursor <job-id>] [--item <work-item-id>]
+                                                 Read active and terminal recovery metadata
+  review-report <job-id>                         Read a validated report separately for adjudication
   work-items [--item <id>] [--state <state>] [--origin original|follow_up]
              [--sort queue|activity|elapsed|cost] [--limit <n>] [--cursor <cursor>]
              [--recommendations]                 Read the summary and one page or one item

@@ -6,11 +6,12 @@
 
 import { DatabaseSync } from "node:sqlite";
 import { CampaignBudgetLedger } from "./campaign-budget.js";
+import { CampaignReviewJobs } from "./campaign-review-jobs.js";
 import { attentionRequestRank } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent } from "./campaign-authority.js";
 import { evaluateApprovalPolicies, sessionSpawnSafetyPolicy } from "./policy-engine.js";
-import { validCampaignControl, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
+import { validCampaignControl, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
 import { lookupRate, priceUsage, resolveCostSource, type RateTable } from "./usage-pricing.js";
 import { collapseAgentSpawnObservations, type StructuredAgentSpawnObservation } from "./child-session-registry.js";
@@ -5016,6 +5017,7 @@ const FOLD_LAST_EVENT_AT = `last_event_at=CASE WHEN COALESCE(message_count,0)=0
 
 export class ControlPlaneDb {
   readonly campaignBudgets: CampaignBudgetLedger;
+  readonly campaignReviewJobs: CampaignReviewJobs;
   private constructor(
     private readonly db: DatabaseSync,
     private readonly artifactBlobs: ArtifactBlobStore,
@@ -5025,6 +5027,7 @@ export class ControlPlaneDb {
     hostRebooted: boolean,
   ) {
     this.campaignBudgets = new CampaignBudgetLedger(db);
+    this.campaignReviewJobs = new CampaignReviewJobs(db,this.campaignBudgets);
     this.ingestRollback = hostRebooted && walPath !== null
       ? { settled: new Set(), runnerTails: new Map(), controlPlaneEvents: new Set() }
       : null;
@@ -5165,7 +5168,7 @@ export class ControlPlaneDb {
 
   campaignBudgetAccountingError(driver: string, model?: string | null, costProtected = false): string | null {
     if (!["claude-code", "codex-app-server"].includes(driver)) return "Campaign limits require metered managed workers; native TUI and external reviewer processes are unsupported.";
-    if (costProtected && driver !== "claude-code" && (!this.usageRateTable || !model || !lookupRate(this.usageRateTable, model))) {
+    if (costProtected && (!this.usageRateTable || !model || !lookupRate(this.usageRateTable, model))) {
       return "Campaign cost accounting is unavailable or unpriced for this model; protected admission is refused.";
     }
     return null;
@@ -5322,6 +5325,9 @@ export class ControlPlaneDb {
       throw error;
     }
   }
+
+  /** Server-only wrapper: reserve an entire managed fan-out before any launch is sent. */
+  campaignBudgetTransaction<T>(work: () => T): T { return this.atomic(work); }
 
   static open(location: string, options: { artifactBlobDir?: string; hostBootId?: string } = {}): ControlPlaneDb {
     if (location !== ":memory:") mkdirSync(dirname(location), { recursive: true });
@@ -14295,7 +14301,8 @@ export class ControlPlaneDb {
       }
     }
     if (projectId && !this.getProject(projectId)) throw new Error("session project does not exist");
-    this.db.exec("BEGIN");
+    const ownsTransaction = !this.db.isTransaction;
+    if (ownsTransaction) this.db.exec("BEGIN");
     try {
       if (budgetRoot && allocation) this.campaignBudgets.admit(budgetRoot, allocation, userLimits);
       this.stmt(
@@ -14411,9 +14418,9 @@ export class ControlPlaneDb {
         sessionId: input.id,
         occurredAt: input.now,
       });
-      this.db.exec("COMMIT");
+      if (ownsTransaction) this.db.exec("COMMIT");
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      if (ownsTransaction) this.db.exec("ROLLBACK");
       throw error;
     }
     return this.getSession(input.id)!;
@@ -17556,11 +17563,25 @@ export class ControlPlaneDb {
       () => this.campaignWorkLedger.lastVerifiedAt(resolvedCampaignId));
     const limit = campaign.max_child_sessions ?? DEFAULT_LIVE_CHILD_LIMIT;
     const occupied = this.childSessionAllocations(resolvedCampaignId).liveCount;
+    const budget=this.campaignBudgets.view(resolvedCampaignId);
+    if(budget) {
+      const runner=this.getRunner(campaign.runner_id),profile=budget.authority.controlledReview,capability=runner?.runtime?.campaignReview;
+      const scope=this.sessionScope(resolvedCampaignId);
+      const tighter=this.campaignBudgets.members(resolvedCampaignId).some((id)=>{
+        const original=this.campaignBudgets.userLimits(id);return original?.costBudgetUsd!=null || original?.maxToolCalls!=null;
+      });
+      const supported=budget.state==="active" && Boolean(profile && capability && (runner?.protocolVersion??0)>=217 &&
+        controlledReviewCapabilityKey(profile)===controlledReviewCapabilityKey(capability)) && !tighter &&
+        (!scope || this.getUsageDailyBudget(scope.organizationId).perUserUsd===null);
+      budget.requiredNativeReview={supported,reason:supported?
+        "Matching native reviewer capability is available; exact job admission and integrated live proof remain required.":
+        "Required native reviewer admission is unsupported or blocked by an additional accounting boundary; this campaign is not unattended-ready for that path."};
+    }
     return {
       status,
       policyRevision: campaign.parent_control_policy_revision,
-      ...(this.campaignBudgets.view(resolvedCampaignId) && this.campaignBudgets.members(resolvedCampaignId).every(this.campaignRootAudienceCanSee(resolvedCampaignId))
-        ? { budget: this.campaignBudgets.view(resolvedCampaignId) } : {}),
+      ...(budget && this.campaignBudgets.members(resolvedCampaignId).every((id) => !this.stmt("SELECT 1 FROM sessions WHERE id=?").get(id) || this.campaignRootAudienceCanSee(resolvedCampaignId)(id))
+        ? { budget } : {}),
       decisionOwners: effectiveOwners,
       limits: {
         maximumConcurrentChildren: limit,

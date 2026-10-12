@@ -839,6 +839,10 @@ export class CampaignWorkLedgerStore {
         if (!existing) {
           const id = newId(CAMPAIGN_WORK_ITEM_ID_PREFIX);
           const origin = input.origin ?? "original";
+          if (origin === "follow_up") {
+            const budgetError = this.hooks.acceptFollowUp?.(campaignId, id);
+            if (budgetError) return fail(budgetError, 409);
+          }
           this.stmt(
             `INSERT INTO campaign_work_items
              (id, campaign_session_id, item_key, title, issue_repository, issue_number, origin, generation,

@@ -1218,6 +1218,16 @@ test("CLI campaign ledger commands map to their tools and refuse other sessions 
     "http://cp/api/sessions/parent/orchestrator-campaign/work-items?limit=5&state=all&includeRecommendations=true");
   assert.equal(await invoke(["campaign", "work-items", "--item", "cwi_1", "--json"]), 0);
   assert.equal(last().url, "http://cp/api/sessions/parent/orchestrator-campaign/work-items/cwi_1");
+  const review={requestId:"review1",workItemId:"cwi_1",pullRequest:{repository:"picoduck/wollipog",number:3065},baseSha:"a".repeat(40),headSha:"b".repeat(40),costUsd:5,toolCalls:20,brief:"Review the pinned snapshot."};
+  assert.equal(await invoke(["campaign","review","--input",JSON.stringify(review),"--json"]),0);
+  assert.equal(last().url,"http://cp/api/sessions/parent/orchestrator-campaign/review-jobs");
+  assert.deepEqual(JSON.parse(last().body!),review);
+  assert.equal(await invoke(["campaign","review-job","review_id","--json"]),0);
+  assert.equal(last().url,"http://cp/api/sessions/parent/orchestrator-campaign/review-jobs/review_id");
+  assert.equal(await invoke(["campaign","review-jobs","--limit","10","--cursor","review_id","--item","cwi_1","--json"]),0);
+  assert.equal(last().url,"http://cp/api/sessions/parent/orchestrator-campaign/review-jobs?limit=10&afterJobId=review_id&workItemId=cwi_1");
+  assert.equal(await invoke(["campaign","review-report","review_id","--json"]),0);
+  assert.equal(last().url,"http://cp/api/sessions/parent/orchestrator-campaign/review-jobs/review_id/report");
   calls.length = 0;
   assert.equal(await invoke(["campaign", "assign", "cwi_1", "child", "--session", "other", "--json"]), 2);
   assert.equal(await invoke(["campaign", "plan", "--json"]), 2, "plan requires --input");
@@ -1225,4 +1235,7 @@ test("CLI campaign ledger commands map to their tools and refuse other sessions 
   version = 195;
   assert.equal(await invoke(["campaign", "plan", "--input", JSON.stringify(plan), "--json"]), 1);
   assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")));
+  calls.length=0;version=216;
+  assert.equal(await invoke(["campaign","review","--input",JSON.stringify(review),"--json"]),1);
+  assert.ok(calls.every((call)=>call.url.endsWith("/api/compatibility")));
 });

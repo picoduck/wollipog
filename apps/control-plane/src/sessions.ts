@@ -1,7 +1,7 @@
 import { acknowledgementRepairFrame } from "./claude-cost-repair.js";
 import type { HumanPrincipal } from "./identity.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl } from "./campaign-authority.js";
-import { campaignAuthorityPreflight, standingRootQuestionAnswers, type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary } from "@wollipog/protocol";
+import { campaignAuthorityPreflight, controlledReviewCapabilityKey, standingRootQuestionAnswers, type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary } from "@wollipog/protocol";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, campaignNeedsEpicScope } from "./campaign-issue-scope.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
 import { issueBoundary, issueEvidenceDigest, issueWork, closureEvidence, publicationEvidence, reservedPublicationSlots } from "./campaign-issue-authority.js";
@@ -4339,6 +4339,9 @@ export class SessionsService {
     const campaignBudgetUserLimits = { costUsd: config.costBudgetUsd, toolCalls: config.maxToolCalls };
     const budgetRoot = parentSessionId ? this.db.campaignBudgets.root(parentSessionId) : null;
     if (budgetRoot) {
+      if (delivery) return fail("Campaign budget admission for pre-staged automation dispatch is unsupported.", 409);
+      const parentError=this.campaignBudgetConfigError(this.db.getSession(parentSessionId!)!);
+      if(parentError) return fail(parentError,409);
       const view = this.db.campaignBudgets.view(budgetRoot)!;
       const accountingError = this.db.campaignBudgetAccountingError(launch.driver, config.model, view.authority.costUsd !== undefined);
       if (req.launchSurface === "native_tui" || accountingError) return fail(accountingError ?? "Campaign limits cannot admit unmetered Native TUI workers.", 409);
@@ -4531,6 +4534,7 @@ export class SessionsService {
 
     const spec: SessionLaunchSpec = {
       sessionId: id,
+      campaignBudgetDispatch: this.db.campaignBudgets.dispatch(id),
       // For an ad-hoc browsed path there is NO workspace — send null, not the stale configured id, so
       // the runner's persisted metadata + snapshots don't misattribute it to a workspace it isn't in.
       workspaceId,
@@ -6610,13 +6614,9 @@ export class SessionsService {
     if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before restarting", 409);
     let session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
-    const budgetError = this.db.campaignBudgets.admissionError(sessionId);
+    const budgetError = this.db.campaignBudgets.admissionError(sessionId) ?? this.campaignBudgetConfigError(session);
     if (budgetError) return fail(budgetError, 409);
     const budgetRoot = this.db.campaignBudgets.root(sessionId);
-    if (budgetRoot) {
-      try { this.db.campaignBudgets.admit(budgetRoot, this.db.campaignBudgets.allocation(sessionId)!, {}); }
-      catch (error) { return fail((error as Error).message, 409); }
-    }
     const campaignBefore = this.campaignAttentionController(session);
     if (session.stopOperation?.status === "stop_failed") {
       return fail("retry the failed Stop before restarting the session", 409);
@@ -6832,7 +6832,16 @@ export class SessionsService {
     // Stop fence and stopped lifecycle intact; a true/half-open send remains fenced until the
     // runner echoes this exact identity in status or snapshot evidence.
     if (restartLaunchId) this.db.setSessionStopRestartLaunchId(sessionId, restartLaunchId);
+    const wasBudgetActive = this.db.campaignBudgets.active(sessionId);
+    if (budgetRoot) {
+      const unsupported = this.campaignBudgetConfigError(session, spec.config, launch.driver);
+      if (unsupported) return fail(unsupported, 409);
+      try { this.db.campaignBudgets.admit(budgetRoot, this.db.campaignBudgets.allocation(sessionId)!, {}); }
+      catch (error) { return fail((error as Error).message, 409); }
+      spec.campaignBudgetDispatch = this.db.campaignBudgets.replaceDispatch(sessionId);
+    }
     if (!this.hub.sendToRunner(session.runnerId, { type: "start_session", spec })) {
+      if (budgetRoot) this.db.campaignBudgets.restoreUnsentActivation(sessionId, wasBudgetActive);
       if (restartLaunchId) this.db.clearSessionStopRestartLaunchId(sessionId);
       return fail("runner is offline", 409);
     }
@@ -7610,6 +7619,9 @@ export class SessionsService {
     if (!session || principal.kind !== "human" || !this.db.isSessionOwner(principal, sessionId)) return fail("campaign not found", 404);
     const root = this.orchestratorCampaignController(session);
     if (!root || root === "refused" || root.id !== sessionId || isTerminal(session.status)) return fail("only a live root campaign can change control", 409);
+    if (!proposal || typeof proposal !== "object" || Array.isArray(proposal) || !["custom", "full_control"].includes(proposal.mode)) return fail("invalid campaign control mode", 400);
+    if (proposal.mode === "custom" && Object.keys(proposal).some((key) => key !== "mode")) return fail("Custom has no authority boundary", 400);
+    if (proposal.mode === "full_control" && Object.keys(proposal).some((key) => !["mode", "objective", "operations", "delegatablePolicyIds", "budgetAuthority"].includes(key))) return fail("invalid campaign authority fields", 400);
     const scope = session.orchestratorPolicy?.issueScope;
     const now = Date.now();
     const control = proposal.mode === "custom" ? { mode: "custom" as const } : scope &&
@@ -7619,6 +7631,10 @@ export class SessionsService {
       if (control.boundary.issueAuthority && (scope!.issueNumbers.length + reservedPublicationSlots(this.db, session, undefined, undefined, true) > control.boundary.issueAuthority.maxIssues ||
           scopeCompatibility(this.db, { ...session, orchestratorPolicy: { ...session.orchestratorPolicy!, control } }))) return fail("The issue boundary exceeds its human-set scope limit or requires protocol-v217 participants", 409);
       if (!session.workspaceId) return fail("Full Control requires a repository workspace binding", 409);
+      if(control.boundary.budgetAuthority?.controlledReview) {
+        const capability=this.db.getRunner(session.runnerId)?.runtime?.campaignReview;
+        if(!capability || controlledReviewCapabilityKey(capability)!==controlledReviewCapabilityKey(control.boundary.budgetAuthority.controlledReview)) return fail("Required native reviewer profile is unsupported or differs from current runner discovery.",409);
+      }
       for (const id of [sessionId, ...this.db.campaignDescendantIds(sessionId)]) {
         const participant = this.db.getSession(id);
         if (!participant || isTerminal(participant.status)) continue;
@@ -7641,6 +7657,7 @@ export class SessionsService {
       if (!this.db.updateSessionCampaignControl(sessionId, control, expectedRevision, now)) return fail("campaign authority revision changed; refresh and retry", 409);
     } catch (error) { return fail((error as Error).message, 409); }
     for (const id of this.db.campaignBudgets.members(sessionId)) this.syncCampaignAllocation(id);
+    this.recoverCampaignReviewJobs(session.runnerId);
     if (this.db.campaignBudgets.view(sessionId)?.state !== "active") this.enforceCampaignBudget(sessionId, now);
     for (const decision of outstanding) {
       this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now);
@@ -7674,6 +7691,7 @@ export class SessionsService {
   campaignBudgetWorkerPreflight(campaignId: string, worker: { kind: "managed"; sessionId: string } | { kind: "external" }):
     ServiceResult<{ rootSessionId: string; authorityRevision: number; allocationDigest: string;
       allocation: import("@wollipog/protocol").CampaignBudgetAllocation;
+      dispatch: import("@wollipog/protocol").CampaignBudgetDispatch;
       worker: { sessionId: string; driver: string; model: string | null; effort: string | null } }> {
     if (worker.kind === "external") return fail("External reviewer accounting/admission is unsupported; this path is not ready for unattended protected work.", 409);
     if (this.db.campaignBudgets.root(worker.sessionId) !== campaignId) return fail("review worker lacks same-campaign budget admission", 409);
@@ -7682,12 +7700,13 @@ export class SessionsService {
     if (!root || !member || control?.mode !== "full_control" || !control.boundary.budgetAuthority || !campaignBoundaryCurrent(root) ||
         !this.db.campaignBudgets.active(member.id) || isTerminal(member.status) || hasBlockingPendingRequest(member.pendingApproval) ||
         member.runnerId !== root.runnerId || member.workspaceId !== root.workspaceId) return fail("review worker is not an active admitted participant in the current campaign boundary", 409);
-    const accountingError = this.db.campaignBudgetAccountingError(member.driver, member.model, control.boundary.budgetAuthority.costUsd !== undefined);
+    const accountingError = this.campaignBudgetConfigError(member);
     if (accountingError) return fail(accountingError, 409);
     const error = this.db.campaignBudgets.admissionError(worker.sessionId);
     if (error) return fail(error, 409);
     const admission = { rootSessionId: campaignId, authorityRevision: control.boundary.revision,
       allocation: this.db.campaignBudgets.allocation(worker.sessionId)!,
+      dispatch: this.db.campaignBudgets.dispatch(worker.sessionId)!,
       worker: { sessionId: member.id, driver: member.driver, model: member.resolvedModel ?? member.model ?? null, effort: member.effort ?? null } };
     return ok({ ...admission, allocationDigest: createHash("sha256").update(JSON.stringify(admission)).digest("hex") });
   }
@@ -7701,11 +7720,15 @@ export class SessionsService {
         !canAccess(allocation.sessionId) || this.db.campaignBudgets.root(allocation.sessionId) !== rootId) return fail("allocation requires a readable admitted campaign member", 400);
     const member = this.db.getSession(allocation.sessionId);
     if (!member) return fail("allocation worker not found", 404);
+    const peerError = this.campaignBudgetConfigError(member);
+    if (peerError) return fail(peerError, 409);
     const prior = this.db.campaignBudgets.allocation(member.id)!;
-    if (!isTerminal(member.status) && ((allocation.costUsd ?? 0) < (prior.costUsd ?? 0) ||
+    allocation = { ...prior, ...allocation };
+    const active = this.db.campaignBudgets.active(member.id);
+    if (active && ((allocation.costUsd ?? 0) < (prior.costUsd ?? 0) ||
         (allocation.toolCalls ?? 0) < (prior.toolCalls ?? 0))) return fail("a live allocation cannot be released before cancellation settles; finish this worker before redistributing its unspent reservation", 409);
     if (!isTerminal(member.status) && !this.hub.isRunnerOnline(member.runnerId)) return fail("allocation cannot change while its runner is offline", 409);
-    try { this.db.campaignBudgets.admit(rootId, allocation, {}); }
+    try { this.db.campaignBudgets.admit(rootId, allocation, {}, active); }
     catch (error) { return fail((error as Error).message, 409); }
     if (!this.syncCampaignAllocation(member.id)) {
       // Keep the reservation until delivery/reconnect; never refund a possibly applied change.
@@ -7714,6 +7737,108 @@ export class SessionsService {
     this.log.info(JSON.stringify({ event: "campaign_budget_allocation", rootId, sessionId: member.id, costUsd: allocation.costUsd, toolCalls: allocation.toolCalls }));
     this.hub.sessionChangedById(rootId);
     return ok(this.db.campaignBudgets.view(rootId)!);
+  }
+
+  requestCampaignReviewJob(callerSessionId: string, request: import("@wollipog/protocol").CampaignReviewJobRequest,
+    canAccess: (id:string)=>boolean=()=>true): ServiceResult<import("@wollipog/protocol").CampaignReviewJobView> {
+    const scope=this.campaignLedgerScope(callerSessionId,canAccess);
+    if(!scope.ok || !scope.data) return failAs(scope);
+    const root=scope.data.root,control=root.orchestratorPolicy?.control;
+    if(!request || typeof request!=="object" || Object.keys(request).some((k)=>!["requestId","workItemId","pullRequest","baseSha","headSha","costUsd","toolCalls","brief"].includes(k)) ||
+        typeof request.requestId!=="string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(request.requestId) || typeof request.workItemId!=="string" ||
+        typeof request.brief!=="string" || request.brief.length<1 || request.brief.length>100_000 ||
+        !/^[a-f0-9]{40}$/.test(request.baseSha) || !/^[a-f0-9]{40}$/.test(request.headSha) ||
+        !Number.isFinite(request.costUsd) || request.costUsd<=0 || !Number.isSafeInteger(request.toolCalls) || request.toolCalls<=0 ||
+        !request.pullRequest || !/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(request.pullRequest.repository) ||
+        !Number.isSafeInteger(request.pullRequest.number) || request.pullRequest.number<=0 ||
+        Object.keys(request.pullRequest).some((k)=>!["repository","number"].includes(k))) return fail("invalid bounded review request",400);
+    if(control?.mode!=="full_control" || !campaignBoundaryCurrent(root) || !control.boundary.budgetAuthority?.controlledReview ||
+        root.archived || isTerminal(root.status) || hasBlockingPendingRequest(root.pendingApproval) ||
+        this.db.campaignBudgets.view(root.id)?.state!=="active") return fail("Required native reviewer admission is unsupported without current human-minted budget/profile authority and unblocked owner admission.",409);
+    const runner=this.db.getRunner(root.runnerId),profile=runner?.runtime?.campaignReview;
+    if(!this.hub.isRunnerOnline(root.runnerId) || (runner?.protocolVersion??0)<217 || !profile ||
+        controlledReviewCapabilityKey(profile)!==controlledReviewCapabilityKey(control.boundary.budgetAuthority.controlledReview)) return fail("Required native reviewer capability/profile is unavailable or changed; unattended readiness is refused.",409);
+    const item=this.db.campaignWorkLedger.detail(root.id,request.workItemId,Date.now(),canAccess);
+    const worker=item?.currentAttempt?.sessionId?this.db.getSession(item.currentAttempt.sessionId):null;
+    if(!item?.issue || !worker || !canAccess(root.id) || !canAccess(worker.id) || hasBlockingPendingRequest(worker.pendingApproval) || worker.runnerId!==root.runnerId || worker.workspaceId!==root.workspaceId ||
+        this.db.campaignBudgets.root(worker.id)!==root.id || !worker.worktreePath ||
+        item.issue.repository.toLowerCase()!==request.pullRequest.repository.toLowerCase() ||
+        !root.orchestratorPolicy?.issueScope?.issueNumbers.includes(item.issue.number) ||
+        !item.stage?.pullRequests?.some((pr)=>pr.repository.toLowerCase()===request.pullRequest.repository.toLowerCase() && pr.number===request.pullRequest.number)) return fail("review target must be the authorized assigned work item and its recorded canonical PR",409);
+    const ownerScope=this.db.sessionScope(root.id);
+    if(ownerScope && this.db.getUsageDailyBudget(ownerScope.organizationId).perUserUsd!==null) return fail("Required native review admission with organization daily limits is unsupported; no daily allowance may be bypassed.",409);
+    for(const id of [root.id,worker.id]) {
+      const personal=this.db.campaignBudgets.userLimits(id);
+      if(personal?.costBudgetUsd!=null || personal?.maxToolCalls!=null) return fail("Required native review admission with inherited tighter session limits is unsupported; the campaign envelope cannot override them.",409);
+    }
+    try {
+      request={requestId:request.requestId,workItemId:request.workItemId,pullRequest:{repository:request.pullRequest.repository.toLowerCase(),number:request.pullRequest.number},baseSha:request.baseSha,headSha:request.headSha,costUsd:request.costUsd,toolCalls:request.toolCalls,brief:request.brief};
+      const command=this.db.campaignReviewJobs.reserve(root.id,root.runnerId,worker.id,control.boundary.revision,profile,request,
+        {workItemAttemptId:item.currentAttempt!.id,issue:item.issue});
+      const view=this.db.campaignReviewJobs.view(command.jobId)!;
+      if(["reserved","running"].includes(view.state) && !this.hub.sendToRunner(root.runnerId,command)) return fail("review reservation retained while runner delivery is unavailable",409);
+      this.hub.sessionChangedById(root.id);
+      this.log.info(JSON.stringify({event:"campaign_review_job_admitted",rootId:root.id,jobId:command.jobId,round:view.round,attempt:view.attempt,costUsd:request.costUsd,toolCalls:request.toolCalls}));
+      return ok(view);
+    } catch(error) { return fail((error as Error).message,409); }
+  }
+
+  campaignReviewJob(callerSessionId:string,jobId:string,canAccess:(id:string)=>boolean=()=>true):ServiceResult<import("@wollipog/protocol").CampaignReviewJobView> {
+    const scope=this.campaignLedgerScope(callerSessionId,canAccess);
+    if(!scope.ok || !scope.data) return failAs(scope);
+    const command=this.db.campaignReviewJobs.command(jobId);
+    if(!command || !canAccess(scope.data.root.id) || command.rootSessionId!==scope.data.root.id || !command.lineage) return fail("campaign review job not found",404);
+    const root=scope.data.root,item=this.db.campaignWorkLedger.detail(root.id,command.request.workItemId,Date.now(),canAccess);
+    const issue=command.lineage.issue;
+    if(!item?.issue || item.issue.number!==issue.number || item.issue.repository.toLowerCase()!==issue.repository.toLowerCase() ||
+        root.orchestratorPolicy?.issueScope?.repository.toLowerCase()!==issue.repository.toLowerCase() ||
+        !root.orchestratorPolicy?.issueScope?.issueNumbers.includes(issue.number) ||
+        !item.attempts.some((a)=>a.id===command.lineage!.workItemAttemptId && (a.sessionId===command.worktreeSessionId || a.sessionId===null)) ||
+        this.db.sessionScope(command.worktreeSessionId) && !canAccess(command.worktreeSessionId)) return fail("campaign review job not found",404);
+    return ok(this.db.campaignReviewJobs.view(jobId)!);
+  }
+
+  campaignReviewJobs(callerSessionId:string,query:{limit?:number;afterJobId?:string;workItemId?:string},canAccess:(id:string)=>boolean=()=>true):ServiceResult<import("@wollipog/protocol").CampaignReviewJobsPage> {
+    const scope=this.campaignLedgerScope(callerSessionId,canAccess);
+    if(!scope.ok || !scope.data) return failAs(scope);
+    if(!query || Object.keys(query).some((k)=>!["limit","afterJobId","workItemId"].includes(k)) || query.limit!==undefined &&
+        (!Number.isSafeInteger(query.limit) || query.limit<1 || query.limit>100) || query.afterJobId!==undefined && !/^review_[a-f0-9-]{36}$/.test(query.afterJobId) ||
+        query.workItemId!==undefined && (typeof query.workItemId!=="string" || query.workItemId.length>256)) return fail("invalid bounded review job query",400);
+    if(!canAccess(scope.data.root.id)) return fail("campaign review jobs not found",404);
+    const page=this.db.campaignReviewJobs.page(scope.data.root.id,query.afterJobId,query.limit??25,query.workItemId);
+    return ok({...page,jobs:page.jobs.filter((j)=>this.campaignReviewJob(callerSessionId,j.jobId,canAccess).ok)});
+  }
+
+  campaignReviewReport(callerSessionId:string,jobId:string,canAccess:(id:string)=>boolean=()=>true):ServiceResult<{jobId:string;receiptSha256:string;reviewReport:string}> {
+    const metadata=this.campaignReviewJob(callerSessionId,jobId,canAccess);
+    if(!metadata.ok || !metadata.data) return failAs(metadata);
+    const report=this.db.campaignReviewJobs.validatedReport(jobId);
+    if(!report || !metadata.data.receiptSha256) return fail("no machine-valid completed review report is available",409);
+    // This is only the controller-validated review prose, never the raw provider transcript.
+    return ok({jobId,receiptSha256:metadata.data.receiptSha256,reviewReport:report});
+  }
+
+  onCampaignReviewJobUpdate(runnerId:string,update:import("@wollipog/protocol").CampaignReviewJobUpdate):void {
+    if(!this.db.campaignReviewJobs.accept(runnerId,update)) return;
+    const command=this.db.campaignReviewJobs.command(update.jobId)!;
+    const root=this.db.getSession(command.rootSessionId),control=root?.orchestratorPolicy?.control;
+    const view=this.db.campaignBudgets.view(command.rootSessionId);
+    if(control?.mode!=="full_control" || !root || !campaignBoundaryCurrent(root) || control.boundary.revision!==command.authorityRevision || view?.state!=="active" ||
+        update.toolCalls>=command.request.toolCalls || (update.costUsd??0)>=command.request.costUsd) {
+      this.hub.sendToRunner(runnerId,{type:"cancel_campaign_review_job",jobId:command.jobId,nonce:command.nonce});
+    }
+    if(view?.state!=="active") this.enforceCampaignBudget(command.rootSessionId,Date.now());
+    this.hub.sessionChangedById(command.rootSessionId);
+    this.log.info(JSON.stringify({event:"campaign_review_job_usage",rootId:command.rootSessionId,jobId:command.jobId,state:update.state,costUsd:update.costUsd,toolCalls:update.toolCalls,receiptSha256:update.receiptSha256}));
+  }
+
+  recoverCampaignReviewJobs(runnerId:string):void {
+    for(const command of this.db.campaignReviewJobs.commands(runnerId)) {
+      const root=this.db.getSession(command.rootSessionId),control=root?.orchestratorPolicy?.control;
+      if(root && control?.mode==="full_control" && campaignBoundaryCurrent(root) && control.boundary.revision===command.authorityRevision &&
+          this.db.campaignBudgets.view(root.id)?.state==="active") this.hub.sendToRunner(runnerId,command);
+      else this.hub.sendToRunner(runnerId,{type:"cancel_campaign_review_job",jobId:command.jobId,nonce:command.nonce});
+    }
   }
 
   private syncCampaignAllocation(sessionId: string): boolean {
@@ -7727,27 +7852,37 @@ export class SessionsService {
     const holdFor = hasBlockingPendingRequest(configured.pendingApproval) ? "control_plane" as const
       : this.runnerHoldAfter(configured, this.guardrailFields(configured));
     return isTerminal(session.status) || this.hub.sendToRunner(session.runnerId, { type: "rearm_governance", sessionId,
+      campaignBudgetDispatch: this.db.campaignBudgets.dispatch(sessionId),
       config: { ...(allocation.costUsd === undefined ? {} : { costBudgetUsd: allocation.costUsd }),
         ...(allocation.toolCalls === undefined ? {} : { maxToolCalls: allocation.toolCalls }) }, ...(holdFor ? { holdFor } : {}) });
   }
 
-  private campaignBudgetConfigError(session: SessionView, config?: SessionConfig): string | null {
+  private campaignBudgetConfigError(session: SessionView, config?: SessionConfig, driver = session.driver): string | null {
     const rootId = this.db.campaignBudgets.root(session.id);
     if (!rootId) return null;
     const view = this.db.campaignBudgets.view(rootId)!;
+    const controller = this.db.getSession(rootId), control = controller?.orchestratorPolicy?.control;
+    if (!controller || control?.mode !== "full_control" || !campaignBoundaryCurrent(controller)) return "campaign allowance boundary is stale or revoked";
+    const preflight = campaignAuthorityPreflight(control, driver, this.db.getRunner(session.runnerId)?.protocolVersion);
+    if (!preflight.supported) return preflight.reason ?? "campaign allowance requires supported accounting peers";
+    if (session.runnerId !== controller.runnerId || session.workspaceId !== controller.workspaceId) return "campaign allowance requires the original runner and workspace";
     if (view.state !== "active") return view.reason ?? "campaign allowance unavailable";
+    if(view.authority.controlledReview) {
+      const capability=this.db.getRunner(controller.runnerId)?.runtime?.campaignReview;
+      if(!capability || controlledReviewCapabilityKey(capability)!==controlledReviewCapabilityKey(view.authority.controlledReview)) return "required native reviewer capability/profile is unavailable; protected dispatch refused";
+    }
     const allocation = this.db.campaignBudgets.allocation(session.id)!;
     if (config?.costBudgetUsd !== undefined && (config.costBudgetUsd <= 0 || allocation.costUsd !== undefined && config.costBudgetUsd !== allocation.costUsd) ||
         config?.maxToolCalls !== undefined && (config.maxToolCalls <= 0 || allocation.toolCalls !== undefined && config.maxToolCalls !== allocation.toolCalls) ||
         config?.costCheckpointsUsd !== undefined) return "campaign allocations cannot be changed through session configuration; use allocate_campaign_budget within the human envelope";
-    return this.db.campaignBudgetAccountingError(session.driver, config?.model ?? session.model, view.authority.costUsd !== undefined);
+    return this.db.campaignBudgetAccountingError(driver, config?.model ?? session.model, view.authority.costUsd !== undefined);
   }
 
   private enforceCampaignBudget(sessionId: string, now: number): boolean {
     const rootId = this.db.campaignBudgets.root(sessionId);
     if (!rootId) return false;
     let view = this.db.campaignBudgets.view(rootId)!;
-    if (view.authority.costUsd !== undefined && this.db.campaignBudgets.members(rootId).some((id) => this.db.campaignUsageHasUnpriced(id))) {
+    if (this.db.campaignBudgets.members(rootId).some((id) => this.db.campaignUsageHasUnpriced(id))) {
       this.db.campaignBudgets.stop(rootId, "accounting_unavailable", "Unpriced campaign usage detected; protected admission stopped without a continue prompt.");
       view = this.db.campaignBudgets.view(rootId)!;
     }
@@ -11927,6 +12062,7 @@ export class SessionsService {
         : (member.orchestrator ? false : (req.useWorktree ?? true));
       const spec: SessionLaunchSpec = {
         sessionId: id,
+        campaignBudgetDispatch: this.db.campaignBudgets.dispatch(id),
         workspaceId: req.workspaceId,
         workspacePath,
         agentId: member.agentId,
@@ -12786,6 +12922,8 @@ export class SessionsService {
     const runId = shortId("r_");
     const title = (req.title?.trim() || titleFromPrompt(req.task, RUN_TASK_TITLE_MAX) || "Multi-agent run").slice(0, 120);
     const titleSource = req.title?.trim() ? "user" as const : "generated" as const;
+    const launches: SessionLaunchSpec[] = [];
+    const materialize = () => {
     this.db.createRun({
       id: runId,
       title,
@@ -12801,12 +12939,27 @@ export class SessionsService {
       // Multi-agent runs always isolate in their own worktree (brief: don't let
       // multiple agents write the same working tree).
       // Clone per member so guardrail normalization never changes the shared request.
-      const config = admitted.data[memberIndex]!;
+      const config = { ...admitted.data![memberIndex]! };
+      const campaignBudgetUserLimits = { costUsd: config.costBudgetUsd, toolCalls: config.maxToolCalls };
+      const budgetRoot = parentSessionId ? this.db.campaignBudgets.root(parentSessionId) : null;
+      if (budgetRoot) {
+        const view = this.db.campaignBudgets.view(budgetRoot)!;
+        const parentError=this.campaignBudgetConfigError(this.db.getSession(parentSessionId!)!);
+        if(parentError) throw new Error(parentError);
+        const peer = this.db.getRunner(req.runnerId)?.protocolVersion ?? 0;
+        if (peer < 217) throw new Error("Campaign run workers require protocol v217");
+        const accountingError = this.db.campaignBudgetAccountingError(launch.driver, config.model, view.authority.costUsd !== undefined);
+        if (accountingError) throw new Error(accountingError);
+        const allocation = this.db.campaignBudgets.prepare(budgetRoot, id, campaignBudgetUserLimits);
+        if (allocation.costUsd !== undefined) config.costBudgetUsd = allocation.costUsd;
+        if (allocation.toolCalls !== undefined) config.maxToolCalls = allocation.toolCalls;
+      }
       const maxCalls = parentSessionId ? config.maxToolCalls : req.maxToolCalls;
       const runMaxCalls = maxCalls != null ? Math.floor(maxCalls) : 0;
       const runCheckpoints = normalizeCostCheckpoints(req.config?.costCheckpointsUsd);
       if (runMaxCalls > 0) config.maxToolCalls = runMaxCalls;
       const session = this.db.createSession({
+        campaignBudgetUserLimits,
         id,
         parentSessionId,
         runnerId: req.runnerId,
@@ -12828,13 +12981,14 @@ export class SessionsService {
       if (runMaxCalls > 0) this.db.updateSessionMaxToolCalls(id, runMaxCalls, now);
       if (runCheckpoints) this.db.updateSessionCostCheckpoints(id, runCheckpoints, now);
       this.db.addRunMember(runId, id, agentId);
-      this.hub.sessionChanged(this.db.getSession(id) ?? session);
+
       // The runner emits the user_message into the box store (source of truth) when it runs the
       // initial prompt — the control plane no longer appends it (would duplicate it on the timeline).
 
       const spec: SessionLaunchSpec = {
         sessionId: id,
         workspaceId: req.workspaceId,
+        campaignBudgetDispatch: this.db.campaignBudgets.dispatch(id),
         workspacePath,
         agentId,
         agentVersion: launch.version,
@@ -12850,11 +13004,20 @@ export class SessionsService {
         context: launch.context,
         config,
       };
-      this.hub.sendToRunner(req.runnerId, { type: "start_session", spec, initialPrompt: req.task });
+      launches.push(spec);
       sessions.push(this.db.getSession(id)!);
     }
 
-    const run = this.db.getRun(runId)!;
+    return { run: this.db.getRun(runId)!, sessions };
+    };
+    let materialized: ReturnType<typeof materialize>;
+    try { materialized = this.db.campaignBudgetTransaction(materialize); }
+    catch (error) { return fail((error as Error).message, 409); }
+    for (const spec of launches) {
+      this.hub.sessionChangedById(spec.sessionId);
+      this.hub.sendToRunner(req.runnerId, { type: "start_session", spec, initialPrompt: req.task });
+    }
+    const { run, sessions } = materialized;
     this.hub.runChanged(run);
     this.log.info(`run created ${runId} with ${sessions.length} agent(s)` + (unknown.length ? `, skipped: ${unknown.join(", ")}` : ""));
     return ok({ run, sessions }, 201);
@@ -12870,12 +13033,18 @@ export class SessionsService {
     fromRunnerId?: string,
     controlPlaneLaunchId?: string,
     capacityWait?: RunnerCapacityBlocker,
+    budgetCheckpoint?: import("@wollipog/protocol").CampaignBudgetUsageCheckpoint,
   ): void {
     const session = this.db.getSession(sessionId);
     if (!session) return;
     if (fromRunnerId && session.runnerId !== fromRunnerId) {
       this.log.warn(`ignoring session_status for ${sessionId} from ${fromRunnerId} (owned by ${session.runnerId})`);
       return;
+    }
+    if (fromRunnerId && isTerminal(status) && budgetCheckpoint) {
+      this.db.campaignBudgets.recordCheckpoint(sessionId, budgetCheckpoint);
+      // History can arrive after terminal status. Its durable hydration completes settlement.
+      void this.hydrateHistory(sessionId).then(() => this.settleCampaignUsage(sessionId)).catch(() => {});
     }
     const campaignBefore = this.campaignAttentionController(session);
     let admittedReplacement = false;
@@ -14243,6 +14412,10 @@ export class SessionsService {
     // and ownership checks are refreshed after yielding, so UI actions remain authoritative.
     for (let offset = 0; offset < snapshots.length; offset += 32) {
       const chunk = snapshots.slice(offset, offset + 32);
+      for(const snap of chunk) {
+        const owner=this.db.getSession(snap.id);
+        if(owner?.runnerId===runnerId && isTerminal(snap.status) && snap.campaignBudgetCheckpoint) this.db.campaignBudgets.recordCheckpoint(snap.id,snap.campaignBudgetCheckpoint);
+      }
       const unsupportedCostSessions = new Set(chunk.filter((snap) =>
         this.unsupportedCostReconciliation(runnerId, snap)).map((snap) => snap.id));
       const stopIntentIds = new Set(this.db.sessionStopIntentIds(runnerId));
@@ -14355,6 +14528,7 @@ export class SessionsService {
         this.hub.sessionChangedById(snap.id);
         recordAppliedVersion(snap.id);
       }
+      for(const snap of chunk) this.settleCampaignUsage(snap.id);
       yield;
     }
     // A session the runner no longer holds has ended for good, whatever its stored status says: a
@@ -14430,6 +14604,7 @@ export class SessionsService {
   applySessionRuntimeUpdate(runnerId: string, snapshot: SessionSnapshot, batch?: RunnerAttentionBatch): void {
     const existing = this.db.getSession(snapshot.id);
     if (!existing || existing.runnerId !== runnerId || this.db.isTombstoned(snapshot.id)) return;
+    if(isTerminal(snapshot.status) && snapshot.campaignBudgetCheckpoint) this.db.campaignBudgets.recordCheckpoint(snapshot.id,snapshot.campaignBudgetCheckpoint);
     const unsupportedCost = this.unsupportedCostReconciliation(runnerId, snapshot);
     const unacknowledgedRevision = snapshot.costReconciliationRevision ?? 0;
     snapshot = unsupportedCost ? { ...snapshot, costUsd: existing.costUsd } : normalizeReconciledSnapshot(this.db, snapshot);
@@ -14478,6 +14653,7 @@ export class SessionsService {
       this.db.clearPolicyResumeStatus(snapshot.id);
     }
     const history = this.db.updateSessionFromSnapshot(snapshot.id, runtimeSnapshot, now);
+    this.settleCampaignUsage(snapshot.id);
     this.synchronizeCostReconciliation(snapshot.id, unacknowledgedRevision);
     if (history?.reset) {
       const reset = this.db.getSession(snapshot.id)!;
@@ -14560,6 +14736,15 @@ export class SessionsService {
     } finally {
       this.hydrating.delete(sessionId);
       this.rehydrate.delete(sessionId);
+      this.settleCampaignUsage(sessionId);
+    }
+  }
+
+  private settleCampaignUsage(sessionId: string): void {
+    const history = this.db.getRunnerHistoryState(sessionId);
+    if (history && this.db.campaignBudgets.settleCheckpoint(sessionId, history)) {
+      const rootId = this.db.campaignBudgets.root(sessionId);
+      if (rootId) this.hub.sessionChangedById(rootId);
     }
   }
 

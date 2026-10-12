@@ -237,6 +237,16 @@ async function workflowDecisionInspectionCompatibilityError(deps: McpDeps): Prom
     ? null : errorResult("Descendant reads and decision lists require control plane protocol v214; update Wollipog and reconnect. Self get_workflow_decision still works; list_descendant_requests shows pending requests only, and a 404 never proves consumption.");
 }
 
+async function campaignBudgetCompatibilityError(deps:McpDeps):Promise<ToolResult|null> {
+  let actual=deps.controlPlaneProtocolVersion;
+  if(!Number.isInteger(actual)) {
+    const compatibility=await cpFetch(deps,"GET","/api/compatibility");
+    if(!compatibility.ok) return errorResult("Campaign budget/review compatibility could not be verified");
+    actual=compatibility.data?.protocolVersion;
+  }
+  return Number.isInteger(actual) && actual!>=217?null:errorResult("Campaign budget/review jobs require control plane protocol v217; update and reconnect.");
+}
+
 async function issueClosureCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
   let actual = deps.controlPlaneProtocolVersion;
   if (!Number.isInteger(actual)) {
@@ -910,6 +920,9 @@ const CAMPAIGN_WORK_LEDGER_TOOLS = ["record_campaign_plan", "update_campaign_wor
   "adjudicate_campaign_recommendation", "get_campaign_work_items"];
 const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "list_sessions", "get_session", "get_session_events",
   "allocate_campaign_budget",
+  "run_campaign_review_job",
+  "get_campaign_review_job",
+  "list_campaign_review_jobs", "get_campaign_review_report",
   "get_campaign", "record_campaign_follow_up", "verify_campaign_child", ...CAMPAIGN_WORK_LEDGER_TOOLS,
   "get_campaign_issue_scope", "request_campaign_issue_scope_change",
   "request_github_issue_closure", "close_github_issue",
@@ -922,6 +935,9 @@ const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "l
   "attach_worktree", "select_worktree", "discard_worktree"]);
 const PARENT_CONTROL_TOOLS = new Set(["get_campaign_issue_scope", "request_campaign_issue_scope_change", "request_github_issue_closure", "close_github_issue",
   "allocate_campaign_budget",
+  "run_campaign_review_job",
+  "get_campaign_review_job",
+  "list_campaign_review_jobs", "get_campaign_review_report",
   "get_campaign", "record_campaign_follow_up", "verify_campaign_child", ...CAMPAIGN_WORK_LEDGER_TOOLS,
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question",
   "resolve_descendant_approval", "resolve_descendant_workflow_decision", "review_descendant_ui_evidence",
@@ -1463,6 +1479,51 @@ export const TOOLS: McpTool[] = [
       if (typeof version !== "number" || version < RUNNER_CAPABILITY_MIN_PROTOCOL.campaignBudgetAdmission) return errorResult("Campaign allocations require control plane protocol v217; update and reconnect.");
       const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/orchestrator-campaign/budget-allocations`, args);
       return r.ok ? textResult(r.data) : errorResult(r.message);
+    },
+  },
+  {
+    name: "run_campaign_review_job",
+    description: "Reserve and dispatch the exact controlled native Opus 5.5/high/read-only cross-model review for an assigned campaign PR. Requires the human-minted matching native profile and priced allowance; never accepts caller usage. Repeat the identical requestId and fields to read current durable state without relaunching. Four valid rounds and two launched attempts per round are enforced.",
+    inputSchema: {type:"object",properties:{requestId:{type:"string"},workItemId:{type:"string"},pullRequest:{type:"object",properties:{repository:{type:"string"},number:{type:"integer",minimum:1}},required:["repository","number"],additionalProperties:false},baseSha:{type:"string"},headSha:{type:"string"},costUsd:{type:"number",exclusiveMinimum:0},toolCalls:{type:"integer",minimum:1},brief:{type:"string"}},required:["requestId","workItemId","pullRequest","baseSha","headSha","costUsd","toolCalls","brief"],additionalProperties:false},
+    handler:async(args,deps)=>{
+      if(!deps.selfSessionId || !deps.orchestrator) return errorResult("this tool requires an Orchestrator session identity");
+      const incompatible=await campaignBudgetCompatibilityError(deps);if(incompatible) return incompatible;
+      const r=await cpFetch(deps,"POST",`/api/sessions/${encodeURIComponent(deps.selfSessionId)}/orchestrator-campaign/review-jobs`,args);
+      return r.ok?textResult(r.data):errorResult(r.message);
+    },
+  },
+  {
+    name:"get_campaign_review_job",
+    description:"Read a same-campaign controlled review job and its historical priced receipt/report without dispatching or authorizing any new spend.",
+    inputSchema:{type:"object",properties:{jobId:{type:"string"}},required:["jobId"],additionalProperties:false},
+    handler:async(args,deps)=>{
+      if(!deps.selfSessionId || !deps.orchestrator || typeof args.jobId!=="string") return errorResult("this tool requires an Orchestrator identity and jobId");
+      const incompatible=await campaignBudgetCompatibilityError(deps);if(incompatible) return incompatible;
+      const r=await cpFetch(deps,"GET",`/api/sessions/${encodeURIComponent(deps.selfSessionId)}/orchestrator-campaign/review-jobs/${encodeURIComponent(args.jobId)}`);
+      return r.ok?textResult(r.data):errorResult(r.message);
+    },
+  },
+  {
+    name:"list_campaign_review_jobs",
+    description:"Read bounded same-root review metadata, including terminal jobs, exact profile/epoch/round/attempt, consumed/valid flags and settlement state. This never admits work, resets allowance or returns briefs/provider transcripts. Continue with nextAfterJobId.",
+    inputSchema:{type:"object",properties:{limit:{type:"integer",minimum:1,maximum:100},afterJobId:{type:"string"},workItemId:{type:"string"}},additionalProperties:false},
+    handler:async(args,deps)=>{
+      if(!deps.selfSessionId || !deps.orchestrator) return errorResult("this tool requires an Orchestrator identity");
+      const incompatible=await campaignBudgetCompatibilityError(deps);if(incompatible) return incompatible;
+      const params=new URLSearchParams();for(const key of ["limit","afterJobId","workItemId"]) if(args[key]!==undefined) params.set(key,String(args[key]));
+      const r=await cpFetch(deps,"GET",`/api/sessions/${encodeURIComponent(deps.selfSessionId)}/orchestrator-campaign/review-jobs?${params}`);
+      return r.ok?textResult(r.data):errorResult(r.message);
+    },
+  },
+  {
+    name:"get_campaign_review_report",
+    description:"Read the separate controller-validated report of an exact machine-valid same-campaign review, bound to its receipt. This returns review prose for independent adjudication, never raw provider stdout, tool arguments, a brief or credentials; it grants no new spend or merge vote.",
+    inputSchema:{type:"object",properties:{jobId:{type:"string"}},required:["jobId"],additionalProperties:false},
+    handler:async(args,deps)=>{
+      if(!deps.selfSessionId || !deps.orchestrator || typeof args.jobId!=="string") return errorResult("this tool requires an Orchestrator identity and jobId");
+      const incompatible=await campaignBudgetCompatibilityError(deps);if(incompatible) return incompatible;
+      const r=await cpFetch(deps,"GET",`/api/sessions/${encodeURIComponent(deps.selfSessionId)}/orchestrator-campaign/review-jobs/${encodeURIComponent(args.jobId)}/report`);
+      return r.ok?textResult(r.data):errorResult(r.message);
     },
   },
   {

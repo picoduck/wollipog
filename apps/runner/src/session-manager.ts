@@ -4443,6 +4443,18 @@ export class SessionManager {
     assertExecutionIsolationContextSupported(this.executionIsolation, context);
   }
 
+  reserveControlledReviewAdmission(jobId:string,agentId:string):boolean {
+    if(this.shuttingDown || this.executionIsolation.mode!=="provider" || this.admissionQueue.length) return false;
+    const admitted=this.boxAdmission.acquire({sessionId:jobId,agentId,weight:this.admissionPolicy.agentWeights[agentId]??1,
+      ...(this.admissionPolicy.agentLimits[agentId]===undefined?{}:{agentLimit:this.admissionPolicy.agentLimits[agentId]})});
+    if(admitted) this.reportCapacity();
+    return admitted;
+  }
+
+  releaseControlledReviewAdmission(jobId:string):void {
+    this.boxAdmission.release(jobId);this.reportCapacity();this.drainAdmissionQueue();
+  }
+
   async prepareSessionNamingExecution(
     agent: AgentDefinition,
     env: Record<string, string>,
@@ -5772,6 +5784,8 @@ export class SessionManager {
       title: spec.title ?? "",
       titleSource: spec.titleSource ?? "generated",
       config: spec.config ?? {},
+      campaignBudgetDispatch: spec.campaignBudgetDispatch,
+      campaignBudgetCheckpoint: undefined,
       projectMemory: spec.projectMemory ?? prior?.projectMemory,
       artifactUploads: spec.artifactUploads ?? prior?.artifactUploads ?? "manual",
       orchestrator: (prior?.orchestrator?.issueScope?.revision ?? 0) > (spec.orchestrator?.issueScope?.revision ?? 0) ? prior?.orchestrator : spec.orchestrator ?? prior?.orchestrator,
@@ -14204,9 +14218,12 @@ export class SessionManager {
     sessionId: string,
     config: { costBudgetUsd?: number | null; maxToolCalls?: number | null },
     holdFor?: "cost_budget" | "max_tool_calls" | "control_plane",
+    campaignBudgetDispatch?: import("@wollipog/protocol").CampaignBudgetDispatch,
   ): void {
     const meta = this.store.readMeta(sessionId);
     if (!meta) return;
+    if (campaignBudgetDispatch) this.store.patchMeta(sessionId, { campaignBudgetDispatch,
+      ...(campaignBudgetDispatch.generation!==meta.campaignBudgetDispatch?.generation?{campaignBudgetCheckpoint:undefined}:{}) });
     const costBudgetUsd = config.costBudgetUsd;
     const maxToolCalls = config.maxToolCalls;
     // No live process: whatever the re-arm carries, the hold change applies to what recovery
@@ -14477,6 +14494,9 @@ export class SessionManager {
       this.reportCapacity();
     }
     if (this.shuttingDown) return;
+    const settledMeta=this.store.readMeta(sessionId);
+    if(!retirement.entry.running && !retirement.entry.providerInitiatedTurnActive && settledMeta?.campaignBudgetDispatch &&
+        ["completed","failed","stopped"].includes(settledMeta.status)) this.emitStatus(sessionId,settledMeta.status,undefined,undefined,undefined,true);
     if (this.pendingDeletions.delete(sessionId)) {
       // Deletion reaps every journal record this session owns, so it supersedes the replay below.
       setImmediate(() => {
@@ -16010,6 +16030,7 @@ export class SessionManager {
     detail?: string,
     worktreePath?: string | null,
     capacityWait?: RunnerCapacityBlocker,
+    finalProviderUsage=false,
   ): void {
     const latchedBeforeFlush = this.active.get(sessionId)?.historyIntegrityFailure;
     this.flushTextDeltas(sessionId);
@@ -16048,6 +16069,14 @@ export class SessionManager {
           ? { ...firstAsync, ...(otherAsync.length ? { additionalRequests: otherAsync } : {}) } : null,
           capacityWait: status === "queued" ? capacityWait : undefined }
       : { status: projectedStatus, capacityWait: status === "queued" ? capacityWait : undefined });
+    const finalMeta=this.store.readMeta(sessionId)!;
+    const checkpoint=terminal && finalMeta.campaignBudgetDispatch && !this.closing.has(sessionId) &&
+      !this.worktreeRebindings.has(sessionId) && !this.providerAccountSwitches.has(sessionId) &&
+      (finalProviderUsage || entry && !entry.running && !entry.providerInitiatedTurnActive) &&
+      runnerSupportsProtocol(this.controlPlaneProtocolVersion(),"campaignBudgetAdmission")
+      ? {generation:finalMeta.campaignBudgetDispatch.generation,historyEpoch:this.snapshot(finalMeta).historyEpoch??0,
+        throughSeq:finalMeta.seq,costUsd:finalMeta.costUsd}:undefined;
+    if(checkpoint) this.store.patchMeta(sessionId,{campaignBudgetCheckpoint:checkpoint});
     this.send({
       type: "session_status",
       sessionId,
@@ -16056,6 +16085,7 @@ export class SessionManager {
       capacityWait: status === "queued" ? capacityWait : undefined,
       worktreePath,
       controlPlaneLaunchId: this.store.readMeta(sessionId)?.controlPlaneLaunchId,
+      ...(checkpoint?{campaignBudgetCheckpoint:checkpoint}:{}),
     });
   }
 
