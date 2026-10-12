@@ -72,7 +72,7 @@ test("Vite production browser coverage cannot silently lose a selected check", (
   }
   assert.match(
     productionConfig,
-    /testMatch:\s*\["timeline-reflow\.spec\.ts",\s*"settings-rows\.spec\.ts",\s*"xterm-smoke\.spec\.ts",\s*"inbox-lazy\.spec\.ts",\s*"inbox-layout-shift\.spec\.ts"\]/,
+    /testMatch:\s*\["timeline-reflow\.spec\.ts",\s*"settings-rows\.spec\.ts",\s*"xterm-smoke\.spec\.ts",\s*"inbox-lazy\.spec\.ts",\s*"inbox-layout-shift\.spec\.ts",\s*"sessions-notice-focus\.spec\.ts"\]/,
     "production browser selection must retain all validated fixtures",
   );
   assert.match(

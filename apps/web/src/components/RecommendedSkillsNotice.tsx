@@ -80,9 +80,17 @@ export function RecommendedSkillsNotice({ recommendations, trailing, onOpen }: {
   onOpen: (skillId: string) => void;
 }) {
   const { skills, busy, error, dismiss } = recommendations;
+  const noticeRef = useRef<HTMLElement>(null);
+  const dismissFrom = (button: HTMLButtonElement, targets: SkillSummary[]) => {
+    // Native disabled blurs the initiating button while it is still connected. Keep focus on the
+    // notice until it leaves, so the slot can recover it; a later deliberate move still wins.
+    if (button.ownerDocument.activeElement === button) noticeRef.current?.focus({ preventScroll: true });
+    void dismiss(targets);
+  };
   if (skills.length === 0) return null;
   return (
-    <Notice as="section" tone="info" ariaLabel="Recommended Skills" title="Recommended Skills" trailing={trailing}>
+    <Notice as="section" tone="info" ariaLabel="Recommended Skills" title="Recommended Skills" trailing={trailing}
+      noticeRef={noticeRef} tabIndex={-1}>
       <p>
         Wollipog includes skills that teach agents in Wollipog sessions to use its tools. They are not on any machine
         until they are assigned in Skills.
@@ -105,14 +113,14 @@ export function RecommendedSkillsNotice({ recommendations, trailing, onOpen }: {
                 {skill.name}
               </a>
               <button type="button" className="btn ghost sm" disabled={busy} aria-label={`Dismiss ${skill.name}`}
-                onClick={() => void dismiss([skill])}>
+                onClick={(event) => dismissFrom(event.currentTarget, [skill])}>
                 Dismiss
               </button>
             </li>
           ))}
         </ul>
         <button type="button" className="btn sm skill-recommendations-all" disabled={busy}
-          onClick={() => void dismiss(skills)}>
+          onClick={(event) => dismissFrom(event.currentTarget, skills)}>
           Dismiss All
         </button>
       </div>
