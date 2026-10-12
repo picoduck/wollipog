@@ -12356,6 +12356,29 @@ test("live Codex usage updates session and model totals and can trip a budget be
   assert.equal(db.getSession(id)!.costUsd, 0.252, "turn settlement adds no usage by itself");
 });
 
+test("live Claude requests show while running, but a runtime snapshot cannot turn them into accrued cost", () => {
+  const { db, hub, svc } = makeHarness();
+  db.setUsageRateTable(parseRateTable({
+    "claude-test": { input_cost_per_token: 0.001, output_cost_per_token: 0.002 },
+  }));
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-test", inputTokens: 10, outputTokens: 5,
+    pricingContext: { requestInputTokens: 10 }, liveUsage: "provisional" }, 1);
+  let session = db.getSession(id)!;
+  assert.deepEqual([session.tokensIn, session.costUsd, session.liveUsage], [0, 0, { tokensIn: 10, tokensOut: 5, costUsd: 0.02 }]);
+  assert.deepEqual(db.listSessionSummaries().find((candidate) => candidate.id === id)?.liveUsage, session.liveUsage,
+    "dashboard summaries show the same running usage");
+  // A runtime snapshot in step with the event stream floors at accrued cost, never the estimate.
+  svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({ id, status: "running", tokensIn: 0, tokensOut: 0, costUsd: 0, seq: 1 }));
+  assert.equal(db.sessionCostUsd(id), 0);
+  assert.deepEqual(db.getSession(id)!.liveUsage, { tokensIn: 10, tokensOut: 5, costUsd: 0.02 });
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-test", inputTokens: 10, outputTokens: 5,
+    costUsd: 0.01, costIsEstimate: true, liveUsage: "settled" }, 2);
+  session = db.getSession(id)!;
+  assert.deepEqual([session.tokensIn, session.costUsd, session.liveUsage], [10, 0.01, undefined]);
+});
+
 test("priced cost acknowledgements are not sent to pre-v106 runners", () => {
   const { db, hub, svc } = makeHarness();
   db.registerRunner(runnerMeta(), Date.now(), 105);

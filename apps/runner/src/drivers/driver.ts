@@ -156,6 +156,8 @@ export interface DriverSubscriptionUsageUpdate {
 export interface DriverCallbacks {
   /** Negotiated control-plane capability; absence retains legacy request replacement. */
   supportsWorkerAttention?: () => boolean;
+  /** Negotiated control-plane capability: provisional live Claude usage is netted at settlement. */
+  supportsLiveClaudeUsage?: () => boolean;
   onEvent: (payload: SessionEventPayload) => void;
   onClaudeUsageCheckpoint?: (checkpoint: import("./claude-usage-accounting.js").ClaudeUsageCheckpoint) => void;
   onStderr: (text: string) => void;
@@ -231,6 +233,8 @@ export interface DriverOptions {
   resumeId?: string;
   agentVersion?: string;
   claudeUsageCheckpoint?: import("./claude-usage-accounting.js").ClaudeUsageCheckpoint;
+  /** Live request usage already published after `claudeUsageCheckpoint`, awaiting settlement. */
+  claudeLiveUsage?: import("./claude-usage-accounting.js").ClaudeLiveUsage;
   /** Runner-owned session directory used for bounded hold sentinels and lifecycle reconciliation. */
   sessionStateDir?: string;
   /** Durable Claude task ids that a resumed transport must reconcile before declaring quiescence. */

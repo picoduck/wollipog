@@ -7026,6 +7026,44 @@ test("Claude resume recovers the latest raw checkpoint from a paged crash suffix
     assert.equal(h.launches.length, 1);
     assert.equal(h.launches[0]!.options.agentVersion, "2.1.287");
     assert.deepEqual(h.launches[0]!.options.claudeUsageCheckpoint, checkpoint);
+    assert.equal(h.launches[0]!.options.claudeLiveUsage, undefined);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("Claude resume hands the driver the live requests still open after its checkpoint", async () => {
+  const h = harness({ driver: "claude-code", command: "claude", agentId: "claude-native", agentVersion: "2.1.296",
+    agentSessionId: "claude-conversation", claudeUsageCheckpointSeq: 0 });
+  const checkpoint = { sessionId: "claude-conversation", totalCostUsd: 0.03, models: {} };
+  const live = (inputTokens: number) => ({ kind: "token_usage" as const, model: "claude-opus-5", inputTokens, outputTokens: 2,
+    cachedInputTokens: 30, cacheCreationInputTokens: 4, liveUsage: "provisional" as const });
+  try {
+    h.store.appendEvent("resume-session", live(100)); // settled by the checkpoint below
+    h.store.appendEvent("resume-session", { kind: "token_usage", costUsd: 0.03, claudeUsageCheckpoint: checkpoint, liveUsage: "settled" });
+    h.store.appendEvent("resume-session", live(5));
+    h.store.appendEvent("resume-session", { kind: "token_usage", inputTokens: 9, parentToolUseId: "task" });
+    h.store.appendEvent("resume-session", live(7));
+    h.store.appendEvent("resume-session", live(8));
+    // A crash interrupted republication after the first request was accounted.
+    h.store.appendEvent("resume-session", { ...live(5), liveUsage: "republished" });
+    h.manager.prompt("resume-session", "resume");
+    for (let index = 0; index < 20 && h.launches.length === 0; index++) await tick();
+    assert.equal(h.launches.length, 1);
+    assert.deepEqual(h.launches[0]!.options.claudeUsageCheckpoint, checkpoint);
+    assert.deepEqual(h.launches[0]!.options.claudeLiveUsage, [live(7), live(8)]);
+    // Live records are display-only: runner totals accrue the record that closes their window.
+    const before = h.store.readMeta("resume-session")!;
+    (h.manager as any).accrueMeta("resume-session", live(9));
+    assert.deepEqual([h.store.readMeta("resume-session")!.tokensIn, h.store.readMeta("resume-session")!.costUsd], [before.tokensIn, before.costUsd]);
+    (h.manager as any).accrueMeta("resume-session", { ...live(9), liveUsage: "republished" });
+    // Recovery no longer rebuilds a republished request, so a crash right after it must not lose its
+    // counters to the lazy metadata flush: a fresh store reads them from disk.
+    assert.equal(new SessionStore(h.root).readMeta("resume-session")!.tokensIn, before.tokensIn + 9);
+    (h.manager as any).accrueMeta("resume-session", { ...live(9), liveUsage: "settled", costUsd: 0.01 });
+    assert.deepEqual([h.store.readMeta("resume-session")!.tokensIn, h.store.readMeta("resume-session")!.costUsd], [before.tokensIn + 18, before.costUsd + 0.01]);
+    assert.equal(new SessionStore(h.root).readMeta("resume-session")!.tokensIn, before.tokensIn + 18);
   } finally {
     h.manager.shutdownAll();
     h.cleanup();

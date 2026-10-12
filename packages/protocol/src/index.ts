@@ -666,7 +666,9 @@
 // 214: read-only descendant workflow decision inspection and nonterminal keyset pages.
 // 215: human-authorized Full Control boundary and shared, reasoned campaign authority; trusted
 //      provider request-source envelopes. Omission preserves Custom and older-peer behavior.
-export const PROTOCOL_VERSION = 215;
+// 216: live Claude Code usage (#3086): display-only provisional per-request `token_usage` records
+//      closed by a `settled` record. Runners send them only to a v216+ control plane.
+export const PROTOCOL_VERSION = 216;
 
 export * from "./campaign-authority.js";
 import type { CampaignControl, CampaignRequestSource, CampaignAuthorityEvaluation } from "./campaign-authority.js";
@@ -1025,6 +1027,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   controlPlaneQueueHold: 105,
   /** v106 runners enforce the control-plane-priced cumulative cost during the active turn. */
   pricedSessionCost: 106,
+  /** v216 control planes show provisional live Claude usage without accruing it. */
+  claudeLiveUsage: 216,
   costReconciliation: 199,
   costReconciliationIdentity: 210,
   /** v129 runners report the exact threshold that cancelled a turn. */
@@ -1228,7 +1232,7 @@ export function worktreeRecoveryReceiptCode(
  * change must advance the offset by the prior radix before adding the new variant; v171 therefore
  * uses 9 (= 5 + 4). For the same or any later local epoch, every new-format value then sorts above
  * every value the preceding format could publish, forcing a resync before a cached sequence number
- * can name a different event.
+ * can name a different event. `SESSION_EVENT_PAYLOAD_WIRE_POLICIES` adds variants the same way.
  *
  * Prefer carrying additive state on the session snapshot, which is version-gated per field and
  * needs no sequence space at all.
@@ -1245,6 +1249,24 @@ const SESSION_EVENT_WIRE_POLICIES = {
 }>>;
 
 /**
+ * Additive payloads of an existing kind that older peers must receive differently, in protocol
+ * order after `SESSION_EVENT_WIRE_POLICIES`. Each counts as a projection variant exactly like a
+ * kind policy, because omitting some of its events renumbers the peer's dense history.
+ */
+const SESSION_EVENT_PAYLOAD_WIRE_POLICIES = [
+  // Live Claude usage (#3086): an older peer would accrue a display-only request and then the
+  // record that accounts it, so it never sees provisional records or content-free markers.
+  { minProtocol: 216, project: (payload: SessionEventPayload): SessionEventPayload | null => {
+    if (payload.kind !== "token_usage" || payload.liveUsage === undefined) return payload;
+    const { liveUsage, ...legacy } = payload;
+    if (liveUsage === "provisional") return null;
+    const content = legacy.inputTokens || legacy.outputTokens || legacy.cachedInputTokens || legacy.cacheCreationInputTokens ||
+      legacy.costUsd !== undefined || legacy.accountingIncomplete || legacy.claudeUsageCheckpoint;
+    return content ? legacy : null;
+  } },
+] as const;
+
+/**
  * Which projection this peer receives, as a dense index. 0 is the exact local history; each higher
  * value omits one more event kind.
  *
@@ -1259,18 +1281,18 @@ const SESSION_EVENT_WIRE_POLICIES = {
 export function sessionEventWireProjectionVariant(
   protocolVersion: number | null | undefined,
 ): number {
-  return Object.values(SESSION_EVENT_WIRE_POLICIES).filter(
+  return [...Object.values(SESSION_EVENT_WIRE_POLICIES), ...SESSION_EVENT_PAYLOAD_WIRE_POLICIES].filter(
     (policy) => !Number.isInteger(protocolVersion) || protocolVersion! < policy.minProtocol,
   ).length;
 }
 
 /** Total distinct projections, including the exact one. */
 export const SESSION_EVENT_WIRE_PROJECTION_VARIANTS =
-  Object.keys(SESSION_EVENT_WIRE_POLICIES).length + 1;
+  Object.keys(SESSION_EVENT_WIRE_POLICIES).length + SESSION_EVENT_PAYLOAD_WIRE_POLICIES.length + 1;
 
 /** Numeric fence advanced at each projection-radix change; v171 followed v148's offset 5 + radix 4,
- * and v204 follows v171's offset 9 + radix 5. */
-export const SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET = 14;
+ * v204 followed v171's offset 9 + radix 5, and v216 follows v204's offset 14 + radix 6. */
+export const SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET = 20;
 
 /** Whether this peer needs any explicit additive session-event compatibility projection.
  * Keeping policy inspection beside the policy table avoids callers probing it with a fabricated
@@ -1291,6 +1313,11 @@ export function projectSessionEventPayloadForProtocol(
   const policy = SESSION_EVENT_WIRE_POLICIES[payload.kind as keyof typeof SESSION_EVENT_WIRE_POLICIES];
   if (policy && (!Number.isInteger(protocolVersion) || protocolVersion! < policy.minProtocol)) {
     if (policy.legacy === "omit") return null;
+  }
+  for (const payloadPolicy of SESSION_EVENT_PAYLOAD_WIRE_POLICIES) {
+    if (Number.isInteger(protocolVersion) && protocolVersion! >= payloadPolicy.minProtocol) continue;
+    const projected = payloadPolicy.project(payload);
+    if (projected !== payload) return projected;
   }
   if (payload.kind === "provider_account_switched" && payload.automatic &&
       (!Number.isInteger(protocolVersion) || protocolVersion! < 173)) {
@@ -5394,6 +5421,14 @@ export type SessionEventPayload =
       accountingIncomplete?: true;
       /** Content-free provider baseline, retained for crash recovery and accounting audits. */
       claudeUsageCheckpoint?: ClaudeUsageCheckpoint;
+      /** Live Claude usage (v216+). A `provisional` record is one completed request of a running
+       * turn. It is display-only: session views show it, rate-priced, until its window closes, but
+       * no total accrues it, because a later record accounts the same request. When no cumulative
+       * checkpoint can cover the window, each request is accounted as an ordinary `republished`
+       * record, in order. `settled` marks the record (or a content-free marker) that closes the
+       * window: the last record of a covering checkpoint or the last republished request. Older
+       * peers never receive provisional records or content-free markers. */
+      liveUsage?: "provisional" | "republished" | "settled";
       /** This child thread is billed independently of its parent thread. */
       independentUsage?: true;
       /** Request-level pricing coordinates; token deltas alone cannot identify a context tier. */
@@ -6901,6 +6936,10 @@ export interface SessionView {
   /** Provenance for `costUsd` when the per-model ledger has caught up with the session totals.
    * Omitted by older control planes and while the ledger trails the runner's live counters. */
   costSource?: UsageCostSource;
+  /** Completed requests of a running Claude turn that no total includes yet (#3086), with a
+   * rate-table cost estimate. Display-only: add it to `tokensIn`/`tokensOut`/`costUsd` to show
+   * usage so far. Absent when nothing is pending and from older control planes. */
+  liveUsage?: { tokensIn: number; tokensOut: number; costUsd: number };
   /** True for sessions adopted from an external CLI transcript — only these can be reprocessed. */
   adopted: boolean;
   /** Sidebar grouping. Absent ⇒ derive from `workspaceId` (null ⇒ "chat"). */

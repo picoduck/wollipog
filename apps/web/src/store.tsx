@@ -486,7 +486,7 @@ const rebuiltArrays = new WeakSet<SessionEvent[]>();
  * `STREAMING_SESSION_FIELDS` in the control plane's hub. */
 const STREAMING_SESSION_FIELDS: ReadonlySet<string> = new Set([
   "updatedAt", "lastEventAt", "messageCount", "preview", "tokensIn", "tokensOut", "contextTokensUsed",
-  "costUsd", "toolCallCount",
+  "costUsd", "liveUsage", "toolCallCount",
 ]);
 
 function sameSessionExceptStreaming(a: SessionView, b: SessionView): boolean {

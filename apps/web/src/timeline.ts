@@ -1147,6 +1147,9 @@ export class TimelineBuilder {
         break;
       }
       case "token_usage": {
+        // A live request record is display-only; the record that closes its window reports the
+        // same request again, and it alone ends the turn (#3086).
+        if (p.liveUsage === "provisional") break;
         if (!p.parentToolUseId) {
           if (this.usageOwner == null || this.turnActivitySinceCompletion()) {
             this.usageOwner = continuationOwner(null, this.activeUserIndex);

@@ -163,6 +163,29 @@ test("stale detail cannot claim that newer live usage was free", () => {
   assert.equal(sessionCostLabel(live, stale)?.text, "$—");
 });
 
+test("a running Claude turn's live usage counts beside settled totals without changing which totals apply", () => {
+  const liveUsage = { tokensIn: 10, tokensOut: 5, costUsd: 0.02 };
+  // Settled 10/5 with a cache-heavy ledger: its processed total exceeds the session's counters.
+  const settled = session({ tokensIn: 10, tokensOut: 5, costUsd: 0.01, liveUsage });
+  const ledger = response({ totals: amount({ inputTokens: 10, uncachedInputTokens: 10, outputTokens: 5, cachedInputTokens: 1000,
+    processedTokens: 1015, costUsd: 0.01, costSource: "modelPriced" }) });
+  const totals = sessionUsageTotals(settled, ledger);
+  assert.equal(totals.detailed, true);
+  assert.deepEqual([totals.inputTokens, totals.outputTokens, totals.cachedInputTokens, totals.processedTokens], [20, 10, 1000, 1030]);
+  assert.ok(Math.abs(totals.costUsd - 0.03) < 1e-12);
+  assert.deepEqual(sessionUsageTotals(session({ liveUsage }), null), {
+    inputTokens: 10, outputTokens: 5, cachedInputTokens: 0, cacheCreationTokens: 0, reasoningTokens: 0,
+    processedTokens: 15, cacheSavingsUsd: 0, costUsd: 0.02, detailed: false,
+  });
+  assert.equal(sessionCostLabel(settled, ledger)?.text, "$0.03");
+  assert.equal(sessionCostLabel(session({ liveUsage: { ...liveUsage, costUsd: 0 } }))?.text, "$—", "unpriced live tokens are not free");
+  // A caught-up ledger's priced zero (a local `/context` result) cannot price a live request.
+  const pricedZero = response({ totals: amount({ inputTokens: 1, outputTokens: 1, processedTokens: 2, costSource: "modelPriced" }) });
+  assert.equal(sessionCostLabel(session({ tokensIn: 1, tokensOut: 1 }), pricedZero)?.text, "$0.00");
+  assert.deepEqual(sessionCostLabel(session({ tokensIn: 1, tokensOut: 1, liveUsage: { ...liveUsage, costUsd: 0 } }), pricedZero),
+    { text: "$—", priced: false, ariaLabel: "Session Usage: Cost Unavailable" });
+});
+
 test("the ledger's cost is used when the session's running total lags behind it", () => {
   const label = sessionCostLabel(
     session({ tokensIn: 25_000, tokensOut: 900, costUsd: 0 }),

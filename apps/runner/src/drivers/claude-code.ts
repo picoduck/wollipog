@@ -572,6 +572,9 @@ export class ClaudeCodeDriver implements Driver {
   private readonly usageAccounting: ClaudeUsageAccounting;
   private usageBaselinePrepared = false;
   private usageBaselinePreparing = false;
+  /** The top-level request streaming now: its `message_start` usage, completed by `message_delta`.
+   * Published live on `message_stop` when the control plane can settle it (#3086). */
+  private liveRequest: { model: string; usage: Record<string, unknown> } | null = null;
   /** The model on the most recent top-level assistant record; stamped on the turn's usage. Claude
    * records the model per message, and the terminal `result` carries none. */
   private turnModel: string | null = null;
@@ -677,7 +680,7 @@ export class ClaudeCodeDriver implements Driver {
     private readonly cb: DriverCallbacks,
     deps: Partial<ClaudeDriverDeps> = {},
   ) {
-    this.usageAccounting = new ClaudeUsageAccounting(claudeRestoresUsage(opts.agentVersion), opts.claudeUsageCheckpoint);
+    this.usageAccounting = new ClaudeUsageAccounting(claudeRestoresUsage(opts.agentVersion), opts.claudeUsageCheckpoint, opts.claudeLiveUsage);
     this.cwd = opts.cwd;
     this.config = opts.config;
     // Phase 2 resume: reuse the persisted claude session id (→ `--resume` from the first turn);
@@ -828,21 +831,69 @@ export class ClaudeCodeDriver implements Driver {
     if (previous?.sessionId === this.sessionId && checkpoint.totalCostUsd > previous.totalCostUsd) {
       // The retired provider persisted work after its last streamed result. Account that suffix
       // at observation time before using the restored total as the next process's baseline.
+      // An interrupted turn has no result, so this is where its usage settles.
       this.emitUsageResult(result);
+    } else {
+      // Nothing restored beyond the baseline: a killed process that could not persist its totals
+      // keeps only the usage already observed live.
+      this.emitUsageEvents(this.usageAccounting.adoptBaseline(checkpoint));
     }
     this.usageAccounting.checkpoint = checkpoint;
     this.usageBaselinePrepared = true;
     this.cb.onClaudeUsageCheckpoint?.(checkpoint);
   }
 
+  /** A provider process is starting. A new conversation's restored total starts at zero, so record
+   * that baseline now: if the first turn is interrupted before any result, the next launch's
+   * restored prefix is then settled against it instead of silently becoming the baseline. */
+  private beginUsageProcess(): void {
+    this.usageBaselinePrepared = false;
+    if (this.firstTurn && this.usageAccounting.restoresUsage && this.usageAccounting.checkpoint?.sessionId !== this.sessionId) {
+      this.usageAccounting.checkpoint = { sessionId: this.sessionId, totalCostUsd: 0, models: {}, accountingScope: "conversation" };
+      this.cb.onClaudeUsageCheckpoint?.(this.usageAccounting.checkpoint);
+    }
+    this.emitUsageEvents(this.usageAccounting.beginProcess());
+  }
+
+  private emitUsageEvents(events: ReturnType<ClaudeUsageAccounting["result"]>): void {
+    for (const event of events) this.cb.onEvent(event);
+  }
+
+  /** Publish a completed top-level request while its turn still runs. Claude streams the same
+   * `usage` on every content-block record of a message, and that copy stops at `message_start`'s
+   * output count, so only the stream's `message_start`/`message_delta` pair is used. */
+  private publishLiveRequest(): void {
+    const request = this.liveRequest;
+    this.liveRequest = null;
+    // The control plane may have changed since `message_start`; only a v216+ peer shows, rather
+    // than accrues, a provisional record.
+    if (!request || this.cb.supportsLiveClaudeUsage?.() !== true) return;
+    const u = request.usage;
+    const n = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+    const details = u.output_tokens_details && typeof u.output_tokens_details === "object"
+      ? u.output_tokens_details as Record<string, unknown> : null;
+    const event = this.usageAccounting.request({
+      model: request.model,
+      inputTokens: n(u.input_tokens), outputTokens: n(u.output_tokens),
+      cacheReadInputTokens: n(u.cache_read_input_tokens), cacheCreationInputTokens: n(u.cache_creation_input_tokens),
+      ...(details && typeof details.thinking_tokens === "number" ? { thinkingTokens: n(details.thinking_tokens) } : {}),
+      ...(u.speed === "fast" ? { serviceTier: "fast" } : typeof u.service_tier === "string" && u.service_tier ? { serviceTier: u.service_tier } : {}),
+    });
+    if (event) this.cb.onEvent(event);
+  }
+
   private emitUsageResult(result: Json): void {
+    const before = this.usageAccounting.checkpoint;
     const events = this.usageAccounting.result(this.sessionId, result, this.turnModel);
+    // An inconclusive result keeps the old baseline; journaling it again would move the recovery
+    // cursor past live requests that are still open (#3086).
+    const checkpoint = this.usageAccounting.checkpoint !== before ? this.usageAccounting.checkpoint : null;
     events.forEach((event, index) => this.cb.onEvent({ ...event,
       ...(index === events.length - 1 && typeof result.duration_ms === "number" ? { durationMs: result.duration_ms } : {}),
-      ...(index === events.length - 1 && this.usageAccounting.checkpoint && !event.accountingIncomplete
-        ? { claudeUsageCheckpoint: this.usageAccounting.checkpoint } : {}),
+      ...(index === events.length - 1 && checkpoint && !event.accountingIncomplete
+        ? { claudeUsageCheckpoint: checkpoint } : {}),
     }));
-    if (this.usageAccounting.checkpoint) this.cb.onClaudeUsageCheckpoint?.(this.usageAccounting.checkpoint);
+    if (checkpoint) this.cb.onClaudeUsageCheckpoint?.(checkpoint);
   }
 
   async newSession(cwd: string): Promise<string> {
@@ -1148,8 +1199,7 @@ export class ClaudeCodeDriver implements Driver {
       }
     }
     if (this.disposed || cancelGeneration !== this.oneShotCancelGeneration) return "cancelled";
-    this.usageBaselinePrepared = false;
-    this.usageAccounting.beginProcess();
+    this.beginUsageProcess();
     return new Promise<StopReason>((resolve) => {
       this.cancelled = false;
       this.pendingApprovals.clear();
@@ -1529,8 +1579,7 @@ export class ClaudeCodeDriver implements Driver {
         (line) => this.processPersistentLine(line),
         () => this.cb.onStderr("discarded oversized NDJSON record from persistent Claude stdout"),
       );
-      this.usageBaselinePrepared = false;
-      this.usageAccounting.beginProcess();
+      this.beginUsageProcess();
       this.intentionalPersistentStop = false;
       this.attachPersistentTransport(child, ++this.persistentGeneration);
     }
@@ -2729,7 +2778,10 @@ export class ClaudeCodeDriver implements Driver {
     const pp = parentId ? { parentToolUseId: parentId } : null;
     switch (msg.type) {
       case "conversation_reset":
-        if (!parentId) this.usageAccounting.checkpoint = null;
+        if (!parentId) {
+          this.liveRequest = null;
+          this.emitUsageEvents(this.usageAccounting.adoptBaseline(null));
+        }
         return null;
 
       case "rate_limit_event":
@@ -3061,8 +3113,25 @@ export class ClaudeCodeDriver implements Driver {
         if (ev.type === "message_start") {
           const id = ev.message?.id;
           if (typeof id === "string" && id) this.streamingMessageIds.set(messageLane, id);
+          const model = ev.message?.model;
+          const usage = ev.message?.usage;
+          if (!parentId) {
+            this.liveRequest = typeof model === "string" && model && model !== "<synthetic>" &&
+              usage && typeof usage === "object" && this.cb.supportsLiveClaudeUsage?.() === true
+              ? { model, usage: { ...usage } } : null;
+          }
+        } else if (ev.type === "message_delta") {
+          // The delta's counters are cumulative for the message, so they replace the start's.
+          if (!parentId && this.liveRequest && ev.usage && typeof ev.usage === "object") {
+            for (const [key, value] of Object.entries(ev.usage as Record<string, unknown>)) {
+              if (typeof value === "number" && Number.isFinite(value) || key === "output_tokens_details" && value && typeof value === "object") {
+                this.liveRequest.usage[key] = value;
+              }
+            }
+          }
         } else if (ev.type === "message_stop") {
           this.streamingMessageIds.delete(messageLane);
+          if (!parentId) this.publishLiveRequest();
         } else if (ev.type === "content_block_delta") {
           const d = ev.delta;
           const providerMessageId = this.streamingMessageIds.get(messageLane);
@@ -3187,6 +3256,8 @@ export class ClaudeCodeDriver implements Driver {
 
       case "result": {
         this.streamingMessageIds.clear();
+        // A request without `message_stop` was cut off; the result's totals are authoritative.
+        if (!parentId) this.liveRequest = null;
         // A stop call never outlives its turn; one left without a tool result proves nothing later.
         // A subagent's result ends only its own lane.
         if (!parentId) this.modelTaskStops.clear();

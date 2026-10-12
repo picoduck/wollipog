@@ -33,13 +33,73 @@ export function claudeUsageCheckpoint(sessionId: string, result: any, restoresUs
   return { sessionId, totalCostUsd, models, accountingScope: restoresUsage ? "conversation" : "process" };
 }
 
-/** result.usage is main-loop/per-turn; modelUsage and USD are cumulative and include children. */
+/** One completed top-level API request, from its `message_start` usage and final `message_delta`. */
+export interface ClaudeRequestUsage {
+  model: string;
+  inputTokens: number; outputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number;
+  /** The subset of `outputTokens` spent thinking (`output_tokens_details.thinking_tokens`). */
+  thinkingTokens?: number;
+  serviceTier?: string;
+}
+
+/** Live request records published since the last checkpoint, in the order they were published. */
+export type ClaudeLiveUsage = UsageEvent[];
+
+/**
+ * result.usage is main-loop/per-turn; modelUsage and USD are cumulative and include children.
+ *
+ * Live usage (#3086): Claude reports cumulative cost only on a turn's `result`, so a long turn
+ * shows nothing until it ends and an interrupted one has no result at all. Each completed
+ * top-level request is therefore also published as a `provisional` record. Provisional records
+ * are display-only: neither runner metadata nor the control plane's ledger accrues them, so the
+ * cumulative checkpoint that follows is still accounted exactly as before and nothing can be
+ * counted twice, whatever order a reconnecting control plane sees events and snapshots in.
+ *
+ * The window of provisional records closes in one of two ways. A checkpoint that covers them (a
+ * result, or a resume probe whose restored prefix grew) marks its last record `settled`. A
+ * baseline that cannot cover them (a killed process that never persisted its totals, an old CLI's
+ * process-scoped totals, a new conversation) republishes each one, in order, as an ordinary
+ * `republished` record, so the usage observed live is accounted rather than lost; a restart
+ * between two of them resumes after the last one written. An inconclusive result (zeroed counters,
+ * a lower total) leaves the window open for the next checkpoint to decide.
+ */
 export class ClaudeUsageAccounting {
   checkpoint: ClaudeUsageCheckpoint | null;
-  constructor(readonly restoresUsage: boolean, checkpoint?: ClaudeUsageCheckpoint) {
+  private live: UsageEvent[];
+  constructor(readonly restoresUsage: boolean, checkpoint?: ClaudeUsageCheckpoint, live?: ClaudeLiveUsage) {
     this.checkpoint = checkpoint?.accountingScope === (restoresUsage ? "conversation" : "process") ? checkpoint : null;
+    this.live = (live ?? []).filter((event) => event.liveUsage === "provisional").map((event) => ({ ...event }));
   }
-  beginProcess(): void { if (!this.restoresUsage) this.checkpoint = null; }
+
+  /** A new process starts. An old CLI's totals restart from zero and can never cover the previous
+   * process's live requests, so they are accounted as observed. */
+  beginProcess(): UsageEvent[] {
+    if (this.restoresUsage) return [];
+    this.checkpoint = null;
+    return this.accountLive();
+  }
+
+  /** Adopt a baseline that publishes no delta: a restored prefix no higher than the last one, or a
+   * new conversation. It cannot cover live requests, so they are accounted as observed. */
+  adoptBaseline(checkpoint: ClaudeUsageCheckpoint | null): UsageEvent[] {
+    this.checkpoint = checkpoint;
+    return this.accountLive();
+  }
+
+  /** A completed top-level request, published while its turn still runs. */
+  request(usage: ClaudeRequestUsage): UsageEvent | null {
+    const inputTokens = count(usage.inputTokens), outputTokens = count(usage.outputTokens);
+    const cachedInputTokens = count(usage.cacheReadInputTokens), cacheCreationInputTokens = count(usage.cacheCreationInputTokens);
+    if (!(inputTokens || outputTokens || cachedInputTokens || cacheCreationInputTokens)) return null;
+    const event: UsageEvent = { kind: "token_usage", model: usage.model, inputTokens, outputTokens, cachedInputTokens, cacheCreationInputTokens,
+      ...(usage.thinkingTokens === undefined ? {} : { reasoningOutputTokens: Math.min(outputTokens, count(usage.thinkingTokens)) }),
+      pricingContext: { requestInputTokens: inputTokens + cachedInputTokens + cacheCreationInputTokens,
+        ...(usage.serviceTier ? { serviceTier: usage.serviceTier } : {}) },
+      liveUsage: "provisional" };
+    this.live.push(event);
+    return event;
+  }
+
   result(sessionId: string, result: any, model?: string | null): UsageEvent[] {
     const next = claudeUsageCheckpoint(sessionId, result, this.restoresUsage);
     const previous = this.checkpoint?.sessionId === sessionId ? this.checkpoint : null;
@@ -73,7 +133,23 @@ export class ClaudeUsageAccounting {
         ...(typeof usage.cache_creation_input_tokens === "number" ? { cacheCreationInputTokens: usage.cache_creation_input_tokens } : {}),
         ...(model ? { model } : {}), costUsd: deltaCost, ...(deltaCost === undefined ? {} : { costIsEstimate: true }) });
     }
-    if (next) this.checkpoint = next;
-    return events;
+    if (!next) return events;
+    // A cumulative checkpoint covers every request since the previous one, live ones included.
+    this.checkpoint = next;
+    return this.settle(events);
+  }
+
+  /** Close the live window with `events`, the last of which (or a content-free marker) is
+   * `settled`. Without an open window the payloads stay exactly as an older peer expects. */
+  private settle(events: UsageEvent[]): UsageEvent[] {
+    if (this.live.length === 0) return events;
+    this.live = [];
+    if (events.length === 0) return [{ kind: "token_usage", liveUsage: "settled" }];
+    return events.map((event, index) => index === events.length - 1 ? { ...event, liveUsage: "settled" } : event);
+  }
+
+  private accountLive(): UsageEvent[] {
+    const observed = this.live.map((event): UsageEvent => ({ ...event, liveUsage: "republished" }));
+    return this.settle(observed);
   }
 }

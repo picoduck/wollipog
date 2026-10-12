@@ -308,7 +308,8 @@ export function workerRoster(
       ...(settled ? { completedAt: facts?.completedAt ?? member.updatedAt } : {}),
       ...(member.resolvedModel || member.model ? { model: member.resolvedModel || member.model! } : {}),
       ...(member.effort ? { effort: member.effort } : {}),
-      tokens: member.tokensIn + member.tokensOut,
+      // A running Claude turn's completed requests count as tokens so far (#3086).
+      tokens: member.tokensIn + member.tokensOut + (member.liveUsage ? member.liveUsage.tokensIn + member.liveUsage.tokensOut : 0),
     });
   }
   return rows;
