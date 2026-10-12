@@ -867,6 +867,30 @@ test("Decision Delegation is Orchestrator-only and shows effective sources", asy
   }
 });
 
+test("unsupported Full Control preview prevents button and Enter launch; Custom remains launchable", async () => {
+  const enabledRunner: RunnerView = { ...runner, protocolVersion: PROTOCOL_VERSION,
+    agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    } })) };
+  const fixture = await mountFixture({ runners: [enabledRunner] });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    assert.equal(createButton(fixture.container).disabled, false);
+    await act(async () => fixture.container.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
+    assert.equal(createButton(fixture.container).disabled, true);
+    await act(async () => submitWithEnter(fixture.container));
+    assert.equal(fixture.requests.length, 0);
+    assert.match(fixture.container.textContent ?? "", /Full Control activation is unavailable/);
+    await act(async () => fixture.container.querySelector<HTMLInputElement>('[data-control-mode="custom"]')!.click());
+    assert.equal(createButton(fixture.container).disabled, false);
+    await act(async () => createButton(fixture.container).click());
+    assert.equal(fixture.requests.length, 1);
+    assert.equal((fixture.requests[0]?.orchestrator as unknown as Record<string, unknown>).control, undefined);
+  } finally { await unmountFixture(fixture); }
+});
+
 test("new Orchestrator sessions send only explicit overrides after showing effective defaults", async () => {
   const enabledRunner: RunnerView = {
     ...runner,

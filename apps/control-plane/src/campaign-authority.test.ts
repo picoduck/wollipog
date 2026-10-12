@@ -162,6 +162,32 @@ test("Full Control cannot delegate persistent grants or Human Required provider 
   } finally { h.db.close(); }
 });
 
+test("Codex permission-profile requests retain human ownership in root and child Full Control", () => {
+  const h = harness(PROTOCOL_VERSION, "/repos/test", "codex-app-server");
+  try {
+    assert.ok(h.enable().ok);
+    for (const sessionId of ["root", "child"]) {
+      const driver = new CodexAppServerDriver({ command: "codex", args: [], cwd: "/repos/test", env: {}, context: { kind: "native" }, config: { permissionMode: "on-request" } }, {
+        onEvent: (event) => h.svc.onSessionEvent(sessionId, event), onStderr() {}, onExit() {},
+      });
+      const requests = new Map<string, (params: unknown, id: string) => Promise<unknown>>();
+      (driver as unknown as { registerHandlers(peer: unknown): void }).registerHandlers({
+        onRequest: (method: string, handler: (params: unknown, id: string) => Promise<unknown>) => requests.set(method, handler),
+        onNotification() {},
+      });
+      void requests.get("item/permissions/requestApproval")!({ permissions: { network: true } }, `grant-${sessionId}`);
+      const session = h.db.getSession(sessionId)!;
+      assert.equal(session.pendingApproval!.options[0]!.name, "Allow for Session");
+      assert.equal(session.pendingApproval!.options[0]!.kind, "allow_always");
+      assert.equal(session.pendingRequestOwners!.human, 1);
+      assert.equal(h.svc.resolveDescendantRequest("root", sessionId, session.pendingApproval!.occurrenceId!,
+        { action: "approve", optionId: "allow" }, () => true).ok, false);
+      assert.equal(h.sent.length, 0, "session grants never get standing root or delegated child admission");
+      driver.dispose();
+    }
+  } finally { h.db.close(); }
+});
+
 test("trusted in-bound auth source inspection has the same owner in every server projection", () => {
   const h = harness();
   try {
