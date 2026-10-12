@@ -572,6 +572,47 @@ test("check names that collide with object prototype keys evaluate normally", ()
   }
 });
 
+test("slow reads cannot carry the call past the timeout plus one read's grace", async () => {
+  // Every read takes 25 s and the contexts never end, so only the shared budget stops the reads.
+  const time = clock();
+  const started = time.now();
+  const starts: number[] = [];
+  const endless = ok({ data: { repository: { object: { statusCheckRollup: {
+    contexts: { pageInfo: { hasNextPage: true, endCursor: "again" }, nodes: [] },
+  } } } } });
+  const first = ok(pr({ commits: { nodes: [{ commit: { oid: HEAD, statusCheckRollup: {
+    contexts: { pageInfo: { hasNextPage: true, endCursor: "c" }, nodes: [run(AGGREGATOR, null)] },
+  } } }] } }));
+  const fake = fakeGh([first], { pages: [endless] });
+  const slow: GhRunner = async (args) => {
+    starts.push(time.now() - started);
+    await time.sleep(25_000);
+    return fake.gh(args);
+  };
+  const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 60_000 }, { gh: slow, now: time.now, sleep: async () => {} });
+  assert.equal(result.ok, false);
+  assert.ok(starts.every((at) => at < 80_000), `no read starts past timeout + grace: ${starts.join(",")}`);
+  assert.equal(starts.length, 4);
+});
+
+test("a read hung past the budget is abandoned on the real clock", async () => {
+  const startedAt = Date.now();
+  const hung: GhRunner = () => new Promise(() => {});
+  const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 1 }, { gh: hung, readGraceMs: 50 });
+  assert.equal(result.ok, false);
+  assert.match(!result.ok ? result.error : "", /forge_unreachable/u);
+  assert.ok(Date.now() - startedAt < 2_000);
+});
+
+test("a read that fails once the timeout has passed reports the last observation as a timeout", async () => {
+  const fake = fakeGh([ok(pr({}, [run(AGGREGATOR, null)])), failed("error connecting to api.github.com")]);
+  const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 30_000 }, { gh: fake.gh, ...clock() });
+  assert.ok(result.ok);
+  assert.equal(result.summary.outcome, "timeout");
+  assert.equal(result.summary.polls, 2);
+  assert.deepEqual(result.summary.checks.required, [{ name: AGGREGATOR, state: "pending", reported: true }]);
+});
+
 test("pull request references parse from numbers, short refs, and github.com URLs", () => {
   assert.deepEqual(parsePullRequestRef("3081", "picoduck/wollipog"), { repository: "picoduck/wollipog", number: 3081 });
   assert.deepEqual(parsePullRequestRef(3081, "picoduck/wollipog"), { repository: "picoduck/wollipog", number: 3081 });

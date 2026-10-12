@@ -105,7 +105,8 @@ GitHub's `mergeStateStatus` to confirm it, because an unseen context could still
 `no_required_checks` at once. An unreadable base is an error, never an empty requirement, and a
 GraphQL answer carrying any error is retried rather than trusted. A queue
 entry that disappears without a merge is reported as `queue_ejected` only once it has stayed missing
-for 10 seconds. Timeouts are clamped to 1 ms–3 hours (default 4 minutes) and polling to
+for 10 seconds. Timeouts are clamped to 1 ms–3 hours (default 4 minutes); reads share that budget, so no read
+starts more than 20 seconds past it and one still in flight then is abandoned. Polling is clamped to
 10 seconds–10 minutes (default 30 seconds); lists are capped at 30 required checks and 20 failed jobs.
 
 `wollipog session steering` (MCP `list_steering_attempts`) returns at most 50 receipts, prioritizing

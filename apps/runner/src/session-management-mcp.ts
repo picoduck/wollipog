@@ -1925,7 +1925,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "wait_pull_request",
-    description: "Wait, without model turns, until a GitHub pull request's required checks pass or fail, its merge-queue entry fails or leaves the queue, it merges or closes, its head moves, or the timeout expires; then return one bounded summary (head SHA, each required check, merge-queue position and state, failed jobs with run links, merged). Required checks come from the base branch's rules; one not reported yet is pending, never passing. Reads only, through this runner's gh login. Keep timeoutMs inside your harness's tool-call limit and call again on outcome \"timeout\".",
+    description: "Wait, without model turns, until a GitHub pull request's required checks pass or fail, its merge-queue entry fails or leaves the queue, it merges or closes, its head moves, or the timeout expires; then return one bounded summary (head SHA, each required check, merge-queue position and state, failed jobs with run links, merged). Required checks come from the base branch's rules; one not reported yet is pending, never passing. Reads only, through this runner's gh login. Keep timeoutMs plus 20 seconds inside your harness's tool-call limit and call again on outcome \"timeout\".",
     inputSchema: {
       type: "object",
       properties: {

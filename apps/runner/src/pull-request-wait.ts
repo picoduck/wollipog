@@ -30,6 +30,9 @@ const MAX_URL = 300;
 const MAX_TRANSIENT_FAILURES = 3;
 /** Pause before confirming that a queue entry which vanished without a merge was really ejected. */
 const EJECTION_CONFIRM_MS = 10_000;
+/** How far past the timeout one in-flight observation may run; no read starts after it. */
+export const PULL_REQUEST_WAIT_READ_GRACE_MS = 20_000;
+const BUDGET_SPENT: GhOutcome = { stdout: "", stderr: "the wait's time budget is spent", code: "ETIMEDOUT", timedOut: true };
 
 export type PullRequestWaitOutcome =
   | "checks_passed"
@@ -112,6 +115,8 @@ export interface PullRequestWaitDeps {
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
   signal?: AbortSignal;
+  /** Test hook for PULL_REQUEST_WAIT_READ_GRACE_MS. */
+  readGraceMs?: number;
 }
 
 export type PullRequestWaitResult =
@@ -579,6 +584,25 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
     return cancellableSleep(deps, Math.min(milliseconds, remaining));
   };
 
+  // Every read shares one budget, so the call returns within the timeout plus one read's grace: no
+  // read starts once it is spent, and one still in flight then is abandoned (reads have no effects).
+  const stopAt = deadline + (deps.readGraceMs ?? PULL_REQUEST_WAIT_READ_GRACE_MS);
+  const gh: GhRunner = async (args) => {
+    const budget = stopAt - now();
+    if (budget <= 0) return BUDGET_SPENT;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const spent = new Promise<GhOutcome>((resolve) => {
+      timer = setTimeout(() => resolve(BUDGET_SPENT), budget);
+      timer.unref?.();
+    });
+    try {
+      return await Promise.race([deps.gh(args), spent]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  /** The latest complete observation, reported if a read fails once the timeout has passed. */
+  let last: Observation | null = null;
   const what = `could not read ${repository}#${ref.number}`;
   const variables = ["-f", `owner=${ref.owner}`, "-f", `name=${ref.name}`, "-F", `number=${ref.number}`];
 
@@ -590,7 +614,7 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
     let pageInfo = record(contexts.pageInfo);
     for (let page = 1; page < MAX_CONTEXT_PAGES && pageInfo?.hasNextPage === true && typeof pageInfo.endCursor === "string"; page++) {
       if (deps.signal?.aborted) break;
-      const read = await graphqlRead(deps.gh, [
+      const read = await graphqlRead(gh, [
         "-f", `query=${PULL_REQUEST_CONTEXTS_QUERY}`, ...variables, "-f", `oid=${sha}`, "-f", `after=${pageInfo.endCursor}`,
       ], what, (data) => {
         const more = record(record(record(record(record(data)?.repository)?.object)?.statusCheckRollup)?.contexts);
@@ -604,7 +628,7 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
   };
 
   const read = async (): Promise<Read<Observation>> => {
-    const main = await graphqlRead(deps.gh, ["-f", `query=${PULL_REQUEST_WAIT_QUERY}`, ...variables], what, observation);
+    const main = await graphqlRead(gh, ["-f", `query=${PULL_REQUEST_WAIT_QUERY}`, ...variables], what, observation);
     if (!main.ok || main.value.state !== "open") return main;
     const seen = main.value;
     const head = await completeContexts(seen.rollup, seen.rollupSha);
@@ -627,6 +651,7 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
         if (!await pause(intervalMs)) return { ok: false, error: "request cancelled" };
         continue;
       }
+      if (last && now() >= deadline) return { ok: true, summary: summarize("timeout", last) };
       return { ok: false, error: result.error };
     }
     const seen = result.value;
@@ -637,19 +662,21 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
     expectedHead = seen.headSha;
 
     if (!required || required.base !== seen.baseRef) {
-      const names = await requiredCheckNames(deps.gh, repository, seen.baseRef, deps.signal);
+      const names = await requiredCheckNames(gh, repository, seen.baseRef, deps.signal);
       if (deps.signal?.aborted) return { ok: false, error: "request cancelled" };
       if (!names.ok) {
         if (names.transient && ++transientFailures <= MAX_TRANSIENT_FAILURES && now() < deadline) {
           if (!await pause(intervalMs)) return { ok: false, error: "request cancelled" };
           continue;
         }
+        if (last && now() >= deadline) return { ok: true, summary: summarize("timeout", last) };
         return { ok: false, error: names.error };
       }
       required = { base: seen.baseRef, names: names.names, apps: names.apps };
     }
     // Only a complete observation, rules included, resets the transient-failure budget.
     transientFailures = 0;
+    last = seen;
 
     if (seen.queue) {
       sawQueue = true;
