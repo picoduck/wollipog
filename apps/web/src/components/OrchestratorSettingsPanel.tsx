@@ -17,10 +17,9 @@ import {
   INTEGRATION_ISOLATION_PRESERVED,
   controlPlaneSupportsIntegrationIsolation,
 } from "../session-preset-defaults.js";
-import { SettingsGroup } from "./SettingsView.js";
 import { DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE } from "../ui-evidence-disclosure.js";
 import type { SelectOption } from "./ui/ChoiceControls.js";
-import { SegmentedRow, SelectRow, StaticRow } from "./ui/SettingsRows.js";
+import { SegmentedRow, SelectRow, SettingsGroup, StaticRow } from "./ui/SettingsRows.js";
 
 const AUTO = "__automatic__";
 const DECISION_LABELS: Record<DelegatableWorkflowDecisionCategory, string> = {
@@ -275,10 +274,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
   const source = view!.source;
 
   return <div className="orchestrator-settings" aria-busy={busy || loading || undefined}>
-    <SettingsGroup title="Behavior">
-      <p className="settings-group-intro">
-        Defaults apply to new campaigns only. Each campaign stores its own effective policy.
-      </p>
+    <SettingsGroup title="Behavior" intro="Defaults apply to new campaigns only. Each campaign stores its own effective policy.">
       <SelectRow
         title="Child Harness"
         description={harnessPolicySupported
@@ -365,11 +361,10 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
       />
     </SettingsGroup>
 
-    <SettingsGroup title="Execution Permissions">
-      <p className="settings-group-intro">
-        The Orchestrator role defaults to delegation. Execution permissions are a separate policy
-        and apply only to new campaigns.
-      </p>
+    <SettingsGroup
+      title="Execution Permissions"
+      intro="The Orchestrator role defaults to delegation. Execution permissions are a separate policy and apply only to new campaigns."
+    >
       <SegmentedRow
         title="Strict Project Isolation"
         options={[
@@ -432,10 +427,10 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
       />
     </SettingsGroup>
 
-    <SettingsGroup title="Decision Delegation">
-      <p className="settings-group-intro">
-        Human ownership is the default. Delegation changes apply only to new campaigns and never grant authority to existing sessions.
-      </p>
+    <SettingsGroup
+      title="Decision Delegation"
+      intro="Human ownership is the default. Delegation changes apply only to new campaigns and never grant authority to existing sessions."
+    >
       <SelectRow
         title="Descendant Requests"
         // The selected option's sentence, as the pills showed it: the row says what the choice does.

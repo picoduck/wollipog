@@ -1272,7 +1272,8 @@ test("comfortable density gives every row more room than compact", async ({ page
         rowTwo: box(".surface > .row.row-2"),
         rowDense: box(".surface > .row.dense"),
         cell: box(".table td"),
-        gap: Number.parseFloat(getComputedStyle(document.querySelector(".settings-options")!).rowGap),
+        setting: box(".setting-row"),
+        gap: Number.parseFloat(getComputedStyle(document.querySelector(".approvals-skeleton")!).rowGap),
       };
     });
   };
@@ -1294,7 +1295,7 @@ test("comfortable density gives every row more room than compact", async ({ page
     // control, which is a different feature with different accessibility obligations.
     expect(comfortable[family].height).toBeLessThan(compact[family].height * 1.6);
   }
-  for (const family of ["rowOne", "rowTwo", "rowDense", "cell"] as const) {
+  for (const family of ["rowOne", "rowTwo", "rowDense", "cell", "setting"] as const) {
     expect(comfortable[family].height - compact[family].height, `a ${family} grows by one 4px row step`).toBe(4);
     expect(comfortable[family].padX, `a ${family} keeps its padding`).toBe(compact[family].padX);
     expect(comfortable[family].padY, `a ${family} keeps its padding`).toBe(compact[family].padY);
@@ -1320,7 +1321,7 @@ test("compact renders exactly what the merge base rendered", async ({ page }) =>
   const computed = await page.evaluate(() => {
     const row = getComputedStyle(document.querySelector(".ui-row")!);
     const inbox = getComputedStyle(document.querySelector(".inbox-row")!);
-    const list = getComputedStyle(document.querySelector(".settings-options")!);
+    const list = getComputedStyle(document.querySelector(".approvals-skeleton")!);
     const boxRunner = getComputedStyle(document.querySelector(".runner-card.box-card")!);
     const nativeRunner = getComputedStyle(document.querySelector(".runner-card:not(.box-card)")!);
     return {

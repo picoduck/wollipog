@@ -6,8 +6,21 @@ import { Window } from "happy-dom";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parse } from "postcss";
-import { NavRow, SegmentedRow, SelectRow, Switch, SwitchRow } from "./SettingsRows.js";
-import { SELECT_LIST_CHROME_PX, SELECT_LIST_MIN_WIDTH_PX, resetSelectPreviewRegistry } from "./ChoiceControls.js";
+import {
+  ActionRow,
+  LinkRow,
+  NavRow,
+  NumberRow,
+  SegmentedRow,
+  SelectRow,
+  SettingRow,
+  SettingsGroup,
+  StaticRow,
+  Switch,
+  SwitchRow,
+  ValueRow,
+} from "./SettingsRows.js";
+import { SELECT_LIST_CHROME_PX, SELECT_LIST_MIN_WIDTH_PX, resetSelectPreviewRegistry, type SelectOption } from "./ChoiceControls.js";
 import { AppearancePanel } from "../SettingsView.js";
 import { ThemeProvider, useTheme } from "../ThemeProvider.js";
 import {
@@ -68,6 +81,9 @@ const globals: Record<string, unknown> = {
   navigator: domWindow.navigator,
   HTMLElement: domWindow.HTMLElement,
   HTMLButtonElement: domWindow.HTMLButtonElement,
+  HTMLInputElement: domWindow.HTMLInputElement,
+  // Components written for the automatic JSX runtime (FieldError) still need React in scope here.
+  React,
   Node: domWindow.Node,
   Event: domWindow.Event,
   MouseEvent: domWindow.MouseEvent,
@@ -136,7 +152,7 @@ test("the row kinds are distinguishable in their inert state", async () => {
     </>,
   );
   try {
-    const [segmented, select, sw, nav] = [...container.querySelectorAll(".ui-row")];
+    const [segmented, select, sw, nav] = [...container.querySelectorAll(".setting-row")];
 
     // Each carries an affordance naming its kind, in every state — including the two that used to
     // be a column of rows whose unselected members showed an empty ring and nothing else.
@@ -146,7 +162,7 @@ test("the row kinds are distinguishable in their inert state", async () => {
     assert.ok(select!.querySelector(".ui-select-trigger"), "a picker row shows a trigger");
     assert.ok(select!.querySelector(".ui-select-caret"), "with a caret saying it opens something");
     assert.ok(sw!.querySelector(".ui-switch"), "an off switch still shows a track");
-    assert.ok(nav!.querySelector(".ui-row-chevron"), "a navigation row shows a chevron");
+    assert.ok(nav!.querySelector(".setting-row-chevron"), "a navigation row shows a chevron");
 
     // And they are not each other.
     assertNoDomNode(segmented!.querySelector(".ui-switch"));
@@ -194,11 +210,11 @@ test("a settings panel is one row per setting, not one row per option", async ()
     />,
   );
   try {
-    const rows = [...container.querySelectorAll(".ui-row")];
+    const rows = [...container.querySelectorAll(".setting-row")];
     assert.equal(rows.length, 5, "Display is five settings, so it is five rows");
-    assert.deepEqual(rows.map((row) => row.querySelector(".ui-row-title")?.textContent),
+    assert.deepEqual(rows.map((row) => row.querySelector(".setting-row-title")?.textContent),
       ["Theme", "Color Scheme", "Density", "Sessions Layout", "Terminal Placement"]);
-    assert.ok(rows.every((row) => row.querySelector(":scope > .ui-row-choice-control")),
+    assert.ok(rows.every((row) => row.querySelector(":scope > .setting-row-control")),
       "all five controls occupy the same trailing alignment slot");
     assert.equal(container.querySelectorAll(".settings-group").length, 1,
       "and one group, since a heading per single-row setting restates the row beneath it");
@@ -236,8 +252,8 @@ test("Sessions Layout writes the Sessions preview layout and follows it live (#2
   );
   try {
     const group = container.querySelector('[role="radiogroup"][aria-label="Sessions Layout"]')!;
-    const row = group.closest(".ui-row")!;
-    assert.equal(row.querySelector(".ui-row-desc")?.textContent, "Preview Right applies in windows 1100px and wider.");
+    const row = group.closest(".setting-row")!;
+    assert.equal(row.querySelector(".setting-row-desc")?.textContent, "Preview Right applies in windows 1100px and wider.");
     const radios = () => [...group.querySelectorAll<HTMLButtonElement>('[role="radio"]')];
     assert.deepEqual(radios().map((radio) => [radio.textContent, radio.getAttribute("aria-checked")]),
       [["Preview Below", "true"], ["Preview Right", "false"]], "Preview Below is the default");
@@ -273,8 +289,8 @@ test("Terminal Placement writes the per-device placement and follows both menus 
   try {
     const group = container.querySelector('[role="radiogroup"][aria-label="Terminal Placement"]')!;
     assert.ok(group, "the row's group is named Terminal Placement");
-    const row = group.closest(".ui-row")!;
-    assert.equal(row.querySelector(".ui-row-desc")?.textContent,
+    const row = group.closest(".setting-row")!;
+    assert.equal(row.querySelector(".setting-row-desc")?.textContent,
       "Where terminal tabs open on this device. Running shells keep running when you switch.");
     const radios = () => [...group.querySelectorAll<HTMLButtonElement>('[role="radio"]')];
     const checked = () => radios().map((radio) => radio.getAttribute("aria-checked"));
@@ -357,11 +373,15 @@ test("the scheme list requests readable content dimensions while preserving trig
   }
 });
 
-async function openListWidth(trigger: { left: number; width: number }, menuWidth?: number): Promise<string> {
+async function openListWidth(
+  trigger: { left: number; width: number },
+  menuWidth?: number,
+  options: readonly SelectOption<string>[] = SCHEMES_FIXTURE,
+): Promise<string> {
   const { container, cleanup } = await render(
     <SelectRow
       title="Color Scheme"
-      options={SCHEMES_FIXTURE}
+      options={options}
       value="wollipog"
       onChange={() => undefined}
       {...(menuWidth === undefined ? {} : { menuWidth })}
@@ -396,9 +416,16 @@ test("an explicit menu width never makes the list narrower than its trigger", as
 test("a Select list opens at least 280px wide, even under a short trigger (§8.3)", async () => {
   // A 160px trigger used to open a 160px list, which wrapped option descriptions onto five lines.
   assert.equal(SELECT_LIST_MIN_WIDTH_PX, 280);
-  assert.equal(await openListWidth({ left: 600, width: 160 }), "280px");
+  const bare = SCHEMES_FIXTURE.map(({ description: _description, ...option }) => option);
+  assert.equal(await openListWidth({ left: 600, width: 160 }, undefined, bare), "280px");
   assert.equal(await openListWidth({ left: 600, width: 160 }, 180), "280px",
     "an explicit width below the floor is raised to it");
+});
+
+test("a setting row's Select opens 360px wide by default when its options carry descriptions", async () => {
+  // So every caller's descriptions read on a line or two without each one choosing a width.
+  assert.equal(await openListWidth({ left: 600, width: 240 }), "360px");
+  assert.equal(await openListWidth({ left: 600, width: 240 }, 400), "400px", "a caller's own width still wins");
 });
 
 test("checked state is exposed structurally, not just by colour", async () => {
@@ -414,9 +441,9 @@ test("checked state is exposed structurally, not just by colour", async () => {
       "exactly one option is checked, and the others say so rather than saying nothing");
     // The CSS keys the selected knob off the attribute itself, so there is no class to fall out of sync.
     assert.ok(pills.every((pill) => pill.className === "seg-option"));
-    const sw = container.querySelector(".ui-row-switch")!;
+    const sw = container.querySelector(".setting-row-switch")!;
     assert.equal(sw.getAttribute("aria-checked"), "true");
-    assert.ok(sw.className.includes("ui-row-switch"));
+    assert.ok(sw.className.includes("setting-row-switch"));
   } finally {
     await cleanup();
   }
@@ -453,7 +480,7 @@ test("a segmented row explains the option that is actually selected", async () =
     <SegmentedRow title="Theme" options={THEMES_FIXTURE} value="dark" onChange={() => undefined} />,
   );
   try {
-    assert.equal(container.querySelector(".ui-row-desc")?.textContent, "Always use the dark palette",
+    assert.equal(container.querySelector(".setting-row-desc")?.textContent, "Always use the dark palette",
       "the row's description tracks the choice rather than describing the setting in general");
   } finally {
     await cleanup();
@@ -1077,9 +1104,9 @@ test("each option's sentence is attached to the control it describes", async () 
 
     // The visible sentence for a segmented row is the SELECTED option's, and the pill already
     // carries it: exposed in both places it is announced twice.
-    const rows = [...container.querySelectorAll(".ui-row")];
-    assert.equal(rows[0]!.querySelector(".ui-row-desc")!.getAttribute("aria-hidden"), "true");
-    assert.equal(rows[1]!.querySelector(".ui-row-desc")!.getAttribute("aria-hidden"), null,
+    const rows = [...container.querySelectorAll(".setting-row")];
+    assert.equal(rows[0]!.querySelector(".setting-row-desc")!.getAttribute("aria-hidden"), "true");
+    assert.equal(rows[1]!.querySelector(".setting-row-desc")!.getAttribute("aria-hidden"), null,
       "the picker's own description is not duplicated anywhere, so it stays in the tree");
   } finally {
     await cleanup();
@@ -1133,7 +1160,7 @@ test("a disabled row reports itself as disabled rather than merely looking faded
     <SwitchRow title="Tailnet" checked={false} disabled onClick={() => clicks.push("toggled")} />,
   );
   try {
-    const row = container.querySelector(".ui-row") as unknown as HTMLButtonElement;
+    const row = container.querySelector(".setting-row") as unknown as HTMLButtonElement;
     assert.equal(row.disabled, true);
     await act(async () => { row.click(); });
     assert.deepEqual(clicks, [], "a disabled row must not fire its action");
@@ -1260,12 +1287,21 @@ test("each affordance has real geometry in the stylesheet, not just a class name
 
 });
 
-test("Appearance controls share one fixed trailing column and fill it", () => {
-  assert.match(ruleOf(".ui-row-choice").get("grid-template-columns") ?? "", /220px/,
-    "the value-column edge must not depend on each row's content width");
-  assert.equal(ruleOf(".ui-row-choice-control").get("width"), "100%");
-  assert.equal(ruleOf(".ui-row-choice-control > .seg").get("width"), "100%");
-  assert.equal(ruleOf(".ui-row-picker").get("width"), "100%");
+test("every setting row shares one fixed control column, and its controls fill it (§8.2)", () => {
+  // The rule outside any container query: the narrow layout below 560px is its own rule.
+  const wide = new Map<string, string>();
+  parse(sheet).each((node) => {
+    if (node.type === "rule" && node.selectors.some((candidate) => candidate.trim() === ".setting-row")) {
+      node.walkDecls((decl) => { wide.set(decl.prop, decl.value.trim()); });
+    }
+  });
+  assert.equal(wide.get("grid-template-columns"), "minmax(0, 1fr) var(--setting-control-w)",
+    "the control-column edge must not depend on each row's content width");
+  assert.equal(ruleOf(":root").get("--setting-control-w"), "240px");
+  assert.equal(ruleOf(".setting-row-control > .ui-select").get("width"), "100%");
+  assert.equal(ruleOf(".setting-row-control > .seg").get("width"), "100%");
+  assert.equal(ruleOf(".setting-row-control > .seg").get("border-color"), "var(--control-outline)",
+    "a segmented control in a row carries the control outline, as the select beside it does");
 });
 
 test("control outlines meet the 3:1 non-text contrast bar in every palette", () => {
@@ -1310,7 +1346,7 @@ test("a busy switch keeps its confirmed value and says it is working", async () 
     <SwitchRow title="Push Notifications" checked busy onClick={() => clicks.push("toggled")} />,
   );
   try {
-    const row = container.querySelector(".ui-row") as unknown as HTMLButtonElement;
+    const row = container.querySelector(".setting-row") as unknown as HTMLButtonElement;
     assert.equal(row.getAttribute("aria-checked"), "true",
       "the confirmed value must survive the pending request, not flip early");
     assert.equal(row.getAttribute("aria-busy"), "true", "and the transition must be announced");
@@ -1425,7 +1461,7 @@ test("a switch row is the same switch: one control class, one track", async () =
       assert.ok(sw.classList.contains("ui-switch-control"));
       assert.equal(sw.querySelectorAll(".ui-switch").length, 1);
     }
-    assert.ok(switches[0]!.classList.contains("ui-row-switch"));
+    assert.ok(switches[0]!.classList.contains("setting-row-switch"));
     assert.ok(!switches[0]!.classList.contains("ui-switch-standalone"), "the row is the switch, not a bare track");
   } finally {
     await cleanup();
@@ -1438,10 +1474,10 @@ test("a switch row shows Saved after a confirmed change, announced beside the ro
   const plain = await render(<SwitchRow title="Automatic Updates" checked onClick={() => undefined} />);
   try {
     const row = shown.container.querySelector('[role="switch"]')!;
-    assert.equal(row.querySelector(".ui-row-saved")?.textContent, "Saved");
-    assert.equal(row.querySelector(".ui-row-saved")?.getAttribute("aria-hidden"), "true", "not part of the switch's name");
+    assert.equal(row.querySelector(".setting-row-saved")?.textContent, "Saved");
+    assert.equal(row.querySelector(".setting-row-saved")?.getAttribute("aria-hidden"), "true", "not part of the switch's name");
     assert.equal(shown.container.querySelector('[role="status"]')?.textContent, "Automatic Updates saved");
-    assertNoDomNode(idle.container.querySelector(".ui-row-saved"));
+    assertNoDomNode(idle.container.querySelector(".setting-row-saved"));
     assert.equal(idle.container.querySelector('[role="status"]')?.textContent, "", "the live region waits, empty");
     assertNoDomNode(plain.container.querySelector('[role="status"]'));
   } finally {
@@ -1454,7 +1490,7 @@ test("a switch row shows Saved after a confirmed change, announced beside the ro
 test("a settled switch carries no busy state", async () => {
   const { container, cleanup } = await render(<SwitchRow title="Tailnet" checked={false} onClick={() => undefined} />);
   try {
-    const row = container.querySelector(".ui-row") as unknown as HTMLButtonElement;
+    const row = container.querySelector(".setting-row") as unknown as HTMLButtonElement;
     assert.equal(row.getAttribute("aria-busy"), null, "aria-busy must not be present when idle");
     assert.equal(row.disabled, false);
   } finally {
@@ -1466,13 +1502,13 @@ test("a settled switch carries no busy state", async () => {
  * The chevron, as RENDERED by NavRow.
  *
  * Reading ChevronRightIcon's source instead let the icon be dropped from the row entirely: the DOM
- * test still found the .ui-row-chevron span, and the source test still found geometry in a function
+ * test still found the .setting-row-chevron span, and the source test still found geometry in a function
  * nobody called any more. Assert the row actually paints one.
  */
 test("a navigation row renders a chevron with real geometry", async () => {
   const { container, cleanup } = await render(<NavRow title="Keyboard Shortcuts" onClick={() => undefined} />);
   try {
-    const slot = container.querySelector(".ui-row-chevron");
+    const slot = container.querySelector(".setting-row-chevron");
     assert.ok(slot, "the chevron slot must exist");
     const svg = slot!.querySelector("svg");
     assert.ok(svg, "and must contain a rendered SVG, not just an empty span");
@@ -1519,7 +1555,7 @@ test("a switch remounted mid-request still reports its confirmed value", async (
   const show = async (open: boolean, state: "on" | "off" | "busy") => {
     await act(async () => { root.render(<PushOwner open={open} state={state} />); });
   };
-  const row = () => container.querySelector(".ui-row") as unknown as HTMLButtonElement | null;
+  const row = () => container.querySelector(".setting-row") as unknown as HTMLButtonElement | null;
 
   try {
     await show(true, "on");                        // confirmed on
@@ -1544,5 +1580,404 @@ test("a switch remounted mid-request still reports its confirmed value", async (
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();
+  }
+});
+
+/*
+ * The §8.2 grid's row kinds (#2947). Every one renders `.setting-row`, a text cell and, where it has
+ * one, a control column, and never an empty first cell.
+ */
+
+const describedBy = (element: Element) => (element.getAttribute("aria-describedby") ?? "").split(/\s+/u).filter(Boolean)
+  .map((id) => domWindow.document.getElementById(id)?.textContent ?? `(missing #${id})`);
+const labelledBy = (element: Element) => (element.getAttribute("aria-labelledby") ?? "").split(/\s+/u).filter(Boolean)
+  .map((id) => domWindow.document.getElementById(id)?.textContent ?? `(missing #${id})`).join(" ");
+
+test("every row kind is one grid with a text cell first, never an empty leading cell", async () => {
+  const { container, cleanup } = await render(
+    <SettingsGroup title="Every Kind">
+      <SwitchRow title="Switch" checked onClick={() => undefined} />
+      <SegmentedRow title="Segmented" options={THEMES_FIXTURE} value="light" onChange={() => undefined} />
+      <SelectRow title="Select" options={SCHEMES_FIXTURE} value="wollipog" onChange={() => undefined} />
+      <NumberRow title="Number" value="30" unit="s" onChange={() => undefined} />
+      <ValueRow title="Value" value="0.30.0" mono copy />
+      <LinkRow title="Link" onClick={() => undefined} />
+      <ActionRow title="Action" actionLabel="Edit…" onAction={() => undefined} />
+      <StaticRow title="Static" description="Nothing to operate." />
+      <SettingRow title="Custom" control={<span>Anything</span>} />
+    </SettingsGroup>,
+  );
+  try {
+    const rows = [...container.querySelectorAll(".setting-row")];
+    assert.equal(rows.length, 9);
+    for (const row of rows) {
+      const first = row.firstElementChild!;
+      assert.ok(first.classList.contains("setting-row-text"), `${row.textContent}: the text cell comes first`);
+      assert.notEqual(first.textContent, "", "and it is never empty");
+      assert.ok(first.querySelector(":scope > .setting-row-label > .setting-row-title"), "the title is in the text cell");
+    }
+    assert.equal(container.querySelector(".settings-group-surface")!.children.length, 9,
+      "one child of the surface per setting, so the hairlines fall between settings");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a number row is a 96px field with its unit inside, named by the title and the unit", async () => {
+  const changes: string[] = [];
+  const { container, cleanup } = await render(
+    <NumberRow
+      title="Idle Timeout"
+      description="How long a session waits before it sleeps."
+      value="30"
+      unit="min"
+      min={0}
+      max={240}
+      onChange={(value) => changes.push(value)}
+    />,
+  );
+  try {
+    const row = container.querySelector(".setting-row")!;
+    assert.ok(row.classList.contains("setting-row-number"));
+    const input = row.querySelector<HTMLInputElement>(".setting-row-control > .field > .input-affix.w-xs > input")!;
+    assert.ok(input, "the field is a .w-xs input-affix in a .field in the control column");
+    assert.equal(input.type, "number");
+    assert.equal(input.getAttribute("inputmode"), "numeric");
+    assert.equal(input.min, "0");
+    assert.equal(input.max, "240");
+    assert.equal(input.value, "30");
+    assert.equal(row.querySelector(".input-affix > .input-affix-text")?.textContent, "min", "the unit sits inside the field");
+    assert.equal(labelledBy(input), "Idle Timeout min");
+    assert.deepEqual(describedBy(input), ["How long a session waits before it sleeps."]);
+    assert.equal(input.getAttribute("aria-invalid"), null);
+    assertNoDomNode(row.querySelector(".field-error"));
+
+    await act(async () => {
+      input.focus();
+      Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, "value")!.set!.call(input, "45");
+      input.dispatchEvent(new domWindow.InputEvent("input", { bubbles: true }) as unknown as Event);
+      input.dispatchEvent(new domWindow.KeyboardEvent("keyup", { bubbles: true }) as unknown as Event);
+    });
+    assert.deepEqual(changes, ["45"], "the caller receives the field's text");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("an invalid number is aria-invalid with a field error under the field, which it points at first", async () => {
+  const { container, cleanup } = await render(
+    <NumberRow
+      title="Maximum Concurrent Children"
+      description="Choose 0 to pause child admission."
+      value="-1"
+      onChange={() => undefined}
+      error="Enter a whole number from 0 to 64."
+    />,
+  );
+  try {
+    const input = container.querySelector<HTMLInputElement>(".setting-row-number input")!;
+    assert.equal(input.getAttribute("aria-invalid"), "true");
+    const error = container.querySelector(".setting-row-control > .field > .field-error")!;
+    assert.equal(error.textContent, "Enter a whole number from 0 to 64.");
+    assert.equal(error.getAttribute("role"), null, "not an alert: focus on the field announces it (§8.5)");
+    assert.deepEqual(describedBy(input), ["Enter a whole number from 0 to 64.", "Choose 0 to pause child admission."]);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a value row shows its value in the control column, mono when asked, with a named Copy", async () => {
+  const writes: string[] = [];
+  const priorClipboard = Object.getOwnPropertyDescriptor(domWindow.navigator, "clipboard");
+  Object.defineProperty(domWindow.navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: async (text: string) => { writes.push(text); } },
+  });
+  const { container, cleanup } = await render(
+    <>
+      <ValueRow title="Server Address" value="https://studio.tail1234.ts.net:4417" mono copy />
+      <ValueRow title="Version" value="0.30.0" copy="Wollipog 0.30.0 (protocol 142)" />
+      <ValueRow title="Channel" value="Stable" />
+    </>,
+  );
+  try {
+    const [address, version, channel] = [...container.querySelectorAll(".setting-row-value")];
+    const value = address!.querySelector(".setting-row-control > .setting-row-value-text")!;
+    assert.equal(value.textContent, "https://studio.tail1234.ts.net:4417");
+    assert.ok(value.classList.contains("is-mono"));
+    assert.equal(value.getAttribute("title"), "https://studio.tail1234.ts.net:4417", "a truncated value keeps its full text");
+    const copy = address!.querySelector<HTMLButtonElement>(".setting-row-control > button.icon-btn.sm")!;
+    assert.equal(copy.getAttribute("aria-label"), "Copy Server Address");
+    await act(async () => { copy.click(); });
+    await act(async () => { await Promise.resolve(); });
+    assert.deepEqual(writes, ["https://studio.tail1234.ts.net:4417"]);
+
+    assert.ok(!version!.querySelector(".setting-row-value-text")!.classList.contains("is-mono"));
+    await act(async () => { version!.querySelector<HTMLButtonElement>("button")!.click(); });
+    await act(async () => { await Promise.resolve(); });
+    assert.deepEqual(writes.at(-1), "Wollipog 0.30.0 (protocol 142)", "a string copies that text instead of the value");
+
+    assertNoDomNode(channel!.querySelector("button"), "no Copy unless asked");
+  } finally {
+    await cleanup();
+    if (priorClipboard) Object.defineProperty(domWindow.navigator, "clipboard", priorClipboard);
+    else delete (domWindow.navigator as unknown as Record<string, unknown>).clipboard;
+  }
+});
+
+test("a link row is one button with a trailing chevron and an optional trailing word; NavRow is the same row", async () => {
+  let clicks = 0;
+  const { container, cleanup } = await render(
+    <>
+      <LinkRow title="Tool Policies" description="Read-only guardrails." trailing="3 Policies" onClick={() => { clicks += 1; }} />
+      <NavRow title="Keyboard Shortcuts" hasPopup="dialog" onClick={() => undefined} />
+      <LinkRow title="Instances" disabled onClick={() => { clicks += 1; }} />
+    </>,
+  );
+  try {
+    assert.equal(NavRow, LinkRow, "the old name stays as an alias until its callers move");
+    const [policies, shortcuts, instances] = [...container.querySelectorAll<HTMLButtonElement>("button.setting-row-link")];
+    assert.ok(policies!.classList.contains("setting-row-trailing"), "the chevron stays beside the text in a narrow group");
+    const control = policies!.querySelector(".setting-row-control")!;
+    assert.equal(control.querySelector(".setting-row-link-word")?.textContent, "3 Policies");
+    assert.equal(control.lastElementChild!.className, "setting-row-chevron", "the chevron is last");
+    assert.equal(control.lastElementChild!.getAttribute("aria-hidden"), "true");
+    await act(async () => { policies!.click(); });
+    assert.equal(clicks, 1);
+
+    assert.equal(shortcuts!.getAttribute("aria-haspopup"), "dialog");
+    assertNoDomNode(shortcuts!.querySelector(".setting-row-link-word"));
+    assertNoDomNode(shortcuts!.querySelector(".setting-row-icon"), "no icon slot without an icon");
+
+    assert.ok(instances!.disabled);
+    assert.ok(instances!.classList.contains("is-disabled"));
+    await act(async () => { instances!.click(); });
+    assert.equal(clicks, 1, "a disabled link does not navigate");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("an action row is one --control-h button named by its label and the row", async () => {
+  let edits = 0;
+  const { container, cleanup } = await render(
+    <>
+      <ActionRow title="Claude Code" description="Opus, high effort." actionLabel="Edit…" hasPopup="dialog" onAction={() => { edits += 1; }} />
+      <ActionRow title="Codex" actionLabel="Edit…" disabled onAction={() => { edits += 1; }} />
+    </>,
+  );
+  try {
+    const [claude, codex] = [...container.querySelectorAll(".setting-row")];
+    assert.ok(claude!.matches("div.setting-row.setting-row-trailing"), "the row holds its button rather than being one");
+    const button = claude!.querySelector<HTMLButtonElement>(".setting-row-control > button")!;
+    assert.equal(button.className, "btn", "a default-size button, so it is --control-h like every control in the column");
+    assert.equal(button.textContent, "Edit…");
+    assert.equal(labelledBy(button), "Edit… Claude Code");
+    assert.deepEqual(describedBy(button), ["Opus, high effort."]);
+    assert.equal(button.getAttribute("aria-haspopup"), "dialog");
+    await act(async () => { button.click(); });
+    assert.equal(edits, 1);
+
+    assert.ok(codex!.classList.contains("is-disabled"));
+    assert.ok(codex!.querySelector<HTMLButtonElement>("button")!.disabled);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a disabled select row shows its reason as visible text, and the trigger is described by it", async () => {
+  const { container, cleanup } = await render(
+    <SelectRow
+      title="Child Harness"
+      description="Automatic or a fixed stable Agent Harness identity."
+      options={SCHEMES_FIXTURE}
+      value="wollipog"
+      disabled
+      disabledReason="Update Wollipog to choose a fixed Child Harness."
+      onChange={() => undefined}
+    />,
+  );
+  try {
+    const row = container.querySelector(".setting-row")!;
+    assert.ok(row.classList.contains("is-disabled"));
+    const reason = row.querySelector(".setting-row-control > .setting-row-reason")!;
+    assert.equal(reason.textContent, "Update Wollipog to choose a fixed Child Harness.");
+    const trigger = row.querySelector(".ui-select-trigger")!;
+    assert.equal(trigger.getAttribute("aria-disabled"), "true");
+    assert.deepEqual(describedBy(trigger), [
+      "Automatic or a fixed stable Agent Harness identity.",
+      "Update Wollipog to choose a fixed Child Harness.",
+    ]);
+  } finally {
+    await cleanup();
+  }
+  const enabled = await render(
+    <SelectRow title="Child Harness" options={SCHEMES_FIXTURE} value="wollipog" disabledReason="Not shown." onChange={() => undefined} />,
+  );
+  try {
+    assertNoDomNode(enabled.container.querySelector(".setting-row-reason"), "an enabled row has no reason to give");
+  } finally {
+    await enabled.cleanup();
+  }
+});
+
+test("a busy row leads its description with a spinner, or replaces it with the busy sentence, and keeps its value", async () => {
+  const { container, cleanup } = await render(
+    <>
+      <SelectRow title="Descendant Requests" description="Requests go to you." options={SCHEMES_FIXTURE} value="github" busy onChange={() => undefined} />
+      <SegmentedRow title="Density" description="Row spacing." options={[{ value: "a", label: "A" }, { value: "b", label: "B" }]} value="b" busy busyLabel="Saving density…" onChange={() => undefined} />
+      <NumberRow title="Retention" value="7" unit="d" busy onChange={() => undefined} />
+    </>,
+  );
+  try {
+    const [select, segmented, number] = [...container.querySelectorAll(".setting-row")];
+    assert.equal(select!.getAttribute("aria-busy"), "true");
+    const description = select!.querySelector(".setting-row-desc")!;
+    assert.equal(description.firstElementChild?.className, "spinner", "the spinner leads the row's own sentence");
+    assert.equal(description.textContent, "Requests go to you.");
+    assert.match(select!.querySelector(".ui-select-trigger")!.textContent ?? "", /GitHub/, "the control keeps its confirmed value");
+
+    const slot = segmented!.querySelector(".setting-row-desc-slot.is-busy")!;
+    const [hidden, shown] = [...slot.querySelectorAll(":scope > .setting-row-desc")];
+    assert.equal(hidden!.textContent, "Row spacing.");
+    assert.equal(hidden!.getAttribute("aria-hidden"), "true", "the description holds the row's height underneath");
+    assert.equal(shown!.textContent, "Saving density…");
+    assert.ok(shown!.querySelector(".spinner"));
+    assert.equal(segmented!.querySelector('[role="radio"][aria-checked="true"]')?.textContent, "B");
+
+    assert.equal(number!.querySelector(".setting-row-desc-slot.is-busy > .setting-row-desc")?.textContent, "Saving…",
+      "a row with no sentence of its own still says what is happening");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a select or segmented row shows Saved at the end of its text and announces it beside the control", async () => {
+  const { container, cleanup } = await render(
+    <>
+      <SelectRow title="Color Scheme" options={SCHEMES_FIXTURE} value="wollipog" saved onChange={() => undefined} />
+      <SegmentedRow title="Theme" options={THEMES_FIXTURE} value="dark" saved={false} onChange={() => undefined} />
+    </>,
+  );
+  try {
+    const [select, segmented] = [...container.querySelectorAll(".setting-row")];
+    const saved = select!.querySelector(".setting-row-text > .setting-row-saved")!;
+    assert.equal(saved.textContent, "Saved");
+    assert.equal(saved.getAttribute("aria-hidden"), "true");
+    assert.equal(select!.querySelector('[role="status"]')?.textContent, "Color Scheme saved");
+    assertNoDomNode(segmented!.querySelector(".setting-row-saved"));
+    assert.equal(segmented!.querySelector('[role="status"]')?.textContent, "", "the live region waits, empty");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a static row states its title at full contrast with no role, and a disabled row dims only its title", () => {
+  // Read from the stylesheet: the title of a static row is not dimmed, and disabled is --text-faint
+  // on the title alone, never opacity on the row (§3.1).
+  const disabledTitle = ruleOf(".setting-row.is-disabled .setting-row-title");
+  assert.equal(disabledTitle.get("color"), "var(--text-faint)");
+  assert.doesNotMatch(sheet, /\.setting-row[^{]*\{[^}]*opacity/u, "no setting row fades by opacity");
+  assert.equal(ruleOf(".setting-row-desc").get("color"), "var(--text-dim)");
+  assert.equal(ruleOf(".setting-row-desc").get("font"), "var(--type-small)");
+  assert.equal(ruleOf(".setting-row-title").get("font"), "var(--type-body-strong)");
+  assert.doesNotMatch(sheet, /\.setting-row-static \.setting-row-title/u, "a static title is not restyled");
+});
+
+test("a settings group renders its head, scope, description, surface and foot", async () => {
+  const { container, cleanup } = await render(
+    <SettingsGroup
+      title="Display"
+      scope="This Device"
+      action={<button type="button" className="btn sm ghost">Reset to Default</button>}
+      intro="How Wollipog looks in this browser."
+      foot="Changes apply to every window on this device."
+    >
+      <StaticRow title="Theme" />
+    </SettingsGroup>,
+  );
+  try {
+    const group = container.querySelector("section.settings-group")!;
+    const head = group.querySelector(":scope > .settings-group-head")!;
+    const title = head.querySelector("h3.settings-group-title")!;
+    assert.equal(title.textContent, "Display", "Title Case as written, never text-transformed");
+    assert.equal(group.getAttribute("aria-labelledby"), title.id, "the section is named by its title");
+    assert.equal(head.querySelector(".settings-group-scope")?.textContent, "This Device");
+    assert.equal(head.querySelector(".settings-group-action > button")?.textContent, "Reset to Default");
+    assert.deepEqual([...group.children].map((child) => child.className), [
+      "settings-group-head",
+      "settings-group-desc",
+      "settings-group-surface surface",
+      "settings-group-foot",
+    ]);
+    assert.equal(group.querySelector(".settings-group-desc")?.textContent, "How Wollipog looks in this browser.");
+    assert.equal(group.querySelector(".settings-group-foot")?.textContent, "Changes apply to every window on this device.");
+    assert.ok(group.querySelector(".settings-group-surface > .setting-row"));
+  } finally {
+    await cleanup();
+  }
+  const bare = await render(<SettingsGroup><StaticRow title="Theme" /></SettingsGroup>);
+  try {
+    const group = bare.container.querySelector("section.settings-group")!;
+    assert.deepEqual([...group.children].map((child) => child.className), ["settings-group-surface surface"],
+      "every part but the surface is optional");
+    assert.equal(group.getAttribute("aria-labelledby"), null);
+  } finally {
+    await bare.cleanup();
+  }
+});
+
+test("a settings group shows a failed instant save above its surface as a compact danger notice with Retry", async () => {
+  let retries = 0;
+  const { container, cleanup, } = await render(
+    <SettingsGroup title="Display" failure={{ message: "Couldn't save Color Scheme.", detail: "HTTP 503", onRetry: () => { retries += 1; } }}>
+      <SelectRow title="Color Scheme" options={SCHEMES_FIXTURE} value="wollipog" onChange={() => undefined} />
+    </SettingsGroup>,
+  );
+  try {
+    const group = container.querySelector("section.settings-group")!;
+    const notice = group.querySelector(":scope > .notice")!;
+    assert.ok(notice.classList.contains("compact"));
+    assert.ok(notice.classList.contains("t-danger"));
+    assert.equal(notice.getAttribute("role"), "alert");
+    assert.equal(notice.nextElementSibling?.classList.contains("settings-group-surface"), true, "directly above the surface");
+    assert.match(notice.textContent ?? "", /Couldn't save Color Scheme\./);
+    const retry = [...notice.querySelectorAll("button")].find((button) => button.textContent === "Retry")!;
+    assert.ok(retry, "Retry repeats the change");
+    await act(async () => { retry.click(); });
+    assert.equal(retries, 1);
+  } finally {
+    await cleanup();
+  }
+  const settled = await render(
+    <SettingsGroup title="Display" failure={null}><StaticRow title="Theme" /></SettingsGroup>,
+  );
+  try {
+    assertNoDomNode(settled.container.querySelector(".notice"), "no notice until a save fails");
+  } finally {
+    await settled.cleanup();
+  }
+});
+
+test("a switch row with saved or failure state is one framed child of its group, its status inside the frame", async () => {
+  const { container, cleanup } = await render(
+    <SettingsGroup title="Alerts">
+      <SwitchRow title="Desktop Alerts" checked onClick={() => undefined} />
+      <SwitchRow title="Push Notifications" checked saved onClick={() => undefined} />
+      <SwitchRow title="Release Notes" checked={false} failure={{ message: "Couldn't save this change.", onRetry: () => undefined }} onClick={() => undefined} />
+    </SettingsGroup>,
+  );
+  try {
+    const surface = container.querySelector(".settings-group-surface")!;
+    assert.deepEqual([...surface.children].map((child) => child.classList.contains("setting-row-frame") ? "frame"
+      : child.classList.contains("setting-row") ? "row" : child.className), ["row", "frame", "frame"]);
+    const [, saved, failed] = [...surface.children];
+    assert.equal(saved!.querySelector(':scope > [role="status"]')?.textContent, "Push Notifications saved");
+    assert.ok(saved!.querySelector(':scope > [role="switch"] > .setting-row-saved'), "Saved sits in the switch row");
+    assert.ok(failed!.querySelector(":scope > .setting-row.setting-row-switch.is-failed > .ui-switch-standalone"),
+      "a failed row is a plain row around a standalone switch");
+    assert.match(failed!.querySelector(':scope > [role="status"]')?.textContent ?? "", /^Release Notes not saved\./);
+  } finally {
+    await cleanup();
   }
 });

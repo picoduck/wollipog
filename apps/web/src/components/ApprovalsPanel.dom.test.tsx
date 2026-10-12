@@ -136,7 +136,7 @@ function switchNamed(scope: ParentNode, title: string): HTMLButtonElement {
 }
 
 function rowTitles(scope: ParentNode): string[] {
-  return [...scope.querySelectorAll(".ui-row-title")].map((element) => element.textContent ?? "");
+  return [...scope.querySelectorAll(".setting-row-title")].map((element) => element.textContent ?? "");
 }
 
 test("Behavior no longer shows Question Response Style or Routine Question Policies", async () => {
@@ -163,7 +163,7 @@ test("the section is three groups, and Routine Questions lists the starters then
   assert.deepEqual([...container.querySelectorAll("h3")].map((heading) => heading.textContent),
     ["Answering Questions", "Routine Questions", "Tool Policies"]);
   const routine = group(container, "Routine Questions");
-  assert.match(routine.querySelector(".settings-group-intro")?.textContent ?? "",
+  assert.match(routine.querySelector(".settings-group-desc")?.textContent ?? "",
     /^Answer routine permission questions automatically in sessions you own\./);
   assert.deepEqual(rowTitles(routine),
     ["Review Sharing and Retries", "Push and Open Pull Requests", "Evidence Upload", "Release Notes"]);
@@ -191,22 +191,22 @@ test("a failed save shows on that row with Try Again, keeps the real state and d
 
   const failed = switchNamed(routine, "Push and Open Pull Requests");
   assert.equal(failed.getAttribute("aria-checked"), "false", "the switch shows its real, saved state");
-  const row = failed.closest(".ui-row")!;
-  assert.ok(row.classList.contains("ui-row-failed"));
-  assert.equal(row.querySelector(".ui-row-failure")?.textContent, "Couldn't save this change. Try Again");
+  const row = failed.closest(".setting-row")!;
+  assert.ok(row.classList.contains("is-failed"));
+  assert.equal(row.querySelector(".setting-row-failure")?.textContent, "Couldn't save this change. Try Again");
   assert.equal(domWindow.document.getElementById(failed.getAttribute("aria-describedby")!)?.textContent,
     "Couldn't save this change.", "the switch is described by the failure, not by Try Again");
-  assert.equal(row.querySelectorAll(".ui-row-desc-slot.is-failed > .ui-row-desc").length, 2,
+  assert.equal(row.querySelectorAll(".setting-row-desc-slot.is-failed > .setting-row-desc").length, 2,
     "the description keeps its place under the failure, so the row keeps its height");
-  assert.equal(routine.querySelectorAll(".ui-row-failure").length, 1, "only the row that failed changes");
+  assert.equal(routine.querySelectorAll(".setting-row-failure").length, 1, "only the row that failed changes");
   assert.deepEqual(rowTitles(routine), before);
   const announced = [...routine.querySelectorAll('[role="status"]')].map((region) => region.textContent).join("|");
   assert.match(announced, /Push and Open Pull Requests not saved\. .*Question policies require their owner/);
 
-  await act(async () => (row.querySelector(".ui-row-retry") as HTMLButtonElement).click());
+  await act(async () => (row.querySelector(".setting-row-retry") as HTMLButtonElement).click());
   assert.deepEqual(api.writes.map((write) => [write.policyId, write.enabled]),
     [["questions:push:alice", true], ["questions:push:alice", true]], "Try Again repeats the change that failed");
-  assert.equal(routine.querySelectorAll(".ui-row-failure").length, 0);
+  assert.equal(routine.querySelectorAll(".setting-row-failure").length, 0);
   assert.equal(switchNamed(routine, "Push and Open Pull Requests").getAttribute("aria-checked"), "true");
 });
 
@@ -216,7 +216,7 @@ test("tool policies list in priority order with effect and meta, and no control 
   const tools = group(container, "Tool Policies");
   assert.deepEqual(rowTitles(tools), ["Deny Shell", "Ask Before Deploys", "Allow Tests", "Review Agent-Created Sessions"],
     "highest priority first; at equal priority deny before ask; question policies excluded");
-  const rows = [...tools.querySelectorAll<HTMLButtonElement>(".ui-row-nav")];
+  const rows = [...tools.querySelectorAll<HTMLButtonElement>(".setting-row-link")];
   assert.deepEqual(rows.map((row) => row.querySelector(".status")?.textContent), ["Deny", "Ask", "Allow", "Ask"]);
   assert.ok(rows.every((row) => row.querySelector(".status.t-neutral.no-dot")), "the effect label is neutral");
   assert.deepEqual([...rows[0]!.querySelectorAll(".policy-meta-item")].map((item) => item.textContent),
@@ -303,10 +303,10 @@ test("a custom policy whose id is a starter's category keeps its own busy, failu
   const routine = group(container, "Routine Questions");
   api.failSaves = 1;
   await act(async () => switchNamed(routine, "Lookalike").click());
-  assert.equal(routine.querySelectorAll(".ui-row-failure").length, 1, "only the custom row fails");
-  assert.ok(switchNamed(routine, "Lookalike").closest(".ui-row-failed"));
-  assert.ok(!switchNamed(routine, "Review Sharing and Retries").closest(".ui-row-failed"));
-  await act(async () => (routine.querySelector(".ui-row-retry") as HTMLButtonElement).click());
+  assert.equal(routine.querySelectorAll(".setting-row-failure").length, 1, "only the custom row fails");
+  assert.ok(switchNamed(routine, "Lookalike").closest(".setting-row.is-failed"));
+  assert.ok(!switchNamed(routine, "Review Sharing and Retries").closest(".setting-row.is-failed"));
+  await act(async () => (routine.querySelector(".setting-row-retry") as HTMLButtonElement).click());
   assert.deepEqual(api.writes.map((write) => [write.policyId, write.enabled]), [["review", false], ["review", false]],
     "Try Again repeats the custom policy's change, not the starter's");
 });
@@ -333,7 +333,7 @@ test("leaving a policy link and coming back to it scrolls to the row again", asy
 test("an organization selector is shown, since the control plane enforces it", async () => {
   const scoped = policy({ policyId: "org-deny", name: "Org Deny", effect: "deny", scope: { organizationId: "org-a" } });
   const { container } = await mount(<ApprovalsPanel />, stub([scoped]).client);
-  const row = group(container, "Tool Policies").querySelector<HTMLButtonElement>(".ui-row-nav")!;
+  const row = group(container, "Tool Policies").querySelector<HTMLButtonElement>(".setting-row-link")!;
   assert.deepEqual([...row.querySelectorAll(".policy-meta-item")].map((item) => item.textContent),
     ["Scope: every machine, one organization"]);
   await act(async () => row.click());

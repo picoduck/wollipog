@@ -167,7 +167,7 @@ test("focus is rescued when a layout swap drops it", () => {
 test("the shortcut reference always has somewhere to return focus", () => {
   // Opened from the Settings Keyboard row, then Back while it is still open: the row is gone and a
   // selector that only knew about the gear resolved to null, dropping focus on <body>.
-  assert.match(app, /\.settings-view \.ui-row-nav/, "the Settings opener needs its own fallback");
+  assert.match(app, /\.settings-view \.setting-row-link/, "the Settings opener needs its own fallback");
   assert.match(app, /\(reresolved \?\? document\.getElementById\("page-title"\)\)\?\.focus\(\)/,
     "and a last resort that exists on every page");
 });
@@ -302,7 +302,7 @@ test("a setting nobody can change is an explanation, not an off switch", () => {
   assert.doesNotMatch(pending.slice(0, 500), /SwitchRow/,
     "an unknown or unbuilt setting must not paint or announce a value it does not have");
   assert.match(pending.slice(0, 500), /<StaticRow/, "it states something instead");
-  const staticRow = rows.slice(rows.indexOf("export function StaticRow"), rows.indexOf("export function NavRow"));
+  const staticRow = rows.slice(rows.indexOf("export function StaticRow"), rows.indexOf("export function LinkRow"));
   assert.doesNotMatch(staticRow, /role=|aria-checked/,
     "there is nothing to operate, so there is no role to announce");
 });

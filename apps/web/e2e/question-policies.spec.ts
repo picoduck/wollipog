@@ -66,20 +66,20 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       expect(titles.indexOf("Orchestrator")).toBe(titles.indexOf("Approvals") + 1);
       await expect(page.locator(".settings-section-link[aria-current=page]")).toHaveText("Approvals");
       await expect(page.locator("#settings-panel-heading")).toHaveText("Approvals");
-      await expect(page.locator(".settings-group > h3")).toHaveText(["Answering Questions", "Routine Questions", "Tool Policies"]);
-      await expect(routine(page).locator(".ui-row-title")).toHaveText([
+      await expect(page.locator(".settings-group-title")).toHaveText(["Answering Questions", "Routine Questions", "Tool Policies"]);
+      await expect(routine(page).locator(".setting-row-title")).toHaveText([
         "Review Sharing and Retries", "Push and Open Pull Requests", "Evidence Upload", "Release Notes Drafts",
       ]);
-      await expect(tools(page).locator(".ui-row-title")).toHaveText([
+      await expect(tools(page).locator(".setting-row-title")).toHaveText([
         "Deny Shell Commands in Production", "Ask Before Deploys", "Allow Running the Web Unit Tests",
         "Block the Staging Network", "Review Agent-Created Sessions",
       ]);
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width);
       // Tool policy names start where the switch rows' names do: no empty icon gutter.
-      const left = async (rows: Locator) => Math.round((await rows.locator(".ui-row-title").first().boundingBox())!.x);
+      const left = async (rows: Locator) => Math.round((await rows.locator(".setting-row-title").first().boundingBox())!.x);
       expect(await left(tools(page))).toBe(await left(routine(page)));
       // A name is the row's content: it is never cut short for the labels and meta beside it.
-      for (const title of await page.locator(".settings-panel .ui-row-title").all()) {
+      for (const title of await page.locator(".settings-panel .setting-row-title").all()) {
         expect(await title.evaluate((element) => element.scrollWidth <= element.clientWidth + 1), await title.innerText()).toBe(true);
       }
     });
@@ -98,17 +98,17 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
 
     test("a failed save stays on its row with Try Again, and nothing else moves", async ({ page }) => {
       await page.goto(`${APPROVALS}&custom&failure`);
-      const rows = page.locator(".settings-panel .ui-row");
+      const rows = page.locator(".settings-panel .setting-row");
       const boxes = async () => (await rows.evaluateAll((elements) => elements.map((element) => {
         const box = element.getBoundingClientRect();
         return [Math.round(box.top), Math.round(box.height)];
       })));
-      await expect(tools(page).locator(".ui-row")).toHaveCount(5);
+      await expect(tools(page).locator(".setting-row")).toHaveCount(5);
       const before = await boxes();
       const scroll = await page.evaluate(() => document.querySelector(".main-body")!.scrollTop);
       const push = routine(page).getByRole("switch", { name: "Push and Open Pull Requests" });
       await push.click();
-      const failure = routine(page).locator(".ui-row-failure");
+      const failure = routine(page).locator(".setting-row-failure");
       await expect(failure).toHaveCount(1);
       await expect(failure).toHaveText("Couldn't save this change. Try Again");
       await expect(push).toHaveAttribute("aria-checked", "false");
@@ -147,7 +147,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       await dialog.getByRole("button", { name: "Done" }).click();
       await expect(dialog).toBeHidden();
       await expect(deny).toBeFocused();
-      for (const row of await tools(page).locator(".ui-row").all()) {
+      for (const row of await tools(page).locator(".setting-row").all()) {
         await row.click();
         await page.getByRole("dialog", { name: "Policy Details" }).getByRole("button", { name: "Done" }).click();
       }
@@ -176,7 +176,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       await capture(page, `load-error-${viewport.width}`);
       await notice.getByRole("button", { name: "Retry" }).click();
       await expect(notice).toBeHidden();
-      await expect(tools(page).locator(".ui-row")).toHaveCount(5);
+      await expect(tools(page).locator(".setting-row")).toHaveCount(5);
     });
   });
 }
@@ -185,8 +185,8 @@ test.describe("on a coarse pointer", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
   test("switches, rows and Try Again are 44px targets", async ({ page }) => {
     await page.goto(`${APPROVALS}&custom&failure`);
-    await expect(tools(page).locator(".ui-row")).toHaveCount(5);
-    for (const row of await page.locator(".settings-panel .ui-row").all()) {
+    await expect(tools(page).locator(".setting-row")).toHaveCount(5);
+    for (const row of await page.locator(".settings-panel .setting-row").all()) {
       expect((await row.boundingBox())!.height).toBeGreaterThanOrEqual(44);
     }
     await routine(page).getByRole("switch", { name: "Evidence Upload" }).click();
@@ -219,13 +219,13 @@ test.describe("evidence", () => {
         await page.setViewportSize(viewport);
         const suffix = `${theme}-${viewport.width}`;
         await page.goto(`${APPROVALS}&custom&theme=${theme}`);
-        await expect(tools(page).locator(".ui-row")).toHaveCount(5);
+        await expect(tools(page).locator(".setting-row")).toHaveCount(5);
         await capture(page, `section-${suffix}`);
-        await tools(page).locator(".ui-row").last().scrollIntoViewIfNeeded();
+        await tools(page).locator(".setting-row").last().scrollIntoViewIfNeeded();
         await capture(page, `tool-policies-${suffix}`);
         await page.goto(`${APPROVALS}&custom&failure&theme=${theme}`);
         await routine(page).getByRole("switch", { name: "Push and Open Pull Requests" }).click();
-        await expect(routine(page).locator(".ui-row-failure")).toHaveCount(1);
+        await expect(routine(page).locator(".setting-row-failure")).toHaveCount(1);
         await capture(page, `row-error-${suffix}`);
         await page.goto(`${APPROVALS}&load=pending&theme=${theme}`);
         await expect(page.locator(".approvals-skeleton-row")).toHaveCount(6);

@@ -10,11 +10,12 @@ import {
   NetworkPanel,
   NotificationsPanel,
   PendingSetting,
-  SettingsGroup,
   SettingsView,
 } from "../components/SettingsView.js";
 import { DEFAULT_ORCHESTRATOR_DEFAULTS, type AgentHarnessDefaultsView } from "@wollipog/protocol";
 import { OrchestratorSettingsPanel } from "../components/OrchestratorSettingsPanel.js";
+import { SettingsGroup } from "../components/ui/SettingsRows.js";
+import { RowKinds } from "./setting-row-kinds.js";
 import { ApprovalsPanel } from "../components/ApprovalsPanel.js";
 import { createApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
@@ -269,6 +270,8 @@ function Harness() {
     }))
     : COLOR_SCHEMES;
   document.documentElement.setAttribute("data-theme", theme);
+  const kinds = params.get("view") === "kinds";
+  const groupWidth = Number(params.get("group-width")) || null;
 
   const disabled = state === "disabled";
   const busy = state === "busy-on" || state === "busy-off";
@@ -306,7 +309,9 @@ function Harness() {
             section={section}
             onNavigate={() => undefined}
             onOpenShortcuts={() => undefined}
-            panels={{
+            panels={kinds ? Object.fromEntries(SETTINGS_SECTIONS.map((entry) => [entry.id, groupWidth
+              ? <div className="settings-panel" style={{ width: groupWidth }}><RowKinds /></div>
+              : <RowKinds />])) as Record<SettingsSection, React.ReactNode> : {
               appearance: (
                 <AppearancePanel
                   options={THEME_OPTIONS}

@@ -208,10 +208,14 @@ async function inkOf(page: Page, locator: Locator, options: InkOptions = {}): Pr
  *   `clip-path: inset(0 0 50% 0)` kept exactly enough. It is now 20.
  * - #1799 shrank the switch to the design system's 32x18 track with a 12px knob (§8.4), so both
  *   switch floors were measured again rather than scaled: the intact track paints 282–338 across
- *   every state, and 158–212 with the knob hidden, so `track` sits at 250, between the two. The knob
+ *   every state, and 158–212 with the knob hidden, so `track` sat at 250, between the two. The knob
  *   alone paints 126–144, so `knob` is 80.
+ * - #2947 put the rows on a group's `--bg-elev` surface, so the corners of a track show that surface
+ *   rather than the page. Measured again: the intact track paints 248–304 across every state and
+ *   theme (an on track is the low end: its edge is its fill), and 124–180 with the knob hidden, so
+ *   `track` is 215, between the two.
  */
-const INK = { track: 250, knob: 80, chevron: 20, icon: 55 } as const;
+const INK = { track: 215, knob: 80, chevron: 20, icon: 55 } as const;
 
 /**
  * Floors for the Appearance controls, set as ANTI-ERASURE bars rather than as tuned baselines.
@@ -248,8 +252,8 @@ const ROWS = {
   switchOff: { section: "notifications", role: "switch", name: /^Desktop Alerts/, affordance: ".ui-switch", minSize: 16, floor: INK.track },
   switchOn: { section: "notifications", role: "switch", name: /^Push Notifications/, affordance: ".ui-switch", minSize: 16, floor: INK.track },
   tailnetOn: { section: "network", role: "switch", name: /^Enable Tailnet Access/, affordance: ".ui-switch", minSize: 16, floor: INK.track },
-  navChevron: { section: "keyboard", role: "button", name: /^Keyboard Shortcuts/, affordance: ".ui-row-chevron", minSize: 8, floor: INK.chevron },
-  navIcon: { section: "keyboard", role: "button", name: /^Keyboard Shortcuts/, affordance: ".ui-row-icon", minSize: 8, floor: INK.icon },
+  navChevron: { section: "keyboard", role: "button", name: /^Keyboard Shortcuts/, affordance: ".setting-row-chevron", minSize: 8, floor: INK.chevron },
+  navIcon: { section: "keyboard", role: "button", name: /^Keyboard Shortcuts/, affordance: ".setting-row-icon", minSize: 8, floor: INK.icon },
 } as const satisfies Record<string, {
   section: SettingsSection;
   role: "switch" | "button";
@@ -343,7 +347,7 @@ async function differingPixels(page: Page, before: Buffer, after: Buffer,
  * The opacity an element is ACTUALLY drawn at: its own, times every ancestor's.
  *
  * Group opacity multiplies, and `getComputedStyle(element).opacity` shows only the element's own
- * share. Adding `.ui-row-switch.is-busy { opacity: 0.7 }` above a track already at `0.6` renders it
+ * share. Adding `.setting-row-switch.is-busy { opacity: 0.7 }` above a track already at `0.6` renders it
  * at 0.42 — enough to take the busy track under 3:1 — while the element still reports 0.6.
  */
 async function effectiveOpacity(locator: Locator): Promise<number> {
@@ -519,7 +523,7 @@ const PIXELS = { threshold: 0.1, animations: "disabled" } as const;
 for (const theme of THEMES) {
   test(`every affordance is painted in ${theme} @production`, async ({ page }) => {
     // Every row in the registry, each on the section that owns it. The nav row's leading icon is in
-    // here because nothing else looks at it: `.ui-row-icon { opacity: 0 }` takes it off the
+    // here because nothing else looks at it: `.setting-row-icon { opacity: 0 }` takes it off the
     // production Keyboard Shortcuts row and every other assertion stays green.
     for (const key of Object.keys(ROWS) as RowKey[]) {
       const spec = ROWS[key];
@@ -527,7 +531,7 @@ for (const theme of THEMES) {
       const mark = row.locator(spec.affordance);
       const state = await painted(mark);
       expectPainted(state, `the ${key} affordance`, spec.minSize);
-      if (spec.affordance !== ".ui-row-icon" && spec.affordance !== ".ui-row-chevron") {
+      if (spec.affordance !== ".setting-row-icon" && spec.affordance !== ".setting-row-chevron") {
         // The border IS the affordance for a radio or a track, and it must actually paint: a
         // zero-alpha colour renders nothing while every geometric assertion still passes.
         expect(state.borderWidth, `the ${key} border must be drawn`).toBeGreaterThan(0);
@@ -566,7 +570,7 @@ for (const theme of THEMES) {
   });
 
   test(`a navigation row paints a chevron in ${theme}`, async ({ page }) => {
-    const slot = (await useRow(page, theme, "navChevron")).locator(".ui-row-chevron");
+    const slot = (await useRow(page, theme, "navChevron")).locator(".setting-row-chevron");
     const svg = slot.locator("svg");
     await expect(svg).toBeVisible();
 
@@ -598,7 +602,7 @@ for (const theme of THEMES) {
   /**
    * Under the pointer, where nothing else in this file looks.
    *
-   * `.ui-row:hover :is(.ui-radio, .ui-switch, .ui-row-chevron) { clip-path: inset(50%) }` is one
+   * `.setting-row:hover :is(.ui-radio, .ui-switch, .setting-row-chevron) { clip-path: inset(50%) }` is one
    * rule that erases every affordance in the dialog for anyone using a mouse.
    */
   test(`affordances survive hover in ${theme}`, async ({ page }) => {
@@ -611,7 +615,7 @@ for (const theme of THEMES) {
       expectPainted(await painted(row.locator(affordance)), `the hovered ${label}`, minSize);
       await expectInk(page, row.locator(affordance), `the hovered ${label}`, floor);
       // A switch's aggregate ink is dominated by its own fill, so the knob needs measuring on its
-      // own: `.ui-row-switch:hover .ui-switch::after { clip-path: inset(50%) }` left ~275 pixels
+      // own: `.setting-row-switch:hover .ui-switch::after { clip-path: inset(50%) }` left ~275 pixels
       // against a 240 floor and took the only positional cue off a hovered switch.
       if (affordance === ".ui-switch") await expectKnob(page, row.locator(affordance), `the hovered ${label} knob`);
     }
@@ -620,9 +624,9 @@ for (const theme of THEMES) {
   /**
    * A row that cannot be operated still has to say what kind of control it is.
    *
-   * `.ui-row.is-disabled` is reachable in production — App.tsx passes `disabled` to the Tailnet
+   * `.setting-row.is-disabled` is reachable in production — App.tsx passes `disabled` to the Tailnet
    * switch while the tailnet is unmanaged or restarting — but no fixture carried the class, so
-   * `.ui-row.is-disabled .ui-switch { opacity: 0 }` made that row's switch vanish with every
+   * `.setting-row.is-disabled .ui-switch { opacity: 0 }` made that row's switch vanish with every
    * assertion green. Contrast is deliberately not required: WCAG exempts inactive components, and
    * the 0.55 row dimming is the intended appearance.
    */
@@ -630,7 +634,7 @@ for (const theme of THEMES) {
     // Every row, including BOTH switch values. Production reaches disabled-OFF — App.tsx disables
     // Tailnet whenever it is unmanaged or restarting, which includes while `enabled` is false — and
     // an earlier loop inspected only the checked one, leaving
-    // `.ui-row-switch.is-disabled[aria-checked="false"] .ui-switch { opacity: 0 }` green.
+    // `.setting-row-switch.is-disabled[aria-checked="false"] .ui-switch { opacity: 0 }` green.
     for (const label of Object.keys(ROWS) as RowKey[]) {
       const { affordance, minSize, floor } = ROWS[label];
       const row = await useRow(page, theme, label, { state: "disabled" });
@@ -649,7 +653,7 @@ for (const theme of THEMES) {
    * request lands, but not the reverse: `aria-checked={busy ? true : checked}` — a plausible
    * simplification — made a switch announce and paint ON before the subscription it represents
    * existed. And testing only dark left
-   * `html[data-theme="light"] .ui-row-switch.is-busy[aria-checked="false"] .ui-switch { opacity: 0 }`
+   * `html[data-theme="light"] .setting-row-switch.is-busy[aria-checked="false"] .ui-switch { opacity: 0 }`
    * green.
    */
   for (const [state, confirmed] of [["busy-on", true], ["busy-off", false]] as const) {
@@ -692,12 +696,12 @@ for (const theme of THEMES) {
  *
  * `NotifyRow` returns null when notifications are unsupported, `PushRow` when push is unavailable,
  * and the Tailnet switch is replaced by a disabled explanation when Tailscale is absent. With both
- * notification rows always present in the fixture, `.ui-row-switch:only-child` under Alerts was a
+ * notification rows always present in the fixture, `.setting-row-switch:only-child` under Alerts was a
  * selector that matched a real production surface and nothing here.
  */
 test("the reduced topology production can render is covered too @production", async ({ page }) => {
   await useHarness(page, "dark", { topology: "minimal", section: "notifications" });
-  await expect(page.locator(".settings-options .ui-row"), "Desktop Alerts must be the only notification row")
+  await expect(page.locator(".settings-group-surface .setting-row"), "Desktop Alerts must be the only notification row")
     .toHaveCount(1);
   await expectInk(page, rowOf(page, "switchOff").locator(".ui-switch"),
     "the sole notification switch", INK.track);
@@ -758,7 +762,7 @@ test("a fresh load leaves the tab order at the top of the page", async ({ page }
 test("every section renders its own panel", async ({ page }) => {
   for (const { id, title } of SETTINGS_SECTIONS) {
     await useHarness(page, "dark", { section: id });
-    await expect(page.locator(".settings-panel .ui-row, .settings-panel .facts").first(),
+    await expect(page.locator(".settings-panel .setting-row, .settings-panel .facts").first(),
       `the ${title} panel must render something`).toBeVisible();
     await expect(page.locator(`.settings-section-link[aria-current="page"]`)).toHaveText(title);
   }
@@ -776,14 +780,14 @@ for (const width of [1440, 390]) {
     let withIcon = 0;
     for (const { id, title } of SETTINGS_SECTIONS) {
       await useHarness(page, "dark", { section: id, defaults: "agent" });
-      const rows = await page.locator(".settings-panel .ui-row").evaluateAll((elements) => elements.map((row) => {
+      const rows = await page.locator(".settings-panel .setting-row").evaluateAll((elements) => elements.map((row) => {
         const rowLeft = row.getBoundingClientRect().left;
-        const icon = row.querySelector(".ui-row-icon");
+        const icon = row.querySelector(".setting-row-icon");
         return {
-          name: row.querySelector(".ui-row-title")?.textContent ?? "",
-          kind: row.classList.contains("ui-row-switch") ? "switch" : row.classList.contains("ui-row-nav") ? "nav" : "other",
+          name: row.querySelector(".setting-row-title")?.textContent ?? "",
+          kind: row.classList.contains("setting-row-switch") ? "switch" : row.classList.contains("setting-row-link") ? "nav" : "other",
           iconWidth: icon && icon.childNodes.length > 0 ? icon.getBoundingClientRect().width : null,
-          offset: (row.querySelector(".ui-row-title")?.getBoundingClientRect().left ?? Number.NaN) - rowLeft,
+          offset: (row.querySelector(".setting-row-title")?.getBoundingClientRect().left ?? Number.NaN) - rowLeft,
         };
       }));
       const switchOffsets = [...new Set(rows.filter((row) => row.kind === "switch").map((row) => row.offset))];
@@ -791,8 +795,8 @@ for (const width of [1440, 390]) {
       for (const row of rows.filter((candidate) => candidate.kind === "nav")) {
         if (row.iconWidth !== null) {
           withIcon += 1;
-          expect(row.iconWidth, `${title}: "${row.name}" keeps its 17px icon column`).toBe(17);
-          expect(row.offset, `${title}: "${row.name}" starts its title after its icon`).toBeGreaterThan(17);
+          expect(row.iconWidth, `${title}: "${row.name}" keeps its 16px icon`).toBe(16);
+          expect(row.offset, `${title}: "${row.name}" starts its title after its icon`).toBeGreaterThan(16);
         } else if (switchOffsets.length === 1) {
           iconless += 1;
           expect(row.offset, `${title}: "${row.name}" starts its title where the switch rows do`).toBe(switchOffsets[0]);
@@ -828,7 +832,7 @@ test.describe("on a touch device", () => {
       const coarse = await page.evaluate(() => matchMedia("(pointer: coarse)").matches);
       expect(coarse, "this must run where the coarse-pointer rules actually apply").toBe(true);
 
-      const rows = page.locator(".ui-row");
+      const rows = page.locator(".setting-row");
       const count = await rows.count();
       total += count;
       for (let index = 0; index < count; index += 1) {
@@ -951,7 +955,7 @@ for (const theme of THEMES) {
  *
  * The static test only required the rule to contain `outline:`, which `outline: none` satisfies,
  * and the first browser version focused one row alone — so
- * `.ui-row-switch:focus-visible, .ui-row-nav:focus-visible { outline: none; box-shadow: none }`
+ * `.setting-row-switch:focus-visible, .setting-row-link:focus-visible { outline: none; box-shadow: none }`
  * left switches and navigation rows with no keyboard indicator at all and passed. Which is why the
  * list below is every KIND rather than one representative, and why the Appearance controls get the
  * same treatment separately: a rule scoped to `.seg-option:focus-visible` is exactly this defect
@@ -963,7 +967,7 @@ const FOCUSABLE = [
   // this file, which measures the focused control rather than the row around it.
   { kind: "switch-off", key: "switchOff" },
   // A checked switch too. The styling is attribute-driven, so
-  // `.ui-row-switch[aria-checked="true"]:focus-visible { outline: none }` is one rule that takes the
+  // `.setting-row-switch[aria-checked="true"]:focus-visible { outline: none }` is one rule that takes the
   // indicator off every switch that is on, and the unchecked target could not see it.
   { kind: "switch-on", key: "switchOn" },
   { kind: "nav", key: "navChevron" },
@@ -1015,7 +1019,7 @@ for (const theme of THEMES) {
       // The clip, derived from the real boxes, and asserted text-free rather than assumed so.
       const rowBox = (await row.boundingBox())!;
       const mark = (await row.locator(affordance).boundingBox())!;
-      const body = (await row.locator(".ui-row-body").boundingBox())!;
+      const body = (await row.locator(".setting-row-text").boundingBox())!;
       // Every remaining row-shaped control carries its affordance at the TRAILING edge — the one
       // leading-edge case was the radio's ring, and Appearance no longer has rows that are radios.
       // The clip is written for that one case rather than branching on an `edge` that now has a
@@ -1060,7 +1064,7 @@ for (const theme of THEMES) {
       ).toBe(true);
 
       /*
-       * And it has to be focus that paints it. Moving the same ring onto `.ui-row` unconditionally
+       * And it has to be focus that paints it. Moving the same ring onto `.setting-row` unconditionally
        * gives every row an identical outline — keyboard focus then indicates nothing — while the
        * focused row's computed style and baseline are byte-for-byte what they were. Comparing the
        * same clip before and after focus is the only form of this claim that a permanent ring
@@ -1078,7 +1082,7 @@ for (const theme of THEMES) {
         .toBeGreaterThan(40);
 
       // And the row's own affordance has to survive being focused. Every ink assertion above runs at
-      // rest, so `.ui-row-nav:focus-visible .ui-row-chevron svg { clip-path: inset(50%) }` took the
+      // rest, so `.setting-row-link:focus-visible .setting-row-chevron svg { clip-path: inset(50%) }` took the
       // navigation cue off the row exactly while it was keyboard-focused — the focused baseline
       // cannot see it, because a clipped chevron scores four pixelmatch differences.
       await expectInk(page, row.locator(affordance), `the focused ${target.kind} affordance`, ROWS[target.key].floor);
@@ -1120,8 +1124,8 @@ test("tabbing through each section reaches every row kind", async ({ page }) => 
       await page.keyboard.press("Tab");
       const kind = await page.evaluate(() => {
         const active = document.activeElement;
-        if (!(active instanceof HTMLElement) || !active.classList.contains("ui-row")) return null;
-        for (const candidate of ["ui-row-switch", "ui-row-nav"]) {
+        if (!(active instanceof HTMLElement) || !active.classList.contains("setting-row")) return null;
+        for (const candidate of ["setting-row-switch", "setting-row-link"]) {
           if (active.classList.contains(candidate)) return candidate;
         }
         return null;
@@ -1133,7 +1137,7 @@ test("tabbing through each section reaches every row kind", async ({ page }) => 
     }
   }
   expect([...reached].sort(), "every row kind must be reachable by Tab")
-    .toEqual(["ui-row-nav", "ui-row-switch"]);
+    .toEqual(["setting-row-link", "setting-row-switch"]);
 });
 
 test.describe("with a touch pointer", () => {
@@ -1158,7 +1162,7 @@ test.describe("with a touch pointer", () => {
       return [rect.top - 3.5, rect.bottom + 3.5].every((y) => element.contains(document.elementFromPoint(x, y)));
     }), "the Refresh hit area is 44px tall").toBe(true);
 
-    const harnessRows = page.locator(".agent-defaults-item > .ui-row-nav");
+    const harnessRows = page.locator(".agent-defaults-item > .setting-row-link");
     const codex = harnessRows.filter({ hasText: "Codex App Server" });
     await codex.focus();
     await page.keyboard.press("Enter");
@@ -1219,14 +1223,14 @@ test("Agent Harness defaults distinguish version skew and politely explain repai
   await expect(page.getByText(/This version of Wollipog does not support Agent Harness defaults/)).toBeVisible();
   await expect(page.getByText(/Update or restart Wollipog so it matches this dashboard/)).toBeVisible();
   await expect(page.getByRole("button", { name: "Retry", exact: true })).toHaveCount(2);
-  await expect(page.locator(".ui-row-static").filter({
+  await expect(page.locator(".setting-row-static").filter({
     hasText: "This version of Wollipog does not support Agent Harness defaults",
   }).getByRole("button", { name: "Retry" })).toBeVisible();
   await expect(page.getByText("Load Failed", { exact: true })).toHaveCount(0);
 
   await useHarness(page, "dark", { section: "behavior", defaults: "agent-repair" });
   await page.getByRole("button", { name: /Default Models, Efforts, and Permissions/ }).click();
-  const codex = page.locator(".agent-defaults-item > .ui-row-nav").filter({ hasText: "Codex App Server" });
+  const codex = page.locator(".agent-defaults-item > .setting-row-link").filter({ hasText: "Codex App Server" });
   await codex.click();
   await page.getByRole("button", { name: /^Codex App Server Model:/ }).click();
   await page.getByRole("option", { name: "Sol" }).click();
@@ -1383,9 +1387,9 @@ test.describe("the appearance controls", () => {
     // headings, so Appearance did not fit on a phone and the alternatives were never side by side.
     // Sessions Layout (#2219) is the fourth setting and Terminal Placement (#2869) the fifth, one row each.
     await useHarness(page, "dark", { section: "appearance" });
-    await expect(page.locator(".settings-panel .ui-row")).toHaveCount(5);
+    await expect(page.locator(".settings-panel .setting-row")).toHaveCount(5);
     await expect(page.locator(".settings-panel .settings-group")).toHaveCount(1);
-    await expect(page.locator(".settings-panel .ui-row-title"))
+    await expect(page.locator(".settings-panel .setting-row-title"))
       .toHaveText(["Theme", "Color Scheme", "Density", "Sessions Layout", "Terminal Placement"]);
   });
 
@@ -1405,7 +1409,7 @@ test.describe("the appearance controls", () => {
     await expect(list).toBeVisible();
     const geometry = await list.evaluate((element) => {
       const listRect = element.getBoundingClientRect();
-      const triggerRect = document.querySelector<HTMLElement>('.ui-row-picker .ui-select-trigger')!
+      const triggerRect = document.querySelector<HTMLElement>('.setting-row-control .ui-select-trigger')!
         .getBoundingClientRect();
       const descriptions = [...element.querySelectorAll<HTMLElement>(".ui-select-option-desc")];
       return {
@@ -1463,10 +1467,10 @@ test.describe("the appearance controls", () => {
   test("Appearance choices stack at the app mobile breakpoint", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await useHarness(page, "dark", { section: "appearance" });
-    const geometry = await page.locator(".ui-row-choice").evaluateAll((rows) => rows.map((row) => {
-      const body = row.querySelector<HTMLElement>(".ui-row-body")!.getBoundingClientRect();
-      const control = row.querySelector<HTMLElement>(".ui-row-choice-control")!.getBoundingClientRect();
-      const description = row.querySelector<HTMLElement>(".ui-row-desc");
+    const geometry = await page.locator(".setting-row").evaluateAll((rows) => rows.map((row) => {
+      const body = row.querySelector<HTMLElement>(".setting-row-text")!.getBoundingClientRect();
+      const control = row.querySelector<HTMLElement>(".setting-row-control")!.getBoundingClientRect();
+      const description = row.querySelector<HTMLElement>(".setting-row-desc");
       const style = description ? getComputedStyle(description) : null;
       const lineHeight = style
         ? Number.parseFloat(style.lineHeight) || Number.parseFloat(style.fontSize) * 1.2
@@ -1661,5 +1665,225 @@ test.describe("the appearance controls", () => {
     }
     await expect(trigger(page)).toHaveAttribute("aria-disabled", "true");
     expectPainted(await painted(trigger(page).locator(".ui-swatch")), "the disabled swatch", 8);
+  });
+});
+
+/**
+ * The §8.2 grid itself (#2947), on the harness's row-kinds gallery: every row kind in every state, in
+ * groups, inside the real Settings page (`?view=kinds`). `group-width` narrows the groups' container
+ * without narrowing the window, which is what the 560px rule answers to.
+ */
+test.describe("the setting-row grid", () => {
+  async function useKinds(page: Page, theme: Theme, groupWidth?: number) {
+    await page.goto(`/settings-rows-e2e.html?theme=${theme}&view=kinds${groupWidth ? `&group-width=${groupWidth}` : ""}`);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    await expect(page.locator(".settings-group").first()).toBeVisible();
+  }
+  const group = (page: Page, title: string) =>
+    page.locator("section.settings-group", { has: page.getByRole("heading", { name: title, exact: true }) });
+  /** A token's computed colour where the rows are, so a scheme's override is the one compared. */
+  const tokenColor = (page: Page, token: string) => page.evaluate((name) => {
+    const probe = document.createElement("div");
+    probe.style.color = `var(${name})`;
+    document.querySelector(".settings-group-surface")!.append(probe);
+    const color = getComputedStyle(probe).color;
+    probe.remove();
+    return color;
+  }, token);
+
+  test("at 1440px every row kind's title starts at one x and every non-switch control ends at one x", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await useKinds(page, "dark");
+    const rows = await group(page, "Row Kinds").locator(".setting-row").evaluateAll((elements) => elements.map((row) => {
+      const control = row.querySelector(":scope > .setting-row-control");
+      // The rightmost thing the control column actually draws (a select keeps an unrendered list
+      // root after its trigger).
+      const rights = [...(control?.children ?? [])].map((child) => child.getBoundingClientRect())
+        .filter((box) => box.width > 1 && box.height > 1).map((box) => box.right);
+      return {
+        title: row.querySelector(".setting-row-title")!.textContent,
+        switch: row.classList.contains("setting-row-switch"),
+        titleLeft: row.querySelector(".setting-row-title")!.getBoundingClientRect().left,
+        controlRight: rights.length ? Math.max(...rights) : null,
+        trackRight: row.querySelector(":scope > .ui-switch")?.getBoundingClientRect().right ?? null,
+      };
+    }));
+    expect(rows.map((row) => row.title)).toEqual([
+      "Desktop Alerts", "Theme", "Color Scheme", "Idle Timeout", "Server Address", "Tool Policies", "Claude Code", "Effective Boundary",
+    ]);
+    const lefts = rows.map((row) => row.titleLeft);
+    for (const row of rows) {
+      expect(Math.abs(row.titleLeft - lefts[0]!), `"${row.title}" starts its title on the group's one edge`).toBeLessThanOrEqual(0.5);
+    }
+    const ends = rows.filter((row) => !row.switch && row.controlRight !== null);
+    expect(ends.length, "select, segmented, number, value, link and action rows were measured").toBe(6);
+    for (const row of ends) {
+      expect(Math.abs(row.controlRight! - ends[0]!.controlRight!), `"${row.title}" ends its control on the group's one edge`)
+        .toBeLessThanOrEqual(0.5);
+    }
+    // And the switch's track sits on the same edge, at the control column's right.
+    const track = rows.find((row) => row.switch)!.trackRight!;
+    expect(Math.abs(track - ends[0]!.controlRight!)).toBeLessThanOrEqual(0.5);
+  });
+
+  test("every control in a row is --control-h on a mouse and carries the control outline", async ({ page }) => {
+    for (const theme of THEMES) {
+      await useKinds(page, theme);
+      const kinds = group(page, "Row Kinds");
+      const outline = await tokenColor(page, "--control-outline");
+      const controls = {
+        select: kinds.locator(".setting-row-control .ui-select-trigger"),
+        segmented: kinds.locator(".setting-row-control > .seg"),
+        number: kinds.locator(".setting-row-control input"),
+        action: kinds.locator(".setting-row-control > .btn"),
+      };
+      for (const [name, control] of Object.entries(controls)) {
+        await expect(control, `one ${name} control`).toHaveCount(1);
+        expect((await control.boundingBox())!.height, `the ${name} control is 32px tall in ${theme}`).toBe(32);
+      }
+      for (const name of ["select", "segmented", "number"] as const) {
+        const edge = await controls[name].evaluate((element) => getComputedStyle(element).borderTopColor);
+        expect(edge, `the ${name} control's edge is --control-outline in ${theme}`).toBe(outline);
+      }
+    }
+  });
+
+  test("no row has an empty first cell, descriptions are 12px --text-dim, and group heads are never transformed", async ({ page }) => {
+    for (const theme of THEMES) {
+      await useKinds(page, theme);
+      const dim = await tokenColor(page, "--text-dim");
+      const firstCells = await page.locator(".setting-row").evaluateAll((rows) => rows.map((row) => ({
+        cls: row.firstElementChild?.className ?? "",
+        text: (row.firstElementChild?.textContent ?? "").trim(),
+        width: row.firstElementChild?.getBoundingClientRect().width ?? 0,
+      })));
+      expect(firstCells.length).toBeGreaterThan(20);
+      for (const cell of firstCells) {
+        expect(cell.cls, "a row starts with its text cell").toBe("setting-row-text");
+        expect(cell.text.length, "and that cell holds the title").toBeGreaterThan(0);
+        expect(cell.width).toBeGreaterThan(0);
+      }
+      const descriptions = await page.locator(".setting-row-desc").evaluateAll((elements) => elements
+        .filter((element) => !element.classList.contains("setting-row-failure"))
+        .map((element) => ({ size: getComputedStyle(element).fontSize, color: getComputedStyle(element).color })));
+      expect(descriptions.length).toBeGreaterThan(15);
+      for (const description of descriptions) {
+        expect(description.size, "a description is never smaller than 12px").toBe("12px");
+        expect(description.color, `a description is --text-dim in ${theme}`).toBe(dim);
+      }
+      const heads = await page.locator(".settings-group-title").evaluateAll((titles) => titles.map((title) => getComputedStyle(title).textTransform));
+      expect(heads.length).toBeGreaterThan(4);
+      expect(new Set(heads)).toEqual(new Set(["none"]));
+    }
+    // And on every production section, which use the same group.
+    for (const { id } of SETTINGS_SECTIONS) {
+      await useHarness(page, "dark", { section: id });
+      const transforms = await page.locator(".settings-group-title").evaluateAll((titles) => titles.map((title) => getComputedStyle(title).textTransform));
+      for (const transform of transforms) expect(transform, `${id}: a group head is written in Title Case`).toBe("none");
+      const empty = await page.locator(".setting-row").evaluateAll((rows) => rows.filter((row) =>
+        !row.firstElementChild?.classList.contains("setting-row-text") || !(row.firstElementChild.textContent ?? "").trim()).length);
+      expect(empty, `${id}: no row starts with an empty cell`).toBe(0);
+    }
+  });
+
+  test("with the group surface 500px wide, fill controls drop under their text and trailing ones stay beside it", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await useKinds(page, "dark", 500);
+    const kinds = group(page, "Row Kinds");
+    expect((await kinds.locator(".settings-group-surface").boundingBox())!.width,
+      "the narrow layout comes from the group's width, at a desktop viewport").toBe(500);
+    const rows = await kinds.locator(".setting-row").evaluateAll((elements) => elements.map((row) => {
+      const box = row.getBoundingClientRect();
+      const style = getComputedStyle(row);
+      const text = row.querySelector(":scope > .setting-row-text")!.getBoundingClientRect();
+      const control = row.querySelector(":scope > .setting-row-control, :scope > .ui-switch");
+      const controlBox = control?.getBoundingClientRect() ?? null;
+      const field = row.querySelector(":scope > .setting-row-control > :first-child")?.getBoundingClientRect() ?? null;
+      return {
+        title: row.querySelector(".setting-row-title")!.textContent,
+        contentLeft: box.left + Number.parseFloat(style.paddingLeft),
+        contentRight: box.right - Number.parseFloat(style.paddingRight),
+        textBottom: text.bottom,
+        textTop: text.top,
+        control: controlBox && { top: controlBox.top, bottom: controlBox.bottom, right: controlBox.right },
+        field: field && { left: field.left, right: field.right },
+      };
+    }));
+    const byTitle = Object.fromEntries(rows.map((row) => [row.title, row]));
+    for (const title of ["Theme", "Color Scheme", "Idle Timeout"]) {
+      const row = byTitle[title]!;
+      expect(row.control!.top, `${title}: the control drops under its text`).toBeGreaterThanOrEqual(row.textBottom);
+      expect(Math.abs(row.field!.left - row.contentLeft), `${title}: the control starts at the row's edge`).toBeLessThanOrEqual(0.5);
+      expect(Math.abs(row.field!.right - row.contentRight), `${title}: the control fills the row`).toBeLessThanOrEqual(0.5);
+    }
+    for (const title of ["Desktop Alerts", "Tool Policies", "Claude Code"]) {
+      const row = byTitle[title]!;
+      expect(row.control!.top, `${title}: the control stays beside its text`).toBeLessThan(row.textBottom);
+      expect(row.control!.bottom).toBeGreaterThan(row.textTop);
+      expect(Math.abs(row.control!.right - row.contentRight), `${title}: and trails at the row's edge`).toBeLessThanOrEqual(0.5);
+    }
+  });
+
+  test("hovering a switch row fills it without a border; hovering a segmented or select row changes nothing", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    for (const theme of THEMES) {
+      await useKinds(page, theme);
+      const kinds = group(page, "Row Kinds");
+      const fill = await tokenColor(page, "--bg-elev-2");
+      const look = (row: Locator) => row.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return {
+          background: style.backgroundColor,
+          border: [style.borderTopWidth, style.borderRightWidth, style.borderBottomWidth, style.borderLeftWidth].join(" "),
+          shadow: style.boxShadow,
+        };
+      });
+      const rows = {
+        switch: kinds.getByRole("switch", { name: "Desktop Alerts" }),
+        segmented: kinds.locator(".setting-row", { has: page.getByRole("radiogroup", { name: "Theme" }) }),
+        select: kinds.locator(".setting-row", { has: page.getByRole("button", { name: /^Color Scheme:/ }) }),
+      };
+      for (const [name, row] of Object.entries(rows)) {
+        await page.mouse.move(0, 0);
+        const rest = await look(row);
+        // On the row's text, not its control: the claim is about the row.
+        await row.locator(".setting-row-title").hover();
+        const hovered = await look(row);
+        if (name === "switch") {
+          expect(hovered.background, `a hovered switch row fills with --bg-elev-2 in ${theme}`).toBe(fill);
+          expect(rest.background).not.toBe(fill);
+          expect(hovered.shadow, "and draws no edge of its own").toBe("none");
+          expect(hovered.border, "its border does not change on hover").toBe(rest.border);
+        } else {
+          expect(hovered, `a hovered ${name} row looks exactly as it does at rest in ${theme}`).toEqual(rest);
+        }
+      }
+    }
+  });
+
+  test("a disabled select row shows its reason as visible text that describes the trigger", async ({ page }) => {
+    await useKinds(page, "dark");
+    const row = group(page, "Disabled").locator(".setting-row", { has: page.getByRole("button", { name: /^Child Harness:/ }) });
+    const reason = row.locator(".setting-row-reason");
+    await expect(reason).toBeVisible();
+    await expect(reason).toHaveText("Update Wollipog to choose a fixed Child Harness.");
+    const described = await row.locator(".ui-select-trigger").evaluate((trigger) => (trigger.getAttribute("aria-describedby") ?? "")
+      .split(/\s+/u).map((id) => trigger.ownerDocument.getElementById(id)?.textContent ?? ""));
+    expect(described).toContain("Update Wollipog to choose a fixed Child Harness.");
+  });
+
+  test.describe("with a coarse pointer", () => {
+    const phone = devices["Pixel 7"];
+    test.use({ viewport: phone.viewport, hasTouch: phone.hasTouch, isMobile: phone.isMobile, userAgent: phone.userAgent });
+
+    test("every control in a row is 44px tall", async ({ page }) => {
+      await useKinds(page, "dark");
+      expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
+      const kinds = group(page, "Row Kinds");
+      for (const selector of [".ui-select-trigger", ".seg", "input", ".btn"]) {
+        const control = kinds.locator(`.setting-row-control ${selector}`).first();
+        expect((await control.boundingBox())!.height, `${selector} is 44px on touch`).toBe(44);
+      }
+    });
   });
 });

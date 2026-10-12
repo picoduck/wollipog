@@ -438,6 +438,8 @@
   --row-h: 40px;
   --row-h-2: 56px;
   --row-h-dense: 32px;
+  /* A setting row's control column (§8.2): every row in a group ends its control at one edge. */
+  --setting-control-w: 240px;
   --icon-sm: 14px;
   --icon: 16px;
   --icon-lg: 20px;
@@ -1270,10 +1272,6 @@ kbd {
 }
 .sdot-failed {
   background: var(--red);
-}
-.settings-options {
-  display: grid;
-  gap: var(--row-gap);
 }
 /* `.settings-dialog*` and `.settings-option*` were deleted with the dialog. They survived a full
    round after the route landed because the Playwright fixture still rendered a Modal, so the rules
@@ -2121,7 +2119,7 @@ button.status { cursor: pointer; }
 /* An operation inside the notice failed; it reads as the notice's own error line. */
 .notice-error { color: var(--danger-text); }
 /* A setting row's reason or failure sits under its description, clear of the words above it. */
-.ui-row-desc > .notice { margin-top: var(--space-2); }
+.setting-row-desc > .notice { margin-top: var(--space-2); }
 .agent-defaults-list > .toolbar > .notice { flex: 1 1 auto; }
 /* Session-level notices sit in the session column under its bar. */
 .session-detail > .notice { margin: var(--space-2) var(--space-3); }
@@ -3266,6 +3264,8 @@ input {
 .input-affix-text:last-child { inset-inline-end: var(--space-3); }
 .input-affix:has(> .input-affix-text:first-child) > input { padding-inline-start: calc(var(--space-3) + 1em + var(--space-1)); }
 .input-affix:has(> .input-affix-text:last-child) > input { padding-inline-end: calc(var(--space-3) + 2em + var(--space-1)); }
+/* Field widths (§8.3): `.w-xs` for numbers, ports and counts, with the unit inside the field. */
+.w-xs { width: 96px; }
 /* SSH-config import picker in "Add a box" — match the dialog's text inputs. */
 textarea {
   padding: var(--space-2) var(--space-3);
@@ -16429,20 +16429,6 @@ button.review-finding-location {
   align-items: center;
   gap: var(--space-2);
 }
-/* The setting row is a row of the Surface, not a card: square, with a hairline above it, and on the
-   §8.2 grid (no leading gutter), so its title lines up with the facts' labels. */
-.skill-source > .ui-row-switch {
-  grid-template-columns: minmax(0, 1fr) auto;
-  padding: var(--space-3) var(--space-4);
-  border-radius: unset;
-  border-bottom-left-radius: var(--radius-md);
-  border-bottom-right-radius: var(--radius-md);
-  box-shadow: inset 0 1px 0 var(--border);
-}
-.skill-source > .ui-row-switch:has(> .ui-row-saved) { grid-template-columns: minmax(0, 1fr) auto auto; }
-.skill-source > .ui-row-switch > :first-child { display: none; }
-.skill-source > .ui-row-switch:first-child { box-shadow: none; }
-.skill-source > .ui-row-switch:hover:not(.is-disabled) { border-color: transparent; }
 /* Manage Groups (#1985): Version History's shape, a `.modal.lg` at full height whose body is two
    panes, a 248px list of groups beside the selected group, each scrolling on its own so the body
    never does. A refused change's notice sits under both panes, above the footer. On a phone sheet
@@ -17180,10 +17166,180 @@ button.review-finding-location {
   .usage-breakdown-heading { align-items: flex-start; flex-direction: column; }
 }
 
-/* ===================== Settings row primitives ==============   Three visually distinct rows. Previously an off switch, an unselected radio, and a plain
-   navigation link all rendered as "blank gutter + bold title + dim description", so the kind of
-   control — and its state — was invisible until you activated it.
-   =================================================================== */
+/* ====================== Setting rows (docs/design-system.md §8.2) ======================
+   One grid for every setting row (#2947): the text cell, then a fixed control column. There is no
+   leading gutter, so every title in a group starts at one left edge and every control that fills its
+   column ends at one right edge; an icon sits inside the text cell. Switch, link and action rows put
+   their control at the column's right edge and keep it there in a narrow container; select,
+   segmented and number controls fill the column and drop under the text below 560px. The container
+   is the group's surface (`.settings-group-surface`), never the viewport.
+   ======================================================================================== */
+.setting-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--setting-control-w);
+  align-items: center;
+  gap: var(--space-2) var(--space-6);
+  width: 100%;
+  min-width: 0;
+  min-height: var(--row-h-2);
+  padding: var(--space-3) var(--space-4);
+  color: var(--text);
+  text-align: left;
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+/* A row with nothing to operate is all text, so its sentence has the row's width. */
+.setting-row-static { grid-template-columns: minmax(0, 1fr); }
+/* The whole row is the control (a switch, a link): it is pressable, and on fine pointers it fills on
+   hover without a border, so a row inside a surface never turns into a card. A row that holds its
+   control (a select, pills, a field, a button) does not respond to hover at all. */
+button.setting-row { cursor: pointer; }
+.setting-row-link.is-disabled { cursor: not-allowed; }
+@media (hover: hover) and (pointer: fine) {
+  button.setting-row:hover:not(:disabled) { background: var(--bg-elev-2); }
+}
+/* A row a policy link brought into view, until focus leaves it. */
+.setting-row[data-targeted],
+.setting-row-frame[data-targeted] > .setting-row { background: var(--surface-selected); }
+
+/* The text cell: an optional 16px icon, the title over its description, and the Saved check of a
+   control that fills its column. */
+.setting-row-text {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.setting-row-icon { display: inline-flex; flex: none; color: var(--text-dim); }
+.setting-row-label {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-0-5);
+  min-width: 0;
+}
+.setting-row-title { font: var(--type-body-strong); overflow-wrap: anywhere; }
+/* 12px --text-dim, never smaller or fainter: it is the sentence that says what the setting does. */
+.setting-row-desc { color: var(--text-dim); font: var(--type-small); overflow-wrap: anywhere; }
+/* Only a disabled row dims, and only its title: --text-faint, never opacity (§3.1). */
+.setting-row.is-disabled .setting-row-title { color: var(--text-faint); }
+/* A flag after a row's title ("Custom", a policy's effect). The title wraps rather than giving way
+   to it, so a name is never cut to a few characters for a label beside it. */
+.setting-row-title-line { display: flex; align-items: baseline; gap: var(--space-2); min-width: 0; }
+.setting-row-title-line > .setting-row-title { min-width: 0; }
+.setting-row-title-line > .status { flex: none; }
+/* A sentence in the description's place: a failed change (§8.5, #2158) or a busy label. The
+   description stays in the same cell, hidden, so the row keeps its height and nothing below moves. */
+.setting-row-desc-slot { display: grid; }
+.setting-row-desc-slot > .setting-row-desc { grid-area: 1 / 1; }
+.setting-row-desc-slot:is(.is-failed, .is-busy) > .setting-row-desc:not(:last-child) { visibility: hidden; }
+.setting-row-failure { color: var(--danger-text); }
+/* A busy row: a 12px spinner leads the sentence while the control keeps its confirmed value. */
+.setting-row-desc > .spinner {
+  width: var(--space-3);
+  height: var(--space-3);
+  margin-right: var(--space-1);
+  vertical-align: -1px;
+}
+/* While it fails the switch row holds Try Again, so it is a plain row around its switch. */
+.setting-row.is-failed { cursor: default; }
+
+/* The control column. Every control in it is --control-h (32px, 44px on touch) on its
+   --control-outline edge; a select, the pills and a reason under them fill it. */
+.setting-row-control {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.setting-row-control > .ui-select { display: block; width: 100%; min-width: 0; }
+.setting-row-control > .seg { width: 100%; border-color: var(--control-outline); }
+/* Why the row cannot be operated, under its control and in its description (§11.3). */
+.setting-row-reason { color: var(--text-faint); font: var(--type-small); }
+/* A number is a `.field` (§8.1, its invalid edge, disabled ink and error included): a 96px input at
+   the column's right edge, its error under it at the column's width. */
+.setting-row-number .input-affix { align-self: flex-end; }
+/* A read-only value, right-aligned, with its Copy after it. */
+.setting-row-value > .setting-row-control,
+.setting-row-trailing > .setting-row-control {
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+.setting-row-value-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.setting-row-value-text.is-mono { font-family: var(--font-mono); font-size: var(--text-sm); }
+.setting-row-link-word { color: var(--text-dim); font: var(--type-small); white-space: nowrap; }
+.setting-row-chevron { display: inline-flex; color: var(--text-dim); }
+/* The switch row is the Switch button itself, so its track and Saved check are the row's own
+   children: both in the control column, the track at its right edge and Saved just before it. */
+.setting-row-switch > .ui-switch,
+.setting-row-switch > .ui-switch-standalone,
+.setting-row-switch > .setting-row-saved {
+  grid-column: 2;
+  grid-row: 1;
+  justify-self: end;
+}
+.setting-row-switch > .setting-row-saved { margin-right: calc(var(--switch-w) + var(--space-3)); }
+
+/* Below 560px of group surface the control drops under its text at full width; a switch, a link or
+   an action stays trailing beside it. */
+@container (max-width: 559px) {
+  .setting-row { grid-template-columns: minmax(0, 1fr); }
+  .setting-row-trailing { grid-template-columns: minmax(0, 1fr) auto; }
+  .setting-row-number .w-xs { width: 100%; }
+  .setting-row-value > .setting-row-control { justify-content: flex-start; }
+}
+
+/* An instant setting's quiet "Saved" check (§8.6). `.ui-row-saved` is the same check on rows that
+   are not yet setting rows (Orchestrator Controls' gates, Skill Assignments). */
+.ui-row-saved,
+.setting-row-saved {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+:is(.ui-row-saved, .setting-row-saved) > svg { color: var(--positive-text); }
+/* In forced colors the icon follows its words: an svg keeps an author colour it sets itself. */
+@media (forced-colors: active) {
+  :is(.ui-row-saved, .setting-row-saved) > svg { color: inherit; }
+}
+
+/* A group of settings (§5.1): a head, one sentence, one surface of rows, one foot line. */
+.settings-group-head { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
+.settings-group-title { margin: 0; color: var(--text); font: var(--type-section); }
+.settings-group-scope { color: var(--text-dim); font: var(--type-small); }
+.settings-group-action { margin-inline-start: auto; }
+.settings-group-desc,
+.settings-group-foot { margin: 0; color: var(--text-dim); font: var(--type-small); }
+/* The surface is the size container for the rows' 560px rule. Select lists stay in place inside it
+   and correct for its containing block (§2.10), so it can be one. */
+.settings-group-surface { container-type: inline-size; }
+/* In a surface a setting row is a row of it: a hairline between rows (above anything that follows
+   another child of a group's surface), and its corners follow the surface's where they meet. */
+.settings-group-surface > * + *,
+.surface > * + :is(.setting-row, .setting-row-frame) { border-top: 1px solid var(--border); }
+.surface > .setting-row:first-child,
+.surface > .setting-row-frame:first-child > .setting-row {
+  border-top-left-radius: var(--radius-md);
+  border-top-right-radius: var(--radius-md);
+}
+.surface > .setting-row:last-child,
+.surface > .setting-row-frame:last-child > .setting-row {
+  border-bottom-left-radius: var(--radius-md);
+  border-bottom-right-radius: var(--radius-md);
+}
+
+/* ---------- Rows not yet on the setting-row grid (#3019 moves them) ----------
+   Approvals' skeleton rows and the Orchestrator number row keep the earlier row recipe. */
 .ui-row {
   display: grid;
   grid-template-columns: auto 1fr auto;
@@ -17208,62 +17364,9 @@ button.review-finding-location {
 }
 .ui-row:hover:not(.is-disabled) { background: var(--bg-elev-2); border-color: var(--border); }
 .ui-row:active:not(.is-disabled) { transform: scale(0.995); }
-.ui-row.is-disabled { cursor: default; opacity: 0.55; }
-/* A row that states something rather than controlling it.
-   NOT dimmed with opacity, though it started that way and the §26 lock rejected it — correctly.
-   WCAG's exemption is for inactive CONTROLS; this is explanatory text, and text that carries
-   information has to be legible whether or not the thing it describes can be operated. It reads as
-   secondary through certified tokens instead, so the difference is still visible and the contrast
-   is still measured. */
-.ui-row-static { cursor: default; grid-template-columns: 1fr; }
-.ui-row-static .ui-row-title { color: var(--text-dim); font-weight: var(--weight-normal); }
 .ui-row-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .ui-row-title { font-size: var(--text-base); font-weight: var(--weight-medium); }
 .ui-row-desc { font-size: var(--text-xs); color: var(--text-faint); line-height: var(--leading-tight); }
-.ui-row-icon, .ui-row-chevron { display: inline-flex; color: var(--text-faint); }
-.ui-row-icon { width: 17px; justify-content: center; }
-/* A navigation row without an icon keeps the slot but not its width, so its title starts where
-   a switch row's does: the switch row's leading slot is just as empty and takes no room (#2642). */
-.ui-row-icon:empty { width: 0; }
-
-/* A row whose control is a GROUP, so the row is a div: it contains buttons and cannot be one.
-   It must therefore stop advertising itself as pressable. A pointer cursor and a hover fill on
-   something that does nothing when clicked is the same lie the blank selection gutter was. */
-.ui-row-choice {
-  cursor: default;
-  /* Every Appearance row uses the same value column. The previous per-row auto track let each
-     control shrink to its own content, so the picker started to the right of Theme and Density. */
-  grid-template-columns: auto minmax(0, 1fr) 220px;
-}
-.ui-row-choice:hover:not(.is-disabled) { background: transparent; border-color: transparent; }
-/* And no press transform. `.ui-row:active { transform: scale(0.995) }` is inherited from the button
-   rows, and a transformed element becomes the containing block for `position: fixed` descendants —
-   which is what `useAnchoredMenuStyle` positions the listbox with. Pressing the trigger would
-   displace the popover it is opening, by the row's own scale, for as long as the mouse is down. */
-.ui-row-choice:active:not(.is-disabled) { transform: none; }
-/* The trailing slot as a COLUMN, because a segmented group is not always one element: an
-   unavailable group renders the sentence explaining why underneath it. As a bare sibling of the
-   group that sentence became a fourth item in a three-column grid, landing on its own line under
-   the leading gutter — the column the row keeps for an icon. */
-.ui-row-choice-control {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: var(--space-1);
-  width: 100%;
-  min-width: 0;
-}
-/* The picker fills the row's trailing slot rather than sitting at the primitive's 160px minimum,
-   so a scheme name and its swatch are not truncated at the width some other caller needed. */
-.ui-row-choice-control > .seg { width: 100%; }
-.ui-row-picker { display: flex; width: 100%; }
-.ui-row-picker .ui-select-trigger { width: 100%; }
-
-@media (max-width: 760px) {
-  .ui-row.ui-row-choice { grid-template-columns: minmax(0, 1fr); }
-  .ui-row-choice > :first-child { display: none; }
-  .ui-row-choice-control { align-items: stretch; }
-}
 
 /* The palette shown AS the palette: a scheme's ground, its accent and its secondary accent. See
    SCHEME_SWATCHES in theme.ts for why these three arrive as literal values and what pins them to
@@ -17321,8 +17424,6 @@ button.review-finding-location {
 }
 /* A disabled switch keeps its size and reads in --text-faint rather than fading the whole row. */
 .ui-switch-control.is-disabled { cursor: not-allowed; }
-.ui-row-switch.is-disabled { opacity: 1; }
-.ui-row-switch.is-disabled .ui-row-title { color: var(--text-faint); }
 /* On or off, a disabled track is the neutral off fill; the thumb's position still says which. */
 .ui-switch-control.is-disabled > .ui-switch { border-color: var(--text-faint); background: var(--bg-elev-3); }
 .ui-switch-control.is-disabled > .ui-switch::after { background: var(--text-faint); }
@@ -17337,38 +17438,8 @@ button.review-finding-location {
    signal is carried by the row's own description, cursor: progress, and aria-busy besides. */
 .ui-switch-control.is-busy > .ui-switch { opacity: 0.85; }
 .ui-switch-control.is-busy { cursor: progress; }
-/* An instant setting's quiet "Saved" check (§8.6), at the row's right edge before the switch. */
-.ui-row-switch:has(> .ui-row-saved) { grid-template-columns: auto minmax(0, 1fr) auto auto; }
-.ui-row-saved {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  color: var(--text-dim);
-  font: var(--type-small);
-}
-.ui-row-saved > svg { color: var(--positive-text); }
-/* In forced colors the icon follows its words: an svg keeps an author colour it sets itself. */
-@media (forced-colors: active) {
-  .ui-row-saved > svg { color: inherit; }
-}
-/* A flag after a row's title ("Custom", a policy's effect). The title wraps rather than giving way
-   to it, so a name is never cut to a few characters for a label beside it. */
-.ui-row-title-line { display: flex; align-items: baseline; gap: var(--space-2); min-width: 0; }
-.ui-row-title-line > .ui-row-title { min-width: 0; overflow-wrap: anywhere; }
-.ui-row-title-line > .status { flex: none; }
-/* A failed change in place of the description (§8.5, #2158). The description stays in the same
-   cell, hidden, so the row keeps its height and nothing below it moves. */
-.ui-row-desc-slot { display: grid; }
-.ui-row-desc-slot > .ui-row-desc { grid-area: 1 / 1; }
-.ui-row-desc-slot.is-failed > .ui-row-desc:not(.ui-row-failure) { visibility: hidden; }
-.ui-row-failure { color: var(--danger-text); }
-/* While it fails the row holds Try Again, so it is a plain row around its switch: no press or
-   hover of its own. */
-.ui-row-failed { cursor: default; }
-.ui-row-failed:hover:not(.is-disabled) { background: transparent; border-color: transparent; }
-.ui-row-failed:active:not(.is-disabled) { transform: none; }
 /* Text buttons that read as links: Try Again on a failed row, an info popover's trigger. */
-.ui-row-retry,
+.setting-row-retry,
 .approvals-info-trigger {
   padding: 0;
   border: 0;
@@ -17377,9 +17448,6 @@ button.review-finding-location {
   text-decoration: underline;
   cursor: pointer;
 }
-/* A row a policy link brought into view, until focus leaves it. */
-.ui-row[data-targeted],
-.ui-row-frame[data-targeted] > .ui-row { background: var(--surface-selected); }
 
 /* Settings › Approvals (#2158). */
 .approvals-info-trigger { display: inline-flex; align-items: center; gap: var(--space-1); vertical-align: bottom; }
@@ -17398,7 +17466,6 @@ button.review-finding-location {
 /* Orchestrator defaults keep Behavior and Decision Delegation visibly separate while reusing the
    settings row controls and their keyboard contracts. */
 .orchestrator-settings { display: grid; gap: var(--space-5); color: var(--text); }
-.orchestrator-settings .ui-row-choice { grid-template-columns: auto minmax(0, 1fr) 260px; }
 .settings-group-intro { margin: 0; padding: 0 var(--row-pad-x) var(--space-2); color: var(--text-dim); font-size: var(--text-sm); line-height: var(--leading-normal); }
 .orchestrator-number-row {
   display: grid;
@@ -17497,13 +17564,12 @@ button.review-finding-location {
 }
 
 @media (max-width: 760px) {
-  .orchestrator-settings .ui-row-choice { grid-template-columns: minmax(0, 1fr); }
   .orchestrator-number-row, .orchestrator-policy-control { grid-template-columns: minmax(0, 1fr); }
   .orchestrator-settings-actions, .orchestrator-policy-unavailable { align-items: stretch; flex-direction: column; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ui-row, .ui-switch, .ui-switch::after { transition: none; }
+  .ui-row, .setting-row, .ui-switch, .ui-switch::after { transition: none; }
 }
 
 /* ---------------------------- Reduced motion ---------------------------- */
@@ -18363,8 +18429,6 @@ button.review-finding-location {
 .rail-order-required { font-size: var(--text-xs); color: var(--text-faint); padding: 0 6px; }
 .rail-order-hint { margin: 0; font-size: var(--text-xs); color: var(--text-faint); }
 .rail-order-actions { display: flex; justify-content: flex-start; }
-
-.settings-group > h3 { margin: 0; font-size: var(--text-sm); text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-dim); }
 
 .agent-defaults-list {
   display: flex;

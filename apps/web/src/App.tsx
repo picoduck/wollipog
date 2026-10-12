@@ -379,7 +379,7 @@ export function Shell() {
     shortcutReturnSelectorRef.current = target?.closest(".rail-settings")
       ? ".rail-settings .rail-item"
       : target?.closest(".settings-view")
-      ? ".settings-view .ui-row-nav"
+      ? ".settings-view .setting-row-link"
       : null;
     setShortcutReferenceOpener(target);
     setShortcutReferenceOpen(true);

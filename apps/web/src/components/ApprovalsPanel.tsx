@@ -5,9 +5,8 @@ import { approvalsPolicyAnchorId } from "../navigation.js";
 import { setQuestionResponseStyle, useQuestionResponseStyle, type QuestionResponseStyle } from "../question-response-style.js";
 import { Notice } from "./Notice.js";
 import { QuestionPoliciesPanel, type PolicyOwner } from "./QuestionPoliciesPanel.js";
-import { SettingsGroup } from "./SettingsView.js";
 import { ToolPoliciesList } from "./ToolPoliciesList.js";
-import { SegmentedRow } from "./ui/SettingsRows.js";
+import { SegmentedRow, SettingsGroup } from "./ui/SettingsRows.js";
 
 /** §12.3: a load that settles sooner than this renders nothing new. */
 const SKELETON_DELAY_MS = 300;
