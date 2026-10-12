@@ -8,6 +8,7 @@ type Member = { session_id: string; root_id: string; cost: number; tools: number
 /** No foreign keys: deletion, transcript replacement and retired attempts must not refund spend.
  * Usage is each session's own monotonic peak, never the recursively reserved child charge. */
 export class CampaignBudgetLedger {
+  get database(): DatabaseSync { return this.sql; }
   constructor(private readonly sql: DatabaseSync) {
     sql.exec(`CREATE TABLE IF NOT EXISTS campaign_budgets (
       root_id TEXT PRIMARY KEY, authority TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'active', reason TEXT,
@@ -182,6 +183,53 @@ export class CampaignBudgetLedger {
 
   active(sessionId: string): boolean {
     return Boolean((this.sql.prepare("SELECT active FROM campaign_budget_members WHERE session_id=?").get(sessionId) as Member | undefined)?.active);
+  }
+
+  /** Narrow server-only #1321 cancellation adapter, not generic reallocation or usage settlement.
+   * Coordinator's cancellation claim and this reservation-only deactivation MUST share a transaction.
+   * No cost/tool history, checkpoint, settlement, ceiling or generation is changed or synthesized. */
+  deactivateNeverDispatchedMediaReservation(sessionId: string, expected: { rootSessionId: string; runnerId: string;
+    generation: string; commandSha256: string; dispatchSha256: string | null }): boolean {
+    if (!this.sql.isTransaction) return false;
+    const row = this.sql.prepare("SELECT payload,payload_sha256,state FROM prepared_media_sessions WHERE json_extract(payload,'$.sessionId')=?")
+      .get(sessionId) as { payload: string; payload_sha256: string; state: string } | undefined;
+    const purpose = this.sql.prepare("SELECT record,sha256 FROM media_session_purposes WHERE session_id=?")
+      .get(sessionId) as { record: string; sha256: string } | undefined;
+    if (!row || row.state !== "cancelling" || !purpose) return false;
+    const r = JSON.parse(row.payload), p = JSON.parse(purpose.record);
+    const sha = (v: unknown) => createHash("sha256").update(JSON.stringify(v)).digest("hex");
+    if (sha(r) !== row.payload_sha256 || sha(p) !== purpose.sha256 || r.state !== row.state ||
+      r.sessionId !== sessionId || r.rootSessionId !== expected.rootSessionId || r.runnerId !== expected.runnerId ||
+      r.admission?.dispatch?.generation !== expected.generation || r.commandSha256 !== expected.commandSha256 ||
+      r.command?.type !== "start_session" || r.command.spec?.sessionId !== sessionId ||
+      r.command.spec.campaignBudgetDispatch?.rootSessionId !== expected.rootSessionId ||
+      r.command.spec.campaignBudgetDispatch?.generation !== expected.generation ||
+      sha(r.command) !== expected.commandSha256 || r.dispatchSha256 !== expected.dispatchSha256 ||
+      p.sessionId !== sessionId || p.rootSessionId !== expected.rootSessionId || p.childSessionId !== r.childSessionId ||
+      p.admissionId !== r.admissionId || p.generation !== expected.generation || sha(p.command) !== expected.commandSha256) return false;
+    if (r.cancellation?.kind === "never_enqueued") {
+      if (!["prepared", "bound"].includes(r.cancellation.from)) return false;
+    } else if (r.cancellation?.kind === "terminal_fenced") {
+      if (!["dispatching", "uncertain"].includes(r.cancellation.from) || !expected.dispatchSha256) return false;
+      const fence = this.sql.prepare("SELECT * FROM media_never_dispatched_fences WHERE session_id=? AND generation=?")
+        .get(sessionId, expected.generation) as { receipt: string; sha256: string; root_id: string; runner_id: string;
+          command_sha256: string; dispatch_sha256: string } | undefined;
+      if (!fence || fence.root_id !== expected.rootSessionId || fence.runner_id !== expected.runnerId ||
+        fence.command_sha256 !== expected.commandSha256 || fence.dispatch_sha256 !== expected.dispatchSha256 ||
+        sha(JSON.parse(fence.receipt)) !== fence.sha256) return false;
+    } else return false;
+    const actual = this.sql.prepare("SELECT 1 FROM campaign_budget_members m JOIN sessions s ON s.id=m.session_id " +
+      "WHERE m.session_id=? AND m.root_id=? AND m.generation=? AND m.active=1 AND m.cost=0 AND m.tools=0 " +
+      "AND s.parent_session_id=? AND s.runner_id=? AND s.status='queued' AND s.cost_usd=0 " +
+      "AND s.usage_peak_cost_usd=0 AND s.usage_peak_tool_calls=0").get(sessionId, expected.rootSessionId,
+        expected.generation, expected.rootSessionId, expected.runnerId);
+    if (!actual || this.sql.prepare("SELECT 1 FROM campaign_budget_checkpoints WHERE session_id=?").get(sessionId) ||
+      this.sql.prepare("SELECT 1 FROM campaign_budget_settlements WHERE session_id=?").get(sessionId) ||
+      this.sql.prepare("SELECT 1 FROM campaign_budget_tool_calls WHERE session_id=?").get(sessionId) ||
+      this.sql.prepare("SELECT 1 FROM usage_session_state WHERE session_id=?").get(sessionId) ||
+      this.sql.prepare("SELECT 1 FROM session_events WHERE session_id=? AND kind IN ('token_usage','tool_call')").get(sessionId)) return false;
+    return Number(this.sql.prepare("UPDATE campaign_budget_members SET active=0 WHERE session_id=? AND root_id=? " +
+      "AND generation=? AND active=1 AND cost=0 AND tools=0").run(sessionId, expected.rootSessionId, expected.generation).changes) === 1;
   }
 
   membersForRunner(runnerId:string):string[] {

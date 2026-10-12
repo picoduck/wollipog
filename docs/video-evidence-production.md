@@ -159,7 +159,9 @@ complete native manifest/ordered frame set, criteria, private destination/provid
 installed executable/tool/namespace profile, audience and current action/allowance constraints.
 The original gate stays Human-owned and its resource digest remains unchanged.
 
-The permit expires within one hour and pins finite cost/tool ceilings from the guarded Session
+Human mint requires `expectedScopeSha256` for the exact independently reviewed action scope.
+A changed profile/source/criterion/request between inspection and mint is rejected. The permit
+expires within one hour and pins finite cost/tool ceilings from the guarded Session
 request; it does not create grants or increase existing limits. The ordinary creation pipeline
 atomically binds a real unsent Session/member/command/generation and permanent validation purpose
 to the one-shot permit. Normal governance, fixed harness/model/effort, tighter ceilings and all
@@ -225,6 +227,24 @@ latency/failure histograms; raw bodies, images, signed URLs, oracle content and 
 Human-inspected proof metadata supplies separate actual provider usage, price and latency evidence.
 
 ## Completed Reviewer Provenance
+
+The owned `PreparedMediaReservationRelease` adapter and guarded budget method separate an unsent
+cancellation from real final usage settlement. The coordinator claims cancellation in the same
+SQLite transaction before deactivating the exact unchanged reservation and ending that never-run
+Session's queued lifecycle. Existing cost/tool peaks, ceilings, generation, history and permanent
+purpose are preserved. Nonzero usage, any usage state/tool record/checkpoint/settlement, replaced
+generation, a generic/code-job identity, or an unclaimed/ambiguous dispatch retains capacity.
+No fabricated zero-cost usage or completed attestation is written.
+
+An unknown outcome can release only after the owning authenticated runner delivers a durable
+exact-command terminal fence. `RunnerMediaDispatchFences` must be consulted before **every**
+provider action, delayed command and recovery: cancellation survives disk reopen and forbids
+claiming that command later; a previously claimed launch cannot certify never-dispatched status.
+The digest is integrity metadata, not authentication. Control-plane ingress uses the actual runner
+channel ID and binds original root/Session/generation/command/grant. These sender/channel/driver
+registrations are still held; a bare response string or worker message cannot establish the fence.
+Ledger reservation deactivation commits with cancellation or rolls back together, including under
+concurrent cancel/dispatch and storage failure. This adapter grants no media access or budget reset.
 
 The historical-attestation lifecycle separates completed quality proof from fresh access.
 Current managed budget admission is required

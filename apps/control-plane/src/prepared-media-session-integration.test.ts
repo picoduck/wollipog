@@ -19,6 +19,9 @@ import type { ReviewerAdmissionContext, EvidenceReviewerTarget, VideoProfileLive
 import { isAgentControlApiRouteAllowed } from "./auth.js";
 import { mediaSessionMutationAllowed } from "./media-session-route-policy.js";
 import { OperatorVideoValidationPermits, type OperatorVideoValidationScope } from "./operator-video-validation.js";
+import { PreparedMediaReservationRelease } from "./prepared-media-reservation-release.js";
+import { RunnerMediaDispatchFences } from "../../runner/src/media-dispatch-fences.js";
+import { DatabaseSync } from "node:sqlite";
 const sha = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 
 /** In-memory concrete DB/service integration with explicitly synthetic proof/rates/source.
@@ -117,7 +120,8 @@ function harness(sourceBytes?: Buffer, validation = false) {
     nativeToolProfileSha256: sha("synthetic installed media tools"), namespaceLaunchSha256: sha("synthetic launch"), authoritySha256: sha("synthetic current authority"),
   } : null;
   const permits = validation ? new OperatorVideoValidationPermits(db.raw(), { current: () => validationScope }) : undefined;
-  const validationProposal = { identity, subject: { ...subject, profile: "paced" as const }, expiresAt: Date.now() + 30_000 };
+  const validationProposal = { identity, subject: { ...subject, profile: "paced" as const },
+    expectedScopeSha256: sha(JSON.stringify(validationScope)), expiresAt: Date.now() + 30_000 };
   const permit = permits?.mint(human, validationProposal);
   if (validation) { assert.ok(permit); validationPermitId = permit.permitId; }
   const service = new SessionsService(db, hub, log, undefined, undefined, undefined, undefined, undefined, undefined,
@@ -187,6 +191,7 @@ test("validation worker messages, changed authority/profile/source, expiry/revoc
   assert.equal(h.permits!.revoke(agent, h.permit!.permitId), false);
   assert.equal(h.permits!.revoke({ ...h.human, role: "viewer" as const }, h.permit!.permitId), false);
   assert.equal(h.permits!.mint({ ...h.human, userId: "another-human" }, h.validationProposal), null);
+  assert.equal(h.permits!.mint(h.human, { ...h.validationProposal, expectedScopeSha256: sha("stale Human-inspected profile") }), null);
   const expired = new OperatorVideoValidationPermits(h.db.raw(), { current: () => h.validationScope() }, () => h.permit!.expiresAt);
   assert.equal(expired.current(h.permit!.permitId), null);
 });
@@ -209,6 +214,106 @@ function syntheticValidationFrames() {
     durationUs: Math.round((i + 1) * 1_000_000 / 30) - Math.round(i * 1_000_000 / 30),
     sha256: sha("synthetic frame " + i), sizeBytes: 10 }));
 }
+
+function releaseHarness(t: { after(fn: () => void): void }) {
+  const h = harness(); t.after(() => h.db.close()); h.messages.length = 0;
+  const release = new PreparedMediaReservationRelease(h.db.raw(), h.db.campaignBudgets);
+  h.ports.cancelNeverDispatched = (record) => release.release(record);
+  h.ports.authorize = async () => true; // Disclosed synthetic current-source adapter; no live grant.
+  const actual = h.prepared.prepare(h.identity);
+  const binding = { namespaceLaunchSha256: sha("synthetic launch"), namespacePolicySha256: sha("synthetic namespace"),
+    authoritySha256: sha("synthetic authority"), grant: { reviewId: "synthetic-review", reviewerSessionId: actual.sessionId,
+      childSessionId: "child", occurrenceId: h.subject.occurrenceId, policyRevision: actual.admission.authorityRevision,
+      sourceEvidenceId: h.subject.evidenceId, sourceArtifactId: "source", sourceSha256: sha(h.source),
+      manifestSha256: sha("synthetic manifest"), bindingSha256: sha("synthetic binding"), criteriaSha256: sha("synthetic criteria"),
+      expiresAt: Date.now() + 30_000, frames: [{ index: 0, ptsUs: 0, durationUs: 33_333, sha256: sha("synthetic native frame"), sizeBytes: 10 }] } };
+  const fenceIdentity = (record: import("./prepared-media-sessions.js").PreparedMediaRecord) => ({ rootSessionId: record.rootSessionId,
+    sessionId: record.sessionId, runnerId: record.runnerId, generation: record.admission.dispatch.generation,
+    commandSha256: record.commandSha256, dispatchSha256: record.dispatchSha256! });
+  return { ...h, actual, binding, release, fenceIdentity };
+}
+test("never-enqueued actual preparation cancels and deactivates only its reservation without manufacturing settlement or erasing purpose", (t) => {
+  const h = releaseHarness(t);
+  const before = h.db.campaignBudgets.view("root")!;
+  const cancelled = h.prepared.cancelPrepared(h.identity);
+  assert.equal(cancelled.state, "cancelled");
+  assert.equal(h.db.campaignBudgets.active(h.actual.sessionId), false);
+  assert.equal(h.db.getSession(h.actual.sessionId)!.status, "stopped");
+  assert.equal(h.db.campaignBudgets.view("root")!.outstanding.costUsd, before.outstanding.costUsd - h.actual.admission.allocation.costUsd!);
+  assert.deepEqual(h.db.campaignBudgets.view("root")!.actual, before.actual);
+  assert.equal(h.db.campaignBudgets.completedAttestation(h.actual.sessionId), null);
+  assert.equal(h.db.raw().prepare("SELECT COUNT(*) AS n FROM campaign_budget_checkpoints").get()!.n, 0);
+  assert.equal(h.db.raw().prepare("SELECT COUNT(*) AS n FROM campaign_budget_settlements").get()!.n, 0);
+  assert.equal(h.service.mediaSessionPurposes.owns(h.actual.sessionId), true);
+  assert.equal(h.service.restart(h.actual.sessionId).ok, false);
+  assert.throws(() => h.prepared.cancelPrepared(h.identity), /possibly dispatched/);
+  assert.deepEqual(h.messages, []);
+});
+test("guarded release rejects usage, checkpoints, settlements, replacement generation, generic identity and storage failure", (t) => {
+  for (const mutate of [
+    (h: ReturnType<typeof releaseHarness>) => h.db.campaignBudgets.replaceDispatch(h.actual.sessionId),
+    (h: ReturnType<typeof releaseHarness>) => h.db.raw().prepare("UPDATE campaign_budget_members SET cost=1 WHERE session_id=?").run(h.actual.sessionId),
+    (h: ReturnType<typeof releaseHarness>) => h.db.raw().prepare("UPDATE campaign_budget_members SET tools=1 WHERE session_id=?").run(h.actual.sessionId),
+    (h: ReturnType<typeof releaseHarness>) => h.db.campaignBudgets.recordCheckpoint(h.actual.sessionId,
+      { generation: h.actual.admission.dispatch.generation, historyEpoch: 0, throughSeq: 0, costUsd: 0 }),
+    (h: ReturnType<typeof releaseHarness>) => h.db.raw().prepare("INSERT INTO campaign_budget_settlements VALUES (?,?,0,0)").run(h.actual.sessionId, "synthetic previous settlement"),
+    (h: ReturnType<typeof releaseHarness>) => h.db.raw().prepare("CREATE TRIGGER synthetic_cancel_failure BEFORE UPDATE ON prepared_media_sessions WHEN NEW.state='cancelled' BEGIN SELECT RAISE(ABORT,'Synthetic cancellation storage failure'); END").run(),
+  ]) {
+    const h = releaseHarness(t); mutate(h);
+    assert.throws(() => h.prepared.cancelPrepared(h.identity));
+    assert.equal(h.prepared.get(h.identity)!.state, "prepared");
+    assert.equal(h.db.campaignBudgets.active(h.actual.sessionId), true);
+    assert.equal(h.service.mediaSessionPurposes.owns(h.actual.sessionId), true);
+  }
+  const h = releaseHarness(t);
+  assert.throws(() => h.release.release({ ...h.actual, ...h.identity, commandSha256: sha(JSON.stringify(h.actual.command)),
+    dispatchSha256: null, state: "cancelling", binding: null }), /cannot be released/);
+  h.db.raw().exec("SAVEPOINT synthetic_generic");
+  try { assert.equal(h.db.campaignBudgets.deactivateNeverDispatchedMediaReservation("child", {
+    rootSessionId: "root", runnerId: "r", generation: h.db.campaignBudgets.dispatch("child")!.generation,
+    commandSha256: sha("code-job"), dispatchSha256: null }), false); }
+  finally { h.db.raw().exec("RELEASE synthetic_generic"); }
+});
+test("unknown launch retains capacity; only owning authenticated runner terminal fence permits atomic cancellation and blocks late launch", async (t) => {
+  const h = releaseHarness(t); h.ports.authorize = async () => true; h.ports.send = async () => "unknown";
+  await h.prepared.bind(h.identity, h.binding);
+  const uncertain = await h.prepared.dispatch(h.identity);
+  const runnerDb = new DatabaseSync(":memory:"); t.after(() => runnerDb.close());
+  const fences = new RunnerMediaDispatchFences(runnerDb), identity = h.fenceIdentity(uncertain);
+  const receipt = fences.cancelBeforeLaunch(identity)!;
+  assert.equal(h.release.recordAuthenticatedFence("agent:child", receipt), false);
+  assert.equal(h.release.recordAuthenticatedFence("r", { ...receipt, fenceSha256: sha("forged receipt") }), false);
+  h.ports.reconcile = async () => ({ ...identity, outcome: "never_dispatched" });
+  await assert.rejects(h.prepared.reconcile(h.identity), /cannot be released/);
+  assert.equal(h.prepared.get(h.identity)!.state, "uncertain");
+  assert.equal(h.db.campaignBudgets.active(h.actual.sessionId), true);
+  assert.equal(h.release.recordAuthenticatedFence("r", receipt), true);
+  assert.equal(h.release.recordAuthenticatedFence("r", receipt), true, "exact authenticated receipt replay changes nothing");
+  assert.equal((await h.prepared.reconcile(h.identity)).state, "cancelled");
+  assert.equal(h.db.campaignBudgets.active(h.actual.sessionId), false);
+  assert.equal(fences.claim(identity), false, "permanent runner fence blocks delayed original command");
+  assert.equal(h.db.campaignBudgets.completedAttestation(h.actual.sessionId), null);
+  assert.equal(h.service.mediaSessionPurposes.owns(h.actual.sessionId), true);
+});
+test("cancellation wins before dispatch CAS; claimed dispatch cannot release on an ambiguous send", async (t) => {
+  const h = releaseHarness(t); await h.prepared.bind(h.identity, h.binding);
+  let resume!: () => void; const wait = new Promise<void>((resolve) => { resume = resolve; }); let sends = 0;
+  h.ports.authorize = async () => { await wait; return true; };
+  h.ports.send = async () => { sends++; return "unknown"; };
+  const dispatch = h.prepared.dispatch(h.identity);
+  assert.equal(h.prepared.cancelPrepared(h.identity).state, "cancelled");
+  resume(); await assert.rejects(dispatch, /dispatch authority denied/);
+  assert.equal(sends, 0); assert.equal(h.db.campaignBudgets.active(h.actual.sessionId), false);
+  const other = releaseHarness(t); await other.prepared.bind(other.identity, other.binding);
+  other.ports.authorize = async () => true;
+  let finish!: () => void; const sendWait = new Promise<void>((resolve) => { finish = resolve; });
+  let entered!: () => void; const started = new Promise<void>((resolve) => { entered = resolve; });
+  other.ports.send = async () => { entered(); await sendWait; return "unknown"; };
+  const running = other.prepared.dispatch(other.identity); await started;
+  assert.throws(() => other.prepared.cancelPrepared(other.identity), /possibly dispatched/);
+  assert.equal(other.db.campaignBudgets.active(other.actual.sessionId), true);
+  finish(); assert.equal((await running).state, "uncertain");
+});
 test("exact validation grant binds one dispatch; unknown reply retains actual capacity and replacement generation loses access", async (t) => {
   const h = harness(undefined, true); t.after(() => h.db.close()); h.messages.length = 0;
   const actual = h.prepared.prepare(h.identity), s = h.validationScope()!;
