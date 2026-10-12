@@ -194,7 +194,9 @@ export async function admitEvidenceReviewer(admissionId: string, target: Evidenc
       JSON.stringify(found.target) !== JSON.stringify(target) || !["running", "idle"].includes(found.status)) return fail("launch_uncertain");
     const workerAdmission = currentWorkerAdmission(deps, context, target, found.reviewerSessionId);
     if (!workerAdmission || found.reviewerSessionId !== reservation.reviewerSessionId) return fail("allowance");
-    return { ok: true, admissionId, reviewerSessionId: found.reviewerSessionId, reservationId: found.reservationId, workerAdmission };
+    const result: ReviewerAdmissionResult = { ok: true, admissionId, reviewerSessionId: found.reviewerSessionId, reservationId: found.reservationId, workerAdmission };
+    deps.finish(admissionId, result);
+    return result;
   }
   const reservation = deps.allowance.reserve({ admissionId, rootSessionId: context.rootSessionId,
     issue: context.issue, policyRevision: context.policyRevision, target });

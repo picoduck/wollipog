@@ -80,6 +80,30 @@ export class SqliteVideoReviewStore implements VideoReviewStore {
       "receipt_id=excluded.receipt_id,receipt=excluded.receipt,acknowledged=0")
       .run(reviewId, receipt.videoFrame.index, receipt.receiptId, JSON.stringify(receipt));
   }
+  recordBatch(reviewId: string, receipts: readonly TemporalVideoReceipt[]): void {
+    this.db.exec("SAVEPOINT temporal_delivery_batch");
+    try {
+      for (const receipt of receipts) this.recordDelivery(reviewId, receipt);
+      this.db.exec("RELEASE temporal_delivery_batch");
+    } catch (error) {
+      this.db.exec("ROLLBACK TO temporal_delivery_batch; RELEASE temporal_delivery_batch");
+      throw error;
+    }
+  }
+  acknowledgeBatch(reviewId: string, receipts: readonly { receiptId: string; sha256: string }[]): boolean {
+    this.db.exec("SAVEPOINT temporal_ack_batch");
+    try {
+      for (const receipt of receipts) if (!this.acknowledge(reviewId, receipt.receiptId, receipt.sha256)) {
+        this.db.exec("ROLLBACK TO temporal_ack_batch; RELEASE temporal_ack_batch");
+        return false;
+      }
+      this.db.exec("RELEASE temporal_ack_batch");
+      return true;
+    } catch (error) {
+      this.db.exec("ROLLBACK TO temporal_ack_batch; RELEASE temporal_ack_batch");
+      throw error;
+    }
+  }
   acknowledge(reviewId: string, receiptId: string, sha256: string): boolean {
     const row = this.db.prepare("SELECT r.receipt FROM temporal_video_receipts r " +
       "JOIN temporal_video_reviews v ON v.review_id=r.review_id " +

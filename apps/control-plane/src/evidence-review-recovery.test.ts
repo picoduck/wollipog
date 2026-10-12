@@ -22,7 +22,7 @@ test("per-frame byte overflow has a specific recapture reason, malformed truncat
 });
 test("busy retries are finite and conversion/splitting/recapture never changes coverage or authority", () => {
   assert.deepEqual([0, 1].map((attempt) => planEvidenceRecovery("full_control", "decoder_busy", attempt).action), ["retry", "retry"]);
-  assert.equal(planEvidenceRecovery("full_control", "decoder_busy", 2).action, "human");
+  assert.equal(planEvidenceRecovery("full_control", "decoder_busy", 2).action, "wait");
   const codes: VideoPreparationFailureCode[] = ["source_limit", "unsupported_media", "decode_limit",
     "unsupported_streams", "recapture_resolution", "recapture_timing", "split_capture", "recapture_frame_size"];
   for (const code of codes) {
@@ -30,7 +30,7 @@ test("busy retries are finite and conversion/splitting/recapture never changes c
     assert.ok(plan.action === "split" || plan.action === "recapture");
     assert.equal(plan.preserve, "all_source_frames_native_timing");
     assert.equal(plan.requiresNewArtifact, true);
-    assert.equal(planEvidenceRecovery("full_control", code, 2).action, "human");
+    assert.equal(planEvidenceRecovery("full_control", code, 2).action, "reject");
     assert.equal(planEvidenceRecovery("custom", code, 0).action, "human");
   }
   for (const attempt of [-1, NaN, Infinity, 0.5]) {

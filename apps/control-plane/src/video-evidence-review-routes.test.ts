@@ -16,6 +16,8 @@ function fixture(t: { after(fn: () => Promise<void>): void }) {
   const service = {
     prepare: async () => { calls++; return { ok: false, code: "live_validation" }; },
     deliver: () => { calls++; throw new Error("No real media grant in this route test."); },
+    deliverBatch: () => { calls++; throw new Error("No real batch grant."); },
+    acknowledgeBatch: () => { calls++; throw new Error("No real batch receipt."); },
     acknowledge: () => { calls++; throw new Error("No real receipt in this route test."); },
     verdict: () => { calls++; throw new Error("No real verdict in this route test."); },
     ownerProvenance: () => { calls++; throw new Error("No real provenance in this route test."); },
@@ -28,7 +30,7 @@ test("all media routes bind their path to the authenticated Session credential b
   const f = fixture(t);
   for (const principal of [null, agent("implementer"), agent("other-campaign")]) {
     f.setPrincipal(principal);
-    for (const action of ["prepare", "frame", "acknowledge", "verdict", "provenance"]) {
+    for (const action of ["prepare", "frame", "frames", "acknowledge", "acknowledge-frames", "verdict", "provenance"]) {
       const result = await f.app.inject({ method: "POST", url: prefix + "/" + action, payload: {} });
       assert.equal(result.statusCode, 403);
     }
@@ -40,6 +42,8 @@ test("untrusted grant claims, URLs, unbounded indices and extra fields never rea
   for (const [action, payload] of [
     ["prepare", { childSessionId: "child", occurrenceId: "workflow", evidenceId: "video", grant: true }],
     ["frame", { reviewId: "review", index: 900 }],
+    ["frames", { reviewId: "review", index: 900 }],
+    ["acknowledge-frames", { reviewId: "review", receipts: [] }],
     ["frame", { reviewId: "review", index: 0, url: "http://localhost/private" }],
     ["acknowledge", { reviewId: "review", receiptId: "receipt", sha256: "bad" }],
     ["verdict", { reviewId: "review", report: { outcome: "accept", criteria: [], rationale: "test", authority: "human" } }],

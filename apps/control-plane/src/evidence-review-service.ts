@@ -137,6 +137,17 @@ export class EvidenceReviewService {
       { receiptId: delivery.receipt.receiptId, frameIndex: index });
     return delivery;
   }
+  deliverBatch(principal: AuthPrincipal, reviewId: string, index: number) {
+    const result = this.runtime.deliverBatch(reviewId, this.authenticatedReviewer(principal, reviewId), index);
+    for (const delivery of result.deliveries) this.audit(this.store.getReview(reviewId)!, "video_evidence_delivery", "reviewer_media",
+      { receiptId: delivery.receipt.receiptId, frameIndex: delivery.receipt.videoFrame.index });
+    return result;
+  }
+  acknowledgeBatch(principal: AuthPrincipal, reviewId: string, receipts: readonly { receiptId: string; sha256: string }[]): void {
+    this.runtime.acknowledgeBatch(reviewId, this.authenticatedReviewer(principal, reviewId), receipts);
+    for (const receipt of receipts) this.audit(this.store.getReview(reviewId)!, "video_evidence_acknowledged", "reviewer_media",
+      { receiptId: receipt.receiptId });
+  }
   acknowledge(principal: AuthPrincipal, reviewId: string, receiptId: string, sha256: string): void {
     this.runtime.acknowledge(reviewId, this.authenticatedReviewer(principal, reviewId), receiptId, sha256);
     this.audit(this.store.getReview(reviewId)!, "video_evidence_acknowledged", "reviewer_media", { receiptId });
