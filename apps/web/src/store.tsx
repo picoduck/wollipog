@@ -276,6 +276,8 @@ interface DeferredLiveBuffer {
 interface DeferredEventTail extends DeferredLiveBuffer {
   /** The HTTP response proved completeness through this seq, not any later gapped live frame. */
   httpTailSeq: number;
+  /** A complete empty opening proves the log's origin; live recovery must still retain seq1. */
+  emptyOpeningComplete?: boolean;
   hasOlder: boolean;
   turnAligned?: boolean;
   pageRequest?: LaterEventsRequest;
@@ -2395,7 +2397,8 @@ export class Store {
       const bounded = live.length ? this.boundedDeferredEvents(live, sessionId) : null;
       this.deferredTails.set(sessionId, { fence, observedTailSeq: tailSeq, events: bounded?.events ?? [],
         bytes: bounded?.bytes ?? 0, byteSizes: bounded?.byteSizes ?? new Map(),
-        httpTailSeq: knownTail, hasOlder: true });
+        httpTailSeq: knownTail, hasOlder: start > 0 || bounded?.truncated === true,
+        emptyOpeningComplete: page.cacheComplete === true && start === 0 && knownTail === 0 });
       this.dispatch({ type: "event_gap_state", fence, events: reading,
         window: { ...this.state.eventWindows.get(sessionId)!, laterGap: {
           afterSeq: end, beforeSeq: end + 1, tailSeq, loading: false, error: null, fence,
@@ -2625,9 +2628,14 @@ export class Store {
         incoming.some(event => event.sessionId !== fence.sessionId)) return false;
     const reading = this.state.events.get(fence.sessionId) ?? [];
     const after = contiguousEventHighWater(reading, fence.baseSeq - 1);
+    const priorWindow = this.state.eventWindows.get(fence.sessionId);
+    // An empty current-turn opening has no visible row to clip. Its owned seq1 boundary can
+    // accept a complete HTTP tail while other empty or sparse readers still require recovery.
+    const emptyOpening = reading.length === 0 && priorWindow?.openingStartSeq === 0 &&
+      priorWindow.baseSeq === 0 && fence.baseSeq === 1;
     // A distant frame might already be the reader's chosen anchor. Without that anchor's identity
     // we cannot clip it safely, or describe the visible sparse array as one contiguous window.
-    if (!reading.length || after !== reading.at(-1)!.seq) return false;
+    if (!emptyOpening && (!reading.length || after !== reading.at(-1)!.seq)) return false;
     const ordered = mergeEvents(undefined, incoming);
     if (contiguousEventHighWater(ordered, ordered[0]!.seq - 1) !== ordered.at(-1)!.seq) return false;
     const pending = this.pendingGapLive.get(fence.sessionId);
@@ -2640,7 +2648,7 @@ export class Store {
       previous?.fence === fence ? previous.observedTailSeq : 0);
     const bounded = this.boundedDeferredEvents(combined, fence.sessionId);
     if (!bounded) return false;
-    const window = this.state.eventWindows.get(fence.sessionId) ?? {
+    const window = priorWindow ?? {
       eventEpoch: fence.eventEpoch, baseSeq: fence.baseSeq, hasOlder: fence.baseSeq > 1,
       complete: this.state.eventHistory.get(fence.sessionId)?.everComplete === true, loadingOlder: false, error: null,
     };
@@ -2655,7 +2663,8 @@ export class Store {
         this.pendingGapLive.delete(fence.sessionId);
         this.deferredTails.delete(fence.sessionId);
         const { laterGap: _gap, ...completed } = window;
-        this.dispatch({ type: "event_gap_state", fence, events: retainedReading, window: { ...completed, complete: true },
+        this.dispatch({ type: "event_gap_state", fence, events: retainedReading, window: {
+          ...completed, baseSeq: emptyOpening ? retainedReading[0]!.seq : completed.baseSeq, complete: true },
           settled: true, complete: true, advanceCursor: true });
         this.finishEventGapRecovery(fence);
         return true;
@@ -2744,7 +2753,7 @@ export class Store {
     const tail = this.deferredTails.get(fence.sessionId);
     const gap = this.state.eventWindows.get(fence.sessionId)?.laterGap;
     if (!tail || !tail.events.length || tail.fence !== fence || !gap || !this.currentGapFence(fence) ||
-        tail.events[0]!.seq > tail.httpTailSeq ||
+        (tail.events[0]!.seq > tail.httpTailSeq && !(tail.emptyOpeningComplete && tail.events[0]!.seq === 1)) ||
         contiguousEventHighWater(tail.events, tail.events[0]!.seq - 1) < gap.tailSeq) return false;
     // This is an explicit change of reading window: the omitted prefix becomes ordinary older
     // history, and only this contiguous current slice supplies the acknowledged cursor.
@@ -2753,6 +2762,8 @@ export class Store {
       window: { ...priorWindow, baseSeq: tail.events[0]!.seq, hasOlder: tail.hasOlder || tail.events[0]!.seq > 1,
         complete: true, turnAligned: tail.turnAligned, loadingOlder: false, error: null },
       settled: true, complete: true, advanceCursor: true });
+    // Equal-base promotion still owns the fence; release it so later live frames follow normally.
+    this.finishEventGapRecovery(fence);
     return true;
   };
 

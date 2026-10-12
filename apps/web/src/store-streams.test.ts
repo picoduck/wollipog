@@ -29,6 +29,17 @@ function message(store: Store, msg: ControlPlaneToUi, now?: number): void {
   store.dispatch({ type: "msg", msg, now });
 }
 
+function emptyOpeningRace(rows: SessionEvent[], complete = true) {
+  const store = new Store({ name: "session", id: "s1" });
+  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [] });
+  store.beginEventHistoryLoad("s1", 0, -1);
+  for (const row of rows) message(store, { type: "session_event", event: row });
+  assert.equal(store.loadTurnStartWindow("s1", { events: [], eventEpoch: 0, turnStartSeq: 0,
+    nextAfter: 0, tailSeq: 0, hasMoreLater: false, hasMoreOlder: false, cacheComplete: complete }, -1), true);
+  assert.deepEqual(store.getState().events.get("s1"), []);
+  return { store, fence: store.getState().eventWindows.get("s1")!.laterGap!.fence };
+}
+
 test("preview handoff installs all bounded pages atomically while preserving the opening transport guard", () => {
   const store = new Store({ name: "session", id: "s1" });
   message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [] });
@@ -97,6 +108,8 @@ test("a turn-start remainder becomes complete only after its contiguous final pa
   assert.equal(store.getState().eventWindows.get("s1")!.laterGap, undefined);
   assert.equal(store.getState().eventWindows.get("s1")!.complete, true);
   assert.equal(store.getState().eventHistory.get("s1")!.everComplete, true);
+  assert.equal(store.getState().eventWindows.get("s1")!.openingStartSeq, 10);
+  assert.equal(store.getState().events.get("s1")![0]!.payload.kind, "user_message");
 });
 
 test("turn-start openings reject stale generations, sparse payloads and foreign sessions", () => {
@@ -196,6 +209,7 @@ test("reusing an opening preserves explicitly loaded earlier rows and their boun
   assert.equal(store.getState().eventWindows.get("s1")!.baseSeq, 1);
   assert.equal(store.getState().eventWindows.get("s1")!.hasOlder, false);
   assert.equal(store.getState().eventWindows.get("s1")!.laterGap!.afterSeq, 10);
+  assert.equal(store.getState().eventWindows.get("s1")!.openingStartSeq, 10);
 });
 
 test("an empty opening keeps a racing distant live frame behind an explicit gap", () => {
@@ -210,6 +224,75 @@ test("an empty opening keeps a racing distant live frame behind an explicit gap"
   assert.equal(store.getState().eventWindows.get("s1")!.laterGap!.tailSeq, 5);
   assert.equal(store.beginLaterEventsLoad("s1")!.after, 0);
 });
+
+for (const recovery of ["live", "http", "later"] as const) {
+  test(`an empty opening recovers a contiguous racing prompt through ${recovery}`, () => {
+    const rows = [userEvent("s1", 1), event("s1", 2), event("s1", 3)];
+    const { store, fence } = emptyOpeningRace(rows);
+    if (recovery === "live") assert.equal(store.promoteDeferredEventTail(fence), true);
+    else if (recovery === "http") assert.equal(store.deferEventTail(fence, rows, true, false), true);
+    else {
+      const request = store.beginLaterEventsLoad("s1")!;
+      assert.equal(request.after, 0);
+      assert.equal(store.loadLaterEvents(request, { events: rows, eventEpoch: 0, nextAfter: 3,
+        hasMoreCached: false, cacheComplete: true }), true);
+    }
+    assert.deepEqual(store.getState().events.get("s1"), rows);
+    assert.equal(store.getState().eventWindows.get("s1")!.laterGap, undefined);
+    assert.equal(store.getState().eventWindows.get("s1")!.complete, true);
+    assert.equal(store.getState().eventHistory.get("s1")!.everComplete, true);
+    assert.equal(store.getState().eventWindows.get("s1")!.openingStartSeq, 0);
+    const next = event("s1", 4);
+    message(store, { type: "session_event", event: next });
+    message(store, { type: "session_event", event: rows[1]! });
+    assert.deepEqual(store.getState().events.get("s1"), [...rows, next],
+      "following must resume after recovery without privately deferring subsequent live frames");
+  });
+}
+
+test("an empty opening's live proof retains all later frames and deduplicates redelivery", () => {
+  const rows = [userEvent("s1", 1), event("s1", 2), event("s1", 3), event("s1", 4)];
+  const { store, fence } = emptyOpeningRace(rows.slice(0, 3));
+  message(store, { type: "session_event", event: rows[1]! });
+  message(store, { type: "session_event", event: rows[3]! });
+  assert.equal(store.promoteDeferredEventTail(fence), true);
+  assert.deepEqual(store.getState().events.get("s1"), rows);
+  assert.equal(store.getState().eventWindows.get("s1")!.hasOlder, false);
+});
+
+for (const rows of [[userEvent("s1", 1), event("s1", 3)], [event("s1", 2), event("s1", 3)]]) {
+  test(`an empty opening refuses sparse live proof ${rows.map(row => row.seq)}`, () => {
+    const { store, fence } = emptyOpeningRace(rows);
+    assert.equal(store.promoteDeferredEventTail(fence), false);
+    assert.equal(store.deferEventTail(fence, [userEvent("s1", 1), event("s1", 3)], true, false), false);
+    assert.deepEqual(store.getState().events.get("s1"), []);
+    assert.equal(store.getState().eventWindows.get("s1")!.complete, false);
+  });
+}
+
+test("an incomplete empty opening cannot certify its racing live tail", () => {
+  const rows = [userEvent("s1", 1), event("s1", 2), event("s1", 3)];
+  const { store, fence } = emptyOpeningRace(rows, false);
+  assert.equal(store.promoteDeferredEventTail(fence), false);
+  assert.equal(store.deferEventTail(fence, rows, false, false), false);
+  assert.deepEqual(store.getState().events.get("s1"), []);
+  assert.equal(store.getState().eventHistory.get("s1")!.everComplete, false);
+});
+
+for (const invalidation of ["epoch", "generation", "revision", "authorization"] as const) {
+  test(`an empty opening refuses tail recovery after ${invalidation} changes`, () => {
+    const rows = [userEvent("s1", 1), event("s1", 2), event("s1", 3)];
+    const { store, fence } = emptyOpeningRace(rows);
+    if (invalidation === "epoch") message(store, { type: "session_events_reset", sessionId: "s1", eventEpoch: 1, events: [] });
+    else if (invalidation === "revision") store.beginEventHistoryLoad("s1", 0, 1);
+    else message(store, { type: "snapshot", runners: [], boxes: [],
+      sessions: invalidation === "authorization" ? [] : [session("s1")], runs: [], pods: [] });
+    const state = store.getState();
+    assert.equal(store.promoteDeferredEventTail(fence), false);
+    assert.equal(store.deferEventTail(fence, rows, true, false), false);
+    assert.equal(store.getState(), state, "refused recovery cannot publish rows or completion");
+  });
+}
 
 test("a recreated reminder replaces a stale higher revision from the prior reminder id", () => {
   const store = new Store();
