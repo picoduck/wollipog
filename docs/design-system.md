@@ -553,11 +553,11 @@ A button with a leading icon reserves nothing; the spinner takes the icon's plac
 `aria-busy="true"` and
 `aria-disabled="true"` (not `disabled`, which would drop the focus the person pressed it with) and
 refuses further presses, keeps its variant's fill, and announces a sentence-case `progress` line
-("Installing the update…") through a polite live region. Toast actions (`ToastOptions.action.progress`)
-and confirmations that wait on their action (`ConfirmationOptions.onConfirm`) use it. A button never
-swaps its label for a progress word ("Installing…"): `apps/web/src/busy-label-ratchet.test.ts`
-records the remaining `? "<Word>ing…"` label swaps by file and fails when one is added, and each area
-removes its own as it rebuilds the screen.
+("Installing the update…") through a polite live region. Toast actions (`ToastOptions.action.progress`),
+confirmations that wait on their action (`ConfirmationOptions.onConfirm`) and the editor save bar's
+Save (§8.6) use it. A button never swaps its label for a progress word ("Installing…"):
+`apps/web/src/busy-label-ratchet.test.ts` records the remaining `? "<Word>ing…"` label swaps by file
+and fails when one is added, and each area removes its own as it rebuilds the screen.
 
 Rules
 
@@ -1856,7 +1856,7 @@ to these form choice groups.
 | --- | --- | --- |
 | Instant | Toggles, selects in settings rows. | Applies on change; a quiet "Saved" check appears for 2s at the row's right edge (`SwitchRow`'s `saved`, announced by a polite region beside the row). |
 | Dialog | Creation and focused edits. | Footer Cancel + primary. |
-| Editor | Multi-field editors in a page (Agent Defaults, Orchestrator, Automation editor). | A sticky save bar at the bottom of the page region, visible only when dirty: "Unsaved changes" + Discard (ghost) + Save (primary). Save is disabled when clean. |
+| Editor | Multi-field editors in a page (Agent Defaults, Orchestrator, Automation editor). | A sticky save bar at the bottom of the page region, visible only when dirty: "Unsaved changes" + Discard (ghost) + Save (primary). A new record shows its bar from the start, with Cancel and its create label. |
 
 The editor save bar is `.save-bar` (`SaveBar`): sticky at the bottom of its region, `--bg-elev`,
 1px `--border-strong`, `--radius-md`, `--elev-2`, padding 12px 16px, gap 8px, and rendered only
@@ -1864,6 +1864,25 @@ while there is something to save or a save failed. When a save fails it becomes 
 the notice's danger wash (7% `--red` over `--bg-elev`, a 32% `--red` edge), a `CircleAlert`, the
 failure in one sentence (`role="alert"`), and Save becomes **Try Again**. In Settings it floats 16px
 above the bottom of the settings panel. No screen uses it yet.
+
+An editor names its actions and states with four props, and changes nothing in `SaveBar` itself:
+
+- **`saveLabel`** (default "Save") names the primary in Title Case: **Save Changes**, **Create
+  Automation**, **Save Defaults**. Try Again still replaces it after a failed save.
+- **`discardLabel`** (default "Discard"). A new record passes **Cancel**.
+- **`alwaysShown`** renders the bar while the form is clean, so a new record shows Cancel and its
+  create label from the start, with no message until something is typed. Save stays enabled there:
+  submitting an empty form runs the editor's validation. Without it the bar is shown only while dirty
+  or after a failed save.
+- **`blockedReason`** refuses Save while the draft cannot be saved and shows the reason in place of
+  "Unsaved changes" (for example "Fix 1 setting to save"). Save is `aria-disabled`, so it keeps the
+  focus of a press the editor answered by blocking, and its `aria-describedby` names the reason (§3.1,
+  Disabled). Discard stays enabled. A block outranks a failure from an earlier draft: the bar shows
+  the reason, not the danger tone.
+
+Busy, Save is a `BusyButton` (§3.1): the spinner shows beside a label that does not change, the button
+keeps its width, a polite line announces "Saving changes…", and Discard is disabled. No save bar
+reads "Saving…".
 
 ### 8.7 Steps
 
