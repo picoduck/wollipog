@@ -238,7 +238,8 @@ CREATE TABLE IF NOT EXISTS campaign_recommendation_dispositions (
 
 -- Issue-closure attribution history (#3084). Every issue an item has ever tracked, and every
 -- follow-up edge from an origin item to an accepted resulting item ever recorded. Rows are only
--- ever added, so a later edit of an item's issue or a re-adjudication cannot disconnect a child
+-- ever added (as upserts: a trigger fired by an upsert would otherwise inherit its conflict
+-- policy), so a later edit of an item's issue or a re-adjudication cannot disconnect a child
 -- from an issue it was once connected to. The backfills cover rows recorded before these tables
 -- existed and are idempotent.
 CREATE TABLE IF NOT EXISTS campaign_work_item_issue_history (
@@ -253,17 +254,20 @@ CREATE INDEX IF NOT EXISTS idx_campaign_work_item_issue_history_issue
 CREATE TRIGGER IF NOT EXISTS campaign_work_item_issue_recorded
   AFTER INSERT ON campaign_work_items WHEN NEW.issue_number IS NOT NULL
 BEGIN
-  INSERT OR IGNORE INTO campaign_work_item_issue_history (work_item_id, issue_repository, issue_number)
-    VALUES (NEW.id, lower(NEW.issue_repository), NEW.issue_number);
+  INSERT INTO campaign_work_item_issue_history (work_item_id, issue_repository, issue_number)
+    VALUES (NEW.id, lower(NEW.issue_repository), NEW.issue_number)
+    ON CONFLICT DO NOTHING;
 END;
 CREATE TRIGGER IF NOT EXISTS campaign_work_item_issue_changed
   AFTER UPDATE OF issue_repository, issue_number ON campaign_work_items WHEN NEW.issue_number IS NOT NULL
 BEGIN
-  INSERT OR IGNORE INTO campaign_work_item_issue_history (work_item_id, issue_repository, issue_number)
-    VALUES (NEW.id, lower(NEW.issue_repository), NEW.issue_number);
+  INSERT INTO campaign_work_item_issue_history (work_item_id, issue_repository, issue_number)
+    VALUES (NEW.id, lower(NEW.issue_repository), NEW.issue_number)
+    ON CONFLICT DO NOTHING;
 END;
-INSERT OR IGNORE INTO campaign_work_item_issue_history (work_item_id, issue_repository, issue_number)
-  SELECT id, lower(issue_repository), issue_number FROM campaign_work_items WHERE issue_number IS NOT NULL;
+INSERT INTO campaign_work_item_issue_history (work_item_id, issue_repository, issue_number)
+  SELECT id, lower(issue_repository), issue_number FROM campaign_work_items WHERE issue_number IS NOT NULL
+    ON CONFLICT DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS campaign_work_lineage_edges (
   origin_work_item_id TEXT NOT NULL,
@@ -277,30 +281,34 @@ CREATE INDEX IF NOT EXISTS idx_campaign_work_lineage_edges_result
 CREATE TRIGGER IF NOT EXISTS campaign_work_lineage_edge_origin
   AFTER INSERT ON campaign_recommendation_origins
 BEGIN
-  INSERT OR IGNORE INTO campaign_work_lineage_edges (origin_work_item_id, result_work_item_id)
+  INSERT INTO campaign_work_lineage_edges (origin_work_item_id, result_work_item_id)
     SELECT NEW.work_item_id, resulting_work_item_id FROM campaign_recommendation_dispositions
-    WHERE recommendation_id=NEW.recommendation_id AND resulting_work_item_id IS NOT NULL;
+    WHERE recommendation_id=NEW.recommendation_id AND resulting_work_item_id IS NOT NULL
+    ON CONFLICT DO NOTHING;
 END;
 CREATE TRIGGER IF NOT EXISTS campaign_work_lineage_edge_adjudicated
   AFTER INSERT ON campaign_recommendation_dispositions WHEN NEW.resulting_work_item_id IS NOT NULL
 BEGIN
-  INSERT OR IGNORE INTO campaign_work_lineage_edges (origin_work_item_id, result_work_item_id)
+  INSERT INTO campaign_work_lineage_edges (origin_work_item_id, result_work_item_id)
     SELECT work_item_id, NEW.resulting_work_item_id FROM campaign_recommendation_origins
-    WHERE recommendation_id=NEW.recommendation_id;
+    WHERE recommendation_id=NEW.recommendation_id
+    ON CONFLICT DO NOTHING;
 END;
 CREATE TRIGGER IF NOT EXISTS campaign_work_lineage_edge_readjudicated
   AFTER UPDATE OF resulting_work_item_id ON campaign_recommendation_dispositions
   WHEN NEW.resulting_work_item_id IS NOT NULL
 BEGIN
-  INSERT OR IGNORE INTO campaign_work_lineage_edges (origin_work_item_id, result_work_item_id)
+  INSERT INTO campaign_work_lineage_edges (origin_work_item_id, result_work_item_id)
     SELECT work_item_id, NEW.resulting_work_item_id FROM campaign_recommendation_origins
-    WHERE recommendation_id=NEW.recommendation_id;
+    WHERE recommendation_id=NEW.recommendation_id
+    ON CONFLICT DO NOTHING;
 END;
-INSERT OR IGNORE INTO campaign_work_lineage_edges (origin_work_item_id, result_work_item_id)
+INSERT INTO campaign_work_lineage_edges (origin_work_item_id, result_work_item_id)
   SELECT origin.work_item_id, disposition.resulting_work_item_id
   FROM campaign_recommendation_origins origin
   JOIN campaign_recommendation_dispositions disposition ON disposition.recommendation_id=origin.recommendation_id
-  WHERE disposition.resulting_work_item_id IS NOT NULL;
+  WHERE disposition.resulting_work_item_id IS NOT NULL
+    ON CONFLICT DO NOTHING;
 `;
 
 /** `details` carries machine-readable fields a client acts on, such as `revision_changed`. */

@@ -24765,7 +24765,7 @@ test("issue closure binds only children whose work bears on the issue (#3084)", 
   for (const mode of ["unrelated_prompt", "unrelated_decision", "new_unrelated_child", "related_prompt",
     "related_decision", "unattributed_prompt", "mentioning_prompt", "earlier_attempt_prompt",
     "follow_up_prompt", "reassigned_into_lineage", "steered_into_issue", "unechoed_launch", "listed_issues",
-    "issue_cleared", "ancestor_issue_toggled", "readjudicated"]) {
+    "issue_cleared", "ancestor_issue_toggled", "readjudicated", "receipt_before_hydration"]) {
     const { db, svc, hub, parent, spawn } = stopAndArchiveCampaignFixture("retain");
     try {
       const plan = svc.recordCampaignPlan(parent.id, { items: [
@@ -24884,6 +24884,14 @@ test("issue closure binds only children whose work bears on the issue (#3084)", 
         prompt(descendant!);
         assert.ok(svc.updateCampaignWorkItem(parent.id, { workItemId: unrelatedItem!, issue: null }).ok);
       }
+      if (mode === "receipt_before_hydration") {
+        // Completion scrubs the staged payload before the runner's echo reaches the event cache.
+        db.stageSessionPromptCommand({ commandId: "steer-into-issue", sessionId: unrelated, runnerId: RUNNER_ID,
+          payloadJson: JSON.stringify({ text: "Also implement issue 1440." }), payloadSha256: "d".repeat(64),
+          expiresAt: Date.now() + 60_000, now: Date.now() });
+        db.db.prepare("UPDATE session_prompt_commands SET state='completed', payload_json='null' WHERE command_id=?")
+          .run("steer-into-issue");
+      }
       if (mode === "readjudicated") {
         const rejoin = svc.recordCampaignFollowUp(parent.id, { originSessionId: related, repository: "picoduck/wollipog",
           title: "Rejoin Follow-Up", originWorkItemIds: [issueItem!] });
@@ -24932,6 +24940,11 @@ test("issue-closure attribution backfills item issue and lineage history (#3084)
       rows("SELECT origin_work_item_id, result_work_item_id FROM campaign_work_lineage_edges")];
     const expected = [[{ work_item_id: issueItem, issue_repository: "picoduck/wollipog", issue_number: 1440 }],
       [{ origin_work_item_id: issueItem, result_work_item_id: accepted.data.workItem.id }]];
+    assert.deepEqual(history(), expected);
+    // Re-adjudicating with only a new reason updates the same edge without a conflict.
+    const reworded = svc.adjudicateCampaignRecommendation(parent.id, { recommendationId: followUp.data.id,
+      disposition: "accepted", reason: "Still needed", resultingWorkItemKey: "followup:backfilled" });
+    assert.ok(reworded.ok, reworded.error);
     assert.deepEqual(history(), expected);
     // An upgraded database starts without history; reapplying the schema backfills it.
     db.db.exec("DELETE FROM campaign_work_item_issue_history; DELETE FROM campaign_work_lineage_edges;");

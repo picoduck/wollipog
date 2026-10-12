@@ -1083,6 +1083,15 @@ CREATE INDEX IF NOT EXISTS idx_session_prompt_commands_due
   WHERE state IN ('pending','sent','accepted','queued','started');
 CREATE INDEX IF NOT EXISTS idx_session_prompt_commands_session
   ON session_prompt_commands(session_id, created_at, command_id);
+-- The standalone numbers each staged prompt contained, kept after its payload is scrubbed so
+-- issue-closure attribution (#3084) cannot lose a mention before the delivered user message
+-- reaches the event cache. -1 records a prompt with too many distinct numbers to list.
+CREATE TABLE IF NOT EXISTS session_prompt_numbers (
+  session_id TEXT NOT NULL,
+  number     INTEGER NOT NULL,
+  PRIMARY KEY (session_id, number),
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS session_prompt_command_attempts (
   request_id    TEXT PRIMARY KEY,
   command_id    TEXT NOT NULL,
@@ -13995,6 +14004,30 @@ export class ControlPlaneDb {
     return { latest: latest ?? null, command: command ?? null };
   }
 
+  private recordSessionPromptNumbers(sessionId: string, payloadJson: string): void {
+    const text = (JSON.parse(payloadJson) as { text?: unknown } | null)?.text;
+    if (typeof text !== "string") return;
+    const numbers = new Set<number>();
+    for (const match of text.matchAll(/(?<!\d)\d{1,15}(?!\d)/gu)) {
+      numbers.add(Number(match[0]));
+      if (numbers.size > 256) {
+        numbers.clear();
+        numbers.add(-1);
+        break;
+      }
+    }
+    for (const number of numbers) {
+      this.stmt("INSERT INTO session_prompt_numbers (session_id, number) VALUES (?, ?) ON CONFLICT DO NOTHING")
+        .run(sessionId, number);
+    }
+  }
+
+  /** Whether any prompt ever staged for the session contained `number` (#3084). */
+  sessionPromptNamedNumber(sessionId: string, number: number): boolean {
+    return Boolean(this.stmt("SELECT 1 FROM session_prompt_numbers WHERE session_id=? AND number IN (?, -1) LIMIT 1")
+      .get(sessionId, number));
+  }
+
   /** Every delivered or staged prompt text containing `needle`, for the issue-closure mention check
    * (#3084). The substring match only narrows the candidates; the caller applies the exact pattern. */
   issueClosurePromptTexts(sessionId: string, needle: string): string[] {
@@ -16769,6 +16802,7 @@ export class ControlPlaneDb {
         input.commandId, input.campaignSessionId, input.runnerId, input.payloadJson,
         input.payloadSha256, input.now, input.expiresAt, input.now, input.now,
       );
+      this.recordSessionPromptNumbers(input.campaignSessionId, input.payloadJson);
       this.stmt(
         `INSERT INTO orchestrator_campaign_continuations
          (continuation_id,campaign_session_id,command_id,event_from_seq,event_through_seq,
@@ -20684,6 +20718,7 @@ export class ControlPlaneDb {
       input.commandId, input.sessionId, input.runnerId, input.payloadJson, input.payloadSha256,
       input.now, input.expiresAt, input.now, input.now,
     );
+    this.recordSessionPromptNumbers(input.sessionId, input.payloadJson);
     return this.getSessionPromptCommand(input.commandId)!;
   }
 
@@ -20753,6 +20788,7 @@ export class ControlPlaneDb {
         commandId, input.sessionId, input.runnerId, input.payloadJson, input.payloadSha256,
         input.now, input.expiresAt, input.now, input.now,
       );
+      this.recordSessionPromptNumbers(input.sessionId, input.payloadJson);
       const command = this.getSessionPromptCommand(commandId)!;
       dismissPredecessor();
       this.db.exec("COMMIT");

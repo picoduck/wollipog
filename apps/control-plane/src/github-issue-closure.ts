@@ -49,7 +49,7 @@ const mentionsIssue = (text: string | null | undefined, issue: number) =>
 /** Live campaign children whose work can bear on the issue (#3084). A child is left out only when
  * the campaign work ledger attributes it elsewhere: its open attempt is on an item outside the
  * issue's lineage, no attempt of it was ever in that lineage, its launch assignment is recorded,
- * and no prompt in its history or queue names the issue. Every other child stays included
+ * and no prompt in its history or queue, or ever staged for it, names the issue. Every other child stays included
  * conservatively: a task can move between issues in steering history, and a later "continue" prompt
  * is not proof it is unrelated. A change to the ledger that moves a child in or out of this set
  * still changes the digest. Without an issue, as for a campaign scope change, every live child is
@@ -64,6 +64,7 @@ export function issueClosureActiveChildren(db: ControlPlaneDb, sessionId: string
     const prompts = [...(child.queued ?? []), ...(child.pendingPrompts ?? [])];
     // The runner echoes the launch prompt as the first user message; until then it is unknown.
     if (issue && attribution?.elsewhere.has(id) && !attribution.lineage.has(id) && assignment !== null &&
+        !db.sessionPromptNamedNumber(id, issue.number) &&
         ![...db.issueClosurePromptTexts(id, String(issue.number)), ...prompts.map((prompt) => prompt.text)]
           .some((text) => mentionsIssue(text, issue.number))) return [];
     return [{ sessionId: id, title: child.title,
