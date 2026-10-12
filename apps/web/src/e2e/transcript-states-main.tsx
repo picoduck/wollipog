@@ -217,6 +217,7 @@ const racingPayloads: SessionEvent["payload"][] = [
   { kind: "user_message", text: "Current prompt: recover the empty opening.", images: [] },
   { kind: "agent_message", text: "The first live response follows the current prompt.", messageId: "race-2", final: true },
   { kind: "agent_message", text: "The second live response completes this synthetic turn.", messageId: "race-3", final: true },
+  { kind: "agent_message", text: "Additional live activity remains visible after recovery.", messageId: "race-4", final: true },
 ];
 const racingEvents: SessionEvent[] = racingPayloads.map((payload, index) => ({ id: index + 1, sessionId: SESSION_ID, seq: index + 1,
   ts: 1_760_000_000_000 + index * 1000, payload }));
@@ -230,7 +231,7 @@ const pendingPromptActions: string[] = [];
 const client = {
   ...api,
   getSessionEventPage: emptyOpeningRace
-    ? async () => ({ events: racingEvents, eventEpoch: 0, nextAfter: 3, hasMoreCached: false, cacheComplete: true })
+    ? async () => ({ events: racingEvents.slice(0, 3), eventEpoch: 0, nextAfter: 3, hasMoreCached: false, cacheComplete: true })
     : never,
   getSessionTurnStartPage: async (): Promise<SessionEventsResponse> => {
     if (!emptyOpeningRace) return never();
@@ -250,7 +251,7 @@ const client = {
   getSessionEventTailPage: (_id: string, before: number | undefined, eventEpoch: number) => {
     tailRequestCount += 1;
     document.body.dataset.tailRequestCount = String(tailRequestCount);
-    if (emptyOpeningRace) return Promise.resolve({ events: racingEvents, eventEpoch, nextBefore: 1,
+    if (emptyOpeningRace) return Promise.resolve({ events: racingEvents.slice(0, 3), eventEpoch, nextBefore: 1,
       hasMoreOlder: false, turnAligned: true, cacheComplete: true });
     if (state === "loading" || state === "unpaired") return never();
     if (state === "incomplete" || state === "agent-logs") {

@@ -27,6 +27,9 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"]) for (con
     await expect(reader).toHaveAttribute("aria-busy", "false");
     await expect(loadLater).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Retry", exact: true })).toHaveCount(0);
+    await page.evaluate(() => window.__emptyOpeningRace.emit([4, 2]));
+    await expect(reader.getByText("Additional live activity remains visible after recovery.", { exact: true })).toBeVisible();
+    await expect.poll(() => page.evaluate(() => window.__emptyOpeningRace.sequences())).toEqual([1, 2, 3, 4]);
     expect(await page.locator("body").getAttribute("data-tail-request-count")).toBe(recovery === "http" ? "1" : null);
     if (recovery === "live") await page.screenshot({ path: test.info().outputPath("recovered-empty-opening.png") });
   });

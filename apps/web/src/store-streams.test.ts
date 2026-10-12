@@ -242,6 +242,11 @@ for (const recovery of ["live", "http", "later"] as const) {
     assert.equal(store.getState().eventWindows.get("s1")!.complete, true);
     assert.equal(store.getState().eventHistory.get("s1")!.everComplete, true);
     assert.equal(store.getState().eventWindows.get("s1")!.openingStartSeq, 0);
+    const next = event("s1", 4);
+    message(store, { type: "session_event", event: next });
+    message(store, { type: "session_event", event: rows[1]! });
+    assert.deepEqual(store.getState().events.get("s1"), [...rows, next],
+      "following must resume after recovery without privately deferring subsequent live frames");
   });
 }
 

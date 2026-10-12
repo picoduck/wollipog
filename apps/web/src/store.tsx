@@ -2762,6 +2762,8 @@ export class Store {
       window: { ...priorWindow, baseSeq: tail.events[0]!.seq, hasOlder: tail.hasOlder || tail.events[0]!.seq > 1,
         complete: true, turnAligned: tail.turnAligned, loadingOlder: false, error: null },
       settled: true, complete: true, advanceCursor: true });
+    // Equal-base promotion still owns the fence; release it so later live frames follow normally.
+    this.finishEventGapRecovery(fence);
     return true;
   };
 
