@@ -1,0 +1,545 @@
+/**
+ * Pull request wait (#3081): block in the runner, not in the model, until a GitHub pull request's
+ * required checks or its merge-queue entry reach an outcome, then return one bounded summary.
+ *
+ * Read-only, through this runner's existing `gh` login: one REST pair reads the base branch's
+ * required checks (rulesets plus classic branch protection) and one GraphQL query per poll reads
+ * the pull request. Nothing here merges, enqueues, retries, or writes anything.
+ *
+ * Which checks are required comes from the base branch's rules, never from the job list: a
+ * required check GitHub has not reported yet has no node at all, so it reads `pending`
+ * (`reported: false`), never passing. A base with no required checks returns at once.
+ */
+import { classifyGhFailure, githubRepository, type GhOutcome, type GhRunner } from "./campaign-forge-status.js";
+
+export const PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS = 240_000;
+export const PULL_REQUEST_WAIT_MAX_TIMEOUT_MS = 10_800_000;
+export const PULL_REQUEST_WAIT_DEFAULT_INTERVAL_MS = 30_000;
+export const PULL_REQUEST_WAIT_MIN_INTERVAL_MS = 10_000;
+export const PULL_REQUEST_WAIT_MAX_INTERVAL_MS = 600_000;
+
+/** Contexts read per commit. A required check beyond this page stays `pending`. */
+const CONTEXTS_PER_COMMIT = 100;
+const MAX_LISTED_CHECKS = 30;
+const MAX_FAILED_JOBS = 20;
+const MAX_NAME = 120;
+const MAX_URL = 300;
+/** Consecutive transient `gh` failures (rate limit, network) tolerated before giving up. */
+const MAX_TRANSIENT_FAILURES = 3;
+/** Pause before confirming that a queue entry which vanished without a merge was really ejected. */
+const EJECTION_CONFIRM_MS = 10_000;
+
+export type PullRequestWaitOutcome =
+  | "checks_passed"
+  | "checks_failed"
+  | "no_required_checks"
+  | "merged"
+  | "closed"
+  | "queue_failed"
+  | "queue_ejected"
+  | "head_changed"
+  | "timeout";
+
+export type CheckState = "passed" | "failed" | "pending";
+
+export interface RequiredCheckSummary {
+  name: string;
+  state: CheckState;
+  /** False while GitHub has not reported the check on this commit; such a check is pending. */
+  reported: boolean;
+}
+
+export interface FailedJob {
+  name: string;
+  required: boolean;
+  conclusion: string;
+  url?: string;
+}
+
+export interface CommitChecksSummary {
+  sha: string;
+  required: RequiredCheckSummary[];
+  /** Checks outside the required set, counted. */
+  other: { passed: number; failed: number; pending: number };
+  failedJobs: FailedJob[];
+  /** Set when a list was cut to its bound or GitHub had more contexts than one page. */
+  truncated?: true;
+}
+
+export interface PullRequestWaitSummary {
+  outcome: PullRequestWaitOutcome;
+  repository: string;
+  number: number;
+  url: string;
+  state: "open" | "closed" | "merged";
+  merged: boolean;
+  mergeCommitSha: string | null;
+  isDraft: boolean;
+  headSha: string;
+  baseRef: string;
+  defaultBranch: string | null;
+  mergeStateStatus: string | null;
+  /** Required check names from the base branch's rules; empty means none are required there.
+   * Null when the rules were not read because the pull request had already merged, closed, or
+   * moved to another head. */
+  requiredCheckNames: string[] | null;
+  checks: CommitChecksSummary;
+  mergeQueue: null | {
+    state: string;
+    position: number | null;
+    enqueuedAt: string | null;
+    checks: CommitChecksSummary | null;
+  };
+  waitedMs: number;
+  polls: number;
+}
+
+export interface PullRequestWaitInput {
+  repository: string;
+  number: number;
+  /** The head the caller reviewed; a different head returns `head_changed`. */
+  headSha?: string;
+  timeoutMs?: number;
+  intervalMs?: number;
+  /** Also return when a check outside the required set fails. */
+  returnOnAnyFailure?: boolean;
+}
+
+export interface PullRequestWaitDeps {
+  gh: GhRunner;
+  now?: () => number;
+  sleep?: (milliseconds: number) => Promise<void>;
+  signal?: AbortSignal;
+}
+
+export type PullRequestWaitResult =
+  | { ok: true; summary: PullRequestWaitSummary }
+  | { ok: false; error: string };
+
+const SHA = /^[0-9a-f]{40}$/u;
+const PASS_CONCLUSIONS = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function clip(value: string, max: number): string {
+  return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+}
+
+function httpsUrl(value: unknown): string | undefined {
+  return typeof value === "string" && value.startsWith("https://") ? clip(value, MAX_URL) : undefined;
+}
+
+/** Parse `owner/name#123`, a github.com pull request URL, or a bare number plus a repository. */
+export function parsePullRequestRef(
+  pullRequest: unknown,
+  repository: unknown,
+): { repository: string; number: number } | { error: string } {
+  let repo = typeof repository === "string" ? repository.trim() : undefined;
+  let number: number | undefined;
+  if (typeof pullRequest === "number") {
+    number = pullRequest;
+  } else if (typeof pullRequest === "string") {
+    const text = pullRequest.trim();
+    const url = /^https:\/\/github\.com\/([^/\s]+\/[^/\s]+)\/pull\/(\d+)(?:[/?#].*)?$/u.exec(text);
+    const short = /^([^/\s#]+\/[^/\s#]+)#(\d+)$/u.exec(text);
+    const match = url ?? short;
+    if (match) {
+      if (repo && repo.toLowerCase() !== match[1]!.toLowerCase()) {
+        return { error: `pull request ${text} is not in repository ${repo}` };
+      }
+      repo = match[1]!;
+      number = Number(match[2]);
+    } else if (/^#?\d+$/u.test(text)) {
+      number = Number(text.replace(/^#/u, ""));
+    } else {
+      return { error: "pullRequest must be a number, owner/name#number, or a github.com pull request URL" };
+    }
+  } else {
+    return { error: "pullRequest is required" };
+  }
+  if (!Number.isSafeInteger(number) || number! < 1) return { error: "pullRequest number must be a positive integer" };
+  if (!repo) return { error: "repository (owner/name) is required when pullRequest is a bare number" };
+  if (!githubRepository({ repository: repo, number: number! })) return { error: `invalid GitHub repository: ${repo}` };
+  return { repository: repo, number: number! };
+}
+
+/** `gh api` reports an HTTP error as `gh: Not Found (HTTP 404)`, which the shared classifier would
+ * read as a missing `gh`, so a status code is classified first. */
+function failureReason(outcome: GhOutcome): string {
+  const status = /\(HTTP (\d{3})\)/u.exec(outcome.stderr)?.[1];
+  if (status === "401") return "forge_unauthenticated";
+  if (status === "429") return "forge_rate_limited";
+  if (status) return `http_${status}`;
+  return classifyGhFailure(outcome);
+}
+
+function ghError(what: string, outcome: GhOutcome): string {
+  const reason = failureReason(outcome);
+  const detail = outcome.stderr.split(/\r?\n/u).map((line) => line.trim()).find(Boolean);
+  return `${what}: ${reason}${detail ? ` (${clip(detail, 200)})` : ""}`;
+}
+
+function transient(outcome: GhOutcome): boolean {
+  const reason = failureReason(outcome);
+  return reason === "forge_unreachable" || reason === "forge_rate_limited";
+}
+
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The base branch's required status check names: every active ruleset's `required_status_checks`
+ * rule plus classic branch protection. Both endpoints need only read access. Any failure is an
+ * error rather than an empty set, so an unreadable base can never look like "nothing required".
+ */
+export async function requiredCheckNames(
+  gh: GhRunner,
+  repository: string,
+  branch: string,
+): Promise<{ ok: true; names: string[] } | { ok: false; error: string; transient: boolean }> {
+  const ref = encodeURIComponent(branch);
+  const names = new Set<string>();
+  const rules = await gh(["api", "--hostname", "github.com", `repos/${repository}/rules/branches/${ref}?per_page=100`]);
+  if (rules.code !== null) return { ok: false, error: ghError(`could not read the rules for ${branch}`, rules), transient: transient(rules) };
+  const ruleList = parseJson(rules.stdout);
+  if (!Array.isArray(ruleList)) return { ok: false, error: `could not read the rules for ${branch}: unexpected response`, transient: false };
+  for (const rule of ruleList) {
+    const value = record(rule);
+    if (value?.type !== "required_status_checks") continue;
+    const checks = record(value.parameters)?.required_status_checks;
+    for (const check of Array.isArray(checks) ? checks : []) {
+      const context = record(check)?.context;
+      if (typeof context === "string" && context) names.add(context);
+    }
+  }
+  const branchInfo = await gh(["api", "--hostname", "github.com", `repos/${repository}/branches/${ref}`]);
+  if (branchInfo.code !== null) {
+    return { ok: false, error: ghError(`could not read branch ${branch}`, branchInfo), transient: transient(branchInfo) };
+  }
+  const protection = record(record(parseJson(branchInfo.stdout))?.protection);
+  const classic = record(protection?.required_status_checks);
+  if (protection?.enabled !== false && classic) {
+    for (const context of Array.isArray(classic.contexts) ? classic.contexts : []) {
+      if (typeof context === "string" && context) names.add(context);
+    }
+    for (const check of Array.isArray(classic.checks) ? classic.checks : []) {
+      const context = record(check)?.context;
+      if (typeof context === "string" && context) names.add(context);
+    }
+  }
+  return { ok: true, names: [...names].sort() };
+}
+
+const CONTEXT_FIELDS = `contexts(first:${CONTEXTS_PER_COMMIT}){pageInfo{hasNextPage} nodes{
+  __typename
+  ... on CheckRun{name status conclusion startedAt detailsUrl isRequired(pullRequestNumber:$number)}
+  ... on StatusContext{context state createdAt targetUrl isRequired(pullRequestNumber:$number)}
+}}`;
+
+export const PULL_REQUEST_WAIT_QUERY = `query($owner:String!,$name:String!,$number:Int!){
+  repository(owner:$owner,name:$name){
+    defaultBranchRef{name}
+    pullRequest(number:$number){
+      url state isDraft headRefOid baseRefName mergeStateStatus
+      mergeCommit{oid}
+      mergeQueueEntry{position state enqueuedAt headCommit{oid statusCheckRollup{${CONTEXT_FIELDS}}}}
+      commits(last:1){nodes{commit{oid statusCheckRollup{${CONTEXT_FIELDS}}}}}
+    }
+  }
+}`;
+
+interface CheckNode {
+  name: string;
+  state: CheckState;
+  conclusion: string;
+  at: string;
+  url?: string;
+  isRequired: boolean;
+}
+
+function checkNode(raw: unknown): CheckNode | null {
+  const node = record(raw);
+  if (!node) return null;
+  if (node.__typename === "CheckRun" && typeof node.name === "string") {
+    const completed = node.status === "COMPLETED";
+    const conclusion = typeof node.conclusion === "string" ? node.conclusion : "";
+    return {
+      name: node.name,
+      state: !completed ? "pending" : PASS_CONCLUSIONS.has(conclusion) ? "passed" : "failed",
+      conclusion: completed ? conclusion || "UNKNOWN" : String(node.status ?? "PENDING"),
+      at: typeof node.startedAt === "string" ? node.startedAt : "",
+      url: httpsUrl(node.detailsUrl),
+      isRequired: node.isRequired === true,
+    };
+  }
+  if (node.__typename === "StatusContext" && typeof node.context === "string") {
+    const state = String(node.state ?? "PENDING");
+    return {
+      name: node.context,
+      state: state === "SUCCESS" ? "passed" : state === "FAILURE" || state === "ERROR" ? "failed" : "pending",
+      conclusion: state,
+      at: typeof node.createdAt === "string" ? node.createdAt : "",
+      url: httpsUrl(node.targetUrl),
+      isRequired: node.isRequired === true,
+    };
+  }
+  return null;
+}
+
+/** Fold one commit's rollup into a bounded summary. Of several runs sharing a name (re-runs), the
+ * latest started wins; a run that has not started yet counts as the latest. The verdict covers
+ * every required check, including any cut from the bounded list. */
+export function evaluateCommitChecks(
+  sha: string,
+  rollup: unknown,
+  requiredNames: readonly string[],
+): { summary: CommitChecksSummary; requiredState: CheckState | "none" } {
+  const contexts = record(record(rollup)?.contexts);
+  const rawNodes = Array.isArray(contexts?.nodes) ? contexts.nodes : [];
+  const moreContexts = record(contexts?.pageInfo)?.hasNextPage === true;
+  const latest = new Map<string, CheckNode>();
+  for (const raw of rawNodes) {
+    const node = checkNode(raw);
+    if (!node) continue;
+    const previous = latest.get(node.name);
+    if (!previous || (previous.at !== "" && (node.at === "" || node.at > previous.at))) latest.set(node.name, node);
+  }
+  // Rules are the authority; a check GitHub itself marks required is added, never removed.
+  const required = new Set(requiredNames);
+  for (const node of latest.values()) if (node.isRequired) required.add(node.name);
+  const requiredList: RequiredCheckSummary[] = [...required].sort().map((name) => {
+    const node = latest.get(name);
+    return { name: clip(name, MAX_NAME), state: node?.state ?? "pending", reported: node !== undefined };
+  });
+  const other = { passed: 0, failed: 0, pending: 0 };
+  const failed: FailedJob[] = [];
+  for (const node of latest.values()) {
+    const isRequired = required.has(node.name);
+    if (!isRequired) other[node.state]++;
+    if (node.state === "failed") {
+      failed.push({ name: clip(node.name, MAX_NAME), required: isRequired, conclusion: node.conclusion, ...(node.url ? { url: node.url } : {}) });
+    }
+  }
+  failed.sort((a, b) => Number(b.required) - Number(a.required) || a.name.localeCompare(b.name));
+  const truncated = moreContexts || requiredList.length > MAX_LISTED_CHECKS || failed.length > MAX_FAILED_JOBS;
+  const requiredState = requiredList.length === 0 ? "none"
+    : requiredList.some((check) => check.state === "failed") ? "failed"
+    : requiredList.every((check) => check.state === "passed") ? "passed"
+    : "pending";
+  return {
+    summary: {
+      sha,
+      required: requiredList.slice(0, MAX_LISTED_CHECKS),
+      other,
+      failedJobs: failed.slice(0, MAX_FAILED_JOBS),
+      ...(truncated ? { truncated: true as const } : {}),
+    },
+    requiredState,
+  };
+}
+
+export function summarizeCommitChecks(sha: string, rollup: unknown, requiredNames: readonly string[]): CommitChecksSummary {
+  return evaluateCommitChecks(sha, rollup, requiredNames).summary;
+}
+
+interface Observation {
+  url: string;
+  state: "open" | "closed" | "merged";
+  isDraft: boolean;
+  headSha: string;
+  baseRef: string;
+  defaultBranch: string | null;
+  mergeStateStatus: string | null;
+  mergeCommitSha: string | null;
+  queue: null | { state: string; position: number | null; enqueuedAt: string | null; headSha: string | null; rollup: unknown };
+  rollup: unknown;
+}
+
+function observation(data: unknown): Observation | null {
+  const repository = record(record(data)?.repository);
+  const pr = record(repository?.pullRequest);
+  if (!pr) return null;
+  const state = pr.state === "OPEN" ? "open" : pr.state === "CLOSED" ? "closed" : pr.state === "MERGED" ? "merged" : null;
+  if (!state || typeof pr.headRefOid !== "string" || !SHA.test(pr.headRefOid) ||
+      typeof pr.baseRefName !== "string" || !pr.baseRefName || typeof pr.url !== "string") return null;
+  const commit = record(record((record(pr.commits)?.nodes as unknown[] | undefined)?.[0])?.commit);
+  const entry = record(pr.mergeQueueEntry);
+  const entryHead = record(entry?.headCommit);
+  const defaultBranch = record(repository?.defaultBranchRef)?.name;
+  const mergeCommit = record(pr.mergeCommit)?.oid;
+  return {
+    url: clip(pr.url, MAX_URL),
+    state,
+    isDraft: pr.isDraft === true,
+    headSha: pr.headRefOid,
+    baseRef: clip(pr.baseRefName, MAX_NAME),
+    defaultBranch: typeof defaultBranch === "string" ? clip(defaultBranch, MAX_NAME) : null,
+    mergeStateStatus: typeof pr.mergeStateStatus === "string" ? pr.mergeStateStatus : null,
+    mergeCommitSha: typeof mergeCommit === "string" && SHA.test(mergeCommit) ? mergeCommit : null,
+    queue: entry
+      ? {
+          state: typeof entry.state === "string" ? entry.state : "UNKNOWN",
+          position: Number.isSafeInteger(entry.position) ? entry.position as number : null,
+          enqueuedAt: typeof entry.enqueuedAt === "string" ? entry.enqueuedAt : null,
+          headSha: typeof entryHead?.oid === "string" && SHA.test(entryHead.oid) ? entryHead.oid : null,
+          rollup: entryHead?.statusCheckRollup ?? null,
+        }
+      : null,
+    rollup: commit?.statusCheckRollup ?? null,
+  };
+}
+
+function clampInteger(value: unknown, fallback: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : fallback));
+}
+
+async function cancellableSleep(deps: PullRequestWaitDeps, milliseconds: number): Promise<boolean> {
+  const sleep = deps.sleep ?? ((duration: number) => new Promise<void>((resolve) => setTimeout(resolve, duration)));
+  const signal = deps.signal;
+  if (!signal) {
+    await sleep(milliseconds);
+    return true;
+  }
+  if (signal.aborted) return false;
+  let onAbort!: () => void;
+  const cancelled = new Promise<boolean>((resolve) => {
+    onAbort = () => resolve(false);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([sleep(milliseconds).then(() => true), cancelled]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
+}
+
+/** Wait for an outcome. Every observation is a read; the loop sleeps between them, so a caller
+ * blocked here makes no model requests until this returns. */
+export async function waitForPullRequest(input: PullRequestWaitInput, deps: PullRequestWaitDeps): Promise<PullRequestWaitResult> {
+  const repo = githubRepository({ repository: input.repository, number: input.number });
+  const ref = repo ? { ...repo, number: input.number } : null;
+  if (!ref) return { ok: false, error: "a valid GitHub repository and pull request number are required" };
+  if (input.headSha !== undefined && !SHA.test(input.headSha)) return { ok: false, error: "headSha must be a full 40-character commit SHA" };
+  const timeoutMs = clampInteger(input.timeoutMs, PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS, 1, PULL_REQUEST_WAIT_MAX_TIMEOUT_MS);
+  const intervalMs = clampInteger(input.intervalMs, PULL_REQUEST_WAIT_DEFAULT_INTERVAL_MS,
+    PULL_REQUEST_WAIT_MIN_INTERVAL_MS, PULL_REQUEST_WAIT_MAX_INTERVAL_MS);
+  const now = deps.now ?? Date.now;
+  const started = now();
+  const deadline = started + timeoutMs;
+  const repository = `${ref.owner}/${ref.name}`;
+  let expectedHead = input.headSha;
+  let required: { base: string; names: string[] } | null = null;
+  let sawQueue = false;
+  let vanishedQueue = false;
+  let transientFailures = 0;
+  let polls = 0;
+
+  const summarize = (outcome: PullRequestWaitOutcome, seen: Observation): PullRequestWaitSummary => ({
+    outcome,
+    repository,
+    number: ref.number,
+    url: seen.url,
+    state: seen.state,
+    merged: seen.state === "merged",
+    mergeCommitSha: seen.mergeCommitSha,
+    isDraft: seen.isDraft,
+    headSha: seen.headSha,
+    baseRef: seen.baseRef,
+    defaultBranch: seen.defaultBranch,
+    mergeStateStatus: seen.mergeStateStatus,
+    requiredCheckNames: required ? required.names.slice(0, MAX_LISTED_CHECKS).map((name) => clip(name, MAX_NAME)) : null,
+    checks: summarizeCommitChecks(seen.headSha, seen.rollup, required?.names ?? []),
+    mergeQueue: seen.queue
+      ? {
+          state: seen.queue.state,
+          position: seen.queue.position,
+          enqueuedAt: seen.queue.enqueuedAt,
+          checks: seen.queue.headSha ? summarizeCommitChecks(seen.queue.headSha, seen.queue.rollup, required?.names ?? []) : null,
+        }
+      : null,
+    waitedMs: Math.max(0, now() - started),
+    polls,
+  });
+
+  // Sleep until the next poll; false when cancelled. A transient failure retries on the same pace.
+  const pause = async (milliseconds: number): Promise<boolean> => {
+    const remaining = deadline - now();
+    if (remaining <= 0) return true;
+    return cancellableSleep(deps, Math.min(milliseconds, remaining));
+  };
+
+  for (;;) {
+    if (deps.signal?.aborted) return { ok: false, error: "request cancelled" };
+    polls++;
+    const outcome = await deps.gh([
+      "api", "graphql", "--hostname", "github.com",
+      "-f", `query=${PULL_REQUEST_WAIT_QUERY}`,
+      "-f", `owner=${ref.owner}`, "-f", `name=${ref.name}`, "-F", `number=${ref.number}`,
+    ]);
+    const response = record(parseJson(outcome.stdout));
+    const errors = Array.isArray(response?.errors) ? response.errors.map(record) : [];
+    const seen = observation(response?.data);
+    if (!seen) {
+      const rateLimited = errors.some((error) => error?.type === "RATE_LIMITED");
+      if ((rateLimited || (outcome.code !== null && transient(outcome))) && ++transientFailures <= MAX_TRANSIENT_FAILURES && now() < deadline) {
+        if (!await pause(intervalMs)) return { ok: false, error: "request cancelled" };
+        continue;
+      }
+      const message = errors.map((error) => typeof error?.message === "string" ? error.message : "").find(Boolean);
+      if (message) return { ok: false, error: `could not read ${repository}#${ref.number}: ${clip(message, 200)}` };
+      return { ok: false, error: outcome.code === null
+        ? `could not read ${repository}#${ref.number}: unexpected response`
+        : ghError(`could not read ${repository}#${ref.number}`, outcome) };
+    }
+    transientFailures = 0;
+
+    if (seen.state === "merged") return { ok: true, summary: summarize("merged", seen) };
+    if (seen.state === "closed") return { ok: true, summary: summarize("closed", seen) };
+    if (expectedHead && seen.headSha !== expectedHead) return { ok: true, summary: summarize("head_changed", seen) };
+    expectedHead = seen.headSha;
+
+    if (!required || required.base !== seen.baseRef) {
+      const names = await requiredCheckNames(deps.gh, repository, seen.baseRef);
+      if (!names.ok) {
+        if (names.transient && ++transientFailures <= MAX_TRANSIENT_FAILURES && now() < deadline) {
+          if (!await pause(intervalMs)) return { ok: false, error: "request cancelled" };
+          continue;
+        }
+        return { ok: false, error: names.error };
+      }
+      required = { base: seen.baseRef, names: names.names };
+    }
+
+    if (seen.queue) {
+      sawQueue = true;
+      vanishedQueue = false;
+      if (seen.queue.state === "UNMERGEABLE") return { ok: true, summary: summarize("queue_failed", seen) };
+    } else if (sawQueue) {
+      // GitHub can drop the entry a moment before the pull request reads MERGED: confirm once.
+      if (vanishedQueue) return { ok: true, summary: summarize("queue_ejected", seen) };
+      vanishedQueue = true;
+      // Unconfirmed at the deadline: report a timeout rather than an ejection that may be a merge.
+      if (now() >= deadline) return { ok: true, summary: summarize("timeout", seen) };
+      if (!await pause(EJECTION_CONFIRM_MS)) return { ok: false, error: "request cancelled" };
+      continue;
+    } else {
+      const checks = evaluateCommitChecks(seen.headSha, seen.rollup, required.names);
+      if (checks.requiredState === "failed" || (input.returnOnAnyFailure && checks.summary.failedJobs.length > 0)) {
+        return { ok: true, summary: summarize("checks_failed", seen) };
+      }
+      if (checks.requiredState === "none") return { ok: true, summary: summarize("no_required_checks", seen) };
+      if (checks.requiredState === "passed") return { ok: true, summary: summarize("checks_passed", seen) };
+    }
+
+    if (now() >= deadline) return { ok: true, summary: summarize("timeout", seen) };
+    // The read after the final pause lands at the deadline, so a timeout summary is current.
+    if (!await pause(intervalMs)) return { ok: false, error: "request cancelled" };
+  }
+}

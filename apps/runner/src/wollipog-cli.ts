@@ -16,9 +16,12 @@ import {
   type ToolResult,
 } from "./session-management-mcp.js";
 import { VERSION } from "./version.js";
+import { contextGhRunner, type GhRunner } from "./campaign-forge-status.js";
 import { defaultHostAdminIo, hostAdminUsage, runHostAdminCli, type HostAdminIo } from "./host-admin-cli.js";
 import { defaultServiceHost, defaultServiceIo, runServiceCli, serviceUsage } from "./service-cli.js";
-import { artifactHelp, decisionHelp, expandCommandAlias, initHelp, pairHelp, resolveHelp, rootHelp, sessionHelp, worktreeHelp } from "./wollipog-help.js";
+import {
+  artifactHelp, decisionHelp, expandCommandAlias, initHelp, pairHelp, pullRequestHelp, resolveHelp, rootHelp, sessionHelp, worktreeHelp,
+} from "./wollipog-help.js";
 import { resolveWorktreeSetupRepositoryRoot, writeStarterWorktreeSetupConfig } from "./worktree-setup-generator.js";
 import { RUNNER_APP_ARGUMENT_INDEX } from "./runner-entry.js";
 import {
@@ -147,6 +150,52 @@ export async function runWollipogInit(
     if (message.includes("already exists") || message.includes("regular file")) return 4;
     return 1;
   }
+}
+
+const PULL_REQUEST_WAIT_SUCCESS = new Set(["checks_passed", "merged", "no_required_checks"]);
+
+/**
+ * `wollipog pr wait`: local and read-only. It uses this machine's `gh` login, needs neither a
+ * session credential nor the control plane, and runs the same `wait_pull_request` handler the MCP
+ * server exposes. A bare number resolves against the current directory's GitHub repository.
+ */
+export async function runPullRequestCli(
+  args: string[],
+  json: boolean,
+  io: { stdout: Write; stderr: Write },
+  gh: GhRunner = contextGhRunner({ kind: "native" }, process.cwd()),
+): Promise<number> {
+  const fail = (message: string, code: number): number => {
+    (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: message })}\n` : `${message}\n`);
+    return code;
+  };
+  const words = positional(args, ["--repo", "--head"]);
+  if (words[1] !== "wait" || words.length !== 3) return fail(pullRequestHelp(), 2);
+  const timeoutMs = numeric(option(args, "--timeout"));
+  const intervalMs = numeric(option(args, "--interval"));
+  if ((optionPresent(args, "--timeout") && timeoutMs === undefined) || (optionPresent(args, "--interval") && intervalMs === undefined)) {
+    return fail("--timeout and --interval take milliseconds", 2);
+  }
+  let repository = option(args, "--repo");
+  if (!repository && /^#?\d+$/u.test(words[2]!)) {
+    const resolved = await gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
+    repository = resolved.code === null ? resolved.stdout.trim() : "";
+    if (!repository) return fail("could not resolve this directory's GitHub repository; pass --repo <owner/name>", 1);
+  }
+  const result = await executeManagerTool("wait_pull_request", {
+    pullRequest: words[2],
+    ...(repository ? { repository } : {}),
+    ...(option(args, "--head") !== undefined ? { headSha: option(args, "--head") } : {}),
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    ...(intervalMs !== undefined ? { intervalMs } : {}),
+    ...(flag(args, "--any-failure") ? { returnOnAnyFailure: true } : {}),
+  }, { fetch: () => Promise.reject(new Error("no control plane")), cpUrl: "", selfSessionId: "", token: "", gh });
+  const data = payload(result);
+  io.stdout(json ? `${JSON.stringify(data)}\n` : `${JSON.stringify(data, null, 2)}\n`);
+  if (result.isError) return 1;
+  const outcome = (data as { outcome?: unknown }).outcome;
+  if (outcome === "timeout") return 124;
+  return PULL_REQUEST_WAIT_SUCCESS.has(String(outcome)) ? 0 : 3;
 }
 
 function invocationArgs(argv: string[]): string[] {
@@ -619,6 +668,9 @@ export async function runWollipogCli(
     }
     return runWollipogInit(process.cwd(), json, io);
   }
+  // Waiting on a pull request is local and read-only too: it reads GitHub through this machine's
+  // `gh` login and never needs a session credential or the control plane.
+  if (positional(args)[0] === "pr") return runPullRequestCli(args, json, io);
   const parsed = command(args);
   if ("error" in parsed) {
     (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: parsed.error })}\n` : `${parsed.error}\n`);

@@ -12,6 +12,16 @@ import {
   WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
   type UiEvidenceReviewDelivery,
 } from "@wollipog/protocol";
+import { contextGhRunner, type GhRunner } from "./campaign-forge-status.js";
+import {
+  parsePullRequestRef,
+  PULL_REQUEST_WAIT_DEFAULT_INTERVAL_MS,
+  PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS,
+  PULL_REQUEST_WAIT_MAX_INTERVAL_MS,
+  PULL_REQUEST_WAIT_MAX_TIMEOUT_MS,
+  PULL_REQUEST_WAIT_MIN_INTERVAL_MS,
+  waitForPullRequest,
+} from "./pull-request-wait.js";
 import { readMediaFileForAttach } from "./session-artifact-file.js";
 import { VERSION } from "./version.js";
 
@@ -80,6 +90,8 @@ export interface McpDeps {
   /** A caller that already authenticated `/api/compatibility` may pass the exact proven version
    * so shared handlers do not repeat the same round-trip. */
   controlPlaneProtocolVersion?: number;
+  /** Read-only `gh` for `wait_pull_request`; defaults to this process's own `gh` login. */
+  gh?: GhRunner;
 }
 
 export type ToolContent =
@@ -910,7 +922,7 @@ const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "l
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question", "resolve_descendant_approval",
   "resolve_descendant_workflow_decision", "review_descendant_ui_evidence", "request_workflow_decision", "get_workflow_decision", "consume_workflow_decision",
   "reconcile_workflow_decision", "list_workflow_decisions",
-  "wait_session", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
+  "wait_session", "wait_pull_request", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
   "list_steering_attempts", "get_steering_attempt", "resolve_steering_attempt", "handoff_session_result",
   "stop_session", "stop_background_job", "restart_session", "archive_session", "set_guardrails", "create_worktree",
   "attach_worktree", "select_worktree", "discard_worktree"]);
@@ -1909,6 +1921,54 @@ export const TOOLS: McpTool[] = [
         intervalMs = nextWaitSessionIntervalMs(intervalMs);
       } while (now() <= deadline);
       return errorResult(`timed out waiting for session ${args.sessionId} to reach ${[...wanted].join(", ")}`);
+    },
+  },
+  {
+    name: "wait_pull_request",
+    description: "Wait, without model turns, until a GitHub pull request's required checks pass or fail, its merge-queue entry fails or leaves the queue, it merges or closes, its head moves, or the timeout expires; then return one bounded summary (head SHA, each required check, merge-queue position and state, failed jobs with run links, merged). Required checks come from the base branch's rules; one not reported yet is pending, never passing. Reads only, through this runner's gh login. Keep timeoutMs inside your harness's tool-call limit and call again on outcome \"timeout\".",
+    inputSchema: {
+      type: "object",
+      properties: {
+        pullRequest: {
+          type: "string",
+          description: "Pull request number (with repository), owner/name#number, or a github.com pull request URL.",
+        },
+        repository: { type: "string", description: "GitHub owner/name; required with a bare number." },
+        headSha: { type: "string", description: "The reviewed head; a different head returns outcome \"head_changed\"." },
+        timeoutMs: {
+          type: "integer",
+          minimum: 1,
+          maximum: PULL_REQUEST_WAIT_MAX_TIMEOUT_MS,
+          description: `Defaults to ${PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS}.`,
+        },
+        intervalMs: {
+          type: "integer",
+          minimum: PULL_REQUEST_WAIT_MIN_INTERVAL_MS,
+          maximum: PULL_REQUEST_WAIT_MAX_INTERVAL_MS,
+          description: `GitHub polling interval; defaults to ${PULL_REQUEST_WAIT_DEFAULT_INTERVAL_MS}.`,
+        },
+        returnOnAnyFailure: { type: "boolean", description: "Also return when a check outside the required set fails." },
+      },
+      required: ["pullRequest"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      const ref = parsePullRequestRef(args?.pullRequest, args?.repository);
+      if ("error" in ref) return errorResult(ref.error);
+      if (args?.headSha !== undefined && typeof args.headSha !== "string") return errorResult("headSha must be a string");
+      const result = await waitForPullRequest({
+        ...ref,
+        ...(typeof args?.headSha === "string" ? { headSha: args.headSha.trim().toLowerCase() } : {}),
+        ...(Number.isFinite(args?.timeoutMs) ? { timeoutMs: args.timeoutMs } : {}),
+        ...(Number.isFinite(args?.intervalMs) ? { intervalMs: args.intervalMs } : {}),
+        returnOnAnyFailure: args?.returnOnAnyFailure === true,
+      }, {
+        gh: deps.gh ?? contextGhRunner({ kind: "native" }, process.cwd()),
+        ...(deps.now ? { now: deps.now } : {}),
+        ...(deps.sleep ? { sleep: deps.sleep } : {}),
+        ...(deps.signal ? { signal: deps.signal } : {}),
+      });
+      return result.ok ? textResult(result.summary) : errorResult(result.error);
     },
   },
   {

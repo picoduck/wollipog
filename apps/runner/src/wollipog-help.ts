@@ -27,6 +27,7 @@ export function rootHelp(): string {
     "  decision            Request, read, consume, and reconcile typed workflow decisions for this session",
     "  issue-closure       Request human approval and execute one campaign issue closure",
     "  campaign            Record and read an Orchestrator campaign's work ledger",
+    "  pr                  Wait for a pull request's required checks or merge-queue outcome",
     "  admin               Administer a control plane from its host",
     "  service             Manage a headless Linux systemd deployment",
     "  help [topic]        Show root or topic-specific help",
@@ -50,7 +51,7 @@ export function rootHelp(): string {
     "  wollipog admin runner-credential rotate --runner RUNNER_ID --output ./runner.token",
     "  wollipog service uninstall  # preserves data by default",
     "",
-    "Topics: init, doctor, update, pair, service, admin, session, worktree, artifact, decision, campaign",
+    "Topics: init, doctor, update, pair, service, admin, session, worktree, artifact, decision, campaign, pr",
     "Run `wollipog help <topic>` for complete commands and options. Help is always text; operational commands use --json for stable machine-readable output.",
   ].join("\n");
 }
@@ -197,6 +198,26 @@ export function updateHelp(): string {
   ].join("\n");
 }
 
+export function pullRequestHelp(): string {
+  return [
+    "Usage: wollipog pr wait <number|owner/name#number|url> [--repo <owner/name>] [--head <sha>]",
+    "                        [--timeout <ms>] [--interval <ms>] [--any-failure] [--json]",
+    "Block until the pull request's required checks pass or fail, its merge-queue entry fails or",
+    "leaves the queue, it merges or closes, its head moves, or the timeout expires. It then prints one",
+    "bounded summary: head SHA, each required check, merge-queue position and state, failed jobs with",
+    "run links, and whether it merged. Nothing calls a model while it waits.",
+    "Required checks come from the base branch's rulesets and branch protection. One GitHub has not",
+    "reported yet is pending, never passing; a base with no required checks returns at once.",
+    "It runs locally with this machine's `gh` login, reads only, and needs no control plane.",
+    "A bare number uses the current directory's GitHub repository unless --repo is given.",
+    "--head <sha> returns head_changed when the pull request no longer points at that commit.",
+    "--timeout defaults to 240000 (4 minutes), up to 10800000; --interval defaults to 30000, 10000-600000.",
+    "--any-failure also returns when a check outside the required set fails.",
+    "Exit status: 0 checks_passed, merged, or no_required_checks; 3 checks_failed, queue_failed,",
+    "queue_ejected, closed, or head_changed; 124 timeout; 1 GitHub could not be read; 2 usage.",
+  ].join("\n");
+}
+
 export function doctorHelp(): string {
   return [
     "Usage: wollipog doctor [--url <loopback-origin>] [--token-file <protected-local-credential>] [--json]",
@@ -235,6 +256,9 @@ function helpForTopic(topic: string): string | null {
       return issueClosureHelp();
     case "campaign":
       return campaignHelp();
+    case "pr":
+    case "pull-request":
+      return pullRequestHelp();
     case "decision":
     case "decisions":
     case "workflow-decision":
@@ -251,7 +275,8 @@ export function resolveHelp(args: string[]): HelpResponse | null {
   const rootHelpFlag = args[0] === "--help" || args[0] === "-h";
   const helpAt = (index: number) => args[index] === "--help" || args[index] === "-h";
   const aliasHelpFlag = (["init", "update", "doctor"].includes(args[0] ?? "") && helpAt(1))
-    || (args[0] === "pair" && (helpAt(1) || (["create", "list", "revoke", "url"].includes(args[1] ?? "") && helpAt(2))));
+    || (args[0] === "pair" && (helpAt(1) || (["create", "list", "revoke", "url"].includes(args[1] ?? "") && helpAt(2))))
+    || (args[0] === "pr" && (helpAt(1) || (args[1] === "wait" && args.slice(2).some((arg) => arg === "--help" || arg === "-h"))));
   if (!helpCommand && !rootHelpFlag && !aliasHelpFlag) return null;
 
   const topic = helpCommand
