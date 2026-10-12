@@ -29,11 +29,12 @@ export class CampaignRecoveryService {
     private readonly log: { info(message: string): void }) {}
 
   maintain(now: number, runnerId?: string): void {
-    const roots = new Set([...this.db.listOrchestratorCampaignSessionIds(runnerId), ...this.db.campaignRecovery.campaignIds()]);
+    const retained = new Set(this.db.campaignRecovery.campaignIds());
+    const roots = new Set([...this.db.listOrchestratorCampaignSessionIds(runnerId), ...retained]);
     for (const rootId of roots) {
       const root = this.db.getSession(rootId);
       if (!root || (runnerId && root.runnerId !== runnerId)) continue;
-      if (root.orchestratorPolicy?.control?.mode !== "full_control" && !this.db.campaignRecovery.campaignIds().includes(rootId)) continue;
+      if (root.orchestratorPolicy?.control?.mode !== "full_control" && !retained.has(rootId)) continue;
       this.synchronize(root, now);
     }
   }
@@ -147,15 +148,17 @@ export class CampaignRecoveryService {
     // execution lane, with its existing receipt and active-turn uniqueness constraints.
     const mayWake = current && supported && root.status === "idle" && !root.pendingApproval &&
       runnerSupportsProtocol(this.db.getRunner(root.runnerId)?.protocolVersion, "campaignContinuations");
+    const committedDispatches: Array<{ recoveryId: string; action: string; reason: string; attempt: number }> = [];
     const dispatched = mayWake ? this.db.campaignRecovery.dispatchDue(root.id, revision, now, (record, eventId) => {
       if (record.resource.kind === "continuation") return; // existing outbox owns backoff/reconciliation
       this.db.recordCampaignContinuationEvent({ eventId, campaignSessionId: root.id,
         kind: "request_actionable", subjectSessionId: record.resource.sessionId,
         occurrenceId: record.id, now });
-      this.log.info(JSON.stringify({ event: "campaign_recovery_dispatched", entryPoint: "recovery_sweep",
-        campaignId: root.id, recoveryId: record.id, policyRevision: revision, action: record.action,
-        reason: record.reason, attempt: record.attempts }));
+      committedDispatches.push({ recoveryId: record.id, action: record.action, reason: record.reason, attempt: record.attempts });
     }) : 0;
+    for (const dispatch of committedDispatches) this.log.info(JSON.stringify({
+      event: "campaign_recovery_dispatched", entryPoint: "recovery_sweep", campaignId: root.id,
+      policyRevision: revision, ...dispatch }));
     if (changed || dispatched) this.changed(root.id);
   }
 }

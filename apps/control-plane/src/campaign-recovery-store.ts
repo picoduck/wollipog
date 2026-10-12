@@ -13,6 +13,8 @@ CREATE TABLE IF NOT EXISTS campaign_recovery (
   FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_campaign_recovery_root ON campaign_recovery(campaign_session_id);
+CREATE INDEX IF NOT EXISTS idx_campaign_recovery_active ON campaign_recovery(campaign_session_id)
+  WHERE json_extract(record_json,'$.state') NOT IN ('resolved','cancelled');
 `;
 
 /** Derived by server adapters from authoritative state, not accepted from agent JSON. */
@@ -48,7 +50,8 @@ export class CampaignRecoveryStore {
   constructor(private readonly db: DatabaseSync, private readonly atomic: <T>(work: () => T) => T) {}
 
   campaignIds(): string[] {
-    return (this.db.prepare("SELECT DISTINCT campaign_session_id AS id FROM campaign_recovery")
+    return (this.db.prepare(`SELECT DISTINCT campaign_session_id AS id FROM campaign_recovery
+      WHERE json_extract(record_json,'$.state') NOT IN ('resolved','cancelled')`)
       .all() as Array<{ id: string }>).map(row => row.id);
   }
 
@@ -67,7 +70,8 @@ export class CampaignRecoveryStore {
   }
 
   private rows(campaignId: string): Row[] {
-    return this.db.prepare("SELECT id,signal,record_json FROM campaign_recovery WHERE campaign_session_id=? ORDER BY id")
+    return this.db.prepare(`SELECT id,signal,record_json FROM campaign_recovery WHERE campaign_session_id=?
+      AND json_extract(record_json,'$.state') NOT IN ('resolved','cancelled') ORDER BY id`)
       .all(campaignId) as unknown as Row[];
   }
   private save(campaignId: string, signal: string, record: CampaignRecoveryRecord): void {
@@ -87,7 +91,8 @@ export class CampaignRecoveryStore {
       for (const observation of observations) {
         const id = identity(campaignId, observation.resource, observation.action);
         observed.add(id);
-        const row = previous.get(id);
+        const row = previous.get(id) ?? this.db.prepare("SELECT id,signal,record_json FROM campaign_recovery WHERE id=?")
+          .get(id) as Row | undefined;
         const old = row ? JSON.parse(row.record_json) as CampaignRecoveryRecord : undefined;
         if (old && old.state === "cancelled") continue;
         if (old && hard.has(old.reason) && !observation.resolved && authorized && old.policyRevision === policyRevision) continue;
