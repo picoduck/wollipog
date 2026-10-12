@@ -174,7 +174,8 @@ export class SessionPromptOutbox {
         const projection = lifecycleEligible
           ? this.db.campaignProjection(command.campaignContinuation.campaignSessionId)
           : null;
-        if (!lifecycleEligible || !projection || projection.status === "waiting_human" ||
+        if (!lifecycleEligible || !projection || (projection.status === "waiting_human" &&
+            !this.db.campaignMayContinueWhileHumanWaiting(command.campaignContinuation.campaignSessionId)) ||
             projection.status === "verified_complete") {
           this.db.deferSessionPromptCommand(row.commandId, now + CAMPAIGN_HOLD_RECHECK_MS, now);
           continue;

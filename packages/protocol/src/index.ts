@@ -676,6 +676,7 @@ export * from "./campaign-authority.js";
 export * from "./campaign-issue-publication.js";
 export * from "./campaign-budget.js";
 export * from "./campaign-review-job.js";
+export * from "./campaign-recovery.js";
 import type { CampaignControl, CampaignRequestSource, CampaignAuthorityEvaluation } from "./campaign-authority.js";
 export const SESSION_SUMMARY_UI_PROTOCOL = 212;
 export const SKILL_REPORT_REQUEST_LIFETIME_MS = 30_000;
@@ -2534,6 +2535,8 @@ export interface UiEvidenceReviewDelivery {
 export interface OrchestratorCampaignProjection {
   budget?: import("./campaign-budget.js").CampaignBudgetView;
   status: OrchestratorCampaignStatus;
+  /** Durable content-safe recovery state; control-plane-owned, never an execution grant. */
+  recovery?: import("./campaign-recovery.js").CampaignRecoveryProjection;
   policyRevision: number;
   decisionOwners: ParentControlDecisionPolicy;
   limits: {
@@ -4459,6 +4462,8 @@ export interface ConsumeWorkflowDecisionRequest {
 }
 
 export interface PendingApproval {
+  /** Server-derived exact recovery exception. Informational; never an approval or retry grant. */
+  campaignRecovery?: import("./campaign-recovery.js").CampaignRecoveryRecord;
   /** Server-derived exception when a parked root callback could not be delivered. */
   standingAdmissionFailure?: "provider_delivery_unavailable";
   /** CP-derived mandatory human rule on this occurrence. Provider input cannot set it. */

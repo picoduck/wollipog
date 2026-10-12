@@ -304,6 +304,7 @@ import type { DurableBackgroundPushDelivery, PushAudience, PushServiceOutcome } 
 import { matchWorkspaceId, matchWorkspaceIds, workspacePathsEqual } from "./workspace-match.js";
 import { installMaintenanceIndexes } from "./maintenance-indexes.js";
 import { CAMPAIGN_WORK_LEDGER_SCHEMA, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
+import { CAMPAIGN_RECOVERY_SCHEMA, CampaignRecoveryStore } from "./campaign-recovery-store.js";
 import {
   CAMPAIGN_FORGE_OBSERVATION_SCHEMA,
   CampaignForgeObservationStore,
@@ -917,6 +918,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_orchestrator_follow_up_unique
 CREATE INDEX IF NOT EXISTS idx_orchestrator_follow_up_campaign
   ON orchestrator_campaign_follow_ups(campaign_session_id, created_at, id);
 ${CAMPAIGN_WORK_LEDGER_SCHEMA}
+${CAMPAIGN_RECOVERY_SCHEMA}
 ${CAMPAIGN_FORGE_OBSERVATION_SCHEMA}
 ${CAMPAIGN_WORK_ACCOUNTING_SCHEMA}
 
@@ -5190,6 +5192,40 @@ export class ControlPlaneDb {
   }
 
   private campaignWorkLedgerStore: CampaignWorkLedgerStore | null = null;
+  private campaignRecoveryStore: CampaignRecoveryStore | null = null;
+
+  get campaignRecovery(): CampaignRecoveryStore {
+    this.campaignRecoveryStore ??= new CampaignRecoveryStore(this.db, work => this.atomic(work));
+    return this.campaignRecoveryStore;
+  }
+
+  /** A child's human gate cannot starve unrelated work, but only a current Full Control
+   * boundary permits that continuation. This never clears the child's gate. */
+  campaignMayContinueWhileHumanWaiting(campaignId: string): boolean {
+    const session = this.getSession(campaignId);
+    return session?.orchestratorPolicy?.control?.mode === "full_control" && !session.archived &&
+      !session.stopOperation && !isTerminal(session.status) && campaignBoundaryCurrent(session) &&
+      campaignAuthorityPreflight(session.orchestratorPolicy.control, session.driver, this.getRunner(session.runnerId)?.protocolVersion).supported;
+  }
+
+  campaignRecoveryRequest(sessionId: string, request: PendingApproval): PendingApproval {
+    const rootId = this.campaignRootForMember(sessionId);
+    if (!rootId || !request.occurrenceId) return request;
+    const recovery = this.campaignRecovery.requestRecord(rootId, sessionId, request.occurrenceId);
+    return recovery ? { ...request, campaignRecovery: recovery } : request;
+  }
+
+  /** Current denied occurrences and uncertain closure mutations require recovery bookkeeping
+   * after their request card settles. A newer resource occurrence supersedes the old exception. */
+  campaignRecoverySettledDecisions(campaignId: string): WorkflowDecisionView[] {
+    return (this.stmt(`SELECT decision.* FROM workflow_decisions decision
+      WHERE controlling_session_id=? AND (status='denied' OR
+        (status='consumed' AND json_extract(issue_closure_result,'$.outcome')='uncertain'))
+        AND NOT EXISTS (SELECT 1 FROM workflow_decisions newer
+          WHERE newer.session_id=decision.session_id AND newer.resource_key=decision.resource_key
+          AND newer.created_at>decision.created_at)`).all(campaignId) as unknown[])
+      .map(workflowDecisionFromRow).filter((decision): decision is WorkflowDecisionView => decision !== null);
+  }
 
   /** The root-keyed campaign work ledger (#2417). Callers resolve the root campaign first. */
   get campaignWorkLedger(): CampaignWorkLedgerStore {
@@ -17587,11 +17623,26 @@ export class ControlPlaneDb {
         "Matching native reviewer capability is available; exact job admission and integrated live proof remain required.":
         "Required native reviewer admission is unsupported or blocked by an additional accounting boundary; this campaign is not unattended-ready for that path."};
     }
+    const recovery = policy.control?.mode === "full_control" ? this.campaignRecovery.projection(resolvedCampaignId) : undefined;
+    if (recovery) {
+      const boundaryCurrent = campaignBoundaryCurrent({ orchestratorPolicy: policy,
+        parentControlPolicy: { revision: campaign.parent_control_policy_revision, decisions: policy.delegation.decisions } });
+      const supported = campaignAuthorityPreflight(policy.control, campaign.driver,
+        this.getRunner(campaign.runner_id)?.protocolVersion).supported;
+      const lifecycleHeld = campaign.archived === 1 || isTerminal(campaign.status as SessionStatus) ||
+        campaign.status === "input_required" || this.sessionStopIntent(resolvedCampaignId) !== undefined;
+      recovery.automation = !boundaryCurrent ? { state: "authority_unavailable", reason: "The current authority boundary is unavailable; recovery cannot enlarge it." }
+        : !supported ? { state: "unsupported_capability", reason: "The current provider cannot enforce authorized recovery." }
+        : lifecycleHeld ? { state: "lifecycle_held", reason: "Recovery is held by the campaign's current lifecycle or human request." }
+        : { state: "available" };
+      recovery.unattendedReady &&= recovery.automation.state === "available";
+    }
     return {
       status,
       policyRevision: campaign.parent_control_policy_revision,
       ...(budget && this.campaignBudgets.members(resolvedCampaignId).every((id) => !this.stmt("SELECT 1 FROM sessions WHERE id=?").get(id) || this.campaignRootAudienceCanSee(resolvedCampaignId)(id))
         ? { budget } : {}),
+      ...(recovery ? { recovery } : {}),
       decisionOwners: effectiveOwners,
       limits: {
         maximumConcurrentChildren: limit,
@@ -17683,7 +17734,8 @@ export class ControlPlaneDb {
       "campaignContinuations",
     );
     const held = campaign.archived === 1 || isTerminal(campaign.status as SessionStatus) ||
-      campaign.status === "input_required" || campaignStatus === "waiting_human" ||
+      campaign.status === "input_required" || (campaignStatus === "waiting_human" &&
+        orchestratorCampaignPolicyFromJson(campaign.orchestrator_policy)?.control?.mode !== "full_control") ||
       campaignStatus === "verified_complete" || !runnerCompatible;
     const state = latest?.state === "missing_result" ? "missing_result" as const
       : latest?.state === "failed" ? "failed" as const
@@ -22409,7 +22461,11 @@ export class ControlPlaneDb {
       messageCount: count,
       eventEpoch: row.event_epoch ?? 0,
       preview: row.preview,
-      pendingApproval: pending,
+      pendingApproval: pending ? {
+        ...this.campaignRecoveryRequest(row.id, pending),
+        ...(pending.additionalRequests ? { additionalRequests: pending.additionalRequests.map(request =>
+          this.campaignRecoveryRequest(row.id, request)) } : {}),
+      } : pending,
       attention: (() => {
         const facts = this.stmt("SELECT * FROM session_attention WHERE session_id=?").get(row.id) as
           { revision: number; meaningful_at: number; result_revision: string | null; result_at: number | null; human_handoff_revision: string | null } | undefined;

@@ -31,6 +31,7 @@ import type { ViewNavigation } from "../navigation.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { MINUTE, campaignProjection, forgeObservation, itemDetail, itemSummary, knownCost, workSummary } from "./campaign-status-fixtures.js";
 import "../styles.css";
+import { campaignRecoveryFixture } from "./campaign-recovery-fixtures.js";
 
 declare global {
   interface Window {
@@ -56,6 +57,10 @@ const scenario = params.get("scenario") ?? "campaign";
 if (params.get("theme") === "light") document.documentElement.dataset.theme = "light";
 
 const NOW = Date.now();
+const recoveryReason = params.get("recovery");
+const recoveryRecord = recoveryReason && ["missing_access", "missing_human_information", "boundary_enlargement",
+  "human_required_rule", "unsupported_capability", "attempts_exhausted", "failed_checks", "reviewer_objection", "uncertain_outcome"].includes(recoveryReason)
+  ? campaignRecoveryFixture(recoveryReason as import("@wollipog/protocol").CampaignRecoveryReason, NOW) : null;
 const HOUR = 60 * MINUTE;
 
 const items: CampaignWorkItemSummary[] = [
@@ -225,6 +230,9 @@ const projectionFor = (rev: number) => campaignProjection(
       enforcement: "admission_and_best_effort_cancellation" as const, externalWorkers: "unsupported" as const,
       sessionLimits: {costBudgetUsd:40,maxToolCalls:null},rootAllocation:{sessionId:"s_parent",costUsd:25,toolCalls:500},costAccounting:"priced" as const,
     } } : {}),
+    ...(recoveryRecord ? { recovery: { unattendedReady: false, automatic: recoveryRecord.state === "dispatched" ? 1 : 0,
+      waitingHuman: recoveryRecord.state === "waiting_human" ? 1 : 0, blocked: recoveryRecord.state === "blocked" ? 1 : 0,
+      records: [recoveryRecord], truncated: false } } : {}),
     heldChildren: [{
       sessionId: "s_child_3",
       holds: [{
@@ -258,9 +266,16 @@ const descendantRequests: DescendantRequestView[] = scenario === "campaign" ? [{
   occurrenceId: "occ_1",
   request: {
     requestId: "req_1",
+    ...(recoveryRecord ? { campaignRecovery: recoveryRecord } : {}),
     occurrenceId: "occ_1",
     title: "Run gh pr merge for the storage pull request",
-    options: [
+    ...(recoveryRecord?.reason === "missing_access" ? {
+      kind: "authentication" as const, title: "Sign in to the required provider account",
+    } : {}),
+    options: recoveryRecord?.reason === "missing_access" ? [
+      { optionId: "auth:login", name: "Sign In", kind: "allow_once" },
+      { optionId: "auth:dismiss", name: "Dismiss", kind: "reject_once" },
+    ] : [
       { optionId: "allow", name: "Allow", kind: "allow_once" },
       { optionId: "reject", name: "Reject", kind: "reject_once" },
     ],

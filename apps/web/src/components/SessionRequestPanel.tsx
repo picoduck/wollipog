@@ -22,6 +22,7 @@ import { SessionQuestionBanner, useSessionResponseRefusal } from "./SessionAppro
 import { State } from "./State.js";
 import { useRemovedFocus } from "./useRemovedFocus.js";
 import { RequestCard } from "./requests/RequestCard.js";
+import { CampaignRecoveryNotice } from "./CampaignRecoveryNotice.js";
 import { RequestKindIcon } from "./requests/request-meta.js";
 
 type RequestPanelItem = {
@@ -374,6 +375,7 @@ export function SessionRequestPanel({
           <a className="request-panel-child" href={childHref} onClick={openChild}>{detail.sessionTitle}</a>
         </div>
         <div ref={detailRef} className="request-panel-detail" role="region" aria-label={requestTypeLabel(detail.request)}>
+          {detail.request.campaignRecovery && <CampaignRecoveryNotice record={detail.request.campaignRecovery} />}
           {!readOnly && detail.request.kind === "question" ? (
             <SessionQuestionBanner
               key={detail.key}
