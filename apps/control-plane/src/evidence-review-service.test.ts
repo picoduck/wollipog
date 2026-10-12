@@ -26,11 +26,11 @@ const record: VideoReviewRecord = {
 /** Credential/audit boundary test doubles only. Real derivation/provenance is tested separately
  * with all source frames; these values are never stored as an actual live proof or receipt. */
 function fixture() {
-  let invoked = 0, owner = true, protocol = 218;
+  let invoked = 0, owner = true, protocol = 219;
   const audit: EvidenceReviewAuditEvent[] = [];
   const pending: ResolvedVideoReviewRequest = {
     binding: record.binding, criteria: record.criteria, target: { agentId: "synthetic", driver: "codex-app-server",
-      modelId: "synthetic-model", providerId: "synthetic-provider", runnerId: "runner", runnerProtocolVersion: 218,
+      modelId: "synthetic-model", providerId: "synthetic-provider", runnerId: "runner", runnerProtocolVersion: 219,
       capabilitiesSha256: digest, auditedAllFrameDelivery: true, reviewerNamespaceSha256: digest, mediaOnlyNamespaceVerified: true },
     mediaType: "video/webm", mode: "full_control", sourceGrantVerified: true,
   };

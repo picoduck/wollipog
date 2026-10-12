@@ -62,6 +62,7 @@ function fixture(t: { skip(reason: string): void; after(fn: () => void): void })
   let retained: Buffer | null = source;
   let now = 1_000;
   const access: VideoReviewRuntimeAccess = {
+    validationProfile: () => "paced",
     currentBinding: () => current,
     readSource: () => retained,
     workerAdmission: () => workerAdmission,
@@ -80,6 +81,30 @@ const report = { outcome: "accept" as const, criteria: [{
   criterionId: "transition", outcome: "pass" as const, observedFrameIndices: [157],
   observation: "Synthetic deterministic test observation, not live-model proof.",
 }], rationale: "Test verdict exercises the server provenance contract only." };
+
+test("distinct candidate permit derives and hands off every native frame, while production approval stays refused", async (t) => {
+  const f = fixture(t); if (!f) return;
+  const candidate = readFileSync(new URL("../test-fixtures/video-review-max-profile.webm", import.meta.url));
+  const admitted = { ...binding, occurrenceId: "candidate-validation", sourceSha256: hash(candidate),
+    operatorValidation: { permitId: "disclosed-candidate-permit", scopeSha256: hash("synthetic candidate scope") } };
+  f.setCurrent(admitted); f.setSource(candidate);
+  f.access.validationProfile = () => "candidate";
+  const derived = await f.runtime.derive(admitted, "video/webm", criteria);
+  assert.ok(derived.ok); if (!derived.ok) return;
+  assert.equal(derived.review.manifest.captureProfile, "candidate");
+  assert.equal(derived.review.manifest.frames.length, 16);
+  assert.equal(derived.review.manifest.width, 640);
+  const batch = f.runtime.deliverBatch(derived.review.reviewId, "reviewer", 0);
+  assert.equal(batch.frameCount, 16);
+  assert.deepEqual(batch.deliveries.map((d) => d.receipt.videoFrame.ptsUs), Array.from({ length: 16 }, (_, i) => i * 250_000));
+  f.runtime.acknowledgeBatch(derived.review.reviewId, "reviewer", batch.deliveries.map((d) => d.receipt));
+  f.runtime.recordVerdict(derived.review.reviewId, "reviewer", { ...report,
+    criteria: [{ ...report.criteria[0]!, observedFrameIndices: [0, 15] }] });
+  assert.equal(f.runtime.validationObservation(derived.review.reviewId, "reviewer").receiptIds.length, 16);
+  assert.throws(() => f.runtime.approvalProvenance(derived.review.reviewId, "reviewer"), refused("verdict"));
+  f.access.validationProfile = () => "paced";
+  assert.throws(() => f.runtime.validationObservation(derived.review.reviewId, "reviewer"), refused("stale"));
+});
 
 test("Human validation observations retain their purpose on every frame and verdict and cannot become production approval", (t) => {
   const f = fixture(t); if (!f || !template) return;

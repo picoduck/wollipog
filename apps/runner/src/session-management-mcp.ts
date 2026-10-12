@@ -1686,7 +1686,7 @@ export const TOOLS: McpTool[] = [
         const compatibility = deps.controlPlaneProtocolVersion === undefined ? await cpFetch(deps, "GET", "/api/compatibility") : null;
         const version = deps.controlPlaneProtocolVersion ?? (compatibility?.ok ? compatibility.data?.protocolVersion : null);
         if (!Number.isInteger(version) || version < PACED_VIDEO_REVIEW_MIN_PROTOCOL) {
-          return errorResult("Delegated video provenance requires production control plane protocol v218; no approval was sent");
+          return errorResult(`Delegated video provenance requires production control plane protocol v${PACED_VIDEO_REVIEW_MIN_PROTOCOL}; no approval was sent`);
         }
       }
       if (args?.childMessage !== undefined) {

@@ -1,5 +1,5 @@
 /** Reserved production contract; deployment must integrate predecessor authority/limits first. */
-export const PACED_VIDEO_REVIEW_MIN_PROTOCOL = 218;
+export const PACED_VIDEO_REVIEW_MIN_PROTOCOL = 219;
 import type { UiEvidenceReviewReceipt } from "./index.js";
 
 export const PACED_VIDEO_REVIEW_BATCH_LIMITS = Object.freeze({ frames: 32, responseBytes: 8 * 1024 * 1024 });

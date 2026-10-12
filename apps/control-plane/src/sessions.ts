@@ -1,7 +1,8 @@
-import { mintCampaignEvidenceAuthority, type EvidenceAuthorityProposal, type EvidenceAuthorityDisclosures } from "./evidence-authority.js";
+import { mintCampaignEvidenceAuthority, campaignEvidenceDisclosuresCurrent, type EvidenceAuthorityProposal, type EvidenceAuthorityDisclosures } from "./evidence-authority.js";
 import { PACED_VIDEO_REVIEW_MIN_PROTOCOL } from "@wollipog/protocol";
 import type { WorkflowVideoEvidenceApprovals } from "./workflow-video-evidence-approvals.js";
 import { MediaSessionPurposes } from "./media-session-purposes.js";
+import { PreparedMediaReservationRelease } from "./prepared-media-reservation-release.js";
 import { MEDIA_SESSION_PURPOSE_ERROR, type PreparedMediaSessionRuntime, type PreparedMediaSubject } from "./prepared-media-session-runtime.js";
 import type { PreparedMediaIdentity, MaterializedMediaSession } from "./prepared-media-sessions.js";
 import { reviewerAdmissionReadiness } from "./evidence-review-worker.js";
@@ -3678,6 +3679,7 @@ export class SessionsService {
       !validation.permitId || resolved.liveProof !== null)) return fail("Validation admission cannot borrow or fabricate production proof.", 409);
     const owner = validation ? "human" : "orchestrator";
     if (!resolved || !root || !child || control?.mode !== "full_control" || !control.boundary.evidenceAuthority ||
+      !campaignEvidenceDisclosuresCurrent(control.boundary.evidenceAuthority, this.evidenceAuthorityDisclosures) ||
       !campaignBoundaryCurrent(root) || !decision || decision.status !== "pending" || decision.authority !== owner ||
       decision.category !== "ui_evidence_approval" || decision.resourceSnapshot.category !== "ui_evidence_approval" ||
       decision.controllingSessionId !== root.id || decision.sessionId !== child.id ||
@@ -4695,6 +4697,12 @@ export class SessionsService {
     if (capture) {
       if (command.type !== "start_session") throw new Error("Prepared media command is malformed.");
       capture.command = { ...command, spec };
+      capture.command.spec = { ...spec, mediaReviewPurpose: {
+        rootSessionId: capture.identity.rootSessionId, childSessionId: capture.identity.childSessionId,
+        admissionId: capture.identity.admissionId, occurrenceId: capture.subject.occurrenceId,
+        evidenceId: capture.subject.evidenceId, generation: spec.campaignBudgetDispatch!.generation,
+        ...(capture.operatorValidation ? { operatorValidation: capture.operatorValidation } : {}),
+      } };
       this.mediaSessionPurposes.add({ sessionId: id, rootSessionId: capture.identity.rootSessionId, childSessionId: capture.identity.childSessionId, admissionId: capture.identity.admissionId, occurrenceId: capture.subject.occurrenceId, evidenceId: capture.subject.evidenceId, resourceDigest: capture.decision.resourceDigest, policyRevision: capture.decision.policyRevision, generation: spec.campaignBudgetDispatch!.generation, command: capture.command, ...(capture.operatorValidation ? { operatorValidation: capture.operatorValidation } : {}) });
     } else if (delivery) {
       delivery.activate(plan!);
@@ -7966,6 +7974,16 @@ export class SessionsService {
     return ok({jobId,receiptSha256:metadata.data.receiptSha256,reviewReport:report});
   }
 
+  /** Owning authenticated runner WebSocket ingress only; never an agent or HTTP body. */
+  onMediaReviewNeverDispatched(runnerId: string, receipt: import("@wollipog/protocol").MediaNeverDispatchedFence): boolean {
+    if ((this.db.getRunner(runnerId)?.protocolVersion ?? 0) < PACED_VIDEO_REVIEW_MIN_PROTOCOL ||
+      !this.db.raw().prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='prepared_media_sessions'").get()) return false;
+    try {
+      return new PreparedMediaReservationRelease(this.db.raw(), this.db.campaignBudgets)
+        .recordAuthenticatedFence(runnerId, receipt);
+    } catch { return false; }
+  }
+
   onCampaignReviewJobUpdate(runnerId:string,update:import("@wollipog/protocol").CampaignReviewJobUpdate):void {
     if(!this.db.campaignReviewJobs.accept(runnerId,update)) return;
     const command=this.db.campaignReviewJobs.command(update.jobId)!;
@@ -9573,6 +9591,7 @@ export class SessionsService {
     snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "ui_evidence_approval" }>): boolean {
     const control = controller.orchestratorPolicy?.control;
     if (!this.workflowVideoApprovals || control?.mode !== "full_control" || !control.boundary?.evidenceAuthority ||
+      !campaignEvidenceDisclosuresCurrent(control.boundary.evidenceAuthority, this.evidenceAuthorityDisclosures) ||
       !campaignBoundaryCurrent(controller) || snapshot.videoReview ||
       ![controller, child].every((session) => (this.db.getRunner(session.runnerId)?.protocolVersion ?? 0) >= PACED_VIDEO_REVIEW_MIN_PROTOCOL)) return false;
     const videos = snapshot.evidence.filter((item) => item.mediaType?.startsWith("video/"));

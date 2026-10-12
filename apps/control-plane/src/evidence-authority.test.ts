@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { validCampaignControl, type CampaignAuthorityBoundary } from "@wollipog/protocol";
-import { mintCampaignEvidenceAuthority, type EvidenceAuthorityDisclosures, type EvidenceAuthorityProposal } from "./evidence-authority.js";
+import { mintCampaignEvidenceAuthority, campaignEvidenceDisclosuresCurrent, type EvidenceAuthorityDisclosures, type EvidenceAuthorityProposal } from "./evidence-authority.js";
 import type { AuthPrincipal } from "./identity.js";
 const boundary: CampaignAuthorityBoundary = {
   version: 1, revision: 4, issueScopeRevision: 1, repository: "owner/repo", objective: "Review original issue",
@@ -21,6 +21,19 @@ const disclosures: EvidenceAuthorityDisclosures = {
   provider: () => ({ disclosureRevision: 3, retentionDisclosure: "Provider-local retention is disclosed by the server.",
     reviewers: [{ driver: "codex-app-server", modelId: "reviewer-model" }] }),
 };
+
+test("current admission cannot reuse a formerly approved destination or provider disclosure", () => {
+  const authority = mintCampaignEvidenceAuthority(human, boundary, "root", proposal, disclosures)!;
+  assert.equal(campaignEvidenceDisclosuresCurrent(authority, disclosures), true);
+  assert.equal(campaignEvidenceDisclosuresCurrent(authority, undefined), false);
+  for (const changed of [
+    { ...disclosures, destination: () => ({ ...disclosures.destination("")!, privacy: "public" as const }) },
+    { ...disclosures, provider: () => ({ ...disclosures.provider("")!, disclosureRevision: 4 }) },
+    { ...disclosures, provider: () => ({ ...disclosures.provider("")!, retentionDisclosure: "Changed retention" }) },
+    { ...disclosures, provider: () => ({ ...disclosures.provider("")!, reviewers: [] }) },
+    { ...disclosures, provider: () => { throw new Error("Unavailable config"); } },
+  ]) assert.equal(campaignEvidenceDisclosuresCurrent(authority, changed), false);
+});
 
 test("only exact human mint can compose a narrowed envelope with the existing authority boundary", () => {
   const e = mintCampaignEvidenceAuthority(human, boundary, "root", proposal, disclosures);

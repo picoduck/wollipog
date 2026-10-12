@@ -1,9 +1,16 @@
 # Production Video Evidence Integration
 
-This is the #1321 follow-on implementation stack. PR #3053 delivers offline preparation only.
-The stack starts at foundation commit 4d545faa2ba97cc9d865930bf9694eca76b39fdf plus the two
-exact reviewed preparation commits. Final main delivery must transplant only these owned changes
-after #2934, #2935, #2936 and #3053 actually merge, and repeat cross-model review and exact-head CI.
+This slice integrates the twelve retained production-preparation commits onto actual main
+`5fe22ec2d09878c1cdf96f298bdd95063d3f54a6`, after the offline preparation PR #3053,
+foundation PR #3061, scope PR #3063 and budget PR #3065 actually merged. Historical
+preparation handoffs and their reviews do not approve this integrated snapshot.
+
+Whole #1321 remains incomplete. The installed native media-only enforcement contract,
+actual compatible reviewer launch, trusted capture adapter, finite Human live permit and
+independently inspected all-frame/oracle/final-usage/pricing evidence remain required.
+No provider launch, upload, live proof registration, hosting activation or permission change
+is authorized by these modules or deterministic tests. Code review and exact-head CI are
+separate gates from live acceptance.
 
 ## Owned Modules and Contracts
 
@@ -45,8 +52,8 @@ after #2934, #2935, #2936 and #3053 actually merge, and repeat cross-model revie
 
 The reviewer modules currently have no hosting entry-point caller. Artifact maintenance is
 prepared in the source tree only; the hosting process has not been changed or restarted. They do not advertise a current runner
-protocol revision or activate production. Protocol 218 is reserved for final production integration,
-after scope 216 and allowance 217. #2936 owns campaignBudgetWorkerPreflight and
+protocol revision or activate production. Protocol 219 is reserved for the media contract; scope uses 217 and native allowance uses 218.
+The advertised protocol remains 218 until an installed supported dispatch contract is available. #2936 owns campaignBudgetWorkerPreflight and
 allocateCampaignBudget; the final adapter must use durable managed admission before dispatch and
 retain live reservations until cancellation/completion settles. An external process is unsupported.
 
@@ -183,9 +190,11 @@ still requires independently inspected **actual** delivery, fresh blind temporal
 usage/current pricing evidence. A fabricated fixture/bootstrap proof is rejected in validation admission.
 
 The 16-frame 640x360 candidate remains a distinct envelope. The normal ≥960-width decoder cannot
-process it by labeling it paced or weakening its limits. Its operator transport/derivation adapter
-and actual provider-wide restricted-tool enforcement remain held integrations; paced/maximum use
-the complete native derivation contract. Deterministic permit/Session/transport tests are disclosed
+process it by labeling it paced or weakening its limits. The distinct candidate decoder now
+derives explicit native presentation times and durations, with 8 MiB source/total frames,
+16 frames, 640x360, 4 seconds, 1 MiB/frame and 250 ms minimum intervals. A trusted current
+validation-permit profile selects it; candidate observations cannot approve production. Actual
+provider-wide restricted-tool enforcement remains held; paced/maximum retain their original bounds. Deterministic permit/Session/transport tests are disclosed
 synthetic tests and prove no live provider behavior or oracle isolation.
 
 ### Reviewable Isolated Live Action
@@ -276,7 +285,9 @@ The evidence-review-budget-provenance adapter separately checks active admission
 
 The dedicated media-only MCP stdio endpoint advertises and dispatches only the two exact media handlers. It offers no filesystem resources, prompts, management, upload or code-review APIs. Incoming UTF-8 lines, outstanding requests and image responses are bounded; a media operation remains busy until its response drains to the provider. Internal exceptions and supplied paths/URLs are not reflected in errors. EOF drains the final admitted response. Actual provider-wide generic tool disabling and enforced OS namespace remain separate prerequisites; this endpoint alone is not live isolation or delivery proof.
 
-The private Session materializer is now composed on the immutable prepared budget checkpoint 6e0ad1455237f6306305d6a6ec5cfda622fa165d. This is an unreviewed dependency stack, not delivered main code or current-host readiness. The exact replay range-diff is retained outside the repository for parent inspection. Final transplant excludes the dependency and preparation commits.
+The private Session materializer is composed on actual merged budget main. The transplant
+excludes old dependency, unreviewed budget and duplicate offline commits. The reviewed strict
+never-dispatched budget method stays unchanged, including missing-table refusal.
 
 Materialization reuses the existing Session creation path. Ordinary governance asks are durably preflighted before entering its atomic Session/member/command transaction, then the same current gate is rechecked inside. The trusted resolver supplies configuration and current authority; public request JSON cannot request private preparation. A permanent purpose marker stores the exact unsent command and actual budget generation together. Generic prompts, config, restart, forks, TUI/shell mutations and broad Session credential routes cannot repurpose that worker. Parent stop and archival remain available. Tests use in-memory DBs and disclosed synthetic proof/rates/source; no actual provider or live validation record is created.
 
@@ -284,6 +295,43 @@ The controller audience must be contained within the source audience before prep
 
 The namespace preserves the existing network grant and mounts only individually verified public DNS/TLS configuration files when that grant permits networking. It never mounts the whole `/etc` tree. Their digests enter the namespace policy binding; a changed runtime file invalidates empirical proof. An executable outside the allowlisted runtime roots has an explicit `/provider` mapping for dispatch. Synthetic kernel probes verify certificate loading, forbidden-state denial and that executable mapping; no provider is launched by these tests.
 
-The original-gate bridge is now composed with core resolution and consumption behind a private registered runtime. It persists exact delegated media references separately from the controller's directly inspected image IDs, with the original snapshot/digest unchanged. Approval, its provenance and image receipt consumption commit atomically; current source/frame/criterion/verdict and historical actor proof are checked again before consumption. Corrupt proof, expired/replaced image receipt, revoked authority, unsupported peer or an absent runtime refuses the operation. The dedicated tool rejects delegated references on pre-218 peers before sending any approval. Hosting registration remains absent.
+The original-gate bridge is now composed with core resolution and consumption behind a private registered runtime. It persists exact delegated media references separately from the controller's directly inspected image IDs, with the original snapshot/digest unchanged. Approval, its provenance and image receipt consumption commit atomically; current source/frame/criterion/verdict and historical actor proof are checked again before consumption. Corrupt proof, expired/replaced image receipt, revoked authority, unsupported peer or an absent runtime refuses the operation. The dedicated tool rejects delegated references on pre-219 peers before sending any approval. Hosting registration remains absent.
 
 The existing human-only campaign control CAS can compose an evidence proposal only through trusted destination/provider disclosure lookups, deriving the authenticated author, revision and scope. Public, unknown, stale or agent-authored disclosure is refused. Budget and issue scope retain their existing contracts. No disclosure lookup is registered on the hosting service and no authority has been minted there.
+
+
+## Installed Native Readiness and Integrated Adapters
+
+Offline inspection on 2026-10-13 found Codex CLI 0.162.1. Its generated experimental
+`ThreadStartParams` includes `dynamicTools`, and `config` permits extra properties. Neither
+establishes a complete built-in tool suppression contract. The installed preflight records a
+specific `builtin_tool_allowlist_unavailable` refusal; unknown versions, schemas or executable
+identities fail closed. It never starts App Server, reads account credentials or advertises support.
+[Official App Server documentation](https://learn.chatgpt.com/docs/app-server) describes dynamic
+calls alongside native tool namespaces; [configuration documentation](https://learn.chatgpt.com/docs/config-file/config-reference)
+provides individual controls, not this installation's complete audited media-only surface.
+The existing inference-transport module reports transport diagnostics and supplies no interceptor.
+The exact current implementation decision retains that installed-native refusal. An unused
+transport-filter abstraction cannot substitute for an audited managed SDK ingress. There is no
+provider/base-URL/profile override or new sender registration in this slice.
+
+Prepared commands now carry a permanent media purpose. The ordinary runner start path refuses
+that marker before workspace/generation/credential/driver work. Actual provider launch still needs
+its dedicated same-generation dispatcher. Terminal never-dispatched fences enter through the
+owning authenticated runner WebSocket identity, with minimum media protocol 219; agent API bodies
+and claimed runner identifiers cannot authorize release. The reservation release still requires its
+same-database cancellation claim and exact source command/purpose/generation, with no usage history.
+
+The durable recovery coordinator claims capture intent before invoking an installed trusted adapter.
+Unknown execution reconciles the same operation; it cannot start a replacement or reset an allowance.
+At most two replacement attempts are admitted for the original resource. New artifact/occurrence
+identities are separately verified through independent trusted derivation. Every original frame's
+content digest, native time and duration must remain represented in order; sampled, omitted, retimed
+or substituted transients fail closed. The original gate snapshot remains unchanged. Actual capture
+capability/action/allowance lookup and capture execution must be registered by the owning service;
+test capture ports are disclosed synthetic doubles and do not prove real recapture or live readiness.
+
+Current private destination and provider disclosure revisions, retention text and exact offered
+reviewer identities are re-read at preparation, resolution and consumption. A privacy or retention
+change invalidates admission/provenance even if the Human previously approved the old disclosure.
+No disclosure authority, candidate runtime profile or live registry record is activated by this slice.

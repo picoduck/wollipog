@@ -8,7 +8,7 @@ import { PACED_VIDEO_REVIEW_PROFILE } from "./video-evidence-runtime.js";
 const hash = (v: string) => createHash("sha256").update(v).digest("hex");
 const target: EvidenceReviewerTarget = {
   agentId: "synthetic-agent", driver: "codex-app-server", modelId: "synthetic-model", providerId: "synthetic-provider",
-  runnerId: "isolated-runner", runnerProtocolVersion: 218, capabilitiesSha256: hash("all-frame-attestation"),
+  runnerId: "isolated-runner", runnerProtocolVersion: 219, capabilitiesSha256: hash("all-frame-attestation"),
   auditedAllFrameDelivery: true, reviewerNamespaceSha256: hash("narrowed namespace"), mediaOnlyNamespaceVerified: true,
 };
 const evidence = {
@@ -27,7 +27,7 @@ const context: ReviewerAdmissionContext = {
     delegatablePolicyIds: [], evidenceAuthority: evidence },
   evidenceAuthority: evidence, uiEvidenceOwner: "orchestrator", taskEvidenceVerified: true,
   destinationConfigurationId: evidence.destination.configurationId, organizationId: evidence.destination.organizationId,
-  audienceSha256: hash("private audience"), controllerProtocolVersion: 218, childProtocolVersion: 218,
+  audienceSha256: hash("private audience"), controllerProtocolVersion: 219, childProtocolVersion: 219,
   boundaryCurrent: true, scopeCurrent: true, destinationPrivateVerified: true,
 };
 /** Test-only fake proof exercises admission guards. It is never written as a live validation record. */

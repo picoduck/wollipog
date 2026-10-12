@@ -4,6 +4,7 @@ import { validVideoLiveProof } from "./evidence-review-worker.js";
 import { VideoEvidenceRuntime, PRODUCTION_VIDEO_REVIEW_PROTOCOL, type VideoReviewBinding,
   type VideoReviewCriterion, type VideoReviewRecord, type VideoReviewStore, type VideoReviewVerdict } from "./video-evidence-runtime.js";
 import { planEvidenceRecovery, type EvidenceRecoveryPlan } from "./evidence-review-recovery.js";
+import type { EvidenceRecoveryExecutor, RecoveryExecutionResult } from "./evidence-review-recovery-executor.js";
 
 export interface PendingVideoReviewRequest {
   childSessionId: string;
@@ -42,6 +43,8 @@ export interface EvidenceReviewAuditEvent {
 }
 
 export interface EvidenceReviewServiceAdapter {
+  /** Installed trusted bounded capture adapter; omission preserves unsupported execution. */
+  recovery?: EvidenceRecoveryExecutor;
   resolvePending(rootSessionId: string, request: PendingVideoReviewRequest): ResolvedVideoReviewRequest | null;
   currentOwner(binding: VideoReviewBinding): boolean;
   liveProof(target: EvidenceReviewerTarget): VideoProfileLiveProof | null;
@@ -52,7 +55,7 @@ export interface EvidenceReviewServiceAdapter {
 export type PrepareEvidenceReviewResult =
   | { ok: true; review: VideoReviewRecord }
   | { ok: false; code: "not_authorized" | "custom_fallback" | "live_validation" | "mixed_peer" |
-      "preparation"; recovery?: EvidenceRecoveryPlan };
+      "preparation"; recovery?: EvidenceRecoveryPlan; execution?: RecoveryExecutionResult };
 const agentSession = (principal: AuthPrincipal) => principal.kind === "agent" ? principal.credentialSessionId : null;
 
 /** Authenticated service boundary for the independent runtime. Agent routes/MCP exposure and
@@ -107,7 +110,16 @@ export class EvidenceReviewService {
         childSessionId: current.binding.childSessionId, reviewerSessionId: current.binding.reviewerSessionId,
         policyRevision: current.binding.policyRevision, attempt, preparationCode: result.code,
         recoveryAction: recovery.action, durationMs: Math.max(0, this.clock() - started) });
-      if (recovery.action !== "retry") return { ok: false, code: "preparation", recovery };
+      if (recovery.action !== "retry") {
+        const b = current.binding;
+        const execution = this.adapter.recovery && (recovery.action === "split" || recovery.action === "recapture")
+          ? await this.adapter.recovery.execute({ rootSessionId: b.rootSessionId, childSessionId: b.childSessionId,
+            occurrenceId: b.occurrenceId, evidenceId: b.sourceEvidenceId, resourceDigest: b.resourceDigest,
+            policyRevision: b.policyRevision, sourceSha256: b.sourceSha256 }, recovery) : undefined;
+        // Replacement subjects start new exact occurrences; this original snapshot cannot be
+        // rewritten or approved with substituted media. Unknown operations reconcile only.
+        return { ok: false, code: "preparation", recovery, ...(execution ? { execution } : {}) };
+      }
       await this.delay(recovery.delayMs);
     }
     return { ok: false, code: "preparation" };

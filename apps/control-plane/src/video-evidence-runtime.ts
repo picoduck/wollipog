@@ -1,7 +1,7 @@
 import { validReviewerBudgetAdmission, type EvidenceReviewerBudgetAdmission } from "./evidence-review-admission.js";
 import { createHash, randomUUID } from "node:crypto";
 import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, PACED_VIDEO_REVIEW_BATCH_LIMITS, type PacedVideoReviewReceipt, type OperatorVideoValidationPurpose } from "@wollipog/protocol";
-import { prepareVideoEvidence, PACED_VIDEO_PREPARATION_PROFILE,
+import { prepareVideoEvidence, prepareCandidateVideoEvidence, PACED_VIDEO_PREPARATION_PROFILE,
   type VideoPreparationManifest, type VideoPreparationResult } from "./video-evidence-preparation.js";
 
 export const PRODUCTION_VIDEO_REVIEW_PROTOCOL = PACED_VIDEO_REVIEW_MIN_PROTOCOL;
@@ -36,6 +36,8 @@ export interface VideoReviewBinding {
 export interface TemporalVideoManifest extends Omit<VideoPreparationManifest, "purpose" | "profile"> {
   purpose: "trusted_temporal_derivation";
   profile: typeof PACED_VIDEO_REVIEW_PROFILE;
+  /** Candidate derivation is validation-only and never satisfies paced production coverage. */
+  captureProfile?: "candidate";
 }
 export interface VideoReviewRecord {
   reviewId: string;
@@ -86,6 +88,8 @@ export interface VideoReviewStore {
 }
 
 export interface VideoReviewRuntimeAccess {
+  /** Trusted current permit lookup. A validation binding cannot select its own decoder profile. */
+  validationProfile?(review: VideoReviewBinding): "candidate" | "paced" | "maximum" | null;
   /** Re-resolves exact pending occurrence, authority, scope, capabilities, managed reviewer
    * identity and reservation on every operation. Returns null for stale/unavailable bindings. */
   currentBinding(review: VideoReviewBinding, phase: "derive" | "media" | "attest" | "resolve"): VideoReviewBinding | null;
@@ -172,13 +176,18 @@ export class VideoEvidenceRuntime {
     if (!validReviewerBudgetAdmission(this.access.workerAdmission(pinned, "active"), pinned)) throw new VideoReviewRefused("stale");
     const bytes = this.access.readSource(pinned.sourceArtifactId);
     if (!bytes || hash(bytes) !== pinned.sourceSha256) throw new VideoReviewRefused("source_mismatch");
-    const result = await prepareVideoEvidence(bytes, mediaType);
+    const validationProfile = pinned.operatorValidation ? this.access.validationProfile?.(pinned) : undefined;
+    if (pinned.operatorValidation && !validationProfile) throw new VideoReviewRefused("stale");
+    const result = await (validationProfile === "candidate"
+      ? prepareCandidateVideoEvidence(bytes, mediaType) : prepareVideoEvidence(bytes, mediaType));
     if (!result.ok) return result;
     if (!fresh(pinned, this.access, "derive") ||
       !validReviewerBudgetAdmission(this.access.workerAdmission(pinned, "active"), pinned)) throw new VideoReviewRefused("stale");
     const retained = this.access.readSource(pinned.sourceArtifactId);
     if (!retained || hash(retained) !== pinned.sourceSha256) throw new VideoReviewRefused("source_mismatch");
+    if (pinned.operatorValidation && this.access.validationProfile?.(pinned) !== validationProfile) throw new VideoReviewRefused("stale");
     const manifest: TemporalVideoManifest = { ...result.manifest,
+      ...(validationProfile === "candidate" ? { captureProfile: "candidate" as const } : {}),
       purpose: "trusted_temporal_derivation", profile: PACED_VIDEO_REVIEW_PROFILE };
     const now = this.clock();
     const review: VideoReviewRecord = {
@@ -208,6 +217,9 @@ export class VideoEvidenceRuntime {
       throw new VideoReviewRefused("stale");
     }
     if (!fresh(review.binding, this.access, phase) ||
+      (review.manifest.captureProfile === "candidate" && !review.binding.operatorValidation) ||
+      (review.binding.operatorValidation && (!this.access.validationProfile?.(review.binding) ||
+        (this.access.validationProfile(review.binding) === "candidate") !== (review.manifest.captureProfile === "candidate"))) ||
       !validReviewerBudgetAdmission(this.access.workerAdmission(review.binding, phase === "resolve" ? "historical" : "active"), review.binding) || hash(JSON.stringify(review.manifest)) !== review.manifestSha256 ||
       !validCriteria(review.criteria) || hash(JSON.stringify(review.criteria)) !== review.criteriaSha256 ||
       review.criteriaSha256 !== review.binding.criteriaSha256) {

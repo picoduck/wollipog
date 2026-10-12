@@ -163,6 +163,12 @@ export class OperatorVideoValidationPermits {
     const p = this.current(permitId);
     return p ? { permitId: p.permitId, scopeSha256: p.scopeSha256 } : null;
   }
+  validationProfile(binding: VideoReviewBinding): OperatorVideoValidationProfile | null {
+    const ref = binding.operatorValidation;
+    const permit = ref ? this.current(ref.permitId) : null;
+    return permit && this.binding(permit.permitId) && ref!.scopeSha256 === permit.scopeSha256 &&
+      sha(this.binding(permit.permitId)) === sha(binding) ? permit.scope.subject.profile : null;
+  }
   /** Server-owned binding for the distinct validation runtime access adapter. Its caller must
    * additionally require active managed admission for derive/media/verdict and genuine historical
    * settlement for Human inspection. This binding cannot enter production approvalProvenance. */

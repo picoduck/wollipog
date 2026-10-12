@@ -15,6 +15,24 @@ export interface EvidenceAuthorityDisclosures {
     reviewers: CampaignEvidenceAuthority["providers"][number]["reviewers"] } | null;
 }
 
+/** Re-read on every resolution/consumption and media admission, not only at Human mint. */
+export function campaignEvidenceDisclosuresCurrent(authority: CampaignEvidenceAuthority,
+  disclosures: EvidenceAuthorityDisclosures | undefined): boolean {
+  if (!disclosures || !validCampaignEvidenceAuthority(authority)) return false;
+  try {
+    const destination = disclosures.destination(authority.destination.configurationId);
+    return Boolean(destination && destination.privacy === "private" &&
+      destination.organizationId === authority.destination.organizationId &&
+      destination.disclosureRevision === authority.destination.disclosureRevision &&
+      authority.providers.every((provider) => {
+        const current = disclosures.provider(provider.providerId);
+        return current && current.disclosureRevision === provider.disclosureRevision &&
+          current.retentionDisclosure === provider.retentionDisclosure && provider.reviewers.every((reviewer) =>
+            current.reviewers.some((actual) => actual.driver === reviewer.driver && actual.modelId === reviewer.modelId));
+      }));
+  } catch { return false; }
+}
+
 /** Called only inside an authenticated human campaign CAS admission. All provenance comes from
  * that principal and boundary; destination and retention disclosures come from server config.
  * Neither a prompt nor a proposal can authorize provider delivery, mint a new policy revision,

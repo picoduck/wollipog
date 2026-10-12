@@ -8712,6 +8712,7 @@ export interface SessionNamingCustomModelResultMessage {
 }
 
 export type RunnerToControlPlane =
+  | { type: "media_review_never_dispatched"; receipt: import("./media-dispatch-fence.js").MediaNeverDispatchedFence }
   | import("./campaign-review-job.js").CampaignReviewJobUpdate
   | RegisterMessage
   | HeartbeatMessage
@@ -8828,6 +8829,11 @@ export interface RegisterRejectedMessage {
 
 /** Everything the runner needs to launch an agent session locally. */
 export interface SessionLaunchSpec {
+  /** Private prepared media marker. Generic start/restart must refuse it, even on mixed peers.
+   * The dedicated dispatcher additionally needs the complete immutable grant and namespace. */
+  mediaReviewPurpose?: { rootSessionId: string; childSessionId: string; admissionId: string;
+    occurrenceId: string; evidenceId: string; generation: string;
+    operatorValidation?: import("./paced-video-review.js").OperatorVideoValidationPurpose };
   /** Server-owned accounting lifecycle; never part of user session configuration. */
   campaignBudgetDispatch?: import("./campaign-budget.js").CampaignBudgetDispatch;
   artifactUploads?: ArtifactUploadPreference;

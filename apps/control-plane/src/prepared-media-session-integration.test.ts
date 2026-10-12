@@ -36,7 +36,7 @@ function harness(sourceBytes?: Buffer, validation = false) {
       capabilities: { models: [{ id: "claude-opus-5-5", displayName: "Synthetic Image Model", default: true, inputModalities: ["text", "image"] }],
         effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true, imageToolResults: true,
         permissionModes: ["default"] } }] };
-  db.registerRunner(metadata, 1, 218);
+  db.registerRunner(metadata, 1, 219);
   db.setUsageRateTable(new Map([["claude-opus-5-5", { inputCostPerToken: 0.000001, outputCostPerToken: 0.000001,
     cacheReadCostPerToken: 0.000001, cacheCreationCostPerToken: 0.000001 }]]));
   const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
@@ -58,12 +58,17 @@ function harness(sourceBytes?: Buffer, validation = false) {
   const rootPolicy = db.getSession("root")!.orchestratorPolicy!;
   assert.equal(rootPolicy.control?.mode, "full_control");
   const boundary = rootPolicy.control!.mode === "full_control" ? rootPolicy.control!.boundary : assert.fail("No fixture boundary");
+  let currentPrivacy: "private" | "public" = "private";
+  let retentionDisclosure = "Synthetic test disclosure.";
+  const disclosures = {
+    destination: () => ({ organizationId: human.organizationId, privacy: currentPrivacy, disclosureRevision: 1 }),
+    provider: () => ({ disclosureRevision: 1, retentionDisclosure,
+      reviewers: [{ driver: "claude-code" as const, modelId: "claude-opus-5-5" }] }),
+  };
   const evidence = mintCampaignEvidenceAuthority(human, boundary, "root", {
     destinationConfigurationId: "synthetic-private", destinationDisclosureRevision: 1,
     providers: [{ providerId: "synthetic-provider", disclosureRevision: 1, reviewers: [{ driver: "claude-code", modelId: "claude-opus-5-5" }] }],
-  }, { destination: () => ({ organizationId: human.organizationId, privacy: "private", disclosureRevision: 1 }),
-    provider: () => ({ disclosureRevision: 1, retentionDisclosure: "Synthetic test disclosure.",
-      reviewers: [{ driver: "claude-code", modelId: "claude-opus-5-5" }] }) });
+  }, disclosures);
   assert.ok(evidence);
   boundary.evidenceAuthority = evidence;
   // Fixture-only human boundary composition until the final human CAS adapter is integrated.
@@ -84,13 +89,13 @@ function harness(sourceBytes?: Buffer, validation = false) {
     controllingSessionId: "root", category: "ui_evidence_approval", resourceKey: "synthetic", resourceSnapshot: snapshot,
     resourceDigest: sha(JSON.stringify(snapshot)), policyRevision: boundary.revision, authority: validation ? "human" : "orchestrator", createdAt: 7 }));
   const target: EvidenceReviewerTarget = { agentId: "claude", driver: "claude-code", modelId: "claude-opus-5-5",
-    providerId: "synthetic-provider", runnerId: "r", runnerProtocolVersion: 218, capabilitiesSha256: sha("synthetic capability"),
+    providerId: "synthetic-provider", runnerId: "r", runnerProtocolVersion: 219, capabilitiesSha256: sha("synthetic capability"),
     auditedAllFrameDelivery: true, reviewerNamespaceSha256: sha("synthetic namespace"), mediaOnlyNamespaceVerified: true };
   const context: ReviewerAdmissionContext = { mode: "full_control", rootSessionId: "root", childSessionId: "child",
     repository: "picoduck/wollipog", issue: 1321, issueScopeRevision: 1, policyRevision: boundary.revision,
     boundary, evidenceAuthority: evidence, uiEvidenceOwner: validation ? "human" : "orchestrator", taskEvidenceVerified: true,
     destinationConfigurationId: "synthetic-private", organizationId: human.organizationId, audienceSha256: sha("synthetic audience"),
-    controllerProtocolVersion: 218, childProtocolVersion: 218, boundaryCurrent: true, scopeCurrent: true, destinationPrivateVerified: true };
+    controllerProtocolVersion: 219, childProtocolVersion: 219, boundaryCurrent: true, scopeCurrent: true, destinationPrivateVerified: true };
   let proof: VideoProfileLiveProof | null = { proofId: "synthetic-not-live", driver: target.driver, modelId: target.modelId,
     providerId: target.providerId, capabilitiesSha256: target.capabilitiesSha256, reviewerNamespaceSha256: target.reviewerNamespaceSha256,
     oracleIsolationEvidenceSha256: sha("synthetic probe"), profile: "paced-silent-complete-frames-v1",
@@ -126,7 +131,7 @@ function harness(sourceBytes?: Buffer, validation = false) {
   const permit = permits?.mint(human, validationProposal);
   if (validation) { assert.ok(permit); validationPermitId = permit.permitId; }
   const service = new SessionsService(db, hub, log, undefined, undefined, undefined, undefined, undefined, undefined,
-    false, undefined, runtime, undefined, undefined, permits);
+    false, undefined, runtime, undefined, disclosures, permits);
   const ports: PreparedMediaSessionPorts = {
     database: db.raw(),
     preflightMaterialization: (id) => { const value = service.preflightPreparedMediaSession(id, subject);
@@ -141,6 +146,8 @@ function harness(sourceBytes?: Buffer, validation = false) {
   };
   const prepared = new PreparedMediaSessions(db.raw(), ports);
   return { db, hub, log, human, source, service, bootstrap, prepared, identity, subject, context, runtime, target, messages, ports,
+    disclosures, revokeDisclosure: () => { retentionDisclosure = "Changed provider retention"; },
+    makeDestinationPublic: () => { currentPrivacy = "public"; },
     dropProof: () => { proof = null; }, permits, permit, validationProposal,
     validationScope: () => validationScope, setValidationScope: (scope: OperatorVideoValidationScope | null) => { validationScope = scope; } };
 }
@@ -157,6 +164,9 @@ test("Human validation permit materializes a real purpose-bound unsent Session w
   assert.equal(p.actual?.generation, actual.admission.dispatch.generation);
   assert.equal(h.db.campaignBudgets.root(actual.sessionId), "root");
   assert.deepEqual(h.service.mediaSessionPurposes.get(actual.sessionId)?.operatorValidation,
+    { permitId: p.permitId, scopeSha256: p.scopeSha256 });
+  assert.equal(actual.command.spec.mediaReviewPurpose?.admissionId, h.identity.admissionId);
+  assert.deepEqual(actual.command.spec.mediaReviewPurpose?.operatorValidation,
     { permitId: p.permitId, scopeSha256: p.scopeSha256 });
   assert.deepEqual(h.db.workflowDecisionByOccurrence(h.subject.occurrenceId), original);
   assert.deepEqual(h.messages, []);
@@ -284,12 +294,13 @@ test("unknown launch retains capacity; only owning authenticated runner terminal
   const fences = new RunnerMediaDispatchFences(runnerDb), identity = h.fenceIdentity(uncertain);
   const receipt = fences.cancelBeforeLaunch(identity)!;
   assert.equal(h.release.recordAuthenticatedFence("agent:child", receipt), false);
+  assert.equal(h.service.onMediaReviewNeverDispatched("agent:child", receipt), false);
   assert.equal(h.release.recordAuthenticatedFence("r", { ...receipt, fenceSha256: sha("forged receipt") }), false);
   h.ports.reconcile = async () => ({ ...identity, outcome: "never_dispatched" });
   await assert.rejects(h.prepared.reconcile(h.identity), /cannot be released/);
   assert.equal(h.prepared.get(h.identity)!.state, "uncertain");
   assert.equal(h.db.campaignBudgets.active(h.actual.sessionId), true);
-  assert.equal(h.release.recordAuthenticatedFence("r", receipt), true);
+  assert.equal(h.service.onMediaReviewNeverDispatched("r", receipt), true);
   assert.equal(h.release.recordAuthenticatedFence("r", receipt), true, "exact authenticated receipt replay changes nothing");
   assert.equal((await h.prepared.reconcile(h.identity)).state, "cancelled");
   assert.equal(h.db.campaignBudgets.active(h.actual.sessionId), false);
@@ -531,7 +542,7 @@ async function gateHarness(t: { skip(reason: string): void; after(fn: () => void
   };
   const approvals = new WorkflowVideoEvidenceApprovals(h.db, runtime, approvalAccess);
   const service = new SessionsService(h.db, h.hub, h.log, undefined, undefined, undefined, undefined, undefined, undefined,
-    false, undefined, h.runtime, approvals);
+    false, undefined, h.runtime, approvals, h.disclosures);
   const reference = { evidenceId: "original-video", reviewId: record.reviewId, verdictId: "not-yet-attested",
     reviewerSessionId: reviewer.sessionId };
   const resolve = (resolution = { outcome: "approve" as const, evidenceReviewed: [] as string[], delegatedVideoEvidence: [reference] }) =>
@@ -602,7 +613,7 @@ test("mixed original evidence requires actual parent image inspection, atomic ap
   assert.deepEqual(h.db.workflowDecisionByOccurrence(h.original.occurrenceId)?.evidenceReviewed, ["direct-image"]);
   const restartedApprovals = new WorkflowVideoEvidenceApprovals(h.db, h.runtime, h.approvalAccess);
   const restarted = new SessionsService(h.db, h.hub, h.log, undefined, undefined, undefined, undefined, undefined, undefined,
-    false, undefined, h.preparedRuntime, restartedApprovals);
+    false, undefined, h.preparedRuntime, restartedApprovals, h.disclosures);
   const consumed = await restarted.consumeWorkflowDecision("child", h.original.occurrenceId, { resourceSnapshot: h.original.resourceSnapshot });
   assert.ok(consumed.ok, consumed.error ?? "Durable proof failed after restart");
   assert.equal(consumed.data?.status, "consumed");
@@ -612,6 +623,18 @@ test("current media authority revocation invalidates approval before consume", a
   const h = await gateHarness(t); if (!h) return; h.complete(); assert.ok(h.resolve().ok); h.revoke();
   const consumed = await h.service.consumeWorkflowDecision("child", h.original.occurrenceId, { resourceSnapshot: h.original.resourceSnapshot });
   assert.equal(consumed.ok, false); assert.equal(h.db.workflowDecisionByOccurrence(h.original.occurrenceId)?.status, "revoked");
+});
+
+test("provider retention and destination privacy are current at preparation, resolution and consumption", async (t) => {
+  const before = harness(); t.after(() => before.db.close()); before.makeDestinationPublic();
+  assert.throws(() => before.prepared.prepare(before.identity));
+  assert.equal(before.db.raw().prepare("SELECT COUNT(*) AS n FROM media_session_purposes").get()!.n, 0);
+  const resolve = await gateHarness(t); if (!resolve) return; resolve.complete(); resolve.revokeDisclosure();
+  assert.equal(resolve.resolve().ok, false);
+  const consume = await gateHarness(t); if (!consume) return; consume.complete(); assert.ok(consume.resolve().ok);
+  consume.makeDestinationPublic();
+  assert.equal((await consume.service.consumeWorkflowDecision("child", consume.original.occurrenceId,
+    { resourceSnapshot: consume.original.resourceSnapshot })).ok, false);
 });
 
 test("human campaign CAS derives evidence disclosure without replacing budget/scope or accepting agent provenance", (t) => {

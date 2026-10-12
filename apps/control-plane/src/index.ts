@@ -1379,6 +1379,9 @@ app.register(async (instance) => {
       case "campaign_review_job_update":
         if(runnerId) svc.onCampaignReviewJobUpdate(runnerId,msg);
         break;
+      case "media_review_never_dispatched":
+        if (runnerId) svc.onMediaReviewNeverDispatched(runnerId, msg.receipt);
+        break;
       case "policy_hook_credential":
         {
           if (deferNewCredentialBinding(msg)) break;
