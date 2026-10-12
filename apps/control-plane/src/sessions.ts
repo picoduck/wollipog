@@ -201,9 +201,12 @@ import {
   RUNNER_REPORTED_STOP,
   SessionArtifactQuotaError,
   UNCHANGED_STOP,
+  campaignRequestToken,
   sessionStopRestorable,
   type AgentLaunch,
+  type CampaignContinuationEventRecord,
   type CampaignContinuationRecord,
+  type CampaignRequestResolutionRecord,
   type ControlPlaneDb,
   type RestartNoticeEntry,
   type RunnerHistoryState,
@@ -319,8 +322,75 @@ const SESSION_COMMAND_RECEIPT_ERROR_MAX_CHARS = 512;
 export const SESSION_STOP_RETRY_INTERVAL_MS = 10_000;
 export const SESSION_STOP_TIMEOUT_MS = 45_000;
 export const SESSION_STOP_MAX_ATTEMPTS = 3;
+/** How soon an event that must wake the Orchestrator promptly is delivered: a human resolving a
+ * gate, a held child, or a child report awaiting verification. Only near-simultaneous events join
+ * it. */
 export const CAMPAIGN_CONTINUATION_FAN_IN_MS = 1_000;
+/** How long any other event waits, from the oldest undelivered one, so that a burst arrives as one
+ * continuation (#3083). Each continuation is a full-context model turn, while a child waiting on
+ * an Orchestrator-owned request already waits for that turn, which takes minutes; 30 seconds lets
+ * a child's request, the requests of siblings that finish CI together, and resolution side effects
+ * share one turn for a small fraction of that wait. A prompt event ends the wait for everything
+ * pending, so the window never delays a human gate. */
+export const CAMPAIGN_CONTINUATION_COALESCE_MS = 30_000;
 export const CAMPAIGN_CONTINUATION_MAX_ATTEMPTS = 3;
+/** Governance outcomes that take a request out of the pending set. */
+const CAMPAIGN_REQUEST_SETTLING_OUTCOMES: ReadonlySet<GovernanceAuditOutcome> = new Set([
+  "allowed", "denied", "dismissed", "answered", "timed_out", "aborted", "revoked", "superseded",
+]);
+const CAMPAIGN_EVENT_TEXT_MAX_CHARS = 120;
+
+function boundedCampaignEventText(text: string): string {
+  const flat = text.replace(/\s+/gu, " ").trim();
+  return flat.length > CAMPAIGN_EVENT_TEXT_MAX_CHARS ? `${flat.slice(0, CAMPAIGN_EVENT_TEXT_MAX_CHARS - 1)}…` : flat;
+}
+
+interface CampaignContinuationEventDetail {
+  seq: number;
+  createdAt: number;
+  /** Delivered after the short fan-in rather than the coalescing window. */
+  prompt: boolean;
+  /** Needs an Orchestrator action that only the full campaign sweep can reveal. */
+  actionable: boolean;
+  /** What the prompt shows for this event. */
+  summary: Record<string, unknown>;
+}
+
+/** The continuation prompt (#3083). It carries enough to decide whether the turn has anything to
+ * do: per-event detail and compact campaign counts. The full get_campaign and
+ * list_descendant_requests sweep is required only when either shows something to act on, so a turn
+ * woken only by settled work can end without re-reading the campaign. The text is control-plane
+ * generated and the runner forwards it verbatim, so every runner that admits continuations receives
+ * it. */
+function campaignContinuationPrompt(
+  continuationId: string,
+  campaignSessionId: string,
+  eventFromSeq: number,
+  eventThroughSeq: number,
+  details: readonly CampaignContinuationEventDetail[],
+  projection: OrchestratorCampaignProjection,
+): string {
+  const counts = {
+    status: projection.status,
+    children: projection.children,
+    pendingRequests: {
+      human: projection.pendingRequests?.human ?? projection.pendingDecisions.human,
+      orchestrator: projection.pendingRequests?.orchestrator ?? projection.pendingDecisions.orchestrator,
+    },
+  };
+  const actionable = details.some((detail) => detail.actionable) || counts.pendingRequests.orchestrator > 0 ||
+    projection.children.blocked > 0 || projection.children.cleanupPending > 0;
+  return [
+    `[Wollipog Campaign Continuation — ${continuationId}]`,
+    `Campaign ${campaignSessionId}; durable event range ${eventFromSeq}-${eventThroughSeq}.`,
+    `Campaign counts: ${JSON.stringify(counts)}`,
+    `Canonical event metadata: ${JSON.stringify(details.map((detail) => detail.summary))}`,
+    actionable
+      ? "Action needed: yes. Query authoritative campaign and descendant state with get_campaign and list_descendant_requests. Drain every currently actionable Orchestrator-owned request, clear each blocked child with the recovery action its hold names, verify terminal child reports and required cleanup, and then continue the campaign or return idle. Human-owned questions and approvals remain blocked on the human and must not be answered or bypassed. Treat repeated metadata as idempotent. Event details describe state when this continuation was staged; read each request through list_descendant_requests before resolving it."
+      : "Action needed: no. No Orchestrator-owned request is pending, no child is held, no child report awaits verification, no required cleanup is pending, and no human settled a gate in this range. Do not re-query get_campaign or list_descendant_requests for these events; end the turn with a one-line status unless work you already started needs this turn. Human-owned questions and approvals remain blocked on the human and must not be answered or bypassed. Treat repeated metadata as idempotent.",
+    "[End Wollipog Campaign Continuation]",
+  ].join("\n");
+}
 const SESSION_STOP_FAILURE_MESSAGE_MAX_CHARS = 240;
 /** Large history payloads staged at once; each holds a UTF-8 copy of up to 32 MiB. */
 const HISTORY_PAYLOAD_STAGING_CONCURRENCY = 4;
@@ -3033,7 +3103,7 @@ export class SessionsService {
 
   private recordGovernanceAudit(
     session: SessionView,
-    request: Pick<PendingApproval, "requestId" | "kind" | "context">,
+    request: Pick<PendingApproval, "requestId" | "kind" | "context"> & Partial<Pick<PendingApproval, "occurrenceId" | "title">>,
     stage: GovernanceAuditStage,
     outcome: GovernanceAuditOutcome,
     actor: GovernanceActor,
@@ -3046,7 +3116,7 @@ export class SessionsService {
       workflowDecision?: GovernanceAuditEntry["workflowDecision"];
     } = {},
   ): GovernanceAuditEntry {
-    return this.db.appendGovernanceAudit(this.governanceAuditRecord(
+    const entry = this.db.appendGovernanceAudit(this.governanceAuditRecord(
       session,
       request,
       stage,
@@ -3055,6 +3125,57 @@ export class SessionsService {
       now,
       options,
     ));
+    if (stage === "resolution" && request.kind !== "workflow_decision") {
+      this.noteCampaignRequestResolution(session, "generic", request.occurrenceId ?? request.requestId,
+        { category: request.kind ?? "permission", title: request.title }, outcome, actor, now);
+    }
+    return entry;
+  }
+
+  /** Remember who settled a campaign request (#3083), under the identity the campaign projection
+   * publishes for it, so that publishing its removal can tell the Orchestrator's own resolution
+   * (which wakes nobody) from a human's or the system's (which carry their outcome and resolver).
+   * A failed delivery leaves the request pending, so it forgets the resolver instead. */
+  private noteCampaignRequestResolution(
+    session: Pick<SessionView, "id" | "parentSessionId" | "role" | "permissionMode">,
+    type: "typed" | "generic",
+    requestKey: string,
+    request: { category: string; title?: string; resourceKey?: string },
+    outcome: GovernanceAuditOutcome,
+    actor: GovernanceActor,
+    now: number,
+  ): void {
+    if (!CAMPAIGN_REQUEST_SETTLING_OUTCOMES.has(outcome) && outcome !== "delivery_failed") return;
+    // A policy settles a request as it arrives, before any campaign lists it, on every tool call it
+    // allows. Recording those would cost writes for removals that never happen; the rare policy
+    // resolution of a listed request reads as an unknown resolver, which still wakes the campaign.
+    if (actor.kind === "policy") return;
+    if (!session.parentSessionId && sessionRole(session) !== "orchestrator") return;
+    // The resolution itself has already happened. Missing provenance only costs the Orchestrator a
+    // wake-up it did not need, so a failure here must never interrupt the caller.
+    try {
+      const campaign = this.db.campaignAncestryRoot(session.id);
+      if (typeof campaign !== "object" || !campaign.hasPolicy) return;
+      const requestToken = campaignRequestToken(type, session.id, requestKey);
+      if (outcome === "delivery_failed") {
+        this.db.forgetCampaignRequestResolution(campaign.id, requestToken);
+        return;
+      }
+      this.db.recordCampaignRequestResolution({
+        campaignSessionId: campaign.id,
+        requestToken,
+        subjectSessionId: session.id,
+        occurrenceId: requestKey,
+        category: request.category,
+        ...(request.title ? { title: boundedCampaignEventText(request.title) } : {}),
+        ...(request.resourceKey ? { resourceKey: boundedCampaignEventText(request.resourceKey) } : {}),
+        outcome,
+        resolvedBy: actor.kind === "agent" && actor.id === campaign.id ? "orchestrator" : actor.kind,
+        resolvedAt: now,
+      });
+    } catch (error) {
+      this.log.warn(`campaign request resolution for ${session.id} was not recorded: ${(error as Error).message}`);
+    }
   }
 
   /** A promoted control-plane card keeps its visible request id, while reconnect replay uses the
@@ -4984,29 +5105,33 @@ export class SessionsService {
             currentLatest.nextAttemptAt > now) continue;
         if (!resetAttemptCount && currentLatest.attemptCount >= CAMPAIGN_CONTINUATION_MAX_ATTEMPTS) continue;
       }
-      const events = this.db.campaignContinuationEvents(
-        campaignSessionId,
-        now - CAMPAIGN_CONTINUATION_FAN_IN_MS,
-      );
+      const events = this.db.campaignContinuationEvents(campaignSessionId, now);
       if (events.length === 0) continue;
+      const details = events.map((event) => {
+        try {
+          return this.campaignContinuationEventDetail(campaignSessionId, event);
+        } catch (error) {
+          // Detail is a convenience. Never let it hold up delivery (or every other prompt this pass
+          // flushes): fall back to the bare metadata, and to the full sweep it then requires.
+          this.log.warn(`campaign continuation detail for event ${event.seq} deferred: ${(error as Error).message}`);
+          return { seq: event.seq, createdAt: event.createdAt, prompt: event.kind !== "request_actionable",
+            actionable: true, summary: { seq: event.seq, kind: event.kind,
+              ...(event.subjectSessionId ? { sessionId: event.subjectSessionId } : {}),
+              ...(event.occurrenceId ? { occurrenceId: event.occurrenceId } : {}), createdAt: event.createdAt } };
+        }
+      });
+      // A prompt event fans in briefly and carries everything pending with it; anything else waits
+      // out the coalescing window from the oldest undelivered event.
+      const promptAt = details.filter((detail) => detail.prompt).map((detail) => detail.createdAt);
+      const dueAt = promptAt.length > 0
+        ? Math.min(...promptAt) + CAMPAIGN_CONTINUATION_FAN_IN_MS
+        : events[0]!.createdAt + CAMPAIGN_CONTINUATION_COALESCE_MS;
+      if (now < dueAt) continue;
       const continuationId = `campaign_cont_${randomUUID().replaceAll("-", "")}`;
       const eventFromSeq = events[0]!.seq;
       const eventThroughSeq = events.at(-1)!.seq;
-      const eventSummary = events.map((event) => ({
-        seq: event.seq,
-        kind: event.kind,
-        ...(event.subjectSessionId ? { sessionId: event.subjectSessionId } : {}),
-        ...(event.occurrenceId ? { occurrenceId: event.occurrenceId } : {}),
-        ...(event.subjectStatus ? { status: event.subjectStatus } : {}),
-        createdAt: event.createdAt,
-      }));
-      const prompt = [
-        `[Wollipog Campaign Continuation — ${continuationId}]`,
-        `Campaign ${campaignSessionId}; durable event range ${eventFromSeq}-${eventThroughSeq}.`,
-        `Canonical event metadata: ${JSON.stringify(eventSummary)}`,
-        "Query authoritative campaign and descendant state with get_campaign and list_descendant_requests. Drain every currently actionable Orchestrator-owned request, clear each blocked child with the recovery action its hold names, verify terminal child reports and required cleanup, and then continue the campaign or return idle. Human-owned questions and approvals remain blocked on the human and must not be answered or bypassed. Treat repeated metadata as idempotent; do not infer request contents from this summary.",
-        "[End Wollipog Campaign Continuation]",
-      ].join("\n");
+      const prompt = campaignContinuationPrompt(continuationId, campaignSessionId, eventFromSeq, eventThroughSeq,
+        details, projection);
       this.promptOutbox.stageCampaignContinuation({
         continuationId,
         campaignSessionId,
@@ -5030,6 +5155,77 @@ export class SessionsService {
         now,
       });
       this.hub.sessionChangedById(campaignSessionId);
+    }
+  }
+
+  /** What one continuation event tells the Orchestrator (#3083), read at delivery: the request's
+   * category, title and whether it is still pending, or how it was settled and by whom, and the
+   * named child's current status. A title rides along only where the Orchestrator can already read
+   * it through list_descendant_requests: its own requests and the Orchestrator-owned ones. */
+  private campaignContinuationEventDetail(
+    campaignSessionId: string,
+    event: CampaignContinuationEventRecord,
+  ): CampaignContinuationEventDetail {
+    const base = { seq: event.seq, kind: event.kind, createdAt: event.createdAt };
+    const subject = (sessionId: string | undefined) => {
+      const current = sessionId ? this.db.campaignContinuationSubject(sessionId) : null;
+      return sessionId ? { sessionId, ...(current ? { childStatus: current.status } : {}) } : {};
+    };
+    const described = (request: { category: string; title?: string; resourceKey?: string }, visible: boolean) => ({
+      category: request.category,
+      ...(visible && request.title ? { title: request.title } : {}),
+      ...(visible && request.resourceKey ? { resourceKey: request.resourceKey } : {}),
+    });
+    const settled = (resolution: CampaignRequestResolutionRecord | null) => resolution
+      ? { outcome: resolution.outcome, resolvedBy: resolution.resolvedBy }
+      : { resolvedBy: "unknown" as const };
+    switch (event.kind) {
+      case "request_actionable": {
+        const occurrenceId = event.occurrenceId ?? "";
+        const candidate = this.db.workflowDecisionByOccurrence(occurrenceId);
+        const typed = candidate && candidate.sessionId === event.subjectSessionId ? candidate : null;
+        const generic = typed || !event.subjectSessionId ? undefined
+          : pendingRequests(this.db.campaignContinuationSubject(event.subjectSessionId)?.pendingApproval ?? null)
+            .find((request) => request.occurrenceId === occurrenceId && request.kind !== "workflow_decision");
+        const pending = typed ? typed.status === "pending" && typed.authority === "orchestrator" : Boolean(generic);
+        const resolution = pending || !event.subjectSessionId ? null : this.db.campaignRequestResolution(campaignSessionId,
+          campaignRequestToken(typed ? "typed" : "generic", event.subjectSessionId, occurrenceId));
+        const request = typed
+          ? { category: typed.category, title: this.workflowDecisionApproval(typed).title,
+            resourceKey: boundedCampaignEventText(typed.resourceKey) }
+          : generic ? { category: generic.kind ?? "permission", title: boundedCampaignEventText(generic.title) }
+          : resolution;
+        // The event was raised for an Orchestrator-owned request, so its title is one it may list.
+        return { ...base, prompt: false, actionable: pending, summary: {
+          ...base, ...subject(event.subjectSessionId), occurrenceId, ...(request ? described(request, true) : {}),
+          pending, ...(pending ? {} : settled(resolution)),
+        } };
+      }
+      case "request_resolved": {
+        const resolution = this.db.campaignRequestResolution(campaignSessionId, event.occurrenceId ?? "");
+        const owner = event.subjectStatus === "human" ? "human" : "orchestrator";
+        const humanResolved = resolution?.resolvedBy === "human";
+        return { ...base, prompt: humanResolved, actionable: humanResolved, summary: {
+          ...base, ...subject(resolution?.subjectSessionId),
+          ...(resolution ? { occurrenceId: resolution.occurrenceId } : {}), owner,
+          ...(resolution
+            ? described(resolution, owner === "orchestrator" || resolution.subjectSessionId === campaignSessionId)
+            : {}),
+          ...settled(resolution),
+        } };
+      }
+      case "child_ready":
+        return { ...base, prompt: true, actionable: true, summary: {
+          ...base, ...subject(event.subjectSessionId), ...(event.subjectStatus ? { status: event.subjectStatus } : {}),
+        } };
+      case "child_blocked":
+        return { ...base, prompt: true, actionable: true, summary: {
+          ...base, ...subject(event.subjectSessionId),
+          ...(event.subjectStatus ? { hold: event.subjectStatus } : {}),
+          ...(event.occurrenceId ? { holdId: event.occurrenceId } : {}),
+        } };
+      case "human_blockers_cleared":
+        return { ...base, prompt: true, actionable: true, summary: base };
     }
   }
 
@@ -7222,21 +7418,32 @@ export class SessionsService {
       }));
       // Flush reads the durable human baseline; do not advance notification before-views.
     }
-    const previousOrchestratorTokens = new Set(
-      before.orchestratorCampaign?.pendingRequests?.orchestratorRequestTokens ?? [],
-    );
     const currentOrchestratorTokens = new Set(
       after?.pendingRequests?.orchestratorRequestTokens ?? [],
     );
-    for (const token of previousOrchestratorTokens) {
-      if (currentOrchestratorTokens.has(token)) continue;
-      continuationEvents.push({
-        eventId: `request-resolved:${before.id}:${token}`,
-        campaignSessionId: before.id,
-        kind: "request_resolved",
-        occurrenceId: token,
-        now,
-      });
+    const currentTokens = new Set([...currentOrchestratorTokens, ...after?.pendingRequests?.humanRequestTokens ?? []]);
+    // A request the Orchestrator settled itself wakes nobody: it already knows (#3083). Any other
+    // Orchestrator-owned removal still wakes it, and so does a human settling a human-owned gate,
+    // which human_blockers_cleared alone reports only once the last one goes. A human-owned request
+    // that ended without a human answer, such as a stopped child's, still waits for that event.
+    const removals = [
+      ["orchestrator", before.orchestratorCampaign?.pendingRequests?.orchestratorRequestTokens ?? [], currentOrchestratorTokens],
+      ["human", before.orchestratorCampaign?.pendingRequests?.humanRequestTokens ?? [], currentTokens],
+    ] as const;
+    for (const [owner, previous, current] of removals) {
+      for (const token of new Set(previous)) {
+        if (current.has(token)) continue;
+        const resolvedBy = this.db.campaignRequestResolution(before.id, token)?.resolvedBy;
+        if (resolvedBy === "orchestrator" || (owner === "human" && resolvedBy !== "human")) continue;
+        continuationEvents.push({
+          eventId: `request-resolved:${before.id}:${token}`,
+          campaignSessionId: before.id,
+          kind: "request_resolved",
+          occurrenceId: token,
+          subjectStatus: owner,
+          now,
+        });
+      }
     }
     const previousHuman = before.orchestratorCampaign?.pendingRequests;
     const humanBlockersCleared = (previousHuman?.human ?? 0) > 0 && (after?.pendingRequests?.human ?? 0) === 0;
@@ -9471,6 +9678,13 @@ export class SessionsService {
     const evidenceReferences = decision.resourceSnapshot.category === "ui_evidence_approval"
       ? decision.resourceSnapshot.evidence.map((item) => item.evidenceId)
       : undefined;
+    if (stage === "resolution") {
+      this.noteCampaignRequestResolution(child, "typed", decision.occurrenceId, {
+        category: decision.category,
+        title: this.workflowDecisionApproval(decision).title,
+        resourceKey: decision.resourceKey,
+      }, outcome, actor, now);
+    }
     // Only the resolving record carries the message digest; later consume/revoke records do not.
     const resolvingRecord = outcome === "allowed" || outcome === "denied";
     // Identity and digest only: never the URI (it may carry a signed query) and never the bytes.

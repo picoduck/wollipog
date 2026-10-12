@@ -43,6 +43,34 @@ ambiguous-result state. It does not answer a question, grant an approval or repl
 provider turn. Recovery runs on runner registration/runtime reconciliation; a disconnected runner
 cannot execute a continuation.
 
+## Waking the Orchestrator
+
+Each continuation is a full-context model turn, so events wake the root Orchestrator only when it
+has something to learn or do (#3083):
+
+- **Its own resolutions wake nobody.** Every request resolution records who settled it, keyed by
+  the same hashed identity the projection publishes, in
+  `orchestrator_campaign_request_resolutions`. When the campaign Orchestrator settled a request
+  itself, through `resolve_descendant_workflow_decision` or another descendant resolution, its
+  removal records no `request_resolved` event. Any other removal of an Orchestrator-owned request
+  still does. A human settling a human-owned gate records one too, besides `human_blockers_cleared`,
+  which fires only once the last human gate goes.
+- **Bursts share one turn.** `child_ready`, `child_blocked`, `human_blockers_cleared` and a human's
+  `request_resolved` are delivered after a one-second fan-in. Any other event waits 30 seconds
+  from the oldest undelivered event. A prompt event carries everything pending with it, so the
+  window never delays a human gate. The control plane checks every five seconds.
+- **The payload says whether to act.** Each event names its request's category and title, the
+  child's current status, and for a settled request its outcome and resolver. The prompt also
+  carries compact campaign counts and an `Action needed` line. Titles appear only for requests
+  the Orchestrator can already list: its own and Orchestrator-owned ones. `Action needed: no`
+  (nothing pending for the Orchestrator, no held child, no report to verify, no required cleanup,
+  no human resolution) lets the turn end without the `get_campaign` and `list_descendant_requests`
+  sweep. The prompt is control-plane text that the runner forwards verbatim, so no protocol change
+  is involved.
+
+Resolution rows are kept for seven days, so a deferred batch that replays a removal still finds
+its resolver. A missing row only costs an extra wake-up.
+
 ## Notification Boundary
 
 Own-session status/approval/delivery progress and reported child occurrences are separate from the

@@ -46,7 +46,7 @@ import {
   pendingRequests,
 } from "@wollipog/protocol";
 import { dispatch as dispatchManagerTool } from "../../runner/src/session-management-mcp.js";
-import { ControlPlaneDb } from "./db.js";
+import { ControlPlaneDb, campaignRequestToken } from "./db.js";
 import { CAMPAIGN_WORK_LEDGER_SCHEMA } from "./campaign-work-ledger-store.js";
 import { applyClaudeReconciliation, previewClaudeReconciliation, observeReconciliationRevision } from "./claude-cost-reconciliation.js";
 import { parseRateTable } from "./usage-pricing.js";
@@ -58,6 +58,8 @@ import { shortVideoDecoderAvailable } from "./video-frame-decode.js";
 import { SessionTitleGenerationError, type SessionTitleGenerator } from "./session-title-generator.js";
 import {
   SessionsService,
+  CAMPAIGN_CONTINUATION_COALESCE_MS,
+  CAMPAIGN_CONTINUATION_FAN_IN_MS,
   EXTERNAL_SESSION_ADOPTION_TIMEOUT_MS,
   EXTERNAL_SESSION_ENUMERATION_TIMEOUT_MS,
   PREPARED_PROMPT_IMAGE_RETENTION_MS,
@@ -1908,7 +1910,8 @@ test("idle Orchestrators durably coalesce nested request and child-ready events 
       kind: "question_request",
       requestId: "campaign-question",
       occurrenceId: "request_campaign_question",
-      questions: [{ id: "next", header: "Next", question: "Sensitive task details?", options: [{ label: "Continue" }] }],
+      questions: [{ id: "next", header: "Next", question: "Which branch next?",
+        options: [{ label: "Sensitive option", description: "Sensitive option details" }] }],
     });
     const report = db.appendEvent(completedChild.id, {
       kind: "agent_message", text: "Completed child report", final: true,
@@ -1939,8 +1942,10 @@ test("idle Orchestrators durably coalesce nested request and child-ready events 
     assert.match(text, /"status":"failed"/u);
     assert.match(text, /"status":"stopped"/u);
     assert.match(text, new RegExp(questionChild.id, "u"));
-    assert.doesNotMatch(text, /Sensitive task details/u,
-      "the generated payload contains identifiers and metadata, not request contents");
+    assert.match(text, /"category":"question","title":"Which branch next\?","pending":true/u,
+      "an Orchestrator-owned request names its category and the title list_descendant_requests shows");
+    assert.doesNotMatch(text, /Sensitive option/u,
+      "the generated payload carries titles and metadata, not the request's options or answers");
     assert.equal(db.getSession(root.id)?.pendingPrompts, undefined,
       "synthetic continuations stay out of the manual prompt-recovery surface");
     assert.equal(db.campaignProjection(root.id)?.continuation?.state, "pending");
@@ -1976,6 +1981,243 @@ test("idle Orchestrators durably coalesce nested request and child-ready events 
     svc.onSessionStatus(completedChild.id, "idle");
     assert.equal(svc.retryDuePrompts(now + 180_000), 0,
       "replayed lifecycle projection cannot manufacture a duplicate event");
+  } finally {
+    db.close();
+  }
+});
+
+/** A root campaign Orchestrator with one running child, and a way to deliver and complete its
+ * continuations, for the wake-up rules of #3083. */
+function continuationCampaign(parentControl: "off" | "questions" | "questions_and_approvals") {
+  const harness = makeHarness();
+  const { db, svc, hub } = harness;
+  const meta = runnerMeta();
+  meta.agents.find((agent) => agent.id === "test-orchestrator")!.capabilities = {
+    models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+    permissionModes: ["default", "orchestrator"],
+  };
+  db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+  const root = svc.createSession({
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+    config: { permissionMode: "orchestrator" }, parentControl,
+  }).data!;
+  db.updateSessionStatus(root.id, "running", Date.now());
+  const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+  let created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: root.id });
+  if (created.status === 428) {
+    assert.ok(svc.approve(root.id, db.getSession(root.id)!.pendingApproval!.requestId, "allow").ok);
+    created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: root.id });
+  }
+  assert.ok(created.ok && created.data, created.error);
+  const child = created.data;
+  db.updateSessionStatus(child.id, "running", Date.now());
+  const continuations = () => hub.sentOfType("durable_session_command").filter((message) =>
+    message.command.type === "prompt_session" && message.command.campaignContinuation?.campaignSessionId === root.id);
+  /** Run the scheduler at `at`; when it stages a continuation, complete it and return its text. */
+  const deliver = (at: number): string | null => {
+    const before = continuations().length;
+    svc.retryDuePrompts(at);
+    const sent = continuations();
+    if (sent.length === before) return null;
+    const delivery = sent.at(-1)!;
+    assert.ok(svc.onDurablePromptReceipt(RUNNER_ID, {
+      type: "durable_session_command_result", requestId: delivery.requestId, commandId: delivery.commandId,
+      sessionId: root.id, state: "accepted", revision: 1, duplicate: false,
+    }));
+    assert.ok(svc.onDurablePromptReceipt(RUNNER_ID, {
+      type: "durable_session_command_update", commandId: delivery.commandId, sessionId: root.id,
+      state: "completed", revision: 2,
+    }));
+    return delivery.command.type === "prompt_session" ? delivery.command.text : "";
+  };
+  const ask = (requestId: string, question: string, secret = false) => svc.onSessionEvent(child.id, {
+    kind: "question_request", requestId, occurrenceId: `request_${requestId}`, ownerToolUseId: "nested-tool",
+    questions: [{ id: "q", header: "Choice", question, ...(secret ? { secret } : {}), options: [{ label: "Continue" }] }],
+  });
+  return { ...harness, root, child, continuations, deliver, ask };
+}
+
+test("an Orchestrator's own answer wakes nobody, while a human's answer wakes it promptly with outcome and resolver (#3083)", () => {
+  const { db, svc, root, child, deliver, ask } = continuationCampaign("questions");
+  try {
+    ask("first", "Which branch first?");
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    assert.equal(deliver(Date.now() + CAMPAIGN_CONTINUATION_FAN_IN_MS + 1_000), null,
+      "an Orchestrator-owned request waits out the coalescing window");
+    const first = deliver(Date.now() + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000)!;
+    assert.match(first, /"kind":"request_actionable".*"childStatus":"input_required","occurrenceId":"request_first","category":"question","title":"Which branch first\?","pending":true/u);
+    assert.match(first, /Campaign counts: \{"status":"active",.*"pendingRequests":\{"human":0,"orchestrator":1\}\}/u);
+    assert.match(first, /Action needed: yes\. Query authoritative campaign and descendant state/u);
+
+    db.updateSessionStatus(root.id, "running", Date.now());
+    assert.ok(svc.resolveDescendantRequest(root.id, child.id, "request_first",
+      { action: "answer", answers: { q: "Continue" } }, () => true).ok);
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    assert.deepEqual(db.campaignContinuationEvents(root.id), [],
+      "the Orchestrator's own resolution records no event for it to read");
+    assert.equal(deliver(Date.now() + 120_000), null, "so it produces no continuation");
+
+    db.updateSessionStatus(root.id, "running", Date.now());
+    ask("second", "Which branch second?");
+    assert.ok(svc.answerQuestion(child.id, "second", { q: "Continue" }).ok, "a human answers it instead");
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    const second = deliver(Date.now() + CAMPAIGN_CONTINUATION_FAN_IN_MS + 1_000);
+    assert.ok(second, "a human resolution wakes the Orchestrator without waiting out the window");
+    assert.match(second, /"kind":"request_resolved".*"occurrenceId":"request_second","owner":"orchestrator","category":"question","title":"Which branch second\?","outcome":"answered","resolvedBy":"human"/u);
+    assert.match(second, /"kind":"request_actionable".*"occurrenceId":"request_second","category":"question","title":"Which branch second\?","pending":false,"outcome":"answered","resolvedBy":"human"/u,
+      "the coalesced request names its own settlement rather than a stale pending card");
+    assert.match(second, /Action needed: yes/u);
+  } finally {
+    db.close();
+  }
+});
+
+test("resolving a child's typed decision with resolve_descendant_workflow_decision does not wake its Orchestrator (#3083)", () => {
+  const { db, svc, root, child, deliver } = continuationCampaign("off");
+  try {
+    assert.ok(svc.setParentControlPolicy(root.id, {
+      implementation_question: "human", pr_merge: "orchestrator", merged_branch_deletion: "human",
+      follow_up_issue_publication: "human", ui_evidence_approval: "orchestrator",
+    }, 0).ok);
+    const merge = svc.createWorkflowDecision(child.id, {
+      requestId: "merge-1", resourceKey: "picoduck/wollipog#123", resourceSnapshot: {
+        category: "pr_merge", repository: "picoduck/wollipog", pullRequest: 123, headSha: "a".repeat(40),
+        reviewResult: "merge", requiredChecks: { headSha: "a".repeat(40), status: "passed", checkedAt: 10,
+          checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" }] },
+      },
+    });
+    assert.ok(merge.ok && merge.data, merge.error);
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    const asked = deliver(Date.now() + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000)!;
+    assert.match(asked, new RegExp(`"occurrenceId":"${merge.data.occurrenceId}","category":"pr_merge","title":"PR Merge Approval Required","resourceKey":"picoduck/wollipog#123","pending":true`, "u"));
+
+    db.updateSessionStatus(root.id, "running", Date.now());
+    assert.ok(svc.resolveDescendantRequest(root.id, child.id, merge.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    assert.equal(db.campaignContinuationEvents(root.id).some((event) => event.kind === "request_resolved"), false);
+    assert.equal(deliver(Date.now() + 120_000), null);
+
+    const replacement = svc.createWorkflowDecision(child.id, {
+      requestId: "merge-2", resourceKey: "picoduck/wollipog#124", resourceSnapshot: {
+        category: "pr_merge", repository: "picoduck/wollipog", pullRequest: 124, headSha: "b".repeat(40),
+        reviewResult: "merge", requiredChecks: { headSha: "b".repeat(40), status: "passed", checkedAt: 10,
+          checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" }] },
+      },
+    });
+    assert.ok(replacement.ok && replacement.data, replacement.error);
+    svc.onSessionStatus(child.id, "stopped");
+    const ended = deliver(Date.now() + CAMPAIGN_CONTINUATION_FAN_IN_MS + 1_000);
+    assert.ok(ended, "the stopped child's report wakes the Orchestrator promptly");
+    assert.match(ended, new RegExp(`"kind":"request_resolved",.*"occurrenceId":"${replacement.data.occurrenceId}","owner":"orchestrator","category":"pr_merge","title":"PR Merge Approval Required","resourceKey":"picoduck/wollipog#124","outcome":"revoked","resolvedBy":"system"`, "u"),
+      "a request that left without the Orchestrator's answer still reaches it, with how it ended");
+    assert.match(ended, /"kind":"child_ready",.*"childStatus":"stopped","status":"stopped"/u);
+  } finally {
+    db.close();
+  }
+});
+
+test("a human settling a human-owned gate wakes the Orchestrator promptly without exposing the child's request (#3083)", () => {
+  const { db, svc, root, child, deliver, ask } = continuationCampaign("questions_and_approvals");
+  try {
+    ask("first", "Private first question?", true);
+    ask("second", "Private second question?", true);
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    assert.ok(svc.answerQuestion(child.id, "first", { q: "Continue" }).ok);
+    assert.equal(db.campaignProjection(root.id)?.status, "waiting_human");
+    assert.equal(deliver(Date.now() + 120_000), null, "the campaign stays held while a human gate remains");
+    assert.ok(svc.answerQuestion(child.id, "second", { q: "Continue" }).ok);
+    const text = deliver(Date.now() + CAMPAIGN_CONTINUATION_FAN_IN_MS + 1_000);
+    assert.ok(text, "the last human answer wakes it without waiting out the window");
+    assert.match(text, /"kind":"human_blockers_cleared"/u);
+    for (const occurrenceId of ["request_first", "request_second"]) {
+      assert.match(text, new RegExp(`"occurrenceId":"${occurrenceId}","owner":"human","category":"question","outcome":"answered","resolvedBy":"human"`, "u"));
+    }
+    assert.doesNotMatch(text, /Private/u, "a human-owned request's title is not one the Orchestrator can list");
+    assert.match(text, /Action needed: yes/u);
+  } finally {
+    db.close();
+  }
+});
+
+test("each campaign event kind wakes on its own schedule and names what the Orchestrator needs (#3083)", () => {
+  const cases = [
+    { name: "child_ready", prompt: true, record: (root: string, child: string) => ({
+      kind: "child_ready" as const, subjectSessionId: child, subjectStatus: "idle", occurrenceId: "event-seq:9" }),
+    expected: /"kind":"child_ready","createdAt":\d+,"sessionId":"s_\w+","childStatus":"running","status":"idle"/u, action: "yes" },
+    { name: "child_blocked", prompt: true, record: (_root: string, child: string) => ({
+      kind: "child_blocked" as const, subjectSessionId: child, subjectStatus: "worktree_recovery", occurrenceId: "hold_1" }),
+    expected: /"kind":"child_blocked","createdAt":\d+,"sessionId":"s_\w+","childStatus":"running","hold":"worktree_recovery","holdId":"hold_1"/u, action: "yes" },
+    { name: "human_blockers_cleared", prompt: true, record: () => ({ kind: "human_blockers_cleared" as const }),
+      expected: /"kind":"human_blockers_cleared","createdAt":\d+\}/u, action: "yes" },
+    { name: "request_resolved by a human", prompt: true, resolver: "human" as const, record: (root: string, child: string) => ({
+      kind: "request_resolved" as const, subjectStatus: "orchestrator", occurrenceId: campaignRequestToken("generic", child, "request_kind") }),
+    expected: /"kind":"request_resolved",.*"occurrenceId":"request_kind","owner":"orchestrator","category":"question","title":"Kind title","outcome":"answered","resolvedBy":"human"/u, action: "yes" },
+    { name: "request_resolved by the system", prompt: false, resolver: "system" as const, record: (root: string, child: string) => ({
+      kind: "request_resolved" as const, subjectStatus: "orchestrator", occurrenceId: campaignRequestToken("generic", child, "request_kind") }),
+    expected: /"owner":"orchestrator","category":"question","title":"Kind title","outcome":"answered","resolvedBy":"system"/u, action: "no" },
+    { name: "request_resolved with no recorded resolver", prompt: false, record: () => ({
+      kind: "request_resolved" as const, subjectStatus: "orchestrator", occurrenceId: "f".repeat(64) }),
+    expected: /"kind":"request_resolved","createdAt":\d+,"owner":"orchestrator","resolvedBy":"unknown"/u, action: "no" },
+    { name: "request_actionable no longer pending", prompt: false, record: (_root: string, child: string) => ({
+      kind: "request_actionable" as const, subjectSessionId: child, occurrenceId: "request_gone" }),
+    expected: /"kind":"request_actionable",.*"occurrenceId":"request_gone","pending":false,"resolvedBy":"unknown"/u, action: "no" },
+  ];
+  for (const scenario of cases) {
+    const { db, root, child, deliver } = continuationCampaign("questions");
+    try {
+      const at = Date.now();
+      if (scenario.resolver) {
+        db.recordCampaignRequestResolution({
+          campaignSessionId: root.id, requestToken: campaignRequestToken("generic", child.id, "request_kind"),
+          subjectSessionId: child.id, occurrenceId: "request_kind", category: "question", title: "Kind title",
+          outcome: "answered", resolvedBy: scenario.resolver, resolvedAt: at,
+        });
+      }
+      db.recordCampaignContinuationEvent({
+        eventId: `kind:${scenario.name}`, campaignSessionId: root.id, now: at, ...scenario.record(root.id, child.id),
+      });
+      db.updateSessionStatus(root.id, "idle", at);
+      const prompt = deliver(at + CAMPAIGN_CONTINUATION_FAN_IN_MS + 500);
+      assert.equal(prompt !== null, scenario.prompt, `${scenario.name} prompt wake-up`);
+      const text = prompt ?? deliver(at + CAMPAIGN_CONTINUATION_COALESCE_MS + 500);
+      assert.ok(text, `${scenario.name} is delivered once the coalescing window ends`);
+      assert.match(text, scenario.expected, scenario.name);
+      assert.match(text, new RegExp(`Action needed: ${scenario.action}\\.`, "u"), scenario.name);
+      if (scenario.action === "no") {
+        assert.match(text, /Do not re-query get_campaign or list_descendant_requests/u);
+        assert.doesNotMatch(text, /Query authoritative campaign/u);
+      }
+    } finally {
+      db.close();
+    }
+  }
+});
+
+test("campaign events within the coalescing window arrive as one continuation, and a prompt event ends the wait (#3083)", () => {
+  const { db, root, child, deliver } = continuationCampaign("questions");
+  try {
+    const record = (eventId: string, now: number, kind: "request_actionable" | "child_ready" = "request_actionable") =>
+      db.recordCampaignContinuationEvent({
+        eventId, campaignSessionId: root.id, kind, subjectSessionId: child.id, now,
+        ...(kind === "child_ready" ? { subjectStatus: "idle" } : { occurrenceId: eventId }),
+      });
+    const start = Date.now();
+    db.updateSessionStatus(root.id, "idle", start);
+    record("request_a", start);
+    record("request_b", start + 10_000);
+    assert.equal(deliver(start + 20_000), null, "the window runs from the oldest undelivered event");
+    const burst = deliver(start + CAMPAIGN_CONTINUATION_COALESCE_MS + 500)!;
+    assert.match(burst, /durable event range 1-2\./u);
+    assert.match(burst, /"occurrenceId":"request_a".*"occurrenceId":"request_b"/u);
+
+    const later = start + 120_000;
+    record("request_c", later);
+    record("ready", later + 5_000, "child_ready");
+    const joined = deliver(later + 5_000 + CAMPAIGN_CONTINUATION_FAN_IN_MS + 500);
+    assert.ok(joined, "a prompt event does not wait for the earlier event's window");
+    assert.match(joined, /durable event range 3-4\./u);
+    assert.match(joined, /"occurrenceId":"request_c".*"kind":"child_ready"/u);
   } finally {
     db.close();
   }
