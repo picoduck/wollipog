@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  campaignAuthorityPreflight, resolveCampaignAuthority, validCampaignControl,
+  campaignAuthorityPreflight, campaignCodeOperationTargets, resolveCampaignAuthority, validCampaignControl,
   HUMAN_ONLY_PARENT_CONTROL_POLICY, type CampaignControl, type PendingApproval,
 } from "./index.js";
 
@@ -16,7 +16,7 @@ const question = (text: string, extra: Partial<PendingApproval> = {}): PendingAp
   questions: [{ id: "choice", question: text, options: [{ label: "A" }, { label: "B" }] }], ...extra,
 });
 const tool: PendingApproval = { requestId: "p", kind: "permission", title: "Inspect Repository", requestSource: "provider_tool",
-  context: { toolName: "commandExecution", input: "git status --short", operation: { kind: "command", input: "git status --short", cwd: "/repo", filesystem: { cwd: "/repo", targets: [] } } }, options: [
+  context: { toolName: "commandExecution", input: "cat src/implementation.ts", operation: { kind: "command", input: "cat src/implementation.ts", cwd: "/repo", filesystem: { cwd: "/repo", targets: [{ path: "src/implementation.ts", resolvedPath: "/repo/src/implementation.ts" }] } } }, options: [
     { optionId: "once", name: "Allow Once", kind: "allow_once" }, { optionId: "always", name: "Always", kind: "allow_always" },
   ] };
 const evaluate = (request: PendingApproval, override: Partial<Parameters<typeof resolveCampaignAuthority>[0]> = {}) =>
@@ -65,7 +65,7 @@ test("one-time approvals and specifically delegated asks cannot grant persistenc
 });
 
 test("verified repository code inspection is independent of authentication keywords; actual secret access stays protected", () => {
-  for (const input of ["git diff -- apps/control-plane/src/auth.ts", "cat src/authentication.ts", "git diff -- src/password.ts"]) {
+  for (const input of ["cat apps/control-plane/src/auth.ts", "cat src/authentication.ts", "cat src/password.ts"]) {
     const request = { ...tool, context: { toolName: "commandExecution", input,
       operation: { kind: "command" as const, input, cwd: "/repo", filesystem: { cwd: "/repo", targets: [{ path: input.split(" ").at(-1)!, resolvedPath: `/repo/${input.split(" ").at(-1)!}` }] } } } };
     assert.equal(evaluate(request, { repositoryRoot: "/repo" }).owner, "orchestrator", input);
@@ -81,6 +81,21 @@ test("verified repository code inspection is independent of authentication keywo
     operation: { kind: "file", path: "/repo/src/authentication.ts", filesystem: { targets: [{ path: "/repo/src/authentication.ts", resolvedPath: "/repo/src/authentication.ts" }] } } } }, { repositoryRoot: "/repo" }).owner, "orchestrator");
 });
 
+test("Git commands never qualify for automatic admission even with canonical evidence or helper flags", () => {
+  for (const input of ["git status --short", "git diff -- src/implementation.ts", "git diff --cached -- src/implementation.ts",
+    "git -C /repo status --porcelain", "git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv -- src/implementation.ts",
+    "git -c core.pager=cat status --short", "/usr/bin/git status --short", "env git status --short", "git show HEAD:src/implementation.ts"]) {
+    const operation = { kind: "command" as const, input, cwd: "/repo", filesystem: { cwd: "/repo",
+      targets: input.includes("status") ? [] : [{ path: "src/implementation.ts", resolvedPath: "/repo/src/implementation.ts" }] } };
+    assert.equal(campaignCodeOperationTargets("commandExecution", operation), null, input);
+    for (const root of [false, true]) {
+      const result = evaluate({ ...tool, context: { ...tool.context, input, operation } }, { root });
+      assert.equal(result.owner, "human", input);
+      assert.equal(result.reason, "outside_boundary", input);
+    }
+  }
+});
+
 test("repository, operations and provider compatibility are bounded and disclosed", () => {
   const snapshot = { category: "merged_branch_deletion" as const, repository: "other/repo", branch: "feature", merged: true as const,
     mergeCommitSha: "a".repeat(40), dependentPullRequests: { checkedAt: 1, open: [] } };
@@ -91,6 +106,7 @@ test("repository, operations and provider compatibility are bounded and disclose
     assert.equal(campaignAuthorityPreflight(control, driver, version).supported, false);
   }
   assert.equal(campaignAuthorityPreflight(control, "codex-app-server", 215).supported, true);
+  assert.ok(campaignAuthorityPreflight(control, "codex-app-server", 215).humanRequiredRequests?.includes("git_execution_without_bounded_effect_proof"));
   assert.equal(validCampaignControl(control), true);
   for (const invalid of [null, {}, { mode: "full_control" }, { mode: "custom", boundary: {} },
     { ...control, boundary: { ...control.boundary, authorizedByUserId: "" } },

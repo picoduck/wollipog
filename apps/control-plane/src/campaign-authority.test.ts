@@ -153,7 +153,7 @@ test("Full Control cannot delegate persistent grants or Human Required provider 
   try {
     assert.ok(h.enable().ok);
     h.svc.onSessionEvent("child", { kind: "permission_request", requestId: "tool", occurrenceId: "tool", requestSource: "provider_tool",
-      title: "Inspect Repository", context: { toolName: "Bash", input: "git status --short", operation: { kind: "command", input: "git status --short", cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [] } } }, options: [
+      title: "Inspect Repository", context: { toolName: "Bash", input: "cat src/implementation.ts", operation: { kind: "command", input: "cat src/implementation.ts", cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [{ path: "src/implementation.ts", resolvedPath: "/repos/test/src/implementation.ts" }] } } }, options: [
         { optionId: "once", name: "Allow Once", kind: "allow_once" }, { optionId: "always", name: "Always", kind: "allow_always" }] });
     assert.equal(h.svc.resolveDescendantRequest("root", "child", "tool", { action: "approve", optionId: "always" }, () => true).ok, false);
     assert.equal(h.svc.resolveDescendantRequest("root", "child", "tool", { action: "approve", optionId: "once" }, () => false).ok, false);
@@ -166,7 +166,7 @@ test("trusted in-bound auth source inspection has the same owner in every server
   const h = harness();
   try {
     assert.ok(h.enable().ok);
-    for (const input of ["git diff -- apps/control-plane/src/auth.ts", "cat src/authentication.ts"]) {
+    for (const input of ["cat apps/control-plane/src/auth.ts", "cat src/authentication.ts"]) {
       h.svc.onSessionEvent("child", { kind: "permission_request", requestId: input, occurrenceId: input, requestSource: "provider_tool",
         title: input, context: { toolName: "commandExecution", input, operation: { kind: "command", input, cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [{ path: input.split(" ").at(-1)!, resolvedPath: `/repos/test/${input.split(" ").at(-1)!}` }] } } },
         options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }] });
@@ -184,8 +184,8 @@ test("root admission cannot settle a foreign effect, missing operation, credenti
     { toolName: "commandExecution", input: "cat /unrelated/repository/README.md", operation: { kind: "command" as const, input: "cat /unrelated/repository/README.md", cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [{ path: "/unrelated/repository/README.md", resolvedPath: "/unrelated/repository/README.md" }] } } },
     { toolName: "commandExecution", input: "pnpm test" },
     { toolName: "commandExecution", input: "pnpm test", operation: { kind: "command" as const, input: "pnpm test", cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [] } } },
-    { toolName: "commandExecution", network: "requested", operation: { kind: "command" as const, input: "git status --short", cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [] } } },
-    { toolName: "commandExecution", providerPermissionExpansion: true, operation: { kind: "command" as const, input: "git status --short", cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [] } } },
+    { toolName: "commandExecution", network: "requested", operation: { kind: "command" as const, input: "cat src/implementation.ts", cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [{ path: "src/implementation.ts", resolvedPath: "/repos/test/src/implementation.ts" }] } } },
+    { toolName: "commandExecution", providerPermissionExpansion: true, operation: { kind: "command" as const, input: "cat src/implementation.ts", cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [{ path: "src/implementation.ts", resolvedPath: "/repos/test/src/implementation.ts" }] } } },
     { toolName: "UnknownTool", operation: { kind: "file" as const, path: "/repos/test/src/auth.ts" } },
     { toolName: "commandExecution", input: "cat .env", operation: { kind: "command" as const, input: "cat .env", cwd: "/repos/test" } },
     { toolName: "permissions", operation: { kind: "permission_grant" as const, lifetime: "session" as const } },
@@ -200,6 +200,33 @@ test("root admission cannot settle a foreign effect, missing operation, credenti
       assert.equal(h.db.getSession("root")!.pendingRequestOwners!.human, 1);
       assert.equal(h.db.campaignProjection("root")!.status, "waiting_human");
       assert.equal(h.svc.resolveDescendantRequest("root", "root", "root-tool", { action: "approve", optionId: "once" }, () => true).ok, false);
+    } finally { h.db.close(); }
+  }
+});
+
+test("generic Git requests remain reachable human exceptions in all projections without root callbacks", () => {
+  for (const input of ["git status --short", "git diff -- src/implementation.ts",
+    "git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv -- src/implementation.ts"]) {
+    const h = harness();
+    try {
+      assert.ok(h.enable().ok);
+      for (const id of ["root", "child"]) h.svc.onSessionEvent(id, {
+        kind: "permission_request", requestId: id, occurrenceId: id, requestSource: "provider_tool", title: "Inspect Repository",
+        context: { toolName: "commandExecution", input, operation: { kind: "command", input, cwd: "/repos/test",
+          filesystem: { cwd: "/repos/test", targets: input.includes("status") ? [] : [{ path: "src/implementation.ts", resolvedPath: "/repos/test/src/implementation.ts" }] } } },
+        options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }],
+      });
+      assert.equal(h.sent.length, 0, "Full Control never settles generic Git execution");
+      assert.equal(h.db.campaignProjection("root")!.status, "waiting_human");
+      assert.equal(h.db.campaignRequestsForPrincipal(h.principal, "root")!.human, 2);
+      assert.equal(h.db.listSessionsForPrincipal(h.principal).find((s) => s.id === "root")!.campaignRequests!.human, 2);
+      const visible = h.svc.descendantRequests("root", () => true, "human").data!.requests;
+      assert.equal(visible.length, 2);
+      for (const id of ["root", "child"]) {
+        assert.equal(h.db.getSession(id)!.pendingRequestOwners!.human, 1);
+        assert.equal(visible.find((r) => r.sessionId === id)!.authorityEvaluation!.reason, "outside_boundary");
+        assert.equal(h.svc.resolveDescendantRequest("root", id, id, { action: "approve", optionId: "once" }, () => true).ok, false);
+      }
     } finally { h.db.close(); }
   }
 });
@@ -295,7 +322,7 @@ test("live Human Required, deny and withdrawn asks have the same effective owner
       h.db.upsertGovernancePolicy(rule, Date.now());
       assert.ok(h.enable(["delegated"]).ok);
       h.svc.onSessionEvent("child", { kind: "permission_request", requestId: "live-rule", occurrenceId: "live-rule", requestSource: "provider_tool",
-        title: "Inspect Repository", context: { toolName: "Bash", input: "git status --short", operation: { kind: "command", input: "git status --short", cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [] } } },
+        title: "Inspect Repository", context: { toolName: "Bash", input: "cat src/implementation.ts", operation: { kind: "command", input: "cat src/implementation.ts", cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [{ path: "src/implementation.ts", resolvedPath: "/repos/test/src/implementation.ts" }] } } },
         options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }] });
       assert.equal(h.db.getSession("child")!.pendingRequestOwners!.orchestrator, 1);
       assert.equal(h.db.listSessionsForPrincipal(h.principal).find((s) => s.id === "root")!.campaignRequests!.orchestrator, 1, "seed the cached list before changing policy");

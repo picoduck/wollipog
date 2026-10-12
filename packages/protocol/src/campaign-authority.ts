@@ -82,20 +82,11 @@ export function campaignCodeOperationTargets(toolName: string | undefined, opera
   const command = operation.input;
   if (typeof command !== "string" || !command || command.length > 2000 ||
       (operation.cwd !== undefined && typeof operation.cwd !== "string") || /[\n\r$`;&|<>()[\]{}'"\\]/u.test(command)) return null;
-  let words = command.trim().split(/\s+/u);
+  const words = command.trim().split(/\s+/u);
   if (words.length > 32) return null;
-  let cwd = operation.cwd;
-  if (words[0] === "git" && words[1] === "-C") {
-    cwd = words[2]; words = ["git", ...words.slice(3)];
-  }
-  if (words[0] === "cat") return words.length > 1 ? { cwd, paths: words.slice(1) } : null;
-  if (words[0] === "git" && words[1] === "diff") {
-    const args = words.slice(2);
-    return args.filter((arg) => arg.startsWith("-")).every((arg) =>
-      ["--", "--no-ext-diff", "--cached", "--staged", "--stat", "--name-only"].includes(arg) || /^-U\d+$/u.test(arg))
-      ? { cwd, paths: args.filter((arg) => !arg.startsWith("-")) } : null;
-  }
-  if (words[0] === "git" && words[1] === "status" && words.slice(2).every((arg) => ["--short", "--branch", "--porcelain"].includes(arg))) return { cwd, paths: [] };
+  // Git inspection can execute repository-configured helpers (including clean filters even
+  // with external diff/textconv disabled). Command flags alone do not prove bounded effects.
+  if (words[0] === "cat") return words.length > 1 ? { cwd: operation.cwd, paths: words.slice(1) } : null;
   return null;
 }
 
@@ -224,6 +215,6 @@ export function campaignAuthorityPreflight(control: CampaignControl | undefined,
   if (!control || control.mode === "custom") return { supported: true };
   if (!validCampaignControl(control)) return { supported: false, reason: "Full Control requires a valid human-authorized boundary." };
   if ((protocolVersion ?? 0) < 215 || !["codex-app-server", "claude-code"].includes(driver)) return { supported: false, reason: "This provider path cannot enforce the Full Control authority contract; use Custom or update the runner." };
-  return { supported: true, humanRequiredRequests: ["secrets_and_sign_in", "persistent_permissions", "provider_access_expansion", "external_elicitation", "root_forms_without_suggested_answers", "unverified_tool_effects", "script_execution_without_bounded_effect_proof", "human_required_rules",
+  return { supported: true, humanRequiredRequests: ["secrets_and_sign_in", "persistent_permissions", "provider_access_expansion", "external_elicitation", "root_forms_without_suggested_answers", "unverified_tool_effects", "git_execution_without_bounded_effect_proof", "script_execution_without_bounded_effect_proof", "human_required_rules",
     ...(driver === "claude-code" ? ["relative_shell_commands_without_verified_cwd"] : [])] };
 }

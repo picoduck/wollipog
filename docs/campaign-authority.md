@@ -64,7 +64,7 @@ that something is implementation work cannot override protected fields or an ext
 provenance. Provider enforcement remains a separate boundary.
 
 Tool intent comes from the concrete normalized provider operation, never its display reason.
-Recognized code inspection/edits and Git status/diff require the campaign workspace binding and a verified directory or absolute bounded
+Recognized native file inspection/edits and bounded `cat` reads require the campaign workspace binding and a verified directory or absolute bounded
 target. Unrelated targets, composed shell commands, unknown effects and missing operation metadata
 stay human-owned. The runner constructs `operation.filesystem` using filesystem metadata, ignoring
 provider-authored evidence claims. Both lexical and canonical targets must stay in the repository;
@@ -73,7 +73,14 @@ callback rechecks the canonical evidence before granting it and cancels changed 
 additional evidence, rather than a replacement for provider filesystem enforcement at execution.
 Repository script commands such as test/typecheck/build do not prove their effects: their code is
 editable by the agent, and a proved cwd is insufficient to authorize that execution outside the
-provider's existing constraints. They remain unverified tool-effect exceptions. Explicit network
+provider's existing constraints. They remain unverified tool-effect exceptions. All Git commands
+also remain unverified: repository configuration can run fsmonitor, textconv, clean filters, pagers
+and other helpers, including clean filters when external diff and textconv are disabled. Canonical
+cwd/path evidence and Git command flags cannot prove those effects. Preflight reports
+`git_execution_without_bounded_effect_proof`; Full Control never settles a generic Git permission
+request automatically. Current independently authorized policy and provider enforcement still
+apply; a remaining request is human-owned with `outside_boundary` (or its stronger current
+policy/protection reason). Explicit network
 or provider permission-expansion envelopes stay protected even for otherwise recognized code
 operations. Existing independently authorized routine policies retain their own enforcement.
 Codex provides command cwd in its approval envelope. Claude's native control
@@ -108,7 +115,9 @@ command admission. A hard deny always wins. Current rules are checked again befo
 resolves a tool approval. Current Human Required, deny, unknown and withdrawn asks also feed every
 request projection, so ownership cannot lag a policy edit. Persistent options never become eligible.
 
-PR merge consumption still arms the exact canonical command and waits for correlated provider
+Supported trusted workflow paths remain separate from generic shell-effect classification. A typed
+PR merge requires its exact resource snapshot, review/CI and current policy gates. Its consumption
+still arms the exact canonical command and waits for correlated provider
 evidence. Its matching one-time tool request consumes that grant without a redundant human gate.
 Human Required asks and hard denies cannot be bypassed by an armed grant. No broader shell grant
 is created; a changed or replayed command needs a new occurrence.
