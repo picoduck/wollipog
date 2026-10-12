@@ -24888,46 +24888,50 @@ test("issue closure binds only children whose work bears on the issue (#3084)", 
   }
 });
 
-test("issue-closure attribution backfills item issue and lineage history (#3084)", () => {
+test("issue-closure attribution treats work recorded before its history as related (#3084)", () => {
   const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
   try {
+    // Emulate a database from before attribution history: no triggers, marker, or history rows.
+    db.db.exec(`DROP TRIGGER campaign_work_item_issue_recorded; DROP TRIGGER campaign_work_item_issue_changed;
+      DROP TRIGGER campaign_work_lineage_edge_origin; DROP TRIGGER campaign_work_lineage_edge_adjudicated;
+      DROP TRIGGER campaign_work_lineage_edge_readjudicated; DELETE FROM campaign_work_attribution_start;`);
     const plan = svc.recordCampaignPlan(parent.id, { items: [
       { key: "issue", issue: { repository: "Picoduck/Wollipog", number: 1440 } }, { key: "other" },
     ], planComplete: true });
     assert.ok(plan.ok && plan.data, plan.error);
     const [issueItem, otherItem] = plan.data.items.map((item) => item.workItemId);
-    const child = spawn(parent.id, "Deliver the item");
-    assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId: issueItem!, childSessionId: child }).ok);
-    assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId: otherItem!, childSessionId: child }).ok);
-    const followUp = svc.recordCampaignFollowUp(parent.id, { originSessionId: child, repository: "picoduck/wollipog",
-      title: "Backfilled Follow-Up", originWorkItemIds: [issueItem!] });
-    assert.ok(followUp.ok && followUp.data, followUp.error);
-    const accepted = svc.adjudicateCampaignRecommendation(parent.id, { recommendationId: followUp.data.id,
-      disposition: "accepted", reason: "Needed", resultingWorkItemKey: "followup:backfilled" });
-    assert.ok(accepted.ok && accepted.data?.workItem, accepted.error);
-    const rows = (sql: string) => db.db.prepare(sql).all().map((row) => ({ ...row }));
-    const history = () => [rows("SELECT work_item_id, issue_repository, issue_number FROM campaign_work_item_issue_history"),
-      rows("SELECT origin_work_item_id, result_work_item_id FROM campaign_work_lineage_edges")];
-    const expected = [[{ work_item_id: issueItem, issue_repository: "picoduck/wollipog", issue_number: 1440 }],
-      [{ origin_work_item_id: issueItem, result_work_item_id: accepted.data.workItem.id }]];
-    assert.deepEqual(history(), expected);
-    // Re-adjudicating with only a new reason updates the same edge without a conflict.
-    const reworded = svc.adjudicateCampaignRecommendation(parent.id, { recommendationId: followUp.data.id,
-      disposition: "accepted", reason: "Still needed", resultingWorkItemKey: "followup:backfilled" });
-    assert.ok(reworded.ok, reworded.error);
-    assert.deepEqual(history(), expected);
-    // An upgraded database starts without history; reapplying the schema backfills it.
-    db.db.exec("DELETE FROM campaign_work_item_issue_history; DELETE FROM campaign_work_lineage_edges;");
-    db.db.exec(CAMPAIGN_WORK_LEDGER_SCHEMA);
-    db.db.exec(CAMPAIGN_WORK_LEDGER_SCHEMA);
-    assert.deepEqual(history(), expected);
+    const earlier = spawn(parent.id, "Deliver the item");
+    assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId: issueItem!, childSessionId: earlier }).ok);
+    assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId: otherItem!, childSessionId: earlier }).ok);
     assert.ok(svc.updateCampaignWorkItem(parent.id, { workItemId: issueItem!, issue: null }).ok);
-    const plain = svc.recordCampaignPlan(parent.id, { items: [{ key: "plain" }], planComplete: true });
+    const rows = (sql: string) => db.db.prepare(sql).all().map((row) => ({ ...row }));
+    assert.deepEqual(rows("SELECT * FROM campaign_work_item_issue_history"), [], "the old schema kept no history");
+
+    db.db.exec(CAMPAIGN_WORK_LEDGER_SCHEMA);
+    db.db.exec(CAMPAIGN_WORK_LEDGER_SCHEMA);
+    const legacy = () => rows("SELECT work_item_id FROM campaign_work_legacy_items ORDER BY work_item_id")
+      .map((row) => row.work_item_id);
+    assert.deepEqual(legacy(), [issueItem, otherItem].sort(), "every item that predates history is legacy, once");
+    const excludable = () => [...db.campaignWorkLedger.issueClosureExcludableSessions(parent.id, "picoduck/wollipog", 1440)];
+    assert.deepEqual(excludable(), [], "work recorded before history began is never treated as unrelated");
+
+    // Items created afterwards are tracked normally, and a reason-only re-adjudication is a no-op upsert.
+    const plain = svc.recordCampaignPlan(parent.id, { items: [{ key: "plain" }, { key: "origin" }], planComplete: true });
     assert.ok(plain.ok && plain.data, plain.error);
-    const elsewhere = spawn(parent.id, "Deliver the plain item");
-    assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId: plain.data.items[0]!.workItemId, childSessionId: elsewhere }).ok);
-    assert.deepEqual([...db.campaignWorkLedger.issueClosureExcludableSessions(parent.id, "picoduck/wollipog", 1440)], [elsewhere],
-      "the earlier attempt keeps the first child connected after its item stops tracking the issue");
+    const [plainItem, originItem] = plain.data.items.map((item) => item.workItemId);
+    const unrelated = spawn(parent.id, "Deliver the plain item");
+    assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId: plainItem!, childSessionId: unrelated }).ok);
+    assert.deepEqual(excludable(), [unrelated]);
+    assert.deepEqual(legacy(), [issueItem, otherItem].sort(), "a later application marks nothing");
+    const followUp = svc.recordCampaignFollowUp(parent.id, { originSessionId: unrelated, repository: "picoduck/wollipog",
+      title: "Tracked Follow-Up", originWorkItemIds: [originItem!] });
+    assert.ok(followUp.ok && followUp.data, followUp.error);
+    for (const reason of ["Needed", "Still needed"]) {
+      const accepted = svc.adjudicateCampaignRecommendation(parent.id, { recommendationId: followUp.data.id,
+        disposition: "accepted", reason, resultingWorkItemKey: "followup:tracked" });
+      assert.ok(accepted.ok, accepted.error);
+    }
+    assert.equal(rows("SELECT * FROM campaign_work_lineage_edges").length, 1);
   } finally { db.close(); }
 });
 

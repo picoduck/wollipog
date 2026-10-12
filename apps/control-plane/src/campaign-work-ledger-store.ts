@@ -239,8 +239,21 @@ CREATE TABLE IF NOT EXISTS campaign_recommendation_dispositions (
 -- Issue-closure attribution history (#3084). Every issue an item has ever tracked, and every
 -- follow-up link from an origin item to a resulting item ever recorded. Rows are only ever added
 -- (as upserts: a trigger fired by an upsert would otherwise inherit its conflict policy), so a
--- later edit of an item's issue or a re-adjudication cannot make a child look unrelated. The backfills cover rows recorded before these tables
--- existed and are idempotent.
+-- later edit of an item's issue or a re-adjudication cannot make a child look unrelated.
+-- History before this schema is unknown, so the first application marks every item that already
+-- exists as legacy, and a legacy item never counts as unrelated. The marker row makes that a
+-- one-time step; later applications mark nothing.
+CREATE TABLE IF NOT EXISTS campaign_work_attribution_start (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1)
+);
+CREATE TABLE IF NOT EXISTS campaign_work_legacy_items (
+  work_item_id TEXT PRIMARY KEY,
+  FOREIGN KEY (work_item_id) REFERENCES campaign_work_items(id) ON DELETE CASCADE
+);
+INSERT INTO campaign_work_legacy_items (work_item_id)
+  SELECT id FROM campaign_work_items WHERE NOT EXISTS (SELECT 1 FROM campaign_work_attribution_start)
+  ON CONFLICT DO NOTHING;
+INSERT INTO campaign_work_attribution_start (singleton) VALUES (1) ON CONFLICT DO NOTHING;
 CREATE TABLE IF NOT EXISTS campaign_work_item_issue_history (
   work_item_id     TEXT NOT NULL,
   issue_repository TEXT NOT NULL,
@@ -264,9 +277,6 @@ BEGIN
     VALUES (NEW.id, lower(NEW.issue_repository), NEW.issue_number)
     ON CONFLICT DO NOTHING;
 END;
-INSERT INTO campaign_work_item_issue_history (work_item_id, issue_repository, issue_number)
-  SELECT id, lower(issue_repository), issue_number FROM campaign_work_items WHERE issue_number IS NOT NULL
-    ON CONFLICT DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS campaign_work_lineage_edges (
   origin_work_item_id TEXT NOT NULL,
@@ -302,12 +312,6 @@ BEGIN
     WHERE recommendation_id=NEW.recommendation_id
     ON CONFLICT DO NOTHING;
 END;
-INSERT INTO campaign_work_lineage_edges (origin_work_item_id, result_work_item_id)
-  SELECT origin.work_item_id, disposition.resulting_work_item_id
-  FROM campaign_recommendation_origins origin
-  JOIN campaign_recommendation_dispositions disposition ON disposition.recommendation_id=origin.recommendation_id
-  WHERE disposition.resulting_work_item_id IS NOT NULL
-    ON CONFLICT DO NOTHING;
 `;
 
 /** `details` carries machine-readable fields a client acts on, such as `revision_changed`. */
@@ -696,9 +700,10 @@ export class CampaignWorkLedgerStore {
   }
 
   /** Sessions an issue closure (#3084) may leave out: each has an open attempt, and every attempt
-   * it has ever had is on an item that has never tracked the issue and has never been linked to
-   * another item as a follow-up origin or result. Both facts come from append-only history, so a
-   * session can only lose this status, never regain it by a ledger edit. */
+   * it has ever had is on an item created after attribution history began that has never tracked
+   * the issue and has never been linked to another item as a follow-up origin or result. All of
+   * it comes from append-only history, so a session can only lose this status, never regain it by
+   * a ledger edit. */
   issueClosureExcludableSessions(campaignId: string, repository: string, issueNumber: number): Set<string> {
     return new Set((this.stmt(`
       SELECT DISTINCT attempt.session_id FROM campaign_work_attempts attempt
@@ -706,7 +711,8 @@ export class CampaignWorkLedgerStore {
         AND NOT EXISTS (
           SELECT 1 FROM campaign_work_attempts earlier
           WHERE earlier.session_id=attempt.session_id AND (
-            EXISTS (SELECT 1 FROM campaign_work_item_issue_history history
+            EXISTS (SELECT 1 FROM campaign_work_legacy_items legacy WHERE legacy.work_item_id=earlier.work_item_id)
+            OR EXISTS (SELECT 1 FROM campaign_work_item_issue_history history
               WHERE history.work_item_id=earlier.work_item_id
                 AND history.issue_repository=lower(?2) AND history.issue_number=?3)
             OR EXISTS (SELECT 1 FROM campaign_work_lineage_edges edge
