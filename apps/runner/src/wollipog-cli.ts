@@ -439,6 +439,18 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
         ? { tool: "handoff_session_result", input: { sessionId: words[2], revision } }
         : { error: "session handoff-result requires an id and --revision" };
     }
+    case "steering":
+      return words[2]
+        ? { tool: "list_steering_attempts", input: { sessionId: words[2] } }
+        : { error: "session steering requires a session id" };
+    case "steering-get":
+      return words[2] && words[3]
+        ? { tool: "get_steering_attempt", input: { sessionId: words[2], submissionId: words[3] } }
+        : { error: "session steering-get requires a session id and submission id" };
+    case "resolve-steering":
+      return words[2] && words[3] && (words[4] === "queue_again" || words[4] === "dismiss")
+        ? { tool: "resolve_steering_attempt", input: { sessionId: words[2], submissionId: words[3], action: words[4] } }
+        : { error: "session resolve-steering requires a session id, submission id, and queue_again or dismiss" };
     case "wait":
       return words[2]
         ? {

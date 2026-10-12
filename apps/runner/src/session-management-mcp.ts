@@ -896,7 +896,8 @@ const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "l
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question", "resolve_descendant_approval",
   "resolve_descendant_workflow_decision", "review_descendant_ui_evidence", "request_workflow_decision", "get_workflow_decision", "consume_workflow_decision",
   "reconcile_workflow_decision",
-  "wait_session", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session", "handoff_session_result",
+  "wait_session", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
+  "list_steering_attempts", "get_steering_attempt", "resolve_steering_attempt", "handoff_session_result",
   "stop_session", "stop_background_job", "restart_session", "archive_session", "set_guardrails", "create_worktree",
   "attach_worktree", "select_worktree", "discard_worktree"]);
 const PARENT_CONTROL_TOOLS = new Set(["get_campaign_issue_scope", "request_campaign_issue_scope_change", "request_github_issue_closure", "close_github_issue",
@@ -2463,7 +2464,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "prompt_session",
-    description: "Send a message/task to a descendant session. The result reports whether the message was delivered immediately or queued behind work already running — a queued message is not lost, but a session inside a long tool call will not see it until that turn ends. Subject to session permissions and governance policies.",
+    description: "Send a message/task to a descendant session. The result reports immediate, queued, or steered delivery and includes steering attempts. For uncertain delivery, read the exact submission with get_steering_attempt or list_steering_attempts, then use resolve_steering_attempt instead of sending the prompt again. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: { sessionId: { type: "string" }, text: { type: "string" } },
@@ -2481,7 +2482,59 @@ export const TOOLS: McpTool[] = [
         text: args.text,
       });
       if (!r.ok) return errorResult(r.message);
-      return textResult({ session: mapSession(r.data), delivery: promptDelivery(r.data) });
+      return textResult({ session: mapSession(r.data), delivery: promptDelivery(r.data),
+        ...(Array.isArray(r.data?.steeringAttempts) ? { steeringAttempts: r.data.steeringAttempts } : {}),
+      });
+    },
+  },
+  {
+    name: "list_steering_attempts",
+    description: "List a descendant's bounded steering receipts, with unresolved attempts first. Pending and uncertain states may already have reached the provider: inspect before resolving or resending. Uses the same descendant permission scope as prompt_session.",
+    inputSchema: {
+      type: "object", properties: { sessionId: { type: "string" } },
+      required: ["sessionId"], additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.sessionId !== "string" || !args.sessionId.trim()) return errorResult("sessionId is required");
+      if (args.sessionId === deps.selfSessionId) return errorResult("refusing: that is my own session");
+      const r = await cpFetch(deps, "GET", `/api/sessions/${encodeURIComponent(args.sessionId)}/steering`);
+      return r.ok ? textResult(r.data) : errorResult(r.message);
+    },
+  },
+  {
+    name: "get_steering_attempt",
+    description: "Read one exact steering submission of a descendant, including its durable resolution state. Reconcile this submission after an uncertain resolve before retrying the same action. Uses the same descendant permission scope as prompt_session.",
+    inputSchema: {
+      type: "object", properties: { sessionId: { type: "string" }, submissionId: { type: "string" } },
+      required: ["sessionId", "submissionId"], additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.sessionId !== "string" || !args.sessionId.trim() ||
+          typeof args?.submissionId !== "string" || !args.submissionId.trim() || args.submissionId.length > 256) {
+        return errorResult("sessionId and an exact submissionId are required");
+      }
+      if (args.sessionId === deps.selfSessionId) return errorResult("refusing: that is my own session");
+      const r = await cpFetch(deps, "GET", `/api/sessions/${encodeURIComponent(args.sessionId)}/steering/${encodeURIComponent(args.submissionId)}`);
+      return r.ok ? textResult(r.data) : errorResult(r.message);
+    },
+  },
+  {
+    name: "resolve_steering_attempt",
+    description: "Resolve one exact descendant steering submission with queue_again or dismiss using the dashboard's durable recovery path. Queue Again may duplicate a provider write whose acknowledgment was lost; choose after inspecting the attempt and session events. A pending resolution is not confirmed: get_steering_attempt before retrying the identical action. Repeated identical resolutions do not queue twice. Subject to session permissions and governance policies.",
+    inputSchema: {
+      type: "object", properties: { sessionId: { type: "string" }, submissionId: { type: "string" },
+        action: { type: "string", enum: ["queue_again", "dismiss"] } },
+      required: ["sessionId", "submissionId", "action"], additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.sessionId !== "string" || !args.sessionId.trim() ||
+          typeof args?.submissionId !== "string" || !args.submissionId.trim() || args.submissionId.length > 256) {
+        return errorResult("sessionId and an exact submissionId are required");
+      }
+      if (args.action !== "queue_again" && args.action !== "dismiss") return errorResult("action must be queue_again or dismiss");
+      if (args.sessionId === deps.selfSessionId) return errorResult("refusing: that is my own session");
+      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(args.sessionId)}/steering/${encodeURIComponent(args.submissionId)}/resolve`, { action: args.action });
+      return r.ok ? textResult({ attempt: r.data }) : errorResult(r.message);
     },
   },
   {

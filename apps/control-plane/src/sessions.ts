@@ -4526,8 +4526,9 @@ export class SessionsService {
     }
     const turnId = this.hub.activeTurnIdForSession(sessionId);
     if (!turnId) return null;
+    const submissionId = `prompt_steer_${randomUUID().slice(0, 12)}`;
     const steered = await this.steer(sessionId, {
-      submissionId: `prompt_steer_${randomUUID().slice(0, 12)}`,
+      submissionId,
       turnId,
       text: this.campaignWrappedText(session, text),
     });
@@ -4542,7 +4543,7 @@ export class SessionsService {
       if (steered.status !== 502) return null;
       return fail(
         `${steered.error ?? "conversation steering failed"} — the message may already have reached ` +
-          "the session, so check its steering attempts before sending it again",
+          `the session. Read steering submission ${submissionId} before sending it again`,
         502,
       );
     }
@@ -4571,13 +4572,17 @@ export class SessionsService {
       if (WORKING_SESSION_STATUSES.has(this.db.getSession(sessionId)?.status ?? "stopped")) return null;
       return fail(
         "conversation steering was discarded by a session lifecycle change — the message may " +
-          "already have reached the session, so check its steering attempts before sending it again",
+          `already have reached the session. Read steering submission ${submissionId} before sending it again`,
         409,
       );
     }
+    const delivery = steeredPromptDeliveryReport(session.status, steered.data.state);
     return ok({
       ...this.db.getSession(sessionId)!,
-      promptDelivery: steeredPromptDeliveryReport(session.status, steered.data.state),
+      promptDelivery: {
+        ...delivery,
+        detail: `${delivery.detail} Steering submission: ${submissionId}.`,
+      },
     });
   }
 
