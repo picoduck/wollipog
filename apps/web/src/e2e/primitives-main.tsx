@@ -4,6 +4,7 @@ import { FieldError } from "../components/FieldError.js";
 import { FieldWarning } from "../components/FieldWarning.js";
 import { FeedbackProvider, useFeedback } from "../components/FeedbackProvider.js";
 import { CopyButton } from "../components/common.js";
+import { OneLineCodeWell } from "../components/OneLineCodeWell.js";
 import { DetailBar } from "../components/PageHeader.js";
 import { SaveBar } from "../components/SaveBar.js";
 import "../styles.css";
@@ -25,7 +26,7 @@ import "../styles.css";
  * warning.
  * `?view=actions-menu` shows instead a detail bar whose ⋯ item confirms with the menu's `reopen` as
  * its Back (#2949, §7.5): on a phone the confirmation replaces the ⋯ sheet and Back brings it back.
- * `?view=code-well` shows instead the single-line code well (#2950, §11.7): a short value and a
+ * `?view=code-well` shows instead `OneLineCodeWell` (#2950, §11.7) with a short value and a
  * 400-character one, each in a `.field` with its label above, beside a wrapping `.code-well` holding
  * the same long value.
  * `?theme=light` switches theme.
@@ -144,10 +145,7 @@ function OneLineWell({ id, label, value }: { id: string; label: string; value: s
   return (
     <div className="field" data-well={id}>
       <span className="field-label">{label}</span>
-      <div className="code-well one-line">
-        <code>{value}</code>
-        <CopyButton text={value} iconOnly ariaLabel={`Copy ${label}`} className="icon-btn sm" />
-      </div>
+      <OneLineCodeWell value={value} name={label} />
     </div>
   );
 }

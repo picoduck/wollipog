@@ -2345,19 +2345,17 @@ of `.code-well` and `.copy-field`.
   pairing code, a signing secret, a webhook address): `align-items: center`, and the value, always a
   `code`, stays on one line with `white-space: nowrap`, `overflow: hidden` and
   `text-overflow: ellipsis`. Only the paint is clipped: the whole value stays in the DOM, so Copy and
-  screen readers get all of it. The trailing copy button is `CopyButton` with `iconOnly`, a
-  `Copy <Name>` accessible name and `className="icon-btn sm"`: 28px, centered on the value, with the
-  shared copy confirmation (§18) and a 44px hit area on a coarse pointer (§15.3).
-- A well that needs a name sits in a `.field` with its label (`.field-label`) above it; the well
-  itself carries no label.
+  screen readers get all of it. The trailing copy button is a `CopyButton` `.icon-btn.sm`: 28px,
+  centered on the value, with the shared copy confirmation (§18) and a 44px hit area on a coarse
+  pointer (§15.3).
+- `OneLineCodeWell` renders it: `<OneLineCodeWell value={secret} name="Signing Secret" />` draws the
+  well and names its button **Copy Signing Secret**. A well that needs a name sits in a `.field` with
+  its label (`.field-label`) above it; the well itself carries no label.
 
-  ```html
-  <div class="field">
-    <span class="field-label">Signing Secret</span>
-    <div class="code-well one-line">
-      <code>whsec_…</code>
-      <!-- CopyButton text={value} iconOnly ariaLabel="Copy Signing Secret" className="icon-btn sm" -->
-    </div>
+  ```tsx
+  <div className="field">
+    <span className="field-label">Signing Secret</span>
+    <OneLineCodeWell value={secret} name="Signing Secret" />
   </div>
   ```
 
@@ -3421,7 +3419,7 @@ green. Area work adopts the component instead of writing the class again.
 | `.menu.flip-up` | `.flip-up`, `.drop-up` | §9.1 | Already delivered: `Menu.tsx` placement (#1803) |
 | `.menu-note` | one area class | §9.1 | Already delivered: `MenuNote` (#1803) |
 | `.menu-scroll` | one area class | §9.1 | Already delivered: the one `Menu` height cap (#1803) |
-| `.code-well` (`.code-well.one-line` for a single-line value) | `.code-well`, `.copy-field` | §11.7 | Connection details; `.code-well.one-line` in the primitives harness (#2950) |
+| `.code-well` (`.code-well.one-line` for a single-line value) | `.code-well`, `.copy-field` | §11.7 | Connection details; `.code-well.one-line` through `OneLineCodeWell` (#2950) |
 | `.pid` | `.pid`, `.masked-field` | §11.8 | `PersonalIdentifier` |
 | `.split` (split button) | three area classes | §3.2 | `EditorSelect` |
 | `.seg.block` (full-width segmented) | two area classes | §10.2 | The Projects visibility filter |

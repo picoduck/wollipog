@@ -10,10 +10,10 @@ import { FieldError } from "./FieldError.js";
 import { FieldWarning } from "./FieldWarning.js";
 import { FilterButton } from "./FilterButton.js";
 import { ListFoot } from "./ListFoot.js";
+import { OneLineCodeWell } from "./OneLineCodeWell.js";
 import { SaveBar } from "./SaveBar.js";
 import { StaleContent } from "./StaleContent.js";
 import { Steps } from "./Steps.js";
-import { CopyButton } from "./common.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
 /*
@@ -373,7 +373,7 @@ test("Steps numbers a real sequence, and lays short steps side by side on reques
   }
 });
 
-test("the single-line code well keeps the whole value for Copy and screen readers, with a 44px Copy on touch (§11.7)", async () => {
+test("OneLineCodeWell keeps the whole value for Copy and screen readers, with a 44px Copy on touch (§11.7)", async () => {
   const value = `whsec_${"7Hq2Zx9KpL4mVb8NcR3tYw6UeJ5sGd1F".repeat(13)}`.slice(0, 400);
   const copied: string[] = [];
   const previousClipboard = Object.getOwnPropertyDescriptor(domWindow.navigator, "clipboard");
@@ -381,20 +381,13 @@ test("the single-line code well keeps the whole value for Copy and screen reader
     configurable: true,
     value: { writeText: async (text: string) => { copied.push(text); } },
   });
-  // The recipe §11.7 documents: a `.field` label above, the value as `code`, Copy as `.icon-btn.sm`.
-  const view = await render(
-    <div className="field">
-      <span className="field-label">Signing Secret</span>
-      <div className="code-well one-line">
-        <code>{value}</code>
-        <CopyButton text={value} iconOnly ariaLabel="Copy Signing Secret" className="icon-btn sm" />
-      </div>
-    </div>,
-  );
+  const view = await render(<OneLineCodeWell value={value} name="Signing Secret" />);
   try {
-    const well = view.container.querySelector(".code-well.one-line")!;
-    assert.equal(well.querySelector("code")?.textContent, value, "the ellipsis clips paint, not the DOM");
-    const copy = well.querySelector<HTMLButtonElement>("button")!;
+    const well = view.container.firstElementChild!;
+    assert.equal(well.className, "code-well one-line");
+    assert.equal(well.getAttribute("aria-label"), null, "the well carries no label; a `.field` names it");
+    assert.equal(well.querySelector(":scope > code")?.textContent, value, "the ellipsis clips paint, not the DOM");
+    const copy = well.querySelector<HTMLButtonElement>(":scope > button")!;
     assert.equal(copy.getAttribute("aria-label"), "Copy Signing Secret");
     assert.deepEqual([...copy.classList].slice(0, 2), ["icon-btn", "sm"]);
     await act(async () => { copy.click(); });
