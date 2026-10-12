@@ -304,7 +304,7 @@ import type { DurableBackgroundPushDelivery, PushAudience, PushServiceOutcome } 
 import { matchWorkspaceId, matchWorkspaceIds, workspacePathsEqual } from "./workspace-match.js";
 import { installMaintenanceIndexes } from "./maintenance-indexes.js";
 import { CAMPAIGN_WORK_LEDGER_SCHEMA, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
-import { CAMPAIGN_RECOVERY_SCHEMA, CampaignRecoveryStore } from "./campaign-recovery-store.js";
+import { CAMPAIGN_RECOVERY_SCHEMA, CampaignRecoveryStore, type CampaignRecoveryVerifiedReport } from "./campaign-recovery-store.js";
 import {
   CAMPAIGN_FORGE_OBSERVATION_SCHEMA,
   CampaignForgeObservationStore,
@@ -5202,10 +5202,14 @@ export class ControlPlaneDb {
   /** A child's human gate cannot starve unrelated work, but only a current Full Control
    * boundary permits that continuation. This never clears the child's gate. */
   campaignMayContinueWhileHumanWaiting(campaignId: string): boolean {
-    const session = this.getSession(campaignId);
-    return session?.orchestratorPolicy?.control?.mode === "full_control" && !session.archived &&
-      !session.stopOperation && !isTerminal(session.status) && campaignBoundaryCurrent(session) &&
-      campaignAuthorityPreflight(session.orchestratorPolicy.control, session.driver, this.getRunner(session.runnerId)?.protocolVersion).supported;
+    // This predicate is also used while projecting a campaign. A SessionView embeds that
+    // projection, so read the authority/lifecycle row directly rather than recursively mapping it.
+    const row = this.stmt("SELECT * FROM sessions WHERE id=?").get(campaignId) as unknown as SessionRow | undefined;
+    const policy = row ? orchestratorCampaignPolicyFromJson(row.orchestrator_policy) : undefined;
+    return Boolean(row && policy?.control?.mode === "full_control" && row.archived !== 1 &&
+      !this.sessionStopIntent(campaignId) && !isTerminal(row.status as SessionStatus) &&
+      campaignBoundaryCurrent({ orchestratorPolicy: policy, parentControlPolicy: this.parentControlPolicy(campaignId) ?? undefined }) &&
+      campaignAuthorityPreflight(policy.control, row.driver, this.getRunner(row.runner_id)?.protocolVersion).supported);
   }
 
   campaignRecoveryRequest(sessionId: string, request: PendingApproval): PendingApproval {
@@ -5222,10 +5226,24 @@ export class ControlPlaneDb {
     return (this.stmt(`SELECT decision.* FROM workflow_decisions decision
       WHERE controlling_session_id=? AND (status='denied' OR
         (status='consumed' AND json_extract(issue_closure_result,'$.outcome')='uncertain'))
+        AND NOT EXISTS (SELECT 1 FROM campaign_recovery_denial_settlements settled
+          WHERE decision.status='denied' AND settled.campaign_session_id=decision.controlling_session_id
+            AND settled.occurrence_id=decision.occurrence_id)
         AND NOT EXISTS (SELECT 1 FROM workflow_decisions newer
           WHERE newer.session_id=decision.session_id AND newer.resource_key=decision.resource_key
           AND newer.rowid>decision.rowid)`).all(campaignId) as unknown[])
       .map(workflowDecisionFromRow).filter((decision): decision is WorkflowDecisionView => decision !== null);
+  }
+
+  /** Exact current server report proof for recovery bookkeeping. Status/archive/ended-at alone
+   * cannot establish completion, and this proof never attests code or media review quality. */
+  campaignRecoveryVerifiedReport(campaignId: string, sessionId: string): CampaignRecoveryVerifiedReport | null {
+    if (!this.campaignChildReportVerified(campaignId, sessionId)) return null;
+    const row = this.stmt(`SELECT report_event_seq AS seq, report_event_epoch AS eventEpoch,
+      report_digest AS digest, report_ts AS ts, verified_at AS verifiedAt
+      FROM orchestrator_campaign_child_reports WHERE campaign_session_id=? AND child_session_id=?`)
+      .get(campaignId, sessionId) as CampaignRecoveryVerifiedReport | undefined;
+    return row && row.eventEpoch !== null && row.digest !== null && row.ts !== null ? row : null;
   }
 
   /** The root-keyed campaign work ledger (#2417). Callers resolve the root campaign first. */
@@ -17736,7 +17754,7 @@ export class ControlPlaneDb {
     );
     const held = campaign.archived === 1 || isTerminal(campaign.status as SessionStatus) ||
       campaign.status === "input_required" || (campaignStatus === "waiting_human" &&
-        orchestratorCampaignPolicyFromJson(campaign.orchestrator_policy)?.control?.mode !== "full_control") ||
+        !this.campaignMayContinueWhileHumanWaiting(campaign.id)) ||
       campaignStatus === "verified_complete" || !runnerCompatible;
     const state = latest?.state === "missing_result" ? "missing_result" as const
       : latest?.state === "failed" ? "failed" as const

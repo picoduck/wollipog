@@ -15,7 +15,24 @@ CREATE TABLE IF NOT EXISTS campaign_recovery (
 CREATE INDEX IF NOT EXISTS idx_campaign_recovery_root ON campaign_recovery(campaign_session_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_recovery_active ON campaign_recovery(campaign_session_id)
   WHERE json_extract(record_json,'$.state') NOT IN ('resolved','cancelled');
+CREATE TABLE IF NOT EXISTS campaign_recovery_denial_settlements (
+  campaign_session_id TEXT NOT NULL,
+  occurrence_id TEXT NOT NULL,
+  subject_session_id TEXT NOT NULL,
+  report_json TEXT NOT NULL,
+  PRIMARY KEY (campaign_session_id, occurrence_id),
+  FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
 `;
+
+/** Server-verified exact terminal-report accounting, never a quality or media receipt. */
+export interface CampaignRecoveryVerifiedReport {
+  seq: number;
+  eventEpoch: number;
+  digest: string;
+  ts: number;
+  verifiedAt: number;
+}
 
 /** Derived by server adapters from authoritative state, not accepted from agent JSON. */
 export interface CampaignRecoveryObservation {
@@ -51,6 +68,15 @@ function identity(campaignId: string, resource: CampaignRecoveryResource, action
  * underlying effect; all existing typed gates and provider admission still apply at execution. */
 export class CampaignRecoveryStore {
   constructor(private readonly db: DatabaseSync, private readonly atomic: <T>(work: () => T) => T) {}
+
+  /** Retire only this denied occurrence after authoritative report verification. Reusing the
+   * session cannot resurrect it or clear a newer denial. No permission/status is changed. */
+  retireDeniedOccurrence(campaignId: string, sessionId: string, occurrenceId: string,
+    report: CampaignRecoveryVerifiedReport): void {
+    this.db.prepare(`INSERT OR IGNORE INTO campaign_recovery_denial_settlements
+      (campaign_session_id,occurrence_id,subject_session_id,report_json) VALUES (?,?,?,?)`)
+      .run(campaignId, occurrenceId, sessionId, JSON.stringify(report));
+  }
 
   campaignIds(): string[] {
     return (this.db.prepare(`SELECT DISTINCT campaign_session_id AS id FROM campaign_recovery

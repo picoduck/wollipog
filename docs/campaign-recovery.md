@@ -21,6 +21,12 @@ ceiling across changed heads; the head remains an exact observation coordinate, 
 Hard denial and exhaustion stay blocked and ask
 for no override. Existing continuation transport owns its own bounded retries and ambiguous-result
 fence; recovery never acknowledges an unknown parent turn to create another turn.
+Denied operations stop being live exceptions when their subject's exact terminal report is
+authoritatively verified; their original decision remains denied. Status, archive and an ended
+attempt alone do not establish completed delivery. Durable retirement binds the exact denied
+occurrence to that verified report, so reusing a session cannot resurrect its old denial or clear
+a newer denial. This terminal accounting proof grants no code/media review quality or approval.
+An uncertain external mutation still requires receipt reconciliation even after report completion.
 
 Instruction reservation and durable continuation-event insertion share one SQLite transaction.
 Restarting the control plane recovers the reservation and event, including any pending backoff.
@@ -39,7 +45,9 @@ provider permissions, policy rules, scope, budget, fixed-worker configuration an
 The recovery layer cannot enlarge scope, reset budgets, acquire credentials, change preferences or
 override Human Required rules. Missing human information/access, boundary enlargement, protected
 rules and unsupported capabilities each expose an actionable exception. Stale forge data is retained
-as unresolved while a fresh read is requested; it cannot prove repair, passing checks or merge.
+as unresolved until the background reader obtains a fresh fact; it cannot prove repair, passing
+checks or merge. Routine stale/transient reads do not wake the parent or spend recovery attempts.
+Actual access/capability failures still expose human exceptions.
 
 `unattendedReady` describes unresolved recovery exceptions only. It is never a launch, scope,
 budget, review, evidence or merge-readiness grant. Integrations must compose the current authority,

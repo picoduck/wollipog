@@ -129,6 +129,110 @@ test("hard denied typed occurrences stay blocked without asking for an override"
   } finally { h.db.close(); }
 });
 
+test("a settled denial retires when its child report is verified and archived", () => {
+  const h = fixture();
+  try {
+    const decision = h.svc.createWorkflowDecision("child", { requestId: "denied-choice", resourceKey: "choice",
+      resourceSnapshot: { category: "implementation_question", question: "Which approach should we use?",
+        options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] } }).data!;
+    assert.ok(h.svc.resolveDescendantRequest("root", "child", decision.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "deny" }, () => true).ok);
+    h.recovery.maintain(100);
+    assert.equal(h.db.campaignProjection("root")!.recovery!.blocked, 1, "live hard denial stays blocked");
+    h.db.updateSessionStatus("child", "completed", 110);
+    h.recovery.maintain(111);
+    assert.equal(h.db.campaignProjection("root")!.recovery!.blocked, 1, "status alone does not establish completed delivery");
+    h.db.setSessionArchived("child", true, 112);
+    h.recovery.maintain(113);
+    assert.equal(h.db.campaignProjection("root")!.recovery!.blocked, 1, "unverified archive is still incomplete");
+    h.db.setSessionArchived("child", false, 114);
+    h.db.updateSessionStatus("child", "idle", 200);
+    const report = h.db.appendEvent("child", { kind: "agent_message", text: "Completed using another approach.", final: true }, 201);
+    h.db.verifyCampaignChildReport("root", "child", report.seq, 202);
+    assert.equal(h.db.campaignChildReportVerified("root", "child"), true);
+    h.recovery.maintain(203);
+    assert.equal(h.db.campaignProjection("root")!.recovery!.blocked, 0, "verified report makes the denied operation historical");
+    h.db.setSessionArchived("child", true, 204);
+    h.recovery.maintain(205);
+    assert.equal(h.db.campaignProjection("root")!.recovery!.blocked, 0);
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "denied", "original denial is never reopened");
+    h.db.setSessionArchived("child", false, 206);
+    h.db.appendEvent("child", { kind: "user_message", text: "Implement the next authorized work item." }, 207);
+    h.db.updateSessionStatus("child", "running", 208);
+    assert.equal(h.db.campaignChildReportVerified("root", "child"), false, "new work needs its own verification");
+    h.recovery.maintain(209);
+    assert.equal(h.db.campaignProjection("root")!.recovery!.blocked, 0, "historical denial does not reappear for new work");
+    const next = h.svc.createWorkflowDecision("child", { requestId: "next-choice", resourceKey: "choice",
+      resourceSnapshot: { category: "implementation_question", question: "Which new approach should we use?",
+        options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] } }).data!;
+    assert.ok(h.svc.resolveDescendantRequest("root", "child", next.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "deny" }, () => true).ok);
+    h.recovery.maintain(210);
+    assert.equal(h.db.campaignProjection("root")!.recovery!.blocked, 1, "historical proof does not clear the new denial");
+  } finally { h.db.close(); }
+});
+
+test("a report verified before a fresh denial cannot settle that new occurrence", () => {
+  const h = fixture();
+  try {
+    h.db.updateSessionStatus("child", "idle", 10);
+    const report = h.db.appendEvent("child", { kind: "agent_message", text: "Earlier work completed.", final: true }, 11);
+    h.db.verifyCampaignChildReport("root", "child", report.seq, 12);
+    const decision = h.svc.createWorkflowDecision("child", { requestId: "fresh-denial", resourceKey: "new-choice",
+      resourceSnapshot: { category: "implementation_question", question: "May I use this new approach?",
+        options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] } }).data!;
+    assert.ok(h.svc.resolveDescendantRequest("root", "child", decision.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "deny" }, () => true).ok);
+    h.db.updateSessionStatus("child", "idle", 20);
+    assert.equal(h.db.campaignChildReportVerified("root", "child"), false, "new decision invalidates the prior report proof");
+    h.recovery.maintain(30);
+    assert.equal(h.db.campaignProjection("root")!.recovery!.blocked, 1, "older accounting proof grants no settlement for a new denial");
+  } finally { h.db.close(); }
+});
+
+test("human-wait continuation projection uses the same current authority admission as delivery", () => {
+  for (const failure of ["stale_boundary", "unsupported_runner"] as const) {
+    const h = fixture();
+    try {
+      h.db.setPendingApproval("child", { requestId: "auth", occurrenceId: "auth-occ", title: "Sign In", kind: "authentication", options: [] });
+      h.db.updateSessionStatus("child", "input_required", 3);
+      h.db.updateSessionStatus("root", "idle", 4);
+      h.db.recordCampaignContinuationEvent({ campaignSessionId: "root", subjectSessionId: "unaffected",
+        eventId: "unaffected-ready", kind: "child_ready", now: 5 });
+      if (failure === "stale_boundary") h.db.raw().prepare(
+        "UPDATE sessions SET parent_control_policy_revision=parent_control_policy_revision+1 WHERE id='root'").run();
+      else h.db.registerRunner(h.metadata, 10, 214);
+      assert.equal(h.db.campaignMayContinueWhileHumanWaiting("root"), false);
+      assert.equal(h.db.campaignProjection("root")!.continuation!.state, "held", failure);
+      h.svc.retryDuePrompts(10000);
+      assert.equal(h.sent.some(message => (message as { type: string }).type === "durable_session_command"), false);
+    } finally { h.db.close(); }
+  }
+});
+
+test("routine forge staleness leaves refresh to the background reader without spending recovery attempts", () => {
+  const h = fixture();
+  try {
+    const planned = h.db.campaignWorkLedger.recordPlan("root", "root", { items: [{ key: "original:2938" }], planComplete: true }, 10);
+    assert.ok(planned.ok);
+    assert.ok(h.db.campaignWorkLedger.updateItem("root", "root", { workItemId: planned.data.items[0]!.workItemId,
+      stage: { stage: "awaiting_checks", pullRequests: [{ repository: "picoduck/wollipog", number: 42 }] } }, 20).ok);
+    h.db.updateSessionStatus("root", "idle", 21);
+    const passing = { state: "passing" as const, failing: 0, passing: 1, pending: 0 };
+    for (let episode = 0; episode < 5; episode++) {
+      const now = 100 + episode * 1000000;
+      h.db.campaignForgeObservations.record("root", "r", [{ ref: { repository: "picoduck/wollipog", number: 42 },
+        observation: { state: "open", draft: false, headSha: "a".repeat(40), baseRef: "main", reviewDecision: "approved",
+          checks: passing, requiredChecks: passing, mergeQueue: null, mergeCommitSha: null } }], now);
+      h.recovery.maintain(now);
+      h.recovery.maintain(now + 700000);
+      h.recovery.maintain(now + 730000);
+      assert.equal(h.db.campaignProjection("root")!.recovery!.records.length, 0, "a stale read is not an uncertain external effect");
+      assert.equal(h.db.hasPendingCampaignContinuationEvents("root"), false, "background refresh needs no parent turn");
+    }
+  } finally { h.db.close(); }
+});
+
 test("uncertain steering keeps its original occurrence and requests reconciliation, never prompt replay", () => {
   const h = fixture();
   try {

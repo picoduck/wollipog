@@ -99,6 +99,13 @@ export class CampaignRecoveryService {
       }
     }
     for (const decision of this.db.campaignRecoverySettledDecisions(root.id)) {
+      if (decision.status === "denied") {
+        const report = this.db.campaignRecoveryVerifiedReport(root.id, decision.sessionId);
+        if (report) {
+          this.db.campaignRecovery.retireDeniedOccurrence(root.id, decision.sessionId, decision.occurrenceId, report);
+          continue;
+        }
+      }
       observations.push({ action: decision.status === "denied" ? "answer_request" : "reconcile_outcome",
         resource: { kind: "request", sessionId: decision.sessionId, occurrenceId: recoveryCoordinate(decision.occurrenceId) },
         reason: decision.status === "denied" ? "hard_denial" : "uncertain_outcome",
@@ -126,9 +133,13 @@ export class CampaignRecoveryService {
           const reason = fact.availability === "unavailable" && ["forge_unauthenticated", "not_authorized"].includes(fact.reason)
             ? "missing_access" : fact.availability === "unavailable" && ["runner_unsupported", "forge_unsupported"].includes(fact.reason)
               ? "unsupported_capability" : "transient_failure";
+          // The background forge reader owns retries for stale/transient reads. A read gap is
+          // informational, not an unknown mutation and not another parent recovery instruction.
+          // Retain any prior check/review failure until a fresh observation proves its repair.
+          if (reason === "transient_failure") continue;
           observations.push({ action: "reconcile_outcome", resource: { kind: "pull_request", sessionId: root.id,
             repository: ref.repository, pullRequest: ref.number, occurrenceId: recoveryCoordinate(`${ref.repository}#${ref.number}`) },
-            reason, owner: reason === "transient_failure" ? "orchestrator" : "human",
+            reason, owner: "human",
             signal: fact.availability === "unavailable" ? fact.reason : "stale" });
           continue;
         }
