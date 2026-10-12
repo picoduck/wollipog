@@ -335,6 +335,7 @@ export interface CampaignWorkLedgerHooks {
   observeCleanup(sessionId: string): CampaignObservedCleanup["worktrees"] | null;
   boundary(sessionId: string): CampaignAttemptBoundary;
   atomic<T>(work: () => T): T;
+  acceptFollowUp?(campaignId: string, workItemId: string): string | null;
   /** Slice 8: the stored GitHub facts of these pull requests, one per ref in order. Status data
    * only; the read routes narrow it for readers who may not see the observing runner. */
   forgePullRequests?(campaignId: string, refs: readonly CampaignPullRequestRef[], now: number):
@@ -1292,6 +1293,10 @@ export class CampaignWorkLedgerStore {
           );
           itemChanged = true;
         }
+      }
+      if (request.disposition === "accepted" && workItemId) {
+        const budgetError = this.hooks.acceptFollowUp?.(campaignId, workItemId);
+        if (budgetError) return fail(budgetError, 409);
       }
       const previous = this.stmt(
         `SELECT disposition, reason, publication_required, resulting_issue_repository, resulting_issue_number,

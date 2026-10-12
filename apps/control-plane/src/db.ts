@@ -5,13 +5,14 @@
  */
 
 import { DatabaseSync } from "node:sqlite";
+import { CampaignBudgetLedger } from "./campaign-budget.js";
 import { attentionRequestRank } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent } from "./campaign-authority.js";
 import { evaluateApprovalPolicies, sessionSpawnSafetyPolicy } from "./policy-engine.js";
 import { validCampaignControl, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
-import { priceUsage, resolveCostSource, type RateTable } from "./usage-pricing.js";
+import { lookupRate, priceUsage, resolveCostSource, type RateTable } from "./usage-pricing.js";
 import { collapseAgentSpawnObservations, type StructuredAgentSpawnObservation } from "./child-session-registry.js";
 import { WalCheckpointer, type WalCheckpointerOptions } from "./wal-checkpointer.js";
 import { mkdirSync, readFileSync } from "node:fs";
@@ -4189,6 +4190,8 @@ export class HourlyUsageUnavailableError extends RangeError {
 }
 
 export interface NewSessionInput {
+  /** Trusted pre-allocation session ceilings, never from request JSON. */
+  campaignBudgetUserLimits?: { costUsd?: number; toolCalls?: number };
   id: string;
   /** Trusted creator attribution, derived from the authenticated session credential. */
   parentSessionId?: string;
@@ -5012,6 +5015,7 @@ const FOLD_LAST_EVENT_AT = `last_event_at=CASE WHEN COALESCE(message_count,0)=0
   ELSE MAX(COALESCE(last_event_at, ?), ?) END`;
 
 export class ControlPlaneDb {
+  readonly campaignBudgets: CampaignBudgetLedger;
   private constructor(
     private readonly db: DatabaseSync,
     private readonly artifactBlobs: ArtifactBlobStore,
@@ -5020,6 +5024,7 @@ export class ControlPlaneDb {
     private readonly walPath: string | null,
     hostRebooted: boolean,
   ) {
+    this.campaignBudgets = new CampaignBudgetLedger(db);
     this.ingestRollback = hostRebooted && walPath !== null
       ? { settled: new Set(), runnerTails: new Map(), controlPlaneEvents: new Set() }
       : null;
@@ -5157,6 +5162,14 @@ export class ControlPlaneDb {
     ).all(from - BACKGROUND_HANDOFF_WAIT_MAX_MS, to - BACKGROUND_HANDOFF_WAIT_MAX_MS) as Array<{ session_id: string }>)
       .map((row) => row.session_id);
   }
+
+  campaignBudgetAccountingError(driver: string, model?: string | null, costProtected = false): string | null {
+    if (!["claude-code", "codex-app-server"].includes(driver)) return "Campaign limits require metered managed workers; native TUI and external reviewer processes are unsupported.";
+    if (costProtected && driver !== "claude-code" && (!this.usageRateTable || !model || !lookupRate(this.usageRateTable, model))) {
+      return "Campaign cost accounting is unavailable or unpriced for this model; protected admission is refused.";
+    }
+    return null;
+  }
   /** Configured Git automatic-update interval, reported with each skill's update status. */
   skillGitAutoUpdateIntervalMs = 60 * 60_000;
   private lastMutationAuditArchive = 0;
@@ -5180,6 +5193,10 @@ export class ControlPlaneDb {
       observeCleanup: (sessionId) => this.campaignAttemptCleanupObservation(sessionId),
       boundary: (sessionId) => this.campaignAttemptBoundary(sessionId),
       atomic: (work) => this.atomic(work),
+      acceptFollowUp: (campaignId, workItemId) => {
+        try { this.campaignBudgets.acceptFollowUp(campaignId, workItemId, () => null); return null; }
+        catch (error) { return (error as Error).message; }
+      },
       forgePullRequests: (campaignId, refs, now) => this.campaignForgeObservations.facts(campaignId, refs, now),
     });
     return this.campaignWorkLedgerStore;
@@ -14237,6 +14254,17 @@ export class ControlPlaneDb {
   }
 
   createSession(input: NewSessionInput): SessionView {
+    const budgetRoot = input.parentSessionId ? this.campaignBudgets.root(input.parentSessionId) : null;
+    const budgetView = budgetRoot ? this.campaignBudgets.view(budgetRoot) : undefined;
+    const userLimits = input.campaignBudgetUserLimits ?? { costUsd: input.config.costBudgetUsd, toolCalls: input.config.maxToolCalls };
+    const allocation = budgetRoot ? this.campaignBudgets.prepare(budgetRoot, input.id, { costUsd: input.config.costBudgetUsd, toolCalls: input.config.maxToolCalls }) : null;
+    if (budgetView) {
+      const error = this.campaignBudgetAccountingError(input.driver, input.config.model, budgetView.authority.costUsd !== undefined);
+      if (error) throw new Error(error);
+      input = { ...input, config: { ...input.config,
+        ...(allocation?.costUsd === undefined ? {} : { costBudgetUsd: allocation.costUsd }),
+        ...(allocation?.toolCalls === undefined ? {} : { maxToolCalls: allocation.toolCalls }) } };
+    }
     const scope = input.scope ?? this.inheritedSessionScope(input.runnerId, input.workspaceId);
     const inferredLocation = input.workspaceId ? this.findProjectLocation(input.runnerId, input.workspaceId) : null;
     let projectLocationId = input.projectLocationId !== undefined
@@ -14269,6 +14297,7 @@ export class ControlPlaneDb {
     if (projectId && !this.getProject(projectId)) throw new Error("session project does not exist");
     this.db.exec("BEGIN");
     try {
+      if (budgetRoot && allocation) this.campaignBudgets.admit(budgetRoot, allocation, userLimits);
       this.stmt(
          `INSERT INTO sessions
            (id, runner_id, workspace_id, project_id, project_location_id, agent_id, title, title_source, status, run_id, use_worktree, archived, creation_actor,
@@ -14333,6 +14362,8 @@ export class ControlPlaneDb {
         this.stmt("UPDATE sessions SET max_child_sessions=? WHERE id=?")
           .run(input.config.maxChildSessions, input.id);
       }
+      if (allocation) this.stmt("UPDATE sessions SET cost_budget_usd=?,max_tool_calls=? WHERE id=?")
+        .run(allocation.costUsd ?? null, allocation.toolCalls ?? null, input.id);
       const handoffRequest = validateExecutionHandoffRequest(input.executionHandoffRequest);
       if (handoffRequest) {
         this.stmt("UPDATE sessions SET execution_handoff_request=? WHERE id=?")
@@ -16270,6 +16301,11 @@ export class ControlPlaneDb {
     return Number(row.tokens) > 0 && Number(row.unpriced_records) > 0 && Number(row.cost_microusd) === 0 && Number(row.cost_remainder_picousd) === 0;
   }
 
+  campaignUsageHasUnpriced(id: string): boolean {
+    return Boolean((this.stmt("SELECT unpriced_records FROM usage_session_state WHERE session_id=?").get(id) as
+      { unpriced_records: number } | undefined)?.unpriced_records);
+  }
+
   getUsageDailyBudget(organizationId: string): UsageDailyBudgetPolicy {
     const row = this.stmt("SELECT per_user_usd, updated_at FROM usage_daily_budget WHERE organization_id=?")
       .get(organizationId) as { per_user_usd: number | null; updated_at: number } | undefined;
@@ -16475,6 +16511,8 @@ export class ControlPlaneDb {
       const changed = this.stmt(`UPDATE sessions SET orchestrator_policy=?, parent_control_policy_revision=parent_control_policy_revision+1,
         updated_at=? WHERE id=? AND parent_control_policy_revision=?`).run(JSON.stringify(campaign), now, id, expectedRevision);
       if (Number(changed.changes) !== 1) { this.db.exec("ROLLBACK"); return false; }
+      if (control.mode === "full_control" && control.boundary.budgetAuthority) this.campaignBudgets.authorize(id, control.boundary.budgetAuthority);
+      else if (this.campaignBudgets.view(id)) this.campaignBudgets.stop(id, "revoked", "Human authorization for campaign allowance was revoked.");
       for (const decision of this.unconsumedWorkflowDecisionsForController(id)) {
         this.stmt(`UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?)
           WHERE occurrence_id=? AND status IN ('pending','approved')`).run(now, decision.occurrenceId);
@@ -17521,6 +17559,8 @@ export class ControlPlaneDb {
     return {
       status,
       policyRevision: campaign.parent_control_policy_revision,
+      ...(this.campaignBudgets.view(resolvedCampaignId) && this.campaignBudgets.members(resolvedCampaignId).every(this.campaignRootAudienceCanSee(resolvedCampaignId))
+        ? { budget: this.campaignBudgets.view(resolvedCampaignId) } : {}),
       decisionOwners: effectiveOwners,
       limits: {
         maximumConcurrentChildren: limit,

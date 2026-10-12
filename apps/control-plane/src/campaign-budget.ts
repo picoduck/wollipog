@@ -1,0 +1,216 @@
+import type { DatabaseSync } from "node:sqlite";
+import { validCampaignBudgetAuthority, type CampaignBudgetAllocation, type CampaignBudgetAuthority, type CampaignBudgetView } from "@wollipog/protocol";
+
+type Member = { session_id: string; root_id: string; cost: number; tools: number; cost_limit: number | null; tool_limit: number | null;
+  user_cost_limit: number | null; user_tool_limit: number | null; active: number };
+const terminal = "('completed','failed','stopped')";
+
+/** No foreign keys: deletion, transcript replacement and retired attempts must not refund spend.
+ * Usage is each session's own monotonic peak, never the recursively reserved child charge. */
+export class CampaignBudgetLedger {
+  constructor(private readonly sql: DatabaseSync) {
+    sql.exec(`CREATE TABLE IF NOT EXISTS campaign_budgets (
+      root_id TEXT PRIMARY KEY, authority TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'active', reason TEXT,
+      accepted_follow_ups INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS campaign_budget_members (
+      session_id TEXT PRIMARY KEY, root_id TEXT NOT NULL, cost REAL NOT NULL, tools INTEGER NOT NULL,
+      cost_limit REAL, tool_limit INTEGER, user_cost_limit REAL, user_tool_limit INTEGER, active INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS campaign_budget_members_root ON campaign_budget_members(root_id);
+    CREATE TABLE IF NOT EXISTS campaign_budget_tool_calls (
+      session_id TEXT NOT NULL, tool_call_id TEXT NOT NULL, PRIMARY KEY(session_id,tool_call_id)
+    );
+    CREATE TABLE IF NOT EXISTS campaign_budget_follow_ups (
+      root_id TEXT NOT NULL, recommendation_id TEXT NOT NULL, PRIMARY KEY(root_id,recommendation_id)
+    );
+    DROP TRIGGER IF EXISTS campaign_budget_session_usage;
+    CREATE TRIGGER campaign_budget_session_usage AFTER UPDATE OF cost_usd, usage_peak_cost_usd, usage_peak_tool_calls, status ON sessions
+    BEGIN
+      UPDATE campaign_budget_members SET cost=MAX(cost, NEW.cost_usd, NEW.usage_peak_cost_usd),
+        tools=MAX(tools, NEW.usage_peak_tool_calls), active=CASE WHEN NEW.status IN ${terminal} AND NOT EXISTS(SELECT 1 FROM session_stop_intents WHERE session_id=NEW.id) THEN 0 ELSE 1 END
+      WHERE session_id=NEW.id;
+    END;
+    DROP TRIGGER IF EXISTS campaign_budget_tool_usage;
+    CREATE TRIGGER campaign_budget_tool_usage AFTER INSERT ON session_events WHEN NEW.kind='tool_call'
+    BEGIN
+      INSERT OR IGNORE INTO campaign_budget_tool_calls(session_id,tool_call_id)
+        SELECT NEW.session_id,json_extract(NEW.payload,'$.toolCallId') WHERE json_extract(NEW.payload,'$.toolCallId') IS NOT NULL
+          AND EXISTS(SELECT 1 FROM campaign_budget_members WHERE session_id=NEW.session_id);
+      UPDATE campaign_budget_members SET tools=MAX(tools,
+        (SELECT COUNT(*) FROM campaign_budget_tool_calls WHERE session_id=NEW.session_id))
+      WHERE session_id=NEW.session_id;
+    END;
+    DROP TRIGGER IF EXISTS campaign_budget_stop_settled;
+    CREATE TRIGGER campaign_budget_stop_settled AFTER DELETE ON session_stop_intents
+    BEGIN
+      UPDATE campaign_budget_members SET active=CASE WHEN (SELECT status FROM sessions WHERE id=OLD.session_id) IN ${terminal} THEN 0 ELSE 1 END WHERE session_id=OLD.session_id;
+    END;`);
+  }
+
+  private atomic<T>(work: () => T): T {
+    this.sql.exec("SAVEPOINT campaign_budget_write");
+    try { const result = work(); this.sql.exec("RELEASE campaign_budget_write"); return result; }
+    catch (error) { this.sql.exec("ROLLBACK TO campaign_budget_write; RELEASE campaign_budget_write"); throw error; }
+  }
+
+  root(sessionId: string): string | null {
+    return (this.sql.prepare("SELECT root_id FROM campaign_budget_members WHERE session_id=?").get(sessionId) as { root_id: string } | undefined)?.root_id ?? null;
+  }
+
+  view(rootId: string): CampaignBudgetView | undefined {
+    const header = this.sql.prepare("SELECT * FROM campaign_budgets WHERE root_id=?").get(rootId) as
+      { authority: string; state: CampaignBudgetView["state"]; reason: string | null; accepted_follow_ups: number } | undefined;
+    if (!header) return undefined;
+    const authority = JSON.parse(header.authority) as CampaignBudgetAuthority;
+    if (authority.costUsd !== undefined && header.state === "active" && this.sql.prepare(`SELECT 1 FROM usage_session_state u
+      JOIN campaign_budget_members m ON m.session_id=u.session_id WHERE m.root_id=? AND u.unpriced_records>0 LIMIT 1`).get(rootId)) {
+      this.stop(rootId, "accounting_unavailable", "Unpriced campaign usage detected; protected admission stopped without a continue prompt.");
+      header.state = "accounting_unavailable"; header.reason = "Unpriced campaign usage detected; protected admission stopped without a continue prompt.";
+    }
+    const rows = this.sql.prepare("SELECT * FROM campaign_budget_members WHERE root_id=?").all(rootId) as unknown as Member[];
+    const actual = { costUsd: 0, toolCalls: 0 }, outstanding = { costUsd: 0, toolCalls: 0 };
+    for (const row of rows) {
+      actual.costUsd += row.cost; actual.toolCalls += row.tools;
+      if (row.active) {
+        outstanding.costUsd += Math.max(0, (row.cost_limit ?? row.cost) - row.cost);
+        outstanding.toolCalls += Math.max(0, (row.tool_limit ?? row.tools) - row.tools);
+      }
+    }
+    const exhausted = authority.costUsd !== undefined && actual.costUsd >= authority.costUsd ||
+      authority.toolCalls !== undefined && actual.toolCalls >= authority.toolCalls;
+    if (exhausted && header.state === "active") {
+      this.stop(rootId, "exhausted", "Campaign allowance reached; unfinished work remains incomplete.");
+      header.state = "exhausted"; header.reason = "Campaign allowance reached; unfinished work remains incomplete.";
+    }
+    return { authority, state: header.state, ...(header.reason ? { reason: header.reason } : {}), actual, outstanding,
+      remaining: { costUsd: authority.costUsd === undefined ? null : Math.max(0, authority.costUsd - actual.costUsd - outstanding.costUsd),
+        toolCalls: authority.toolCalls === undefined ? null : Math.max(0, authority.toolCalls - actual.toolCalls - outstanding.toolCalls) },
+      occupied: rows.filter((r) => r.active && r.session_id !== rootId).length,
+      acceptedFollowUps: header.accepted_follow_ups,
+      reachedCheckpointsUsd: authority.checkpointsUsd?.filter((v) => actual.costUsd >= v) ?? [],
+      enforcement: "admission_and_best_effort_cancellation", externalWorkers: "unsupported" };
+  }
+
+  authorize(rootId: string, authority: CampaignBudgetAuthority): void {
+    if (!validCampaignBudgetAuthority(authority)) throw new Error("invalid campaign allowance");
+    this.atomic(() => {
+      const old = this.view(rootId);
+      // A new human grant can enlarge ceilings, but cannot silently resume revoked accounting.
+      if (old && old.state !== "active") throw new Error("a stopped campaign allowance cannot be reset; start an explicitly authorized new campaign");
+      this.sql.prepare(`INSERT INTO campaign_budgets(root_id,authority) VALUES (?,?)
+        ON CONFLICT(root_id) DO UPDATE SET authority=excluded.authority`).run(rootId, JSON.stringify(authority));
+      const existingFollowUps = this.sql.prepare("SELECT id FROM campaign_work_items WHERE campaign_session_id=? AND origin='follow_up'").all(rootId) as unknown as Array<{ id: string }>;
+      for (const item of existingFollowUps) {
+        const inserted = this.sql.prepare("INSERT OR IGNORE INTO campaign_budget_follow_ups VALUES (?,?)").run(rootId,item.id);
+        if (Number(inserted.changes)) this.sql.prepare("UPDATE campaign_budgets SET accepted_follow_ups=accepted_follow_ups+1 WHERE root_id=?").run(rootId);
+      }
+      const members = this.sql.prepare(`WITH RECURSIVE members(id) AS (SELECT ? UNION SELECT s.id FROM sessions s JOIN members m ON s.parent_session_id=m.id)
+        SELECT s.id, s.status, MAX(s.cost_usd,s.usage_peak_cost_usd) AS cost,
+          MAX(s.usage_peak_tool_calls,COALESCE((SELECT tool_calls FROM session_tool_call_counts WHERE session_id=s.id),0)) AS tools,
+          s.cost_budget_usd AS cost_limit, s.max_tool_calls AS tool_limit FROM sessions s JOIN members m ON s.id=m.id`).all(rootId) as unknown as
+          Array<{ id: string; status: string; cost: number; tools: number; cost_limit: number | null; tool_limit: number | null }>;
+      for (const m of members) {
+        const count = (this.sql.prepare("SELECT COUNT(DISTINCT json_extract(payload,'$.toolCallId')) AS n FROM session_events WHERE session_id=? AND kind='tool_call'").get(m.id) as { n: number }).n;
+        if (!old && authority.toolCalls !== undefined && m.tools > count) throw new Error("Campaign tool accounting is unavailable because preauthorization history is incomplete; protected admission is refused.");
+        this.sql.prepare(`INSERT OR IGNORE INTO campaign_budget_members(session_id,root_id,cost,tools,cost_limit,tool_limit,user_cost_limit,user_tool_limit,active)
+          VALUES (?,?,?,?,?,?,?,?,?)`).run(m.id,rootId,m.cost,m.tools,m.cost_limit,m.tool_limit,m.cost_limit,m.tool_limit,["completed","failed","stopped"].includes(m.status)?0:1);
+        this.sql.prepare(`INSERT OR IGNORE INTO campaign_budget_tool_calls(session_id,tool_call_id)
+          SELECT session_id,json_extract(payload,'$.toolCallId') FROM session_events WHERE session_id=? AND kind='tool_call' AND json_extract(payload,'$.toolCallId') IS NOT NULL`).run(m.id);
+      }
+      // All live members need finite reservations before authority is usable. Preserve tighter
+      // existing session ceilings; otherwise divide free capacity, including a root share.
+      const rows = this.sql.prepare("SELECT * FROM campaign_budget_members WHERE root_id=? AND active=1").all(rootId) as unknown as Member[];
+      const used = this.view(rootId)!;
+      for (const r of rows) {
+        if (old && (authority.costUsd === undefined || r.cost_limit !== null) && (authority.toolCalls === undefined || r.tool_limit !== null)) continue;
+        const cost = authority.costUsd === undefined ? r.cost_limit : Math.min(r.cost_limit ?? Infinity,
+          r.cost + Math.max(0, authority.costUsd - used.actual.costUsd) / Math.max(1, rows.length + (authority.concurrency ?? 1)));
+        const tools = authority.toolCalls === undefined ? r.tool_limit : Math.min(r.tool_limit ?? Infinity,
+          r.tools + Math.floor(Math.max(0, authority.toolCalls - used.actual.toolCalls) / Math.max(1, rows.length + (authority.concurrency ?? 1))));
+        this.sql.prepare("UPDATE campaign_budget_members SET cost_limit=?,tool_limit=? WHERE session_id=?").run(cost,tools,r.session_id);
+      }
+      const view = this.view(rootId)!;
+      if (view.state !== "active" || (authority.costUsd !== undefined && view.actual.costUsd + view.outstanding.costUsd > authority.costUsd + 1e-9) ||
+          (authority.toolCalls !== undefined && view.actual.toolCalls + view.outstanding.toolCalls > authority.toolCalls) ||
+          (authority.concurrency !== undefined && view.occupied > authority.concurrency) ||
+          (authority.acceptedFollowUps !== undefined && view.acceptedFollowUps > authority.acceptedFollowUps)) throw new Error("allowance is below existing spend or reservations");
+    });
+  }
+
+  stop(rootId: string, state: Exclude<CampaignBudgetView["state"], "active">, reason: string): void {
+    this.sql.prepare("UPDATE campaign_budgets SET state=?,reason=? WHERE root_id=? AND state='active'").run(state,reason,rootId);
+  }
+
+  allocation(sessionId: string): CampaignBudgetAllocation | null {
+    const r = this.sql.prepare("SELECT * FROM campaign_budget_members WHERE session_id=?").get(sessionId) as Member | undefined;
+    return r ? { sessionId, ...(r.cost_limit === null ? {} : { costUsd: r.cost_limit }), ...(r.tool_limit === null ? {} : { toolCalls: r.tool_limit }) } : null;
+  }
+
+  userLimits(sessionId: string): { costBudgetUsd: number | null; maxToolCalls: number | null } | undefined {
+    const row = this.sql.prepare("SELECT * FROM campaign_budget_members WHERE session_id=?").get(sessionId) as Member | undefined;
+    return row ? { costBudgetUsd: row.user_cost_limit, maxToolCalls: row.user_tool_limit } : undefined;
+  }
+
+  prepare(rootId: string, sessionId: string, requested: { costUsd?: number; toolCalls?: number }): CampaignBudgetAllocation {
+    const view = this.view(rootId); if (!view || view.state !== "active") throw new Error(view?.reason ?? "campaign allowance unavailable");
+    const slots = Math.max(1, (view.authority.concurrency ?? 1) - view.occupied);
+    const prior = this.allocation(sessionId);
+    return { sessionId,
+      ...(view.authority.costUsd === undefined ? requested.costUsd === undefined ? {} : { costUsd: requested.costUsd } :
+        { costUsd: requested.costUsd ?? prior?.costUsd ?? (view.remaining.costUsd ?? 0) / slots }),
+      ...(view.authority.toolCalls === undefined ? requested.toolCalls === undefined ? {} : { toolCalls: requested.toolCalls } :
+        { toolCalls: requested.toolCalls ?? prior?.toolCalls ?? Math.floor((view.remaining.toolCalls ?? 0) / slots) }) };
+  }
+
+  members(rootId: string): string[] {
+    return (this.sql.prepare("SELECT session_id FROM campaign_budget_members WHERE root_id=?").all(rootId) as unknown as Member[]).map((r) => r.session_id);
+  }
+
+  admissionError(sessionId: string): string | null {
+    const rootId = this.root(sessionId); if (!rootId) return null;
+    const v = this.view(rootId)!;
+    if (v.state !== "active") return v.reason ?? "campaign allowance unavailable";
+    const row = this.sql.prepare("SELECT * FROM campaign_budget_members WHERE session_id=?").get(sessionId) as Member;
+    if (v.authority.costUsd !== undefined && (row.cost_limit === null || row.cost >= row.cost_limit) ||
+        v.authority.toolCalls !== undefined && (row.tool_limit === null || row.tools >= row.tool_limit)) return "session campaign allocation reached; reallocate within the existing envelope before dispatch";
+    return null;
+  }
+
+  /** Must run inside the session insertion transaction. A failed insert releases the reservation. */
+  admit(rootId: string, allocation: CampaignBudgetAllocation, userLimits: { costUsd?: number; toolCalls?: number }, activate = true): void {
+    this.atomic(() => {
+      const v = this.view(rootId); if (!v || v.state !== "active") throw new Error(v?.reason ?? "campaign allowance unavailable");
+      const old = this.sql.prepare("SELECT * FROM campaign_budget_members WHERE session_id=?").get(allocation.sessionId) as Member | undefined;
+      if (old) allocation = { ...allocation, costUsd: allocation.costUsd ?? old.cost_limit ?? undefined, toolCalls: allocation.toolCalls ?? old.tool_limit ?? undefined };
+      if (old && old.root_id !== rootId) throw new Error("session belongs to another allowance");
+      if (activate && !old?.active && allocation.sessionId !== rootId && v.authority.concurrency !== undefined && v.occupied >= v.authority.concurrency) throw new Error("campaign concurrency allowance reached");
+      for (const [requested, spent, ceiling, userCeiling, remaining, prior] of [
+        [allocation.costUsd, old?.cost ?? 0, v.authority.costUsd, old ? old.user_cost_limit : userLimits.costUsd, v.remaining.costUsd, old?.active ? Math.max(0,(old.cost_limit ?? 0)-old.cost) : 0],
+        [allocation.toolCalls, old?.tools ?? 0, v.authority.toolCalls, old ? old.user_tool_limit : userLimits.toolCalls, v.remaining.toolCalls, old?.active ? Math.max(0,(old.tool_limit ?? 0)-old.tools) : 0],
+      ]) {
+        if (requested != null && (!Number.isFinite(requested) || requested < spent! || (userCeiling != null && requested > userCeiling))) throw new Error("allocation exceeds a tighter session ceiling or is below spent usage");
+        if (ceiling != null && (requested == null || requested <= spent! || requested - spent! > (remaining ?? 0) + prior! + 1e-9)) throw new Error("allocation exceeds unreserved campaign allowance");
+      }
+      if (allocation.toolCalls !== undefined && !Number.isSafeInteger(allocation.toolCalls)) throw new Error("tool allocation must be an integer");
+      this.sql.prepare(`INSERT INTO campaign_budget_members(session_id,root_id,cost,tools,cost_limit,tool_limit,user_cost_limit,user_tool_limit,active)
+        VALUES (?,?,0,0,?,?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET cost_limit=excluded.cost_limit,tool_limit=excluded.tool_limit,active=excluded.active`)
+        .run(allocation.sessionId,rootId,allocation.costUsd??null,allocation.toolCalls??null,userLimits.costUsd??null,userLimits.toolCalls??null,activate?1:0);
+    });
+  }
+
+  acceptFollowUp<T>(rootId: string, recommendationId: string, write: () => T): T {
+    return this.atomic(() => {
+      const view = this.view(rootId);
+      if (!view) return write();
+      const duplicate = this.sql.prepare("SELECT 1 FROM campaign_budget_follow_ups WHERE root_id=? AND recommendation_id=?").get(rootId,recommendationId);
+      if (!duplicate && (view.state !== "active" || view.authority.acceptedFollowUps !== undefined && view.acceptedFollowUps >= view.authority.acceptedFollowUps)) throw new Error("campaign accepted follow-up allowance reached");
+      const result = write();
+      if (!duplicate) {
+        this.sql.prepare("INSERT INTO campaign_budget_follow_ups VALUES (?,?)").run(rootId,recommendationId);
+        this.sql.prepare("UPDATE campaign_budgets SET accepted_follow_ups=accepted_follow_ups+1 WHERE root_id=?").run(rootId);
+      }
+      return result;
+    });
+  }
+}

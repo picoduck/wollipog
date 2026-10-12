@@ -72,6 +72,23 @@ function resultJson(result: any): any {
   return JSON.parse(result.content[0].text);
 }
 
+test("campaign allocation tool fails closed on old peers and requires a matching Orchestrator", async () => {
+  const { deps, calls } = makeDeps(() => ({ status: 200, body: { state: "active" } }));
+  deps.controlPlaneProtocolVersion = 217;
+  const args = { sessionId: "s_worker", costUsd: 10, toolCalls: 100 };
+  assert.equal((await callTool(deps, "allocate_campaign_budget", args)).isError, true);
+  assert.equal(calls.length, 0);
+  deps.orchestrator = true;
+  deps.controlPlaneProtocolVersion = 216;
+  assert.equal((await callTool(deps, "allocate_campaign_budget", args)).isError, true);
+  assert.equal(calls.length, 0);
+  deps.controlPlaneProtocolVersion = 217;
+  assert.equal((await callTool(deps, "allocate_campaign_budget", args)).isError, undefined);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.url, `${CP_URL}/api/sessions/${SELF_ID}/orchestrator-campaign/budget-allocations`);
+  assert.deepEqual(calls[0]!.body, args);
+});
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function resultText(result: any): string {
   return result.content.map((c: { text: string }) => c.text).join("\n");

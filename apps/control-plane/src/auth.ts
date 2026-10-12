@@ -163,6 +163,7 @@ const ORCHESTRATOR_API_ROUTES = new Set([
   "POST /api/sessions/:id/orchestrator-campaign/follow-ups",
   "POST /api/sessions/:id/orchestrator-campaign/verify-child",
   "POST /api/sessions/:id/orchestrator-campaign/plan",
+  "POST /api/sessions/:id/orchestrator-campaign/budget-allocations",
   "GET /api/sessions/:id/orchestrator-campaign/work-items",
   "GET /api/sessions/:id/orchestrator-campaign/work-items/:itemId",
   "POST /api/sessions/:id/orchestrator-campaign/work-items/:itemId",

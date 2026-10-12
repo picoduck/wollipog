@@ -909,6 +909,7 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
 const CAMPAIGN_WORK_LEDGER_TOOLS = ["record_campaign_plan", "update_campaign_work_item", "assign_campaign_work_item",
   "adjudicate_campaign_recommendation", "get_campaign_work_items"];
 const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "list_sessions", "get_session", "get_session_events",
+  "allocate_campaign_budget",
   "get_campaign", "record_campaign_follow_up", "verify_campaign_child", ...CAMPAIGN_WORK_LEDGER_TOOLS,
   "get_campaign_issue_scope", "request_campaign_issue_scope_change",
   "request_github_issue_closure", "close_github_issue",
@@ -920,6 +921,7 @@ const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "l
   "stop_session", "stop_background_job", "restart_session", "archive_session", "set_guardrails", "create_worktree",
   "attach_worktree", "select_worktree", "discard_worktree"]);
 const PARENT_CONTROL_TOOLS = new Set(["get_campaign_issue_scope", "request_campaign_issue_scope_change", "request_github_issue_closure", "close_github_issue",
+  "allocate_campaign_budget",
   "get_campaign", "record_campaign_follow_up", "verify_campaign_child", ...CAMPAIGN_WORK_LEDGER_TOOLS,
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question",
   "resolve_descendant_approval", "resolve_descendant_workflow_decision", "review_descendant_ui_evidence",
@@ -1447,6 +1449,19 @@ export const TOOLS: McpTool[] = [
       const r = await cpFetch(deps, "POST",
         `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/orchestrator-campaign/recommendations/${encodeURIComponent(recommendationId as string)}/adjudicate`,
         fields);
+      return r.ok ? textResult(r.data) : errorResult(r.message);
+    },
+  },
+  {
+    name: "allocate_campaign_budget",
+    description: "Reserve absolute cumulative cost/tool allowance for an already admitted managed campaign worker within the immutable human envelope. Spent usage, concurrency and tighter session ceilings are preserved. Live reservations cannot be released until cancellation/completion settles. External reviewers are unsupported; this does not authorize new spending or permissions.",
+    inputSchema: { type: "object", properties: { sessionId: { type: "string" }, costUsd: { type: "number", exclusiveMinimum: 0 }, toolCalls: { type: "integer", minimum: 1 } }, required: ["sessionId"], additionalProperties: false },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId || !deps.orchestrator) return errorResult("this tool requires an Orchestrator session identity");
+      const compatibility = deps.controlPlaneProtocolVersion === undefined ? await cpFetch(deps, "GET", "/api/compatibility") : null;
+      const version = deps.controlPlaneProtocolVersion ?? (compatibility?.ok ? compatibility.data?.protocolVersion : null);
+      if (typeof version !== "number" || version < RUNNER_CAPABILITY_MIN_PROTOCOL.campaignBudgetAdmission) return errorResult("Campaign allocations require control plane protocol v217; update and reconnect.");
+      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/orchestrator-campaign/budget-allocations`, args);
       return r.ok ? textResult(r.data) : errorResult(r.message);
     },
   },

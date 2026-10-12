@@ -3625,6 +3625,7 @@ export class SessionsService {
       }
       const guarded = childSessionGuardrails({
         ...parent,
+        ...this.db.campaignBudgets.userLimits(parent.id),
         costUsd: (parent.costUsd ?? 0) + reserved.costBudgetUsd,
         toolCallCount: (parent.toolCallCount ?? 0) + reserved.maxToolCalls,
       }, candidate, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.liveCount,
@@ -3700,6 +3701,7 @@ export class SessionsService {
       const allocated = this.db.childSessionAllocations(parentSessionId);
       const guarded = childSessionGuardrails({
         ...parent,
+        ...this.db.campaignBudgets.userLimits(parent.id),
         costUsd: (parent.costUsd ?? 0) + allocated.costBudgetUsd,
         toolCallCount: (parent.toolCallCount ?? 0) + allocated.maxToolCalls,
       }, req.config, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - allocated.liveCount,
@@ -4334,6 +4336,18 @@ export class SessionsService {
     const titleSource = snapshotSpec?.titleSource ?? (req.title?.trim() ? "user" as const : "generated" as const);
     // Cloned so the clamp below never mutates the caller's request object.
     const config = { ...requestedConfig };
+    const campaignBudgetUserLimits = { costUsd: config.costBudgetUsd, toolCalls: config.maxToolCalls };
+    const budgetRoot = parentSessionId ? this.db.campaignBudgets.root(parentSessionId) : null;
+    if (budgetRoot) {
+      const view = this.db.campaignBudgets.view(budgetRoot)!;
+      const accountingError = this.db.campaignBudgetAccountingError(launch.driver, config.model, view.authority.costUsd !== undefined);
+      if (req.launchSurface === "native_tui" || accountingError) return fail(accountingError ?? "Campaign limits cannot admit unmetered Native TUI workers.", 409);
+      try {
+        const allocation = this.db.campaignBudgets.prepare(budgetRoot, id, campaignBudgetUserLimits);
+        if (allocation.costUsd !== undefined) config.costBudgetUsd = allocation.costUsd;
+        if (allocation.toolCalls !== undefined) config.maxToolCalls = allocation.toolCalls;
+      } catch (error) { return fail((error as Error).message, 409); }
+    }
     if (config.costBudgetUsd !== undefined && config.costBudgetUsd <= 0) delete config.costBudgetUsd;
     if (config.maxToolCalls !== undefined) {
       config.maxToolCalls = Math.floor(config.maxToolCalls);
@@ -4456,7 +4470,9 @@ export class SessionsService {
       if (!gate.ok) return failAs(gate);
     }
     if (delivery) delivery.stage(plan!);
-    const session = existing ?? this.db.createSession({
+    let session: SessionView;
+    try { session = existing ?? this.db.createSession({
+      campaignBudgetUserLimits,
       id,
       parentSessionId,
       creationActor: creationContext?.defaultOwnerUserId
@@ -4487,6 +4503,10 @@ export class SessionsService {
       automationOrigin: delivery?.automationOrigin,
       now,
     });
+    } catch (error) {
+      if (budgetRoot) return fail((error as Error).message, 409);
+      throw error;
+    }
     if (config.costBudgetUsd && config.costBudgetUsd > 0) {
       this.db.updateSessionCostBudget(id, config.costBudgetUsd, now);
     }
@@ -4759,7 +4779,11 @@ export class SessionsService {
     }
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    const budgetError = this.db.campaignBudgets.admissionError(sessionId);
+    if (budgetError) return fail(budgetError, 409);
     const requestedConfig = snapshotCommand?.type === "prompt_session" ? snapshotCommand.config : config;
+    const budgetConfigError = this.campaignBudgetConfigError(session, requestedConfig);
+    if (budgetConfigError) return fail(budgetConfigError, 409);
     if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before sending a message", 409);
     const configInputError = sessionGuardrailConfigError(requestedConfig);
     if (configInputError) return fail(configInputError, 400);
@@ -5354,6 +5378,8 @@ export class SessionsService {
     // report success for work the durable outbox cannot or must not deliver.
     const configInputError = sessionGuardrailConfigError(candidate.command.config);
     if (configInputError) return fail(configInputError, 400);
+    const budgetError = this.db.campaignBudgets.admissionError(sessionId) ?? this.campaignBudgetConfigError(session, candidate.command.config);
+    if (budgetError) return fail(budgetError, 409);
     const campaignBehaviorError = this.campaignChildBehaviorError(session, candidate.command.config);
     if (campaignBehaviorError) return fail(campaignBehaviorError, 409);
     const tuiGuardrailError = this.activeAgentTuiGuardrailError(session, candidate.command.config);
@@ -5486,6 +5512,8 @@ export class SessionsService {
     if (!session) return fail("session not found", 404);
     const configInputError = sessionGuardrailConfigError(config);
     if (configInputError) return fail(configInputError, 400);
+    const budgetConfigError = this.campaignBudgetConfigError(session, config);
+    if (budgetConfigError) return fail(budgetConfigError, 409);
     const campaignBehaviorError = this.campaignChildBehaviorError(session, config);
     if (campaignBehaviorError) return fail(campaignBehaviorError, 409);
     if (actor.kind === "agent" && actor.id === sessionId &&
@@ -6582,6 +6610,13 @@ export class SessionsService {
     if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before restarting", 409);
     let session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    const budgetError = this.db.campaignBudgets.admissionError(sessionId);
+    if (budgetError) return fail(budgetError, 409);
+    const budgetRoot = this.db.campaignBudgets.root(sessionId);
+    if (budgetRoot) {
+      try { this.db.campaignBudgets.admit(budgetRoot, this.db.campaignBudgets.allocation(sessionId)!, {}); }
+      catch (error) { return fail((error as Error).message, 409); }
+    }
     const campaignBefore = this.campaignAttentionController(session);
     if (session.stopOperation?.status === "stop_failed") {
       return fail("retry the failed Stop before restarting the session", 409);
@@ -6601,7 +6636,7 @@ export class SessionsService {
           return fail("the parent session has 0 remaining live child slots; raise maxChildSessions before restarting this child", 409);
         }
         const allowanceError = childRestartAllowanceError(
-          parent,
+          { ...parent, ...this.db.campaignBudgets.userLimits(parent.id) },
           allocated,
           this.db.childSessionRestartReservation(session.id),
         );
@@ -7569,6 +7604,7 @@ export class SessionsService {
     mode: "full_control"; objective: string; operations: CampaignAuthorityBoundary["operations"];
     delegatablePolicyIds: string[];
     issueAuthority?: CampaignAuthorityBoundary["issueAuthority"];
+    budgetAuthority?: CampaignAuthorityBoundary["budgetAuthority"];
   }, expectedRevision: number, principal: HumanPrincipal): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session || principal.kind !== "human" || !this.db.isSessionOwner(principal, sessionId)) return fail("campaign not found", 404);
@@ -7589,6 +7625,11 @@ export class SessionsService {
         if (participant.runnerId !== session.runnerId || participant.workspaceId !== session.workspaceId) return fail("campaign participants must share the repository workspace and runner", 409);
         const preflight = campaignAuthorityPreflight(control, participant.driver, this.db.getRunner(participant.runnerId)?.protocolVersion);
         if (!preflight.supported) return fail(preflight.reason!, 409);
+        if (control.boundary.budgetAuthority) {
+          const accountingError = this.db.campaignBudgetAccountingError(participant.driver, participant.model, control.boundary.budgetAuthority.costUsd !== undefined);
+          if (accountingError || participant.adopted || this.activeAgentTuiGuardrailError(participant, { maxToolCalls: 1 })) return fail(accountingError ?? "Campaign allowance cannot cover an unmetered provider launch.", 409);
+          if (control.boundary.budgetAuthority.costUsd !== undefined && this.db.campaignUsageHasUnpriced(participant.id)) return fail("Campaign usage contains unpriced records; accounting must be reconciled before protection can be authorized.", 409);
+        }
       }
       if (control.boundary.delegatablePolicyIds.some((id) => !this.governancePolicies().some((rule) =>
           rule.policyId === id && rule.enabled && rule.effect === "ask" && !rule.builtin && !rule.conditions?.humanRequired))) {
@@ -7596,7 +7637,11 @@ export class SessionsService {
       }
     }
     const outstanding = this.db.unconsumedWorkflowDecisionsForController(sessionId);
-    if (!this.db.updateSessionCampaignControl(sessionId, control, expectedRevision, now)) return fail("campaign authority revision changed; refresh and retry", 409);
+    try {
+      if (!this.db.updateSessionCampaignControl(sessionId, control, expectedRevision, now)) return fail("campaign authority revision changed; refresh and retry", 409);
+    } catch (error) { return fail((error as Error).message, 409); }
+    for (const id of this.db.campaignBudgets.members(sessionId)) this.syncCampaignAllocation(id);
+    if (this.db.campaignBudgets.view(sessionId)?.state !== "active") this.enforceCampaignBudget(sessionId, now);
     for (const decision of outstanding) {
       this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now);
       this.recordWorkflowDecisionAudit(decision, "revoked", { kind: "human", id: principal.userId }, now);
@@ -7622,6 +7667,88 @@ export class SessionsService {
     const root = this.orchestratorCampaignController(controller);
     return controllerId === requesterId && controller?.orchestratorPolicy?.control?.mode === "full_control" &&
       campaignBoundaryCurrent(controller) && root !== "refused" && root?.id === controllerId;
+  }
+
+  /** Production reviewer adapters must use this preflight rather than treating a shell worker
+   * as free. A managed worker must already have a durable same-campaign admission. */
+  campaignBudgetWorkerPreflight(campaignId: string, worker: { kind: "managed"; sessionId: string } | { kind: "external" }):
+    ServiceResult<{ rootSessionId: string; allocation: import("@wollipog/protocol").CampaignBudgetAllocation }> {
+    if (worker.kind === "external") return fail("External reviewer accounting/admission is unsupported; this path is not ready for unattended protected work.", 409);
+    if (this.db.campaignBudgets.root(worker.sessionId) !== campaignId) return fail("review worker lacks same-campaign budget admission", 409);
+    const error = this.db.campaignBudgets.admissionError(worker.sessionId);
+    if (error) return fail(error, 409);
+    return ok({ rootSessionId: campaignId, allocation: this.db.campaignBudgets.allocation(worker.sessionId)! });
+  }
+
+  allocateCampaignBudget(callerSessionId: string, allocation: import("@wollipog/protocol").CampaignBudgetAllocation,
+    canAccess: (id: string) => boolean = () => true): ServiceResult<import("@wollipog/protocol").CampaignBudgetView> {
+    const scope = this.campaignLedgerScope(callerSessionId, canAccess);
+    if (!scope.ok || !scope.data) return failAs(scope);
+    const rootId = scope.data.root.id;
+    if (!allocation || typeof allocation.sessionId !== "string" || Object.keys(allocation).some((key) => !["sessionId", "costUsd", "toolCalls"].includes(key)) ||
+        !canAccess(allocation.sessionId) || this.db.campaignBudgets.root(allocation.sessionId) !== rootId) return fail("allocation requires a readable admitted campaign member", 400);
+    const member = this.db.getSession(allocation.sessionId);
+    if (!member) return fail("allocation worker not found", 404);
+    const prior = this.db.campaignBudgets.allocation(member.id)!;
+    if (!isTerminal(member.status) && ((allocation.costUsd ?? 0) < (prior.costUsd ?? 0) ||
+        (allocation.toolCalls ?? 0) < (prior.toolCalls ?? 0))) return fail("a live allocation cannot be released before cancellation settles; finish this worker before redistributing its unspent reservation", 409);
+    if (!isTerminal(member.status) && !this.hub.isRunnerOnline(member.runnerId)) return fail("allocation cannot change while its runner is offline", 409);
+    try { this.db.campaignBudgets.admit(rootId, allocation, {}); }
+    catch (error) { return fail((error as Error).message, 409); }
+    if (!this.syncCampaignAllocation(member.id)) {
+      // Keep the reservation until delivery/reconnect; never refund a possibly applied change.
+      return fail("runner did not receive allocation; reservation retained for reconciliation", 409);
+    }
+    this.log.info(JSON.stringify({ event: "campaign_budget_allocation", rootId, sessionId: member.id, costUsd: allocation.costUsd, toolCalls: allocation.toolCalls }));
+    this.hub.sessionChangedById(rootId);
+    return ok(this.db.campaignBudgets.view(rootId)!);
+  }
+
+  private syncCampaignAllocation(sessionId: string): boolean {
+    const allocation = this.db.campaignBudgets.allocation(sessionId);
+    const session = this.db.getSession(sessionId);
+    if (!allocation || !session) return false;
+    const now = Date.now();
+    if (allocation.costUsd !== undefined) this.db.updateSessionCostBudget(sessionId, allocation.costUsd, now);
+    if (allocation.toolCalls !== undefined) this.db.updateSessionMaxToolCalls(sessionId, allocation.toolCalls, now);
+    const configured = this.db.getSession(sessionId)!;
+    const holdFor = hasBlockingPendingRequest(configured.pendingApproval) ? "control_plane" as const
+      : this.runnerHoldAfter(configured, this.guardrailFields(configured));
+    return isTerminal(session.status) || this.hub.sendToRunner(session.runnerId, { type: "rearm_governance", sessionId,
+      config: { ...(allocation.costUsd === undefined ? {} : { costBudgetUsd: allocation.costUsd }),
+        ...(allocation.toolCalls === undefined ? {} : { maxToolCalls: allocation.toolCalls }) }, ...(holdFor ? { holdFor } : {}) });
+  }
+
+  private campaignBudgetConfigError(session: SessionView, config?: SessionConfig): string | null {
+    const rootId = this.db.campaignBudgets.root(session.id);
+    if (!rootId) return null;
+    const view = this.db.campaignBudgets.view(rootId)!;
+    if (view.state !== "active") return view.reason ?? "campaign allowance unavailable";
+    const allocation = this.db.campaignBudgets.allocation(session.id)!;
+    if (config?.costBudgetUsd !== undefined && (config.costBudgetUsd <= 0 || allocation.costUsd !== undefined && config.costBudgetUsd !== allocation.costUsd) ||
+        config?.maxToolCalls !== undefined && (config.maxToolCalls <= 0 || allocation.toolCalls !== undefined && config.maxToolCalls !== allocation.toolCalls) ||
+        config?.costCheckpointsUsd !== undefined) return "campaign allocations cannot be changed through session configuration; use allocate_campaign_budget within the human envelope";
+    return this.db.campaignBudgetAccountingError(session.driver, config?.model ?? session.model, view.authority.costUsd !== undefined);
+  }
+
+  private enforceCampaignBudget(sessionId: string, now: number): boolean {
+    const rootId = this.db.campaignBudgets.root(sessionId);
+    if (!rootId) return false;
+    let view = this.db.campaignBudgets.view(rootId)!;
+    if (view.authority.costUsd !== undefined && this.db.campaignBudgets.members(rootId).some((id) => this.db.campaignUsageHasUnpriced(id))) {
+      this.db.campaignBudgets.stop(rootId, "accounting_unavailable", "Unpriced campaign usage detected; protected admission stopped without a continue prompt.");
+      view = this.db.campaignBudgets.view(rootId)!;
+    }
+    const error = this.db.campaignBudgets.admissionError(sessionId);
+    if (!error) return false;
+    const ids = view.state === "active" ? [sessionId] : this.db.campaignBudgets.members(rootId);
+    for (const id of ids) {
+      const member = this.db.getSession(id);
+      if (member && !isTerminal(member.status)) this.stopAtGuardrail(member, now);
+    }
+    this.log.info(JSON.stringify({ event: "campaign_budget_admission_stopped", rootId, sessionId, reason: error, state: view.state }));
+    this.hub.sessionChangedById(rootId);
+    return true;
   }
 
   private campaignChildBehaviorError(session: SessionView, config: SessionConfig | undefined): string | null {
@@ -12992,6 +13119,7 @@ export class SessionsService {
   }
 
   private gateOnPolicy(sessionId: string, now: number, fanOut = true, softOnly = false): boolean {
+    if (this.enforceCampaignBudget(sessionId, now)) return true;
     const s = this.db.getSession(sessionId);
     if (!s) return false;
     const ask = this.pendingPolicyAsk(s, softOnly);
@@ -13384,6 +13512,7 @@ export class SessionsService {
         throw error;
       }
     }
+    if (payload.kind === "token_usage" || payload.kind === "tool_call") this.enforceCampaignBudget(sessionId, now);
     const reconciledSteering = this.reconcileSteeringFromUserMessage(sessionId, payload, now);
     const commandEvidence = payload.kind === "user_message" ? payload.commandInvocation : undefined;
     const reconciledCommand = commandEvidence
