@@ -40,15 +40,29 @@ export function normalizeIssueClosureSnapshot(value: Record<string, unknown>): G
     openPullRequests, activeChildren };
 }
 
-/** Any live campaign child can still hold related work. Include it conservatively: a task can
- * move between issues in steering history, and a later "continue" prompt is not proof it is unrelated. */
-export function issueClosureActiveChildren(db: ControlPlaneDb, sessionId: string) {
+/** Text that names the issue: `#123`, `owner/repo#123`, `.../issues/123`, or `issue 123`. A match
+ * only ever adds a child; prose can show a task bears on an issue but never that it does not. */
+const mentionsIssue = (text: string | null | undefined, issue: number) =>
+  typeof text === "string" && new RegExp(`(?:#|/issues/|\\bissues?\\s+)${issue}(?!\\d)`, "iu").test(text);
+
+/** Live campaign children whose work can bear on the issue (#3084). A child is left out only when
+ * the campaign work ledger attributes it elsewhere: its open attempt is on an item outside the
+ * issue's lineage, no attempt of it was ever in that lineage, and none of its assignment or prompts
+ * names the issue. Every other child stays included conservatively: a task can move between issues
+ * in steering history, and a later "continue" prompt is not proof it is unrelated. A change to the
+ * ledger that moves a child in or out of this set still changes the digest. Without an issue, as
+ * for a campaign scope change, every live child is included. */
+export function issueClosureActiveChildren(db: ControlPlaneDb, sessionId: string, issue?: { repository: string; number: number }) {
+  const attribution = issue ? db.campaignWorkLedger.issueLineageSessions(sessionId, issue.repository, issue.number) : null;
   return db.campaignDescendantIds(sessionId).flatMap((id) => {
     const child = db.getSession(id);
     if (!child || isTerminal(child.status) || child.archived) return [];
     const assignment = db.initialUserMessageText(id);
     const state = db.issueClosureAssignmentState(id);
     const prompts = [...(child.queued ?? []), ...(child.pendingPrompts ?? [])];
+    if (issue && attribution?.elsewhere.has(id) && !attribution.lineage.has(id) &&
+        ![assignment, state.latest?.text, state.command?.text, ...prompts.map((prompt) => prompt.text)]
+          .some((text) => mentionsIssue(text, issue.number))) return [];
     return [{ sessionId: id, title: child.title,
       assignmentDigest: createHash("sha256").update(JSON.stringify({
         assignment, state, prompts, parentSessionId: child.parentSessionId, worktreePath: child.worktreePath,

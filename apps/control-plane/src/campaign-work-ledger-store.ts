@@ -622,6 +622,47 @@ export class CampaignWorkLedgerStore {
     return sessions;
   }
 
+  /** Attribution for an issue closure (#3084). The lineage is every item recorded for the issue plus
+   * the follow-up items it descends from and that descend from it, through adjudicated
+   * recommendations; siblings and dependencies are not lineage. `lineage` holds every session with
+   * any attempt in it, open or ended, so earlier work on the issue still counts. `elsewhere` holds
+   * sessions whose open attempt is on an item outside the lineage. */
+  issueLineageSessions(campaignId: string, repository: string, issueNumber: number): { lineage: Set<string>; elsewhere: Set<string> } {
+    const rows = this.stmt(`
+      WITH RECURSIVE
+        edges(origin_id, result_id) AS (
+          SELECT origin.work_item_id, disposition.resulting_work_item_id
+          FROM campaign_recommendation_origins origin
+          JOIN campaign_recommendation_dispositions disposition ON disposition.recommendation_id=origin.recommendation_id
+          WHERE disposition.resulting_work_item_id IS NOT NULL
+        ),
+        issue_items(id) AS (
+          SELECT id FROM campaign_work_items
+          WHERE campaign_session_id=? AND lower(issue_repository)=lower(?) AND issue_number=?
+        ),
+        descendants(id) AS (
+          SELECT id FROM issue_items
+          UNION SELECT edges.result_id FROM edges JOIN descendants ON edges.origin_id=descendants.id
+        ),
+        ancestors(id) AS (
+          SELECT id FROM issue_items
+          UNION SELECT edges.origin_id FROM edges JOIN ancestors ON edges.result_id=ancestors.id
+        ),
+        lineage(id) AS (SELECT id FROM descendants UNION SELECT id FROM ancestors)
+      SELECT attempt.session_id, attempt.ended_at IS NULL AS open,
+        attempt.work_item_id IN (SELECT id FROM lineage) AS related
+      FROM campaign_work_attempts attempt
+      WHERE attempt.campaign_session_id=? AND attempt.session_id IS NOT NULL
+    `).all(campaignId, repository, issueNumber, campaignId) as Array<{ session_id: string; open: number; related: number }>;
+    const lineage = new Set<string>();
+    const elsewhere = new Set<string>();
+    for (const row of rows) {
+      if (row.related) lineage.add(row.session_id);
+      else if (row.open) elsewhere.add(row.session_id);
+    }
+    return { lineage, elsewhere };
+  }
+
   /* ------------------------------ Dependencies ------------------------------ */
 
   /** True when the dependency graph contains a cycle. */

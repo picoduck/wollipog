@@ -24758,6 +24758,102 @@ test("issue closure requires an exact human decision and executes one durable ac
   }
 });
 
+test("issue closure binds only children whose work bears on the issue (#3084)", async () => {
+  // Each mode changes one child after the human approved closing issue 1440, then executes.
+  const executable = new Set(["unrelated_prompt", "unrelated_decision", "new_unrelated_child"]);
+  for (const mode of ["unrelated_prompt", "unrelated_decision", "new_unrelated_child", "related_prompt",
+    "related_decision", "unattributed_prompt", "mentioning_prompt", "earlier_attempt_prompt",
+    "follow_up_prompt", "reassigned_into_lineage"]) {
+    const { db, svc, hub, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+    try {
+      const plan = svc.recordCampaignPlan(parent.id, { items: [
+        { key: "issue", issue: { repository: "picoduck/wollipog", number: 1440 } },
+        { key: "other", issue: { repository: "picoduck/wollipog", number: 1441 } },
+        { key: "unrelated" },
+      ], planComplete: true });
+      assert.ok(plan.ok && plan.data, plan.error);
+      const [issueItem, otherItem, unrelatedItem] = plan.data.items.map((item) => item.workItemId);
+      const assign = (workItemId: string, childSessionId: string) => {
+        const assigned = svc.assignCampaignWorkItem(parent.id, { workItemId, childSessionId });
+        assert.ok(assigned.ok, assigned.error);
+      };
+      const related = spawn(parent.id, "Deliver the first item");
+      assign(issueItem!, related);
+      const unrelated = spawn(parent.id, "Deliver issue 1441");
+      // The runner echoes the assignment as the child's first user message.
+      db.appendEvent(unrelated, { kind: "user_message",
+        text: mode === "mentioning_prompt" ? "Deliver issue 1441 after picoduck/wollipog#1440 lands." : "Deliver issue 1441." }, Date.now());
+      if (mode === "earlier_attempt_prompt") {
+        assign(unrelatedItem!, unrelated);
+        assign(issueItem!, unrelated);
+        assign(otherItem!, unrelated);
+      } else assign(otherItem!, unrelated);
+      const unattributed = mode === "unattributed_prompt" ? spawn(parent.id, "Help with something") : null;
+      // A follow-up recommended from the issue's item is part of its lineage.
+      const followUp = svc.recordCampaignFollowUp(parent.id, { originSessionId: related, repository: "picoduck/wollipog",
+        title: "Lineage Follow-Up", originWorkItemIds: [issueItem!] });
+      assert.ok(followUp.ok && followUp.data, followUp.error);
+      const accepted = svc.adjudicateCampaignRecommendation(parent.id, { recommendationId: followUp.data.id,
+        disposition: "accepted", reason: "Needed", resultingWorkItemKey: "followup:lineage" });
+      assert.ok(accepted.ok && accepted.data?.workItem, accepted.error);
+      const followUpItem = accepted.data.workItem.id;
+      const lineageChild = mode === "follow_up_prompt" ? spawn(parent.id, "Deliver the follow-up") : null;
+      if (lineageChild) assign(followUpItem, lineageChild);
+
+      let executions = 0;
+      hub.requestHandler = (message) => {
+        if (message.type !== "github_issue_closure") throw new Error("unexpected runner command");
+        if (message.operation === "inspect") return { type: "github_issue_closure_result", requestId: message.requestId,
+          sessionId: parent.id, ok: true, inspection: { repository: "picoduck/wollipog", issue: message.issue, title: "Merged work",
+            url: `https://github.com/picoduck/wollipog/issues/${message.issue}`, state: "OPEN",
+            forgeDigest: "a".repeat(64), openPullRequests: [] } };
+        executions++;
+        return { type: "github_issue_closure_result", requestId: message.requestId, sessionId: parent.id,
+          ok: true, result: { outcome: "closed", completedAt: Date.now() } };
+      };
+      const requested = await svc.requestGithubIssueClosure(parent.id, { requestId: "closure-1440", issue: 1440,
+        reason: "completed", explanation: "The work merged.", evidence: ["Merged in the campaign."] });
+      assert.ok(requested.ok && requested.data?.decision, `${mode}: ${requested.error}`);
+      const decision = requested.data.decision;
+      assert.ok(decision.resourceSnapshot.category === "issue_closure");
+      const bound = new Set(decision.resourceSnapshot.activeChildren.map((child) => child.sessionId));
+      assert.ok(bound.has(related), `${mode}: the child assigned to the issue is bound`);
+      assert.equal(bound.has(unrelated), ["mentioning_prompt", "earlier_attempt_prompt"].includes(mode),
+        `${mode}: a child attributed elsewhere is bound only when it names the issue or once worked on it`);
+      if (unattributed) assert.ok(bound.has(unattributed), "a child without an open attempt stays bound");
+      if (lineageChild) assert.ok(bound.has(lineageChild), "a child on a follow-up of the issue is bound");
+      assert.ok(svc.approve(parent.id, decision.occurrenceId, "approve", { kind: "human", id: "reviewer" }).ok);
+
+      const prompt = (sessionId: string) => db.stageSessionPromptCommand({ commandId: `prompt-${sessionId}`, sessionId,
+        runnerId: RUNNER_ID, payloadJson: JSON.stringify({ text: "Continue." }), payloadSha256: "c".repeat(64),
+        expiresAt: Date.now() + 60_000, now: Date.now() });
+      const raiseDecision = (sessionId: string) => assert.ok(svc.createWorkflowDecision(sessionId, {
+        requestId: `ui-${sessionId}`, resourceKey: `ui-${sessionId}`, resourceSnapshot: { category: "ui_evidence_approval",
+          evidence: [{ evidenceId: "after", uri: "https://evidence.example/after.png", sha256: "c".repeat(64) }] },
+      }).ok);
+      if (["unrelated_prompt", "mentioning_prompt", "earlier_attempt_prompt"].includes(mode)) prompt(unrelated);
+      if (mode === "unrelated_decision") raiseDecision(unrelated);
+      if (mode === "new_unrelated_child") assign(unrelatedItem!, spawn(parent.id, "Deliver the unrelated item"));
+      if (mode === "related_prompt") prompt(related);
+      if (mode === "related_decision") raiseDecision(related);
+      if (unattributed) prompt(unattributed);
+      if (lineageChild) prompt(lineageChild);
+      if (mode === "reassigned_into_lineage") assign(followUpItem, unrelated);
+
+      const result = await svc.executeGithubIssueClosure(parent.id, decision.occurrenceId, decision.resourceDigest);
+      if (executable.has(mode)) {
+        assert.ok(result.ok && result.data, `${mode}: ${result.error}`);
+        assert.equal(result.data.issueClosureResult?.outcome, "closed");
+        assert.equal(executions, 1);
+      } else {
+        assert.equal(result.status, 409, `${mode}: related work changed`);
+        assert.equal(db.workflowDecisionByOccurrence(decision.occurrenceId)?.status, "revoked");
+        assert.equal(executions, 0);
+      }
+    } finally { db.close(); }
+  }
+});
+
 /* ------------------------- Campaign work ledger (#2417) ------------------------- */
 
 function ledgerItem(svc: SessionsService, campaignId: string, key: string) {
