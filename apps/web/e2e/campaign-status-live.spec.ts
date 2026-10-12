@@ -215,7 +215,10 @@ async function openCampaignStatus(page: Page, sessionId: string) {
 
 async function showCampaignStatus(page: Page) {
   // A remembered open panel covers a phone's session bar, toggle included (#2843).
-  await expect(page.getByRole("button", { name: "Side Panel" }).first().or(page.locator("#right-panel")).first()).toBeVisible();
+  // This shared stack's full navigations can hit the 16-start/10s connection admission window.
+  // Allow the bounded reconnect backoff to recover before requiring session controls, as signIn does.
+  await expect(page.getByRole("button", { name: "Side Panel" }).first().or(page.locator("#right-panel")).first())
+    .toBeVisible({ timeout: 30_000 });
   if (!await page.locator("#right-panel").isVisible()) await page.getByRole("button", { name: "Side Panel" }).first().click();
   const row = launcherRow(page);
   // A remembered mode opens straight into Campaign Status; otherwise pick it from the launcher.
