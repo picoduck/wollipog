@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import {test} from "node:test";
-import {controlledReviewForgeTarget,controlledReviewUsage} from "./campaign-review-jobs.js";
+import {spawn} from "node:child_process";
+import {once} from "node:events";
+import {mkdtempSync,mkdirSync,readFileSync,writeFileSync,rmSync} from "node:fs";
+import {tmpdir} from "node:os";
+import {join} from "node:path";
+import type {CampaignReviewJobCommand,CampaignReviewJobUpdate} from "@wollipog/protocol";
+import {SessionStore} from "./session-store.js";
+import {ControlledCampaignReviewer,controlledReviewForgeTarget,controlledReviewUsage} from "./campaign-review-jobs.js";
 
 const init={type:"system",subtype:"init",model:"claude-opus-5-5",session_id:"native",tools:["Read"],permissionMode:"dontAsk"};
 const tool=(id:string,name="Read")=>({type:"assistant",message:{content:[{type:"tool_use",id,name}]}});
@@ -37,4 +44,69 @@ test("native forge binding uses older-gh-compatible scoped REST and rejects stal
   for(const bad of [{...response,number:1},{...response,base:{...response.base,sha:"c".repeat(40)}},
     {...response,head:{...response.head,repo:{full_name:"foreign/fork"}}},{...response,state:"closed"}])
     await assert.rejects(controlledReviewForgeTarget(request,"https://github.com/picoduck/wollipog.git",async()=>JSON.stringify(bad)),/canonical forge target/);
+});
+
+function jobHarness() {
+  const root=mkdtempSync(join(tmpdir(),"native-review-lifecycle-"));
+  const command:CampaignReviewJobCommand={type:"campaign_review_job",jobId:"review_11111111-1111-1111-1111-111111111111",nonce:"nonce",rootSessionId:"root",authorityRevision:2,
+    worktreeSessionId:"worker",profile:{profile:"native_opus_5_5_high_read_only",controllerSha256:"a".repeat(64),executableSha256:"b".repeat(64),cliVersion:"2.1.287",accounting:"provider_list_estimate",account:"runner_default_claude",agentId:"claude"},
+    request:{requestId:"test",workItemId:"item",pullRequest:{repository:"picoduck/wollipog",number:3065},baseSha:"c".repeat(40),headSha:"d".repeat(40),costUsd:5,toolCalls:20,brief:"Review."}};
+  const dir=join(root,command.jobId);mkdirSync(dir);
+  const updates:CampaignReviewJobUpdate[]=[],released:string[]=[],reserved:string[]=[];
+  const store=new SessionStore(join(root,"sessions"));
+  const manager=()=>new ControlledCampaignReviewer(root,store,(u)=>updates.push(u),(id)=>{reserved.push(id);return true;},(id)=>released.push(id));
+  const persist=(extra:Record<string,unknown>={})=>writeFileSync(join(dir,"state.json"),JSON.stringify({command,repo:root,args:["--expected-diff-sha256","e".repeat(64)],phase:"running",...extra}));
+  return {root,dir,command,updates,released,reserved,manager,persist,cleanup:()=>rmSync(root,{recursive:true,force:true})};
+}
+
+test("durable native final artifacts settle paid invalid reviews and replay without dispatch",async()=>{
+  const h=jobHarness();
+  try {
+    h.persist();writeFileSync(join(h.dir,"provider.jsonl"),raw(init,tool("a"),result(2)));
+    writeFileSync(join(h.dir,"summary.json"),JSON.stringify({status:"complete",launched:true,phase:"execution",attempt_valid:false,effective_vote:"INVALID",
+      reviewed_base:h.command.request.baseSha,reviewed_head:h.command.request.headSha,models:["claude-opus-5-5"],diff_sha256:"e".repeat(64)}));
+    const manager=h.manager();await manager.dispatch(h.command);
+    const receipt=h.updates.at(-1)!;
+    assert.equal(receipt.state,"completed");assert.equal(receipt.costUsd,2);assert.equal(receipt.attemptValid,false);assert.equal(receipt.attemptConsumed,true);
+    assert.deepEqual(h.released,[h.command.jobId]);
+    const reservations=h.reserved.length;
+    await manager.dispatch(h.command);
+    assert.deepEqual(h.updates.at(-1),receipt);assert.equal(h.reserved.length,reservations,"terminal replay does not admit another provider");
+  } finally {h.cleanup();}
+});
+
+test("native controller preflight refusal releases a known-zero job without spending an attempt",async()=>{
+  const h=jobHarness();
+  try {
+    h.persist();writeFileSync(join(h.dir,"summary.json"),JSON.stringify({status:"complete",launched:false,phase:"preflight"}));
+    await h.manager().dispatch(h.command);
+    assert.equal(h.updates.at(-1)!.state,"not_launched");assert.equal(h.updates.at(-1)!.costUsd,0);
+    assert.equal(h.updates.at(-1)!.attemptConsumed,false);assert.deepEqual(h.released,[h.command.jobId]);
+  } finally {h.cleanup();}
+});
+
+test("unknown native accounting retains budget outcome but releases host capacity only after owned processes exit",async()=>{
+  const h=jobHarness();
+  // A bounded local process substitutes for the lifecycle boundary, never a provider invocation.
+  const child=spawn(process.execPath,["-e","process.on('SIGTERM',()=>{});console.log('ready');setTimeout(()=>{},10000)"],{detached:true,stdio:["ignore","pipe","ignore"]});
+  const closed=once(child,"close");
+  try {
+    await once(child.stdout!,"data");
+    const stat=readFileSync(`/proc/${child.pid}/stat`,"utf8");
+    const startIdentity=stat.slice(stat.lastIndexOf(")")+2).split(" ")[19];
+    h.persist({pid:child.pid,startIdentity});
+    writeFileSync(join(h.dir,"provider.jsonl"),raw(init,tool("a","Bash")));
+    const manager=h.manager();await manager.dispatch(h.command);
+    assert.equal(h.updates.at(-1)!.state,"accounting_unavailable");
+    assert.equal(h.updates.at(-1)!.costUsd,undefined,"unknown usage is not settled as zero");
+    assert.deepEqual(h.released,[],"SIGTERM intent is not exit evidence");
+    const recovered=h.manager();
+    assert.ok(h.reserved.length>=2,"restart reclaims a still-owned unavailable job's host slot");
+    child.kill("SIGKILL");await closed;
+    const deadline=Date.now()+3000;
+    while(!h.released.length && Date.now()<deadline) await new Promise((r)=>setTimeout(r,50));
+    assert.ok(h.released.length>0,"proven retirement returns shared host capacity");
+    await recovered.dispatch(h.command);
+    assert.equal(h.updates.at(-1)!.state,"accounting_unavailable","capacity release cannot fabricate a usage settlement");
+  } finally {child.kill("SIGKILL");await closed;h.cleanup();}
 });

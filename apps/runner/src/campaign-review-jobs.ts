@@ -101,10 +101,23 @@ function processIdentity(pid:number):string|null {
   try { const stat=readFileSync(`/proc/${pid}/stat`,"utf8");return stat.slice(stat.lastIndexOf(")")+2).split(" ")[19]??null; }
   catch { return null; }
 }
+function processGroupAlive(groupId:number):boolean|null {
+  try {
+    for(const name of readdirSync("/proc")) {
+      if(!/^\d+$/.test(name)) continue;
+      try {
+        const stat=readFileSync(`/proc/${name}/stat`,"utf8");
+        if(Number(stat.slice(stat.lastIndexOf(")")+2).split(" ")[2])===groupId) return true;
+      } catch(error) { if((error as NodeJS.ErrnoException).code!=="ENOENT" && (error as NodeJS.ErrnoException).code!=="ESRCH") return null; }
+    }
+    return false;
+  } catch { return null; }
+}
 
 /** Runner-owned private artifacts and process identity make retry/restart one-shot. */
 export class ControlledCampaignReviewer {
   private readonly polling=new Map<string,ReturnType<typeof setTimeout>>();
+  private readonly retirementPolling=new Map<string,ReturnType<typeof setTimeout>>();
   private readonly dispatching=new Set<string>();
   constructor(private readonly root:string,private readonly store:SessionStore,private readonly send:(u:CampaignReviewJobUpdate)=>void,
     private readonly reserve:(jobId:string,agentId:string)=>boolean,private readonly release:(jobId:string)=>void) {
@@ -115,9 +128,11 @@ export class ControlledCampaignReviewer {
       if(!/^review_[a-f0-9-]{36}$/.test(name)) continue;
       try {
         const state=JSON.parse(readFileSync(join(root,name,"state.json"),"utf8")) as State;
-        const alive=state.pid && state.startIdentity && processIdentity(state.pid)===state.startIdentity ||
+        const alive=state.pid && state.startIdentity && (processIdentity(state.pid)===state.startIdentity || processGroupAlive(state.pid)!==false) ||
           state.providerPid && state.providerStartIdentity && processIdentity(state.providerPid)===state.providerStartIdentity;
-        if(state.phase!=="finished" && alive && !reserve(name,state.command.profile.agentId)) this.cancel(name,state.command.nonce);
+        if(alive && (state.phase!=="finished" || state.update?.state==="accounting_unavailable") &&
+            !reserve(name,state.command.profile.agentId)) this.cancel(name,state.command.nonce);
+        if(state.update?.state==="accounting_unavailable") this.releaseFinishedAdmissionWhenReaped(state);
       } catch {}
     }
   }
@@ -133,7 +148,20 @@ export class ControlledCampaignReviewer {
     if(["completed","not_launched","accounting_unavailable"].includes(update.state)) state.phase="finished";
     this.save(dir,state);
     if(["completed","not_launched"].includes(update.state)) this.release(state.command.jobId);
+    else if(update.state==="accounting_unavailable") this.releaseFinishedAdmissionWhenReaped(state);
     this.send(update);
+  }
+  /** Budget settlement and process capacity are separate: retain unknown spending, but release
+   * the host slot once the exact owned process tree is proven gone. No PID means no exit proof. */
+  private releaseFinishedAdmissionWhenReaped(state:State):void {
+    const key=state.command.jobId;
+    const previous=this.retirementPolling.get(key);if(previous) clearTimeout(previous);
+    if(!state.pid || !state.startIdentity) return;
+    const alive=processIdentity(state.pid)===state.startIdentity || processGroupAlive(state.pid)!==false ||
+      state.providerPid && state.providerStartIdentity && processIdentity(state.providerPid)===state.providerStartIdentity;
+    if(!alive) { this.retirementPolling.delete(key);this.release(key);return; }
+    const timer=setTimeout(()=>this.releaseFinishedAdmissionWhenReaped(state),1000);
+    timer.unref();this.retirementPolling.set(key,timer);
   }
   async dispatch(command:CampaignReviewJobCommand):Promise<void> {
     if(this.dispatching.has(command.jobId)) return;
@@ -145,7 +173,10 @@ export class ControlledCampaignReviewer {
     if(existsSync(join(dir,"state.json"))) {
       const state=JSON.parse(readFileSync(join(dir,"state.json"),"utf8")) as State;
       if(JSON.stringify(state.command)!==JSON.stringify(command)) return;
-      if(state.phase==="finished" && state.update) this.send(state.update);
+      if(state.phase==="finished" && state.update) {
+        if(state.update.state==="accounting_unavailable") this.releaseFinishedAdmissionWhenReaped(state);
+        this.send(state.update);
+      }
       else {
         if(!this.reserve(command.jobId,command.profile.agentId)) this.cancel(command.jobId,command.nonce);
         this.poll(dir,state);
@@ -251,7 +282,7 @@ export class ControlledCampaignReviewer {
   cancel(jobId:string,nonce:string):void {
     try {
       const dir=this.dir(jobId),state=JSON.parse(readFileSync(join(dir,"state.json"),"utf8")) as State;
-      if(state.command.nonce!==nonce || state.phase==="finished") return;
+      if(state.command.nonce!==nonce || state.phase==="finished" && state.update?.state!=="accounting_unavailable") return;
       state.cancelled=true;this.save(dir,state);
       if(!state.pid) return;
       const controllerAlive=state.startIdentity && processIdentity(state.pid)===state.startIdentity;

@@ -80,7 +80,7 @@ installed skill, account, hosting setting or permission is edited by this adapte
 owned clean worktree and canonical GitHub REST base/head must match. Reservations and dispatch
 identity commit atomically before launching. A repeated identical request reads the existing job;
 it cannot launch another provider. `get_campaign_review_job` / `campaign review-job <job-id>`
-reads its receipt/report without new spending, including after the allowance stops.
+reads its receipt metadata without new spending, including after the allowance stops.
 `list_campaign_review_jobs` / `campaign review-jobs` also reads terminal jobs, with keyset
 `afterJobId` pagination and a limit of 1–100 (default 25). Read authorization rechecks the current
 root audience, authorized repository/issue, durable work-item attempt and source-session lineage.

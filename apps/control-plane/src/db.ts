@@ -16426,11 +16426,16 @@ export class ControlPlaneDb {
            SELECT owner_id, bucket_ts, cost_microusd FROM usage_hourly WHERE organization_id=? AND owner_kind='user' AND bucket_ts>=?
            UNION ALL
            SELECT owner_id, bucket_ts, cost_microusd FROM usage_daily WHERE organization_id=? AND owner_kind='user' AND bucket_ts>=?
+           UNION ALL
+           SELECT user_id AS owner_id, CAST(strftime('%s',day) AS INTEGER)*1000 AS bucket_ts,
+                  cost*1000000 AS cost_microusd FROM campaign_review_daily_cost
+            WHERE organization_id=? AND day>=?
          )
         GROUP BY owner_id
         ORDER BY today DESC, month DESC, owner_id ASC
         LIMIT 500`,
-    ).all(dayStart, since7, organizationId, since30, organizationId, since30) as unknown as Array<{
+    ).all(dayStart, since7, organizationId, since30, organizationId, since30,
+      organizationId, new Date(since30).toISOString().slice(0,10)) as unknown as Array<{
       owner_id: string; today: number; week: number; month: number;
     }>;
     const nameOf = this.stmt("SELECT display_name FROM identity_users WHERE user_id=?");

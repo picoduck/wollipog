@@ -14,7 +14,8 @@ for (const theme of ["dark", "light"]) {
       await expect(summary).toContainText("Session Limits");
       await expect(summary).toContainText("Session Limits$40.00, no session tool ceiling");
       await expect(summary).toContainText("Root Allocation$25.00, 500 tool calls");
-      await expect(summary).toContainText("External reviewers are unsupported.");
+      await expect(summary).toContainText("Managed Sessions and approved native review jobs.");
+      await expect(summary).toContainText("Unmanaged reviewer invocations are unsupported.");
       await expect(summary).toContainText("This is not a hard billing cap.");
       const size = await summary.evaluate((el) => ({ width: el.clientWidth, scroll: el.scrollWidth }));
       expect(size.scroll).toBeLessThanOrEqual(size.width + 1);
