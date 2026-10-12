@@ -95,6 +95,33 @@ async function settle(): Promise<void> {
   await act(async () => new Promise<void>((resolve) => domWindow.setTimeout(resolve, 0)));
 }
 
+test("Full Control defaults preview blocks saving and never mutates authenticated defaults", async () => {
+  const writes: unknown[] = [];
+  const transport: ApiTransport = { instanceId: "test", publicOrigin: "http://localhost", close() {},
+    async request(_path, init) {
+      if (init?.method === "PUT") writes.push(init.body);
+      return new Response(JSON.stringify(settings()), { headers: { "content-type": "application/json" } });
+    } };
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<ApiProvider client={createApiClient(transport)}><OrchestratorSettingsPanel /></ApiProvider>));
+    await settle();
+    const save = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Save Defaults")!;
+    const full = container.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!;
+    assert.ok(full);
+    await act(async () => full.click());
+    assert.match(container.textContent ?? "", /Activation Unavailable/);
+    assert.match(container.textContent ?? "", /Defaults apply only to new campaigns/);
+    assert.equal(save.disabled, true);
+    await act(async () => save.click());
+    assert.deepEqual(writes, []);
+    await act(async () => container.querySelector<HTMLInputElement>('[data-control-mode="custom"]')!.click());
+    assert.equal(save.disabled, false);
+  } finally { await act(async () => root.unmount()); container.remove(); }
+});
+
 test("Orchestrator settings separate policy areas, validate accessibly, and persist a complete user default", async () => {
   let current = settings();
   const writes: unknown[] = [];
@@ -117,7 +144,7 @@ test("Orchestrator settings separate policy areas, validate accessibly, and pers
     await act(async () => root.render(<ApiProvider client={createApiClient(transport)}><OrchestratorSettingsPanel /></ApiProvider>));
     await settle();
     assert.deepEqual([...container.querySelectorAll("h3")].map((node) => node.textContent),
-      ["Behavior", "Execution Permissions", "Decision Delegation"]);
+      ["Orchestrator Control", "Behavior", "Execution Permissions", "Decision Delegation"]);
     assert.match(container.textContent ?? "", /Human-Only Decisions/);
     assert.match(container.textContent ?? "", /provider may retain images in provider-local transcripts or media logs/,
       "the retention disclosure is visible while Human is still selected");

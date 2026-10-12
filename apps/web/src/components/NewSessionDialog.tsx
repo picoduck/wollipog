@@ -74,6 +74,7 @@ import { ProjectLocationDialog } from "./ProjectLocationDialog.js";
 import { nativeTuiAccountingDetail } from "../native-tui-accounting.js";
 import { projectAvailabilityLabel, projectAvailabilityMeta, type ProjectLocationCandidate } from "../project-management.js";
 import { StatusBadge } from "./StatusBadge.js";
+import { FullControlPreparation } from "./FullControlPreparation.js";
 import { projectAudienceVisibilitySummary } from "../session-project-assignment.js";
 import { supportsAgentTui } from "../shells-panel.js";
 import { nativeTuiUnavailableReason } from "../native-tui-availability.js";
@@ -256,6 +257,7 @@ export function NewSessionDialog({
     () => cloneOrchestratorDefaults(DEFAULT_ORCHESTRATOR_DEFAULTS),
   );
   const [orchestratorOverrides, setOrchestratorOverrides] = useState(() => new Set<string>());
+  const [controlPreview, setControlPreview] = useState<"custom" | "full_control">("custom");
   const [liveChildLimitDraft, setLiveChildLimitDraft] = useState(String(DEFAULT_LIVE_CHILD_LIMIT));
   const [harnessDefaults, setHarnessDefaults] = useState<{
     api: typeof api; scope: typeof instanceScope; view: AgentHarnessDefaultsView | null; error: boolean;
@@ -1009,7 +1011,7 @@ export function NewSessionDialog({
     (!executionTarget || executionTarget.available) && cloudBudgetValid &&
     (launchSurface !== "native_tui" || nativeTuiSupported) &&
     (defaultsReady || orchestrator) &&
-    (!orchestrator || (orchestratorSupported && orchestratorSettingsReady &&
+    (!orchestrator || (controlPreview !== "full_control" && orchestratorSupported && orchestratorSettingsReady &&
       orchestratorCapabilitiesValid && orchestratorDelegationValid && orchestratorExecutionValid)) &&
     liveChildLimitValid &&
     (!directWslRequiresSafeOrchestrator || (orchestrator && orchestratorSupported)) && !retainedSessionId;
@@ -1021,7 +1023,7 @@ export function NewSessionDialog({
   }, [
     projectSelection, selectedProject?.id, projectLocationId, projectLocationLaunchable,
     runnerId, workspaceId, browsedPath, agentId, selectedAgentOption?.disabled, providerAccountId,
-    defaultsReady, harnessDefaults?.error, roleOverride, orchestrator, orchestratorSupported,
+    defaultsReady, harnessDefaults?.error, roleOverride, orchestrator, orchestratorSupported, controlPreview,
     directWslRequiresSafeOrchestrator, launchSurface, nativeTuiSupported,
     executionTargetId, executionTarget?.id, executionTarget?.available,
     cloudBudgetUsd, cloudBudgetValid, retainedSessionId,
@@ -1076,7 +1078,10 @@ export function NewSessionDialog({
     setValidationError(null);
     setRequestError(null);
     if (!valid) {
-      if (retainedSessionId) {
+      if (orchestrator && controlPreview === "full_control") {
+        setValidationError("Full Control activation is unavailable. Review the preflight or choose Custom.");
+        focusValidationProblem('[data-control-mode="full_control"]');
+      } else if (retainedSessionId) {
         setValidationError("Open the retained session before creating another one.");
         retainedSessionButtonRef.current?.focus();
       } else if (projectsSupported && !projectSelection) {
@@ -1689,6 +1694,12 @@ export function NewSessionDialog({
               >Retry Orchestrator Defaults</button>}
             </div>}
             {orchestrator && orchestratorSettingsReady && <div className="new-session-orchestrator-policy" data-validation-target="orchestrator-defaults">
+              <FullControlPreparation surface="launch" defaults={{ ...orchestratorDraft,
+                execution: { ...orchestratorDraft.execution, integrationIsolation: effectiveIntegrationIsolation } }} mode={controlPreview}
+                onChange={setControlPreview} disabled={busy}
+                root={{ driver: agent?.driver, permissionMode: roleOverride === "orchestrator" &&
+                  (providerPermissionsPreset || !orchestratorRoleSupported) ? "orchestrator" : savedPermissionMode }}
+                workspace={workspaceId || browsedPath} />
               <fieldset className="orchestrator-policy-area">
                 <legend>Behavior</legend>
                 <p className="muted">These effective values are resolved and stored before the campaign's first turn.</p>

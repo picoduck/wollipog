@@ -21,6 +21,7 @@ import { SettingsGroup } from "./SettingsView.js";
 import { DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE } from "../ui-evidence-disclosure.js";
 import type { SelectOption } from "./ui/ChoiceControls.js";
 import { SegmentedRow, SelectRow, StaticRow } from "./ui/SettingsRows.js";
+import { FullControlPreparation } from "./FullControlPreparation.js";
 
 const AUTO = "__automatic__";
 const DECISION_LABELS: Record<DelegatableWorkflowDecisionCategory, string> = {
@@ -62,6 +63,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
   const [draft, setDraft] = useState<OrchestratorDefaults | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [controlPreview, setControlPreview] = useState<"custom" | "full_control">("custom");
   const [error, setError] = useState<string | null>(null);
   const generation = useRef(0);
   const draftDirty = useRef(false);
@@ -246,7 +248,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
       : view?.capabilities.status === "available");
 
   const save = async () => {
-    if (!draft || busy || !limitValid || !fixedPairValid) return;
+    if (!draft || busy || !limitValid || !fixedPairValid || controlPreview === "full_control") return;
     generation.current += 1;
     setBusy(true);
     setError(null);
@@ -275,6 +277,8 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
   const source = view!.source;
 
   return <div className="orchestrator-settings" aria-busy={busy || loading || undefined}>
+    <FullControlPreparation surface="defaults" defaults={draft} mode={controlPreview}
+      onChange={setControlPreview} disabled={busy} />
     <SettingsGroup title="Behavior">
       <p className="settings-group-intro">
         Defaults apply to new campaigns only. Each campaign stores its own effective policy.
@@ -476,7 +480,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
     {error && <p className="form-error" role="alert">{error}</p>}
     <div className="orchestrator-settings-actions">
       <span className="muted">Current Source: {source === "user_default" ? "User Default" : "Wollipog Default"}</span>
-      <button type="button" className="btn primary" disabled={busy || !limitValid || !fixedPairValid} onClick={() => void save()}>
+      <button type="button" className="btn primary" disabled={busy || !limitValid || !fixedPairValid || controlPreview === "full_control"} onClick={() => void save()}>
         {busy ? "Saving…" : "Save Defaults"}
       </button>
     </div>
