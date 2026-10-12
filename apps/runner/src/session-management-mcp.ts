@@ -559,6 +559,8 @@ function mapSession(s: Json): Json {
     ...(s?.orchestratorCampaign ? { orchestratorCampaign: s.orchestratorCampaign } : {}),
     ...(s?.campaignRequests ? { campaignRequests: s.campaignRequests } : {}),
     costUsd: s?.costUsd,
+    // A running Claude turn's requests that no total includes yet, with a rate-table estimate (#3086).
+    ...(s?.liveUsage ? { liveUsage: s.liveUsage } : {}),
     costBudgetUsd: s?.costBudgetUsd ?? null,
     costCheckpointsUsd: s?.costCheckpointsUsd ?? null,
     costCheckpointApprovedUsd: s?.costCheckpointApprovedUsd ?? null,
@@ -1124,7 +1126,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "list_sessions",
-    description: "List lightweight session summaries with status, title, guardrails, live-child capacity, and any pending approval title. Use get_session for full campaign state and unfinished background-job ids.",
+    description: "List lightweight session summaries with status, title, guardrails, live-child capacity, and any pending approval title. liveUsage is a running Claude turn's usage that no total includes yet. Use get_session for full campaign state and unfinished background-job ids.",
     inputSchema: {
       type: "object",
       properties: { archived: { type: "boolean", description: "Include archived sessions" } },
@@ -1138,7 +1140,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "get_session",
-    description: "Get one session's full metadata by id, including any hold that keeps its next turn from starting and the recovery action that clears it.",
+    description: "Get one session's full metadata by id, including any hold that keeps its next turn from starting and the recovery action that clears it. tokensIn keeps the provider's meaning: Claude Code counts only uncached input while Codex includes cache reads, as tokensInIncludesCachedInput says.",
     inputSchema: {
       type: "object",
       properties: { sessionId: { type: "string" } },
@@ -1176,6 +1178,9 @@ export const TOOLS: McpTool[] = [
                 messageCount: s.messageCount,
                 tokensIn: s.tokensIn,
                 tokensOut: s.tokensOut,
+                // Claude Code counts only uncached input in tokensIn; Codex includes cache reads (#3086).
+                tokensInIncludesCachedInput: s.driver === "claude-code" ? false
+                  : s.driver === "codex" || s.driver === "codex-app-server" ? true : null,
                 preview: typeof s.preview === "string" ? truncate(s.preview, MAX_LINE) : null,
               },
       });

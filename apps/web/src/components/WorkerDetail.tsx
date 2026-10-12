@@ -1,6 +1,7 @@
 import { useContext, useEffect, useId, useLayoutEffect, useMemo, useRef } from "react";
 import type { PendingApproval, SessionView } from "@wollipog/protocol";
 import { formatRecordedRelativeTime, formatRecordedTimestamp, titleCaseLabel } from "../format.js";
+import { INPUT_TOKEN_BASIS_LABEL } from "../session-cost.js";
 import { useStoreActions } from "../store.js";
 import type { SubagentLifecycle } from "../subagents.js";
 import type { TimelineItem } from "../timeline.js";
@@ -163,6 +164,8 @@ export function WorkerDetail({
           )}
           {worker.toolCount != null && <li>{worker.toolCount.toLocaleString()} {worker.toolCount === 1 ? "Tool Use" : "Tool Uses"}</li>}
           {tokens && <li>{tokens}</li>}
+          {/* Claude counts only uncached input and Codex all of it, so the count says which (#3086). */}
+          {tokens && worker.inputBasis && <li>{INPUT_TOKEN_BASIS_LABEL[worker.inputBasis]}</li>}
         </ul>
       </div>
       {request && (

@@ -118,6 +118,21 @@ test("roster rows carry a group, an activity sentence and a parent, and keep the
   assert.equal(rows.filter(isCurrentWorker).length, 4);
 });
 
+test("a worker's tokens say whether its provider counts cached input (#3086)", () => {
+  const claudeParent = { ...session, driver: "claude-code" } as SessionView;
+  const codexMember = { ...session, id: "codex", title: "Codex", driver: "codex-app-server", pendingApproval: null,
+    backgroundJobs: [], tokensIn: 5, tokensOut: 7, createdAt: 1, updatedAt: 2 } as unknown as SessionView;
+  const piMember = { ...codexMember, id: "pi", title: "Pi", driver: "pi" } as unknown as SessionView;
+  const rows = workerRoster(claudeParent, [child], [codexMember, piMember], () => true);
+  const basis = Object.fromEntries(rows.map((row) => [row.id, row.inputBasis]));
+  assert.deepEqual(basis, {
+    "subagent:child": "excludesCached",
+    "background:monitor": undefined,
+    "session:codex": "includesCached",
+    "session:pi": undefined,
+  });
+});
+
 test("a step reads as what the worker is doing, did, or waits to do", () => {
   assert.equal(stepActivity("$ npm test", "now"), "Running npm test");
   assert.equal(stepActivity("Bash: npm test", "done"), "Ran npm test");

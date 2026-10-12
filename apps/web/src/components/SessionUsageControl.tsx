@@ -2,7 +2,8 @@ import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { SessionUsageResponse, SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { formatCost, formatTokens } from "../format.js";
-import { costProvenanceNote, estimatedCostSourceUrl, sessionCostLabel, sessionUsageTotals } from "../session-cost.js";
+import { costProvenanceNote, estimatedCostSourceUrl, inputTokenBasis, RUNNING_COUNTERS_BASIS_NOTE, sessionCostLabel,
+  sessionUsageTotals } from "../session-cost.js";
 import { useLiveSession } from "../store.js";
 import { useAnchoredPopover } from "./anchored-popover.js";
 import { ComposerButton } from "./ComposerControls.js";
@@ -113,6 +114,11 @@ function SessionUsageFigures({ session, panelId, detail }: { session: SessionVie
             </>
           ) : provenance}
         </p>
+      )}
+      {/* The running counters keep the provider's meaning of input until the breakdown separates
+          cached input for every driver (#3086). */}
+      {!totals.detailed && inputTokenBasis(session.driver) && (
+        <p className="session-usage-note">{RUNNING_COUNTERS_BASIS_NOTE[inputTokenBasis(session.driver)!]}</p>
       )}
       {breakdownError && <p className="session-usage-note" role="alert">{breakdownError}</p>}
       {byModel.length > 0 && (

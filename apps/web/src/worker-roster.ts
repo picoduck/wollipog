@@ -4,6 +4,7 @@ import { statusMeta, statusValues, type StatusMeta } from "./status-meta.js";
 import type { SubagentDescriptor } from "./subagents.js";
 import { splitStepTitle } from "./work-steps.js";
 import { backgroundJobLabel } from "./background-job-stop.js";
+import { inputTokenBasis, type InputTokenBasis } from "./session-cost.js";
 
 /**
  * The one word a worker shows (docs/design-system.md §11.2, #2857): the Subagent / background job
@@ -56,6 +57,8 @@ export interface WorkerRow {
   effort?: string;
   tokens?: number;
   inclusiveTokens?: number;
+  /** Whether `tokens` counts cached input, which differs by provider (#3086). */
+  inputBasis?: InputTokenBasis;
   role?: string;
   phase?: string;
   activations?: number;
@@ -269,6 +272,8 @@ export function workerRoster(
         ? { tokens: (agent.directUsage.inputTokens ?? 0) + (agent.directUsage.outputTokens ?? 0) } : {}),
       ...(agent.inclusiveUsage?.inputTokens != null || agent.inclusiveUsage?.outputTokens != null
         ? { inclusiveTokens: (agent.inclusiveUsage.inputTokens ?? 0) + (agent.inclusiveUsage.outputTokens ?? 0) } : {}),
+      // A subagent's usage is reported by its session's provider.
+      ...(inputTokenBasis(session.driver) ? { inputBasis: inputTokenBasis(session.driver) } : {}),
       ...(agent.toolCount == null ? {} : { toolCount: agent.toolCount }),
       ...(latest == null ? {} : { latestTool: { ...latest, active: latestActive } }),
     };
@@ -310,6 +315,7 @@ export function workerRoster(
       ...(member.effort ? { effort: member.effort } : {}),
       // A running Claude turn's completed requests count as tokens so far (#3086).
       tokens: member.tokensIn + member.tokensOut + (member.liveUsage ? member.liveUsage.tokensIn + member.liveUsage.tokensOut : 0),
+      ...(inputTokenBasis(member.driver) ? { inputBasis: inputTokenBasis(member.driver) } : {}),
     });
   }
   return rows;

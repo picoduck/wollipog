@@ -171,6 +171,8 @@ test("the page's facts name the worker's kind, its parent as a link, and its tok
     assert.equal(facts[0], "Subagent");
     assert.match(facts[1]!, /^Started /);
     assert.ok(facts.includes("600 Tokens, 740 With Nested"), `the tokens fact counts its nested worker: ${facts.join(" | ")}`);
+    assert.equal(facts[facts.indexOf("600 Tokens, 740 With Nested") + 1], "Excludes Cached Input",
+      "Claude counts only uncached input, and the page says so beside the count (#3086)");
     assert.equal(facts.some((fact) => fact.startsWith("In ")), false, "a top-level worker has no parent link");
 
     // Nested Workers lists its child as a roster row, which opens the child's own page.
