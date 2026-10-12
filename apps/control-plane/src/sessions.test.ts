@@ -2064,9 +2064,64 @@ test("an Orchestrator's own answer wakes nobody, while a human's answer wakes it
     const second = deliver(Date.now() + CAMPAIGN_CONTINUATION_FAN_IN_MS + 1_000);
     assert.ok(second, "a human resolution wakes the Orchestrator without waiting out the window");
     assert.match(second, /"kind":"request_resolved".*"occurrenceId":"request_second","owner":"orchestrator","category":"question","title":"Which branch second\?","outcome":"answered","resolvedBy":"human"/u);
-    assert.match(second, /"kind":"request_actionable".*"occurrenceId":"request_second","category":"question","title":"Which branch second\?","pending":false,"outcome":"answered","resolvedBy":"human"/u,
-      "the coalesced request names its own settlement rather than a stale pending card");
+    assert.match(second, /"kind":"request_actionable".*"occurrenceId":"request_second","category":"question","pending":false,"outcome":"answered","resolvedBy":"human"/u,
+      "the coalesced request names its own settlement rather than a stale pending card, and only a pending one its title");
     assert.match(second, /Action needed: yes/u);
+  } finally {
+    db.close();
+  }
+});
+
+test("a request the Orchestrator lost to a human before delivery is shown without its title (#3083)", () => {
+  const { db, svc, root, child, deliver, ask } = continuationCampaign("questions");
+  try {
+    ask("moved", "Which private branch?");
+    assert.ok(svc.setParentControl(root.id, "off").ok);
+    assert.equal(svc.descendantRequests(root.id, () => true).status, 403,
+      "with Parent Control off the Orchestrator can no longer list the request");
+    assert.ok(svc.answerQuestion(child.id, "moved", { q: "Continue" }).ok, "a human answers it");
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    const text = deliver(Date.now() + CAMPAIGN_CONTINUATION_FAN_IN_MS + 1_000);
+    assert.ok(text, "the removal still wakes the Orchestrator promptly");
+    assert.doesNotMatch(text, /private branch/u);
+    assert.match(text, /Action needed: yes/u);
+  } finally {
+    db.close();
+  }
+});
+
+test("a prompt event behind a full delivery slice still wakes the Orchestrator promptly (#3083)", () => {
+  const { db, root, child, deliver } = continuationCampaign("questions");
+  try {
+    const start = Date.now();
+    db.updateSessionStatus(root.id, "idle", start);
+    for (let index = 0; index < 64; index += 1) {
+      db.recordCampaignContinuationEvent({ eventId: `backlog-${index}`, campaignSessionId: root.id,
+        kind: "request_actionable", subjectSessionId: child.id, occurrenceId: `request_backlog_${index}`, now: start });
+    }
+    db.recordCampaignContinuationEvent({ eventId: "ready", campaignSessionId: root.id, kind: "child_ready",
+      subjectSessionId: child.id, subjectStatus: "idle", now: start });
+    const first = deliver(start + CAMPAIGN_CONTINUATION_FAN_IN_MS + 500);
+    assert.ok(first, "the queue, not the 64-event slice, decides the deadline");
+    assert.match(first, /durable event range 1-64\./u);
+    assert.match(deliver(start + CAMPAIGN_CONTINUATION_FAN_IN_MS + 600) ?? "", /durable event range 65-65\..*"kind":"child_ready"/su);
+  } finally {
+    db.close();
+  }
+});
+
+test("a human answer whose resolver could not be recorded still wakes the Orchestrator for a full sweep (#3083)", () => {
+  const { db, svc, root, child, deliver, ask } = continuationCampaign("questions");
+  try {
+    ask("unrecorded", "Which branch?");
+    db.recordCampaignRequestResolution = () => { throw new Error("disk full"); };
+    assert.ok(svc.answerQuestion(child.id, "unrecorded", { q: "Continue" }).ok,
+      "a provenance failure never interrupts the resolution");
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    const text = deliver(Date.now() + CAMPAIGN_CONTINUATION_FAN_IN_MS + 1_000);
+    assert.ok(text, "an unattributed removal wakes the Orchestrator promptly");
+    assert.match(text, /"kind":"request_resolved",.*"owner":"orchestrator","resolvedBy":"unknown"/u);
+    assert.match(text, /Action needed: yes/u);
   } finally {
     db.close();
   }
@@ -2175,9 +2230,9 @@ test("each campaign event kind wakes on its own schedule and names what the Orch
     { name: "request_resolved by the system", prompt: false, resolver: "system" as const, record: (root: string, child: string) => ({
       kind: "request_resolved" as const, subjectStatus: "orchestrator", occurrenceId: campaignRequestToken("generic", child, "request_kind") }),
     expected: /"owner":"orchestrator","category":"question","title":"Kind title","outcome":"answered","resolvedBy":"system"/u, action: "no" },
-    { name: "request_resolved with no recorded resolver", prompt: false, record: () => ({
+    { name: "request_resolved with no recorded resolver", prompt: true, record: () => ({
       kind: "request_resolved" as const, subjectStatus: "orchestrator", occurrenceId: "f".repeat(64) }),
-    expected: /"kind":"request_resolved","createdAt":\d+,"owner":"orchestrator","resolvedBy":"unknown"/u, action: "no" },
+    expected: /"kind":"request_resolved","createdAt":\d+,"owner":"orchestrator","resolvedBy":"unknown"/u, action: "yes" },
     { name: "request_actionable no longer pending", prompt: false, record: (_root: string, child: string) => ({
       kind: "request_actionable" as const, subjectSessionId: child, occurrenceId: "request_gone" }),
     expected: /"kind":"request_actionable",.*"occurrenceId":"request_gone","pending":false,"resolvedBy":"unknown"/u, action: "no" },

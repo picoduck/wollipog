@@ -5125,8 +5125,12 @@ export class SessionsService {
         }
       });
       // A prompt event fans in briefly and carries everything pending with it; anything else waits
-      // out the coalescing window from the oldest undelivered event.
-      const promptAt = details.filter((detail) => detail.prompt).map((detail) => detail.createdAt);
+      // out the coalescing window from the oldest undelivered event. The queue decides, not just
+      // this bounded slice, so a backlog cannot hold a prompt event behind the window.
+      const promptAt = [
+        this.db.campaignContinuationPromptEventAt(campaignSessionId),
+        ...details.filter((detail) => detail.prompt).map((detail) => detail.createdAt),
+      ].filter((at): at is number => at !== null);
       const dueAt = promptAt.length > 0
         ? Math.min(...promptAt) + CAMPAIGN_CONTINUATION_FAN_IN_MS
         : events[0]!.createdAt + CAMPAIGN_CONTINUATION_COALESCE_MS;
@@ -5191,25 +5195,35 @@ export class SessionsService {
         const generic = typed || !event.subjectSessionId ? undefined
           : pendingRequests(this.db.campaignContinuationSubject(event.subjectSessionId)?.pendingApproval ?? null)
             .find((request) => request.occurrenceId === occurrenceId && request.kind !== "workflow_decision");
-        const pending = typed ? typed.status === "pending" && typed.authority === "orchestrator" : Boolean(generic);
-        const resolution = pending || !event.subjectSessionId ? null : this.db.campaignRequestResolution(campaignSessionId,
+        // Ownership can change between the event and its delivery, so a title is shown only while
+        // the request is still pending and the Orchestrator still owns it: exactly when
+        // list_descendant_requests would show it.
+        const genericOwner = generic && event.subjectSessionId
+          ? this.continuationRequestOwner(campaignSessionId, event.subjectSessionId, generic) : undefined;
+        const live = typed ? typed.status === "pending" : Boolean(generic);
+        const owner = typed ? typed.authority : genericOwner;
+        const pending = live && owner === "orchestrator";
+        const resolution = live || !event.subjectSessionId ? null : this.db.campaignRequestResolution(campaignSessionId,
           campaignRequestToken(typed ? "typed" : "generic", event.subjectSessionId, occurrenceId));
         const request = typed
           ? { category: typed.category, title: this.workflowDecisionApproval(typed).title,
             resourceKey: boundedCampaignEventText(typed.resourceKey) }
           : generic ? { category: generic.kind ?? "permission", title: boundedCampaignEventText(generic.title) }
           : resolution;
-        // The event was raised for an Orchestrator-owned request, so its title is one it may list.
         return { ...base, prompt: false, actionable: pending, summary: {
-          ...base, ...subject(event.subjectSessionId), occurrenceId, ...(request ? described(request, true) : {}),
-          pending, ...(pending ? {} : settled(resolution)),
+          ...base, ...subject(event.subjectSessionId), occurrenceId, ...(request ? described(request, pending) : {}),
+          pending, ...(live && !pending ? { owner: "human" } : {}), ...(live ? {} : settled(resolution)),
         } };
       }
       case "request_resolved": {
-        const resolution = this.db.campaignRequestResolution(campaignSessionId, event.occurrenceId ?? "");
+        // Only the resolution that caused this removal describes it. A removal with no such record,
+        // for instance a change of owner or a record that could not be written, may still have been
+        // a human's, so it wakes the Orchestrator promptly and asks for the full sweep.
+        const recorded = this.db.campaignRequestResolution(campaignSessionId, event.occurrenceId ?? "");
+        const resolution = recorded && recorded.resolvedAt <= event.createdAt ? recorded : null;
         const owner = event.subjectStatus === "human" ? "human" : "orchestrator";
-        const humanResolved = resolution?.resolvedBy === "human";
-        return { ...base, prompt: humanResolved, actionable: humanResolved, summary: {
+        const humanOrUnknown = !resolution || resolution.resolvedBy === "human";
+        return { ...base, prompt: humanOrUnknown, actionable: humanOrUnknown, summary: {
           ...base, ...subject(resolution?.subjectSessionId),
           ...(resolution ? { occurrenceId: resolution.occurrenceId } : {}), owner,
           ...(resolution
@@ -5231,6 +5245,13 @@ export class SessionsService {
       case "human_blockers_cleared":
         return { ...base, prompt: true, actionable: true, summary: base };
     }
+  }
+
+  /** Who currently answers a child's generic request, as list_descendant_requests would judge it. */
+  private continuationRequestOwner(campaignSessionId: string, childSessionId: string, request: PendingApproval): "human" | "orchestrator" {
+    const campaign = this.db.getSession(campaignSessionId);
+    const child = this.db.getSession(childSessionId);
+    return campaign && child ? this.genericCampaignAuthority(campaign, child, request).owner : "human";
   }
 
   private reconcileCampaignContinuationCommand(commandId: string, now: number): void {

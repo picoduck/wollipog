@@ -16831,6 +16831,24 @@ export class ControlPlaneDb {
     } : null;
   }
 
+  /** When the earliest undelivered event that must wake the Orchestrator promptly was recorded,
+   * across the whole pending queue rather than one bounded delivery slice (#3083). Prompt events are
+   * a child becoming ready or held, the last human blocker clearing, and a request removal not
+   * attributed to a non-human resolver that caused it: an unknown resolver may be a human. */
+  campaignContinuationPromptEventAt(campaignSessionId: string): number | null {
+    const row = this.stmt(
+      `SELECT MIN(event.created_at) AS at FROM orchestrator_campaign_events event
+       WHERE event.campaign_session_id=? AND event.seq>? AND (
+         event.kind IN ('child_ready','child_blocked','human_blockers_cleared') OR
+         (event.kind='request_resolved' AND NOT EXISTS (
+           SELECT 1 FROM orchestrator_campaign_request_resolutions resolution
+           WHERE resolution.campaign_session_id=event.campaign_session_id
+             AND resolution.request_token=event.occurrence_id
+             AND resolution.resolved_by!='human' AND resolution.resolved_at<=event.created_at)))`,
+    ).get(campaignSessionId, this.campaignContinuationCursor(campaignSessionId)) as { at: number | null };
+    return row.at ?? null;
+  }
+
   hasPendingCampaignContinuationEvents(campaignSessionId: string): boolean {
     return Boolean(this.stmt(
       "SELECT 1 FROM orchestrator_campaign_events WHERE campaign_session_id=? AND seq>? LIMIT 1",
