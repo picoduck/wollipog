@@ -665,9 +665,12 @@
 // 213: authoritative bounded history previews in an explicit runner coordinate space (#2881).
 // 215: human-authorized Full Control boundary and shared, reasoned campaign authority; trusted
 //      provider request-source envelopes. Omission preserves Custom and older-peer behavior.
-export const PROTOCOL_VERSION = 215;
+// 217: durable campaign allowance and managed-worker allocation admission. Requires priced,
+//      metered managed providers; external workers and unpriced usage fail closed.
+export const PROTOCOL_VERSION = 217;
 
 export * from "./campaign-authority.js";
+export * from "./campaign-budget.js";
 import type { CampaignControl, CampaignRequestSource, CampaignAuthorityEvaluation } from "./campaign-authority.js";
 export const SESSION_SUMMARY_UI_PROTOCOL = 212;
 export const SKILL_REPORT_REQUEST_LIFETIME_MS = 30_000;
@@ -919,6 +922,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   delegatedParentControl: 136,
   typedWorkflowDecisionDelegation: 139,
   fullControlAuthority: 215,
+  campaignBudgetAdmission: 217,
   workflowDecisionActionAdmission: 151,
   workflowDecisionActionReconciliation: 153,
   /** Control plane retains and delivers a resolver's child-facing workflow-decision message. */
@@ -2494,6 +2498,7 @@ export interface UiEvidenceReviewDelivery {
 /** Credential-free, server-derived campaign state. The stored policy remains the source of truth;
  * this projection applies runtime compatibility fallbacks without mutating or broadening it. */
 export interface OrchestratorCampaignProjection {
+  budget?: import("./campaign-budget.js").CampaignBudgetView;
   status: OrchestratorCampaignStatus;
   policyRevision: number;
   decisionOwners: ParentControlDecisionPolicy;

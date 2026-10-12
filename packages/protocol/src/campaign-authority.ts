@@ -1,4 +1,5 @@
 import { parentControlRequestEligible } from "./index.js";
+import { validCampaignBudgetAuthority, type CampaignBudgetAuthority } from "./campaign-budget.js";
 import type { ApprovalContext, ParentControlDecisionPolicy, ParentControlMode, PendingApproval, WorkflowDecisionCategory, WorkflowDecisionResourceSnapshot } from "./index.js";
 
 export type CampaignControlMode = "custom" | "full_control";
@@ -19,6 +20,7 @@ export interface CampaignAuthorityBoundary {
   /** Exact human-selected policy asks eligible for one-time delegation. Built-in rules and
    * escalations requiring a human cannot be named here to override their enforcement. */
   delegatablePolicyIds: string[];
+  budgetAuthority?: CampaignBudgetAuthority;
 }
 
 export type CampaignControl = { mode: "custom" } | { mode: "full_control"; boundary: CampaignAuthorityBoundary };
@@ -52,7 +54,8 @@ export function validCampaignControl(value: unknown): value is CampaignControl {
   const b = control.boundary;
   const bounded = (v: unknown, max: number) => typeof v === "string" && v.trim().length > 0 && v.length <= max && !/[\x00-\x1f\x7f]/u.test(v);
   return Boolean(b && !Array.isArray(b) && b.version === 1 &&
-    Object.keys(b).every((key) => ["version", "revision", "issueScopeRevision", "repository", "objective", "authorizedByUserId", "authorizedAt", "operations", "delegatablePolicyIds"].includes(key)) &&
+    Object.keys(b).every((key) => ["version", "revision", "issueScopeRevision", "repository", "objective", "authorizedByUserId", "authorizedAt", "operations", "delegatablePolicyIds", "budgetAuthority"].includes(key)) &&
+    (b.budgetAuthority === undefined || validCampaignBudgetAuthority(b.budgetAuthority)) &&
     Number.isSafeInteger(b.revision) && b.revision > 0 && bounded(b.repository, 256) && /^[\w.-]+\/[\w.-]+$/u.test(b.repository) &&
     Number.isSafeInteger(b.issueScopeRevision) && b.issueScopeRevision > 0 &&
     bounded(b.objective, 4000) && bounded(b.authorizedByUserId, 256) && Number.isSafeInteger(b.authorizedAt) && b.authorizedAt > 0 &&
@@ -223,6 +226,7 @@ export function resolveCampaignAuthority(input: {
 export function campaignAuthorityPreflight(control: CampaignControl | undefined, driver: string, protocolVersion: number | null | undefined): { supported: boolean; reason?: string; humanRequiredRequests?: string[] } {
   if (!control || control.mode === "custom") return { supported: true };
   if (!validCampaignControl(control)) return { supported: false, reason: "Full Control requires a valid human-authorized boundary." };
+  if (control.boundary.budgetAuthority && (protocolVersion ?? 0) < 217) return { supported: false, reason: "Campaign limits require a protocol-v217 runner; unsupported peers cannot admit protected work." };
   if ((protocolVersion ?? 0) < 215 || !["codex-app-server", "claude-code"].includes(driver)) return { supported: false, reason: "This provider path cannot enforce the Full Control authority contract; use Custom or update the runner." };
   return { supported: true, humanRequiredRequests: ["secrets_and_sign_in", "persistent_permissions", "provider_access_expansion", "external_elicitation", "root_forms_without_suggested_answers", "unverified_tool_effects", "script_execution_without_bounded_effect_proof", "human_required_rules",
     ...(driver === "claude-code" ? ["relative_shell_commands_without_verified_cwd"] : [])] };

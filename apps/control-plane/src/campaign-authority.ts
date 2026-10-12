@@ -10,13 +10,14 @@ import type { HumanPrincipal } from "./identity.js";
 export function authorizeFullControl(
   principal: HumanPrincipal,
   scope: NonNullable<NonNullable<SessionView["orchestratorPolicy"]>["issueScope"]>,
-  proposal: Pick<CampaignAuthorityBoundary, "objective" | "operations" | "delegatablePolicyIds">,
+  proposal: Pick<CampaignAuthorityBoundary, "objective" | "operations" | "delegatablePolicyIds" | "budgetAuthority">,
   revision: number,
   now: number,
 ): CampaignControl | null {
   if (principal.kind !== "human" || !principal.userId || scope.authorizedByUserId !== principal.userId) return null;
   const control: CampaignControl = { mode: "full_control", boundary: {
     objective: proposal.objective, operations: proposal.operations, delegatablePolicyIds: proposal.delegatablePolicyIds,
+    ...(proposal.budgetAuthority !== undefined ? { budgetAuthority: proposal.budgetAuthority } : {}),
     version: 1, revision, issueScopeRevision: scope.revision, repository: scope.repository,
     authorizedByUserId: principal.userId, authorizedAt: now,
   } };

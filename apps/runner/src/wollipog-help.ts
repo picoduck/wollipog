@@ -139,6 +139,8 @@ Commands:
   update-item <work-item-id> --input '<json>'    Update fields, commitment, stage, blocker, or endAttempt
   assign <work-item-id> <child-session-id>       Record that a descendant now works on the item
   adjudicate <recommendation-id> --input '<json>'
+  allocate --input '<json>'
+    Reserve managed-worker campaign allowance within the human ceiling.
                                                  Record {disposition, reason, resultingWorkItemKey?,
                                                  resultingIssue?, publicationRequired?}
   work-items [--item <id>] [--state <state>] [--origin original|follow_up]

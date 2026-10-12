@@ -218,6 +218,12 @@ const projectionFor = (rev: number) => campaignProjection(
       : recordedWork(rev),
   {
     limits: { maximumConcurrentChildren: 4, occupied: 3, remaining: 1, costBudgetUsd: 40, maxToolCalls: null },
+    ...(params.get("budget") === "1" ? { budget: {
+      authority: { version: 1 as const, costUsd: 100, toolCalls: 2000, concurrency: 4, acceptedFollowUps: 3, accounting: "managed_workers_only" as const, unpriced: "stop" as const },
+      state: "active" as const, actual: { costUsd: 12, toolCalls: 100 }, outstanding: { costUsd: 50, toolCalls: 900 },
+      remaining: { costUsd: 38, toolCalls: 1000 }, occupied: 3, acceptedFollowUps: 1, reachedCheckpointsUsd: [],
+      enforcement: "admission_and_best_effort_cancellation" as const, externalWorkers: "unsupported" as const,
+    } } : {}),
     heldChildren: [{
       sessionId: "s_child_3",
       holds: [{

@@ -3956,6 +3956,25 @@ function campaignLedgerPrincipal(req: FastifyRequest, reply: FastifyReply, id: s
   return principal;
 }
 
+app.post("/api/sessions/:id/orchestrator-campaign/budget-allocations", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = campaignLedgerPrincipal(req, reply, id);
+  if (!principal) return reply;
+  return respond(reply, svc.allocateCampaignBudget(id, req.body as import("@wollipog/protocol").CampaignBudgetAllocation,
+    (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+
+// Budget minting shares the foundation's human-only CAS and revocation contract. No agent
+// allowlist entry exists for this endpoint; account defaults never establish an envelope.
+app.post("/api/sessions/:id/orchestrator-campaign/control", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "human") return reply.code(403).send({ error: "authenticated human authorization is required" });
+  const body = req.body as { proposal?: Parameters<SessionsService["setCampaignControl"]>[1]; expectedRevision?: number } | null;
+  if (!body?.proposal || !Number.isSafeInteger(body.expectedRevision)) return reply.code(400).send({ error: "proposal and expectedRevision are required" });
+  return respond(reply, svc.setCampaignControl(id, body.proposal, body.expectedRevision!, principal));
+});
+
 app.post("/api/sessions/:id/orchestrator-campaign/plan", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const principal = campaignLedgerPrincipal(req, reply, id);

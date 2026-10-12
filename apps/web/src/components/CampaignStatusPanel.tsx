@@ -322,7 +322,8 @@ function CampaignSummarySection({ data, now }: { data: CampaignStatusData; now: 
                 : view.cost.note && <span className="campaign-status-meta">{view.cost.note}</span>}
             </dd>
           </div>
-          {view.budget && <div><dt>Budget</dt><dd>{view.budget}</dd></div>}
+          {view.budget && <div><dt>Session Limits</dt><dd>{view.budget}</dd></div>}
+          {summary.campaign?.budget && <CampaignBudgetFacts budget={summary.campaign.budget} />}
           <div>
             <dt>Outstanding</dt>
             <dd>{view.obligations.length === 0 ? "None" : view.obligations.map((entry) => `${entry.count} ${entry.phrase}`).join(", ")}</dd>
@@ -340,6 +341,20 @@ function CampaignSummarySection({ data, now }: { data: CampaignStatusData; now: 
       </StaleContent>
     </section>
   );
+}
+
+export function CampaignBudgetFacts({ budget }: { budget: import("@wollipog/protocol").CampaignBudgetView }) {
+  const limits = [budget.authority.costUsd === undefined ? null : `$${budget.authority.costUsd.toFixed(2)}`,
+    budget.authority.toolCalls === undefined ? null : `${budget.authority.toolCalls} tool calls`,
+    budget.authority.concurrency === undefined ? null : `${budget.authority.concurrency} concurrent workers`,
+    budget.authority.acceptedFollowUps === undefined ? null : `${budget.authority.acceptedFollowUps} accepted follow-ups`].filter(Boolean).join(", ");
+  return <>
+    <div><dt>Campaign Allowance</dt><dd>{limits}<span className="campaign-status-meta">{budget.reason ?? "Human authorized; allocations cannot enlarge this allowance."}</span></dd></div>
+    <div><dt>Recorded Campaign Spend</dt><dd>${budget.actual.costUsd.toFixed(2)}, {budget.actual.toolCalls} tool calls</dd></div>
+    <div><dt>Outstanding Allocations</dt><dd>${budget.outstanding.costUsd.toFixed(2)}, {budget.outstanding.toolCalls} tool calls</dd></div>
+    <div><dt>Unallocated Allowance</dt><dd>{budget.remaining.costUsd === null ? "No campaign cost ceiling" : `$${budget.remaining.costUsd.toFixed(2)}`}, {budget.remaining.toolCalls === null ? "no campaign tool ceiling" : `${budget.remaining.toolCalls} tool calls`}</dd></div>
+    <div><dt>Accounting Policy</dt><dd>Managed workers only. Unpriced usage stops protected admission. External reviewers are unsupported.<span className="campaign-status-meta">Cancellation is asynchronous; in-flight work can overshoot the allowance. This is not a hard billing cap.</span></dd></div>
+  </>;
 }
 
 function CostText({ cost }: { cost: CampaignCostView }) {

@@ -473,7 +473,8 @@ agent with no campaign of its own, or a hook without the cost check, receives no
 
 Budgets show their actual scope: `OrchestratorCampaignProjection.limits.costBudgetUsd` is the
 Orchestrator session's own budget, and the panel and the `get_campaign` tool say so. There is no
-campaign-wide budget. Forecasts and ETA are out of scope.
+campaign-wide budget for Custom campaigns. A human-minted Full Control `budgetAuthority` adds a separate
+root-wide admission allowance, described in [campaign limits](campaign-limits.md). Forecasts and ETA are out of scope.
 
 ## Forge Status (Slice 8)
 

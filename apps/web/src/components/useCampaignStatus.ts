@@ -39,7 +39,7 @@ export type CampaignLoadStatus = "loading" | "ready" | "error";
 export interface CampaignSummaryState {
   status: CampaignLoadStatus;
   summary: CampaignWorkSummary | null;
-  campaign: Pick<OrchestratorCampaignProjection, "status" | "limits" | "heldChildren"> | null;
+  campaign: Pick<OrchestratorCampaignProjection, "status" | "limits" | "heldChildren" | "budget"> | null;
   /** The root session's title, for a member's "part of" line. */
   campaignTitle: string | null;
   /** Why the summary could not be loaded, or, beside a shown summary, why it could not be refreshed. */
