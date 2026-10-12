@@ -1102,6 +1102,106 @@ test("a debounced flush merges into fresh disk state — never clobbers another 
   }
 });
 
+test("clean metadata cache validates unchanged files without re-reading their contents", (t) => {
+  const { store, root } = tmpStore();
+  const metaPath = join(root, "s_abc", "meta.json");
+  let stats = 0;
+  let reads = 0;
+  const stat = fs.statSync;
+  const read = fs.readFileSync;
+  const statSpy = t.mock.method(fs, "statSync", ((...args: Parameters<typeof fs.statSync>) => {
+    if (String(args[0]) === metaPath) stats++;
+    return stat(...args);
+  }) as typeof fs.statSync);
+  const readSpy = t.mock.method(fs, "readFileSync", (...args: Parameters<typeof fs.readFileSync>) => {
+    if (String(args[0]) === metaPath) reads++;
+    return read(...args);
+  });
+  syncBuiltinESMExports();
+  try {
+    store.create(meta());
+    stats = 0;
+    reads = 0;
+    for (let i = 0; i < 10; i++) assert.equal(store.readMeta("s_abc")!.title, "do a thing");
+    assert.equal(stats, 10, "exactly one stat validates each clean-cache lookup");
+    assert.equal(reads, 0, "unchanged metadata stays cached");
+  } finally {
+    statSpy.mock.restore();
+    readSpy.mock.restore();
+    syncBuiltinESMExports();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("metadata cache uses change time when file identity is unavailable", (t) => {
+  const { store, root } = tmpStore();
+  const metaPath = join(root, "s_abc", "meta.json");
+  const stat = fs.statSync;
+  let changeTime = 1n;
+  const spy = t.mock.method(fs, "statSync", ((...args: Parameters<typeof fs.statSync>) => {
+    const result = stat(...args);
+    // Model a filesystem that reports zero device/inode and a reused modification timestamp.
+    return String(args[0]) === metaPath && args[1]?.bigint
+      ? { ...result, dev: 0n, ino: 0n, mtimeNs: 1n, ctimeNs: changeTime }
+      : result;
+  }) as typeof fs.statSync);
+  syncBuiltinESMExports();
+  try {
+    store.create(meta({ title: "peer write 1" }));
+    const original = statSync(metaPath, { bigint: true });
+    writeFileSync(metaPath, JSON.stringify({ ...diskMeta(root), title: "peer write 2" }, null, 2));
+    assert.equal(statSync(metaPath, { bigint: true }).size, original.size);
+    changeTime++;
+    assert.equal(store.readMeta("s_abc")!.title, "peer write 2");
+  } finally {
+    spy.mock.restore();
+    syncBuiltinESMExports();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("missing or unreadable metadata invalidates a warm cache and never republishes stale fields", async (t) => {
+  for (const failure of ["missing", "stat error", "read error", "malformed"] as const) {
+    await t.test(failure, (t) => {
+      const { store, root } = tmpStore();
+      const metaPath = join(root, "s_abc", "meta.json");
+      const stat = fs.statSync;
+      const read = fs.readFileSync;
+      try {
+        store.create(meta());
+        store.appendEvent("s_abc", { kind: "agent_message", text: "pending" });
+        assert.equal(store.readMeta("s_abc")!.seq, 1);
+        if (failure === "missing") rmSync(metaPath);
+        else if (failure === "stat error") {
+          t.mock.method(fs, "statSync", ((...args: Parameters<typeof fs.statSync>) => {
+            if (String(args[0]) === metaPath) throw Object.assign(new Error("unreadable"), { code: "EACCES" });
+            return stat(...args);
+          }) as typeof fs.statSync);
+        } else {
+          writeFileSync(`${metaPath}.new`, failure === "malformed" ? "invalid json" : readFileSync(metaPath));
+          renameSync(`${metaPath}.new`, metaPath);
+          if (failure === "read error") {
+            t.mock.method(fs, "readFileSync", (...args: Parameters<typeof fs.readFileSync>) => {
+              if (String(args[0]) === metaPath) throw Object.assign(new Error("unreadable"), { code: "EACCES" });
+              return read(...args);
+            });
+          }
+        }
+        syncBuiltinESMExports();
+        assert.equal(store.readMeta("s_abc"), null);
+        assert.equal((store as unknown as { cache: Map<string, unknown> }).cache.has("s_abc"), false);
+        const before = existsSync(metaPath) ? read(metaPath) : null;
+        store.flush("s_abc");
+        assert.deepEqual(existsSync(metaPath) ? read(metaPath) : null, before, "flush leaves unavailable metadata alone");
+      } finally {
+        t.mock.restoreAll();
+        syncBuiltinESMExports();
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
 test("resetEvents is durable immediately and clears stale pending deltas", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-store-reset-"));
   try {
@@ -1469,7 +1569,7 @@ test("a debounced flush whose deltas were dropped meanwhile does not publish the
   }
 });
 
-test("a debounced flush that keeps losing the race to other writers leaves its deltas pending and re-arms", async () => {
+test("a debounced flush that keeps losing the race preserves same-size, same-mtime peer replacements", async () => {
   const { store, root } = tmpStore();
   try {
     store.create(meta());
@@ -1477,20 +1577,33 @@ test("a debounced flush that keeps losing the race to other writers leaves its d
     const internals = store as unknown as Record<string, (path: string, contents: string) => Promise<void>>;
     const write = internals.writeSyncedFileInBackground!.bind(store);
     const peer = new SessionStore(root);
+    const metaPath = join(root, "s_abc", "meta.json");
+    let prior: fs.BigIntStats | undefined;
     let writes = 0;
     internals.writeSyncedFileInBackground = async (path: string, contents: string) => {
       writes++;
       await write(path, contents);
-      peer.patchMeta("s_abc", { title: `peer write ${writes}` });
+      peer.patchMeta("s_abc", { title: `peer write ${writes}`, agentSessionId: `peer-thread-${writes}` });
+      // Integer seconds are exactly representable by utimes on every supported platform. All
+      // three atomic replacements deliberately share a nanosecond mtime and byte length.
+      utimesSync(metaPath, 1_700_000_000, 1_700_000_000);
+      const current = statSync(metaPath, { bigint: true });
+      if (prior) {
+        assert.equal(current.mtimeNs, prior.mtimeNs);
+        assert.equal(current.size, prior.size);
+      }
+      prior = current;
     };
     await fireDebouncedFlush(store, "s_abc");
     assert.equal(writes, 3, "bounded retries");
     assert.equal(diskMeta(root).seq, 0);
     assert.equal(diskMeta(root).title, "peer write 3");
+    assert.equal(diskMeta(root).agentSessionId, "peer-thread-3");
     assert.ok((store as unknown as FlushInternals).flushTimers.has("s_abc"), "the next pass is scheduled");
     store.flush("s_abc");
     assert.equal(diskMeta(root).seq, 1);
     assert.equal(diskMeta(root).title, "peer write 3");
+    assert.equal(diskMeta(root).agentSessionId, "peer-thread-3", "other peer fields survive the synchronous merge");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
