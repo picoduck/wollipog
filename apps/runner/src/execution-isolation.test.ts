@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
-  buildSeatbeltProfile,
   cloneExecutionIsolationState,
   migrateExecutionIsolationState,
   adoptLegacyWslExecutionIsolationState,
@@ -161,34 +160,70 @@ test("Orchestrator Seatbelt never resolves additional roots excluded from its pr
   assert.doesNotMatch(isolation?.backend === "seatbelt" ? isolation.profile : "", /Users\/me\/Work\/ignored/u);
 });
 
-test("Seatbelt profile escapes paths and limits its writable surface", () => {
-  const profile = buildSeatbeltProfile({
-    driver: "codex-app-server",
-    dataDir: '/Users/me/Library/Application Support/Wollipog "state"',
-    env: { HOME: "/Users/me" },
-    sessionId: "s1",
-    cwd: "/Users/me/repo",
-  }, "/Users/me", "inherit", "/private/var/folders/tmp");
+/** Native macOS adapter stubs: renders the live Seatbelt profile on any host without claiming
+ * native execution. Paths resolve to themselves so each assertion sees exactly what it passed. */
+const nativeMacSeatbeltRuntime = {
+  platform: "darwin" as const,
+  nativeHome: () => "/Users/me",
+  nativeTmp: () => "/private/var/folders/tmp",
+  realpathNative: async (path: string) => path,
+  mkdirNative: async () => {},
+  resolveNative: async (name: string) => name === "sandbox-exec" ? {
+    path: "/usr/bin/sandbox-exec", via: "path" as const, launch: { command: "/usr/bin/sandbox-exec", args: [] },
+  } : null,
+};
+
+test("Seatbelt profile escapes paths and limits its writable surface", async () => {
+  const isolation = await resolveExecutionIsolation(
+    { mode: "seatbelt", network: "inherit" }, { kind: "native" }, nativeMacSeatbeltRuntime, {
+      driver: "codex-app-server",
+      dataDir: '/Users/me/Library/Application Support/Wollipog "state"',
+      env: { HOME: "/Users/me" },
+      sessionId: "s1",
+      cwd: "/Users/me/repo",
+    },
+  );
+  assert.equal(isolation?.backend, "seatbelt");
+  const profile = isolation?.backend === "seatbelt" ? isolation.profile : "";
   assert.match(profile, /allow network/);
-  assert.match(profile, /\\"state\\"/);
-  assert.match(profile, /\/Users\/me\/\.codex\/sessions/);
-  assert.throws(() => buildSeatbeltProfile({
-    driver: "acp", dataDir: "/data", env: {}, sessionId: "s1", cwd: "/repo\nallow default",
-  }, "/Users/me", "deny"), /control-free POSIX path/);
+  assert.ok(profile.includes('    (subpath "/Users/me/Library/Application Support/Wollipog \\"state\\"")\n'), profile);
+  assert.doesNotMatch(profile, /[^\\]"state/u);
+  assert.match(profile, /\(subpath "\/Users\/me\/\.codex\/sessions"\)/u);
+  for (const control of ["\n", "\r", "\0"]) {
+    await assert.rejects(() => resolveExecutionIsolation(
+      { mode: "seatbelt", network: "deny" }, { kind: "native" }, nativeMacSeatbeltRuntime, {
+        driver: "acp", dataDir: "/data", env: {}, sessionId: "s1", cwd: `/repo${control}allow default`,
+      },
+    ), /control-free POSIX path/, JSON.stringify(control));
+  }
 });
 
-test("Orchestrator Seatbelt grants writes only to scratch and provider transcripts", () => {
-  const profile = buildSeatbeltProfile({
-    driver: "claude-code",
-    dataDir: "/Users/me/Library/Application Support/Wollipog",
-    env: { HOME: "/Users/me" },
-    sessionId: "s1",
-    cwd: "/Users/me/Wollipog/orchestrator-scratch",
-    additionalWritableRoots: ["/Users/me/Work/repo"],
-    orchestratorScratchOnly: true,
-  }, "/Users/me", "inherit", "/private/var/folders/tmp");
-  assert.match(profile, /orchestrator-scratch/);
-  assert.match(profile, /\/Users\/me\/\.claude\/projects/);
+test("Orchestrator Seatbelt grants writes only to scratch and provider transcripts", async () => {
+  const isolation = await resolveExecutionIsolation(
+    { mode: "seatbelt", network: "inherit" }, { kind: "native" }, nativeMacSeatbeltRuntime, {
+      driver: "claude-code",
+      dataDir: "/Users/me/Library/Application Support/Wollipog",
+      env: { HOME: "/Users/me" },
+      sessionId: "s1",
+      cwd: "/Users/me/Wollipog/orchestrator-scratch",
+      additionalWritableRoots: ["/Users/me/Work/repo"],
+      orchestratorScratchOnly: true,
+    },
+  );
+  assert.equal(isolation?.backend, "seatbelt");
+  const profile = isolation?.backend === "seatbelt" ? isolation.profile : "";
+  assert.deepEqual(isolation?.backend === "seatbelt" ? isolation.writableRoots : [], [
+    "/Users/me/Wollipog/orchestrator-scratch",
+    "/Users/me/.claude/projects",
+  ]);
+  assert.ok(profile.includes([
+    "(allow file-write*",
+    '    (literal "/dev/null")',
+    '    (literal "/dev/tty")',
+    '    (subpath "/Users/me/Wollipog/orchestrator-scratch")',
+    '    (subpath "/Users/me/.claude/projects")',
+    ")",
+  ].join("\n")), profile);
   assert.doesNotMatch(profile, /Application Support\/Wollipog/);
   assert.doesNotMatch(profile, /Users\/me\/Work\/repo/);
   assert.doesNotMatch(profile, /private\/var\/folders\/tmp/);

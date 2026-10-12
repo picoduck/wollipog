@@ -8,7 +8,7 @@ import { supportsClaudeProjectMemory } from "@wollipog/protocol";
 import { projectMemoryAgentVersion, effectiveProjectMemoryKey, NativeProjectMemorySettings, prepareProjectMemory, withClaudeProjectMemory } from "./project-memory.js";
 import type { SessionMeta } from "./session-store.js";
 import { runContextCommand } from "./context-command.js";
-import { resolveExecutionIsolation, buildSeatbeltProfile } from "./execution-isolation.js";
+import { resolveExecutionIsolation } from "./execution-isolation.js";
 
 function meta(projectId = "project", account = "/account/one", sharing: "shared" | "separate" = "separate"): SessionMeta {
   return { driver: "claude-code", agentVersion: "2.1.284", projectMemory: { projectId, sharing },
@@ -97,9 +97,14 @@ test("Bubblewrap binds only the selected partition; Seatbelt grants it even for 
     assert.ok(isolation?.backend === "bwrap");
     assert.ok(isolation.writableBinds?.some((bind) => bind.source === selected && bind.target === selected));
     assert.ok(!isolation.writableBinds?.some((bind) => bind.source === other));
-    const profile = buildSeatbeltProfile(state, state.env.HOME, "inherit");
-    assert.ok(profile.includes(selected));
-    assert.ok(!profile.includes(other!));
+    const seatbelt = await resolveExecutionIsolation({ mode: "seatbelt", network: "inherit" }, { kind: "native" }, {
+      platform: "darwin", realpathNative: async (path) => path, mkdirNative: async () => {},
+      resolveNative: async () => ({ launch: { command: "/usr/bin/sandbox-exec", args: [] } }) as never,
+    }, state);
+    assert.ok(seatbelt?.backend === "seatbelt");
+    assert.ok(seatbelt.writableRoots.includes(selected));
+    assert.ok(seatbelt.profile.includes(selected));
+    assert.ok(!seatbelt.profile.includes(other!));
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
