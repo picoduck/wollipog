@@ -261,11 +261,19 @@ function Sample() {
             <button type="button" className="btn danger">Danger</button>
             <button type="button" className="btn">Ordinary</button>
           </div>
-          <div className="sample-row">
-            {SETTINGS_SECTIONS.map((section: { id: SettingsSection; title: string }) => (
-              <a key={section.id} className="settings-section-link" href={`/settings/${section.id}`}>{section.title}</a>
+          {/* Settings' section nav, the current section in the §5.2 selected state. */}
+          <nav className="settings-nav" aria-label="Settings Sections">
+            {SETTINGS_SECTIONS.map((section: { id: SettingsSection; title: string }, index) => (
+              <a
+                key={section.id}
+                className={`row settings-nav-item${index === 0 ? " is-selected" : ""}`}
+                aria-current={index === 0 ? "page" : undefined}
+                href={`/settings/${section.id}`}
+              >
+                <span className="row-title">{section.title}</span>
+              </a>
             ))}
-          </div>
+          </nav>
           <div className="seg" role="radiogroup" aria-label="Theme">
             {THEME_OPTIONS.map((option, index) => (
               <span key={option.value} role="radio" aria-checked={index === 0} className="seg-option">{option.label}</span>

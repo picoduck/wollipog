@@ -29,7 +29,7 @@ import {
   parseColorScheme,
   type ColorScheme,
 } from "../theme.js";
-import { SETTINGS_SECTIONS, type SettingsSection } from "../navigation.js";
+import { SETTINGS_SECTIONS, viewFromPath, viewPath, type SettingsSection, type View } from "../navigation.js";
 import "../styles.css";
 
 /**
@@ -255,9 +255,25 @@ function Harness() {
   const showAgentDefaults = ["agent", "agent-missing", "agent-repair"].includes(params.get("defaults") ?? "");
   const requestedUpdates = params.get("updates") as UpdateState | null;
   const update = updateFixture(requestedUpdates && UPDATE_STATES.includes(requestedUpdates) ? requestedUpdates : null);
-  const section: SettingsSection = SETTINGS_SECTIONS.some((entry) => entry.id === requestedSection)
-    ? requestedSection!
-    : "appearance";
+  // `route` drives the frame itself (#3018): parsed as the shell parses the address, with links and
+  // Back pushing the next one, so a phone's index and its section pages are real routes. Without
+  // it, `section` picks a section directly.
+  const [route, setRoute] = React.useState(() => params.get("route"));
+  React.useEffect(() => {
+    const onPop = () => setRoute(new URLSearchParams(window.location.search).get("route"));
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+  const routed = route === null ? null : viewFromPath(route);
+  const navigate = (view: View) => {
+    const next = new URLSearchParams(window.location.search);
+    next.set("route", viewPath(view));
+    window.history.pushState(null, "", `?${next}`);
+    setRoute(viewPath(view));
+  };
+  const section: SettingsSection | undefined = routed?.name === "settings"
+    ? routed.section
+    : SETTINGS_SECTIONS.some((entry) => entry.id === requestedSection) ? requestedSection! : "appearance";
   // A failed Tailnet change: the error takes the row description's place (Settings › Network).
   const tailnetError = params.get("tailnet-error") === "1"
     ? "Tailscale refused the change. Check that the Tailscale app is running, then try again."
@@ -304,7 +320,7 @@ function Harness() {
         <div className="main-body">
           <SettingsView
             section={section}
-            onNavigate={() => undefined}
+            onNavigate={navigate}
             onOpenShortcuts={() => undefined}
             panels={{
               appearance: (
@@ -356,7 +372,11 @@ function Harness() {
                   )}
                 />
               ),
-              approvals: <ApiProvider client={harnessDefaultsApi}><ApprovalsPanel /></ApiProvider>,
+              approvals: (
+                <ApiProvider client={harnessDefaultsApi}>
+                  <ApprovalsPanel policyId={routed?.name === "settings" ? routed.policyId : undefined} />
+                </ApiProvider>
+              ),
               orchestrator: <ApiProvider client={harnessDefaultsApi}><OrchestratorSettingsPanel /></ApiProvider>,
               network: (
                 <NetworkPanel

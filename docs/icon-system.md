@@ -92,7 +92,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `SelectLinesIcon` | Lucide | `TextSelection` | Review's Select Lines toggle, which turns line selection on in the diff (#2849). |
 | `WrapLinesIcon` | Lucide | `WrapText` | The Wrap Lines toggle in a markdown code block's header and in an artifact preview's code well (#2855). |
 | `WarningIcon` | Lucide | `TriangleAlert` | Generic warning state. |
-| `InfoIcon` | Lucide | `Info` | Generic information state; the info and neutral tone icon on toasts and notices; the session bar's Pinned Summary toggle, which opens the session's details column. |
+| `InfoIcon` | Lucide | `Info` | Generic information state; the info and neutral tone icon on toasts and notices; the session bar's Pinned Summary toggle, which opens the session's details column; Settings › About. |
 | `SuccessIcon` | Lucide | `CircleCheck` | The success tone icon on toasts and notices; a completed plan step; an allowed or answered Decision Record; the UI evidence digest caption. |
 | `DecisionClosedIcon` | Lucide | `CircleX` | A Decision Record that ended without going ahead: Rejected, Dismissed, Ended Early, Replaced, Resolved by Provider. |
 | `DecisionBlockedIcon` | Lucide | `ShieldX` | A Decision Record blocked by a policy or fail-closed; a UI evidence tile whose bytes don't match the request's digest. |
@@ -100,7 +100,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `PlanPendingIcon` | Lucide | `Circle` | A plan step not started yet. |
 | `PlanInProgressIcon` | Lucide | `CircleDot` | The plan step in progress. |
 | `ErrorIcon` | Lucide | `CircleAlert` | The danger tone icon on toasts and notices; the failed count on a work ledger line; a UI evidence tile that Can't Load or Can't Show. |
-| `KeyboardIcon` | Lucide | `Keyboard` | Keyboard shortcuts. |
+| `KeyboardIcon` | Lucide | `Keyboard` | Keyboard shortcuts, and Settings › Keyboard. |
 | `AccountIcon` | Lucide | `CircleUserRound` | The provider account a session runs under. |
 | `SignInIcon` | Lucide | `KeyRound` | The Request Card's Sign-In kind: a sign-in the session waits for (#2198). |
 | `LockIcon` | Lucide | `Lock` | Locked or restricted state; a masked identifier that is not an email. |
@@ -144,13 +144,13 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ZedEditorIcon` | Custom Exception | `Simple Icons 16.29.0: Zed Industries` | Canonical monochrome product mark; Lucide excludes vendor logos. |
 | `ShieldIcon` | Lucide | `Shield` | Generic approval status, intentionally filled; the Request Card's Permission kind. |
 | `ShieldAlertIcon` | Lucide | `ShieldAlert` | A permission mode that skips approval checks: the composer bar's shield and that mode's permission menu row, amber on the icon only. |
-| `ShieldCheckIcon` | Lucide | `ShieldCheck` | An Orchestrator's fixed permission mode in the composer bar, and Verified on an artifact preview's meta line once its bytes match their checksum (#2855). |
+| `ShieldCheckIcon` | Lucide | `ShieldCheck` | An Orchestrator's fixed permission mode in the composer bar, Verified on an artifact preview's meta line once its bytes match their checksum (#2855), and Settings › Approvals. |
 | `PlanIcon` | Lucide | `ListTodo` | A plan: the composer bar's Plan toggle and a transcript plan card's head; `ListChecks` already means the background job list. |
 | `ArrowUpIcon` | Lucide | `ArrowUp` | Generic upward action. |
 | `ArrowUpRightIcon` | Lucide | `ArrowUpRight` | The trailing arrow of a link to another Wollipog page, such as Side Chat's Open Session (#2862). |
 | `ArrowDownIcon` | Lucide | `ArrowDown` | Generic downward action; Jump to Question on a pending question's transcript marker, down to the request dock. |
 | `StopTurnIcon` | Lucide | `Square` | Filled and optically scaled to preserve its send-arrow balance; also a stopped turn's footer mark. |
-| `TuningIcon` | Lucide | `SlidersHorizontal` | Model or effort tuning. |
+| `TuningIcon` | Lucide | `SlidersHorizontal` | Model or effort tuning, and Settings › Behavior, which holds each agent's default model and effort. |
 | `GitHubIcon` | Custom Exception | `GitHub Mark` | Official brand mark with a 16-unit solid geometry. |
 | `NotesIcon` | Lucide | `NotebookText` | Notes summary. |
 | `ComputerIcon` | Lucide | `Monitor` | Local computer. |
@@ -169,11 +169,14 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ChildSessionRequestsIcon` | Lucide | `Network` | Who answers an Orchestrator's child session requests: the Pinned Summary's Child Session Requests row. |
 | `WorkflowDecisionsIcon` | Lucide | `Route` | Where an Orchestrator's workflow gates are decided: the Pinned Summary's Workflow Decisions row; the Request Card's Workflow Decision kind. |
 | `GuardrailsIcon` | Lucide | `Fence` | A session's limits: the + menu's Guardrails… row. `Gauge` already means the Fast service tier. |
-| `OrchestratorControlsIcon` | Lucide | `Waypoints` | An Orchestrator's parent control and workflow gates: the + menu's Orchestrator Controls… row. `Workflow` already means workflow runs. |
+| `OrchestratorControlsIcon` | Lucide | `Waypoints` | An Orchestrator's parent control and workflow gates: the + menu's Orchestrator Controls… row, and Settings › Orchestrator. `Workflow` already means workflow runs. |
 | `ExternalLinkIcon` | Lucide | `ExternalLink` | A link that opens outside Wollipog. |
 | `WrenchIcon` | Lucide | `Wrench` | Project setup suggestion. |
 | `HeldIcon` | Lucide | `CirclePause` | Child sessions held from starting their next turn: the Held Children campaign notice. |
-| `ExperimentIcon` | Lucide | `FlaskConical` | An experimental feature, on the page a turned-off experiment's route shows. |
+| `ExperimentIcon` | Lucide | `FlaskConical` | An experimental feature, on the page a turned-off experiment's route shows, and Settings › Experimental. |
+| `AppearanceIcon` | Lucide | `Palette` | Settings › Appearance: theme, color scheme, density and navigation. |
+| `NotificationsIcon` | Lucide | `Bell` | Settings › Notifications: alerts when a session needs you. |
+| `NetworkIcon` | Lucide | `Wifi` | Settings › Network: reaching this machine from other devices. `Network` already means child session requests, and `Globe` a remote host. |
 | `VersionIcon` | Lucide | `Tag` | A numbered version ("v3") in a meta row. |
 | `UpdatedIcon` | Lucide | `Clock` | When something last changed, in a meta row. |
 | `HistoryIcon` | Lucide | `History` | Decision History, in the Session Tools list and the tool switcher (#2844). |

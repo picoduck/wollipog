@@ -14,7 +14,8 @@ import { closeWarning } from "./components/DesktopCloseGuard.js";
 import { heldUpdateMessage } from "./desktop-updates.js";
 import { HIDDEN_IDENTIFIER_TEXT } from "./components/PersonalIdentifier.js";
 import { lifecycleConflictPresentation } from "./components/RunnersView.js";
-import { backLabel } from "./navigation.js";
+import { backLabel, SETTINGS_SECTIONS } from "./navigation.js";
+import { SETTINGS_DESCRIPTION } from "./components/SettingsView.js";
 import { reminderMenuActionLabel } from "./session-reminders.js";
 import {
   DEPLOY_TO_TRACKING_MACHINES_CONSENT,
@@ -1268,4 +1269,16 @@ test("the Agents notices' titles and buttons are Title Case; their sentences are
     assert.ok(isSentenceCase(sentence.replace(/^\d+ /, "N ")) && /\.$/.test(sentence), JSON.stringify(sentence));
   }
   for (const part of offlineAttentionSentence(2, "build box").split(". ")) assert.ok(isSentenceCase(part.replace(/^\d+ /, "N ")), part);
+});
+
+test("Settings' section names, scopes and Back are Title Case; its descriptions are sentences (#3018)", () => {
+  assert.ok(isSentenceCase(SETTINGS_DESCRIPTION) && !isTitleCase(SETTINGS_DESCRIPTION), SETTINGS_DESCRIPTION);
+  for (const section of SETTINGS_SECTIONS) {
+    assert.ok(isTitleCase(section.title) && !/[.!?…]$/.test(section.title), section.title);
+    if (section.scope) assert.ok(isTitleCase(section.scope), section.scope);
+    assert.ok(isSentenceCase(section.description) && !isTitleCase(section.description), section.description);
+  }
+  const settingsView = readFileSync(path.join(SOURCE_ROOT, "components/SettingsView.tsx"), "utf8");
+  assert.match(settingsView, /backLabel="Back to Settings"/, "a phone section's Back names the index it returns to");
+  assert.ok(isTitleCase("Back to Settings"));
 });

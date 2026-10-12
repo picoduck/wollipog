@@ -217,7 +217,8 @@ test("phone inbox defers secondary views and shows loading while Settings arrive
   await expect(page.getByRole("status").filter({ hasText: "Loading…" })).toBeVisible();
   if (process.env.EVIDENCE_DIR) await page.screenshot({ path: `${process.env.EVIDENCE_DIR}/settings-loading-390.png` });
   release();
-  await expect(page.getByRole("heading", { name: "Appearance", exact: true })).toBeVisible();
+  // A phone's /settings is the section index (#3018): Appearance is a row there, not a heading.
+  await expect(page.getByRole("navigation", { name: "Settings Sections" }).getByRole("link", { name: /^Appearance/ })).toBeVisible();
   if (process.env.EVIDENCE_DIR) await page.screenshot({ path: `${process.env.EVIDENCE_DIR}/settings-ready-390.png` });
 });
 

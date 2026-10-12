@@ -18,7 +18,7 @@ const DESTINATIONS = [
   { path: "/skills", title: "Agent Skills", description: true },
   { path: "/archived", title: "Archived Sessions", max: 1200 },
   { path: "/usage", title: "Usage and Cost", description: true, max: 1200 },
-  { path: "/settings", title: "Settings" },
+  { path: "/settings", title: "Settings", description: true },
 ] as const;
 
 async function openDestination(page: Page, path: string, title: string) {

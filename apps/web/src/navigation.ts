@@ -34,16 +34,31 @@ export type View =
  */
 export type SettingsSection = "appearance" | "notifications" | "keyboard" | "behavior" | "approvals" | "orchestrator" | "network" | "experimental" | "about";
 
-export const SETTINGS_SECTIONS: ReadonlyArray<{ id: SettingsSection; title: string }> = [
-  { id: "appearance", title: "Appearance" },
-  { id: "notifications", title: "Notifications" },
-  { id: "keyboard", title: "Keyboard" },
-  { id: "behavior", title: "Behavior" },
-  { id: "approvals", title: "Approvals" },
-  { id: "orchestrator", title: "Orchestrator" },
-  { id: "network", title: "Network" },
-  { id: "experimental", title: "Experimental" },
-  { id: "about", title: "About" },
+/** Where a section's settings are kept, when every one of them is kept in the same place. */
+export type SettingsScope = "This Device" | "Your Account";
+
+export interface SettingsSectionEntry {
+  id: SettingsSection;
+  title: string;
+  /** One line in user terms: under the section's title, and as its row's second line on a phone. */
+  description: string;
+  /**
+   * Named once in the section's head (§11.3 meta). Absent where the section's groups are kept in
+   * different places, or where it keeps nothing.
+   */
+  scope?: SettingsScope;
+}
+
+export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSectionEntry> = [
+  { id: "appearance", title: "Appearance", description: "Theme, colors, density and navigation.", scope: "This Device" },
+  { id: "notifications", title: "Notifications", description: "Alerts when a session needs you.", scope: "This Device" },
+  { id: "keyboard", title: "Keyboard", description: "Shortcuts for getting around faster." },
+  { id: "behavior", title: "Behavior", description: "Typing, privacy and agent defaults." },
+  { id: "approvals", title: "Approvals", description: "Question answers and tool policies." },
+  { id: "orchestrator", title: "Orchestrator", description: "Defaults for sessions that run others.", scope: "Your Account" },
+  { id: "network", title: "Network", description: "Reach this machine from other devices." },
+  { id: "experimental", title: "Experimental", description: "Features that are still being tested.", scope: "This Device" },
+  { id: "about", title: "About", description: "Versions and updates." },
 ];
 
 /**
@@ -333,7 +348,7 @@ export function viewPath(view: View): string {
     case "run": return `/runs/~${encodeResourceId(view.id)}`;
     case "settings": return view.section === "approvals" && view.policyId !== undefined
       ? `/settings/approvals/~${encodeResourceId(view.policyId)}`
-      : `/settings/${view.section ?? "appearance"}`;
+      : view.section ? `/settings/${view.section}` : "/settings";
     case "pod": return `/pods/~${encodeResourceId(view.id)}`;
   }
 }
@@ -395,7 +410,8 @@ export function viewFromPath(pathname: string, search = ""): View | null {
   }
   if (path === "/usage") return { name: "usage" };
   if (path === "/archived") return { name: "archived" };
-  if (path === "/settings") return { name: "settings", section: "appearance" };
+  // No section: a phone shows the section index, and wider layouts open the first section (§6.1, §6.2).
+  if (path === "/settings") return { name: "settings" };
   // Keep old bookmarks useful while Session Naming now lives compactly under Behavior.
   if (path === "/settings/session-naming") return { name: "settings", section: "behavior" };
   const settingsMatch = /^\/settings\/(appearance|notifications|keyboard|behavior|approvals|orchestrator|network|experimental|about)$/.exec(path);

@@ -17691,8 +17691,10 @@ button.review-finding-location {
 @media (hover: hover) {
   .tab:hover { color: var(--text); }
 }
-.tab[aria-selected="true"] { color: var(--text); }
-.tab[aria-selected="true"]::after {
+/* A link tab (TabList's `links`) is current through `aria-current`, the same way. */
+a.tab { text-decoration: none; }
+.tab:is([aria-selected="true"], [aria-current="page"]) { color: var(--text); }
+.tab:is([aria-selected="true"], [aria-current="page"])::after {
   content: "";
   position: absolute;
   right: 0;
@@ -18301,37 +18303,54 @@ button.review-finding-location {
 }
 
 /* ------------------------------------------------------------------------------------------------
- * Settings as a route (§11.3): the master/detail shape ProjectsView already establishes.
+ * Settings as a route (§6, §10.1, §15): the sections are the list and each one is a route. Desktop
+ * shows them as a 192px column beside the panel; the compact tier moves them into the page header
+ * as link tabs; a phone shows them as an index of their own, and each section under a detail bar.
  * ---------------------------------------------------------------------------------------------- */
 .settings-view { display: flex; gap: var(--space-6); min-height: 0; }
-/* Settings content is a form page (§4.5): the panel caps at the form width beside its section list. */
-.settings-view > .settings-panel { max-width: var(--page-max-form); }
-.settings-sections {
+/* Under a phone's index, `/settings` keeps its default section mounted for the wider layouts. */
+.settings-view[hidden] { display: none; }
+/* The section list stays in view while the panel scrolls under it. */
+.settings-nav {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
   flex: none;
-  width: 180px;
+  flex-direction: column;
+  gap: var(--space-1);
+  width: 192px;
   position: sticky;
   top: 0;
   align-self: flex-start;
 }
-.settings-section-link {
-  min-height: var(--control-h);
-  padding: 8px 10px;
-  border-radius: var(--radius-sm);
-  color: var(--text-dim);
-  font-size: var(--text-base);
-  text-decoration: none;
+/* A §5.2 row at the control height (44px on touch). Hover is the row's --bg-elev-2; the current
+   section is the selected state, a --surface-selected fill and a 2px --accent bar, with its glyph
+   in --accent, so the two never read alike. */
+.settings-nav-item { height: var(--control-h); color: var(--text-dim); }
+.settings-nav-item > .row-title { font: var(--type-body); }
+.settings-nav-item.is-selected { color: var(--text); }
+.settings-nav-item.is-selected > .row-icon { color: var(--accent); }
+/* Forced colors drops fills, so the current section's bar is painted in a system colour and widened,
+   as the Sessions list's is, to keep the selection visible. */
+@media (forced-colors: active) {
+  .settings-nav-item.is-selected::before { width: var(--space-1); background: Highlight; }
 }
-.settings-section-link:hover { background: var(--bg-elev-2); color: var(--text); }
-.settings-section-link.active {
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
-  color: var(--accent-on-tint);
-  font-weight: var(--weight-medium);
+@media (hover: hover) {
+  .settings-nav-item:hover { color: var(--text); }
+  /* The shared row hover would otherwise replace the selected fill under the pointer. */
+  .row.settings-nav-item.is-selected:hover { background: var(--surface-selected); }
 }
-.settings-panel { flex: 1; min-width: 0; max-width: 620px; display: flex; flex-direction: column; gap: var(--space-5); }
-.settings-panel > h2 { margin: 0; color: var(--text); font-size: var(--text-xl); }
+/* Settings content is a form page (§4.5): the panel caps at the form width beside its section list. */
+.settings-panel { flex: 1; min-width: 0; max-width: var(--page-max-form); display: flex; flex-direction: column; gap: var(--space-5); }
+/* The section's head: its title, its one line and, when the whole section is kept in one place,
+   where that is (§11.3 meta), so the rows need not repeat it. */
+.settings-panel-head { display: flex; align-items: baseline; gap: var(--space-4); min-width: 0; }
+.settings-panel-heading { display: flex; flex: 1; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.settings-panel-heading > h2 { margin: 0; color: var(--text); font: var(--type-title); }
+.settings-panel-desc { margin: 0; color: var(--text-dim); font: var(--type-body); }
+.settings-panel-scope { flex: none; color: var(--text-dim); font: var(--type-small); }
+/* In the compact tier the current tab names the section, so the panel does not repeat it. */
+@media (min-width: 761px) and (max-width: 1099px) {
+  .settings-panel-heading > h2 { display: none; }
+}
 .settings-group { display: flex; flex-direction: column; gap: var(--space-2); }
 
 /* Settings -> Appearance -> Navigation: the rail's visibility and order editor (#385). */
@@ -18443,13 +18462,16 @@ button.review-finding-location {
   .session-naming-key-field { grid-column: auto; }
 }
 
-/* On a phone the section list stacks above the panel, the way the rest of the app's master/detail
-   screens already collapse. */
-@media (max-width: 760px) {
-  .settings-view { flex-direction: column; gap: var(--space-4); }
-  .settings-sections { width: 100%; flex-direction: row; overflow-x: auto; position: static; }
-  .settings-section-link { display: flex; align-items: center; white-space: nowrap; }
-}
+/* A phone's Settings index (§6.2): the sections as two-line rows in three surfaces, each opening its
+   own page. No row is ever selected. */
+.settings-index { display: flex; flex-direction: column; gap: var(--space-4); }
+.settings-index-chevron { display: inline-flex; flex: none; color: var(--text-faint); }
+/* A phone's section page: the detail bar is full-bleed and the panel sits in the gutter under it,
+   where the detail bar names the section and the page has no description (§4.2). */
+.settings-detail { padding-bottom: var(--space-16); }
+.settings-detail > .settings-view { margin: var(--space-5) var(--page-gutter) 0; }
+.settings-detail .settings-panel-heading { display: none; }
+.settings-detail .settings-panel-head:not(:has(> .settings-panel-scope)) { display: none; }
 
 
 
