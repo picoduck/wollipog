@@ -272,6 +272,9 @@ export interface Driver {
    * a turn the provider itself ended in error; the session manager attaches it to the durable
    * receipt so a scheduler sees the cause instead of a bare stop reason. */
   lastTurnError?(): string | null;
+  /** The provider provably never started a turn for the prompt that just settled: it rejected the
+   * submission itself, or the driver refused to send it. False whenever delivery is uncertain. */
+  lastPromptUndelivered?(): boolean;
   /** Active steering coordinate, never a retained completed-turn checkpoint. */
   activeSteeringTurnId?(): string | null;
 

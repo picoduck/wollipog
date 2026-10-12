@@ -584,6 +584,10 @@ interface ActiveSession {
    * ACP may publish catalog notifications while session/new is still resolving; those remain
    * display-only until this fence opens. */
   providerReady: boolean;
+  /** Set from publication until this entry's own launch establishes the provider session (#3085).
+   * Prompts admitted meanwhile stay queued: a Codex thread does not exist yet, so a turn would
+   * reach the provider with a null thread id. Unlike providerReady, sign-out never re-arms it. */
+  providerLaunchPending?: boolean;
   /** Process-generation truth that narrows the live catalog without mutating durable discovery
    * capabilities. Cleared automatically when this ActiveSession is replaced. */
   steeringAvailable?: boolean;
@@ -8026,6 +8030,7 @@ export class SessionManager {
       ...(isolation?.backend === "seatbelt" ? { seatbeltWritableRoots: [...isolation.writableRoots] } : {}),
       status: "starting",
       providerReady: false,
+      providerLaunchPending: true,
       running: false,
       queue: [],
       permissionOptionKinds: new Map(),
@@ -8076,14 +8081,20 @@ export class SessionManager {
     this.refreshCapacityInventorySession(sessionId);
     this.reportCapacity();
     this.send({ type: "process_status", sessionId, processStatus: "running", pid: client.pid });
+    // A launch that ends before establishing the provider session never sent the prompts admitted
+    // while it was starting. Settle them rather than strand their receipts in a retired FIFO.
+    const retireUnlaunched = () => {
+      client.dispose();
+      this.deleteActiveSession(sessionId, entry);
+      this.rejectQueued(entry.queue.splice(0), "the provider launch ended before this message was sent");
+    };
 
     try {
       await client.initialize();
       if (this.active.get(sessionId) !== entry || !this.store.has(sessionId) ||
           !this.launchIsCurrent(sessionId, launchGeneration)) {
         const deleted = !this.store.has(sessionId);
-        client.dispose();
-        this.deleteActiveSession(sessionId, entry);
+        retireUnlaunched();
         if (deleted) await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "session was deleted during driver initialization", launchGeneration);
         return false;
       }
@@ -8091,12 +8102,12 @@ export class SessionManager {
       if (this.active.get(sessionId) !== entry || !this.store.has(sessionId) ||
           !this.launchIsCurrent(sessionId, launchGeneration)) {
         const deleted = !this.store.has(sessionId);
-        client.dispose();
-        this.deleteActiveSession(sessionId, entry);
+        retireUnlaunched();
         if (deleted) await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "session was deleted during provider session creation", launchGeneration);
         return false;
       }
       entry.providerReady = true;
+      entry.providerLaunchPending = false;
       // App-server and ACP establish a real provider session during new/resume/load. Persist it
       // immediately so a crash before the first completed turn does not lose the coordinate. ACP
       // resumability remains capability-derived from the handshake stored above.
@@ -8160,14 +8171,12 @@ export class SessionManager {
       // runPrompt retains the completed-turn fallback for older or abbreviated provider streams.
     } catch (err) {
       if (!this.launchIsCurrent(sessionId, launchGeneration)) {
-        client.dispose();
-        this.deleteActiveSession(sessionId, entry);
+        retireUnlaunched();
         await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "session launch was cancelled during driver initialization", launchGeneration);
         return false;
       }
       if (entry.historyIntegrityFailure) {
-        client.dispose();
-        this.deleteActiveSession(sessionId, entry);
+        retireUnlaunched();
         await this.cancelNewCloudHandoff(
           meta,
           hadCloudHandoffBeforeLaunch,
@@ -8184,8 +8193,7 @@ export class SessionManager {
           reason: resumeId ? "process_restart" : "fresh",
         });
         this.emitStatus(sessionId, "input_required", `${providerDisplayName(meta.driver)} authentication is required`);
-        client.dispose();
-        this.deleteActiveSession(sessionId, entry);
+        retireUnlaunched();
         await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "provider authentication is required", launchGeneration);
         return false;
       }
@@ -8200,8 +8208,7 @@ export class SessionManager {
       }
       if (!this.emitEvent(sessionId, { kind: "error", message: `agent init failed: ${errText(err)}` })) {
         const deleted = !this.store.has(sessionId);
-        client.dispose();
-        this.deleteActiveSession(sessionId, entry);
+        retireUnlaunched();
         if (deleted) await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "session was deleted while driver initialization failed", launchGeneration);
         return false;
       }
@@ -8210,8 +8217,7 @@ export class SessionManager {
       } else {
         this.emitStatus(sessionId, "failed", errText(err));
       }
-      client.dispose();
-      this.deleteActiveSession(sessionId, entry);
+      retireUnlaunched();
       await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "driver initialization failed", launchGeneration);
       return false;
     }
@@ -8219,6 +8225,11 @@ export class SessionManager {
       provider: meta.driver, sharing: meta.projectMemory.sharing,
       effective: preparedProjectMemoryDirectory ? meta.projectMemory.sharing : "account_native" }));
     this.log(`session ${sessionId} ready (cwd=${cwd}${resumeId ? ", resumed" : ""})`);
+    // Release prompts admitted while the provider was starting. Deferred so the caller first
+    // activates the pre-launch FIFO, whose ordinals precede anything admitted during startup.
+    setImmediate(() => {
+      if (this.active.get(sessionId) === entry && entry.queue.length) this.scheduleDrain(sessionId);
+    });
     return true;
   }
 
@@ -11049,7 +11060,7 @@ export class SessionManager {
         this.store.readMeta(sessionId)?.status === "queued") {
       this.emitStatus(sessionId, "idle");
     }
-    if (entry.running || entry.authenticationBlocked || entry.historyQuarantined ||
+    if (entry.running || entry.providerLaunchPending || entry.authenticationBlocked || entry.historyQuarantined ||
         entry.historyIntegrityFailure || entry.governanceTripped || this.queueHeld(entry) ||
         this.steerFences(entry).size ||
         this.reservedPromotionPrecedesQueue(sessionId, entry)) return;
@@ -12996,6 +13007,7 @@ export class SessionManager {
         durable?.uncertain("session stopped while provider execution was in progress");
         return;
       }
+      let rejectedAnswerBlocker: string | undefined;
       if (stop === "refusal" && recoveredQuestion?.pendingQuestion.async) {
         // The accepted answer turn could not be delivered. Correct its provisional history
         // resolution so the original question is visibly replaced and cannot be resubmitted.
@@ -13004,6 +13016,12 @@ export class SessionManager {
           occurrenceId: recoveredQuestion.recoveryId,
           answered: false, resolutionReason: "replaced",
         });
+        // Authentication recovery owns its own blocker and replay; do not race it with a re-ask.
+        if (!entry.authenticationBlocked && entry.client.lastPromptUndelivered?.()) {
+          rejectedAnswerBlocker = this.reaskAsyncQuestionAfterRejectedTurn(
+            sessionId, recoveredQuestion, entry.client.lastTurnError?.() ?? null,
+          );
+        }
       }
       const postTurnTree = await this.captureDiff(sessionId);
       if (entry.historyIntegrityFailure) return;
@@ -13048,6 +13066,8 @@ export class SessionManager {
       } else if (stop === "cancelled") {
         // Legacy cancel_session behavior is deliberately unchanged for old control planes.
         this.emitStatus(sessionId, "stopped");
+      } else if (rejectedAnswerBlocker) {
+        this.emitStatus(sessionId, "input_required", rejectedAnswerBlocker);
       } else {
         // The provider completed before the interrupt took effect. Do not fabricate Interrupted
         // or strand the existing FIFO: this was a normal completed turn, not a cancelled one.
@@ -15462,6 +15482,37 @@ export class SessionManager {
         disposition: result.disposition, reason: result.reason,
       }));
     });
+  }
+
+  /** The provider rejected the turn that would deliver an async answer, so it never saw the answer
+   * (#3085). The answered occurrence keeps its command-correlated resolution, which fences that
+   * durable identity, so ask the same question as a fresh occurrence the user can answer again.
+   * Returns the session blocker naming the provider's error, or undefined if nothing was restored. */
+  private reaskAsyncQuestionAfterRejectedTurn(
+    sessionId: string,
+    recovered: NonNullable<QueuedPrompt["recoveredQuestion"]>,
+    providerError: string | null,
+  ): string | undefined {
+    try {
+      const meta = this.store.readMeta(sessionId);
+      if (!meta || isTerminal(meta.status) || meta.providerHistoryBlock) return undefined;
+      if (pendingRequests(meta.pendingApproval).some((request) => request.requestId === recovered.requestId)) {
+        return undefined;
+      }
+      if (!this.emitEvent(sessionId, {
+        kind: "question_request", async: true, requestId: recovered.requestId,
+        questions: recovered.pendingQuestion.questions ?? [],
+        ...(recovered.pendingQuestion.ownerToolUseId ? { ownerToolUseId: recovered.pendingQuestion.ownerToolUseId } : {}),
+      })) return undefined;
+      const blocker = `${providerDisplayName(meta.driver)} rejected the turn that would deliver this answer` +
+        `${providerError ? `: ${providerError}` : ""}. The question remains available; submit the answer again.`;
+      this.emitEvent(sessionId, { kind: "stderr", text: blocker });
+      this.store.flush(sessionId);
+      return blocker;
+    } catch (error) {
+      this.log(`async question could not be restored after a rejected turn for ${sessionId}: ${errText(error)}`);
+      return undefined;
+    }
   }
 
   /** A known pre-provider failure permits a fresh durable retry of this occurrence. Re-emit the
