@@ -237,10 +237,9 @@ CREATE TABLE IF NOT EXISTS campaign_recommendation_dispositions (
 );
 
 -- Issue-closure attribution history (#3084). Every issue an item has ever tracked, and every
--- follow-up edge from an origin item to an accepted resulting item ever recorded. Rows are only
--- ever added (as upserts: a trigger fired by an upsert would otherwise inherit its conflict
--- policy), so a later edit of an item's issue or a re-adjudication cannot disconnect a child
--- from an issue it was once connected to. The backfills cover rows recorded before these tables
+-- follow-up link from an origin item to a resulting item ever recorded. Rows are only ever added
+-- (as upserts: a trigger fired by an upsert would otherwise inherit its conflict policy), so a
+-- later edit of an item's issue or a re-adjudication cannot make a child look unrelated. The backfills cover rows recorded before these tables
 -- existed and are idempotent.
 CREATE TABLE IF NOT EXISTS campaign_work_item_issue_history (
   work_item_id     TEXT NOT NULL,
@@ -696,43 +695,23 @@ export class CampaignWorkLedgerStore {
     return sessions;
   }
 
-  /** Attribution for an issue closure (#3084). The lineage is every item that has ever tracked the
-   * issue plus the follow-up items it descends from and that descend from it, through every edge
-   * ever adjudicated; siblings and dependencies are not lineage. Both inputs are append-only
-   * history, so the lineage only grows. `lineage` holds every session with any attempt in it, open
-   * or ended, so earlier work on the issue still counts. `elsewhere` holds sessions whose open
-   * attempt is on an item outside it. */
-  issueLineageSessions(campaignId: string, repository: string, issueNumber: number): { lineage: Set<string>; elsewhere: Set<string> } {
-    const rows = this.stmt(`
-      WITH RECURSIVE
-        issue_items(id) AS (
-          SELECT history.work_item_id FROM campaign_work_item_issue_history history
-          JOIN campaign_work_items item ON item.id=history.work_item_id
-          WHERE item.campaign_session_id=?1 AND history.issue_repository=lower(?2) AND history.issue_number=?3
-        ),
-        descendants(id) AS (
-          SELECT id FROM issue_items
-          UNION SELECT edge.result_work_item_id FROM campaign_work_lineage_edges edge
-          JOIN descendants ON edge.origin_work_item_id=descendants.id
-        ),
-        ancestors(id) AS (
-          SELECT id FROM issue_items
-          UNION SELECT edge.origin_work_item_id FROM campaign_work_lineage_edges edge
-          JOIN ancestors ON edge.result_work_item_id=ancestors.id
-        ),
-        lineage(id) AS (SELECT id FROM descendants UNION SELECT id FROM ancestors)
-      SELECT attempt.session_id, attempt.ended_at IS NULL AS open,
-        attempt.work_item_id IN (SELECT id FROM lineage) AS related
-      FROM campaign_work_attempts attempt
-      WHERE attempt.campaign_session_id=?1 AND attempt.session_id IS NOT NULL
-    `).all(campaignId, repository, issueNumber) as Array<{ session_id: string; open: number; related: number }>;
-    const lineage = new Set<string>();
-    const elsewhere = new Set<string>();
-    for (const row of rows) {
-      if (row.related) lineage.add(row.session_id);
-      else if (row.open) elsewhere.add(row.session_id);
-    }
-    return { lineage, elsewhere };
+  /** Sessions an issue closure (#3084) may leave out: each has an open attempt, and every attempt
+   * it has ever had is on an item that has never tracked the issue and has never been linked to
+   * another item as a follow-up origin or result. Both facts come from append-only history, so a
+   * session can only lose this status, never regain it by a ledger edit. */
+  issueClosureExcludableSessions(campaignId: string, repository: string, issueNumber: number): Set<string> {
+    return new Set((this.stmt(`
+      SELECT DISTINCT attempt.session_id FROM campaign_work_attempts attempt
+      WHERE attempt.campaign_session_id=?1 AND attempt.session_id IS NOT NULL AND attempt.ended_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM campaign_work_attempts earlier
+          WHERE earlier.session_id=attempt.session_id AND (
+            EXISTS (SELECT 1 FROM campaign_work_item_issue_history history
+              WHERE history.work_item_id=earlier.work_item_id
+                AND history.issue_repository=lower(?2) AND history.issue_number=?3)
+            OR EXISTS (SELECT 1 FROM campaign_work_lineage_edges edge
+              WHERE edge.origin_work_item_id=earlier.work_item_id OR edge.result_work_item_id=earlier.work_item_id)))
+    `).all(campaignId, repository, issueNumber) as Array<{ session_id: string }>).map((row) => row.session_id));
   }
 
   /* ------------------------------ Dependencies ------------------------------ */

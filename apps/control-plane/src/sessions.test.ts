@@ -24763,9 +24763,8 @@ test("issue closure binds only children whose work bears on the issue (#3084)", 
   // Each mode changes one child after the human approved closing issue 1440, then executes.
   const executable = new Set(["unrelated_prompt", "unrelated_decision", "new_unrelated_child"]);
   for (const mode of ["unrelated_prompt", "unrelated_decision", "new_unrelated_child", "related_prompt",
-    "related_decision", "unattributed_prompt", "mentioning_prompt", "earlier_attempt_prompt",
-    "follow_up_prompt", "reassigned_into_lineage", "steered_into_issue", "unechoed_launch", "listed_issues",
-    "issue_cleared", "ancestor_issue_toggled", "readjudicated", "receipt_before_hydration"]) {
+    "related_decision", "unattributed_prompt", "unechoed_launch", "earlier_attempt_prompt", "issue_cleared",
+    "follow_up_prompt", "linked_unrelated_prompt", "reassigned_into_lineage", "issue_toggled", "readjudicated"]) {
     const { db, svc, hub, parent, spawn } = stopAndArchiveCampaignFixture("retain");
     try {
       const plan = svc.recordCampaignPlan(parent.id, { items: [
@@ -24779,51 +24778,42 @@ test("issue closure binds only children whose work bears on the issue (#3084)", 
         const assigned = svc.assignCampaignWorkItem(parent.id, { workItemId, childSessionId });
         assert.ok(assigned.ok, assigned.error);
       };
-      // The runner echoes each prompt as a user message; the harness has no runner to do it.
-      const echo = (sessionId: string, text: string) => db.appendEvent(sessionId, { kind: "user_message", text }, Date.now());
-      const related = spawn(parent.id, "Deliver the first item");
+      const track = (workItemId: string, issue: { repository: string; number: number } | null) =>
+        assert.ok(svc.updateCampaignWorkItem(parent.id, { workItemId, issue }).ok);
+      const followUpOf = (originItem: string, originSessionId: string, key: string) => {
+        const recommended = svc.recordCampaignFollowUp(parent.id, { originSessionId, repository: "picoduck/wollipog",
+          title: `Follow-Up ${key}`, originWorkItemIds: [originItem] });
+        assert.ok(recommended.ok && recommended.data, recommended.error);
+        const accepted = svc.adjudicateCampaignRecommendation(parent.id, { recommendationId: recommended.data.id,
+          disposition: "accepted", reason: "Needed", resultingWorkItemKey: key });
+        assert.ok(accepted.ok && accepted.data?.workItem, accepted.error);
+        return accepted.data.workItem.id;
+      };
+      // The runner echoes each launch prompt as the first user message; the harness has no runner.
+      const launch = (prompt: string, echoed = true) => {
+        const id = spawn(parent.id, prompt);
+        if (echoed) db.appendEvent(id, { kind: "user_message", text: prompt }, Date.now());
+        return id;
+      };
+      const related = launch("Deliver the first item");
       assign(issueItem!, related);
-      const launch = mode === "mentioning_prompt" ? "Deliver issue 1441 after picoduck/wollipog#1440 lands."
-        : mode === "unechoed_launch" ? "Implement issue 1440." : "Deliver issue 1441.";
-      const unrelated = spawn(parent.id, launch);
-      if (mode !== "unechoed_launch") echo(unrelated, launch);
+      const unrelated = launch("Deliver issue 1441.", mode !== "unechoed_launch");
       if (mode === "earlier_attempt_prompt") {
-        assign(unrelatedItem!, unrelated);
         assign(issueItem!, unrelated);
         assign(otherItem!, unrelated);
       } else if (mode === "issue_cleared") {
-        // Clearing an item's issue later does not erase that an earlier attempt worked on it.
-        const track = (issue: { repository: string; number: number } | null) =>
-          assert.ok(svc.updateCampaignWorkItem(parent.id, { workItemId: unrelatedItem!, issue }).ok);
-        track({ repository: "picoduck/wollipog", number: 1440 });
+        // Clearing an item's issue later does not erase that the item once tracked it.
+        track(unrelatedItem!, { repository: "picoduck/wollipog", number: 1440 });
         assign(unrelatedItem!, unrelated);
         assign(otherItem!, unrelated);
-        track(null);
+        track(unrelatedItem!, null);
       } else assign(otherItem!, unrelated);
-      const unattributed = mode === "unattributed_prompt" ? spawn(parent.id, "Help with something") : null;
-      // A follow-up recommended from the issue's item is part of its lineage.
-      const followUp = svc.recordCampaignFollowUp(parent.id, { originSessionId: related, repository: "picoduck/wollipog",
-        title: "Lineage Follow-Up", originWorkItemIds: [issueItem!] });
-      assert.ok(followUp.ok && followUp.data, followUp.error);
-      const accepted = svc.adjudicateCampaignRecommendation(parent.id, { recommendationId: followUp.data.id,
-        disposition: "accepted", reason: "Needed", resultingWorkItemKey: "followup:lineage" });
-      assert.ok(accepted.ok && accepted.data?.workItem, accepted.error);
-      const followUpItem = accepted.data.workItem.id;
-      const lineageChild = mode === "follow_up_prompt" ? spawn(parent.id, "Deliver the follow-up") : null;
-      if (lineageChild) assign(followUpItem, lineageChild);
-      // A child on a follow-up of an issue-less item, connected to the issue only after approval.
-      let descendant: string | null = null;
-      if (mode === "ancestor_issue_toggled") {
-        const recommended = svc.recordCampaignFollowUp(parent.id, { originSessionId: unrelated, repository: "picoduck/wollipog",
-          title: "Plain Follow-Up", originWorkItemIds: [unrelatedItem!] });
-        assert.ok(recommended.ok && recommended.data, recommended.error);
-        const plain = svc.adjudicateCampaignRecommendation(parent.id, { recommendationId: recommended.data.id,
-          disposition: "accepted", reason: "Needed", resultingWorkItemKey: "followup:plain" });
-        assert.ok(plain.ok && plain.data?.workItem, plain.error);
-        descendant = spawn(parent.id, "Deliver the plain follow-up");
-        echo(descendant, "Deliver the plain follow-up");
-        assign(plain.data.workItem.id, descendant);
-      }
+      const unattributed = mode === "unattributed_prompt" ? launch("Help with something") : null;
+      // A follow-up of the issue's item, and of an unrelated item: any follow-up link keeps a child bound.
+      const lineageChild = mode === "follow_up_prompt" ? launch("Deliver the follow-up") : null;
+      if (lineageChild) assign(followUpOf(issueItem!, related, "followup:lineage"), lineageChild);
+      const linkedChild = mode === "linked_unrelated_prompt" ? launch("Deliver the plain follow-up") : null;
+      if (linkedChild) assign(followUpOf(unrelatedItem!, unrelated, "followup:plain"), linkedChild);
 
       let executions = 0;
       hub.requestHandler = (message) => {
@@ -24843,11 +24833,11 @@ test("issue closure binds only children whose work bears on the issue (#3084)", 
       assert.ok(decision.resourceSnapshot.category === "issue_closure");
       const bound = new Set(decision.resourceSnapshot.activeChildren.map((child) => child.sessionId));
       assert.ok(bound.has(related), `${mode}: the child assigned to the issue is bound`);
-      assert.equal(bound.has(unrelated), ["mentioning_prompt", "earlier_attempt_prompt", "unechoed_launch", "issue_cleared"].includes(mode),
-        `${mode}: a child attributed elsewhere is bound only when it names the issue, once worked on it, or its launch is unknown`);
+      assert.equal(bound.has(unrelated), ["unechoed_launch", "earlier_attempt_prompt", "issue_cleared"].includes(mode),
+        `${mode}: a child attributed elsewhere is bound only when its launch is unknown or it was ever connected to the issue`);
       if (unattributed) assert.ok(bound.has(unattributed), "a child without an open attempt stays bound");
       if (lineageChild) assert.ok(bound.has(lineageChild), "a child on a follow-up of the issue is bound");
-      if (descendant) assert.ok(!bound.has(descendant), "a child with no connection to the issue is not bound");
+      if (linkedChild) assert.ok(bound.has(linkedChild), "a child on any follow-up-linked item stays bound");
       assert.ok(svc.approve(parent.id, decision.occurrenceId, "approve", { kind: "human", id: "reviewer" }).ok);
 
       const prompt = (sessionId: string) => db.stageSessionPromptCommand({ commandId: `prompt-${sessionId}`, sessionId,
@@ -24857,40 +24847,20 @@ test("issue closure binds only children whose work bears on the issue (#3084)", 
         requestId: `ui-${sessionId}`, resourceKey: `ui-${sessionId}`, resourceSnapshot: { category: "ui_evidence_approval",
           evidence: [{ evidenceId: "after", uri: "https://evidence.example/after.png", sha256: "c".repeat(64) }] },
       }).ok);
-      if (["unrelated_prompt", "mentioning_prompt", "earlier_attempt_prompt", "unechoed_launch", "issue_cleared"].includes(mode)) prompt(unrelated);
-      if (mode === "listed_issues") {
-        echo(unrelated, "Implement issues 1441 and 1440.");
-        echo(unrelated, "Continue.");
-      }
-      if (mode === "steered_into_issue") {
-        echo(unrelated, "Also implement issue 1440.");
-        echo(unrelated, "Continue.");
-      }
+      if (["unrelated_prompt", "unechoed_launch", "earlier_attempt_prompt", "issue_cleared"].includes(mode)) prompt(unrelated);
       if (mode === "unrelated_decision") raiseDecision(unrelated);
-      if (mode === "new_unrelated_child") {
-        const added = spawn(parent.id, "Deliver the unrelated item");
-        echo(added, "Deliver the unrelated item");
-        assign(unrelatedItem!, added);
-      }
+      if (mode === "new_unrelated_child") assign(unrelatedItem!, launch("Deliver the unrelated item"));
       if (mode === "related_prompt") prompt(related);
       if (mode === "related_decision") raiseDecision(related);
       if (unattributed) prompt(unattributed);
       if (lineageChild) prompt(lineageChild);
-      if (mode === "reassigned_into_lineage") assign(followUpItem, unrelated);
+      if (linkedChild) prompt(linkedChild);
+      if (mode === "reassigned_into_lineage") assign(issueItem!, unrelated);
       // Connecting a child after approval and disconnecting it again still revokes: history only grows.
-      if (mode === "ancestor_issue_toggled") {
-        assert.ok(svc.updateCampaignWorkItem(parent.id, { workItemId: unrelatedItem!,
-          issue: { repository: "picoduck/wollipog", number: 1440 } }).ok);
-        prompt(descendant!);
-        assert.ok(svc.updateCampaignWorkItem(parent.id, { workItemId: unrelatedItem!, issue: null }).ok);
-      }
-      if (mode === "receipt_before_hydration") {
-        // Completion scrubs the staged payload before the runner's echo reaches the event cache.
-        db.stageSessionPromptCommand({ commandId: "steer-into-issue", sessionId: unrelated, runnerId: RUNNER_ID,
-          payloadJson: JSON.stringify({ text: "Also implement issue 1440." }), payloadSha256: "d".repeat(64),
-          expiresAt: Date.now() + 60_000, now: Date.now() });
-        db.db.prepare("UPDATE session_prompt_commands SET state='completed', payload_json='null' WHERE command_id=?")
-          .run("steer-into-issue");
+      if (mode === "issue_toggled") {
+        track(otherItem!, { repository: "picoduck/wollipog", number: 1440 });
+        prompt(unrelated);
+        track(otherItem!, { repository: "picoduck/wollipog", number: 1441 });
       }
       if (mode === "readjudicated") {
         const rejoin = svc.recordCampaignFollowUp(parent.id, { originSessionId: related, repository: "picoduck/wollipog",
@@ -24952,9 +24922,12 @@ test("issue-closure attribution backfills item issue and lineage history (#3084)
     db.db.exec(CAMPAIGN_WORK_LEDGER_SCHEMA);
     assert.deepEqual(history(), expected);
     assert.ok(svc.updateCampaignWorkItem(parent.id, { workItemId: issueItem!, issue: null }).ok);
-    const attribution = db.campaignWorkLedger.issueLineageSessions(parent.id, "picoduck/wollipog", 1440);
-    assert.deepEqual([[...attribution.lineage], [...attribution.elsewhere]], [[child], [child]],
-      "the earlier attempt keeps the child in the lineage after the item stops tracking the issue");
+    const plain = svc.recordCampaignPlan(parent.id, { items: [{ key: "plain" }], planComplete: true });
+    assert.ok(plain.ok && plain.data, plain.error);
+    const elsewhere = spawn(parent.id, "Deliver the plain item");
+    assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId: plain.data.items[0]!.workItemId, childSessionId: elsewhere }).ok);
+    assert.deepEqual([...db.campaignWorkLedger.issueClosureExcludableSessions(parent.id, "picoduck/wollipog", 1440)], [elsewhere],
+      "the earlier attempt keeps the first child connected after its item stops tracking the issue");
   } finally { db.close(); }
 });
 

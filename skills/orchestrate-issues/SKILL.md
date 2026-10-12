@@ -126,11 +126,11 @@ The root Orchestrator can propose closing an issue in its human-authorized campa
 `request_github_issue_closure` (`requestId`, `issue`, `reason`: `completed` or `not_planned`,
 `explanation`, `evidence`, and an optional exact `comment`). The runner derives the repository,
 current issue, and related open pull requests; the server includes the assignments of active
-children whose work can bear on the issue. A child is left out only when its open
-`assign_campaign_work_item` attempt is on a work item outside the issue's lineage (items for the
-issue and the follow-ups it came from or produced), it never had an attempt in that lineage, its
-launch prompt is recorded, and none of its prompts contains the issue number. Record each child's
-assignment so unrelated activity does not revoke the approval.
+children whose work can bear on the issue. A child is left out only when its launch prompt is
+recorded, it has an open `assign_campaign_work_item` attempt, and every attempt it has ever had is
+on a work item that has never tracked the issue and has no follow-up links. Record each child's
+assignment so unrelated activity does not revoke the approval; a prompt that mentions the issue
+does not bind an unassigned child by itself.
 Closure always requires a human-owned typed decision, regardless of Parent Control. Read it with
 `get_workflow_decision`, then use `close_github_issue` with its exact `occurrenceId` and
 `resourceDigest`. The CLI equivalents are:

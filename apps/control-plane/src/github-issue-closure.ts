@@ -40,33 +40,23 @@ export function normalizeIssueClosureSnapshot(value: Record<string, unknown>): G
     openPullRequests, activeChildren };
 }
 
-/** Text containing the issue number as a standalone number, in any phrasing (`#123`, `issues 122 and
- * 123`, `.../issues/123`). Matching the bare number over-includes on purpose: a match only ever
- * adds a child, and prose can show a task bears on an issue but never that it does not. */
-const mentionsIssue = (text: string | null | undefined, issue: number) =>
-  typeof text === "string" && new RegExp(`(?<!\\d)${issue}(?!\\d)`, "u").test(text);
-
 /** Live campaign children whose work can bear on the issue (#3084). A child is left out only when
- * the campaign work ledger attributes it elsewhere: its open attempt is on an item outside the
- * issue's lineage, no attempt of it was ever in that lineage, its launch assignment is recorded,
- * and no prompt in its history or queue, or ever staged for it, names the issue. Every other child stays included
- * conservatively: a task can move between issues in steering history, and a later "continue" prompt
- * is not proof it is unrelated. A change to the ledger that moves a child in or out of this set
- * still changes the digest. Without an issue, as for a campaign scope change, every live child is
- * included. */
+ * its launch prompt is recorded (the runner echoes it as the first user message) and the campaign
+ * work ledger attributes it elsewhere: it has an open attempt, and every attempt it has ever had is
+ * on an item that has never tracked the issue and has no follow-up links. Every other child stays
+ * included: a task can move between issues in steering history, and a later "continue" prompt is
+ * not proof it is unrelated. Exclusion is decided from append-only history, so a child once
+ * connected to the issue is never excluded again, and bringing one into the set changes the
+ * digest. Without an issue, as for a campaign scope change, every live child is included. */
 export function issueClosureActiveChildren(db: ControlPlaneDb, sessionId: string, issue?: { repository: string; number: number }) {
-  const attribution = issue ? db.campaignWorkLedger.issueLineageSessions(sessionId, issue.repository, issue.number) : null;
+  const excludable = issue ? db.campaignWorkLedger.issueClosureExcludableSessions(sessionId, issue.repository, issue.number) : null;
   return db.campaignDescendantIds(sessionId).flatMap((id) => {
     const child = db.getSession(id);
     if (!child || isTerminal(child.status) || child.archived) return [];
     const assignment = db.initialUserMessageText(id);
+    if (excludable?.has(id) && assignment !== null) return [];
     const state = db.issueClosureAssignmentState(id);
     const prompts = [...(child.queued ?? []), ...(child.pendingPrompts ?? [])];
-    // The runner echoes the launch prompt as the first user message; until then it is unknown.
-    if (issue && attribution?.elsewhere.has(id) && !attribution.lineage.has(id) && assignment !== null &&
-        !db.sessionPromptNamedNumber(id, issue.number) &&
-        ![...db.issueClosurePromptTexts(id, String(issue.number)), ...prompts.map((prompt) => prompt.text)]
-          .some((text) => mentionsIssue(text, issue.number))) return [];
     return [{ sessionId: id, title: child.title,
       assignmentDigest: createHash("sha256").update(JSON.stringify({
         assignment, state, prompts, parentSessionId: child.parentSessionId, worktreePath: child.worktreePath,
