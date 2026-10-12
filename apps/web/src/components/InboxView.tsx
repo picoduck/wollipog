@@ -338,24 +338,32 @@ export function InboxView({
   sessionsRef.current = sessions;
   const selectedSessionIdRef = useRef(inbox.selectedSessionId);
   selectedSessionIdRef.current = inbox.selectedSessionId;
-  const triageDetailReadsRef = useRef(new Map<string, {
+  type TriageDetailRead = {
+    sessionId: string;
     load: ReturnType<typeof beginSessionDetailLoad>;
     selection: string | null;
     expanded: string | null;
-  }>());
+  };
+  const triageDetailReadsRef = useRef(new Map<string, TriageDetailRead>());
+  const activeTriageDetailReadsRef = useRef(new Set<TriageDetailRead>());
 
   useLayoutEffect(() => {
-    for (const [id, pending] of triageDetailReadsRef.current) {
-      if (!pending.load.isCurrent() || pending.selection !== inbox.selectedSessionId ||
-          pending.expanded !== expandedSessionId) {
+    for (const pending of activeTriageDetailReadsRef.current) {
+      if (!pending.load.isCurrent()) {
         pending.load.cancel();
-        triageDetailReadsRef.current.delete(id);
+        activeTriageDetailReadsRef.current.delete(pending);
+        if (triageDetailReadsRef.current.get(pending.sessionId) === pending) triageDetailReadsRef.current.delete(pending.sessionId);
+      } else if (pending.selection !== inbox.selectedSessionId || pending.expanded !== expandedSessionId) {
+        // Moving through the list releases coordination, but preserves the action already issued.
+        // Keep its fence owned until settlement so leaving this component can still cancel it.
+        if (triageDetailReadsRef.current.get(pending.sessionId) === pending) triageDetailReadsRef.current.delete(pending.sessionId);
       }
     }
   }, [sessions, inbox.selectedSessionId, expandedSessionId]);
 
   useLayoutEffect(() => () => {
-    for (const pending of triageDetailReadsRef.current.values()) pending.load.cancel();
+    for (const pending of activeTriageDetailReadsRef.current) pending.load.cancel();
+    activeTriageDetailReadsRef.current.clear();
     triageDetailReadsRef.current.clear();
   }, [api, beginSessionDetailLoad, instanceScope]);
 
@@ -1357,18 +1365,26 @@ export function InboxView({
       // A replaced request or selection can retry without waiting for an obsolete transport.
       if (previous?.load.isCurrent() && previous.selection === selectedSessionIdRef.current &&
           previous.expanded === expandedSessionIdRef.current) return;
-      previous?.load.cancel();
+      // A new intent for this session supersedes any read released by earlier navigation.
+      for (const pending of activeTriageDetailReadsRef.current) {
+        if (pending.sessionId !== sessionId) continue;
+        pending.load.cancel();
+        activeTriageDetailReadsRef.current.delete(pending);
+      }
       const pending = {
+        sessionId,
         load: beginSessionDetailLoad(sessionId),
         selection: selectedSessionIdRef.current,
         expanded: expandedSessionIdRef.current,
       };
       reads.set(sessionId, pending);
+      activeTriageDetailReadsRef.current.add(pending);
       try {
         targetSession = (await api.session(sessionId)).session;
         if (!pending.load.apply(targetSession)) return;
       } finally {
         pending.load.cancel();
+        activeTriageDetailReadsRef.current.delete(pending);
         // An older response must never release a replacement read's ownership.
         if (reads.get(sessionId) === pending) reads.delete(sessionId);
       }

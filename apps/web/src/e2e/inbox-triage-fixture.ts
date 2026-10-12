@@ -8,6 +8,8 @@ export function installInboxTriageFixture(
 ) {
   const actions: Array<{ sessionId: string; requestId: string; optionId: string | null }> = [];
   const questionActions: Array<{ sessionId: string; body: Parameters<ApiClient["answerQuestion"]>[1] }> = [];
+  const detailRequests: string[] = [];
+  let settledDetails = 0;
   for (const session of sessions) {
     session.status = "input_required";
     session.pendingApproval = {
@@ -21,9 +23,15 @@ export function installInboxTriageFixture(
   const detail = (id: string) => structuredClone(sessions.find((session) => session.id === id)!);
   client.session = async (id) => {
     // A synthetic HTTP seam gives Playwright control of individual responses and real request counts.
-    const response = await fetch(`/__inbox-triage-detail/${encodeURIComponent(id)}`);
-    if (!response.ok) throw new Error("Synthetic detail read failed");
-    return response.json();
+    // Record synchronously so slow network routing cannot hide duplicate calls in a negative assertion.
+    detailRequests.push(id);
+    try {
+      const response = await fetch(`/__inbox-triage-detail/${encodeURIComponent(id)}`);
+      if (!response.ok) throw new Error("Synthetic detail read failed");
+      return await response.json();
+    } finally {
+      settledDetails += 1;
+    }
   };
   client.approve = async (id, body) => {
     actions.push({ sessionId: id, ...body });
@@ -43,6 +51,8 @@ export function installInboxTriageFixture(
     detail,
     actions: () => structuredClone(actions),
     questionActions: () => structuredClone(questionActions),
+    detailRequests: () => [...detailRequests],
+    settledDetails: () => settledDetails,
     summary(id, patch = {}) {
       const session = sessions.find((candidate) => candidate.id === id)!;
       Object.assign(session, structuredClone(patch));
@@ -57,6 +67,8 @@ declare global {
       detail(id: string): SessionView;
       actions(): Array<{ sessionId: string; requestId: string; optionId: string | null }>;
       questionActions(): Array<{ sessionId: string; body: Parameters<ApiClient["answerQuestion"]>[1] }>;
+      detailRequests(): string[];
+      settledDetails(): number;
       summary(id: string, patch?: Partial<SessionView>): void;
     };
   }
