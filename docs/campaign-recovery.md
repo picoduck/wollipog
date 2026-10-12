@@ -16,7 +16,9 @@ exception. Consumed one-shot permissions are never restored by recovery.
 Recovery records reserve at most four instructions per original resource. Transient failures use
 exponential backoff starting at one second, capped at thirty seconds. Repeated unchanged
 observations neither spend another attempt nor create another request or wake. Replacement-worker
-records retain the original ledger item's ceiling. Hard denial and exhaustion stay blocked and ask
+records retain the original ledger item's ceiling. Check repair and re-review retain a repository/PR
+ceiling across changed heads; the head remains an exact observation coordinate, not a counter reset.
+Hard denial and exhaustion stay blocked and ask
 for no override. Existing continuation transport owns its own bounded retries and ambiguous-result
 fence; recovery never acknowledges an unknown parent turn to create another turn.
 
@@ -24,6 +26,10 @@ Instruction reservation and durable continuation-event insertion share one SQLit
 Restarting the control plane recovers the reservation and event, including any pending backoff.
 The existing continuation lane preserves single-flight execution and runner receipt identities.
 Stop, archive, authority revocation and explicit root restart cancel the old recovery records.
+A cancellation fences the old dispatch reservation without hiding a still-live human exception.
+Human gates are re-derived under the current policy; exhausted history remains blocked if work
+reappears. Automatic work with the same cancelled occurrence stays visibly blocked and cannot
+re-dispatch, while a fresh authoritative occurrence keeps the logical resource's spent ceiling.
 A paused or input-required root is never restarted automatically. A human gate on one child allows
 an otherwise idle parent with a current Full Control boundary to continue unrelated authorized work;
 the child's gate stays unchanged. Custom campaigns retain their existing whole-campaign human hold.

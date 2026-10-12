@@ -5209,10 +5209,11 @@ export class ControlPlaneDb {
   }
 
   campaignRecoveryRequest(sessionId: string, request: PendingApproval): PendingApproval {
+    const { campaignRecovery: _derivedRecovery, ...stored } = request;
     const rootId = this.campaignRootForMember(sessionId);
-    if (!rootId || !request.occurrenceId) return request;
-    const recovery = this.campaignRecovery.requestRecord(rootId, sessionId, request.occurrenceId);
-    return recovery ? { ...request, campaignRecovery: recovery } : request;
+    if (!rootId || !stored.occurrenceId || this.sessionOrchestratorPolicy(rootId)?.control?.mode !== "full_control") return stored;
+    const recovery = this.campaignRecovery.requestRecord(rootId, sessionId, stored.occurrenceId);
+    return recovery ? { ...stored, campaignRecovery: recovery } : stored;
   }
 
   /** Current denied occurrences and uncertain closure mutations require recovery bookkeeping
@@ -5223,7 +5224,7 @@ export class ControlPlaneDb {
         (status='consumed' AND json_extract(issue_closure_result,'$.outcome')='uncertain'))
         AND NOT EXISTS (SELECT 1 FROM workflow_decisions newer
           WHERE newer.session_id=decision.session_id AND newer.resource_key=decision.resource_key
-          AND newer.created_at>decision.created_at)`).all(campaignId) as unknown[])
+          AND newer.rowid>decision.rowid)`).all(campaignId) as unknown[])
       .map(workflowDecisionFromRow).filter((decision): decision is WorkflowDecisionView => decision !== null);
   }
 
@@ -28525,21 +28526,24 @@ function pendingApprovalWithOccurrenceIds(
   const priorByRequestId = new Map(
     pendingRequests(prior).map((request) => [request.requestId, request]),
   );
-  const identify = (request: PendingApproval): PendingApproval => ({
-    ...request,
-    occurrenceId: request.occurrenceId || priorByRequestId.get(request.requestId)?.occurrenceId ||
-      `request_${randomUUID().replace(/-/g, "")}`,
-    requestedAt: (!request.occurrenceId || request.occurrenceId === priorByRequestId.get(request.requestId)?.occurrenceId)
-      ? priorByRequestId.get(request.requestId)?.requestedAt ?? Date.now() : Date.now(),
-    ...((!request.occurrenceId || request.occurrenceId === priorByRequestId.get(request.requestId)?.occurrenceId) &&
-      priorByRequestId.get(request.requestId)?.standingAdmissionFailure
-      ? { standingAdmissionFailure: priorByRequestId.get(request.requestId)!.standingAdmissionFailure } : {}),
-    ...((!request.occurrenceId || request.occurrenceId === priorByRequestId.get(request.requestId)?.occurrenceId) &&
-      priorByRequestId.get(request.requestId)?.humanRequired ? { humanRequired: true } : {}),
-    ...(request.additionalRequests
-      ? { additionalRequests: request.additionalRequests.map(identify) }
-      : {}),
-  });
+  const identify = (request: PendingApproval): PendingApproval => {
+    const { campaignRecovery: _derivedRecovery, ...stored } = request;
+    return {
+      ...stored,
+      occurrenceId: request.occurrenceId || priorByRequestId.get(request.requestId)?.occurrenceId ||
+        `request_${randomUUID().replace(/-/g, "")}`,
+      requestedAt: (!request.occurrenceId || request.occurrenceId === priorByRequestId.get(request.requestId)?.occurrenceId)
+        ? priorByRequestId.get(request.requestId)?.requestedAt ?? Date.now() : Date.now(),
+      ...((!request.occurrenceId || request.occurrenceId === priorByRequestId.get(request.requestId)?.occurrenceId) &&
+        priorByRequestId.get(request.requestId)?.standingAdmissionFailure
+        ? { standingAdmissionFailure: priorByRequestId.get(request.requestId)!.standingAdmissionFailure } : {}),
+      ...((!request.occurrenceId || request.occurrenceId === priorByRequestId.get(request.requestId)?.occurrenceId) &&
+        priorByRequestId.get(request.requestId)?.humanRequired ? { humanRequired: true } : {}),
+      ...(request.additionalRequests
+        ? { additionalRequests: request.additionalRequests.map(identify) }
+        : {}),
+    };
+  };
   return identify(approval);
 }
 

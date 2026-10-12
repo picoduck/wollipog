@@ -59,7 +59,7 @@ test("revocation and policy changes cancel admission; human and denied requests 
     const store = db.campaignRecovery;
     store.synchronize("root", 1, true, [observation()], 1);
     store.synchronize("root", 2, true, [observation()], 100);
-    assert.equal(store.projection("root").records.length, 0);
+    assert.equal(store.projection("root").blocked, 1, "live cancelled work remains visible without admission");
     store.synchronize("root", 2, true, [observation("new-event")], 200);
     assert.equal(store.dispatchDue("root", 2, 10000, () => assert.fail("rebound authority")), 0);
     const human = { ...observation(), resource: { ...observation().resource, occurrenceId: "auth-1" },
@@ -88,5 +88,63 @@ test("unknown outcomes instruct reconciliation and never authorize mutation repl
     });
     db.campaignRecovery.synchronize("root", 1, false, [observation()], 2);
     assert.equal(db.campaignRecovery.projection("root").automatic, 0);
+  } finally { db.close(); }
+});
+
+test("live human gates stay observable after policy changes and cancelled reservations", () => {
+  const db = database();
+  try {
+    const store = db.campaignRecovery;
+    const human = { ...observation(), owner: "human" as const, reason: "missing_access" as const };
+    store.synchronize("root", 1, true, [human], 1);
+    store.synchronize("root", 2, true, [human], 2);
+    assert.equal(store.projection("root").waitingHuman, 1);
+    assert.equal(store.projection("root").unattendedReady, false);
+    store.synchronize("root", 2, false, [], 3);
+    store.synchronize("root", 2, true, [human], 4);
+    assert.equal(store.projection("root").waitingHuman, 1);
+    assert.equal(store.synchronize("root", 2, true, [human], 5), false, "unchanged live gate remains quiet");
+    assert.equal(store.dispatchDue("root", 2, 10000, () => assert.fail("human gate")), 0);
+  } finally { db.close(); }
+});
+
+test("PR repair ceilings survive changing heads and resolved history", () => {
+  const db = database();
+  try {
+    const store = db.campaignRecovery;
+    const ids: string[] = [];
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      store.synchronize("root", 1, true, [{ action: "repair_checks", owner: "orchestrator", reason: "failed_checks",
+        resource: { kind: "pull_request", sessionId: "root", repository: "picoduck/wollipog", pullRequest: 42,
+          occurrenceId: `head-${attempt}` }, signal: `head-${attempt}` }], attempt);
+      assert.equal(store.dispatchDue("root", 1, attempt, record => ids.push(record.id)), 1);
+    }
+    assert.equal(new Set(ids).size, 1, "repair pushes retain one PR ceiling");
+    store.synchronize("root", 1, true, [], 5);
+    store.synchronize("root", 1, true, [{ action: "repair_checks", owner: "orchestrator", reason: "failed_checks",
+      resource: { kind: "pull_request", sessionId: "root", repository: "picoduck/wollipog", pullRequest: 42,
+        occurrenceId: "head-5" }, signal: "head-5" }], 6);
+    assert.equal(store.projection("root").blocked, 1);
+    assert.equal(store.projection("root").records[0]!.attempts, 4);
+  } finally { db.close(); }
+});
+
+test("resolved worker exhaustion remains blocked when a replacement fails", () => {
+  const db = database();
+  try {
+    const store = db.campaignRecovery;
+    const worker = (n: number) => ({ action: "replace_worker" as const, owner: "orchestrator" as const,
+      reason: "transient_failure" as const, resource: { kind: "worker" as const, sessionId: `worker-${n}`,
+        occurrenceId: `epoch-${n}`, workItemId: "same-item" }, signal: `failure-${n}` });
+    for (let n = 1; n <= 4; n++) {
+      store.synchronize("root", 1, true, [worker(n)], n * 100000);
+      store.dispatchDue("root", 1, n * 100000 + 30000, () => {});
+    }
+    store.synchronize("root", 1, true, [worker(5)], 600000);
+    assert.equal(store.projection("root").blocked, 1);
+    store.synchronize("root", 1, true, [], 700000);
+    store.synchronize("root", 1, true, [worker(6)], 800000);
+    assert.equal(store.projection("root").blocked, 1, "resolution never refunds exhausted attempts");
+    assert.equal(store.projection("root").records[0]!.attempts, 4);
   } finally { db.close(); }
 });

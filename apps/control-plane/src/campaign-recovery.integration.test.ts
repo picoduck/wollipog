@@ -178,6 +178,42 @@ test("missing recovery capability explicitly prevents unattended readiness and a
   } finally { h.db.close(); }
 });
 
+test("derived recovery metadata is stripped from stored and runner-originated requests", () => {
+  const h = fixture();
+  try {
+    const request: PendingApproval = { requestId: "auth", occurrenceId: "auth-occ", title: "Sign In", kind: "authentication", options: [] };
+    h.db.setPendingApproval("child", request);
+    h.recovery.maintain(10);
+    const decorated = h.db.getSession("child")!.pendingApproval!;
+    assert.ok(decorated.campaignRecovery);
+    h.db.setPendingApproval("child", { ...decorated, additionalRequests: [{ ...decorated, requestId: "other", occurrenceId: "other-occ" }] });
+    const raw = h.db.raw().prepare("SELECT pending_approval FROM sessions WHERE id='child'").get() as { pending_approval: string };
+    assert.equal(raw.pending_approval.includes('"campaignRecovery"'), false, "derived metadata is not persisted, including sibling requests");
+    h.db.raw().prepare("UPDATE sessions SET pending_approval=? WHERE id='child'").run(JSON.stringify(decorated));
+    h.db.updateSessionCampaignControl("root", { mode: "custom" }, 2, 20);
+    h.recovery.maintain(30);
+    assert.equal(h.db.getSession("child")!.pendingApproval!.campaignRecovery, undefined, "legacy stored metadata cannot survive the live mapper");
+  } finally { h.db.close(); }
+});
+
+test("same-millisecond replacement decisions supersede stale denied recovery", () => {
+  const h = fixture();
+  try {
+    const snapshot = { category: "implementation_question" as const, question: "Which test fixture should we implement?",
+      options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] };
+    const first = h.svc.createWorkflowDecision("child", { requestId: "old", resourceKey: "same", resourceSnapshot: snapshot }).data!;
+    assert.ok(h.svc.resolveDescendantRequest("root", "child", first.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "deny" }, () => true).ok);
+    const second = h.svc.createWorkflowDecision("child", { requestId: "new", resourceKey: "same", resourceSnapshot: snapshot }).data!;
+    assert.ok(second);
+    h.db.raw().prepare("UPDATE workflow_decisions SET created_at=100 WHERE occurrence_id IN (?,?)")
+      .run(first.occurrenceId, second.occurrenceId);
+    assert.equal(h.db.campaignRecoverySettledDecisions("root").length, 0);
+    h.recovery.maintain(1000);
+    assert.equal(h.db.campaignProjection("root")!.recovery!.blocked, 0);
+  } finally { h.db.close(); }
+});
+
 test("fresh check/review failures route to repair; stale facts cannot resolve their exceptions", () => {
   const h = fixture();
   try {

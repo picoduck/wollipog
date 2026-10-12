@@ -4,7 +4,7 @@ export type CampaignRecoveryAction = "answer_request" | "review_evidence" | "rec
   "replace_worker" | "reformulate_request" | "repair_checks" | "rereview" | "reconcile_outcome" | "continue_campaign";
 export type CampaignRecoveryReason = "authorized_action" | "transient_failure" | "failed_checks" | "reviewer_objection" |
   "uncertain_outcome" | "missing_human_information" | "missing_access" | "boundary_enlargement" |
-  "human_required_rule" | "unsupported_capability" | "hard_denial" | "attempts_exhausted";
+  "human_required_rule" | "unsupported_capability" | "hard_denial" | "attempts_exhausted" | "authority_changed";
 export type CampaignRecoveryState = "ready" | "backoff" | "dispatched" | "waiting_human" |
   "blocked" | "resolved" | "cancelled";
 export interface CampaignRecoveryResource {
@@ -28,6 +28,8 @@ export interface CampaignRecoveryRecord {
   state: CampaignRecoveryState;
   effectiveOwner: "human" | "orchestrator";
   policyRevision: number;
+  /** An old reservation cannot dispatch after cancellation even if its live exception is shown. */
+  dispatchFenced?: boolean;
   attempts: number;
   maxAttempts: number;
   attemptedRecovery: CampaignRecoveryAction[];
@@ -65,4 +67,5 @@ export const CAMPAIGN_RECOVERY_EXPLANATIONS: Record<CampaignRecoveryReason, stri
   unsupported_capability: "The current provider path cannot safely perform this operation. Use a supported capability without changing campaign preferences automatically.",
   hard_denial: "The operation was denied. It remains blocked and recovery will not request repeated overrides.",
   attempts_exhausted: "The recovery ceiling was exhausted. It remains blocked and recovery will not reset the ceiling or request repeated overrides.",
+  authority_changed: "The original recovery reservation was cancelled. This live resource remains blocked until a fresh exact occurrence is available; no override is requested.",
 };

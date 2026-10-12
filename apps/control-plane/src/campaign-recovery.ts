@@ -41,10 +41,14 @@ export class CampaignRecoveryService {
 
   synchronize(root: SessionView, now: number): void {
     const full = root.orchestratorPolicy?.control?.mode === "full_control";
+    const revision = root.parentControlPolicy?.revision ?? 0;
+    if (!full) {
+      if (this.db.campaignRecovery.synchronize(root.id, revision, false, [], now)) this.changed(root.id);
+      return;
+    }
     const current = full && !root.archived && !root.stopOperation && !isTerminal(root.status) && campaignBoundaryCurrent(root);
     const supported = campaignAuthorityPreflight(root.orchestratorPolicy?.control, root.driver,
       this.db.getRunner(root.runnerId)?.protocolVersion).supported;
-    const revision = root.parentControlPolicy?.revision ?? 0;
     const observations: CampaignRecoveryObservation[] = [];
     const previous = this.db.campaignRecovery.activeObservations(root.id);
     const ledgerWorkers = this.db.campaignWorkLedger.attemptedSessionIds(root.id);

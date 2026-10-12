@@ -40,7 +40,10 @@ const human = new Set<CampaignRecoveryReason>(["missing_human_information", "mis
 
 function identity(campaignId: string, resource: CampaignRecoveryResource, action: CampaignRecoveryAction): string {
   const coordinate = resource.kind === "worker" && resource.workItemId
-    ? { kind: "worker", workItemId: resource.workItemId } : resource;
+    ? { kind: "worker", workItemId: resource.workItemId }
+    : resource.kind === "pull_request" && ["repair_checks", "rereview"].includes(action)
+      ? { kind: "pull_request", repository: resource.repository?.toLowerCase(), pullRequest: resource.pullRequest }
+      : resource;
   return `recovery_${createHash("sha256").update(JSON.stringify([campaignId, coordinate, action])).digest("hex")}`;
 }
 
@@ -94,21 +97,26 @@ export class CampaignRecoveryStore {
         const row = previous.get(id) ?? this.db.prepare("SELECT id,signal,record_json FROM campaign_recovery WHERE id=?")
           .get(id) as Row | undefined;
         const old = row ? JSON.parse(row.record_json) as CampaignRecoveryRecord : undefined;
-        if (old && old.state === "cancelled") continue;
-        if (old && hard.has(old.reason) && !observation.resolved && authorized && old.policyRevision === policyRevision) continue;
-        if (old && row!.signal === observation.signal && old.policyRevision === policyRevision && authorized &&
-            old.effectiveOwner === observation.owner && old.reason === observation.reason &&
-            (observation.resolved ? old.state === "resolved" : !terminal.has(old.state))) continue;
         const attempts = old?.attempts ?? 0;
-        const reason = attempts >= CAMPAIGN_RECOVERY_LIMITS.maxAttempts && !observation.resolved
-          ? "attempts_exhausted" : observation.reason;
-        const cancelled = !authorized || (old !== undefined && old.policyRevision !== policyRevision);
-        const state = cancelled ? "cancelled" : observation.resolved ? "resolved" : hard.has(reason) ? "blocked"
+        const changedResource = old !== undefined && JSON.stringify(old.resource) !== JSON.stringify(observation.resource);
+        const freshOccurrence = old !== undefined && (old.resource.occurrenceId !== observation.resource.occurrenceId ||
+          old.resource.sessionId !== observation.resource.sessionId);
+        const dispatchFenced = (!authorized || old?.dispatchFenced === true || old?.state === "cancelled" ||
+          old !== undefined && old.policyRevision !== policyRevision) && !(authorized && freshOccurrence);
+        let reason = attempts >= CAMPAIGN_RECOVERY_LIMITS.maxAttempts && !observation.resolved
+          ? "attempts_exhausted" : old && hard.has(old.reason) && !terminal.has(old.state) && !observation.resolved
+            ? old.reason : observation.reason;
+        const state = !authorized && observation.owner !== "human" ? "cancelled" : observation.resolved ? "resolved" : hard.has(reason) ? "blocked"
           : observation.owner === "human" || human.has(reason) ? "waiting_human"
+          : dispatchFenced ? "blocked"
           : reason === "transient_failure" ? "backoff" : "ready";
+        if (state === "blocked" && dispatchFenced && !hard.has(reason)) reason = "authority_changed";
+        if (old && row!.signal === observation.signal && !changedResource && old.policyRevision === policyRevision &&
+            old.effectiveOwner === observation.owner && old.reason === reason && Boolean(old.dispatchFenced) === dispatchFenced &&
+            (observation.resolved ? old.state === "resolved" : !terminal.has(old.state) || state === old.state)) continue;
         const next: CampaignRecoveryRecord = {
           id, action: observation.action, resource: structuredClone(observation.resource), reason, state,
-          effectiveOwner: observation.owner, policyRevision: old?.policyRevision ?? policyRevision,
+          effectiveOwner: observation.owner, policyRevision, ...(dispatchFenced ? { dispatchFenced: true } : {}),
           attempts, maxAttempts: CAMPAIGN_RECOVERY_LIMITS.maxAttempts,
           attemptedRecovery: old?.attemptedRecovery ?? [], requiredInput: inputFor[reason] ?? "none",
           explanation: CAMPAIGN_RECOVERY_EXPLANATIONS[reason], createdAt: old?.createdAt ?? now, updatedAt: now,
@@ -121,7 +129,8 @@ export class CampaignRecoveryStore {
         const record = JSON.parse(row.record_json) as CampaignRecoveryRecord;
         if (terminal.has(record.state) || observed.has(row.id)) continue;
         this.save(campaignId, row.signal, { ...record,
-          state: authorized && record.policyRevision === policyRevision ? "resolved" : "cancelled", updatedAt: now });
+          state: authorized && record.policyRevision === policyRevision ? "resolved" : "cancelled",
+          ...(!authorized || record.policyRevision !== policyRevision ? { dispatchFenced: true } : {}), updatedAt: now });
         changed = true;
       }
       return changed;
@@ -137,7 +146,7 @@ export class CampaignRecoveryStore {
       for (const row of this.rows(campaignId)) {
         const record = JSON.parse(row.record_json) as CampaignRecoveryRecord;
         if (dispatched >= CAMPAIGN_RECOVERY_LIMITS.dispatchPerPass) break;
-        if (record.policyRevision !== policyRevision || record.effectiveOwner !== "orchestrator" ||
+        if (record.dispatchFenced || record.policyRevision !== policyRevision || record.effectiveOwner !== "orchestrator" ||
             !["ready", "backoff"].includes(record.state) || (record.nextAttemptAt ?? 0) > now) continue;
         const next: CampaignRecoveryRecord = { ...record, state: "dispatched", attempts: record.attempts + 1,
           attemptedRecovery: [...record.attemptedRecovery, record.action], updatedAt: now };
