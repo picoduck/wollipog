@@ -6,7 +6,7 @@ import { join } from "node:path";
 import fc from "fast-check";
 import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
   validCampaignBudgetAuthority, type CampaignBudgetAuthority, type RunnerMetadata } from "@wollipog/protocol";
-import { ControlPlaneDb } from "./db.js";
+import { ControlPlaneDb, RUNNER_REPORTED_STOP } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
@@ -157,6 +157,27 @@ test("competing reservations cannot both spend the same remaining allowance", ()
     assert.equal(h.db.campaignBudgets.view("root")!.outstanding.costUsd, 80);
     assert.equal(h.db.getSession("second"), null);
   } finally { h.db.close(); }
+});
+
+test("a restart refused by occupied campaign slots preserves its stop fence",()=>{
+  const h=harness();
+  try {
+    assert.ok(h.enable(allowance({costUsd:120})).ok);
+    h.make("old","root",{costBudgetUsd:20,maxToolCalls:20});
+    h.db.updateSessionStatus("old","stopped",7,RUNNER_REPORTED_STOP);
+    h.db.campaignBudgets.recordCheckpoint("old",{generation:h.db.campaignBudgets.dispatch("old")!.generation,historyEpoch:0,throughSeq:0,costUsd:0});
+    assert.ok(h.db.campaignBudgets.settleCheckpoint("old",{historyEpoch:0,hydratedSeq:0}));
+    h.make("new1","root",{costBudgetUsd:20,maxToolCalls:20});
+    h.make("new2","root",{costBudgetUsd:20,maxToolCalls:20});
+    h.db.addSessionStopIntent("old","r",8);
+    const dispatch=h.db.campaignBudgets.dispatch("old");
+    const result=h.svc.restart("old");
+    assert.equal(result.ok,false);assert.match(result.error!,/concurrency/);
+    assert.equal(h.db.sessionStopRestartLaunchId("old"),null,"no launch was sent, so terminal stop evidence must still settle");
+    assert.deepEqual(h.db.campaignBudgets.dispatch("old"),dispatch);
+    assert.equal(h.db.campaignBudgets.active("old"),false);
+    assert.equal(h.sent.some((m)=>(m as any).type==="start_session"),false);
+  } finally {h.db.close();}
 });
 
 test("preauthorized checkpoints do not ask; tighter session ceilings cannot be enlarged", () => {
@@ -349,6 +370,10 @@ test("native service binds authority, assigned scope, canonical PR and server-on
     assert.equal(cost.total.value.usd,2,"native review appears in total cost as well as the allowance ledger");
     const ownerScope=h.db.sessionScope("root")!;
     assert.equal(h.db.userCostTodayUsd(ownerScope.organizationId,h.principal.userId),2,"enabling a daily cap later cannot erase already recorded native spending");
+    const listed=h.db.listUserCostWindows(ownerScope.organizationId).find((row)=>row.userId===h.principal.userId)!;
+    assert.equal(listed.todayUsd,2);
+    assert.equal(listed.last7DaysUsd,2);
+    assert.equal(listed.last30DaysUsd,2);
     h.svc.onCampaignReviewJobUpdate("r",{type:"campaign_review_job_update",jobId:command.jobId,nonce:command.nonce,state:"completed",costUsd:2,toolCalls:3,attemptValid:true,attemptConsumed:true,vote:"UPVOTE",receiptSha256:"c".repeat(64),report:"UPVOTE"});
     assert.equal(h.db.userCostTodayUsd(ownerScope.organizationId,h.principal.userId),2,"receipt replay never charges a second time");
     const attemptCost=h.db.campaignWorkLedger.accounting.attemptUsage("root").get(command.lineage!.workItemAttemptId)!;

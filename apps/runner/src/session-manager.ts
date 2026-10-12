@@ -14352,7 +14352,8 @@ export class SessionManager {
             ? { providerAuthDismissedCommandIds: authenticationDismissedCommandIds }
             : {}),
         });
-        this.emitStatus(sessionId, "stopped");
+        this.emitStatus(sessionId, "stopped", undefined, undefined, undefined,
+          !this.closing.has(sessionId) && !rebinding && !accountSwitching);
       }
       if (!this.closing.has(sessionId) && !rebinding && !accountSwitching) {
         this.releaseAdmissionIfInactive(sessionId);
@@ -14460,7 +14461,9 @@ export class SessionManager {
     }
     if (this.shuttingDown) return;
     const settledMeta=this.store.readMeta(sessionId);
-    if(!retirement.entry.running && !retirement.entry.providerInitiatedTurnActive && settledMeta?.campaignBudgetDispatch &&
+    // The exact provider has retired, even if Stop interrupted a running turn. Its last usage
+    // callbacks have been persisted; stale in-memory turn flags cannot keep the reservation live.
+    if(!this.active.has(sessionId) && settledMeta?.campaignBudgetDispatch &&
         ["completed","failed","stopped"].includes(settledMeta.status)) this.emitStatus(sessionId,settledMeta.status,undefined,undefined,undefined,true);
     if (this.pendingDeletions.delete(sessionId)) {
       // Deletion reaps every journal record this session owns, so it supersedes the replay below.

@@ -355,7 +355,7 @@ export function CampaignBudgetFacts({ budget }: { budget: import("@wollipog/prot
     <div><dt>Recorded Campaign Spend</dt><dd>{budget.costAccounting === "unavailable" ? "Cost unavailable" : `$${budget.actual.costUsd.toFixed(2)}`}, {budget.actual.toolCalls} tool calls</dd></div>
     <div><dt>Outstanding Allocations</dt><dd>${budget.outstanding.costUsd.toFixed(2)}, {budget.outstanding.toolCalls} tool calls</dd></div>
     <div><dt>Unallocated Allowance</dt><dd>{budget.remaining.costUsd === null ? "No campaign cost ceiling" : `$${budget.remaining.costUsd.toFixed(2)}`}, {budget.remaining.toolCalls === null ? "no campaign tool ceiling" : `${budget.remaining.toolCalls} tool calls`}</dd></div>
-    <div><dt>Accounting Policy</dt><dd>Managed workers only. Unpriced usage stops protected admission. External reviewers are unsupported.<span className="campaign-status-meta">Cancellation is asynchronous; in-flight work can overshoot the allowance. This is not a hard billing cap.</span></dd></div>
+    <div><dt>Accounting Policy</dt><dd>Managed Sessions and approved native review jobs. Unpriced usage stops protected admission. Unmanaged reviewer invocations are unsupported.<span className="campaign-status-meta">Cancellation is asynchronous; in-flight work can overshoot the allowance. This is not a hard billing cap.</span></dd></div>
   </>;
 }
 

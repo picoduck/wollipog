@@ -6600,7 +6600,6 @@ export class SessionsService {
     // Persist replacement identity before the ambiguous socket write. A false send leaves the
     // Stop fence and stopped lifecycle intact; a true/half-open send remains fenced until the
     // runner echoes this exact identity in status or snapshot evidence.
-    if (restartLaunchId) this.db.setSessionStopRestartLaunchId(sessionId, restartLaunchId);
     const wasBudgetActive = this.db.campaignBudgets.active(sessionId);
     if (budgetRoot) {
       const unsupported = this.campaignBudgetConfigError(session, spec.config, launch.driver);
@@ -6609,6 +6608,7 @@ export class SessionsService {
       catch (error) { return fail((error as Error).message, 409); }
       spec.campaignBudgetDispatch = this.db.campaignBudgets.replaceDispatch(sessionId);
     }
+    if (restartLaunchId) this.db.setSessionStopRestartLaunchId(sessionId, restartLaunchId);
     if (!this.hub.sendToRunner(session.runnerId, { type: "start_session", spec })) {
       if (budgetRoot) this.db.campaignBudgets.restoreUnsentActivation(sessionId, wasBudgetActive);
       if (restartLaunchId) this.db.clearSessionStopRestartLaunchId(sessionId);
