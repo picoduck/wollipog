@@ -182,7 +182,8 @@ export async function runPullRequestCli(
   let remainingMs = timeoutMs;
   if (!repository && /^#?\d+$/u.test(words[2]!)) {
     // Discovery comes out of the same budget as the wait, so the command still ends in time.
-    const budgetMs = Math.min(PULL_REQUEST_WAIT_MAX_TIMEOUT_MS, Math.max(1, timeoutMs ?? PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS));
+    // Clamped and floored exactly as the wait itself treats --timeout.
+    const budgetMs = Math.min(PULL_REQUEST_WAIT_MAX_TIMEOUT_MS, Math.max(1, Math.floor(timeoutMs ?? PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS)));
     const startedAt = Date.now();
     const discovery = AbortSignal.timeout(budgetMs);
     const resolved = await gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],

@@ -249,6 +249,9 @@ test("pr wait runs locally through gh with outcome exit codes and never contacts
   const spent = await run(["pr", "wait", "7", "--timeout", "100", "--json"], late);
   assert.equal(spent.code, 1);
   assert.match(JSON.parse(spent.stdout).error, /whole timeout/u);
+  const fractional = await run(["pr", "wait", "7", "--timeout", "100.5", "--json"], passed.gh);
+  assert.equal(fractional.code, 0, "a fractional timeout is floored, never a crash");
+  assert.equal(JSON.parse(fractional.stdout).outcome, "checks_passed");
 
   for (const args of [["pr"], ["pr", "wait"], ["pr", "watch", "7"], ["pr", "wait", "7", "--timeout", "soon"]]) {
     const usage = await run(args, passed.gh);
