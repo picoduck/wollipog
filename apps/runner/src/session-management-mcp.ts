@@ -1253,7 +1253,21 @@ export const TOOLS: McpTool[] = [
           ...(args?.workItem !== undefined ? { workItem: args.workItem } : {}),
         },
       );
-      return r.ok ? textResult(r.data) : errorResult(r.message);
+      if (!r.ok) return errorResult(r.message);
+      // Keep what cleanup needs (archive operation, worktrees) and drop the rest of the full
+      // child session view, which overflows tool-result limits (#3080).
+      const child = r.data?.child;
+      return textResult({
+        ...r.data,
+        ...(child && typeof child === "object" ? {
+          child: {
+            ...mapSession(child),
+            worktreePath: child.worktreePath ?? null,
+            ...(Array.isArray(child.worktrees) ? { worktrees: capArray(child.worktrees, 8) } : {}),
+            ...(child.archiveOperation ? { archiveOperation: child.archiveOperation } : {}),
+          },
+        } : {}),
+      });
     },
   },
   {
@@ -1566,7 +1580,19 @@ export const TOOLS: McpTool[] = [
           },
         },
       );
-      return r.ok ? textResult({ decision: r.data }) : errorResult(r.message);
+      if (!r.ok) return errorResult(r.message);
+      // The control plane answers with the child's full session view, tens of KB once its
+      // slash-command catalog and job history are included (#3080). Echo the accepted
+      // resolution and the compact child shape every session-returning tool shares.
+      return textResult({
+        decision: {
+          sessionId: args.sessionId,
+          occurrenceId: args.occurrenceId,
+          outcome: args.outcome,
+          ...(typeof args.selectedOptionId === "string" ? { selectedOptionId: args.selectedOptionId } : {}),
+        },
+        session: mapSession(r.data),
+      });
     },
   },
   {

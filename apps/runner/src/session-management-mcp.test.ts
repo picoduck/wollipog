@@ -200,6 +200,48 @@ test("typed workflow decision tools preserve exact request, resolution, and cons
   assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/descendant-requests/resolve`);
 });
 
+test("descendant decision resolution and child verification return a compact child, not its full session view", async () => {
+  // The control plane answers both routes with the child's full SessionView; a realistic one
+  // carries a large slash-command catalog and job history that overflowed tool results (#3080).
+  const fullChild = {
+    id: "s_child", title: "Child", status: "running", runnerId: "r1", archiveStatus: "stop_pending",
+    worktreePath: "/w/child", worktrees: [{ id: "wt1", path: "/w/child", branch: "agent/child" }],
+    archiveOperation: { operationId: "stop_1", status: "stop_pending" },
+    agentCapabilities: { slashCommands: Array.from({ length: 200 }, (_, i) => ({ name: `cmd-${i}`, description: "x".repeat(200) })) },
+    backgroundJobs: Array.from({ length: 100 }, (_, i) => ({ id: `job-${i}`, terminalStatus: "completed", output: "y".repeat(200) })),
+    pendingPrompts: [{ text: "z".repeat(5000) }],
+  };
+  const campaign = { status: "active", policyRevision: 1 };
+  const { deps } = makeDeps((call) => call.url.endsWith("/verify-child")
+    ? { status: 202, body: { campaign, child: fullChild, workItem: { revision: 2 } } }
+    : { status: 200, body: fullChild });
+  deps.orchestrator = true;
+
+  const resolution = await callTool(deps, "resolve_descendant_workflow_decision", {
+    sessionId: "s_child", occurrenceId: "workflow_7", outcome: "deny",
+  });
+  assert.ok(resolution.content[0].text.length < 4_000);
+  const resolved = resultJson(resolution);
+  assert.deepEqual(resolved.decision, { sessionId: "s_child", occurrenceId: "workflow_7", outcome: "deny" });
+  assert.equal(resolved.session.status, "running");
+  assert.equal(resolved.session.agentCapabilities, undefined);
+  assert.equal(resolved.session.backgroundJobs, undefined);
+  assert.equal(resolved.session.pendingPrompts, undefined);
+
+  const verification = await callTool(deps, "verify_campaign_child", {
+    childSessionId: "s_child", reportEventSeq: 3, followUpsAccounted: true,
+  });
+  assert.ok(verification.content[0].text.length < 4_000);
+  const verified = resultJson(verification);
+  assert.deepEqual(verified.campaign, campaign);
+  assert.deepEqual(verified.workItem, { revision: 2 });
+  assert.equal(verified.child.archiveStatus, "stop_pending");
+  assert.deepEqual(verified.child.archiveOperation, fullChild.archiveOperation);
+  assert.deepEqual(verified.child.worktrees, fullChild.worktrees);
+  assert.equal(verified.child.agentCapabilities, undefined);
+  assert.equal(verified.child.backgroundJobs, undefined);
+});
+
 test("review_descendant_ui_evidence returns the verified image and refuses bytes that miss the bound digest", async () => {
   const bytes = Buffer.from("exact evidence bytes");
   const receipt = {
