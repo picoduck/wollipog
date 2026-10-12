@@ -543,7 +543,10 @@ The lifetime policy is quiescence-aware and fail-safe:
 - Claude `modelUsage` and `total_cost_usd` include the whole query tree. In CLI 2.1.277+ they
   restore cumulative conversation totals on resume and fork; older CLIs scope them to the process.
   The driver subtracts raw per-model checkpoints and reconciles the prefix a replacement process
-  will restore with a zero-inference local `/context` probe. See `usage-cost-aggregation.md`.
+  will restore with a zero-inference local `/context` probe. Against a v216+ control plane each
+  completed top-level request is also published live as a display-only `provisional` record, closed by
+  the next checkpoint or republished when none can cover it, so a running or interrupted turn is not
+  invisible until a result. See `usage-cost-aggregation.md`.
 - All three lifetime controls are runner-only and are scrubbed from native, WSL, and standalone
   TUI child environments.
 
@@ -839,6 +842,7 @@ harmless because Claude never reaches the control channel for a command the hook
 | `system`/`init` | `session_id`, `model`, `tools`, `permissionMode` | record session id/model (no event, or `status`); seed capabilities |
 | `stream_event` `content_block_delta` `text_delta` | `event.delta.text`, open `message_start.message.id`, block `index` | `{kind:"agent_message", text, messageId?}` (live token stream) |
 | `stream_event` `content_block_start` `thinking`/thinking deltas | delta text, open message id, block `index` | `{kind:"agent_thought", text, messageId?}` |
+| top-level `stream_event` `message_start` → `message_delta` → `message_stop` | `message.model`, `message.usage`, cumulative `usage` on the delta | v216+ control plane: `{kind:"token_usage", liveUsage:"provisional", model, inputTokens, outputTokens, cachedInputTokens, cacheCreationInputTokens, pricingContext}` once per request |
 | `stream_event` `content_block_start` `tool_use` | `content_block.name`, `id`, `parent_tool_use_id` | `{kind:"tool_call", toolCallId:id, title:name, toolKind, status:"pending", parentToolUseId?}` |
 | `stream_event` `content_block_delta` `input_json_delta` | `partial_json` | `{kind:"tool_call_update", toolCallId, status:"in_progress", text:partial}` |
 | `assistant` (complete) | `message.content[]` text blocks | authoritative `{kind:"agent_message", text}` (dedupe vs deltas) |

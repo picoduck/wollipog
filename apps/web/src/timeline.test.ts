@@ -649,6 +649,17 @@ test("message timestamps and defensible top-level turn durations survive project
   assert.deepEqual([second.durationMs, second.durationSource], [320, "provider"]);
 });
 
+test("a live request record neither ends its turn nor adds to the usage its settlement reports again", () => {
+  const items = deriveTimeline([
+    { id: 30, sessionId: "s", seq: 30, ts: 1_000, payload: { kind: "user_message", text: "long turn" } },
+    { id: 31, sessionId: "s", seq: 31, ts: 1_400, payload: { kind: "token_usage", inputTokens: 3, outputTokens: 2, liveUsage: "provisional" } },
+    { id: 32, sessionId: "s", seq: 32, ts: 9_000, payload: { kind: "token_usage", inputTokens: 4, outputTokens: 3, durationMs: 7_900, liveUsage: "settled" } },
+  ]);
+  const turn = items[0] as Extract<TimelineItem, { kind: "user_message" }>;
+  assert.deepEqual([turn.durationMs, turn.durationSource, turn.lastUsageAt], [7_900, "provider", 9_000]);
+  assert.deepEqual([turn.turnUsage?.inputTokens, turn.turnUsage?.outputTokens], [4, 3]);
+});
+
 test("missing or invalid terminal evidence never fabricates a turn duration", () => {
   const events: SessionEvent[] = [
     { id: 20, sessionId: "s", seq: 20, ts: 5_000, payload: { kind: "user_message", text: "unfinished" } },

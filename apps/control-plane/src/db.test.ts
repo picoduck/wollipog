@@ -17,6 +17,7 @@ import type {
   ForgeReviewSyncInfo,
   GitHubReviewSyncInfo,
   SessionConfig,
+  SessionEventPayload,
   SessionSnapshot,
   WorkflowDecisionView,
   WorkflowArtifact,
@@ -9097,6 +9098,70 @@ test("independent Codex child requests contribute to session billing exactly onc
   assert.equal(totals.cachedInputTokens, 600);
   assert.equal(totals.costUsd, 0.00192);
   assert.equal(db.getSession("sess-1")!.costUsd, 0.00192);
+});
+
+test("live Claude requests show in the session while running and are accounted only by the record closing them", () => {
+  const db = withRunner();
+  db.setUsageRateTable(parseRateTable(rateDocument));
+  db.createSession(newSession({ driver: "claude-code", config: { model: "claude-fable-5-1" } }));
+  const near = (actual: number, expected: number, message?: string) => assert.ok(Math.abs(actual - expected) < 1e-9, `${message ?? ""} ${actual} != ${expected}`);
+  const live = { kind: "token_usage" as const, model: "claude-fable-5-1", inputTokens: 1000, outputTokens: 100,
+    pricingContext: { requestInputTokens: 1000, serviceTier: "standard" }, liveUsage: "provisional" as const };
+  const settled = { kind: "token_usage" as const, model: "claude-fable-5-1", inputTokens: 1000, outputTokens: 100,
+    costUsd: 0.01, costIsEstimate: true as const, liveUsage: "settled" as const };
+  const ledger = () => db.queryUsageAggregation(localOwner(), { since: 0, through: 10000000, granularity: "hour" }).totals;
+  const shown = () => {
+    const session = db.getSession("sess-1")!;
+    return session.costUsd + (session.liveUsage?.costUsd ?? 0);
+  };
+  let seq = 0;
+  const append = (payload: SessionEventPayload) => db.appendEvent("sess-1", payload, 3600100 + seq, { accrueUsage: true, runnerSeq: ++seq });
+
+  // 1000 input at $5/M plus 100 output at $25/M, visible before the turn's result but never accrued.
+  append(live);
+  assert.deepEqual(db.getSession("sess-1")!.liveUsage, { tokensIn: 1000, tokensOut: 100, costUsd: 0.0075 });
+  assert.deepEqual([db.getSession("sess-1")!.costUsd, db.getSession("sess-1")!.tokensIn, db.sessionCostUsd("sess-1"), ledger().inputTokens], [0, 0, 0, 0]);
+  assert.deepEqual(db.listSessionSummaries().find((session) => session.id === "sess-1")?.liveUsage, db.getSession("sess-1")!.liveUsage);
+  append(settled);
+  near(shown(), 0.01, "the provider total replaces the live estimate");
+  assert.equal(db.getSession("sess-1")!.liveUsage, undefined);
+  assert.equal(ledger().inputTokens, 1000);
+
+  // A killed process's requests are republished as ordinary records the rate table prices.
+  append(live);
+  append(live);
+  append({ ...live, liveUsage: "republished" });
+  near(shown(), 0.01 + 0.0075 + 0.0075, "one accounted, one still shown");
+  append({ ...live, liveUsage: "settled" });
+  near(shown(), 0.025);
+  assert.equal(db.getSession("sess-1")!.tokensIn, 3000);
+  // A content-free close records nothing itself.
+  append(live);
+  append({ kind: "token_usage", liveUsage: "settled" });
+  near(shown(), 0.025);
+  assert.equal(ledger().inputTokens, 3000);
+  assert.equal(ledger().unpricedRecords, 0);
+
+  // Reconnect: a snapshot covering an unseen close is authoritative, and the stale estimate goes.
+  append(live);
+  db.updateSessionFromSnapshot("sess-1", snapshot({ id: "sess-1", driver: "claude-code", tokensIn: 4000, tokensOut: 400,
+    costUsd: 0.035, costIsEstimate: true, seq: seq + 1 }), 3700000);
+  near(shown(), 0.035, "neither lost nor counted twice");
+  db.appendEvent("sess-1", settled, 3700100, { accrueUsage: true, runnerSeq: seq + 1 });
+  near(shown(), 0.035, "the covered close is not replayed");
+  // Reconnect: live requests the control plane never saw add nothing to the runner's totals.
+  seq += 1;
+  db.updateSessionFromSnapshot("sess-1", snapshot({ id: "sess-1", driver: "claude-code", tokensIn: 4000, tokensOut: 400,
+    costUsd: 0.035, costIsEstimate: true, seq: seq + 2 }), 3700200);
+  seq += 2;
+  append(settled);
+  near(shown(), 0.045);
+  assert.equal(ledger().inputTokens, 5000);
+
+  // A replaced history skips its replayed close; its estimate goes with it.
+  append(live);
+  db.appendEvent("sess-1", settled, 3700300, { accrueUsage: true, runnerSeq: seq + 1, historyEpoch: 7 });
+  assert.equal(db.getSession("sess-1")!.liveUsage, undefined);
 });
 
 test("zeroed provider accounting is unpriced and historical Claude estimates remain disclosed", () => {

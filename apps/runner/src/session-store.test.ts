@@ -163,6 +163,33 @@ test("appendEvent assigns increasing seq and readEvents filters by afterSeq", ()
   }
 });
 
+test("v214 wire projection omits display-only live Claude usage from live sends and history alike", () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    const provisional = store.appendEvent("s_abc", { kind: "token_usage", model: "claude-opus-5", inputTokens: 3,
+      outputTokens: 2, liveUsage: "provisional" }, 1001)!;
+    const marker = store.appendEvent("s_abc", { kind: "token_usage", liveUsage: "settled" }, 1002)!;
+    const republished = store.appendEvent("s_abc", { kind: "token_usage", model: "claude-opus-5", inputTokens: 3,
+      outputTokens: 2, liveUsage: "republished" }, 1003)!;
+    assert.equal(store.projectEventForProtocol("s_abc", provisional, 214), null);
+    assert.equal(store.projectEventForProtocol("s_abc", marker, 214), null);
+    assert.deepEqual(store.projectEventForProtocol("s_abc", republished, 214), {
+      ...republished, seq: 1, payload: { kind: "token_usage", model: "claude-opus-5", inputTokens: 3, outputTokens: 2 },
+    }, "an older peer accounts the republished request as an ordinary record at its dense coordinate");
+    assert.deepEqual(store.readEventsForProtocol("s_abc", 0, 214).map((event) => [event.seq, event.payload]), [
+      [1, { kind: "token_usage", model: "claude-opus-5", inputTokens: 3, outputTokens: 2 }],
+    ]);
+    assert.equal(store.snapshots(214)[0]?.seq, 1);
+    assert.notEqual(store.snapshots(214)[0]?.historyEpoch, store.snapshots(CURRENT_PEER)[0]?.historyEpoch,
+      "the two projections number history differently, so they never share cursors");
+    assert.deepEqual(store.readEventsForProtocol("s_abc", 0, CURRENT_PEER).map((event) => event.payload.liveUsage),
+      ["provisional", "settled", "republished"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("v86 wire projection omits response completions while keeping dense live and hydration cursors", () => {
   const { store, root } = tmpStore();
   try {
@@ -522,29 +549,33 @@ test("the projection-count encoding fences every prior one-policy wire generatio
     const recent = store.snapshots(147)[0]!;
     const previous = store.snapshots(170)[0]!;
     const lastFiveVariant = store.snapshots(203)[0]!;
+    const lastSixVariant = store.snapshots(215)[0]!;
     const current = store.snapshots(CURRENT_PEER)[0]!;
 
     // Before v130 the one-policy encoding at local epoch zero was 1 for v86 and 0 for every
     // v87+ peer. Before v148 the three-variant encoding used offset 2, before v171 the
-    // four-variant encoding used offset 5, and before v204 the five-variant encoding used offset 9.
+    // four-variant encoding used offset 5, before v204 the five-variant encoding used offset 9, and
+    // before v216 the six-variant encoding used offset 14.
     // The advanced offset makes every current projection larger than each predecessor at the same
     // local epoch, so every control plane resyncs when the runner upgrades even if its protocol
     // changes at the same time.
     assert.notEqual(legacy.historyEpoch, 1);
     assert.notEqual(intermediate.historyEpoch, 0);
-    assert.equal(legacy.historyEpoch, 19);
-    assert.equal(intermediate.historyEpoch, 18);
-    assert.equal(recent.historyEpoch, 17);
-    assert.equal(previous.historyEpoch, 16);
-    assert.equal(lastFiveVariant.historyEpoch, 15);
+    assert.equal(legacy.historyEpoch, 26);
+    assert.equal(intermediate.historyEpoch, 25);
+    assert.equal(recent.historyEpoch, 24);
+    assert.equal(previous.historyEpoch, 23);
+    assert.equal(lastFiveVariant.historyEpoch, 22);
+    assert.equal(lastSixVariant.historyEpoch, 21);
 
-    assert.equal(current.historyEpoch, 14);
+    assert.equal(current.historyEpoch, 20);
     for (let localEpoch = 0; localEpoch < 8; localEpoch++) {
       const retiredFormatMaximum = localEpoch * 2 + 1;
       const precedingFormatMaximum = 2 + localEpoch * 3 + 2;
       const previousFormatMaximum = 5 + localEpoch * 4 + 3;
       const fiveVariantFormatMaximum = 9 + localEpoch * 5 + 4;
-      for (const peer of [86, 129, 147, 170, 203, CURRENT_PEER]) {
+      const sixVariantFormatMaximum = 14 + localEpoch * 6 + 5;
+      for (const peer of [86, 129, 147, 170, 203, 214, 215, CURRENT_PEER]) {
         assert.ok(store.projectedHistoryEpoch(localEpoch, peer) > retiredFormatMaximum,
           `v${peer} local epoch ${localEpoch} sorts above the retired encoding`);
         assert.ok(store.projectedHistoryEpoch(localEpoch, peer) > precedingFormatMaximum,
@@ -553,6 +584,8 @@ test("the projection-count encoding fences every prior one-policy wire generatio
           `v${peer} local epoch ${localEpoch} sorts above the preceding four-variant encoding`);
         assert.ok(store.projectedHistoryEpoch(localEpoch, peer) > fiveVariantFormatMaximum,
           `v${peer} local epoch ${localEpoch} sorts above the preceding five-variant encoding`);
+        assert.ok(store.projectedHistoryEpoch(localEpoch, peer) > sixVariantFormatMaximum,
+          `v${peer} local epoch ${localEpoch} sorts above the preceding six-variant encoding`);
       }
     }
 

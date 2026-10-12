@@ -220,8 +220,23 @@ test("machine skill adoption is capability-gated per platform", () => {
   assert.equal(machineSkillAdoptionRecoveryRequirement(undefined), null);
 });
 
-test("PROTOCOL_VERSION is 215", () => {
-  assert.equal(PROTOCOL_VERSION, 215);
+test("older peers never receive display-only live Claude usage, but still account republished requests", () => {
+  const provisional = { kind: "token_usage" as const, model: "claude-opus-5", inputTokens: 3, outputTokens: 2, liveUsage: "provisional" as const };
+  const republished = { ...provisional, liveUsage: "republished" as const };
+  const settledResult = { kind: "token_usage" as const, costUsd: 0.01, costIsEstimate: true as const, liveUsage: "settled" as const };
+  for (const version of [undefined, 214, 215]) {
+    assert.equal(projectSessionEventPayloadForProtocol(provisional, version), null);
+    assert.equal(projectSessionEventPayloadForProtocol({ kind: "token_usage", liveUsage: "settled" }, version), null);
+    assert.deepEqual(projectSessionEventPayloadForProtocol(republished, version), { kind: "token_usage", model: "claude-opus-5", inputTokens: 3, outputTokens: 2 });
+    assert.deepEqual(projectSessionEventPayloadForProtocol(settledResult, version), { kind: "token_usage", costUsd: 0.01, costIsEstimate: true });
+  }
+  assert.equal(projectSessionEventPayloadForProtocol(provisional, 216), provisional);
+});
+
+test("PROTOCOL_VERSION is 216", () => {
+  assert.equal(PROTOCOL_VERSION, 216);
+  assert.equal(runnerSupportsProtocol(215, "claudeLiveUsage"), false);
+  assert.equal(runnerSupportsProtocol(216, "claudeLiveUsage"), true);
   assert.equal(runnerSupportsProtocol(208, "skillRequestResumption"), false);
   assert.equal(runnerSupportsProtocol(209, "skillRequestResumption"), true);
   assert.equal(runnerSupportsProtocol(207, "campaignIssueScopeChanges"), false);
@@ -1116,8 +1131,8 @@ test("additive session-event kinds use explicit older-peer policies without muta
   assert.equal(sessionEventWireProjectionRequiredForProtocol(undefined), true);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(86), true);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(87), true);
-  assert.equal(sessionEventWireProjectionVariant(86), 5);
-  assert.equal(sessionEventWireProjectionVariant(87), 4);
+  assert.equal(sessionEventWireProjectionVariant(86), 6);
+  assert.equal(sessionEventWireProjectionVariant(87), 5);
 
   const hookDecision = {
     kind: "policy_hook_decision",
@@ -1132,8 +1147,8 @@ test("additive session-event kinds use explicit older-peer policies without muta
   assert.equal(projectSessionEventPayloadForProtocol(hookDecision, 130), hookDecision);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(129), true);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(130), true);
-  assert.equal(sessionEventWireProjectionVariant(129), 4);
-  assert.equal(sessionEventWireProjectionVariant(130), 3);
+  assert.equal(sessionEventWireProjectionVariant(129), 5);
+  assert.equal(sessionEventWireProjectionVariant(130), 4);
 
   const actionArm = {
     kind: "workflow_action_admission_armed",
@@ -1146,8 +1161,8 @@ test("additive session-event kinds use explicit older-peer policies without muta
   assert.equal(projectSessionEventPayloadForProtocol(actionArm, 151), actionArm);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(150), true);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(151), true);
-  assert.equal(sessionEventWireProjectionVariant(150), 3);
-  assert.equal(sessionEventWireProjectionVariant(151), 2);
+  assert.equal(sessionEventWireProjectionVariant(150), 4);
+  assert.equal(sessionEventWireProjectionVariant(151), 3);
 
   const accountSwitch = {
     kind: "provider_account_switched",
@@ -1162,27 +1177,35 @@ test("additive session-event kinds use explicit older-peer policies without muta
   assert.equal(projectSessionEventPayloadForProtocol(automaticAccountSwitch, 173), automaticAccountSwitch);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(170), true);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(171), true);
-  assert.equal(sessionEventWireProjectionVariant(170), 2);
-  assert.equal(sessionEventWireProjectionVariant(171), 1);
+  assert.equal(sessionEventWireProjectionVariant(170), 3);
+  assert.equal(sessionEventWireProjectionVariant(171), 2);
 
   // A provider compaction (#1224) is omitted for peers that predate it.
   const compacted = { kind: "context_compacted", trigger: "manual", preTokens: 48_000 } as const;
   assert.equal(projectSessionEventPayloadForProtocol(compacted, 203), null);
   assert.equal(projectSessionEventPayloadForProtocol(compacted, 204), compacted);
-  assert.equal(sessionEventWireProjectionRequiredForProtocol(204), false);
-  assert.equal(sessionEventWireProjectionVariant(204), 0);
-  assert.equal(SESSION_EVENT_WIRE_PROJECTION_VARIANTS, 6);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(204), true);
+  assert.equal(sessionEventWireProjectionVariant(204), 1);
+  // Live Claude usage (#3086) omits only provisional token_usage records and content-free markers.
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(214), true);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(215), true);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(216), false);
+  assert.equal(sessionEventWireProjectionVariant(214), 1);
+  assert.equal(sessionEventWireProjectionVariant(215), 1);
+  assert.equal(sessionEventWireProjectionVariant(216), 0);
+  assert.equal(SESSION_EVENT_WIRE_PROJECTION_VARIANTS, 7);
 
   // The variant is the count of unmet policies, so it stays a dense index. The count is the
   // projected-epoch radix, and the explicit offset fences the retired encodings.
-  assert.equal(sessionEventWireProjectionVariant(86), 5);
-  assert.equal(sessionEventWireProjectionVariant(undefined), 5);
-  assert.equal(sessionEventWireProjectionVariant(87), 4);
-  assert.equal(sessionEventWireProjectionVariant(130), 3);
-  assert.equal(sessionEventWireProjectionVariant(151), 2);
-  assert.equal(sessionEventWireProjectionVariant(171), 1);
-  assert.equal(sessionEventWireProjectionVariant(204), 0);
-  assert.equal(SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET, 14);
+  assert.equal(sessionEventWireProjectionVariant(86), 6);
+  assert.equal(sessionEventWireProjectionVariant(undefined), 6);
+  assert.equal(sessionEventWireProjectionVariant(87), 5);
+  assert.equal(sessionEventWireProjectionVariant(130), 4);
+  assert.equal(sessionEventWireProjectionVariant(151), 3);
+  assert.equal(sessionEventWireProjectionVariant(171), 2);
+  assert.equal(sessionEventWireProjectionVariant(204), 1);
+  assert.equal(sessionEventWireProjectionVariant(216), 0);
+  assert.equal(SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET, 20);
 
   const required = { kind: "error", message: "still required" } as const;
   assert.equal(projectSessionEventPayloadForProtocol(required, 1), required,

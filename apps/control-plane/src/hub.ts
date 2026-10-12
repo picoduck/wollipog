@@ -230,6 +230,7 @@ const STREAMING_SESSION_FIELDS = new Set<string>([
   "tokensOut",
   "contextTokensUsed",
   "costUsd",
+  "liveUsage",
   "toolCallCount",
 ]);
 
