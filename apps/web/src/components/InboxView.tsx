@@ -338,6 +338,26 @@ export function InboxView({
   sessionsRef.current = sessions;
   const selectedSessionIdRef = useRef(inbox.selectedSessionId);
   selectedSessionIdRef.current = inbox.selectedSessionId;
+  const triageDetailReadsRef = useRef(new Map<string, {
+    load: ReturnType<typeof beginSessionDetailLoad>;
+    selection: string | null;
+    expanded: string | null;
+  }>());
+
+  useLayoutEffect(() => {
+    for (const [id, pending] of triageDetailReadsRef.current) {
+      if (!pending.load.isCurrent() || pending.selection !== inbox.selectedSessionId ||
+          pending.expanded !== expandedSessionId) {
+        pending.load.cancel();
+        triageDetailReadsRef.current.delete(id);
+      }
+    }
+  }, [sessions, inbox.selectedSessionId, expandedSessionId]);
+
+  useLayoutEffect(() => () => {
+    for (const pending of triageDetailReadsRef.current.values()) pending.load.cancel();
+    triageDetailReadsRef.current.clear();
+  }, [api, beginSessionDetailLoad, instanceScope]);
 
   const clearHeldOrder = useCallback(() => {
     if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
@@ -1331,11 +1351,27 @@ export function InboxView({
   const decide = useCallback(async (sessionId: string, intent: InboxApprovalIntent) => {
     let targetSession = sessions.get(sessionId);
     if (targetSession?.projection === "summary") {
-      const detailLoad=beginSessionDetailLoad(sessionId);
+      const reads = triageDetailReadsRef.current;
+      const previous = reads.get(sessionId);
+      // Refuse repeated keys only while this exact hydration fence and browsing target are current.
+      // A replaced request or selection can retry without waiting for an obsolete transport.
+      if (previous?.load.isCurrent() && previous.selection === selectedSessionIdRef.current &&
+          previous.expanded === expandedSessionIdRef.current) return;
+      previous?.load.cancel();
+      const pending = {
+        load: beginSessionDetailLoad(sessionId),
+        selection: selectedSessionIdRef.current,
+        expanded: expandedSessionIdRef.current,
+      };
+      reads.set(sessionId, pending);
       try {
         targetSession = (await api.session(sessionId)).session;
-        if (!detailLoad.apply(targetSession)) return;
-      } finally { detailLoad.cancel(); }
+        if (!pending.load.apply(targetSession)) return;
+      } finally {
+        pending.load.cancel();
+        // An older response must never release a replacement read's ownership.
+        if (reads.get(sessionId) === pending) reads.delete(sessionId);
+      }
     }
     const approval = targetSession ? prioritizedPendingRequests(targetSession.pendingApproval)[0] : undefined;
     if (!targetSession || !approval) return;
