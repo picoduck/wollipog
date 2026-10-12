@@ -81,6 +81,38 @@ const report = { outcome: "accept" as const, criteria: [{
   observation: "Synthetic deterministic test observation, not live-model proof.",
 }], rationale: "Test verdict exercises the server provenance contract only." };
 
+test("Human validation observations retain their purpose on every frame and verdict and cannot become production approval", (t) => {
+  const f = fixture(t); if (!f || !template) return;
+  const record = structuredClone(template);
+  record.reviewId = "synthetic_validation_observation";
+  record.binding = { ...binding, operatorValidation: { permitId: "synthetic-permit", scopeSha256: hash("synthetic-human-scope") } };
+  f.setCurrent(record.binding);
+  f.store.saveDerived(record, images);
+  for (let index = 0; index < record.manifest.frames.length;) {
+    const batch = f.runtime.deliverBatch(record.reviewId, "reviewer", index);
+    for (const delivered of batch.deliveries) assert.deepEqual(delivered.receipt.operatorValidation, record.binding.operatorValidation);
+    f.runtime.acknowledgeBatch(record.reviewId, "reviewer", batch.deliveries.map((d) => d.receipt));
+    index = batch.nextIndex;
+  }
+  const verdict = f.runtime.recordVerdict(record.reviewId, "reviewer", report);
+  assert.deepEqual(verdict.operatorValidation, record.binding.operatorValidation);
+  assert.deepEqual(f.runtime.validationObservation(record.reviewId, "reviewer"), verdict);
+  assert.throws(() => f.runtime.approvalProvenance(record.reviewId, "reviewer"), refused("verdict"));
+  assert.throws(() => f.runtime.validationObservation("video_test", "reviewer"), refused("verdict"));
+  const decision = { category: "ui_evidence_approval", authority: "orchestrator", status: "pending",
+    controllingSessionId: binding.rootSessionId, sessionId: binding.childSessionId, occurrenceId: binding.occurrenceId,
+    policyRevision: binding.policyRevision, resourceDigest: binding.resourceDigest,
+    resourceSnapshot: { category: "ui_evidence_approval", evidence: [{ evidenceId: binding.sourceEvidenceId,
+      artifactId: binding.sourceArtifactId, sha256: binding.sourceSha256, mediaType: "video/webm" }] } } as WorkflowDecisionView;
+  const bridge = new VideoEvidenceDecisionBridge(f.runtime, { decisionCurrent: () => true, linkedReview: () => record,
+    directImageReviewed: () => false });
+  assert.throws(() => bridge.approvalProvenance(decision, [], [{ evidenceId: binding.sourceEvidenceId,
+    reviewId: record.reviewId, verdictId: verdict.verdictId, reviewerSessionId: "reviewer" }], "resolve"), /not bound/);
+  f.db.prepare("UPDATE temporal_video_receipts SET receipt=json_remove(receipt,'$.operatorValidation') WHERE review_id=? AND frame_index=157")
+    .run(record.reviewId);
+  assert.throws(() => f.runtime.validationObservation(record.reviewId, "reviewer"), refused("receipt"));
+});
+
 test("actual trusted runtime derivation snapshots source and rejects implementer self-review", async (t) => {
   const f = fixture(t); if (!f) return;
   const freshBinding = { ...binding, occurrenceId: "workflow_fresh" };

@@ -5,6 +5,8 @@ import { MediaSessionPurposes } from "./media-session-purposes.js";
 import { MEDIA_SESSION_PURPOSE_ERROR, type PreparedMediaSessionRuntime, type PreparedMediaSubject } from "./prepared-media-session-runtime.js";
 import type { PreparedMediaIdentity, MaterializedMediaSession } from "./prepared-media-sessions.js";
 import { reviewerAdmissionReadiness } from "./evidence-review-worker.js";
+import type { OperatorVideoValidationPermits } from "./operator-video-validation.js";
+import type { OperatorVideoValidationPurpose } from "@wollipog/protocol";
 import { acknowledgementRepairFrame } from "./claude-cost-repair.js";
 import type { HumanPrincipal } from "./identity.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl } from "./campaign-authority.js";
@@ -1517,7 +1519,7 @@ function backgroundJobStopRefusal(reason: StopBackgroundJobRefusal | undefined):
 }
 
 const PREPARED_MEDIA_CAPTURE = Symbol("private prepared media Session capture");
-type PreparedMediaCapture = { identity: PreparedMediaIdentity; subject: PreparedMediaSubject; decision: WorkflowDecisionView; command: Extract<DurableSessionCommand, { type: "start_session" }> | null };
+type PreparedMediaCapture = { identity: PreparedMediaIdentity; subject: PreparedMediaSubject; decision: WorkflowDecisionView; operatorValidation?: OperatorVideoValidationPurpose; command: Extract<DurableSessionCommand, { type: "start_session" }> | null };
 
 export class SessionsService {
   readonly mediaSessionPurposes: MediaSessionPurposes;
@@ -1576,8 +1578,10 @@ export class SessionsService {
     private readonly preparedMediaRuntime?: PreparedMediaSessionRuntime,
     private readonly workflowVideoApprovals?: WorkflowVideoEvidenceApprovals,
     private readonly evidenceAuthorityDisclosures?: EvidenceAuthorityDisclosures,
+    private readonly operatorValidationPermits?: OperatorVideoValidationPermits,
   ) {
     if (workflowVideoApprovals && workflowVideoApprovals.database !== db) throw new Error("Media approvals require the same durable database.");
+    if (operatorValidationPermits && operatorValidationPermits.database !== db.raw()) throw new Error("Validation permits require the same durable database.");
     this.mediaSessionPurposes = new MediaSessionPurposes(this.db.raw());
     this.promptOutbox = new SessionPromptOutbox(this.db, this.hub, this.log);
     // Replayed events took new sequence numbers after a crash: the upsert's new epoch makes open
@@ -3542,14 +3546,19 @@ export class SessionsService {
     const root = this.db.getSession(identity.rootSessionId), child = this.db.getSession(identity.childSessionId);
     const decision = this.db.workflowDecisionByOccurrence(subject.occurrenceId);
     const control = root?.orchestratorPolicy?.control;
+    const validation = resolved?.operatorValidation;
+    if (validation && (Object.keys(validation).length !== 1 || typeof validation.permitId !== "string" ||
+      !validation.permitId || resolved.liveProof !== null)) return fail("Validation admission cannot borrow or fabricate production proof.", 409);
+    const owner = validation ? "human" : "orchestrator";
     if (!resolved || !root || !child || control?.mode !== "full_control" || !control.boundary.evidenceAuthority ||
-      !campaignBoundaryCurrent(root) || !decision || decision.status !== "pending" || decision.authority !== "orchestrator" ||
+      !campaignBoundaryCurrent(root) || !decision || decision.status !== "pending" || decision.authority !== owner ||
       decision.category !== "ui_evidence_approval" || decision.resourceSnapshot.category !== "ui_evidence_approval" ||
       decision.controllingSessionId !== root.id || decision.sessionId !== child.id ||
       decision.policyRevision !== root.parentControlPolicy?.revision ||
       !this.workflowDecisionRelationship(root.id, child.id) || this.workflowDecisionChildEnded(child) ||
-      evaluateCampaignAuthority(root, child, this.db.getRunner(child.runnerId)?.protocolVersion,
-        decision.resourceSnapshot, root.parentControlPolicy, this.db.getRunner(root.runnerId)?.protocolVersion).owner !== "orchestrator") {
+      (validation ? !root.parentControlPolicy || !this.workflowDecisionAuthorityCurrent(root, root.parentControlPolicy, decision) :
+        evaluateCampaignAuthority(root, child, this.db.getRunner(child.runnerId)?.protocolVersion,
+          decision.resourceSnapshot, root.parentControlPolicy, this.db.getRunner(root.runnerId)?.protocolVersion).owner !== owner)) {
       return fail("The exact original media gate has no current preparation authority.", 409);
     }
     const { context, target, liveProof, request } = resolved;
@@ -3567,7 +3576,8 @@ export class SessionsService {
       this.db.getRunner(target.runnerId)?.protocolVersion !== target.runnerProtocolVersion ||
       request.config?.model !== target.modelId || request.role === "orchestrator" || request.launchSurface === "native_tui" ||
       request.images?.length || this.db.getAgentLaunch(request.runnerId, request.agentId)?.driver !== target.driver ||
-      reviewerAdmissionReadiness(context, target, liveProof, Date.now())) {
+      (validation ? !this.operatorValidationPermits?.authorizePreparation(validation.permitId, identity, subject, context, target, request) :
+        reviewerAdmissionReadiness(context, target, liveProof, Date.now()))) {
       return fail("Current scoped media profile, destination, disclosure or allowance preparation is unsupported.", 409);
     }
     const item = decision.resourceSnapshot.evidence.find((e) => e.evidenceId === subject.evidenceId);
@@ -3580,6 +3590,12 @@ export class SessionsService {
     try { bytes = this.db.readWorkflowArtifactBytes(source.artifactId); } catch { bytes = null; }
     if (!bytes || bytes.length > MAX_SESSION_VIDEO_BYTES || createHash("sha256").update(bytes).digest("hex") !== item.sha256) {
       return fail("The original source artifact no longer matches its immutable digest.", 409);
+    }
+    if (validation) {
+      const permit = this.operatorValidationPermits!.current(validation.permitId);
+      if (!permit || permit.scope.gate.resourceDigest !== decision.resourceDigest || permit.scope.gate.policyRevision !== decision.policyRevision ||
+        permit.scope.source.artifactId !== source.artifactId || permit.scope.source.sha256 !== item.sha256 ||
+        permit.scope.source.sizeBytes !== bytes.length) return fail("Original Human validation source or occurrence changed.", 409);
     }
     // The controller can receive quality observations only within the source audience.
     // Use its already narrower audience for the reviewer; never broaden either audience.
@@ -3603,7 +3619,8 @@ export class SessionsService {
     const root = this.db.getSession(identity.rootSessionId)!;
     const decision = this.db.workflowDecisionByOccurrence(subject.occurrenceId)!;
     const capture: PreparedMediaCapture = { identity: structuredClone(identity), subject: structuredClone(subject),
-      decision, command: null };
+      decision, command: null,
+      ...(resolved.operatorValidation ? { operatorValidation: this.operatorValidationPermits!.purpose(resolved.operatorValidation.permitId)! } : {}) };
     this.preparedMediaCaptures.add(capture);
     let created: ServiceResult<SessionView>;
     try {
@@ -3616,8 +3633,10 @@ export class SessionsService {
     if (!admission.ok || !admission.data) throw new Error("Actual post-materialization budget preflight failed.");
     const again = this.preparedMediaRuntime!.resolve(identity, subject);
     if (!again || JSON.stringify(again) !== JSON.stringify(resolved)) throw new Error("Media preparation authority changed during materialization.");
-    return ok({ sessionId: created.data.id, runnerId: created.data.runnerId,
-      command: structuredClone(capture.command), admission: admission.data });
+    const materialized = { sessionId: created.data.id, runnerId: created.data.runnerId,
+      command: structuredClone(capture.command), admission: admission.data };
+    if (resolved.operatorValidation) this.operatorValidationPermits!.bindPrepared(resolved.operatorValidation.permitId, materialized);
+    return ok(materialized);
   }
 
   createSession(
@@ -4549,7 +4568,7 @@ export class SessionsService {
     if (capture) {
       if (command.type !== "start_session") throw new Error("Prepared media command is malformed.");
       capture.command = { ...command, spec };
-      this.mediaSessionPurposes.add({ sessionId: id, rootSessionId: capture.identity.rootSessionId, childSessionId: capture.identity.childSessionId, admissionId: capture.identity.admissionId, occurrenceId: capture.subject.occurrenceId, evidenceId: capture.subject.evidenceId, resourceDigest: capture.decision.resourceDigest, policyRevision: capture.decision.policyRevision, generation: spec.campaignBudgetDispatch!.generation, command: capture.command });
+      this.mediaSessionPurposes.add({ sessionId: id, rootSessionId: capture.identity.rootSessionId, childSessionId: capture.identity.childSessionId, admissionId: capture.identity.admissionId, occurrenceId: capture.subject.occurrenceId, evidenceId: capture.subject.evidenceId, resourceDigest: capture.decision.resourceDigest, policyRevision: capture.decision.policyRevision, generation: spec.campaignBudgetDispatch!.generation, command: capture.command, ...(capture.operatorValidation ? { operatorValidation: capture.operatorValidation } : {}) });
     } else if (delivery) {
       delivery.activate(plan!);
     } else {

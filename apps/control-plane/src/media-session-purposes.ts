@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import type { DurableSessionCommand } from "@wollipog/protocol";
+import type { DurableSessionCommand, OperatorVideoValidationPurpose } from "@wollipog/protocol";
 import type { DatabaseSync } from "node:sqlite";
 
 export interface MediaSessionPurpose {
+  operatorValidation?: OperatorVideoValidationPurpose;
   sessionId: string;
   rootSessionId: string;
   childSessionId: string;
@@ -34,6 +35,9 @@ export class MediaSessionPurposes {
   }
   add(purpose: MediaSessionPurpose): void {
     if (!this.db.isTransaction || purpose.sessionId === purpose.rootSessionId || purpose.sessionId === purpose.childSessionId ||
+      (purpose.operatorValidation !== undefined && (!/^[a-f0-9]{64}$/u.test(purpose.operatorValidation.scopeSha256) ||
+        typeof purpose.operatorValidation.permitId !== "string" || !purpose.operatorValidation.permitId ||
+        Object.keys(purpose.operatorValidation).length !== 2)) ||
       !Number.isSafeInteger(purpose.policyRevision) || purpose.policyRevision <= 0 ||
       !/^[a-f0-9]{64}$/u.test(purpose.resourceDigest) ||
       [purpose.sessionId, purpose.rootSessionId, purpose.childSessionId, purpose.admissionId, purpose.occurrenceId, purpose.evidenceId, purpose.generation]

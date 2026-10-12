@@ -11,6 +11,8 @@ export interface PreparedMediaSessionRuntime {
     context: ReviewerAdmissionContext;
     target: EvidenceReviewerTarget;
     liveProof: VideoProfileLiveProof | null;
+    /** Private server lookup of a durable Human-only validation permit. Not request JSON. */
+    operatorValidation?: { permitId: string };
   } | null;
 }
 export interface PreparedMediaSubject { occurrenceId: string; evidenceId: string }

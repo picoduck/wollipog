@@ -12,6 +12,9 @@ const failure = (message: string): ToolResult => ({ content: [{ type: "text", te
 const digest = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
 function validGrant(grant: PacedVideoTransportGrant, now: number): boolean {
   return Boolean(grant && typeof grant === "object" && Array.isArray(grant.frames) && Number.isSafeInteger(now) && grant.expiresAt > now &&
+    (grant.operatorValidation === undefined || grant.operatorValidation && Object.keys(grant.operatorValidation).length === 2 &&
+      typeof grant.operatorValidation.permitId === "string" && grant.operatorValidation.permitId.length > 0 &&
+      grant.operatorValidation.permitId.length <= 256 && digest(grant.operatorValidation.scopeSha256)) &&
     grant.frames.length > 0 && grant.frames.length <= 900 &&
     [grant.sourceSha256, grant.manifestSha256, grant.bindingSha256, grant.criteriaSha256].every(digest) &&
     grant.frames.every((frame, index) => frame.index === index && digest(frame.sha256) &&
@@ -26,7 +29,9 @@ function verifiedDelivery(candidate: unknown, grant: PacedVideoTransportGrant, i
       Object.keys(value).length === keys.length && Object.keys(value).every((key) => keys.includes(key));
     if (!exact(delivery, ["receipt", "mimeType", "sizeBytes", "data"]) ||
       !exact(receipt, ["receiptId", "occurrenceId", "reviewerSessionId", "childSessionId", "policyRevision",
-        "evidenceId", "artifactId", "sha256", "deliveredAt", "deliveryOrder", "videoFrame", "bindingSha256", "criteriaSha256"]) ||
+        "evidenceId", "artifactId", "sha256", "deliveredAt", "deliveryOrder", "videoFrame", "bindingSha256", "criteriaSha256",
+        ...(grant.operatorValidation ? ["operatorValidation"] : [])]) ||
+      JSON.stringify(receipt.operatorValidation) !== JSON.stringify(grant.operatorValidation) ||
       !exact(receipt.videoFrame, ["sourceArtifactId", "sourceSha256", "manifestSha256", "profile", "index", "ptsMs", "ptsUs", "durationUs"]) ||
       !Number.isSafeInteger(receipt.deliveredAt) || receipt.deliveredAt <= 0 || receipt.deliveredAt >= grant.expiresAt) return false;
     const temporal = receipt?.videoFrame;
@@ -91,12 +96,15 @@ export async function submitVideoEvidenceVerdict(report: unknown, deps: VideoRev
   try {
     const result = await deps.request("verdict", { reviewId: deps.grant.reviewId, report }) as {
       verdictId?: string; reviewId?: string; reviewerSessionId?: string; bindingSha256?: string; outcome?: string;
+      operatorValidation?: PacedVideoTransportGrant["operatorValidation"];
     };
     if (!result?.verdictId || result.reviewId !== deps.grant.reviewId ||
       result.reviewerSessionId !== deps.grant.reviewerSessionId || result.bindingSha256 !== deps.grant.bindingSha256 ||
+      JSON.stringify(result.operatorValidation) !== JSON.stringify(deps.grant.operatorValidation) ||
       !["accept", "reject"].includes(result.outcome ?? "")) return failure("The verdict response does not match this exact review.");
     return { content: [{ type: "text", text: JSON.stringify({ verdictId: result.verdictId, reviewId: result.reviewId,
-      outcome: result.outcome, typedDecisionResolved: false }) }] };
+      outcome: result.outcome, typedDecisionResolved: false,
+      ...(result.operatorValidation ? { operatorValidation: result.operatorValidation, productionProof: false } : {}) }) }] };
   } catch { return failure("The criterion verdict was not confirmed; reconcile its durable record before retrying."); }
 }
 

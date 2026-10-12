@@ -150,6 +150,60 @@ human-only empirical proof and preceding main dependencies are present, readines
 
 ## Remaining Integration
 
+The private `operator-video-validation.ts` permit path prepares first-proof admission without
+claiming that a production profile has passed live validation. It is code/interface preparation,
+with no hosting route or installed native sender/driver registration. Only an authenticated Human
+owner/admin who established the current boundary may mint a finite permit after the trusted server
+adapter has verified the original **Human-owned** pending UI occurrence and its exact source,
+complete native manifest/ordered frame set, criteria, private destination/provider disclosure,
+installed executable/tool/namespace profile, audience and current action/allowance constraints.
+The original gate stays Human-owned and its resource digest remains unchanged.
+
+The permit expires within one hour and pins finite cost/tool ceilings from the guarded Session
+request; it does not create grants or increase existing limits. The ordinary creation pipeline
+atomically binds a real unsent Session/member/command/generation and permanent validation purpose
+to the one-shot permit. Normal governance, fixed harness/model/effort, tighter ceilings and all
+user/org/session/daily/host/child/aggregate/native/media concurrency guards remain required.
+Replay, unknown outcome, substituted source/criteria/profile/authority, expiry, revocation and
+replacement generation cannot create or reuse admission. Unknown dispatch keeps its reservation.
+
+Trusted runner preparation must bind the exact per-Session namespace launch, reusable policy and
+full grant digest before dispatch. Every validation receipt and criterion verdict carries
+`operatorValidation={permitId,scopeSha256}`. Transport verifies that purpose; stripping or borrowing
+it withholds model images/verdict confirmation. The production runtime approval-provenance method,
+original gate bridge and owner preparation service reject validation observations. Human inspection
+uses a separate observation method, rechecking complete receipts/integrity and current historical
+settlement; it grants no new access, gate approval or production support. Registry proof registration
+still requires independently inspected **actual** delivery, fresh blind temporal verdict and metered
+usage/current pricing evidence. A fabricated fixture/bootstrap proof is rejected in validation admission.
+
+The 16-frame 640x360 candidate remains a distinct envelope. The normal ≥960-width decoder cannot
+process it by labeling it paced or weakening its limits. Its operator transport/derivation adapter
+and actual provider-wide restricted-tool enforcement remain held integrations; paced/maximum use
+the complete native derivation contract. Deterministic permit/Session/transport tests are disclosed
+synthetic tests and prove no live provider behavior or oracle isolation.
+
+### Reviewable Isolated Live Action
+
+Before any separately Human-authorized live action, fill and inspect this exact action record using
+the isolated test control plane's actual immutable records. Placeholder or unknown fields mean
+unsupported admission; a campaign code-design approval cannot authorize the action.
+
+| Pinned Item | Required Evidence |
+| --- | --- |
+| Campaign/work item/original occurrence | Actual campaign, #1321, Human owner, child/evidence IDs, pending occurrence, source and criterion digests, current policy/boundary/scope revisions |
+| Destination/provider | Exact configured private Session-artifact destination/org/disclosure, provider identity and retention; independently verified privacy |
+| Installed reviewer | Actual managed Session/admission/runner/dispatch generation, fixed driver/model/effort, executable and native two-tool profile digests |
+| Isolation | Disposable new ports/DB/artifact/provider state, exact namespace launch/policy, verified inaccessible fresh oracle/generator/truth across actual tools/filesystem/resources/APIs |
+| Three separate bounded runs | Fresh candidate16, paced360, maximum900 captures/complete derivations; finite cost/tools and expiry within existing allowance for each one-shot permit |
+| Dispatch/recovery | Exact durable command/grant digest, no replay after unknown reply, retained unknown allocation, authenticated terminal fence and final accounting |
+| Inspection | Complete ordered receipt and model-visible transport digests, unbiased criteria/blind answer, private oracle commitment comparison after completion, genuine final usage/latency/current official pricing |
+
+No live executable command is offered until the actual registered restricted driver/sender and
+candidate adapter support the record. Existing fixture recipes or previous smoke oracles cannot
+be used as blind challenges. Never point this action at the hosting dogfood ports/DB/provider state,
+restart that stack, or silently change policy, isolation, account, grants or budget ceilings.
+
 Private storage, bounded expiry, authenticated route definitions and runner transport are prepared.
 Wire exact current workflow/policy/audience/capability lookup,
 accountable worker admission, protected media reading/verdict routes and typed owner resolution.

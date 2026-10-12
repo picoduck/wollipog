@@ -11212,6 +11212,6 @@ export function isTerminal(status: SessionStatus): boolean {
   return TERMINAL_STATUSES.includes(status);
 }
 
-export type { PacedVideoReviewReceipt, PacedVideoReviewDelivery, PacedVideoReviewBatchDelivery, PacedVideoTransportGrant, DelegatedVideoEvidenceReference } from "./paced-video-review.js";
+export type { PacedVideoReviewReceipt, PacedVideoReviewDelivery, PacedVideoReviewBatchDelivery, PacedVideoTransportGrant, DelegatedVideoEvidenceReference, OperatorVideoValidationPurpose } from "./paced-video-review.js";
 
 export { PACED_VIDEO_REVIEW_BATCH_LIMITS, PACED_VIDEO_REVIEW_MIN_PROTOCOL } from "./paced-video-review.js";

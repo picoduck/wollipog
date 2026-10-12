@@ -18,11 +18,12 @@ import { PreparedMediaSessions, type PreparedMediaSessionPorts } from "./prepare
 import type { ReviewerAdmissionContext, EvidenceReviewerTarget, VideoProfileLiveProof } from "./evidence-review-worker.js";
 import { isAgentControlApiRouteAllowed } from "./auth.js";
 import { mediaSessionMutationAllowed } from "./media-session-route-policy.js";
+import { OperatorVideoValidationPermits, type OperatorVideoValidationScope } from "./operator-video-validation.js";
 const sha = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 
 /** In-memory concrete DB/service integration with explicitly synthetic proof/rates/source.
  * No actual managed provider, credential, live proof registration, media upload or usage occurs. */
-function harness(sourceBytes?: Buffer) {
+function harness(sourceBytes?: Buffer, validation = false) {
   const db = ControlPlaneDb.open(":memory:");
   const human: HumanPrincipal = { ...db.localIdentityContext(), kind: "human", actorId: "synthetic-human" };
   const audience = { organizationId: human.organizationId, owner: { kind: "user" as const, userId: human.userId } };
@@ -78,13 +79,13 @@ function harness(sourceBytes?: Buffer) {
   const snapshot = normalized.data;
   assert.ok(db.createWorkflowDecision({ requestId: "synthetic-ui", occurrenceId: "original-gate", sessionId: "child",
     controllingSessionId: "root", category: "ui_evidence_approval", resourceKey: "synthetic", resourceSnapshot: snapshot,
-    resourceDigest: sha(JSON.stringify(snapshot)), policyRevision: boundary.revision, authority: "orchestrator", createdAt: 7 }));
+    resourceDigest: sha(JSON.stringify(snapshot)), policyRevision: boundary.revision, authority: validation ? "human" : "orchestrator", createdAt: 7 }));
   const target: EvidenceReviewerTarget = { agentId: "claude", driver: "claude-code", modelId: "claude-opus-5-5",
     providerId: "synthetic-provider", runnerId: "r", runnerProtocolVersion: 218, capabilitiesSha256: sha("synthetic capability"),
     auditedAllFrameDelivery: true, reviewerNamespaceSha256: sha("synthetic namespace"), mediaOnlyNamespaceVerified: true };
   const context: ReviewerAdmissionContext = { mode: "full_control", rootSessionId: "root", childSessionId: "child",
     repository: "picoduck/wollipog", issue: 1321, issueScopeRevision: 1, policyRevision: boundary.revision,
-    boundary, evidenceAuthority: evidence, uiEvidenceOwner: "orchestrator", taskEvidenceVerified: true,
+    boundary, evidenceAuthority: evidence, uiEvidenceOwner: validation ? "human" : "orchestrator", taskEvidenceVerified: true,
     destinationConfigurationId: "synthetic-private", organizationId: human.organizationId, audienceSha256: sha("synthetic audience"),
     controllerProtocolVersion: 218, childProtocolVersion: 218, boundaryCurrent: true, scopeCurrent: true, destinationPrivateVerified: true };
   let proof: VideoProfileLiveProof | null = { proofId: "synthetic-not-live", driver: target.driver, modelId: target.modelId,
@@ -97,13 +98,30 @@ function harness(sourceBytes?: Buffer) {
     modelDeliveryEvidenceSha256: sha("synthetic-delivery"), usageEvidenceSha256: sha("synthetic-usage"),
     pricingEvidenceSha256: sha("synthetic-pricing"), inputTokens: 1, outputTokens: 1, actualCostUsd: 0.1,
     latencyMs: 1, verifiedByUserId: human.userId };
+  let validationPermitId: string | undefined;
+  if (validation) proof = null;
   const runtime: PreparedMediaSessionRuntime = { resolve: () => ({ context, target, liveProof: proof,
+    ...(validation ? { operatorValidation: { permitId: validationPermitId! } } : {}),
     request: { runnerId: "r", workspaceId: "w", agentId: "claude", title: "Synthetic Media Reviewer",
       prompt: "Review authorized #1321 through the exact scoped media tools.", config: { model: target.modelId, costBudgetUsd: 2, maxToolCalls: 10 } } }) };
-  const service = new SessionsService(db, hub, log, undefined, undefined, undefined, undefined, undefined, undefined,
-    false, undefined, runtime);
   const identity = { rootSessionId: "root", childSessionId: "child", admissionId: "synthetic-media", requestSha256: sha("exact source and criteria") };
   const subject = { occurrenceId: "original-gate", evidenceId: "original-video" };
+  // Disclosed synthetic permit scope only: no real Human mint, provider profile or live proof.
+  let validationScope: OperatorVideoValidationScope | null = validation ? {
+    identity, subject: { ...subject, profile: "paced" }, authorizedByUserId: human.userId, organizationId: human.organizationId,
+    gate: { authority: "human", status: "pending", resourceDigest: sha(JSON.stringify(snapshot)), policyRevision: boundary.revision },
+    source: { artifactId: "source", sha256: sha(source), sizeBytes: source.length, manifestSha256: sha("synthetic native manifest"),
+      orderedFramesSha256: sha(JSON.stringify(syntheticValidationFrames())), criteriaSha256: sha("synthetic criteria"),
+      frames: 360, width: 1280, height: 720, durationUs: 12_000_000 },
+    context, target, request: runtime.resolve(identity, subject)!.request, providerExecutableSha256: sha("synthetic installed exe"),
+    nativeToolProfileSha256: sha("synthetic installed media tools"), namespaceLaunchSha256: sha("synthetic launch"), authoritySha256: sha("synthetic current authority"),
+  } : null;
+  const permits = validation ? new OperatorVideoValidationPermits(db.raw(), { current: () => validationScope }) : undefined;
+  const validationProposal = { identity, subject: { ...subject, profile: "paced" as const }, expiresAt: Date.now() + 30_000 };
+  const permit = permits?.mint(human, validationProposal);
+  if (validation) { assert.ok(permit); validationPermitId = permit.permitId; }
+  const service = new SessionsService(db, hub, log, undefined, undefined, undefined, undefined, undefined, undefined,
+    false, undefined, runtime, undefined, undefined, permits);
   const ports: PreparedMediaSessionPorts = {
     database: db.raw(),
     preflightMaterialization: (id) => { const value = service.preflightPreparedMediaSession(id, subject);
@@ -118,8 +136,117 @@ function harness(sourceBytes?: Buffer) {
   };
   const prepared = new PreparedMediaSessions(db.raw(), ports);
   return { db, hub, log, human, source, service, bootstrap, prepared, identity, subject, context, runtime, target, messages, ports,
-    dropProof: () => { proof = null; } };
+    dropProof: () => { proof = null; }, permits, permit, validationProposal,
+    validationScope: () => validationScope, setValidationScope: (scope: OperatorVideoValidationScope | null) => { validationScope = scope; } };
 }
+
+test("Human validation permit materializes a real purpose-bound unsent Session without synthetic production proof or changing its Human gate", (t) => {
+  const h = harness(undefined, true); t.after(() => h.db.close()); h.messages.length = 0;
+  const original = h.db.workflowDecisionByOccurrence(h.subject.occurrenceId)!;
+  assert.equal(original.authority, "human");
+  assert.equal(h.runtime.resolve(h.identity, h.subject)!.liveProof, null);
+  const actual = h.prepared.prepare(h.identity);
+  const p = h.permits!.get(h.permit!.permitId)!;
+  assert.equal(p.state, "bound");
+  assert.equal(p.actual?.sessionId, actual.sessionId);
+  assert.equal(p.actual?.generation, actual.admission.dispatch.generation);
+  assert.equal(h.db.campaignBudgets.root(actual.sessionId), "root");
+  assert.deepEqual(h.service.mediaSessionPurposes.get(actual.sessionId)?.operatorValidation,
+    { permitId: p.permitId, scopeSha256: p.scopeSha256 });
+  assert.deepEqual(h.db.workflowDecisionByOccurrence(h.subject.occurrenceId), original);
+  assert.deepEqual(h.messages, []);
+  assert.equal(h.service.restart(actual.sessionId).ok, false);
+  assert.equal(h.service.prompt(actual.sessionId, "Use a general tool").ok, false);
+  assert.equal(h.permits!.mint(h.human, h.validationProposal), null, "same exact original permit cannot be reminted");
+  assert.throws(() => h.permits!.bindPrepared(p.permitId, actual), /atomic validation/);
+});
+test("validation worker messages, changed authority/profile/source, expiry/revocation and unknown permit cannot prepare", (t) => {
+  const mutations = [
+    (h: ReturnType<typeof harness>) => { h.permits!.revoke(h.human, h.permit!.permitId); },
+    (h: ReturnType<typeof harness>) => { h.setValidationScope(null); },
+    (h: ReturnType<typeof harness>) => { h.validationScope()!.nativeToolProfileSha256 = sha("replacement tool profile"); },
+    (h: ReturnType<typeof harness>) => { h.validationScope()!.source.criteriaSha256 = sha("replacement criteria"); },
+    (h: ReturnType<typeof harness>) => { h.db.raw().prepare("UPDATE workflow_decisions SET authority='orchestrator'").run(); },
+    (h: ReturnType<typeof harness>) => { h.db.raw().prepare("UPDATE workflow_decisions SET resource_digest=?").run(sha("replacement occurrence")); },
+    (h: ReturnType<typeof harness>) => { const resolve = h.runtime.resolve;
+      h.runtime.resolve = (id, subject) => ({ ...resolve(id, subject)!, liveProof: { proofId: "fixture-bootstrap" } as VideoProfileLiveProof }); },
+    (h: ReturnType<typeof harness>) => { h.runtime.resolve = () => ({ ...h.validationScope()!, liveProof: null,
+      operatorValidation: { permitId: "unminted-worker-claim" } }); },
+  ];
+  for (const mutate of mutations) {
+    const h = harness(undefined, true); t.after(() => h.db.close()); h.messages.length = 0; mutate(h);
+    assert.throws(() => h.prepared.prepare(h.identity));
+    assert.equal(h.db.raw().prepare("SELECT COUNT(*) AS n FROM media_session_purposes").get()!.n, 0);
+    assert.equal(h.db.raw().prepare("SELECT COUNT(*) AS n FROM campaign_budget_members").get()!.n, 2);
+    assert.deepEqual(h.messages, []);
+  }
+  const h = harness(undefined, true); t.after(() => h.db.close());
+  const agent = { kind: "agent" as const, credentialSessionId: "child", actorId: "agent:child", organizationId: h.human.organizationId,
+    delegatedScope: h.db.sessionScope("child")! };
+  assert.equal(h.permits!.mint(agent, { ...h.validationProposal, identity: { ...h.identity, admissionId: "worker" } }), null);
+  assert.equal(h.permits!.revoke(agent, h.permit!.permitId), false);
+  assert.equal(h.permits!.revoke({ ...h.human, role: "viewer" as const }, h.permit!.permitId), false);
+  assert.equal(h.permits!.mint({ ...h.human, userId: "another-human" }, h.validationProposal), null);
+  const expired = new OperatorVideoValidationPermits(h.db.raw(), { current: () => h.validationScope() }, () => h.permit!.expiresAt);
+  assert.equal(expired.current(h.permit!.permitId), null);
+});
+test("validation materialization rollback restores one-shot permit with real Session/member/purpose", (t) => {
+  const h = harness(undefined, true); t.after(() => h.db.close()); h.messages.length = 0;
+  const original = h.ports.materialize;
+  h.ports.materialize = (identity) => { original(identity); throw new Error("Synthetic post-claim storage failure"); };
+  assert.throws(() => h.prepared.prepare(h.identity), /storage failure/);
+  assert.equal(h.permits!.get(h.permit!.permitId)!.state, "authorized");
+  assert.equal(h.db.raw().prepare("SELECT COUNT(*) AS n FROM sessions").get()!.n, 2);
+  assert.equal(h.db.raw().prepare("SELECT COUNT(*) AS n FROM campaign_budget_members").get()!.n, 2);
+  assert.equal(h.db.raw().prepare("SELECT COUNT(*) AS n FROM media_session_purposes").get()!.n, 0);
+  assert.deepEqual(h.messages, []);
+  h.ports.materialize = original;
+  assert.ok(h.prepared.prepare(h.identity).sessionId);
+});
+
+function syntheticValidationFrames() {
+  return Array.from({ length: 360 }, (_, i) => ({ index: i, ptsUs: Math.round(i * 1_000_000 / 30),
+    durationUs: Math.round((i + 1) * 1_000_000 / 30) - Math.round(i * 1_000_000 / 30),
+    sha256: sha("synthetic frame " + i), sizeBytes: 10 }));
+}
+test("exact validation grant binds one dispatch; unknown reply retains actual capacity and replacement generation loses access", async (t) => {
+  const h = harness(undefined, true); t.after(() => h.db.close()); h.messages.length = 0;
+  const actual = h.prepared.prepare(h.identity), s = h.validationScope()!;
+  const binding = {
+    namespaceLaunchSha256: s.namespaceLaunchSha256, namespacePolicySha256: s.target.reviewerNamespaceSha256,
+    authoritySha256: s.authoritySha256,
+    grant: { operatorValidation: h.permits!.purpose(h.permit!.permitId)!, reviewId: "synthetic-validation-review",
+      reviewerSessionId: actual.sessionId, childSessionId: h.identity.childSessionId, occurrenceId: h.subject.occurrenceId,
+      policyRevision: s.gate.policyRevision, sourceEvidenceId: h.subject.evidenceId, sourceArtifactId: s.source.artifactId,
+      sourceSha256: s.source.sha256, manifestSha256: s.source.manifestSha256, bindingSha256: sha(JSON.stringify(h.permits!.binding(h.permit!.permitId))),
+      criteriaSha256: s.source.criteriaSha256, expiresAt: h.permit!.expiresAt - 1,
+      frames: syntheticValidationFrames() },
+  };
+  h.ports.authorize = async (record) => h.permits!.authorize(record);
+  let sends = 0;
+  h.ports.send = async () => { sends++; return "unknown"; };
+  const bound = await h.prepared.bind(h.identity, binding);
+  assert.equal(h.permits!.authorize(bound), true);
+  for (const mutate of [
+    (record: typeof bound) => { delete record.binding!.grant.operatorValidation; },
+    (record: typeof bound) => { record.binding!.grant.operatorValidation!.scopeSha256 = sha("borrowed permit"); },
+    (record: typeof bound) => { record.binding!.namespaceLaunchSha256 = sha("replaced namespace"); },
+    (record: typeof bound) => { record.binding!.grant.criteriaSha256 = sha("borrowed criteria"); },
+    (record: typeof bound) => { record.binding!.grant.frames.pop(); },
+    (record: typeof bound) => { record.binding!.grant.frames[157]!.sha256 = sha("changed transient"); },
+  ]) { const changed = structuredClone(bound); mutate(changed); assert.equal(h.permits!.authorize(changed), false); }
+  const uncertain = await h.prepared.dispatch(h.identity);
+  assert.equal(uncertain.state, "uncertain");
+  assert.equal((await h.prepared.dispatch(h.identity)).state, "uncertain");
+  assert.equal(sends, 1);
+  assert.equal(h.db.campaignBudgets.root(actual.sessionId), "root");
+  assert.equal(h.permits!.get(h.permit!.permitId)!.state, "bound");
+  h.db.campaignBudgets.replaceDispatch(actual.sessionId);
+  assert.equal(h.permits!.authorize(uncertain), false);
+  assert.equal(h.service.mediaSessionPurposes.owns(actual.sessionId), true);
+  assert.throws(() => h.prepared.cancelPrepared(h.identity), /possibly dispatched/);
+  assert.deepEqual(h.messages, [], "synthetic send did not start any real provider");
+});
 test("concrete createSession pipeline atomically materializes actual row/member/unsent command without provider dispatch", (t) => {
   const h = harness(); t.after(() => h.db.close());
   h.messages.length = 0;

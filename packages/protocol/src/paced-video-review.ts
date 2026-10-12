@@ -4,8 +4,12 @@ import type { UiEvidenceReviewReceipt } from "./index.js";
 
 export const PACED_VIDEO_REVIEW_BATCH_LIMITS = Object.freeze({ frames: 32, responseBytes: 8 * 1024 * 1024 });
 
+/** Permanent experimental purpose. These observations never authorize a production UI gate. */
+export interface OperatorVideoValidationPurpose { permitId: string; scopeSha256: string }
+
 /** Server-derived complete-frame receipt. Types grant no media access or empirical readiness. */
 export interface PacedVideoReviewReceipt extends UiEvidenceReviewReceipt {
+  operatorValidation?: OperatorVideoValidationPurpose;
   bindingSha256: string;
   criteriaSha256: string;
   deliveryOrder: number;
@@ -24,6 +28,7 @@ export interface PacedVideoReviewDelivery {
 }
 /** Trusted runner configuration from the exact server grant, never model tool arguments. */
 export interface PacedVideoTransportGrant {
+  operatorValidation?: OperatorVideoValidationPurpose;
   reviewId: string;
   reviewerSessionId: string;
   childSessionId: string;
