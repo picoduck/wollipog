@@ -511,8 +511,11 @@ function promptDelivery(s: Json): Json {
 }
 
 function unfinishedBackgroundJobs(s: Json): { unfinishedBackgroundJobs?: Json[] } {
+  // A job the runner no longer lists (`sourcePresent: false`) is a retained record, not running work:
+  // a launch's provisional `tool:` record superseded by its provider task id is one (#3073).
   const jobs = Array.isArray(s?.backgroundJobs)
-    ? s.backgroundJobs.filter((job: Json) => typeof job?.id === "string" && !job.terminalStatus)
+    ? s.backgroundJobs.filter((job: Json) => typeof job?.id === "string" && !job.terminalStatus &&
+      job.sourcePresent !== false)
     : [];
   return jobs.length
     ? {

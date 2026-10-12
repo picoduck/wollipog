@@ -232,7 +232,8 @@ test("8 human-owned and 4 Orchestrator-owned child requests are one 8 Child Requ
     assert.equal(trigger().getAttribute("aria-label"), "Session Status: 8 Child Requests");
     await act(async () => { trigger().click(); });
     const rows = [...popover()!.querySelectorAll(".session-status-row")];
-    assert.deepEqual(rows.map((row) => row.querySelector(".status")?.textContent), ["8 Child Requests"]);
+    assert.deepEqual(rows.map((row) => row.querySelector(".status")?.textContent), ["8 Child Requests", "Running"],
+      "the session's lifecycle is still listed under what needs the person (#3073)");
     assert.equal(rows[0]!.querySelector(".session-status-text")?.textContent,
       "8 requests from child sessions need your input.");
     assert.doesNotMatch(popover()!.textContent ?? "", /Orchestrator Action|Descendant Requests|Needs Your Input/u);
@@ -322,9 +323,10 @@ test("the popover is titled Session Status and lists each condition with its sen
     assert.deepEqual(rows.map((row) => [row.badge, row.action]), [
       ...sessionAttentionBreakdown({ status: "input_required", pendingApproval: { ...approval, additionalRequests: [question] } })
         .map((group) => [group.label, group.label === "Answer Required" ? "Answer" : "Review Request"]),
+      ["Awaiting Input", undefined],
       ["Waiting on External Job", "Open"],
       ["2 Workers", "Open Agents"],
-    ], "lifecycle is not listed while something needs the person");
+    ], "the lifecycle is listed, without an action, after what needs the person (#3073)");
     assert.ok(rows.every((row) => /\.$/.test(row.sentence ?? "")), "every row says what it means");
 
     await act(async () => { rowButton("Open Background Work").click(); });

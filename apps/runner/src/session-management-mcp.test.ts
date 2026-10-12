@@ -1707,6 +1707,8 @@ test("session results list unfinished background jobs by id for stop_background_
     backgroundJobs: [
       { id: "monitor-1", launchType: "monitor", parentTurnId: "turn-1", registeredAt: 10 },
       { id: "agent-1", launchType: "agent", parentTurnId: "turn-1", registeredAt: 11, terminalStatus: "completed" },
+      // A record the runner no longer lists, such as a superseded `tool:` placeholder, is not running (#3073).
+      { id: "tool:toolu_1", launchType: "agent", parentTurnId: "turn-1", registeredAt: 10, sourcePresent: false },
     ],
   } } }));
   const result = await callTool(deps, "get_session", { sessionId: "s_child" });

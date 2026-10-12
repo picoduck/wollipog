@@ -786,8 +786,9 @@ extending the settled one-bar session chrome app-wide.
   available and exactly one job of the blocked turn is still running, and Result Missing offers
   Acknowledge Missing Result; otherwise either opens Background Work. The step closes the popover and
   leaves focus on the Session Status control; reopened while its request runs, the row's button is
-  busy, and a failure is an error toast (#2275). The lifecycle is listed only when nothing needs the
-  person. Queue reasons are rows, not badges.
+  busy, and a failure is an error toast (#2275). The lifecycle is always listed, after what needs the
+  person, so a request never hides that the agent is Running (#3073). Queue reasons are rows, not
+  badges.
 
 ### 4.4 Bar Height: 48px
 

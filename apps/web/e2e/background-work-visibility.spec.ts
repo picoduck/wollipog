@@ -424,6 +424,9 @@ for (const width of [390, 1440]) {
     await expect(status).toHaveAccessibleName("Session Status: Result Blocked");
     await expectButtonUnclipped(status);
     await status.click();
+    // The session's own status stays listed beneath it (#3073).
+    await expect(page.getByRole("dialog", { name: "Session Status" }).locator(".session-status-row .status"))
+      .toHaveText(["Result Blocked", "Waiting on External Job", "Awaiting Prompt", "1 Worker"]);
     const row = page.getByRole("dialog", { name: "Session Status" }).locator(".session-status-row")
       .filter({ hasText: "Result Blocked" });
     await expect(row.locator(".session-status-text")).toHaveText(

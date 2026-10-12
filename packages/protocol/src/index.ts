@@ -6045,6 +6045,11 @@ export interface ManagedBackgroundJobSnapshot {
   assistantResultPersistedAt?: number;
   /** v192: present only when Wollipog ended the job itself (#1849). */
   endedBy?: ManagedBackgroundJobEnd;
+  /** The provisional record of this job's launch (a `tool:` id) that this provider task id
+   * superseded (#3073). The control plane drops that record's row while it holds no result
+   * evidence, so the job is listed once. Absent from earlier runners, whose superseded record stays
+   * a tombstone the runner no longer lists. */
+  replacesJobId?: string;
 }
 
 /** Who asked Wollipog to end a managed background job: the runner on its own policy, a person the
@@ -6100,6 +6105,12 @@ export interface ManagedBackgroundJobView {
  * fires does not, and it would otherwise hold a sibling's result and a queued prompt in silence. */
 export const BACKGROUND_JOB_STALL_MS = 60 * 60_000;
 
+/** The runner's default bound on a queued handoff waiting for unfinished background work before it
+ * ends that work (#1778; `WOLLIPOG_CLAUDE_HANDOFF_WAIT_MAX_MS` overrides it per runner). The control
+ * plane reuses it: a finished result an unfinished sibling has held back this long, after its parent
+ * turn ended, is reported as `continuation_blocked` (#3073). */
+export const BACKGROUND_HANDOFF_WAIT_MAX_MS = 60 * 60_000;
+
 /** Provider-neutral terminal evidence safe to project across runner/control-plane boundaries. */
 export interface ManagedBackgroundResult {
   id: string;
@@ -6112,7 +6123,9 @@ export type BackgroundDeliveryWatchdogState =
   | "terminal_without_continuation"
   /** A finished job's result cannot be returned: another job started by the same turn has no
    * terminal status, and the runner records a continuation only once every one of them does
-   * (#1651). Unlike `terminal_without_continuation`, nothing progresses on its own. */
+   * (#1651). Unlike `terminal_without_continuation`, nothing progresses on its own. Reported only
+   * once the parent turn has ended and the result has waited `BACKGROUND_HANDOFF_WAIT_MAX_MS`;
+   * until then the receipt carries no watchdog state (#3073). */
   | "continuation_blocked"
   | "accepted_without_result"
   | "result_not_projected"
@@ -6164,7 +6177,8 @@ export interface BackgroundDeliveryView {
   /** Separate service, display, and click acknowledgements for each push subscription. */
   notifications?: BackgroundNotificationReceiptView[];
   watchdogState?: BackgroundDeliveryWatchdogState;
-  /** With `continuation_blocked`: jobs from the same turn that still have no terminal status. */
+  /** Jobs from the same turn that still have no terminal status, while they hold back a finished
+   * result: with `continuation_blocked`, or with no watchdog state before that (#3073). */
   unfinishedSiblingJobs?: number;
 }
 

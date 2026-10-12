@@ -277,8 +277,30 @@ test("an idle session with a blocked result shows Result Blocked as its status (
   assert.equal(summary.primary.needsYou, true);
   assert.equal(summary.primary.delivery?.parentTurnId, "turn-1");
   assert.equal(summary.more, 0);
-  // It needs the person, so the lifecycle is not listed after it.
-  assert.deepEqual(summary.conditions.map((condition) => condition.meta.label), ["Result Blocked"]);
+  // It needs the person, so it is the badge; the lifecycle is still listed after it (#3073).
+  assert.deepEqual(summary.conditions.map((condition) => condition.meta.label), ["Result Blocked", "Awaiting Prompt"]);
+});
+
+test("a result its sibling still holds back reads Running in its turn, then Waiting on External Job (#3073)", () => {
+  // The control plane reports no watchdog state until the turn has ended and the bound has passed.
+  const waiting = { parentTurnId: "turn-1", jobCount: 1, terminalCount: 1, unfinishedSiblingJobs: 1 };
+  const running = sessionStatusSummary({ status: "running", pendingApproval: null, attentionOwners: undefined,
+    backgroundWorkState: "running", backgroundDeliveries: [waiting] });
+  assert.equal(running.primary.meta.label, "Running");
+  assert.equal(running.more, 0);
+  assert.deepEqual(running.conditions.map((condition) => [condition.meta.label, condition.needsYou]),
+    [["Running", false], ["Waiting on External Job", false]], "in-flight work is a passive row");
+  const ended = sessionStatusSummary({ status: "idle", pendingApproval: null, attentionOwners: undefined,
+    backgroundWorkState: "running", backgroundDeliveries: [waiting] });
+  assert.equal(ended.primary.meta.label, "Waiting on External Job");
+  assert.equal(ended.primary.needsYou, false);
+  assert.deepEqual(ended.conditions.map((condition) => condition.meta.label), ["Waiting on External Job", "Awaiting Prompt"]);
+  // Past the bound it is Result Blocked, and the session's lifecycle stays in the popover.
+  const blocked = sessionStatusSummary(deliverySession("continuation_blocked", { status: "running", backgroundWorkState: "running" }));
+  assert.equal(blocked.primary.meta.label, "Result Blocked");
+  assert.equal(blocked.more, 0);
+  assert.deepEqual(blocked.conditions.map((condition) => condition.meta.label),
+    ["Result Blocked", "Running", "Waiting on External Job"]);
 });
 
 test("an idle session with a missing result shows Result Missing as its status (#2275)", () => {
@@ -296,7 +318,8 @@ test("an approval leads a missing result, which counts as +1 (#2275)", () => {
   }));
   assert.equal(summary.primary.meta.label, "Approval Required");
   assert.equal(summary.more, 1);
-  assert.deepEqual(summary.conditions.map((condition) => condition.meta.label), ["Approval Required", "Result Missing"]);
+  assert.deepEqual(summary.conditions.map((condition) => condition.meta.label),
+    ["Approval Required", "Result Missing", "Awaiting Input"]);
 });
 
 test("a delivery that waits on the person ranks after requests and before Background Work Lost (#2275)", () => {
@@ -305,7 +328,7 @@ test("a delivery that waits on the person ranks after requests and before Backgr
     backgroundWorkState: "orphaned",
   } as Partial<SessionStatusSource>), { descendantRequests: 2, runnerOnline: false });
   assert.deepEqual(summary.conditions.map((condition) => condition.kind),
-    ["child_requests", "background_delivery", "background_work", "disconnected"]);
+    ["child_requests", "background_delivery", "background_work", "disconnected", "lifecycle"]);
   assert.equal(summary.more, 1);
 });
 

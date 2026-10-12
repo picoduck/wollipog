@@ -24,6 +24,7 @@ import type {
   type UsageAmount,
 } from "@wollipog/protocol";
 import {
+  BACKGROUND_HANDOFF_WAIT_MAX_MS,
   BACKGROUND_JOB_STALL_MS,
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   PROTOCOL_VERSION,
@@ -4463,6 +4464,92 @@ test("a finished job whose sibling never finishes is a blocked delivery, and a l
     assert.deepEqual(db.getSession("blocked")?.backgroundDeliveries, [{
       parentTurnId: "turn-1", jobCount: 2, terminalCount: 2, watchdogState: "terminal_without_continuation",
     }]);
+  } finally {
+    db.close();
+  }
+});
+
+test("a held-back result is not blocked while its parent turn runs, and is Result Blocked only past the bound (#3073)", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    db.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    let liveTurn: string | undefined = "turn-1";
+    db.setLiveTurnSource((sessionId) => sessionId === "held" ? liveTurn : undefined);
+    const job = (id: string, parentTurnId: string, finishedAt?: number) => ({
+      id, parentTurnId, runnerId: "runner-1", workspaceId: null, launchType: "agent" as const, registeredAt: 1_000,
+      ...(finishedAt === undefined ? {} : { terminalStatus: "completed" as const, terminalObservedAt: finishedAt, continuationRequired: true }),
+    });
+    const report = (finishedAt: number, parentTurnId = "turn-1") => db.updateSessionFromSnapshot("held", snapshot({
+      id: "held", driver: "claude_code", backgroundWorkState: "running",
+      backgroundJobs: [job(`shell-${parentTurnId}`, parentTurnId, finishedAt), job(`agent-${parentTurnId}`, parentTurnId)],
+    }), Date.now());
+    const delivery = () => db.getSession("held")?.backgroundDeliveries;
+    const summary = () => db.listSessionSummaries().find((session) => session.id === "held");
+    const recovery = () => db.getSession("held")?.attention?.humanActions.map((action) => action.requestId) ?? [];
+    db.createSessionFromSnapshot(snapshot({ id: "held", driver: "claude_code", status: "running" }), "runner-1", 1_000);
+    const long = Date.now() - BACKGROUND_HANDOFF_WAIT_MAX_MS - 60_000;
+    report(long);
+    const waiting = [{ parentTurnId: "turn-1", jobCount: 1, terminalCount: 1, unfinishedSiblingJobs: 1 }];
+    // The parent turn is still running: however long the result has waited, it is not blocked.
+    assert.deepEqual(delivery(), waiting);
+    assert.deepEqual(summary()?.backgroundDeliveries, waiting, "the Sessions list agrees with the session");
+    assert.deepEqual(recovery(), [], "nothing asks the person while the turn runs");
+
+    // A job started outside any runner turn may belong to whichever turn is running.
+    db.updateSessionFromSnapshot("held", snapshot({ id: "held", driver: "claude_code", backgroundJobs: [] }), Date.now());
+    report(long, "unknown");
+    liveTurn = "provider:3";
+    assert.deepEqual(delivery(), [{ ...waiting[0], parentTurnId: "unknown" }]);
+
+    // After the turn, a result an unfinished sibling has held back for less than the bound only waits.
+    liveTurn = undefined;
+    db.raw().prepare("DELETE FROM managed_background_jobs WHERE session_id='held'").run();
+    const recent = Date.now() - 60_000;
+    report(recent);
+    assert.deepEqual(delivery(), waiting);
+    assert.deepEqual(summary()?.backgroundDeliveries, waiting);
+    assert.deepEqual(recovery(), []);
+    // A later turn running is not the parent turn.
+    liveTurn = "turn-2";
+    assert.deepEqual(delivery(), waiting);
+
+    // Past the bound it is Result Blocked, everywhere, and the sweep names the session when it crosses.
+    db.raw().prepare("UPDATE managed_background_jobs SET terminal_observed_at=? WHERE session_id='held' AND job_id='shell-turn-1'")
+      .run(long);
+    const blocked = [{ ...waiting[0], watchdogState: "continuation_blocked" }];
+    assert.deepEqual(delivery(), blocked);
+    assert.deepEqual(summary()?.backgroundDeliveries, blocked);
+    assert.deepEqual(recovery(), ["background-recovery:turn-1"]);
+    const crossed = long + BACKGROUND_HANDOFF_WAIT_MAX_MS;
+    assert.deepEqual(db.sessionsWithHeldResultsReachingBound(crossed - 5_000, crossed), ["held"]);
+    assert.deepEqual(db.sessionsWithHeldResultsReachingBound(crossed, crossed + 5_000), [],
+      "a session is republished once, when its bound passes");
+    // The live turn is read on every view, not captured when the job was reported.
+    liveTurn = "turn-1";
+    assert.deepEqual(delivery(), waiting);
+  } finally {
+    db.close();
+  }
+});
+
+test("a provider task id that supersedes its launch's provisional record leaves one job row (#3073)", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    db.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    const agent = { parentTurnId: "turn-1", runnerId: "runner-1", workspaceId: null, launchType: "agent" as const, registeredAt: 1_000 };
+    db.createSessionFromSnapshot(snapshot({ id: "promoted", driver: "claude_code", backgroundWorkState: "running",
+      backgroundJobs: [{ ...agent, id: "tool:toolu_1" }, { ...agent, id: "tool:toolu_2" }] }), "runner-1", 2_000);
+    // A runner that names the superseded record: the provisional row goes. One that does not leaves
+    // a tombstone it no longer lists, as before.
+    db.updateSessionFromSnapshot("promoted", snapshot({ id: "promoted", driver: "claude_code", backgroundWorkState: "running",
+      backgroundJobs: [{ ...agent, id: "a01157", replacesJobId: "tool:toolu_1" }, { ...agent, id: "a05678" }] }), 2_100);
+    const jobs = () => db.listManagedBackgroundJobs("promoted").map((job) => [job.id, job.sourcePresent]);
+    assert.deepEqual(jobs().sort(), [["a01157", true], ["a05678", true], ["tool:toolu_2", false]]);
+    // A record the snapshot still lists is never dropped this way.
+    db.updateSessionFromSnapshot("promoted", snapshot({ id: "promoted", driver: "claude_code", backgroundWorkState: "running",
+      backgroundJobs: [{ ...agent, id: "a01157", replacesJobId: "tool:toolu_1" },
+        { ...agent, id: "a05678", replacesJobId: "a01157" }] }), 2_200);
+    assert.deepEqual(jobs().sort(), [["a01157", true], ["a05678", true], ["tool:toolu_2", false]]);
   } finally {
     db.close();
   }

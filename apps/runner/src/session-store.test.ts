@@ -912,6 +912,18 @@ test("v192 snapshots say who ended a job, naming a person by role and never by a
   assert.ok(endedBy(191)?.every(([, end]) => end === undefined), "an older control plane receives no endedBy");
 });
 
+test("a snapshot names the provisional record a provider task id superseded (#3073)", () => {
+  const job = (id: string, replacesJobId?: string): DurableBackgroundJob => ({
+    id, toolUseId: "toolu_private", parentTurnId: "turn-1", runnerId: "runner-1", workspaceId: "repo",
+    context: { kind: "native" }, launchType: "agent", registeredAt: 10, ...(replacesJobId ? { replacesJobId } : {}),
+  });
+  const projected = metaToSnapshot(meta({ backgroundJobs: [job("a01157", "tool:toolu_1"), job("a05678")] }), 213)
+    .backgroundJobs;
+  assert.equal(projected?.[0]?.replacesJobId, "tool:toolu_1");
+  assert.equal("replacesJobId" in (projected?.[1] ?? {}), false);
+  assert.equal(JSON.stringify(projected).includes("toolu_private"), false);
+});
+
 test("v83 snapshots explicitly classify provider background tracking", () => {
   assert.equal(metaToSnapshot(meta({ driver: "claude-code" }), 82).backgroundWorkTracking, undefined);
   assert.equal(metaToSnapshot(meta({ driver: "claude-code" }), 83).backgroundWorkTracking, "managed");

@@ -26,8 +26,8 @@ test("rule 1: the first attention kind in the breakdown's order leads, and +N co
   assert.equal(summary.primary.meta.label, sessionAttentionBreakdown(source)[0]!.label);
   assert.equal(summary.primary.kind, "attention");
   assert.equal(summary.more, 1);
-  // The lifecycle is not listed while something needs the person, so "Awaiting Input" is not said twice.
-  assert.deepEqual(labels(source), sessionAttentionBreakdown(source).map((group) => group.label));
+  // The lifecycle is listed after what needs the person, never counted in +N (#3073).
+  assert.deepEqual(labels(source), [...sessionAttentionBreakdown(source).map((group) => group.label), "Awaiting Input"]);
 });
 
 test("rule 1: two requests of one kind are one condition with a count, not +1", () => {
@@ -69,7 +69,7 @@ test("rule 1: child requests follow the session's own requests as one condition,
     pendingApproval: approval,
     orchestratorCampaign: campaign,
   }));
-  assert.deepEqual(withRequest.conditions.map((condition) => condition.kind), ["attention", "child_requests"]);
+  assert.deepEqual(withRequest.conditions.map((condition) => condition.kind), ["attention", "child_requests", "lifecycle"]);
   assert.equal(withRequest.conditions[1]!.meta.label, "2 Child Requests");
   assert.equal(withRequest.conditions[1]!.meta.tone, "warning");
   assert.equal(withRequest.more, 1);
@@ -84,7 +84,7 @@ test("rule 1: child requests follow the session's own requests as one condition,
   const descendants = sessionStatusSummary(session({ status: "input_required", pendingApproval: approval }), {
     descendantRequests: 1,
   });
-  assert.deepEqual(descendants.conditions.map((condition) => condition.kind), ["attention", "child_requests"]);
+  assert.deepEqual(descendants.conditions.map((condition) => condition.kind), ["attention", "child_requests", "lifecycle"]);
   assert.equal(descendants.conditions[1]!.meta.label, "1 Child Request");
   assert.equal(descendants.more, 1);
   // A campaign's request counts already include its descendants', so they are not counted twice.

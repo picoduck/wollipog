@@ -802,7 +802,8 @@ for (const viewport of [
       await expect(statusPopover).toBeVisible();
       const rows = statusPopover.locator(".session-status-row");
       // Child requests are one condition; the Orchestrator's share is counted only in the panel (#2206).
-      await expect(rows.locator(".status")).toHaveText(["1 Child Request", "Waiting on External Job", "1 Worker"]);
+      // The lifecycle stays listed under what needs the person (#3073); it has no action.
+      await expect(rows.locator(".status")).toHaveText(["1 Child Request", "Waiting on External Job", "Awaiting Prompt", "1 Worker"]);
       await expect(rows.locator("button")).toHaveText(["Open Requests", "Open", "Open Agents"]);
       // On a phone every popover is a bottom sheet across the screen (docs/design-system.md §9.2).
       await dialogMotionSettled(page);
@@ -994,7 +995,7 @@ for (const width of [1440, 320]) {
         inside: badge.left >= box.left - 0.5 && badge.right <= box.right + 0.5,
       };
     }));
-    expect(rows.length).toBe(2);
+    expect(rows.length).toBe(3);
     for (const metrics of rows) expect(metrics).toEqual({ overlap: false, inside: true });
   });
 }

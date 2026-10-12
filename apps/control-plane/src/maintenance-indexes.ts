@@ -24,6 +24,9 @@ CREATE INDEX IF NOT EXISTS idx_outbound_event_deliveries_retention
 CREATE INDEX IF NOT EXISTS idx_outbound_event_deliveries_retry
   ON outbound_event_deliveries(next_attempt_at, created_at, delivery_id)
   WHERE status IN ('pending','retrying') AND payload_json IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_managed_background_jobs_held_results
+  ON managed_background_jobs(terminal_observed_at, session_id)
+  WHERE source_present=1 AND continuation_required=1 AND continuation_id IS NULL AND terminal_observed_at IS NOT NULL;
 `;
 
 const ORPHANS = /* sql */ `

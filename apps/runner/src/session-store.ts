@@ -445,6 +445,8 @@ export interface DurableBackgroundJob {
   assistantResultPersistedAt?: number;
   /** Runner-private proof that v82 structured delivery evidence was durably published. */
   structuredDeliveryPublishedAt?: number;
+  /** The provisional record of this job's launch that this one superseded (#3073). */
+  replacesJobId?: string;
 }
 
 export interface SessionSlashCommandProvenance {
@@ -3992,6 +3994,7 @@ export function metaToSnapshot(
           endedBy: job.endedBy && runnerSupportsProtocol(controlPlaneProtocolVersion, "backgroundJobEndedBy")
             ? projectBackgroundJobEnd(job.endedBy)
             : undefined,
+          ...(job.replacesJobId ? { replacesJobId: job.replacesJobId } : {}),
         }))
       : undefined,
     tokensIn: m.tokensIn,
