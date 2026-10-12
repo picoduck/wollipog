@@ -77,7 +77,6 @@ import { FeedbackProvider } from "./components/FeedbackProvider.js";
 import { OfflineBanner } from "./components/OfflineBanner.js";
 import { PairingBanner } from "./components/PairingBanner.js";
 import { ChevronLeftIcon, KeyboardIcon, LockIcon, PlusIcon } from "./components/Icons.js";
-import { NavRow, SwitchRow } from "./components/ui/SettingsRows.js";
 import { backLabel, viewPath, viewSubjectName, viewTitle } from "./navigation.js";
 import { sessionDisplayTitle } from "./session-title.js";
 import { routedSessionPlaceholder } from "./detail-placeholder.js";

@@ -1276,6 +1276,8 @@ test.describe("the appearance controls", () => {
   const pill = (page: Page, group: string, name: string) =>
     seg(page, group).getByRole("radio", { name });
   const trigger = (page: Page) => page.getByRole("button", { name: /^Color Scheme:/ });
+  /** Appearance's Display group; the Navigation editor follows it in the same section. */
+  const display = (page: Page) => page.locator("section.settings-group", { has: page.getByRole("heading", { name: "Display", exact: true }) });
 
   for (const theme of THEMES) {
     test(`every option is visible before it is chosen in ${theme}`, async ({ page }) => {
@@ -1387,14 +1389,14 @@ test.describe("the appearance controls", () => {
     });
   }
 
-  test("the whole panel is five rows, one per setting", async ({ page }) => {
+  test("the whole Display group is five rows, one per setting", async ({ page }) => {
     // The defect this replaced, stated as a number: three settings rendered as ten rows under three
     // headings, so Appearance did not fit on a phone and the alternatives were never side by side.
     // Sessions Layout (#2219) is the fourth setting and Terminal Placement (#2869) the fifth, one row each.
     await useHarness(page, "dark", { section: "appearance" });
-    await expect(page.locator(".settings-panel .setting-row")).toHaveCount(5);
-    await expect(page.locator(".settings-panel .settings-group")).toHaveCount(1);
-    await expect(page.locator(".settings-panel .setting-row-title"))
+    await expect(page.locator(".settings-panel .settings-group-title")).toHaveText(["Display", "Navigation"]);
+    await expect(display(page).locator(".setting-row")).toHaveCount(5);
+    await expect(display(page).locator(".setting-row-title"))
       .toHaveText(["Theme", "Color Scheme", "Density", "Sessions Layout", "Terminal Placement"]);
   });
 
@@ -1523,7 +1525,7 @@ test.describe("the appearance controls", () => {
       skipWithoutBaselines();
       await useHarness(page, theme, { section: "appearance" });
       await page.mouse.move(0, 0);
-      const group = page.locator(".settings-panel .settings-group");
+      const group = display(page);
       await expect(page).toHaveScreenshot(`settings-rows-${theme}.png`, {
         ...PIXELS,
         clip: await snappedClip(group),

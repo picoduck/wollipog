@@ -121,8 +121,9 @@ test("the rhythm is driven by tokens, not by literals", () => {
   // The point of the axis is that ONE edit reaches every screen through the primitives. A row that
   // hardcodes its padding is a row the setting cannot move, and it will look like the setting is
   // broken rather than like that row opted out.
-  const row = css.slice(css.indexOf(".ui-row {"), css.indexOf(".ui-row:hover"));
-  assert.match(row, /padding: var\(--row-pad-y\) var\(--row-pad-x\)/);
+  // A setting row (§8.2) is at least --row-h-2 tall, which density moves.
+  const row = css.slice(css.indexOf("\n.setting-row {"), css.indexOf(".setting-row-static {"));
+  assert.match(row, /min-height: var\(--row-h-2\)/);
   // A two-line Sessions row is --row-h-2 tall, which density moves, and pads only its sides; the
   // phone's three-line card adds --inbox-row-pad-y above and below (#2209).
   const inbox = css.slice(css.indexOf("\n.inbox-row {"), css.indexOf(".inbox-row:hover"));

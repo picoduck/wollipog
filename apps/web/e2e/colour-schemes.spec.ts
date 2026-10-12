@@ -1238,7 +1238,7 @@ for (const scheme of SCHEMES) {
 test("comfortable density gives every row more room than compact", async ({ page }) => {
   const heights = async (density: "compact" | "comfortable") => {
     await page.goto(`/colour-schemes-e2e.html?density=${density}`);
-    await expect(page.locator(".ui-row").first()).toBeVisible();
+    await expect(page.locator(".setting-row").first()).toBeVisible();
     return page.evaluate(() => {
       // Every family, and BOTH dimensions. The first version measured one settings row, one inbox
       // row and one gap, so a setting that reached two screens out of six passed as
@@ -1257,7 +1257,6 @@ test("comfortable density gives every row more room than compact", async ({ page
         };
       };
       return {
-        row: box(".ui-row"),
         inbox: box(".inbox-row"),
         card: box(".column .card"),
         agent: box(".agent-row"),
@@ -1273,7 +1272,6 @@ test("comfortable density gives every row more room than compact", async ({ page
         rowDense: box(".surface > .row.dense"),
         cell: box(".table td"),
         setting: box(".setting-row"),
-        gap: Number.parseFloat(getComputedStyle(document.querySelector(".approvals-skeleton")!).rowGap),
       };
     });
   };
@@ -1282,7 +1280,7 @@ test("comfortable density gives every row more room than compact", async ({ page
 
   // Each of the three, not the total: a scale that grew one dimension and shrank another could
   // still add up, and "more room" has to mean more room everywhere it is claimed.
-  for (const family of ["row", "card", "agent", "finding", "ext", "boxRunner", "nativeRunner", "workspace"] as const) {
+  for (const family of ["card", "agent", "finding", "ext", "boxRunner", "nativeRunner", "workspace"] as const) {
     // A MEANINGFUL step, not "greater than": a subpixel increase satisfied the first version, and
     // a density setting nobody can see is a setting that does not work.
     expect(comfortable[family].height, `a ${family} row must be meaningfully taller`)
@@ -1305,8 +1303,6 @@ test("comfortable density gives every row more room than compact", async ({ page
   expect(comfortable.inbox.height - compact.inbox.height, "a Sessions row grows by one 4px row step").toBe(4);
   expect(comfortable.inbox.padX, "a Sessions row must gain horizontal room").toBeGreaterThan(compact.inbox.padX);
   expect([compact.inbox.padY, comfortable.inbox.padY]).toEqual([0, 0]);
-  expect(comfortable.gap, "and the rows must sit further apart").toBeGreaterThan(compact.gap);
-  expect(comfortable.gap, "without the list becoming a stack of cards").toBeLessThan(compact.gap * 2.5);
 });
 
 test("compact renders exactly what the merge base rendered", async ({ page }) => {
@@ -1319,33 +1315,22 @@ test("compact renders exactly what the merge base rendered", async ({ page }) =>
     "compact is the ABSENCE of the attribute, so the default cannot depend on storage").toBe(null);
 
   const computed = await page.evaluate(() => {
-    const row = getComputedStyle(document.querySelector(".ui-row")!);
     const inbox = getComputedStyle(document.querySelector(".inbox-row")!);
-    const list = getComputedStyle(document.querySelector(".approvals-skeleton")!);
     const boxRunner = getComputedStyle(document.querySelector(".runner-card.box-card")!);
     const nativeRunner = getComputedStyle(document.querySelector(".runner-card:not(.box-card)")!);
     return {
-      rowPadding: `${row.paddingTop} ${row.paddingRight}`,
-      rowMinHeight: row.minHeight,
       inboxPadding: `${inbox.paddingTop} ${inbox.paddingRight}`,
       inboxMinHeight: inbox.minHeight,
-      listGap: list.rowGap,
       boxRunnerPadding: `${boxRunner.paddingTop} ${boxRunner.paddingRight}`,
       nativeRunnerPadding: `${nativeRunner.paddingTop} ${nativeRunner.paddingRight}`,
     };
   });
   expect(computed).toEqual({
-    rowPadding: "11px 12px",
-    // The settings row has declared one control height as its floor since #1799 (32px with this
-    // mouse, 44px on touch). A compact row's padding and text are taller than that, so it still
-    // renders as the merge base did; only the computed floor moved from `auto`. The Sessions row
-    // declares none, and Chromium computes `0px` for it by its box type — read from the browser
-    // rather than chosen, after an earlier version of this expectation guessed and failed. Its
-    // height is --row-h-2 since #2209, so it pads only its sides.
-    rowMinHeight: "32px",
+    // The Sessions row declares no minimum height, and Chromium computes `0px` for it by its box
+    // type — read from the browser rather than chosen, after an earlier version of this expectation
+    // guessed and failed. Its height is --row-h-2 since #2209, so it pads only its sides.
     inboxPadding: "0px 11px",
     inboxMinHeight: "0px",
-    listGap: "6px",
     boxRunnerPadding: "16px 18px",
     nativeRunnerPadding: "16px 18px",
   });

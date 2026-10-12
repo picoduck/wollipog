@@ -9,7 +9,6 @@ import { parse } from "postcss";
 import {
   ActionRow,
   LinkRow,
-  NavRow,
   NumberRow,
   SegmentedRow,
   SelectRow,
@@ -148,7 +147,7 @@ test("the row kinds are distinguishable in their inert state", async () => {
       <SegmentedRow title="Theme" options={THEMES_FIXTURE} value="system" onChange={() => undefined} />
       <SelectRow title="Color Scheme" options={SCHEMES_FIXTURE} value="wollipog" onChange={() => undefined} />
       <SwitchRow title="Desktop Alerts" description="Approvals and finished turns" checked={false} onClick={() => undefined} />
-      <NavRow title="Keyboard Shortcuts" description="Reference" onClick={() => undefined} />
+      <LinkRow title="Keyboard Shortcuts" description="Reference" onClick={() => undefined} />
     </>,
   );
   try {
@@ -1499,14 +1498,14 @@ test("a settled switch carries no busy state", async () => {
 });
 
 /**
- * The chevron, as RENDERED by NavRow.
+ * The chevron, as RENDERED by LinkRow.
  *
  * Reading ChevronRightIcon's source instead let the icon be dropped from the row entirely: the DOM
  * test still found the .setting-row-chevron span, and the source test still found geometry in a function
  * nobody called any more. Assert the row actually paints one.
  */
 test("a navigation row renders a chevron with real geometry", async () => {
-  const { container, cleanup } = await render(<NavRow title="Keyboard Shortcuts" onClick={() => undefined} />);
+  const { container, cleanup } = await render(<LinkRow title="Keyboard Shortcuts" onClick={() => undefined} />);
   try {
     const slot = container.querySelector(".setting-row-chevron");
     assert.ok(slot, "the chevron slot must exist");
@@ -1725,17 +1724,16 @@ test("a value row shows its value in the control column, mono when asked, with a
   }
 });
 
-test("a link row is one button with a trailing chevron and an optional trailing word; NavRow is the same row", async () => {
+test("a link row is one button with a trailing chevron and an optional trailing word", async () => {
   let clicks = 0;
   const { container, cleanup } = await render(
     <>
       <LinkRow title="Tool Policies" description="Read-only guardrails." trailing="3 Policies" onClick={() => { clicks += 1; }} />
-      <NavRow title="Keyboard Shortcuts" hasPopup="dialog" onClick={() => undefined} />
+      <LinkRow title="Keyboard Shortcuts" hasPopup="dialog" onClick={() => undefined} />
       <LinkRow title="Instances" disabled onClick={() => { clicks += 1; }} />
     </>,
   );
   try {
-    assert.equal(NavRow, LinkRow, "the old name stays as an alias until its callers move");
     const [policies, shortcuts, instances] = [...container.querySelectorAll<HTMLButtonElement>("button.setting-row-link")];
     assert.ok(policies!.classList.contains("setting-row-trailing"), "the chevron stays beside the text in a narrow group");
     const control = policies!.querySelector(".setting-row-control")!;

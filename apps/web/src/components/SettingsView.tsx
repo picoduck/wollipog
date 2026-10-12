@@ -49,7 +49,7 @@ import { useIsCompact, useIsMobile } from "./useIsMobile.js";
 import { EXPERIMENT_COPY, experimentForViewName } from "../experiments.js";
 import { useExperiments } from "../use-experiments.js";
 import { destination } from "../navigation.js";
-import { NavRow, SegmentedRow, SelectRow, SettingsGroup, StaticRow, SwitchRow } from "./ui/SettingsRows.js";
+import { LinkRow, SegmentedRow, SelectRow, SettingsGroup, StaticRow, SwitchRow } from "./ui/SettingsRows.js";
 import { Select } from "./ui/ChoiceControls.js";
 import { SCHEME_SWATCHES, type ColorScheme, type ResolvedTheme } from "../theme.js";
 import type { SessionsPreviewLayout } from "../sessions-preview-layout.js";
@@ -563,8 +563,8 @@ export function KeyboardPanel({
   onOpenShortcuts: (returnFocus: HTMLElement | null) => void;
 }) {
   return (
-    <SettingsGroup title="Shortcuts">
-      <NavRow
+    <SettingsGroup>
+      <LinkRow
         title="Keyboard Shortcuts"
         description={shortcutLabel}
         icon={<KeyboardIcon size={16} />}
@@ -973,7 +973,7 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
 
   return (
     <>
-      <NavRow
+      <LinkRow
         title="Default Models, Efforts, and Permissions"
         description={summary}
         expanded={expanded}
@@ -1033,7 +1033,7 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
             </button>
           </div>
           {view.defaults.length === 0 && (
-            <p className="ui-row-desc agent-defaults-empty">No discovered Agent Harnesses are available yet.</p>
+            <p className="field-helper agent-defaults-empty">No discovered Agent Harnesses are available yet.</p>
           )}
           {view.defaults.map((option) => {
             const key = harnessIdentityKey(option);
@@ -1049,7 +1049,7 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
               (!draft.model || efforts.length === 0 || !!draft.effort);
             return (
               <div className="agent-defaults-item" key={key}>
-                <NavRow
+                <LinkRow
                   title={option.name}
                   description={harnessDefaultSummary(option)}
                   expanded={isEditing}
@@ -1073,7 +1073,7 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
                 {isEditing && (
                   <div id={`agent-default-${encodeURIComponent(key)}`} className="agent-defaults-editor">
                     {!configurable && (
-                      <p className="ui-row-desc">This Agent Harness advertises no configurable models, efforts, or permission modes.</p>
+                      <p className="field-helper">This Agent Harness advertises no configurable models, efforts, or permission modes.</p>
                     )}
                     {option.installations.length === 0 && (
                       <Notice tone="warning" compact role="status">This saved Agent Harness is no longer discovered. Reset it to use the Wollipog default.</Notice>
@@ -1488,7 +1488,7 @@ export function SessionNamingPanel() {
 
   return (
     <SettingsGroup title="Session Naming">
-      <NavRow
+      <LinkRow
         title="Session Naming"
         description={summaryStatus}
         disabled={!settings || busy || customBusy}
@@ -1529,10 +1529,10 @@ export function SessionNamingPanel() {
             estimatedOptionHeight={72}
           />
           {!settings.canManage && (
-            <p className="ui-row-desc">Organization owner or admin permission is required to change this setting.</p>
+            <p className="field-helper">Organization owner or admin permission is required to change this setting.</p>
           )}
           {draftMode === "session_agent_account" && legacyFollowAvailable && (
-            <p className="ui-row-desc">
+            <p className="field-helper">
               Each session will use its own Machine and authenticated Agent Harness without changing its billing boundary.
             </p>
           )}
@@ -1662,12 +1662,12 @@ export function SessionNamingPanel() {
               />
             </label>
           </div>
-          <p className="ui-row-desc">
+          <p className="field-helper">
             The API key is sent once to the selected Machine and is never returned to this browser or stored by the control plane.
             {" "}When this mode is active, bounded session text is sent through that Machine to the configured provider.
           </p>
           {custom?.configurationSource === "runner" && customDraftChanged && !customEndpoint && (
-            <p className="ui-row-desc">Re-enter the complete endpoint URL to change this saved configuration.</p>
+            <p className="field-helper">Re-enter the complete endpoint URL to change this saved configuration.</p>
           )}
           <div className="session-naming-custom-actions">
             <button
@@ -1697,10 +1697,10 @@ export function SessionNamingPanel() {
               Test Connection
             </button>
           </div>
-          {customStatus && <p role="status" className="ui-row-desc">{customStatus}</p>}
+          {customStatus && <p role="status" className="field-helper">{customStatus}</p>}
             </>
           )}
-          {error?.action === "save" && <p role="alert" className="ui-row-desc">{summaryStatus}</p>}
+          {error?.action === "save" && <p role="alert" className="field-helper">{summaryStatus}</p>}
           <div className="session-naming-actions">
             <button type="button" className="btn sm" disabled={!settings.canManage || !saveComplete || busy || customBusy} onClick={save}>
               Save Configuration
@@ -1731,7 +1731,7 @@ export function ExperimentalPanel({
   onToggle: (id: ExperimentId, enabled: boolean) => void;
 }) {
   return (
-    <SettingsGroup title="Untested Features">
+    <SettingsGroup>
       <SwitchRow
         title={EXPERIMENT_COPY.multiAgent.name}
         description={`Runs and workflow graphs that coordinate several agents. Off hides ${EXPERIMENT_COPY.multiAgent.name} from navigation and search on this device.`}
@@ -1790,7 +1790,7 @@ export function NetworkPanel({ tailnet }: { tailnet: TailnetAccessSetting }) {
     />
   );
   return (
-    <SettingsGroup title="Tailnet">
+    <SettingsGroup>
       {tailnetRow}
       <PendingSetting
         title="Control-Plane Origin"
@@ -1810,7 +1810,7 @@ export function NetworkPanel({ tailnet }: { tailnet: TailnetAccessSetting }) {
 export function AboutPanel({ update }: { update?: DesktopUpdateSetting } = {}) {
   const controlPlaneVersion = useControlPlaneVersion();
   return (
-    <SettingsGroup title="Versions">
+    <SettingsGroup>
       <dl className="facts">
         {update?.status && <><dt>Desktop App</dt><dd>{update.status.currentVersion}</dd></>}
         <dt>Control Plane</dt>
@@ -2010,7 +2010,7 @@ export function NotificationsPanel({
   disabled?: boolean;
 }) {
   return (
-    <SettingsGroup title="Alerts">
+    <SettingsGroup>
       <NotifyRow notify={{ ...notify, disabled }} />
       <PushRow push={push} disabled={disabled} />
     </SettingsGroup>

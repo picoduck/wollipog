@@ -387,7 +387,7 @@ test("removing a rule confirms naming the group's skills; toggling it applies at
     const enabled = dialog.querySelector<HTMLButtonElement>('.skill-assignment [role="switch"]')!;
     await click(enabled);
     assert.deepEqual(view.api.writes, [["update-rule", "review", "rule-1", { enabled: false }]]);
-    assert.equal(dialog.querySelector(".skill-assignment .ui-row-saved")?.textContent, "Saved");
+    assert.equal(dialog.querySelector(".skill-assignment .setting-row-saved")?.textContent, "Saved");
     assert.equal(dialog.querySelector(".skill-assignment .skill-assignment-desc")?.textContent, "Group assignment, turned off");
 
     // An invocation change spins on the invocation control, not on Enabled.

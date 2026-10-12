@@ -279,12 +279,6 @@ function Sample() {
               <span key={option.value} role="radio" aria-checked={index === 0} className="seg-option">{option.label}</span>
             ))}
           </div>
-          {/* The two rhythm carriers the density tokens drive: settings rows --row-gap apart, as
-              Approvals' skeleton rows are, and an inbox row. */}
-          <div className="approvals-skeleton">
-            <button type="button" className="ui-row"><span className="ui-row-body"><span className="ui-row-title">A settings row</span></span></button>
-            <button type="button" className="ui-row"><span className="ui-row-body"><span className="ui-row-title">Another settings row</span></span></button>
-          </div>
           {/* A setting row (§8.2) takes its height from --row-h-2, so density moves it by the token's step. */}
           <div className="surface">
             <div className="setting-row setting-row-static">

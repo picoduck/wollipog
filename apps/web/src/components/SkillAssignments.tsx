@@ -212,7 +212,7 @@ export function AssignmentRuleRow({ rule, title, offDescription, busy, saving, s
         >
           Enabled
         </Switch>
-        {saved && <span className="ui-row-saved" aria-hidden="true"><CheckIcon size={14} />Saved</span>}
+        {saved && <span className="setting-row-saved" aria-hidden="true"><CheckIcon size={14} />Saved</span>}
         <RuleActionsMenu title={title} disabled={busy} removing={removing} inline={inlineMenus} onRemove={onRemove} />
       </div>
       <span className="sr-only" role="status">{saved ? `${title} saved` : ""}</span>

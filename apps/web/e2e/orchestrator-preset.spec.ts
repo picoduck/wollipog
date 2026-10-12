@@ -364,7 +364,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await expect(page.locator("body")).toHaveAttribute("data-session-reloads", "1");
     await expect(merge.getByRole("radio", { name: "Human" }), "the stored choice comes back")
       .toHaveAttribute("aria-checked", "true");
-    await expect(dialog.locator(".ui-row-saved")).toHaveCount(0);
+    await expect(dialog.locator(".setting-row-saved")).toHaveCount(0);
     await expect(page.locator(".session-notice-slot"), "nothing reaches the composer's error line").toHaveCount(0);
     await notice.scrollIntoViewIfNeeded();
     await page.screenshot({ path: `test-results/orchestrator-controls/conflict-${viewport.width}.png` });

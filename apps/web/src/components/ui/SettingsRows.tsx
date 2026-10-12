@@ -523,9 +523,6 @@ export function LinkRow({
   );
 }
 
-/** The navigation row's earlier name. Kept until its callers move to `LinkRow`. */
-export const NavRow = LinkRow;
-
 /**
  * One action for the setting, such as Edit…, as a button in the control column. The button is named
  * by its label and the row's title ("Edit… Claude Code"), so a list of rows does not read as a list
@@ -754,7 +751,8 @@ export function SwitchRow({
  *
  * - The head: a title in `--type-section`, written in Title Case (never `text-transform`); an
  *   optional scope label as §11.3 meta ("This Device", "Your Account", "This Window", "This
- *   Machine"); and at most one head action.
+ *   Machine"); and at most one head action. A Settings section with one group leaves out its title:
+ *   the section's own heading already names it (#3019).
  * - An optional one-sentence description (`intro`).
  * - One `.surface` holding the rows, hairlines between them. It is the size container for the 560px
  *   rule, so the rows answer to the group's width rather than the viewport's.

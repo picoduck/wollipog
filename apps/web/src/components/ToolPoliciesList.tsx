@@ -12,7 +12,7 @@ import { LockIcon } from "./Icons.js";
 import { Modal } from "./Modal.js";
 import { SkeletonRows } from "./QuestionPoliciesPanel.js";
 import { StatusBadge } from "./StatusBadge.js";
-import { NavRow, SettingsGroup } from "./ui/SettingsRows.js";
+import { LinkRow, SettingsGroup } from "./ui/SettingsRows.js";
 
 /**
  * Settings › Approvals › Tool Policies (#2158): the policies that allow, ask about or deny tool
@@ -36,7 +36,7 @@ export function ToolPoliciesList({ policies }: { policies: readonly GovernancePo
         : rows.length === 0 ? (
           <p className="approvals-empty">No tool policies. Every tool call follows the session's permission mode.</p>
         ) : rows.map((policy) => (
-          <NavRow
+          <LinkRow
             key={policy.policyId}
             id={approvalsPolicyAnchorId(policy.policyId)}
             hasPopup="dialog"

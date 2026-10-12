@@ -75,7 +75,8 @@ function ArtifactUploadSettingsEditor() {
     }
   };
 
-  return <>
+  // One child of the group's surface per setting: the row and what it says about its last change.
+  return <div className="setting-row-frame">
     <SelectRow
       title="Artifact Uploads"
       description={<>Saved for your sessions on this instance. Applies when sessions launch or resume; live sessions keep their current instructions until then. Explicit task and project hosting requirements take priority. Native TUI sessions do not receive this guidance automatically; use explicit task instructions or the opt-in using-wollipog skill.</>}
@@ -85,11 +86,13 @@ function ArtifactUploadSettingsEditor() {
       onChange={(value) => { void save(value as ArtifactUploadPreference); }}
       menuWidth={360}
     />
-    {loading && <p className="muted sm" role="status">Loading artifact upload preference…</p>}
-    {saving && <p className="muted sm" role="status">Saving artifact upload preference…</p>}
-    {saved && <p className="muted sm" role="status">Artifact upload preference saved.</p>}
-    {error && <Notice tone="danger" role="alert" actions={!error.unsupported && (
-      <button type="button" className="btn ghost sm" onClick={() => setRetry((value) => value + 1)}>Retry</button>
-    )}>{error.message}</Notice>}
-  </>;
+    {(loading || saving || saved || error) && <div className="artifact-upload-status">
+      {loading && <p role="status">Loading artifact upload preference…</p>}
+      {saving && <p role="status">Saving artifact upload preference…</p>}
+      {saved && <p role="status">Artifact upload preference saved.</p>}
+      {error && <Notice tone="danger" role="alert" actions={!error.unsupported && (
+        <button type="button" className="btn ghost sm" onClick={() => setRetry((value) => value + 1)}>Retry</button>
+      )}>{error.message}</Notice>}
+    </div>}
+  </div>;
 }

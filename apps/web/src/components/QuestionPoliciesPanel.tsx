@@ -172,11 +172,12 @@ export function SkeletonRows({ count, announce }: { count: number; announce: str
     <div className="approvals-skeleton" role="status">
       <span className="sr-only">{announce}</span>
       {Array.from({ length: count }, (_, index) => (
-        <div className="ui-row approvals-skeleton-row" aria-hidden="true" key={index}>
-          <span />
-          <span className="ui-row-body">
-            <span className="skeleton-bar title" />
-            <span className="skeleton-bar" />
+        <div className="setting-row setting-row-static approvals-skeleton-row" aria-hidden="true" key={index}>
+          <span className="setting-row-text">
+            <span className="setting-row-label">
+              <span className="skeleton-bar title" />
+              <span className="skeleton-bar" />
+            </span>
           </span>
         </div>
       ))}
