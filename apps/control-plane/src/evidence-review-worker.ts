@@ -135,12 +135,14 @@ export function validVideoLiveProof(proof: VideoProfileLiveProof | null,
     Number.isSafeInteger(proof.latencyMs) && proof.latencyMs > 0);
 }
 
-export function reviewerAdmissionReadiness(context: ReviewerAdmissionContext | null,
-  target: EvidenceReviewerTarget, proof: VideoProfileLiveProof | null, now: number): ReviewerAdmissionResult | null {
+/** Shared current constraints. Omitting empirical proof here grants no launch or media access;
+ * only the private Human validation permit path may use this without production proof. */
+export function reviewerAdmissionPrerequisites(context: ReviewerAdmissionContext | null,
+  target: EvidenceReviewerTarget, owner: "human" | "orchestrator"): ReviewerAdmissionResult | null {
   const refuse = (reason: Extract<ReviewerAdmissionResult, { ok: false }>["reason"]) => ({ ok: false as const, reason });
   if (!context) return refuse("boundary");
   if (context.mode === "custom") return refuse("custom_fallback");
-  if (context.uiEvidenceOwner !== "orchestrator") return refuse("human_required");
+  if (context.uiEvidenceOwner !== owner) return refuse("human_required");
   const b = context.boundary;
   const e = context.evidenceAuthority;
   if (!b || !e || !context.boundaryCurrent || !validCampaignEvidenceAuthority(e) ||
@@ -156,8 +158,13 @@ export function reviewerAdmissionReadiness(context: ReviewerAdmissionContext | n
     .some((version) => !Number.isSafeInteger(version) || version < PRODUCTION_VIDEO_REVIEW_PROTOCOL)) return refuse("mixed_peer");
   if (!target.auditedAllFrameDelivery || !digest(target.capabilitiesSha256) || !digest(context.audienceSha256)) return refuse("capability");
   if (!target.mediaOnlyNamespaceVerified || !digest(target.reviewerNamespaceSha256)) return refuse("reviewer_namespace");
-  if (!validVideoLiveProof(proof, target, now)) return refuse("live_validation");
   return null;
+}
+
+export function reviewerAdmissionReadiness(context: ReviewerAdmissionContext | null,
+  target: EvidenceReviewerTarget, proof: VideoProfileLiveProof | null, now: number): ReviewerAdmissionResult | null {
+  const refused = reviewerAdmissionPrerequisites(context, target, "orchestrator");
+  return refused ?? (validVideoLiveProof(proof, target, now) ? null : { ok: false, reason: "live_validation" });
 }
 
 function currentWorkerAdmission(deps: ReviewerAdmissionDependencies, context: ReviewerAdmissionContext,

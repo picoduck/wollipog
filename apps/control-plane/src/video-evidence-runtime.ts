@@ -1,6 +1,6 @@
 import { validReviewerBudgetAdmission, type EvidenceReviewerBudgetAdmission } from "./evidence-review-admission.js";
 import { createHash, randomUUID } from "node:crypto";
-import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, PACED_VIDEO_REVIEW_BATCH_LIMITS, type PacedVideoReviewReceipt } from "@wollipog/protocol";
+import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, PACED_VIDEO_REVIEW_BATCH_LIMITS, type PacedVideoReviewReceipt, type OperatorVideoValidationPurpose } from "@wollipog/protocol";
 import { prepareVideoEvidence, PACED_VIDEO_PREPARATION_PROFILE,
   type VideoPreparationManifest, type VideoPreparationResult } from "./video-evidence-preparation.js";
 
@@ -12,6 +12,7 @@ const hash = (value: Buffer | string) => createHash("sha256").update(value).dige
 /** These values are resolved by the authenticated service, never accepted as child assertions.
  * Any change invalidates the pending review, including a runtime capability/audience change. */
 export interface VideoReviewBinding {
+  operatorValidation?: OperatorVideoValidationPurpose;
   rootSessionId: string;
   childSessionId: string;
   occurrenceId: string;
@@ -50,6 +51,7 @@ export interface VideoReviewRecord {
 export type TemporalVideoReceipt = PacedVideoReviewReceipt;
 export interface VideoReviewCriterion { criterionId: string; description: string }
 export interface VideoReviewVerdict {
+  operatorValidation?: OperatorVideoValidationPurpose;
   verdictId: string;
   reviewId: string;
   reviewerSessionId: string;
@@ -109,11 +111,13 @@ const fresh = (binding: VideoReviewBinding, access: VideoReviewRuntimeAccess,
 const scopedId = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 256 && !/[\x00-\x1f\x7f]/u.test(value);
 const digest = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
 function validBinding(b: VideoReviewBinding): boolean {
-  if (!b || typeof b !== "object" || Array.isArray(b) || Object.keys(b).length !== 18 ||
+  if (!b || typeof b !== "object" || Array.isArray(b) || Object.keys(b).length !== (b.operatorValidation === undefined ? 18 : 19) ||
     Object.keys(b).some((key) => !["rootSessionId", "childSessionId", "occurrenceId", "resourceDigest",
       "policyRevision", "boundaryRevision", "evidenceAuthorityRevision", "reviewerSessionId",
       "reviewerDriver", "reviewerModelId", "providerId", "audienceSha256", "capabilitiesSha256",
-      "sourceEvidenceId", "sourceArtifactId", "sourceSha256", "workerAdmissionSha256", "criteriaSha256"].includes(key))) return false;
+      "sourceEvidenceId", "sourceArtifactId", "sourceSha256", "workerAdmissionSha256", "criteriaSha256", "operatorValidation"].includes(key))) return false;
+  if (b.operatorValidation !== undefined && (!b.operatorValidation ||
+    Object.keys(b.operatorValidation).length !== 2 || !scopedId(b.operatorValidation.permitId) || !digest(b.operatorValidation.scopeSha256))) return false;
   return [b.rootSessionId, b.childSessionId, b.occurrenceId, b.reviewerSessionId,
     b.reviewerDriver, b.reviewerModelId, b.providerId, b.sourceEvidenceId, b.sourceArtifactId].every(scopedId) &&
     [b.resourceDigest, b.audienceSha256, b.capabilitiesSha256, b.sourceSha256, b.workerAdmissionSha256, b.criteriaSha256].every(digest) &&
@@ -247,6 +251,7 @@ export class VideoEvidenceRuntime {
     }
     const binding = review.binding;
     const receipt: TemporalVideoReceipt = {
+      ...(binding.operatorValidation ? { operatorValidation: structuredClone(binding.operatorValidation) } : {}),
       bindingSha256: videoReviewBindingDigest(binding), criteriaSha256: review.criteriaSha256,
       receiptId: "uireceipt_" + randomUUID().replaceAll("-", ""),
       occurrenceId: binding.occurrenceId, reviewerSessionId: binding.reviewerSessionId,
@@ -307,7 +312,8 @@ export class VideoEvidenceRuntime {
     const f = review.manifest.frames[index];
     const b = review.binding;
     const v = receipt.videoFrame;
-    return Boolean(f && Number.isSafeInteger(receipt.deliveredAt) && receipt.deliveredAt >= review.createdAt &&
+    return Boolean(f && JSON.stringify(receipt.operatorValidation) === JSON.stringify(b.operatorValidation) &&
+      Number.isSafeInteger(receipt.deliveredAt) && receipt.deliveredAt >= review.createdAt &&
       receipt.deliveredAt <= this.clock() && receipt.deliveredAt < review.expiresAt && receipt.bindingSha256 === bindingDigest && receipt.criteriaSha256 === review.criteriaSha256 && receipt.occurrenceId === b.occurrenceId && receipt.reviewerSessionId === b.reviewerSessionId &&
       receipt.childSessionId === b.childSessionId && receipt.policyRevision === b.policyRevision &&
       receipt.artifactId === review.reviewId + ":frame:" + index && receipt.evidenceId === b.sourceEvidenceId &&
@@ -356,6 +362,7 @@ export class VideoEvidenceRuntime {
     const workerAdmission = this.access.workerAdmission(review.binding, "active");
     if (!validReviewerBudgetAdmission(workerAdmission, review.binding)) throw new VideoReviewRefused("stale");
     const verdict: VideoReviewVerdict = { ...structuredClone(report), verdictId: "uiverdict_" + randomUUID().replaceAll("-", ""),
+      ...(review.binding.operatorValidation ? { operatorValidation: structuredClone(review.binding.operatorValidation) } : {}),
       reviewId, reviewerSessionId: authenticatedReviewerSessionId, manifestSha256: review.manifestSha256,
       bindingSha256: videoReviewBindingDigest(review.binding), criteriaSha256: review.criteriaSha256,
       receiptIds: receipts.map((r) => r.receiptId), recordedAt: this.clock(),
@@ -367,6 +374,20 @@ export class VideoEvidenceRuntime {
   /** The controlling owner still resolves the existing typed decision. This only supplies
    * current server-verifiable provenance; it does not resolve or consume a workflow decision. */
   approvalProvenance(reviewId: string, authenticatedReviewerSessionId: string): VideoReviewVerdict {
+    if (this.store.getReview(reviewId)?.binding.operatorValidation) throw new VideoReviewRefused("verdict");
+    const verdict = this.verifiedObservation(reviewId, authenticatedReviewerSessionId);
+    if (verdict.outcome !== "accept" || verdict.operatorValidation) throw new VideoReviewRefused("verdict");
+    return verdict;
+  }
+
+  /** Metadata/quality observation only for the separate authenticated Human inspection ingress.
+   * Never an approval/consumption or readiness proof; rejects non-validation observations. */
+  validationObservation(reviewId: string, authenticatedReviewerSessionId: string): VideoReviewVerdict {
+    if (!this.store.getReview(reviewId)?.binding.operatorValidation) throw new VideoReviewRefused("verdict");
+    return this.verifiedObservation(reviewId, authenticatedReviewerSessionId);
+  }
+
+  private verifiedObservation(reviewId: string, authenticatedReviewerSessionId: string): VideoReviewVerdict {
     const review = this.current(reviewId, authenticatedReviewerSessionId, "resolve");
     const receipts = this.completeReceipts(review);
     for (const frame of review.manifest.frames) {
@@ -377,7 +398,8 @@ export class VideoEvidenceRuntime {
       }
     }
     const verdict = this.store.getVerdict(reviewId);
-    if (!verdict || !validReviewerBudgetAdmission(verdict.workerAdmission, review.binding) || verdict.outcome !== "accept" || verdict.reviewerSessionId !== authenticatedReviewerSessionId ||
+    if (!verdict || !validReviewerBudgetAdmission(verdict.workerAdmission, review.binding) ||
+      JSON.stringify(verdict.operatorValidation) !== JSON.stringify(review.binding.operatorValidation) || verdict.reviewerSessionId !== authenticatedReviewerSessionId ||
       verdict.manifestSha256 !== review.manifestSha256 || verdict.bindingSha256 !== videoReviewBindingDigest(review.binding) ||
       verdict.criteriaSha256 !== review.criteriaSha256 ||
       JSON.stringify(verdict.receiptIds) !== JSON.stringify(receipts.map((r) => r.receiptId))) throw new VideoReviewRefused("verdict");

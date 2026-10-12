@@ -85,6 +85,31 @@ test("a recorded worker verdict remains separate from exact typed decision resol
   assert.equal((await submitVideoEvidenceVerdict({ outcome: "accept", criteria: [], rationale: "test", evidenceReviewed: ["fake"] }, f.deps)).isError, true);
 });
 
+test("validation transport rejects missing, stripped or borrowed purpose and production transport cannot accept validation receipts", async () => {
+  const purpose = { permitId: "synthetic-human-permit", scopeSha256: sha("synthetic scoped action") };
+  for (const mismatch of ["missing", "borrowed", "foreign", "production"]) {
+    const f = fixture();
+    f.deps.grant.operatorValidation = purpose;
+    if (mismatch !== "missing") f.delivery.receipt.operatorValidation = mismatch === "borrowed" ? { ...purpose, permitId: "other" } :
+      mismatch === "foreign" ? { ...purpose, scopeSha256: sha("other source") } : purpose;
+    if (mismatch === "production") delete f.deps.grant.operatorValidation;
+    const result = await reviewVideoEvidenceFrame({ index: 0 }, f.deps);
+    assert.equal(result.isError, true, mismatch);
+    assert.equal(f.calls.some((c) => c.action === "acknowledge"), false);
+  }
+  const f = fixture(); f.deps.grant.operatorValidation = purpose; f.delivery.receipt.operatorValidation = purpose;
+  assert.equal((await reviewVideoEvidenceFrame({ index: 0 }, f.deps)).isError, undefined);
+  f.deps.request = async () => ({ verdictId: "synthetic-verdict", reviewId: f.deps.grant.reviewId,
+    reviewerSessionId: "worker", bindingSha256: f.deps.grant.bindingSha256, outcome: "accept", operatorValidation: purpose });
+  const report = { outcome: "accept", criteria: [], rationale: "Disclosed synthetic test only." };
+  const result = await submitVideoEvidenceVerdict(report, f.deps);
+  assert.equal(result.isError, undefined);
+  assert.match(result.content[0].text, /"productionProof":false/);
+  f.deps.request = async () => ({ verdictId: "synthetic-verdict", reviewId: f.deps.grant.reviewId,
+    reviewerSessionId: "worker", bindingSha256: f.deps.grant.bindingSha256, outcome: "accept" });
+  assert.equal((await submitVideoEvidenceVerdict(report, f.deps)).isError, true);
+});
+
 test("consecutive batch handoff verifies every frame before one atomic acknowledgement and preserves model-visible source order", async () => {
   const f = fixture();
   const base = structuredClone(f.delivery);

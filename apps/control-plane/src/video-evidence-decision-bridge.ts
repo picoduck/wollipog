@@ -40,7 +40,7 @@ export class VideoEvidenceDecisionBridge {
     const proofs = videos.map((item) => {
       const reference = delegated.find((r) => r.evidenceId === item.evidenceId);
       const review = this.access.linkedReview(decision, item.evidenceId);
-      if (!reference || !review || !item.artifactId || review.binding.sourceEvidenceId !== item.evidenceId ||
+      if (!reference || !review || review.binding.operatorValidation || !item.artifactId || review.binding.sourceEvidenceId !== item.evidenceId ||
         review.binding.rootSessionId !== decision.controllingSessionId || review.binding.childSessionId !== decision.sessionId ||
         review.binding.occurrenceId !== decision.occurrenceId || review.binding.resourceDigest !== decision.resourceDigest ||
         review.binding.policyRevision !== decision.policyRevision || review.binding.sourceArtifactId !== item.artifactId ||

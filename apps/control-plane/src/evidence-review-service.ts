@@ -68,6 +68,7 @@ export class EvidenceReviewService {
     const root = agentSession(principal);
     if (!root || principal.kind !== "agent" || principal.orchestrator !== true) return { ok: false, code: "not_authorized" };
     const pending = this.adapter.resolvePending(root, request);
+    if (pending?.binding.operatorValidation) return { ok: false, code: "not_authorized" };
     if (!pending || pending.binding.rootSessionId !== root || pending.binding.childSessionId !== request.childSessionId ||
       pending.binding.occurrenceId !== request.occurrenceId || !pending.sourceGrantVerified ||
       !this.adapter.currentOwner(pending.binding)) return { ok: false, code: "not_authorized" };
