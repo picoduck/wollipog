@@ -3598,6 +3598,8 @@ export type StructuredRequestResolutionReason =
 /** Bounded rendering of WHAT is being approved (tool name + its input) — the trust surface:
  * an Allow button without the command/diff it authorizes defeats confirm-before-apply. */
 export interface ApprovalContext {
+  /** Trusted bridge reports requested provider access expansion; never a delegatable code intent. */
+  providerPermissionExpansion?: boolean;
   /** Concrete operation recovered by the provider bridge. Display reasons and tool input's
    * claimed intent never populate it. Missing/truncated operation stays unverified. */
   operation?: ({ kind: "command"; input: string; cwd?: string } | { kind: "file"; path: string } |
@@ -4397,6 +4399,8 @@ export interface ConsumeWorkflowDecisionRequest {
 }
 
 export interface PendingApproval {
+  /** Server-derived exception when a parked root callback could not be delivered. */
+  standingAdmissionFailure?: "provider_delivery_unavailable";
   /** CP-derived mandatory human rule on this occurrence. Provider input cannot set it. */
   humanRequired?: boolean;
   /** Runner bridge envelope, not question/tool input. Missing provenance fails closed in Full

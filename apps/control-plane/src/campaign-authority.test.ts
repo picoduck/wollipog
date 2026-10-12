@@ -42,9 +42,9 @@ function harness(protocol = PROTOCOL_VERSION, workspacePath = "/repos/test", dri
   const sent: unknown[] = [];
   hub.sendToRunner = (_id, message) => { sent.push(message); return true; };
   const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
-  const enable = () => svc.setCampaignControl("root", { mode: "full_control", objective: "Implement #2934",
+  const enable = (delegatablePolicyIds: string[] = []) => svc.setCampaignControl("root", { mode: "full_control", objective: "Implement #2934",
     operations: ["implementation_question", "question", "tool_approval", "policy_ask", "pr_merge", "merged_branch_deletion"],
-    delegatablePolicyIds: [] }, 1, principal);
+    delegatablePolicyIds }, 1, principal);
   const snapshot: WorkflowDecisionResourceSnapshot = { category: "implementation_question", question: "Which authentication library should we implement?",
     options: [{ optionId: "a", label: "Library A" }, { optionId: "b", label: "Library B" }] };
   const ask = (id: string, requestId: string) => svc.createWorkflowDecision(id, { requestId, resourceKey: requestId, resourceSnapshot: snapshot });
@@ -153,7 +153,7 @@ test("Full Control cannot delegate persistent grants or Human Required provider 
   try {
     assert.ok(h.enable().ok);
     h.svc.onSessionEvent("child", { kind: "permission_request", requestId: "tool", occurrenceId: "tool", requestSource: "provider_tool",
-      title: "Run Tests", context: { toolName: "Bash", input: "pnpm test", operation: { kind: "command", input: "pnpm test", cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [] } } }, options: [
+      title: "Inspect Repository", context: { toolName: "Bash", input: "git status --short", operation: { kind: "command", input: "git status --short", cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [] } } }, options: [
         { optionId: "once", name: "Allow Once", kind: "allow_once" }, { optionId: "always", name: "Always", kind: "allow_always" }] });
     assert.equal(h.svc.resolveDescendantRequest("root", "child", "tool", { action: "approve", optionId: "always" }, () => true).ok, false);
     assert.equal(h.svc.resolveDescendantRequest("root", "child", "tool", { action: "approve", optionId: "once" }, () => false).ok, false);
@@ -181,8 +181,11 @@ test("trusted in-bound auth source inspection has the same owner in every server
 
 test("root admission cannot settle a foreign effect, missing operation, credential request or persistent grant", () => {
   const cases = [
-    { toolName: "commandExecution", input: "cat /unrelated/repository/README.md", operation: { kind: "command" as const, input: "cat /unrelated/repository/README.md", cwd: "/repos/test" } },
+    { toolName: "commandExecution", input: "cat /unrelated/repository/README.md", operation: { kind: "command" as const, input: "cat /unrelated/repository/README.md", cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [{ path: "/unrelated/repository/README.md", resolvedPath: "/unrelated/repository/README.md" }] } } },
     { toolName: "commandExecution", input: "pnpm test" },
+    { toolName: "commandExecution", input: "pnpm test", operation: { kind: "command" as const, input: "pnpm test", cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [] } } },
+    { toolName: "commandExecution", network: "requested", operation: { kind: "command" as const, input: "git status --short", cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [] } } },
+    { toolName: "commandExecution", providerPermissionExpansion: true, operation: { kind: "command" as const, input: "git status --short", cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [] } } },
     { toolName: "UnknownTool", operation: { kind: "file" as const, path: "/repos/test/src/auth.ts" } },
     { toolName: "commandExecution", input: "cat .env", operation: { kind: "command" as const, input: "cat .env", cwd: "/repos/test" } },
     { toolName: "permissions", operation: { kind: "permission_grant" as const, lifetime: "session" as const } },
@@ -256,6 +259,58 @@ test("root admission follows physical targets and refuses source symlinks escapi
       assert.equal(h.sent.length, 0, "escaping source path never settles the parked root callback");
     }
   } finally { h.db.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("pending root requests settle on human admission; unavailable delivery becomes a disclosed human exception", () => {
+  for (const available of [true, false]) {
+    const h = harness();
+    try {
+      h.generic("root", "already-parked");
+      assert.ok(h.db.getSession("root")!.pendingApproval);
+      if (!available) (h.svc as unknown as { hub: Hub }).hub.sendToRunner = () => false;
+      assert.ok(h.enable().ok);
+      const root = h.db.getSession("root")!;
+      if (available) assert.equal(root.pendingApproval, null);
+      else {
+        assert.equal(root.pendingApproval!.standingAdmissionFailure, "provider_delivery_unavailable");
+        assert.equal(root.pendingRequestOwners!.human, 1);
+        assert.equal(root.pendingRequestOwners!.requests![0]!.authorityEvaluation!.reason, "provider_delivery_unavailable");
+        assert.equal(h.db.campaignProjection("root")!.status, "waiting_human");
+        const { standingAdmissionFailure: _serverField, ...runnerPending } = root.pendingApproval!;
+        h.db.setPendingApproval("root", runnerPending);
+        assert.equal(h.db.getSession("root")!.pendingApproval!.standingAdmissionFailure, "provider_delivery_unavailable", "same-occurrence runner metadata cannot erase the server exception");
+        h.db.setPendingApproval("root", { ...runnerPending, occurrenceId: "fresh-occurrence" });
+        assert.equal(h.db.getSession("root")!.pendingApproval!.standingAdmissionFailure, undefined, "a fresh occurrence does not inherit an old delivery exception");
+      }
+    } finally { h.db.close(); }
+  }
+});
+
+test("live Human Required, deny and withdrawn asks have the same effective owner in every projection and resolution", () => {
+  for (const change of ["human", "deny", "disabled"] as const) {
+    const h = harness();
+    try {
+      const rule = { policyId: "delegated", name: "Delegate Inspection", effect: "ask" as const, priority: 1,
+        enabled: true, scope: { toolName: "Bash" } };
+      h.db.upsertGovernancePolicy(rule, Date.now());
+      assert.ok(h.enable(["delegated"]).ok);
+      h.svc.onSessionEvent("child", { kind: "permission_request", requestId: "live-rule", occurrenceId: "live-rule", requestSource: "provider_tool",
+        title: "Inspect Repository", context: { toolName: "Bash", input: "git status --short", operation: { kind: "command", input: "git status --short", cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [] } } },
+        options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }] });
+      assert.equal(h.db.getSession("child")!.pendingRequestOwners!.orchestrator, 1);
+      assert.equal(h.db.listSessionsForPrincipal(h.principal).find((s) => s.id === "root")!.campaignRequests!.orchestrator, 1, "seed the cached list before changing policy");
+      h.db.upsertGovernancePolicy({ ...rule, ...(change === "human" ? { conditions: { humanRequired: true } }
+        : change === "deny" ? { effect: "deny" } : { enabled: false }) }, Date.now());
+      assert.equal(h.db.getSession("child")!.pendingRequestOwners!.human, 1);
+      assert.equal(h.db.campaignRequestsForPrincipal(h.principal, "root")!.human, 1);
+      assert.equal(h.db.listSessionsForPrincipal(h.principal).find((s) => s.id === "root")!.campaignRequests!.human, 1);
+      assert.equal(h.db.campaignProjection("root")!.status, "waiting_human");
+      const human = h.svc.descendantRequests("root", () => true, "human").data!.requests[0]!;
+      assert.equal(human.authorityEvaluation!.reason, "human_required_rule");
+      assert.equal(h.svc.resolveDescendantRequest("root", "child", "live-rule", { action: "approve", optionId: "once" }, () => true).ok, false);
+      assert.equal(h.sent.length, 0);
+    } finally { h.db.close(); }
+  }
 });
 
 test("a real parked root NDJSON provider resumes after its question and one-time auth-file approval without another agent call", { timeout: 10_000 }, async () => {

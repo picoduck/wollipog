@@ -64,14 +64,18 @@ that something is implementation work cannot override protected fields or an ext
 provenance. Provider enforcement remains a separate boundary.
 
 Tool intent comes from the concrete normalized provider operation, never its display reason.
-Recognized code inspection/edits, Git status/diff and prescribed repository test/typecheck/build
-commands require the campaign workspace binding and a verified directory or absolute bounded
+Recognized code inspection/edits and Git status/diff require the campaign workspace binding and a verified directory or absolute bounded
 target. Unrelated targets, composed shell commands, unknown effects and missing operation metadata
 stay human-owned. The runner constructs `operation.filesystem` using filesystem metadata, ignoring
 provider-authored evidence claims. Both lexical and canonical targets must stay in the repository;
 source symlinks pointing outside it, dangling links and inaccessible targets fail closed. A delegated
 callback rechecks the canonical evidence before granting it and cancels changed targets. This is
 additional evidence, rather than a replacement for provider filesystem enforcement at execution.
+Repository script commands such as test/typecheck/build do not prove their effects: their code is
+editable by the agent, and a proved cwd is insufficient to authorize that execution outside the
+provider's existing constraints. They remain unverified tool-effect exceptions. Explicit network
+or provider permission-expansion envelopes stay protected even for otherwise recognized code
+operations. Existing independently authorized routine policies retain their own enforcement.
 Codex provides command cwd in its approval envelope. Claude's native control
 channel does not provide a reliable cwd for relative Bash commands; absolute bounded operations
 can qualify, and relative commands without that proof are disclosed preflight exceptions. Existing
@@ -92,13 +96,17 @@ assumption). It records a system resolution, rather than an agent-created grant.
 no bounded suggested answer, ambiguous recommendations or invalid cardinality are disclosed
 human exceptions. A real NDJSON fixture verifies that both callbacks settle and the provider
 continues. No stopped-provider recovery is introduced here; that remains #2938.
+Human mode admission also attempts existing eligible parked root occurrences. If delivering a
+standing response fails, the exact request carries `standingAdmissionFailure` and is disclosed as
+`provider_delivery_unavailable`, with human attention, rather than an unreachable self-owned card.
 
 Only `allow_once` options can grant tool access through Full Control. A policy ask additionally
 requires its exact rule ID in the human-authorized `delegatablePolicyIds` list. Unknown, disabled,
 built-in and Human Required rules cannot be admitted to that list. `conditions.humanRequired: true`
 is valid only for ask rules and prevents delegation, including an otherwise matching workflow
 command admission. A hard deny always wins. Current rules are checked again before an agent
-resolves a tool approval. Persistent options never become eligible.
+resolves a tool approval. Current Human Required, deny, unknown and withdrawn asks also feed every
+request projection, so ownership cannot lag a policy edit. Persistent options never become eligible.
 
 PR merge consumption still arms the exact canonical command and waits for correlated provider
 evidence. Its matching one-time tool request consumes that grant without a redundant human gate.

@@ -18,7 +18,7 @@ test("canonical operation evidence rejects dangling links and catches a replaced
     unlinkSync(link); symlinkSync(join(directory, "absent.ts"), link);
     assert.equal(campaignOperationEvidence("Read", { kind: "file", path: link }).filesystem, undefined);
     assert.equal(campaignOperationEvidenceCurrent("Read", evidence), false);
-    assert.equal(campaignOperationEvidence("Bash", { kind: "command", input: "pnpm test", cwd: join(directory, "missing") }).filesystem, undefined);
+    assert.equal(campaignOperationEvidence("Bash", { kind: "command", input: "git status --short", cwd: join(directory, "missing") }).filesystem, undefined);
     assert.equal(campaignOperationEvidence("Write", { kind: "file", path: join(directory, "src/new.ts") }).filesystem?.targets[0]?.resolvedPath, join(directory, "src/new.ts"));
     assert.equal(campaignOperationEvidence("Unknown", { kind: "file", path: link, filesystem: { targets: [{ path: link, resolvedPath: link }] } }).filesystem, undefined);
   } finally { rmSync(directory, { recursive: true, force: true }); }

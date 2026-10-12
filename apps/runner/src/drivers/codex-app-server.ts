@@ -2666,6 +2666,8 @@ export function approvalContext(
   const networkRequested = params?.permissions?.network;
   return {
     toolName,
+    ...(["networkApprovalContext", "additionalPermissions", "permissions", "sandbox", "sandboxPolicy", "sandboxPermissions", "sandbox_permissions"]
+      .some((key) => params?.[key] != null) ? { providerPermissionExpansion: true } : {}),
     ...(method === PERMISSIONS_METHOD ? { operation: { kind: "permission_grant" as const, lifetime: "session" as const } } :
       commandInput && commandInput.length <= 2000 ? { operation: campaignOperationEvidence(toolName, { kind: "command", input: commandInput,
       ...(typeof params?.cwd === "string" && params.cwd.length <= 1024 ? { cwd: params.cwd } : {}) }) } :

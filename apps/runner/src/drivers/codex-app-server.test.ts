@@ -4097,6 +4097,7 @@ test("approvalContext exposes bounded Codex tool/path/network/branch selectors",
     reason: "apply patch",
   }, true), {
     toolName: "fileChange",
+    providerPermissionExpansion: true,
     input: "apply patch",
     operation: { kind: "file", path: "/repo/a.ts", filesystem: { targets: [{ path: "/repo/a.ts", resolvedPath: "/repo/a.ts" }] } },
     path: "/repo/a.ts",
@@ -4126,6 +4127,9 @@ test("authority provenance uses concrete operations, never display reasons or a 
   }, false).operation, undefined);
   assert.deepEqual(approvalContext("item/permissions/requestApproval", { permissions: { network: true } }, false).operation,
     { kind: "permission_grant", lifetime: "session" });
+  for (const envelope of [{ networkApprovalContext: { host: "fixture.invalid" } }, { additionalPermissions: { fileSystem: {} } }]) {
+    assert.equal(approvalContext("item/commandExecution/requestApproval", { command: "git status --short", cwd: "/repo", ...envelope }, false).providerPermissionExpansion, true);
+  }
 });
 
 test("approvalResponse: command/file approvals use {decision: accept|decline}", () => {

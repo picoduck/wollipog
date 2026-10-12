@@ -27,7 +27,7 @@ export interface CampaignAuthorityEvaluation {
   owner: "human" | "orchestrator";
   basis: "human_required" | "custom_policy" | "campaign_delegation" | "standing_authorization";
   reason: "custom_owner" | "authorized_operation" | "outside_boundary" | "protected_request" |
-    "unverified_intent" | "unsupported_provider" | "human_required_rule" | "evidence_review_unavailable";
+    "unverified_intent" | "unsupported_provider" | "human_required_rule" | "evidence_review_unavailable" | "provider_delivery_unavailable";
   operation: CampaignAuthorityOperation;
   boundaryRevision?: number;
 }
@@ -93,7 +93,6 @@ export function campaignCodeOperationTargets(toolName: string | undefined, opera
       ? { cwd, paths: args.filter((arg) => !arg.startsWith("-")) } : null;
   }
   if (words[0] === "git" && words[1] === "status" && words.slice(2).every((arg) => ["--short", "--branch", "--porcelain"].includes(arg))) return { cwd, paths: [] };
-  if (/^pnpm(?:\s+(?:-r|--filter\s+@[a-z0-9_.-]+\/[a-z0-9_.-]+))*\s+(?:test|typecheck|build)$/u.test(words.join(" "))) return { cwd, paths: [] };
   return null;
 }
 
@@ -148,6 +147,7 @@ export function standingRootQuestionAnswers(request: PendingApproval): Record<st
  * not a field taken from a child-authored snapshot. Unknown sensitive forms fail closed. */
 export function campaignRequestProtected(request: PendingApproval, verifiedPlanning: boolean, verifiedCodeOperation = false): boolean {
   if (request.kind === "authentication" || request.context?.escalatedBy || request.runnerGuardrail) return true;
+  if (request.context?.network || request.context?.providerPermissionExpansion) return true;
   if (request.context?.operation?.kind === "permission_grant") return true;
   if (request.kind === "question") {
     if (!request.questions?.length) return true;
@@ -192,6 +192,7 @@ export function resolveCampaignAuthority(input: {
     return result(eligible ? "orchestrator" : "human", "custom_policy", "custom_owner");
   }
   if (!validCampaignControl(input.control)) return result("human", "human_required", "outside_boundary");
+  if (request?.standingAdmissionFailure) return result("human", "human_required", "provider_delivery_unavailable");
   const boundary = input.control.boundary;
   if (!boundary.operations.includes(operation) || (input.snapshot && "repository" in input.snapshot &&
       input.snapshot.repository.toLowerCase() !== boundary.repository.toLowerCase())) return result("human", "human_required", "outside_boundary");
@@ -220,6 +221,6 @@ export function campaignAuthorityPreflight(control: CampaignControl | undefined,
   if (!control || control.mode === "custom") return { supported: true };
   if (!validCampaignControl(control)) return { supported: false, reason: "Full Control requires a valid human-authorized boundary." };
   if ((protocolVersion ?? 0) < 215 || !["codex-app-server", "claude-code"].includes(driver)) return { supported: false, reason: "This provider path cannot enforce the Full Control authority contract; use Custom or update the runner." };
-  return { supported: true, humanRequiredRequests: ["secrets_and_sign_in", "persistent_permissions", "external_elicitation", "root_forms_without_suggested_answers", "unverified_tool_effects", "human_required_rules",
+  return { supported: true, humanRequiredRequests: ["secrets_and_sign_in", "persistent_permissions", "provider_access_expansion", "external_elicitation", "root_forms_without_suggested_answers", "unverified_tool_effects", "script_execution_without_bounded_effect_proof", "human_required_rules",
     ...(driver === "claude-code" ? ["relative_shell_commands_without_verified_cwd"] : [])] };
 }
