@@ -4182,6 +4182,12 @@ test("opt-in Parent Control resolves exact nested request occurrences with agent
     assert.equal(svc.resolveDescendantRequest(parent.data.id, child.id, "request_old_runner", {
       action: "approve", optionId: "once",
     }, () => true).status, 409);
+    const unsupportedPending = db.getSession(child.id)!.pendingApproval!;
+    db.setPendingApproval(child.id, { ...unsupportedPending, kind: "authentication" });
+    assert.equal(svc.resolveDescendantRequest(parent.data.id, child.id, "request_old_runner", {
+      action: "approve", optionId: "once",
+    }, () => true).status, 403, "Custom rejects an ineligible request before checking provider capability");
+    db.setPendingApproval(child.id, unsupportedPending);
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     assert.ok(svc.setParentControl(parent.data.id, "off").ok);
     assert.equal(svc.descendantRequests(parent.data.id, () => true).status, 403);

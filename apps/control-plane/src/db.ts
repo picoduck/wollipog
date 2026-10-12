@@ -8,6 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 import { attentionRequestRank } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent } from "./campaign-authority.js";
+import { evaluateApprovalPolicies, sessionSpawnSafetyPolicy } from "./policy-engine.js";
 import { validCampaignControl, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
 import { priceUsage, resolveCostSource, type RateTable } from "./usage-pricing.js";
@@ -2975,6 +2976,7 @@ function addCampaignRequestSummary(
   controller?: Parameters<typeof campaignAuthorityFromRows>[0],
   controllerProtocol?: number | null,
   repositoryRoot?: string,
+  currentRequest?: (pending: PendingApproval) => PendingApproval,
 ): void {
   if (request.type === "typed") {
     if (request.authority !== "human" && request.authority !== "orchestrator") return;
@@ -2987,7 +2989,7 @@ function addCampaignRequestSummary(
   for (const pending of pendingRequests(parseJson<PendingApproval>(request.pending_approval))) {
     if (pending.kind === "workflow_decision") continue;
     const authority = controller ? campaignAuthorityFromRows(controller,
-      { id: request.session_id, driver: request.driver, repositoryRoot, runnerId: request.runner_id ?? undefined, workspaceId: request.workspace_id }, runnerProtocol, pending, controllerProtocol).owner
+      { id: request.session_id, driver: request.driver, repositoryRoot, runnerId: request.runner_id ?? undefined, workspaceId: request.workspace_id }, runnerProtocol, currentRequest?.(pending) ?? pending, controllerProtocol).owner
       : evaluateCampaignAuthority({ id: "controller", driver: request.driver, parentControl: mode },
         { id: request.session_id, driver: request.driver }, runnerProtocol, pending).owner;
     counts[authority]++;
@@ -10632,7 +10634,7 @@ export class ControlPlaneDb {
       .all(sessionId,65-ancestors.length,sessionId,orchestratorCampaignPolicyFromJson(root.orchestrator_policy)?.control?.mode === "full_control" ? 1 : 0,...authorization.params,sessionId,...authorization.params) as unknown as
       Array<CampaignRequestSummaryRow & { protocol_version: number | null }>;
     for (const request of requests) addCampaignRequestSummary(counts,request,root.parent_control,request.protocol_version,root, root.runner_protocol,
-      orchestratorCampaignPolicyFromJson(root.orchestrator_policy)?.control?.mode === "full_control" ? this.sessionRepositoryRoot(request.session_id) : undefined);
+      orchestratorCampaignPolicyFromJson(root.orchestrator_policy)?.control?.mode === "full_control" ? this.sessionRepositoryRoot(request.session_id) : undefined, (pending) => this.campaignPolicyRequest(request.session_id, orchestratorCampaignPolicyFromJson(root.orchestrator_policy)?.control, pending));
     counts.humanRequestTokens!.sort();
     return counts;
   }
@@ -10840,7 +10842,7 @@ export class ControlPlaneDb {
         const counts=context.campaignRequests.get(rootId);
         if (!counts) continue;
         const root=context.rows.get(rootId)!;
-        addCampaignRequestSummary(counts,request,root.parent_control,context.runnerProtocols.get(request.runner_id!) ?? null,root,context.runnerProtocols.get(root.runner_id) ?? null, orchestratorCampaignPolicyFromJson(root.orchestrator_policy)?.control?.mode === "full_control" ? this.repositoryRootFromRow(context.rows.get(request.session_id)!) : undefined);
+        addCampaignRequestSummary(counts,request,root.parent_control,context.runnerProtocols.get(request.runner_id!) ?? null,root,context.runnerProtocols.get(root.runner_id) ?? null, orchestratorCampaignPolicyFromJson(root.orchestrator_policy)?.control?.mode === "full_control" ? this.repositoryRootFromRow(context.rows.get(request.session_id)!) : undefined, (pending) => this.campaignPolicyRequest(request.session_id, orchestratorCampaignPolicyFromJson(root.orchestrator_policy)?.control, pending));
       }
     }
     for (const counts of context.campaignRequests.values()) counts.humanRequestTokens!.sort();
@@ -17144,7 +17146,7 @@ export class ControlPlaneDb {
       for (const request of pendingRequests(parseJson<PendingApproval>(campaign.pending_approval)).filter((item) => item.kind !== "workflow_decision")) {
         const evaluation = campaignAuthorityFromRows(campaign, { id: campaign.id, driver: campaign.driver as SessionView["driver"],
           runnerId: campaign.runner_id, workspaceId: campaign.workspace_id, repositoryRoot: this.sessionRepositoryRoot(campaign.id) },
-        this.getRunner(campaign.runner_id)?.protocolVersion, request);
+        this.getRunner(campaign.runner_id)?.protocolVersion, this.campaignPolicyRequest(campaign.id, policy.control, request));
         if (evaluation.owner === "orchestrator") {
           pendingGenericOrchestrator += 1;
           orchestratorRequestKeys.push(`generic:${campaign.id}:${request.occurrenceId ?? request.requestId}`);
@@ -17160,7 +17162,7 @@ export class ControlPlaneDb {
       const generic = pendingRequests(approval).filter((request) => request.kind !== "workflow_decision");
       let childHasHumanRequest = childPending.some((decision) => decision.authority === "human");
       for (const request of generic) {
-        if (campaignAuthorityFromRows(campaign, { id: child.id, driver: child.driver, runnerId: child.runner_id, workspaceId: child.workspace_id, repositoryRoot: policy.control?.mode === "full_control" ? this.sessionRepositoryRoot(child.id) : undefined }, this.getRunner(child.runner_id)?.protocolVersion, request, policy.control?.mode === "full_control" ? this.getRunner(campaign.runner_id)?.protocolVersion : undefined).owner === "orchestrator") {
+        if (campaignAuthorityFromRows(campaign, { id: child.id, driver: child.driver, runnerId: child.runner_id, workspaceId: child.workspace_id, repositoryRoot: policy.control?.mode === "full_control" ? this.sessionRepositoryRoot(child.id) : undefined }, this.getRunner(child.runner_id)?.protocolVersion, this.campaignPolicyRequest(child.id, policy.control, request), policy.control?.mode === "full_control" ? this.getRunner(campaign.runner_id)?.protocolVersion : undefined).owner === "orchestrator") {
           pendingGenericOrchestrator += 1;
           orchestratorRequestKeys.push(`generic:${child.id}:${request.occurrenceId ?? request.requestId}`);
         } else {
@@ -22130,6 +22132,32 @@ export class ControlPlaneDb {
     return row ? this.repositoryRootFromRow(row) : undefined;
   }
 
+  /** Live effective policy facts compose with occurrence-time mandatory gates. Used by both
+   * projections and response admission, so a policy edit cannot leave stale delegated ownership. */
+  campaignPolicyRequest(sessionId: string, control: CampaignControl | undefined, request: PendingApproval): PendingApproval {
+    if (control?.mode !== "full_control" || request.kind === "question" || request.kind === "workflow_decision") return request;
+    const row = this.stmt("SELECT runner_id,workspace_id,agent_id,status,cost_usd FROM sessions WHERE id=?").get(sessionId) as
+      Pick<SessionRow, "runner_id" | "workspace_id" | "agent_id" | "status" | "cost_usd"> | undefined;
+    if (!row) return { ...request, humanRequired: true };
+    const rules = [sessionSpawnSafetyPolicy(), ...this.listGovernancePolicies()];
+    const stamped = request.governancePolicyId ? rules.find((rule) => rule.policyId === request.governancePolicyId) : undefined;
+    const withdrawn = request.governancePolicyId && (!stamped?.enabled || stamped.effect !== "ask" || stamped.questionRule);
+    const current = evaluateApprovalPolicies({ scope: {
+      sessionId, organizationId: "local", runnerId: row.runner_id,
+      ...(row.workspace_id ? { workspaceId: row.workspace_id } : {}),
+      ...(row.agent_id ? { agentId: row.agent_id } : {}),
+      ...(request.context?.toolName ? { toolName: request.context.toolName } : {}),
+      ...(request.context?.path ? { path: request.context.path } : {}),
+      ...(request.context?.network ? { network: request.context.network } : {}),
+      ...(request.context?.branch ? { branch: request.context.branch } : {}),
+    }, status: row.status as SessionStatus, costUsd: row.cost_usd,
+      toolCallCount: rules.some((rule) => rule.enabled && (rule.conditions?.minToolCalls !== undefined || rule.conditions?.maxToolCalls !== undefined)) ? this.countToolCalls(sessionId) : 0,
+      escalated: Boolean(request.context?.escalatedBy) }, rules);
+    const mandatory = withdrawn || current.effect === "deny" || current.effect === "ask" && current.policy &&
+      (current.policy.builtin || current.policy.conditions?.humanRequired || !control.boundary.delegatablePolicyIds.includes(current.policy.policyId));
+    return mandatory ? { ...request, humanRequired: true } : request;
+  }
+
   /** Resolve descendant request ownership from durable ancestry and the current root policy.
    * This keeps list counts, reminders, and notifications aligned after policy changes or reloads
    * without trusting a stale owner copied into a provider request. */
@@ -22144,7 +22172,7 @@ export class ControlPlaneDb {
         operation: request.workflowDecision?.category ?? "tool_approval",
       };
       return campaignAuthorityFromRows(row, { id: row.id, driver: row.driver as SessionView["driver"], runnerId: row.runner_id, workspaceId: row.workspace_id, repositoryRoot: this.repositoryRootFromRow(row) },
-        summary ? summary.runnerProtocols.get(row.runner_id) : this.getRunner(row.runner_id)?.protocolVersion, request);
+        summary ? summary.runnerProtocols.get(row.runner_id) : this.getRunner(row.runner_id)?.protocolVersion, this.campaignPolicyRequest(row.id, orchestratorCampaignPolicyFromJson(row.orchestrator_policy)?.control, request));
     }
     if (!row.parent_session_id) return undefined;
     const seen = new Set<string>([row.id]);
@@ -22173,7 +22201,7 @@ export class ControlPlaneDb {
       operation: request.workflowDecision?.category ?? "tool_approval",
     };
     return campaignAuthorityFromRows(controller, { id: row.id, driver: row.driver as SessionView["driver"], runnerId: row.runner_id, workspaceId: row.workspace_id, repositoryRoot: orchestratorCampaignPolicyFromJson(controller.orchestrator_policy)?.control?.mode === "full_control" ? this.repositoryRootFromRow(row) : undefined },
-      summary ? summary.runnerProtocols.get(row.runner_id) : this.getRunner(row.runner_id)?.protocolVersion, request,
+      summary ? summary.runnerProtocols.get(row.runner_id) : this.getRunner(row.runner_id)?.protocolVersion, this.campaignPolicyRequest(row.id, orchestratorCampaignPolicyFromJson(controller.orchestrator_policy)?.control, request),
       summary ? summary.runnerProtocols.get(controller.runner_id) : orchestratorCampaignPolicyFromJson(controller.orchestrator_policy)?.control?.mode === "full_control" ? this.getRunner(controller.runner_id)?.protocolVersion : undefined);
   }
 
@@ -28087,6 +28115,11 @@ function pendingApprovalWithOccurrenceIds(
       `request_${randomUUID().replace(/-/g, "")}`,
     requestedAt: (!request.occurrenceId || request.occurrenceId === priorByRequestId.get(request.requestId)?.occurrenceId)
       ? priorByRequestId.get(request.requestId)?.requestedAt ?? Date.now() : Date.now(),
+    ...((!request.occurrenceId || request.occurrenceId === priorByRequestId.get(request.requestId)?.occurrenceId) &&
+      priorByRequestId.get(request.requestId)?.standingAdmissionFailure
+      ? { standingAdmissionFailure: priorByRequestId.get(request.requestId)!.standingAdmissionFailure } : {}),
+    ...((!request.occurrenceId || request.occurrenceId === priorByRequestId.get(request.requestId)?.occurrenceId) &&
+      priorByRequestId.get(request.requestId)?.humanRequired ? { humanRequired: true } : {}),
     ...(request.additionalRequests
       ? { additionalRequests: request.additionalRequests.map(identify) }
       : {}),

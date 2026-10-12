@@ -15,8 +15,8 @@ const question = (text: string, extra: Partial<PendingApproval> = {}): PendingAp
   requestId: "q", kind: "question", title: text, options: [], requestSource: "provider_question",
   questions: [{ id: "choice", question: text, options: [{ label: "A" }, { label: "B" }] }], ...extra,
 });
-const tool: PendingApproval = { requestId: "p", kind: "permission", title: "Run Tests", requestSource: "provider_tool",
-  context: { toolName: "commandExecution", input: "pnpm test", operation: { kind: "command", input: "pnpm test", cwd: "/repo", filesystem: { cwd: "/repo", targets: [] } } }, options: [
+const tool: PendingApproval = { requestId: "p", kind: "permission", title: "Inspect Repository", requestSource: "provider_tool",
+  context: { toolName: "commandExecution", input: "git status --short", operation: { kind: "command", input: "git status --short", cwd: "/repo", filesystem: { cwd: "/repo", targets: [] } } }, options: [
     { optionId: "once", name: "Allow Once", kind: "allow_once" }, { optionId: "always", name: "Always", kind: "allow_always" },
   ] };
 const evaluate = (request: PendingApproval, override: Partial<Parameters<typeof resolveCampaignAuthority>[0]> = {}) =>

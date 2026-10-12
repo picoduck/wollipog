@@ -16,7 +16,7 @@ import type { GithubIssueClosureRequest, GithubIssueClosureResult } from "@wolli
 import { createHash, randomUUID } from "node:crypto";
 import { posix, win32 } from "node:path";
 import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
-  addPendingRequest, removePendingRequest, pendingRequests, campaignHumanAttentionAdded,
+  addPendingRequest, removePendingRequest, pendingRequests, parentControlRequestEligible, campaignHumanAttentionAdded,
   CODEX_APP_SERVER_IMAGE_MIME_TYPES,
   MAX_PROMPT_IMAGE_BYTES,
   MAX_SESSION_VIDEO_BYTES,
@@ -7288,7 +7288,7 @@ export class SessionsService {
     const repositoryRoot = controller.orchestratorPolicy?.control?.mode === "full_control" && request.context?.operation
       ? this.db.sessionRepositoryRoot(requester.id) : undefined;
     const workspaceId = requester.workspaceId ?? (controller.orchestratorPolicy?.control?.mode === "full_control" ? this.db.getSession(requester.id)?.workspaceId : undefined);
-    return evaluateCampaignAuthority(controller, { ...requester, workspaceId, repositoryRoot: repositoryRoot ?? undefined }, this.db.getRunner(requester.runnerId)?.protocolVersion, request, controller.parentControlPolicy,
+    return evaluateCampaignAuthority(controller, { ...requester, workspaceId, repositoryRoot: repositoryRoot ?? undefined }, this.db.getRunner(requester.runnerId)?.protocolVersion, this.db.campaignPolicyRequest(requester.id, controller.orchestratorPolicy?.control, request), controller.parentControlPolicy,
       controller.orchestratorPolicy?.control?.mode === "full_control" ? this.db.getRunner(controller.runnerId)?.protocolVersion : undefined);
   }
 
@@ -7309,7 +7309,13 @@ export class SessionsService {
       : request.kind !== "question" && optionId
         ? this.approve(sessionId, request.requestId, optionId, actor, sessionId)
         : null;
-    if (!result?.ok) return false;
+    if (!result?.ok) {
+      const pending = this.db.getSession(sessionId)?.pendingApproval;
+      if (pendingRequests(pending).some((candidate) => candidate.requestId === request.requestId && candidate.occurrenceId === request.occurrenceId)) {
+        this.db.setPendingApproval(sessionId, replacePendingApproval(pending, { ...request, standingAdmissionFailure: "provider_delivery_unavailable" }));
+      }
+      return false;
+    }
     this.log.info(JSON.stringify({ event: "campaign_authority_evaluated", entryPoint: "root_provider_admission",
       sessionId, requestId: request.requestId, occurrenceId: request.occurrenceId,
       policyRevision: session.parentControlPolicy?.revision, ...evaluation }));
@@ -7349,6 +7355,11 @@ export class SessionsService {
     for (const decision of outstanding) {
       this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now);
       this.recordWorkflowDecisionAudit(decision, "revoked", { kind: "human", id: principal.userId }, now);
+    }
+    if (control.mode === "full_control") {
+      for (const pending of pendingRequests(this.db.getSession(sessionId)?.pendingApproval)) {
+        if (pending.kind !== "workflow_decision") this.executeStandingRootRequest(sessionId, pending);
+      }
     }
     this.publishCampaignAttentionTransition(session);
     this.log.info(JSON.stringify({ event: "campaign_control_changed", sessionId,
@@ -9641,6 +9652,9 @@ export class SessionsService {
     if (!pending) return fail("descendant request occurrence is stale or no longer pending", 409);
     if (pending.kind === "workflow_decision") {
       return fail("typed workflow decisions require a typed workflow resolution", 409);
+    }
+    if (parent.orchestratorPolicy?.control?.mode !== "full_control" && !parentControlRequestEligible(mode, pending)) {
+      return fail("this request requires a human response", 403);
     }
     const unsupported = this.capabilityFailure(
       child.runnerId,
