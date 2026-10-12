@@ -20,6 +20,7 @@ import {
   type SideChatView,
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
+import { startVisiblePolling } from "../visible-polling.js";
 import { useApi } from "../api-context.js";
 import { useHasStore, useOptionalStoreSelector, useStoreActions } from "../store.js";
 import { viewPath } from "../navigation.js";
@@ -422,11 +423,10 @@ export function SideChatPanel({
         inFlight = false;
       }
     };
-    void poll();
-    const timer = window.setInterval(() => void poll(), POLL_MS);
+    const stopPolling = startVisiblePolling(() => void poll(), POLL_MS);
     return () => {
       current = false;
-      window.clearInterval(timer);
+      stopPolling();
     };
   }, [api, childId, session.id]);
 

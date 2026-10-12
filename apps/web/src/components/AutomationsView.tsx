@@ -18,6 +18,7 @@ import type {
 import { runnerSupportsProtocol } from "@wollipog/protocol";
 import { AutomationsIcon } from "./Icons.js";
 import { useApi } from "../api-context.js";
+import { startVisiblePolling } from "../visible-polling.js";
 import { instancePublicOrigin, useInstances } from "../instances-context.js";
 import { titleCaseLabel } from "../format.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
@@ -183,56 +184,73 @@ export function AutomationsView() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  /**
-   * The newest refresh that has been STARTED. Only it may commit.
-   *
-   * This list is polled every five seconds and also refreshed after every mutation, so two are
-   * routinely in flight. Without a generation, a slow earlier request commits after a later one and
-   * the screen goes backwards — and because the editor now closes when its automation leaves the
-   * list, going backwards means silently discarding someone's unsaved form for an automation that
-   * still exists.
-   */
+  // Polls skip a busy refresh. A mutation waits for it and then reads its own authoritative result.
+  const refreshInFlight = useRef<Promise<void> | null>(null);
   const refreshGeneration = useRef(0);
 
-  const refresh = useCallback(async () => {
-    const generation = (refreshGeneration.current += 1);
-    const current = () => generation === refreshGeneration.current;
+  const refresh = useCallback(async (onlyWhileVisible = false) => {
+    while (refreshInFlight.current) {
+      await refreshInFlight.current.catch(() => {});
+    }
+    if (onlyWhileVisible && document.visibilityState === "hidden") return;
+    const work = (async () => {
+      const generation = (refreshGeneration.current += 1);
+      const current = () => generation === refreshGeneration.current;
 
-    // The automation list is authoritative and is committed on its own. It used to share a
-    // `Promise.all` with the workflow definitions, so a rejected workflow fetch threw away a
-    // successful list — which meant a deleted automation stayed on screen, the editor stayed open
-    // on it, and Save sent `updateAutomation` for an ID the control plane no longer had.
-    const automationResult = await api.automations();
-    if (!current()) return;
-    setItems(automationResult.automations);
-    setListLoaded(true);
+      // Commit the authoritative list independently, so a workflow failure cannot leave a deleted
+      // automation's editor open and allow Save to send an ID the control plane no longer has.
+      const automationResult = await api.automations();
+      if (!current()) return;
+      setItems(automationResult.automations);
+      setListLoaded(true);
 
-    const workflowsLoaded = api.workflowDefinitions()
-      .then((workflowResult) => { if (current()) setWorkflows(workflowResult); });
+      const workflowsLoaded = api.workflowDefinitions()
+        .then((workflowResult) => { if (current()) setWorkflows(workflowResult); });
 
-    const loaded = await Promise.all(automationResult.automations.map(async (item) => {
-      const [detail, triggerResult] = await Promise.all([
-        api.automation(item.automationId),
-        api.automationTriggers(item.automationId),
-      ]);
-      return [item.automationId, detail.executions, triggerResult.triggers] as const;
-    }));
-    if (!current()) return;
-    setDetails(Object.fromEntries(loaded.map(([id, executions]) => [id, executions])));
-    setTriggers(Object.fromEntries(loaded.map(([id, _executions, triggerItems]) => [id, triggerItems])));
-    // Awaited last so a workflow failure is still reported, but only after the list it has no
-    // business blocking has been committed.
-    await workflowsLoaded;
+      const detailsLoaded = Promise.allSettled(automationResult.automations.map(async (item) => {
+        const [detail, triggerResult] = await Promise.allSettled([
+          api.automation(item.automationId),
+          api.automationTriggers(item.automationId),
+        ]);
+        if (detail.status === "rejected") throw detail.reason;
+        if (triggerResult.status === "rejected") throw triggerResult.reason;
+        return [item.automationId, detail.value.executions, triggerResult.value.triggers] as const;
+      })).then((results) => {
+        const loaded = results.map((result) => {
+          if (result.status === "rejected") throw result.reason;
+          return result.value;
+        });
+        if (!current()) return;
+        setDetails(Object.fromEntries(loaded.map(([id, executions]) => [id, executions])));
+        setTriggers(Object.fromEntries(loaded.map(([id, _executions, triggerItems]) => [id, triggerItems])));
+      });
+      // Keep the refresh busy until every fan-out request settles, even when one endpoint fails.
+      const results = await Promise.allSettled([workflowsLoaded, detailsLoaded]);
+      for (const result of results) if (result.status === "rejected") throw result.reason;
+    })();
+    refreshInFlight.current = work;
+    try {
+      await work;
+    } finally {
+      refreshInFlight.current = null;
+    }
   }, [api]);
 
   useEffect(() => {
     let active = true;
-    const load = () => refresh().catch((cause) => active && setError((cause as Error).message));
-    void load();
-    const timer = window.setInterval(load, 5_000);
+    let initialRefresh = true;
+    const load = () => {
+      // A previous effect's request can still be settling after Strict Mode cleanup or an API
+      // change. The new effect must refresh after it, rather than wait for the first interval.
+      if (refreshInFlight.current && !initialRefresh) return;
+      initialRefresh = false;
+      void refresh(true).catch((cause) => active && setError((cause as Error).message));
+    };
+    const stopPolling = startVisiblePolling(load, 5_000);
     return () => {
       active = false;
-      window.clearInterval(timer);
+      refreshGeneration.current += 1;
+      stopPolling();
     };
   }, [refresh]);
 

@@ -2859,6 +2859,7 @@ export function StoreProvider({
   useEffect(() => {
     const dispatch = store.dispatch;
     let closed = false;
+    let reconnectDelay = 1_500;
     let cancelBackgroundObservations = () => {};
     const subscriptionSync = new UiSubscriptionSynchronizer();
     const syncSubscriptions = () => {
@@ -2935,6 +2936,7 @@ export function StoreProvider({
         if (closed) return;
         if (!receivedFrame) {
           receivedFrame = true;
+          reconnectDelay = 1_500;
           dispatch({ type: "conn", conn: "online" });
         }
         try {
@@ -2963,10 +2965,13 @@ export function StoreProvider({
         // fast loop can't fix a missing credential, but a re-pair elsewhere should self-heal.
         const unauthorized = ev.code === 1008;
         dispatch({ type: "conn", conn: unauthorized ? "unauthorized" : "offline", authRequired: unauthorized || undefined });
+        // Equal jitter avoids synchronized retry waves, while the exponential window is capped.
+        const delay = unauthorized ? 10_000 : reconnectDelay * (0.5 + Math.random() * 0.5);
+        if (!unauthorized) reconnectDelay = Math.min(30_000, reconnectDelay * 2);
         reconnectRef.current = window.setTimeout(() => {
           reconnectRef.current = null;
           open();
-        }, unauthorized ? 10_000 : 1500);
+        }, delay);
       };
       ws.onerror = () => ws.close();
     };
@@ -2989,7 +2994,7 @@ export function StoreProvider({
     };
     const unsubscribeCredentialChanges = connection.onCredentialChange?.(onTokenChanged);
     // Only a pending retry can be brought forward. While a socket is opening or online there is
-    // none, so a second Retry Now never opens a second socket; the retry cadence is unchanged.
+    // none, so a second Retry Now never opens a second socket; automatic retries retain backoff.
     store.setReconnectHandler(() => {
       const conn = store.getState().conn;
       if (closed || reconnectRef.current === null || conn === "connecting" || conn === "online") return false;

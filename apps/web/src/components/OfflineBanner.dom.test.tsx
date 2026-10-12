@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { afterEach, beforeEach, mock, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
@@ -72,6 +72,9 @@ class FakeSocket implements UiSocket {
 
 const SNAPSHOT = JSON.stringify({ type: "snapshot", runners: [], runs: [], pods: [], sessions: [] });
 const ORIGIN = "http://127.0.0.1:4317";
+
+beforeEach(() => { mock.method(Math, "random", () => 0); });
+afterEach(() => { mock.restoreAll(); });
 
 /** The Shell's wiring: the banner after 2s of disconnection, Retry Now bound to the store. */
 function ShellBanner({ developmentBuild }: { developmentBuild: boolean }) {
@@ -155,13 +158,13 @@ test("Retry Now shows a busy state, and a second click starts no second attempt"
     assert.equal(button.getAttribute("aria-disabled"), "true");
     await view.click();
     assert.equal(view.sockets.length, before + 1, "clicking twice starts one attempt");
-    // The attempt fails: the button is offered again and the normal 1.5s retry resumes.
+    // The attempt fails: the button is offered again and the backed-off retry resumes.
     await view.fail();
     assert.equal(view.button()!.textContent, "Retry Now");
     assert.equal(view.button()!.getAttribute("aria-busy"), null);
     assert.equal(view.button()!.getAttribute("aria-disabled"), null);
-    await advance(1500);
-    assert.equal(view.sockets.length, before + 2, "the store's own retry cadence is unchanged");
+    await advance(3000);
+    assert.equal(view.sockets.length, before + 2, "the store resumes its automatic backoff after Retry Now fails");
   } finally {
     await view.dispose();
   }

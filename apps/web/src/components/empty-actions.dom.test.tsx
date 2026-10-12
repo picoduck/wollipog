@@ -20,6 +20,7 @@ import { RunnersView } from "./RunnersView.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
+import { withScopedClockOverrides } from "./test-clock-overrides.js";
 
 /**
  * What the empty-state actions actually DO.
@@ -352,43 +353,56 @@ test("a genuinely empty board still offers to create", async () => {
   await unmount();
 });
 
-test("an older poll cannot close an editor opened from a newer one", async () => {
-  // Two refreshes are routinely in flight: the five-second poll plus one after every mutation. A
-  // slow earlier request committing after a later one makes the screen go backwards — and since the
-  // editor closes when its automation leaves the list, going backwards discards an unsaved form for
-  // an automation that still exists.
+test("serialized polling preserves an editor for a newly discovered automation", async () => {
+  // Serialization prevents a slow older list from landing after a newer one and discarding an
+  // unsaved editor. Exercise the real interval callbacks without requiring overlapping reads.
   const held: Array<() => void> = [];
+  const polls = new Map<number, () => void>();
+  let nextTimerId = 1;
   let calls = 0;
   let items = [automation("automation-1", "Nightly")];
-  const { container, unmount } = await mount({
-    automations: async () => {
-      calls += 1;
-      const snapshot = items;
-      // The FIRST call is held open; by the time it resolves, its list is stale.
-      if (calls === 1) await new Promise<void>((resolve) => held.push(resolve));
-      return { automations: snapshot };
-    },
-    automation: async () => ({ executions: [] }),
-    automationTriggers: async () => ({ triggers: [] }),
-    workflowDefinitions: async () => [],
-  } as unknown as Partial<ApiClient>, <AutomationsView />);
+  await withScopedClockOverrides(domWindow, {
+    setInterval: (poll: () => void) => { const id = nextTimerId++; polls.set(id, poll); return id; },
+    clearInterval: (id: number) => { polls.delete(id); },
+  }, async () => {
+    const { container, unmount } = await mount({
+      automations: async () => {
+        calls += 1;
+        const snapshot = items;
+        // The FIRST call is held open; by the time it resolves, its list is stale.
+        if (calls === 1) await new Promise<void>((resolve) => held.push(resolve));
+        return { automations: snapshot };
+      },
+      automation: async () => ({ executions: [] }),
+      automationTriggers: async () => ({ triggers: [] }),
+      workflowDefinitions: async () => [],
+      outboundEventSubscriptions: async () => [],
+    } as unknown as Partial<ApiClient>, <AutomationsView />);
+    try {
+      items = [automation("automation-1", "Nightly"), automation("automation-2", "Weekly")];
+      await act(async () => { for (const poll of polls.values()) poll(); });
+      assert.equal(calls, 1, "a slow initial list prevents the next interval from starting a newer read");
+      await act(async () => { for (const release of held) release(); });
+      assert.equal(container.querySelectorAll(".automation-card").length, 1,
+        "the older one-item list settles before another refresh can start");
 
-  // A later refresh starts and completes with both automations while the first is still pending.
-  items = [automation("automation-1", "Nightly"), automation("automation-2", "Weekly")];
-  await act(async () => { await nextPoll(); });
-  await expandAllCards(container);
-  const edits = [...container.querySelectorAll("button")].filter((b) => (b.textContent ?? "").trim() === "Edit");
-  assert.equal(edits.length, 2, "both automations render before the stale poll lands");
-  await act(async () => { fireDomEvent.click(edits[1]!); });
-  assert.ok(container.querySelector(".automation-editor"), "the newer automation is open for editing");
+      await act(async () => { for (const poll of polls.values()) poll(); });
+      assert.equal(calls, 2, "the next interval reads the new authoritative list");
+      await expandAllCards(container);
+      const edits = [...container.querySelectorAll("button")].filter((b) => (b.textContent ?? "").trim() === "Edit");
+      assert.equal(edits.length, 2, "both automations render after the serialized fresh read");
+      await act(async () => { fireDomEvent.click(edits[1]!); });
+      assert.ok(container.querySelector(".automation-editor"), "the newer automation is open for editing");
 
-  // Now the stale first poll finishes, carrying the one-item list.
-  await act(async () => { for (const release of held) release(); await Promise.resolve(); });
-  await act(async () => { await Promise.resolve(); });
-
-  assert.ok(container.querySelector(".automation-editor"),
-    "a poll that started BEFORE the automation existed must not conclude that it was deleted");
-  await unmount();
+      await act(async () => { for (const poll of polls.values()) poll(); });
+      assert.equal(calls, 3);
+      assert.ok(container.querySelector(".automation-editor"),
+        "subsequent polling preserves the newly discovered automation's unsaved editor");
+    } finally {
+      for (const release of held) release();
+      await unmount();
+    }
+  });
 });
 
 test("a workflow-definition failure cannot keep a deleted automation on screen", async () => {
