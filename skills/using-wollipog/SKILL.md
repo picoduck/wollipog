@@ -5,6 +5,10 @@ description: Operate Wollipog sessions from inside an agent session through the 
 
 # Using Wollipog
 
+For campaign authority, read [Campaign Authority Preflight](references/campaign-authority.md).
+It covers effective mode/boundary, exact decision owners, unresolved human gates, and evidence
+upload/provider disclosure; it does not authorize a campaign or change installed policies.
+
 Use the `wollipog` command when it is on `PATH`. A Wollipog-hosted session supplies
 `WOLLIPOG_CONTROL_PLANE_URL`, `WOLLIPOG_SESSION_ID`, and a protected token file automatically; do
 not print, copy, or pass that token on the command line.
@@ -84,7 +88,9 @@ When those MCP tools are unavailable, use the equivalent self-scoped `wollipog d
 `get`, and `consume` commands above; the exact resource snapshot and optional PR-merge action are
 JSON objects. The CLI refuses `--session` for these commands and exposes no resolution operation.
 Only the current owner may resolve the exact pending occurrence. Authentication, secrets,
-persistent grants, governance, budgets, and tool guardrails remain human-only.
+persistent grants, governance changes, budget increases, and tool guardrails remain human-only.
+Separate human-established budget authority may permit bounded managed-worker reservations and
+allocations; never infer it from a campaign name or use an unmetered worker to evade accounting.
 A stop or restart revokes every decision the session has not consumed. After a restart the session
 receives a `[Wollipog Session Restart]` message naming each revoked occurrence: do not act on an
 earlier approval of it, and request again what you still need.
@@ -249,7 +255,9 @@ The root Orchestrator can propose closing an issue in its human-authorized campa
 `request_github_issue_closure` (`requestId`, `issue`, `reason`: `completed` or `not_planned`,
 `explanation`, `evidence`, and an optional exact `comment`). The runner derives the repository,
 current issue, and related open pull requests; the server includes active child assignments.
-Closure always requires a human-owned typed decision, regardless of Parent Control. Read it with
+Custom retains human-owned closure review. Full Control delegates only when the exact server
+occurrence confirms eligible human-established issue authority and verified delivery or a supported
+not-planned disposition. Older hosts or missing authority remain human-only. Read the owner with
 `get_workflow_decision`, then use `close_github_issue` with its exact `occurrenceId` and
 `resourceDigest`. The CLI equivalents are:
 
@@ -259,9 +267,10 @@ wollipog decision get <occurrence-id> --json
 wollipog issue-closure execute <occurrence-id> --digest <resource-digest> --json
 ```
 
-Approval expires 30 minutes after the human resolves it. Changed issue evidence, policy, or child
+Approval expires 30 minutes after resolution. Changed issue evidence, policy, or child
 work requires renewed review. Never substitute a shell command or generic approval, and never
-approve the Orchestrator's own request. Read `issueClosureResult`: `closed` and `already_closed`
+approve a human-owned request. Eligible root Full Control decisions use server-recorded standing
+authorization, never self-created authority. Read `issueClosureResult`: `closed` and `already_closed`
 are verified outcomes, `refused` requires renewed review, and `uncertain` means GitHub may have
 accepted the action. Inspect uncertain outcomes without replaying the comment or closure.
 Issue closure does not attest implementation or campaign completion. Unsupported peers, nonlocal
@@ -279,15 +288,24 @@ are not members and never grant authority. Inspect candidates and select the int
 To recover or extend an existing campaign, use `request_campaign_issue_scope_change` (CLI:
 `wollipog issue-scope request --proposal '<json>'`) with `requestId`, `expectedRevision`, `explanation`,
 and exact `additions` and `removals`, each an array of `{ "repository": "owner/repo", "number": 123 }`.
-An authenticated human must approve the exact change, even under Parent Control. The human approval
-operation applies and consumes it atomically; the agent cannot resolve or consume its own scope proposal.
+Custom retains authenticated human review of the exact change. Full Control requires separate
+human-established issue authority and server-verified lineage and limits; unsupported hosts retain
+human review. Read the exact occurrence owner. Resolution applies and consumes scope atomically;
+do not separately consume it or treat a ledger record as scope authorization.
 Pending, denied, stale and replayed proposals leave scope unchanged. After approval, re-read the scope.
 Humans can inspect, resolve epic candidates, and request changes in Campaign Status's Authorized Issue Scope.
 
 Scope changes preserve conversation and work history. Removals display affected assignments and revoke
-outstanding action decisions; issue closure retains its separate human approval. Active Orchestrator
+outstanding action decisions; issue closure retains its separate exact decision. Active Orchestrator
 participants must use the campaign's runner and repository workspace. Updates require protocol v208
 on the control plane and participating runners; unsupported peers must be updated and reconnected.
 The authoritative revision is persisted on both sides, delivered on reconnect and restart, and checked
 again by closure execution. An offline or unsynchronized runner cannot execute a revised closure.
 Ledger recording, assignments, ordinary prompts, and epic links never modify authority.
+
+Bounded Full Control issue writes require protocol v216 on every participant. With eligible issue
+authority, scope proposals name `lineage: {kind: "epic", epic: <number>}` or
+`{kind: "follow_up", publicationOccurrenceId: <id>}`. Follow-up publication requires a deduplicated,
+accepted recommendation with authorized origins and exact sanitized repository/title/body/labels;
+include `recommendationId` in the typed request, read the published issue back and record it before
+proposing scope addition. Incidental references, foreign repositories and limits remain enforced.

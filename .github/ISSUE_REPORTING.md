@@ -107,6 +107,20 @@ its Markdown structure:
 ## Agent Publication Gate
 
 Before an agent publishes an issue, it must show the exact sanitized repository, title, body, and
-labels for approval. Approval of an earlier draft does not cover material changes. After creation,
+labels for approval. Custom retains the existing user approval requirement. Full Control permits
+the authorized Orchestrator to review that exact public payload only when the current server
+occurrence confirms eligible human-established issue authority for this repository and accepted,
+deduplicated follow-up lineage. Include the recommendation identity in the typed publication
+request. Read the effective owner and authority evaluation; a mode label, general intent, ledger
+acceptance, or ordinary prompt is not approval. Missing authority, unsupported hosting versions,
+Human Required rules, and unresolved external mandatory human instructions retain human review.
+
+Use the exact typed publication request/get/consume workflow; consume an approved unchanged
+payload immediately before publication. The Orchestrator must inspect the entire title, body,
+labels and repository before resolving. It cannot approve a human-owned occurrence. Delegation
+changes the eligible reviewer only: investigation, duplicate checks immediately before creation,
+sanitization, public-content rules, preview formatting and verification remain mandatory.
+
+Approval of an earlier draft does not cover material changes. After creation,
 the agent must read the issue back, verify its contents, and return the issue link. It must never
 claim that an issue was created when publication or verification failed.

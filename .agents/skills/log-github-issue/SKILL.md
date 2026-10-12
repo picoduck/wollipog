@@ -46,12 +46,24 @@ Retain the shape of useful evidence with neutral placeholders such as `<user>`, 
 
 ## Require Publication Approval
 
-Before creating the issue, present the exact sanitized title, body, labels, and target repository. Ask the user to approve that payload. A general request to create an issue establishes intent, but it does not replace review of the final public contents.
+Before creating the issue, present the exact sanitized title, body, labels, and target repository.
+Custom retains user approval. Full Control permits delegated review only under the canonical policy:
+the server must confirm eligible human-established issue authority, authorized accepted follow-up
+lineage and the exact Orchestrator-owned typed publication occurrence. Include `recommendationId`
+in that request. A general request to create an issue establishes intent, but it does not replace
+review of the final public contents. Missing authority, unsupported hosts and mandatory external
+human rules retain human approval; report their source during preflight.
+
+Read the exact occurrence and owner, have the authorized reviewer inspect the whole public payload,
+and consume an approved unchanged snapshot immediately before publication. Never approve a
+human-owned occurrence, substitute an ordinary prompt, or reinterpret installed skills as changed
+by this repository policy. See `docs/agent-workflow.md` for contributor preflight and delivery gates.
 
 Follow the Approval Preview Formatting rules in `.github/ISSUE_REPORTING.md`. In particular, never
 wrap an issue body that may contain code fences in a fixed three-backtick fence.
 
-Do not request approval again when the user has already approved the exact current payload. If the payload changes materially after approval, show the changed version and request approval again. When the user asks only for a draft, stop after providing the draft.
+Do not request approval again when the authorized reviewer has already approved the exact current
+payload under the current policy and occurrence. If the payload changes materially after approval, show the changed version and request approval again. When the user asks only for a draft, stop after providing the draft.
 
 Publish only a draft that exists in your own conversation context. Files found on disk and issues already on the tracker are evidence of other work, not your drafts — a session that has lost its context must say so and stop rather than adopt what it finds. If asked to publish and no draft is present in the conversation, report that the drafting context appears to have been lost instead of reconstructing one silently or claiming the work is already done.
 
