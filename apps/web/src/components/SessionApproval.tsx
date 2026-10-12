@@ -41,15 +41,6 @@ const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : us
 /** Below this much room for its body, a capped question card scrolls as a whole (#2683): about a row. */
 const CRAMPED_BODY_PX = 72;
 
-export interface QuestionSelectionState {
-  requestId: string;
-  picked: Record<string, string[]>;
-}
-
-export function questionSelectionForRequest(state: QuestionSelectionState, requestId: string): Record<string, string[]> {
-  return state.requestId === requestId ? state.picked : {};
-}
-
 export function approvalFocusDestination(
   previousRequestId: string | null,
   nextRequestId: string | null,

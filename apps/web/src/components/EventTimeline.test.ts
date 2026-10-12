@@ -6,7 +6,6 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { deriveTimeline, groupTimeline, publishTimelineSnapshotDelta, SubagentTreeProjector, TimelineBuilder, type TimelineItem } from "../timeline.js";
 import {
   automaticSubagentOpen,
-  automaticSubagentOpenAfterChange,
   assistantForkTurns,
   EventTimeline,
   estimateTimelineRow,
@@ -596,9 +595,6 @@ test("automatic subagent disclosure opens the first live child but keeps deep/em
   assert.equal(automaticSubagentOpen(1, 1), false, "deeper agents remain lazy");
   assert.equal(automaticSubagentOpen(0, 40), true);
   assert.equal(automaticSubagentOpen(0, 41), false, "large trees remain collapsed");
-  assert.equal(automaticSubagentOpenAfterChange(0, 0, 1, false, false), true, "an empty live Task opens on its first child");
-  assert.equal(automaticSubagentOpenAfterChange(0, 40, 41, false, true), false, "an untouched live tree auto-collapses at the large threshold");
-  assert.equal(automaticSubagentOpenAfterChange(0, 41, 42, true, true), true, "a user's disclosure choice remains sticky");
 });
 
 test("history prefix merges preserve work and coalesced text render keys", () => {

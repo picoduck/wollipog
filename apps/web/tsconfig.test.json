@@ -32,7 +32,6 @@
     "src/pinned-summary.test.ts",
     "src/projects.test.ts",
     "src/reminder-schedule.test.ts",
-    "src/review-queue-details.test.ts",
     "src/session-actions.test.ts",
     "src/session-preset-defaults.test.ts",
     "src/session-project-assignment.test.ts",

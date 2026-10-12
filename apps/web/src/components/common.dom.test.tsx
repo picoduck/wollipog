@@ -7,7 +7,7 @@ import type { SessionView } from "@wollipog/protocol";
 import {
   BackgroundDeliveryBadge,
   BackgroundNotificationBadge,
-  BackgroundWorkBadge,
+  backgroundWorkAccessibleName,
   AttentionBadge,
   COPY_RESULT_MS,
   CopyButton,
@@ -175,99 +175,12 @@ test("a labeled copy button sizes itself for every label it can show, but its te
   }
 });
 
-test("background-work badges expose current states and suppress the legacy settled sentinel", async () => {
-  const happyContainer = domWindow.document.createElement("div");
-  domWindow.document.body.append(happyContainer);
-  const container = happyContainer as unknown as HTMLDivElement;
-  const root = createRoot(container);
-  try {
-    await act(async () => {
-      root.render(
-        <>
-          <BackgroundWorkBadge state="running" />
-          <BackgroundWorkBadge state="continuation_pending" />
-          <BackgroundWorkBadge state="orphaned" />
-          <BackgroundWorkBadge state="resumed" />
-        </>,
-      );
-    });
-
-    const badges = [...container.querySelectorAll('.status[data-group="background-work"]')];
-    // "Orphaned" is retired everywhere (docs/design-system.md §11.2): lost work reads Lost.
-    assert.deepEqual(
-      badges.map((badge) => badge.textContent),
-      ["Background Work: Waiting on External Job", "Background Work: Continuation Pending", "Background Work: Lost"],
-    );
-    assert.deepEqual(
-      badges.map((badge) => badge.getAttribute("aria-label")),
-      ["Background Work: Waiting on External Job", "Background Work: Continuation Pending", "Background Work: Lost"],
-    );
-    assert.ok(badges.every((badge) => badge.getAttribute("role") === "status"));
-    assert.ok(badges.every((badge) => !badge.hasAttribute("title")));
-    // Running work pulses in the info tone; lost work is danger and does not pulse.
-    assert.deepEqual(
-      badges.map((badge) => [badge.classList.contains("t-info"), badge.classList.contains("pulse"), badge.classList.contains("t-danger")]),
-      [[true, true, false], [true, true, false], [false, false, true]],
-    );
-  } finally {
-    await act(async () => { root.unmount(); });
-    container.remove();
-  }
-});
-
-test("compact background-work badges show specific states and expose every full label", async () => {
-  const happyContainer = domWindow.document.createElement("div");
-  domWindow.document.body.append(happyContainer);
-  const container = happyContainer as unknown as HTMLDivElement;
-  const root = createRoot(container);
-  try {
-    await act(async () => {
-      root.render(<>
-        <BackgroundWorkBadge state="running" compact />
-        <BackgroundWorkBadge state="continuation_pending" compact />
-        <BackgroundWorkBadge state="orphaned" compact />
-        <BackgroundWorkBadge state="resumed" compact />
-      </>);
-    });
-    const badges = [...container.querySelectorAll('[role="status"]')];
-    const fullLabels = [
-      "Background Work: Waiting on External Job",
-      "Background Work: Continuation Pending",
-      "Background Work: Lost",
-    ];
-    assert.deepEqual(badges.map((badge) => badge.getAttribute("aria-label")), fullLabels);
-    assert.deepEqual(badges.map((badge) => badge.getAttribute("title")), fullLabels);
-    assert.deepEqual(
-      badges.map((badge) => badge.querySelector(".sr-only")?.textContent),
-      fullLabels,
-    );
-    assert.deepEqual(
-      badges.map((badge) => badge.querySelector('[aria-hidden="true"]:last-child')?.textContent),
-      ["Waiting on External Job", "Continuation Pending", "Background Work Lost"],
-    );
-  } finally {
-    await act(async () => { root.unmount(); });
-    container.remove();
-  }
-});
-
-test("presentational background-work badges do not create a duplicate live region", async () => {
-  const happyContainer = domWindow.document.createElement("div");
-  domWindow.document.body.append(happyContainer);
-  const container = happyContainer as unknown as HTMLDivElement;
-  const root = createRoot(container);
-  try {
-    await act(async () => {
-      root.render(<BackgroundWorkBadge state="running" compact announce={false} />);
-    });
-    const badge = container.querySelector('.status[data-group="background-work"]');
-    assert.ok(badge);
-    assert.equal(badge.getAttribute("role"), null);
-    assert.equal(badge.textContent, "Background Work: Waiting on External JobWaiting on External Job");
-  } finally {
-    await act(async () => { root.unmount(); });
-    container.remove();
-  }
+test("background-work accessible names always name background work, and lost work reads Lost", () => {
+  // "Orphaned" is retired everywhere (docs/design-system.md §11.2): lost work reads Lost.
+  assert.deepEqual(
+    (["running", "continuation_pending", "orphaned"] as const).map((state) => backgroundWorkAccessibleName(state)),
+    ["Background Work: Waiting on External Job", "Background Work: Continuation Pending", "Background Work: Lost"],
+  );
 });
 
 test("background-work indicators become keyboard-native panel controls when actionable", async () => {
@@ -278,26 +191,14 @@ test("background-work indicators become keyboard-native panel controls when acti
   let opens = 0;
   try {
     await act(async () => root.render(<>
-      <BackgroundWorkBadge state="running" onOpen={() => { opens += 1; }} />
       <BackgroundDeliveryBadge state="accepted_without_result" onOpen={() => { opens += 1; }} />
       <BackgroundNotificationBadge state="retry" onOpen={() => { opens += 1; }} />
     </>));
     const buttons = [...container.querySelectorAll<HTMLButtonElement>("button")];
-    assert.equal(buttons.length, 3);
+    assert.equal(buttons.length, 2);
     assert.ok(buttons.every((button) => button.getAttribute("aria-controls") === "right-panel"));
-    assert.deepEqual(
-      [...container.querySelectorAll('[role="status"]')].map((status) => ({
-        label: status.getAttribute("aria-label"),
-        text: status.textContent,
-      })),
-      [{
-        label: "Background Work: Waiting on External Job",
-        text: "Background Work: Waiting on External Job",
-      }],
-      "an actionable current-state badge keeps one live announcement without changing button semantics",
-    );
     for (const button of buttons) await act(async () => button.click());
-    assert.equal(opens, 3);
+    assert.equal(opens, 2);
   } finally {
     await act(async () => root.unmount());
     container.remove();

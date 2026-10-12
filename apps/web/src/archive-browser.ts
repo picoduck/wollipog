@@ -2,8 +2,6 @@ import type { SessionStatus, SessionView } from "@wollipog/protocol";
 import { sessionAgentLabel } from "./components/agent-options.js";
 import { statusMeta } from "./status-meta.js";
 
-export const ARCHIVE_PAGE_SIZE = 50;
-
 export type ArchiveStateFilter = "archived" | "unarchived" | "all";
 
 export interface ArchiveBrowserFilters {
