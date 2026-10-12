@@ -78,6 +78,17 @@ Two classes the first sweeps re-derived independently, now named so no run deriv
   `projectChildSessionRegistry` provide reference results for incremental projectors. Check whether
   the tests compare the live projector against the oracle; deleting it can remove independent
   correctness coverage even though production never calls it.
+- The production pass intentionally ignores test imports, so test-support modules such as
+  `apps/web/src/palettes.ts`, `css-rules.ts`, `dom-test-*.ts`, and
+  `apps/runner/src/git-test-repo.ts` can appear as unused files. Confirm their test callers support
+  live behavior before excluding them; this is not an exemption for test-only production wrappers.
+- Build-time consumers count. `apps/web/vite.config.ts` imports `css-support.ts`,
+  `desktop-bundle.ts`, and `precompressed-assets.ts`; trace those imports and their build use
+  before accepting an unused-file finding from the production pass.
+- Dependencies may supply packaged native assets without a TypeScript import. The runner's
+  `node-pty` dependency supplies `conpty.node`, which `apps/runner/scripts/build-binary.mjs`
+  resolves and embeds for Windows SEA builds. Check asset resolution and packaging before
+  treating it as unused.
 
 ## Report
 
