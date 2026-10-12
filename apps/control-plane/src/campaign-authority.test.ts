@@ -313,6 +313,24 @@ test("live Human Required, deny and withdrawn asks have the same effective owner
   }
 });
 
+test("ambiguous credential-value choices stay human even on trusted question and implementation routes without secret fields", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable().ok);
+    for (const question of ["Which password should I use?", "Which credentials should we use to implement the feature?"]) {
+      h.svc.onSessionEvent("root", { kind: "question_request", requestId: question, occurrenceId: question,
+        requestSource: "provider_question", questions: [{ id: "value", question, options: [{ label: "A" }, { label: "B" }] }] });
+      assert.equal(h.db.getSession("root")!.pendingRequestOwners!.human, 1);
+      assert.equal(h.sent.length, 0, "a planning source cannot authorize actual credential-value selection");
+      const typed = h.svc.createWorkflowDecision("child", { requestId: question, resourceKey: question,
+        resourceSnapshot: { ...h.snapshot, question } });
+      assert.ok(typed.ok);
+      assert.equal(typed.data!.authority, "human");
+      assert.equal(typed.data!.authorityEvaluation!.reason, "protected_request");
+    }
+  } finally { h.db.close(); }
+});
+
 test("a real parked root NDJSON provider resumes after its question and one-time auth-file approval without another agent call", { timeout: 10_000 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "campaign-root-authority-"));
   mkdirSync(join(root, "src")); writeFileSync(join(root, "src/authentication.ts"), "export const implementation = true;\n");
