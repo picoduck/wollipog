@@ -8,7 +8,8 @@ type Row = { job_id: string; root_id: string; runner_id: string; command: string
 
 /** This ledger has no agent-facing completion method. Authenticated runner receipts settle it. */
 export class CampaignReviewJobs {
-  constructor(private readonly sql: DatabaseSync, private readonly budgets: CampaignBudgetLedger) {
+  constructor(private readonly sql: DatabaseSync, private readonly budgets: CampaignBudgetLedger,
+    private readonly chargeScope:(rootId:string)=>{organizationId:string;userId:string}|null=()=>null) {
     sql.exec(`CREATE TABLE IF NOT EXISTS campaign_review_jobs (
       job_id TEXT PRIMARY KEY, root_id TEXT NOT NULL, runner_id TEXT NOT NULL, request_id TEXT NOT NULL,
       target TEXT NOT NULL, base_sha TEXT NOT NULL, command TEXT NOT NULL, state TEXT NOT NULL,
@@ -16,7 +17,12 @@ export class CampaignReviewJobs {
       valid INTEGER NOT NULL DEFAULT 0, consumed INTEGER NOT NULL DEFAULT 1, receipt TEXT, vote TEXT, reason TEXT,
       UNIQUE(root_id,request_id)
     );`);
+    sql.exec(`CREATE TABLE IF NOT EXISTS campaign_review_daily_cost (
+      job_id TEXT NOT NULL, organization_id TEXT NOT NULL, user_id TEXT NOT NULL, day TEXT NOT NULL,
+      cost REAL NOT NULL, PRIMARY KEY(job_id,day)
+    );`);
     if(!(sql.prepare("PRAGMA table_info(campaign_review_jobs)").all() as Array<{name:string}>).some((c)=>c.name==="report")) sql.exec("ALTER TABLE campaign_review_jobs ADD COLUMN report TEXT");
+    if(!(sql.prepare("PRAGMA table_info(campaign_review_jobs)").all() as Array<{name:string}>).some((c)=>c.name==="charge_scope")) sql.exec("ALTER TABLE campaign_review_jobs ADD COLUMN charge_scope TEXT");
   }
 
   private atomic<T>(work: () => T): T {
@@ -47,6 +53,7 @@ export class CampaignReviewJobs {
       this.budgets.admit(rootId,{sessionId:jobId,costUsd:request.costUsd,toolCalls:request.toolCalls},{});
       this.sql.prepare(`INSERT INTO campaign_review_jobs(job_id,root_id,runner_id,request_id,target,base_sha,command,state,round,attempt)
         VALUES (?,?,?,?,?,?,?,'reserved',?,?)`).run(jobId,rootId,runnerId,request.requestId,target,request.baseSha,JSON.stringify(command),round,attempt);
+      this.sql.prepare("UPDATE campaign_review_jobs SET charge_scope=? WHERE job_id=?").run(JSON.stringify(this.chargeScope(rootId)),jobId);
       return command;
     });
   }
@@ -104,6 +111,13 @@ export class CampaignReviewJobs {
           update.costUsd===undefined || update.attemptValid===true && !["UPVOTE","DOWNVOTE"].includes(update.vote??"") ||
           update.state==="not_launched" && (update.costUsd!==0 || update.toolCalls!==0 || update.attemptConsumed!==false))) return false;
       const final=["completed","not_launched"].includes(update.state);
+      const delta=(update.costUsd??row.cost??0)-(row.cost??0);
+      if(delta>0) {
+        const scopeRow=this.sql.prepare("SELECT charge_scope FROM campaign_review_jobs WHERE job_id=?").get(update.jobId) as {charge_scope:string|null};
+        const scope=scopeRow.charge_scope?JSON.parse(scopeRow.charge_scope):null;
+        if(scope) this.sql.prepare(`INSERT INTO campaign_review_daily_cost VALUES (?,?,?,?,?)
+          ON CONFLICT(job_id,day) DO UPDATE SET cost=cost+excluded.cost`).run(update.jobId,scope.organizationId,scope.userId,new Date().toISOString().slice(0,10),delta);
+      }
       // Receipt, usage and reservation release commit together. Failed paid reviews also count.
       this.sql.prepare("UPDATE campaign_budget_members SET cost=MAX(cost,?),tools=MAX(tools,?),active=? WHERE session_id=?")
         .run(update.costUsd??row.cost??0,update.toolCalls,final?0:1,update.jobId);

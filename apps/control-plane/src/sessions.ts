@@ -7823,6 +7823,12 @@ export class SessionsService {
     const command=this.db.campaignReviewJobs.command(update.jobId)!;
     const root=this.db.getSession(command.rootSessionId),control=root?.orchestratorPolicy?.control;
     const view=this.db.campaignBudgets.view(command.rootSessionId);
+    const ownerScope=root?this.db.sessionScope(root.id):null;
+    if(ownerScope && this.db.getUsageDailyBudget(ownerScope.organizationId).perUserUsd!==null) {
+      this.db.campaignBudgets.stop(command.rootSessionId,"accounting_unavailable","Native review admission cannot continue across a newly enabled organization daily limit.");
+      this.hub.sendToRunner(runnerId,{type:"cancel_campaign_review_job",jobId:command.jobId,nonce:command.nonce});
+      this.enforceCampaignBudget(command.rootSessionId,Date.now());
+    }
     if(control?.mode!=="full_control" || !root || !campaignBoundaryCurrent(root) || control.boundary.revision!==command.authorityRevision || view?.state!=="active" ||
         update.toolCalls>=command.request.toolCalls || (update.costUsd??0)>=command.request.costUsd) {
       this.hub.sendToRunner(runnerId,{type:"cancel_campaign_review_job",jobId:command.jobId,nonce:command.nonce});

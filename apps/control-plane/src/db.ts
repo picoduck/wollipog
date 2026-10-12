@@ -5027,7 +5027,10 @@ export class ControlPlaneDb {
     hostRebooted: boolean,
   ) {
     this.campaignBudgets = new CampaignBudgetLedger(db);
-    this.campaignReviewJobs = new CampaignReviewJobs(db,this.campaignBudgets);
+    this.campaignReviewJobs = new CampaignReviewJobs(db,this.campaignBudgets,(rootId)=>{
+      const scope=this.sessionScope(rootId);
+      return scope?.owner.kind==="user"?{organizationId:scope.organizationId,userId:scope.owner.userId}:null;
+    });
     this.ingestRollback = hostRebooted && walPath !== null
       ? { settled: new Set(), runnerTails: new Map(), controlPlaneEvents: new Set() }
       : null;
@@ -16367,8 +16370,10 @@ export class ControlPlaneDb {
       `SELECT COALESCE((SELECT SUM(cost_microusd) FROM usage_hourly
                          WHERE organization_id=? AND owner_kind='user' AND owner_id=? AND bucket_ts>=?), 0)
             + COALESCE((SELECT SUM(cost_microusd) FROM usage_daily
-                         WHERE organization_id=? AND owner_kind='user' AND owner_id=? AND bucket_ts>=?), 0) AS microusd`,
-    ).get(organizationId, userId, since, organizationId, userId, since) as { microusd: number };
+                         WHERE organization_id=? AND owner_kind='user' AND owner_id=? AND bucket_ts>=?), 0)
+            + COALESCE((SELECT SUM(cost)*1000000 FROM campaign_review_daily_cost
+                         WHERE organization_id=? AND user_id=? AND day>=?),0) AS microusd`,
+    ).get(organizationId, userId, since, organizationId, userId, since,organizationId,userId,new Date(since).toISOString().slice(0,10)) as { microusd: number };
     return Number(row.microusd ?? 0);
   }
 
