@@ -179,7 +179,7 @@ def collect(report, results, output, outcome, receipt):
                 yield from specs(suite.get("suites", []))
         attempts = 0
         for spec in specs(document.get("suites", [])):
-            if spec.get("file") not in ALLOWLIST or spec.get("ok") is True:
+            if spec.get("file") not in ALLOWLIST:
                 continue
             for case in spec.get("tests", []):
                 for result in case.get("results", []):

@@ -7,8 +7,11 @@ rules remain unchanged, and a failed test step remains failed even when diagnost
 are missing or their upload fails. The required aggregator reads that job result.
 
 The JSON reporter selects attachments from the exact failed shard. Only complete
-trace/error-context pairs are retained, at most three attempts per shard, for
-three days. Input reports are capped at 32 MiB; each input capture at 16 MiB;
+trace/error-context pairs are retained from the first three failed attempts per
+shard, for three days. Rejected/missing pairs count toward that attempt budget;
+later candidates are not scanned for retention. A failed attempt that passes on
+retry remains eligible when fail-on-flaky fails the test step. A successful step
+still uploads nothing. Input reports are capped at 32 MiB; each input capture at 16 MiB;
 ZIP archives at 128 entries and 32 MiB expanded; each projected trace at 8 MiB
 expanded, with at most 20,000 records and 1 MiB per line. Error contexts retain at
 most 2,000 structural lines. Each shard uploads

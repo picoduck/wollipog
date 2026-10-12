@@ -2,6 +2,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -90,6 +91,19 @@ class ArtifactTests(unittest.TestCase):
             self.write_report(file, status, ok)
             self.assertEqual(self.collect()["failures"], 0)
             self.output.rmdir()
+
+    def test_failed_attempt_of_flaky_spec_is_retained_only_when_job_failed(self):
+        # Playwright marks a fail-then-pass spec ok=True, even when failOnFlakyTests fails CI.
+        self.write_report(status="failed", ok=True)
+        document = json.loads(self.report.read_text())
+        case = document["suites"][0]["suites"][0]["specs"][0]["tests"][0]
+        case["status"] = "flaky"
+        case["results"].append({"status": "passed", "attachments": []})
+        self.report.write_text(json.dumps(document))
+        self.assertEqual(self.collect()["failures"], 1)
+        shutil.rmtree(self.output)
+        self.assertEqual(self.collect("success")["failures"], 0)
+        self.assertEqual(list(self.output.iterdir()), [])
 
     def test_missing_required_file_drops_the_entire_pair(self):
         self.context.unlink()
