@@ -8,6 +8,7 @@ import type {
   SessionReminderView,
   SessionView,
 } from "@wollipog/protocol";
+import { BACKGROUND_HANDOFF_WAIT_MAX_MS } from "@wollipog/protocol";
 import { automationCommandDigest, canonicalAutomationCommandJson } from "./automation-command-outbox.js";
 import { ControlPlaneDb } from "./db.js";
 import { LOCAL_OWNER_USER_ID } from "./identity.js";
@@ -624,6 +625,58 @@ test("runner queue updates fan out to every dashboard and clear hold state autho
   assert.equal(drained?.queued, undefined);
   assert.equal(drained?.activeTurnId, undefined);
   assert.equal(hub.activeTurnIdForSession(session.id), undefined);
+  db.close();
+});
+
+test("a held-back background result follows the live turn, and the bound sweep republishes it (#3073)", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const runnerId = "runner-held-result";
+  db.registerRunner({ runnerId, hostname: "held-host", os: "linux", version: "1", agents: [], workspaces: [] }, 1);
+  const session = db.createSession({
+    id: "session-held-result", runnerId, workspaceId: null, agentId: null, title: "Held Result",
+    useWorktree: false, driver: "claude-code", config: {}, now: 2,
+  });
+  const finishedAt = 1_000_000;
+  const job = db.raw().prepare(`INSERT INTO managed_background_jobs
+    (session_id,job_id,parent_turn_id,runner_id,launch_type,registered_at,last_observed_at,
+     terminal_status,terminal_observed_at,continuation_required)
+    VALUES(?,?,'turn-a',?,'agent',1,1,?,?,?)`);
+  job.run(session.id, "shell-done", runnerId, "completed", finishedAt, 1);
+  job.run(session.id, "agent-running", runnerId, null, null, null);
+  const messages: Array<{ type: string; session?: SessionView }> = [];
+  const hub = new Hub(db);
+  hub.attachRunner(runnerId, { send() {} });
+  hub.addUiClient({ send: (data) => messages.push(JSON.parse(data) as { type: string; session?: SessionView }) });
+  const shown = () => messages.findLast((message) => message.type === "session_upsert")?.session?.backgroundDeliveries
+    ?.map((delivery) => [delivery.parentTurnId, delivery.watchdogState ?? null, delivery.unfinishedSiblingJobs]);
+
+  const listRevision = db.sessionListRevision();
+  hub.setSessionQueue(session.id, [], false, "turn-a");
+  assert.deepEqual(shown(), [["turn-a", null, 1]], "the parent turn is running, so its result only waits");
+  assert.notEqual(db.sessionListRevision(), listRevision, "a cached session list is rebuilt when a turn starts");
+  const runningRevision = db.sessionListRevision();
+  hub.setSessionQueue(session.id, [{ id: "prompt-b", text: "B" }], false, "turn-a");
+  assert.equal(db.sessionListRevision(), runningRevision, "a queue change within the turn keeps it");
+  hub.setSessionQueue(session.id, [], false);
+  assert.deepEqual(shown(), [["turn-a", "continuation_blocked", 1]], "the turn ended long past the bound");
+
+  const crossed = finishedAt + BACKGROUND_HANDOFF_WAIT_MAX_MS;
+  const before = messages.length;
+  assert.equal(hub.publishHeldResultsReachingBound(crossed + 1, crossed + 5_000), 0);
+  assert.equal(messages.length, before, "nothing crossed the bound in that window");
+  const sweptRevision = db.sessionListRevision();
+  assert.equal(hub.publishHeldResultsReachingBound(crossed - 5_000, crossed), 1);
+  assert.notEqual(db.sessionListRevision(), sweptRevision, "a cached session list is rebuilt when a bound passes");
+  assert.equal(messages.length, before + 1, "the session is republished when its bound passes");
+  assert.deepEqual(shown(), [["turn-a", "continuation_blocked", 1]]);
+
+  // A disconnect that clears a live parent turn republishes the session as it now stands, even when
+  // the session is already terminal and gets no other upsert.
+  db.raw().prepare("UPDATE sessions SET status='failed' WHERE id=?").run(session.id);
+  hub.setSessionQueue(session.id, [], false, "turn-a");
+  assert.deepEqual(shown(), [["turn-a", null, 1]]);
+  hub.clearRunnerQueues(runnerId);
+  assert.deepEqual(shown(), [["turn-a", "continuation_blocked", 1]], "the cleared turn no longer hides the blocked result");
   db.close();
 });
 

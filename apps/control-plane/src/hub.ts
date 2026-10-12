@@ -471,6 +471,9 @@ export class Hub {
       1,
       Math.floor(options.maxUiConnectionStartsGlobalPerWindow ?? MAX_UI_CONNECTION_STARTS_GLOBAL_PER_WINDOW),
     );
+    // A held-back background result is not blocked while its parent turn runs (#3073). The queue
+    // overlay is the only record of that turn; a disconnect clears it (`clearRunnerQueues`).
+    this.db.setLiveTurnSource?.((sessionId) => this.queuedBySession.get(sessionId)?.activeTurnId);
     try {
       for (const session of this.db.listSessions({ includeArchived: true })) {
         this.sessionProjectState.set(session.id, this.projectStateKey(session));
@@ -1452,6 +1455,7 @@ export class Hub {
   /** Runner reported a session's not-yet-started prompt queue (ephemeral); relay to dashboards. */
   setSessionQueue(sessionId: string, queue: QueuedPromptView[], held = false, activeTurnId?: string): void {
     this.snapshotQueueRevision++;
+    if (this.queuedBySession.get(sessionId)?.activeTurnId !== activeTurnId) this.db.derivedSessionStateChanged?.();
     if (queue.length || held || activeTurnId) this.queuedBySession.set(sessionId, { queue, held, activeTurnId });
     else this.queuedBySession.delete(sessionId);
     const session = this.db.getSession(sessionId);
@@ -1479,8 +1483,12 @@ export class Hub {
     for (const id of [...this.queuedBySession.keys()]) {
       const s = this.db.getSession(id);
       if (!s || s.runnerId === runnerId) {
+        const hadLiveTurn = Boolean(this.queuedBySession.get(id)?.activeTurnId);
         this.queuedBySession.delete(id);
-        if (s) this.publishSessionUpsert(s);
+        if (hadLiveTurn) this.db.derivedSessionStateChanged?.();
+        // Read again once the live turn is gone: a held-back result it hid may now be blocked (#3073).
+        const current = s && hadLiveTurn ? this.db.getSession(id) : s;
+        if (current) this.publishSessionUpsert(current);
       }
     }
   }
@@ -1525,6 +1533,15 @@ export class Hub {
 
   worktreeSetupNoticeDismissed(userId: string, projectId: string): void {
     this.broadcast({ type: "worktree_setup_notice_dismissed", userId, projectId });
+  }
+
+  /** Republish sessions whose held-back background result became Result Blocked in `(from, to]`:
+   * the bound elapsing changes their status with no other change to announce it (#3073). */
+  publishHeldResultsReachingBound(from: number, to: number): number {
+    const sessionIds = this.db.sessionsWithHeldResultsReachingBound(from, to);
+    if (sessionIds.length) this.db.derivedSessionStateChanged();
+    for (const sessionId of sessionIds) this.sessionChangedById(sessionId);
+    return sessionIds.length;
   }
 
   fireDueSessionReminders(now = Date.now()): number {

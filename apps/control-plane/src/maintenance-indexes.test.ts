@@ -12,6 +12,7 @@ const NEW_INDEXES = [
   "idx_session_command_invocations_expiry", "idx_session_prompt_commands_expiry",
   "idx_session_prompt_commands_retention", "idx_outbound_event_deliveries_lease",
   "idx_outbound_event_deliveries_retention", "idx_outbound_event_deliveries_retry",
+  "idx_managed_background_jobs_held_results",
 ];
 const TRIGGERS = [
   "outbound_events_orphan_insert", "outbound_deliveries_orphan_insert",

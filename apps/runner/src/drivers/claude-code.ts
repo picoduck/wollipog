@@ -22,7 +22,7 @@ import { parseClaudeInitCatalog } from "../discovery/claude-slash-catalog.js";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { AgentQuestion, PlanEntry, PromptImage, SessionConfig } from "@wollipog/protocol";
+import { BACKGROUND_HANDOFF_WAIT_MAX_MS, type AgentQuestion, type PlanEntry, type PromptImage, type SessionConfig } from "@wollipog/protocol";
 import { approvalScopeContext } from "../approval-scope.js";
 import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
 import { inspectClaudeBackgroundWork, inspectClaudeBackgroundWorkInContext, type ClaudeBackgroundWorkInspection } from "../claude-background-work.js";
@@ -74,8 +74,9 @@ const DEFAULT_PENDING_MAX_MS = 7 * 24 * 60 * 60_000;
 /** How long a queued handoff waits on unfinished background work before the runner ends it
  * (#1778). An hour matches the control plane's Stalled mark (`BACKGROUND_JOB_STALL_MS`), is far
  * longer than a CI watch or a subagent normally runs, and is counted from when a prompt began to
- * wait, not from when the job started, so work nobody is waiting on is never ended by it. */
-const DEFAULT_HANDOFF_WAIT_MAX_MS = 60 * 60_000;
+ * wait, not from when the job started, so work nobody is waiting on is never ended by it. The
+ * control plane's Result Blocked bound is the same shared value (#3073). */
+const DEFAULT_HANDOFF_WAIT_MAX_MS = BACKGROUND_HANDOFF_WAIT_MAX_MS;
 const MAX_TIMER_MS = 0x7fffffff;
 const GRACEFUL_STOP_MS = 5_000;
 /** After killTree has had time to deliver its bounded native/WSL escalation, stop waiting for an

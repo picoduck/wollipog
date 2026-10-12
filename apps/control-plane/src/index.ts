@@ -6264,6 +6264,18 @@ const sweepSessionReminders = () => {
 sweepSessionReminders();
 const sessionReminderTimer = setInterval(sweepSessionReminders, 1_000);
 sessionReminderTimer.unref();
+// Every read derives Result Blocked from the time; this tells dashboards when it starts (#3073).
+let heldResultSweepAt = Date.now();
+const heldResultTimer = setInterval(() => {
+  const now = Date.now();
+  try {
+    hub.publishHeldResultsReachingBound(heldResultSweepAt, now);
+    heldResultSweepAt = now;
+  } catch (error) {
+    app.log.warn({ error: error instanceof Error ? error.message : String(error) }, "held background result sweep deferred");
+  }
+}, 5_000);
+heldResultTimer.unref();
 const sessionCommandRetryTimer = setInterval(() => {
   try {
     svc.retryDueSessionCommands(Date.now());
@@ -6372,6 +6384,7 @@ app.addHook("onClose", async () => {
   clearInterval(skillGitAutoUpdateTimer);
   clearInterval(usagePricingTimer);
   clearInterval(sessionReminderTimer);
+  clearInterval(heldResultTimer);
   clearInterval(sessionCommandRetryTimer);
   clearInterval(sessionStopMaintenanceTimer);
   clearInterval(backgroundPushRetryTimer);

@@ -4505,6 +4505,41 @@ test("provider task promotion preserves the provisional job's parent turn", () =
     assert.equal(promoted.jobs[0]?.id, "provider-task-1");
     assert.equal(promoted.jobs[0]?.parentTurnId, "parent-turn");
     assert.equal(promoted.jobs[0]?.registeredAt, 10);
+    assert.equal(promoted.jobs[0]?.replacesJobId, "tool:spawn-1", "the control plane is told which record it replaces (#3073)");
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("a provider task first seen without its tool use retires the provisional record once tied to it (#3073)", () => {
+  const h = harness({ driver: "claude-code" });
+  try {
+    const merge = (update: Record<string, unknown>) => {
+      const merged = (h.manager as any).mergeDurableBackgroundJobs(h.store.readMeta("resume-session"), update, "parent-turn");
+      h.store.patchMeta("resume-session", { backgroundJobs: merged.jobs });
+      return merged as { jobs: Array<{ id: string; terminalObservedAt?: number; replacesJobId?: string }>; queuedJobIds: string[] };
+    };
+    const sibling = { id: "shell-1", toolUseId: "spawn-shell", launchType: "shell", startedAt: 9 };
+    merge({ state: "running", pendingTaskIds: ["shell-1", "tool:spawn-1"],
+      jobs: [sibling, { id: "tool:spawn-1", toolUseId: "spawn-1", launchType: "agent", startedAt: 10 }] });
+    // task_started named no tool use: both records are listed, as the driver still holds both.
+    assert.deepEqual(merge({ state: "running", pendingTaskIds: ["provider-task-1", "shell-1", "tool:spawn-1"],
+      jobs: [{ id: "provider-task-1", launchType: "unknown", startedAt: 11 }, sibling,
+        { id: "tool:spawn-1", toolUseId: "spawn-1", launchType: "agent", startedAt: 10 }] }).jobs.map((job) => job.id),
+    ["shell-1", "tool:spawn-1", "provider-task-1"]);
+    // The async-launch result ties the provider id to the tool use; the driver drops its placeholder.
+    const tied = merge({ state: "running", pendingTaskIds: ["provider-task-1", "shell-1"],
+      jobs: [{ id: "provider-task-1", toolUseId: "spawn-1", launchType: "unknown", startedAt: 11 }, sibling] }).jobs;
+    assert.deepEqual(tied.map((job) => [job.id, job.replacesJobId]),
+      [["shell-1", undefined], ["provider-task-1", "tool:spawn-1"]], "one job for the agent, not a placeholder beside it");
+    // When both finish, nothing from the launch is left unfinished, so the turn's continuation is queued.
+    const finished = merge({ state: null, pendingTaskIds: [], terminalJobs: [
+      { id: "shell-1", toolUseId: "spawn-shell", launchType: "shell", startedAt: 9, status: "completed", terminalAt: 20, continuationRequired: true },
+      { id: "provider-task-1", toolUseId: "spawn-1", launchType: "agent", startedAt: 11, status: "completed", terminalAt: 21, continuationRequired: true },
+    ] });
+    assert.ok(finished.jobs.every((job) => job.terminalObservedAt !== undefined));
+    assert.deepEqual(finished.queuedJobIds.sort(), ["provider-task-1", "shell-1"]);
   } finally {
     h.manager.shutdownAll();
     h.cleanup();

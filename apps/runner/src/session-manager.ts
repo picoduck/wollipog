@@ -16814,6 +16814,7 @@ export class SessionManager {
     settledModelStops: ReadonlySet<string> = new Set(),
   ): { jobs: DurableBackgroundJob[]; queuedJobIds: string[] } {
     const byId = new Map((current.backgroundJobs ?? []).map((job) => [job.id, { ...job }]));
+    const reported = new Set([...update.jobs ?? [], ...update.terminalJobs ?? []].map((job) => job.id));
     const findAlias = (id: string, toolUseId?: string) => byId.get(id) ?? (toolUseId
       ? [...byId.values()].find((job) => job.toolUseId === toolUseId)
       : undefined);
@@ -16829,7 +16830,20 @@ export class SessionManager {
         byId.set(movedId, { ...carried, id: movedId });
         prior = undefined;
       }
-      if (prior && prior.id !== job.id) byId.delete(prior.id);
+      let replaced = prior && prior.id !== job.id ? prior.id : undefined;
+      if (replaced) byId.delete(replaced);
+      // A provider id first seen without its tool use is recorded beside the provisional record of
+      // that launch. Once a report ties them and no longer lists the provisional one, it is the same
+      // job: left behind, it would be an unfinished sibling forever and hold its turn's results back
+      // (#3073). Either way the control plane is told which record this one replaces.
+      if (job.toolUseId) {
+        for (const [id, other] of byId) {
+          if (id === job.id || reported.has(id) || other.toolUseId !== job.toolUseId ||
+              other.restartedAt !== undefined || other.terminalObservedAt !== undefined) continue;
+          byId.delete(id);
+          replaced = id;
+        }
+      }
       const outputReference = job.outputFile?.slice(0, MAX_BACKGROUND_OUTPUT_REFERENCE_CHARS);
       byId.set(job.id, {
         ...(prior ?? {
@@ -16845,6 +16859,7 @@ export class SessionManager {
         ...(job.toolUseId ? { toolUseId: job.toolUseId } : {}),
         launchType: job.launchType,
         ...(outputReference ? { outputReference } : {}),
+        ...(replaced ? { replacesJobId: replaced } : {}),
       });
     };
     for (const job of update.jobs ?? []) register(job);

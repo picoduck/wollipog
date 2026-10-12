@@ -456,8 +456,8 @@ export interface SessionStatusSummary {
   primary: SessionCondition;
   /** How many OTHER conditions need the person: the "+N". Never counts passive states. */
   more: number;
-  /** Every condition, in rank order, for the Session Status popover. The lifecycle is listed only
-   * when nothing needs the person. */
+  /** Every condition, in rank order, for the Session Status popover. The lifecycle is always
+   * listed: it is the badge only when nothing ranks above it. */
   conditions: SessionCondition[];
 }
 
@@ -641,9 +641,8 @@ export function sessionStatusSummary(
   if (lost) conditions.push(lost);
   if (disconnected) conditions.push(disconnected);
   if (waiting) conditions.push(waiting);
-  if (needs.length === 0) {
-    conditions.push({ kind: "lifecycle", meta: lifecycle, description: lifecycleDescription(lifecycle), needsYou: false });
-  }
+  // Listed even under a request, so the popover still says the agent is Running (#3073).
+  conditions.push({ kind: "lifecycle", meta: lifecycle, description: lifecycleDescription(lifecycle), needsYou: false });
   if (background && background !== lost && background !== waiting) conditions.push(background);
   if (delivery && !delivery.needsYou) conditions.push(delivery);
   const workers = context.activeWorkers ?? 0;

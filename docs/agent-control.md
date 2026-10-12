@@ -960,10 +960,13 @@ queued behind a turn that had never started.
 - **The job is reported, too.** A listed job with no terminal status for more than an hour carries
   `stalledSince` in the session's job inventory and reads **Stalled** in the Background Work panel.
   That is a report, not proof it ended. A finished job whose result cannot be returned because a
-  sibling from the same turn is unfinished is a `continuation_blocked` delivery, shown as **Result
-  Blocked** with the step that clears it (ask the session to stop the unfinished job; a stop or a
-  restart ends every job, a stop discards the result, and a v191 restart reports it to the new
-  conversation), rather than **Result Pending** with "No action is needed".
+  sibling from the same turn is unfinished waits passively (the session reads **Waiting on External
+  Job**) while its parent turn runs and until an hour has passed since it finished
+  (`BACKGROUND_HANDOFF_WAIT_MAX_MS`, the runner's default handoff bound; #3073). After both, it is a
+  `continuation_blocked` delivery, shown as **Result Blocked** with the step that clears it (ask the
+  session to stop the unfinished job; a stop or a restart ends every job, a stop discards the result,
+  and a v191 restart reports it to the new conversation), rather than **Result Pending** with "No
+  action is needed".
   Older runners leave all of this absent, and a queued prompt behind such a barrier stays invisible
   to them as before.
 - **Who ended a job is shown (#1849).** A job Wollipog ended carries `endedBy` in the session's job

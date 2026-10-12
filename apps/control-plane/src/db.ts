@@ -45,6 +45,7 @@ import {
   parentControlRequestEligible,
   sessionHolds,
   BACKGROUND_JOB_STALL_MS,
+  BACKGROUND_HANDOFF_WAIT_MAX_MS,
   normalizeAgentHarnessIdentity,
   agentContextKey,
   runnerSupportsProtocol,
@@ -5031,6 +5032,55 @@ export class ControlPlaneDb {
 
   setUsageRateTable(table: RateTable | null): void {
     this.usageRateTable = table;
+  }
+  /** The runner's live turn coordinate per session (`SessionQueueMessage.activeTurnId`), which only
+   * the hub's ephemeral overlay holds. Unset, no turn counts as running. */
+  private liveTurnSource: (sessionId: string) => string | undefined = () => undefined;
+
+  setLiveTurnSource(source: (sessionId: string) => string | undefined): void {
+    this.liveTurnSource = source;
+  }
+
+  private derivedSessionRevision = 0;
+
+  /** A session view's input outside the database changed: a live turn began or ended, or a held-back
+   * result reached its bound (#3073). Cached session lists are rebuilt on their next read. */
+  derivedSessionStateChanged(): void {
+    this.derivedSessionRevision++;
+  }
+
+  /** Where a turn's finished result held back by an unfinished sibling stands (#3073). While its
+   * parent turn runs it is not blocked: that turn may still be the one waiting on the work. A job
+   * started outside any runner turn (`unknown`) may belong to whichever turn is running. After the
+   * turn, it is Result Blocked only once the result has waited the runner's handoff bound; a job
+   * that needs a continuation finished outside its own provider turn, so its finish is never before
+   * that turn ended. Until then it carries no watchdog state, and the session reads Waiting on
+   * External Job from its running work. */
+  private heldResultState(
+    sessionId: string,
+    parentTurnId: string,
+    unfinishedSiblings: number,
+    heldSince: number,
+    now: number,
+  ): Pick<BackgroundDeliveryView, "watchdogState" | "unfinishedSiblingJobs"> {
+    if (unfinishedSiblings <= 0) return { watchdogState: "terminal_without_continuation" };
+    const liveTurn = this.liveTurnSource(sessionId);
+    const parentRunning = liveTurn !== undefined && (parentTurnId === liveTurn || parentTurnId === "unknown");
+    return !parentRunning && heldSince + BACKGROUND_HANDOFF_WAIT_MAX_MS <= now
+      ? { watchdogState: "continuation_blocked", unfinishedSiblingJobs: unfinishedSiblings }
+      : { unfinishedSiblingJobs: unfinishedSiblings };
+  }
+
+  /** Sessions where a held-back result reached the Result Blocked bound in `(from, to]`, so the
+   * periodic sweep republishes them even though nothing else changed (#3073). */
+  sessionsWithHeldResultsReachingBound(from: number, to: number): string[] {
+    if (to <= from) return [];
+    return (this.stmt(
+      `SELECT DISTINCT session_id FROM managed_background_jobs
+        WHERE source_present=1 AND continuation_required=1 AND continuation_id IS NULL
+          AND terminal_observed_at IS NOT NULL AND terminal_observed_at>? AND terminal_observed_at<=?`,
+    ).all(from - BACKGROUND_HANDOFF_WAIT_MAX_MS, to - BACKGROUND_HANDOFF_WAIT_MAX_MS) as Array<{ session_id: string }>)
+      .map((row) => row.session_id);
   }
   /** Configured Git automatic-update interval, reported with each skill's update status. */
   skillGitAutoUpdateIntervalMs = 60 * 60_000;
@@ -10671,7 +10721,7 @@ export class ControlPlaneDb {
   sessionListRevision(): string {
     const changes = (this.stmt("SELECT total_changes() AS changes").get() as { changes: number }).changes;
     const version = (this.stmt("PRAGMA data_version").get() as { data_version: number }).data_version;
-    return `${changes}:${version}`;
+    return `${changes}:${version}:${this.derivedSessionRevision}`;
   }
 
   /** A fixed set of SQL reads, with audience filtering before hydration. Large provider and
@@ -10866,7 +10916,7 @@ export class ControlPlaneDb {
         delivery.accepted_at,delivery.missing_result_at,delivery.notification_queued_at,delivery.dashboard_observed_at,
         COALESCE(delivery.notification_queued_at,delivery.updated_at) AS sort_at,COUNT(job.job_id) AS job_count,
         SUM(CASE WHEN job.terminal_observed_at IS NOT NULL THEN 1 ELSE 0 END) AS terminal_count,
-        0 AS unfinished_sibling_count,
+        0 AS unfinished_sibling_count,NULL AS held_since,
         CASE WHEN SUM(job.source_present)>0 AND delivery.missing_result_at IS NOT NULL AND
             delivery.missing_result_acknowledged_at IS NULL AND delivery.runner_result_persisted_at IS NULL
           THEN 'accepted_without_result'
@@ -10885,9 +10935,7 @@ export class ControlPlaneDb {
         SUM(CASE WHEN job.terminal_observed_at IS NOT NULL THEN 1 ELSE 0 END) AS terminal_count,
         (SELECT COUNT(*) FROM managed_background_jobs sibling WHERE sibling.session_id=job.session_id
           AND sibling.parent_turn_id=job.parent_turn_id AND sibling.source_present=1 AND sibling.terminal_observed_at IS NULL) AS unfinished_sibling_count,
-        CASE WHEN (SELECT COUNT(*) FROM managed_background_jobs sibling WHERE sibling.session_id=job.session_id
-          AND sibling.parent_turn_id=job.parent_turn_id AND sibling.source_present=1 AND sibling.terminal_observed_at IS NULL)>0
-          THEN 'continuation_blocked' ELSE 'terminal_without_continuation' END AS watchdog_state
+        MIN(job.terminal_observed_at) AS held_since,NULL AS watchdog_state
       FROM managed_background_jobs job JOIN sessions session ON session.id=job.session_id
       JOIN session_ownership ownership ON ownership.session_id=session.id
       WHERE ${authorization.sql} AND session.status!='stopped' AND job.source_present=1
@@ -10899,11 +10947,14 @@ export class ControlPlaneDb {
         session_id: string; continuation_id: string | null; parent_turn_id: string; queued_at: number | null;
         accepted_at: number | null; missing_result_at: number | null; job_count: number; terminal_count: number;
         notification_queued_at: number | null; dashboard_observed_at: number | null;
-        unfinished_sibling_count: number; watchdog_state: BackgroundDeliveryWatchdogState;
+        unfinished_sibling_count: number; held_since: number | null; watchdog_state: BackgroundDeliveryWatchdogState | null;
       }>;
+    const deliveryNow=Date.now();
     for (const entry of deliveries) {
       const items=context.backgroundDeliveries.get(entry.session_id) ?? [];
       if (items.length>=64) continue;
+      const held=entry.continuation_id ? null
+        : this.heldResultState(entry.session_id,entry.parent_turn_id,entry.unfinished_sibling_count,entry.held_since ?? deliveryNow,deliveryNow);
       items.push({ parentTurnId: entry.parent_turn_id,jobCount: entry.job_count,terminalCount: entry.terminal_count,
         ...(entry.continuation_id ? { continuationId: entry.continuation_id } : {}),
         ...(entry.queued_at!=null ? { queuedAt: entry.queued_at } : {}),
@@ -10911,8 +10962,7 @@ export class ControlPlaneDb {
         ...(entry.missing_result_at!=null ? { missingResultAt: entry.missing_result_at } : {}),
         ...(entry.notification_queued_at!=null ? { notificationQueuedAt: entry.notification_queued_at } : {}),
         ...(entry.dashboard_observed_at!=null ? { dashboardObservedAt: entry.dashboard_observed_at } : {}),
-        ...(entry.unfinished_sibling_count ? { unfinishedSiblingJobs: entry.unfinished_sibling_count } : {}),
-        watchdogState: entry.watchdog_state });
+        ...(held ?? { watchdogState: entry.watchdog_state! }) });
       context.backgroundDeliveries.set(entry.session_id,items);
     }
     const usage = this.stmt(`SELECT usage.session_id,
@@ -14761,6 +14811,14 @@ export class ControlPlaneDb {
     const replacedJob = this.stmt(
       "DELETE FROM managed_background_jobs WHERE session_id=? AND job_id=? AND registered_at < ?",
     );
+    // A launch's provisional record that a provider task id superseded is the same job, not a
+    // second one the runner stopped listing; it goes while it holds no result evidence (#3073).
+    const supersededJob = this.stmt(
+      `DELETE FROM managed_background_jobs WHERE session_id=? AND job_id=? AND terminal_observed_at IS NULL
+         AND continuation_id IS NULL AND assistant_result_persisted_at IS NULL`,
+    );
+    const listedIds = new Set((jobs as readonly unknown[]).flatMap((job) =>
+      job && typeof job === "object" && typeof (job as { id?: unknown }).id === "string" ? [(job as { id: string }).id] : []));
     const upsertDelivery = this.stmt(
       `INSERT INTO managed_background_deliveries
         (session_id, continuation_id, parent_turn_id, queued_at, submitted_at, accepted_at,
@@ -14803,6 +14861,10 @@ export class ControlPlaneDb {
       // same id is a new job: a task id repeated after a Restart moved the carried record aside
       // (#1779), or one repeating a pruned job's id. None of the earlier job's facts describe it.
       replacedJob.run(sessionId, job.id, job.registeredAt);
+      if (validOptionalBackgroundIdentity(job.replacesJobId) && job.replacesJobId &&
+          job.replacesJobId !== job.id && !listedIds.has(job.replacesJobId)) {
+        supersededJob.run(sessionId, job.replacesJobId);
+      }
       upsertJob.run(
         sessionId,
         job.id,
@@ -15122,6 +15184,7 @@ export class ControlPlaneDb {
     const pending = status === "stopped" ? [] : this.stmt(
       `SELECT job.parent_turn_id, COUNT(*) AS job_count,
               SUM(CASE WHEN job.terminal_observed_at IS NOT NULL THEN 1 ELSE 0 END) AS terminal_count,
+              MIN(job.terminal_observed_at) AS held_since,
               (SELECT COUNT(*) FROM managed_background_jobs sibling
                 WHERE sibling.session_id=job.session_id AND sibling.parent_turn_id=job.parent_turn_id
                   AND sibling.source_present=1 AND sibling.terminal_observed_at IS NULL) AS unfinished_sibling_count
@@ -15135,15 +15198,15 @@ export class ControlPlaneDb {
       parent_turn_id: string;
       job_count: number;
       terminal_count: number;
+      held_since: number;
       unfinished_sibling_count: number;
     }>;
+    const now = Date.now();
     return views.concat(pending.map((row) => ({
       parentTurnId: row.parent_turn_id,
       jobCount: row.job_count,
       terminalCount: row.terminal_count,
-      ...(row.unfinished_sibling_count > 0
-        ? { watchdogState: "continuation_blocked" as const, unfinishedSiblingJobs: row.unfinished_sibling_count }
-        : { watchdogState: "terminal_without_continuation" as const }),
+      ...this.heldResultState(sessionId, row.parent_turn_id, row.unfinished_sibling_count, row.held_since, now),
     })));
   }
 

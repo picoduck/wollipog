@@ -134,6 +134,7 @@ export function captureMaintenanceQueries(db: ControlPlaneDb): MaintenanceQuery[
     ["claimDueBackgroundPushDeliveries", () => db.claimDueBackgroundPushDeliveries(now)],
     ["claimOutboundEventDeliveries", () => db.claimOutboundEventDeliveries(now, 16, 30_000)],
     ["compactOutboundEventDeliveries", () => db.compactOutboundEventDeliveries(now)],
+    ["sessionsWithHeldResultsReachingBound", () => db.sessionsWithHeldResultsReachingBound(now - 5_000, now)],
   ];
   try {
     for (const [name, action] of actions) { method = name; action(); }
