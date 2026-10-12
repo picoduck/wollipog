@@ -622,50 +622,233 @@ test("same-PID registries cannot adopt checkpoint cleanup authority and metadata
   assert.notEqual(helperPass(home).status, 0);
 });
 
-test("real native and helper contenders elect one owner on a compacted chain", { skip: process.platform !== "linux", timeout: 30_000 }, async (t) => {
-  const home = fixture(t);
+type ContenderName = "native" | "helper";
+type PublicationFault = "empty" | "split" | "invalid" | "exit" | "error";
+type ReportState = "absent" | "empty" | "partial" | "invalid" | "complete";
+
+// These bounds belong only to the contender fixture, never to lease acquisition.
+const contenderWaitMs = 15_000;
+const contenderCloseMs = 5_000;
+function contenderReport(path: string): { state: ReportState; outcome?: string } {
+  if (!fs.existsSync(path)) return { state: "absent" };
+  if (fs.statSync(path).size > 16) return { state: "invalid" };
+  const raw = fs.readFileSync(path, "utf8");
+  if (raw === "won\n" || raw === "lost\n") return { state: "complete", outcome: raw.trim() };
+  if (!raw) return { state: "empty" };
+  return { state: ["won\n", "lost\n"].some(value => value.startsWith(raw)) ? "partial" : "invalid" };
+}
+
+function contenderProcess(t: Pick<TestContext, "signal" | "after">, home: string, name: ContenderName, args: string[], reapers: Array<() => Promise<void>>) {
+  t.signal.throwIfAborted();
+  const child = spawn(name === "native" ? process.execPath : "python3", args,
+    { env: { ...process.env, HOME: home }, stdio: ["ignore", "ignore", "pipe"] });
+  // Drain stderr, but never put arbitrary child output (HOME paths, environment) in diagnostics.
+  child.stderr.on("data", () => {});
+  let spawnFailed = false;
+  child.on("error", () => { spawnFailed = true; });
+  let didClose = false;
+  const closed = new Promise<void>(resolve => child.once("close", () => { didClose = true; resolve(); }));
+  const status = () => `${name}: exit=${child.exitCode ?? "pending"}, signal=${child.signalCode ?? "none"}, spawn=${spawnFailed ? "failed" : "ok"}`;
+  let reaping: Promise<void> | undefined;
+  const waitClosed = async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([closed, new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`contender cleanup timeout; ${status()}`)), contenderCloseMs);
+      })]);
+    } finally { clearTimeout(timer); }
+  };
+  const reap = () => reaping ??= (async () => {
+    if (!didClose && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await waitClosed();
+  })();
+  reapers.push(reap); t.after(reap);
+  return { child, status, reap, closed: () => didClose, failed: () => spawnFailed || child.signalCode !== null || (child.exitCode !== null && child.exitCode !== 0) };
+}
+type ContenderProcess = ReturnType<typeof contenderProcess>;
+
+async function contenderReady(process: ContenderProcess, path: string, phase: string, signal: AbortSignal,
+  options: { report?: boolean; timeout?: number; incompleteTimeout?: number; observeIncomplete?: (state: ReportState) => void } = {}) {
+  const deadline = performance.now() + (options.timeout ?? contenderWaitMs);
+  let incompleteDeadline: number | undefined;
+  for (;;) {
+    const report = options.report ? contenderReport(path) : { state: fs.existsSync(path) ? "complete" : "absent" };
+    const diagnostic = () => `contender ${phase}; report=${report.state}; ${process.status()}`;
+    if (signal.aborted) throw new Error(`${diagnostic()}; cancelled`, { cause: signal.reason });
+    if (process.failed()) throw new Error(`${diagnostic()}; child failed`);
+    if (report.state === "invalid") throw new Error(`${diagnostic()}; invalid report`);
+    if (report.state === "complete") return "outcome" in report ? report.outcome : undefined;
+    if (process.closed()) throw new Error(`${diagnostic()}; incomplete report at exit`);
+    if (options.incompleteTimeout && (report.state === "empty" || report.state === "partial")) incompleteDeadline ??= performance.now() + options.incompleteTimeout;
+    if (performance.now() >= Math.min(deadline, incompleteDeadline ?? deadline)) throw new Error(`${diagnostic()}; reporting timeout`);
+    options.observeIncomplete?.(report.state as ReportState);
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+}
+
+async function checkpointContenders(t: TestContext, options: {
+  delayed?: ContenderName; fault?: PublicationFault; stall?: "timeout" | "cancel";
+  onCleanup?: (home: string, processes: ContenderProcess[]) => void;
+} = {}) {
+  const reapers: Array<() => Promise<void>> = [];
+  const home = fixture(t, reapers);
   seed(home, 9);
-  const gate = join(home, "go");
-  const finish = join(home, "finish");
-  const nativeReady = join(home, "native-ready");
-  const helperReady = join(home, "helper-ready");
-  const nativeResult = join(home, "native-result");
-  const helperResult = join(home, "helper-result");
+  const gate = join(home, "go"), finish = join(home, "finish"), publishGo = join(home, "publish-go");
   const script = join(home, "contender.mts");
-  fs.writeFileSync(script, `import { ProviderHomeLeaseRegistry } from ${JSON.stringify(nativeModule)};\nimport { existsSync, writeFileSync } from "node:fs";\nconst wait = (path) => { while (!existsSync(path)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10); };\nconst registry = new ProviderHomeLeaseRegistry(${JSON.stringify(owner)}, { beforeTransitionPublishForTest: () => { writeFileSync(${JSON.stringify(nativeReady)}, "ready"); wait(${JSON.stringify(gate)}); } });\ntry { registry.acquireHome(${JSON.stringify(home)}); writeFileSync(${JSON.stringify(nativeResult)}, "won"); wait(${JSON.stringify(finish)}); registry.releaseAll(); } catch { writeFileSync(${JSON.stringify(nativeResult)}, "lost"); }`);
+  const nativeReady = join(home, "native-ready"), helperReady = join(home, "helper-ready");
+  const nativeResult = join(home, "native-result"), helperResult = join(home, "helper-result");
+  const faultFor = (name: ContenderName) => options.delayed === name ? options.fault : undefined;
+  fs.writeFileSync(script, `import { ProviderHomeLeaseRegistry } from ${JSON.stringify(nativeModule)};
+import { existsSync, writeFileSync, appendFileSync } from "node:fs";
+const wait = (path) => { const until=Date.now()+${contenderWaitMs}; while (!existsSync(path)) { if(Date.now()>=until) throw new Error("fixture barrier timeout"); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10); } };
+const registry = new ProviderHomeLeaseRegistry(${JSON.stringify(owner)}, { beforeTransitionPublishForTest: () => { writeFileSync(${JSON.stringify(nativeReady)}, "ready"); wait(${JSON.stringify(gate)}); } });
+let outcome;
+try { registry.acquireHome(${JSON.stringify(home)}); outcome="won"; }
+catch(error) { if(!/already in use|changed during recovery/.test(String(error))) throw error; outcome="lost"; }
+// Publication is deliberately outside the acquisition catch: a reporting failure is never a loss.
+const fault=${JSON.stringify(faultFor("native") ?? null)}, result=${JSON.stringify(nativeResult)};
+if(fault==="error") throw new Error("fixture publication failed");
+if(fault==="invalid") writeFileSync(result,"private invalid report");
+else if(fault) { writeFileSync(result,fault==="split" ? outcome[0] : ""); if(fault==="exit") process.exit(0); wait(${JSON.stringify(publishGo)}); appendFileSync(result,(fault==="split" ? outcome.slice(1) : outcome)+"\\n"); }
+else writeFileSync(result,outcome+"\\n");
+if(outcome==="won") { wait(${JSON.stringify(finish)}); registry.releaseAll(); }`);
   const code = program(`
 original_publish = publish_lease
+def wait_fixture(path):
+    deadline = time.monotonic() + ${contenderWaitMs / 1000}
+    while not os.path.exists(path):
+        if time.monotonic() >= deadline: raise RuntimeError("fixture barrier timeout")
+        time.sleep(0.01)
 def publish_lease(root, lock, target, value):
     if target.startswith("next-") and value.get("state") == "active":
         with open(${JSON.stringify(helperReady)}, "w") as stream: stream.write("ready")
-        while not os.path.exists(${JSON.stringify(gate)}): time.sleep(0.01)
+        wait_fixture(${JSON.stringify(gate)})
     return original_publish(root, lock, target, value)
 home_fd, _ = open_root(os.environ["HOME"])
 try: lease = acquire_lease(home_fd, "${owner}")
-except:
-    with open(${JSON.stringify(helperResult)}, "w") as stream: stream.write("lost")
+except RuntimeError as error:
+    if "already in use" not in str(error) and "changed during recovery" not in str(error): raise
+    outcome = "lost"
+else: outcome = "won"
+fault = ${JSON.stringify(faultFor("helper") ?? "")}
+if fault == "error": raise RuntimeError("fixture publication failed")
+if fault == "invalid":
+    with open(${JSON.stringify(helperResult)}, "w") as stream: stream.write("private invalid report")
+elif fault:
+    with open(${JSON.stringify(helperResult)}, "w") as stream:
+        stream.write(outcome[0] if fault == "split" else "")
+        stream.flush()
+        if fault == "exit": sys.exit(0)
+        wait_fixture(${JSON.stringify(publishGo)})
+        stream.write((outcome[1:] if fault == "split" else outcome) + "\\n")
 else:
-    with open(${JSON.stringify(helperResult)}, "w") as stream: stream.write("won")
-    while not os.path.exists(${JSON.stringify(finish)}): time.sleep(0.01)
+    with open(${JSON.stringify(helperResult)}, "w") as stream: stream.write(outcome + "\\n")
+if outcome == "won":
+    wait_fixture(${JSON.stringify(finish)})
     release_lease(lease)
 os.close(home_fd)`);
-  const children = [spawn(process.execPath, ["--import", "tsx", script]), spawn("python3", ["-c", code], { env: { ...process.env, HOME: home } })];
-  let output = "";
-  for (const child of children) {
-    child.stderr?.on("data", (chunk) => { output += chunk; });
-    t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); });
+  const processes: ContenderProcess[] = [];
+  const cancellation = new AbortController();
+  const signal = AbortSignal.any([t.signal, cancellation.signal]);
+  const pending: Promise<unknown>[] = [];
+  const track = <T>(promise: Promise<T>) => { pending.push(promise); return promise; };
+  let phase = "startup";
+  const interrupted = () => console.error(`contender ${phase}; cancelled; ${processes.map((p, i) => `${p.status()}, report=${contenderReport(i === 0 ? nativeResult : helperResult).state}`).join("; ")}`);
+  t.signal.addEventListener("abort", interrupted, { once: true });
+  try {
+    processes.push(contenderProcess(t, home, "native", ["--import", "tsx", script], reapers));
+    processes.push(contenderProcess(t, home, "helper", ["-c", code], reapers));
+    await Promise.all([track(contenderReady(processes[0]!, nativeReady, "native acquisition barrier", signal)),
+      track(contenderReady(processes[1]!, helperReady, "helper acquisition barrier", signal))]);
+    fs.writeFileSync(gate, "go");
+    phase = "result publication";
+    let incompleteObservations = 0;
+    const outcomes = await Promise.all(processes.map((process, index) => {
+      const name: ContenderName = index === 0 ? "native" : "helper";
+      return track(contenderReady(process, index === 0 ? nativeResult : helperResult, `${name} result publication`, signal, {
+        report: true, incompleteTimeout: options.stall === "timeout" && name === options.delayed ? 200 : undefined,
+        observeIncomplete: state => {
+          if (name !== options.delayed || state !== (options.fault === "split" ? "partial" : "empty")) return;
+          incompleteObservations++;
+          // Observe the paused report through the actual readiness loop on two different turns.
+          if (incompleteObservations !== 2) return;
+          if (options.stall === "cancel") cancellation.abort(new Error("fixture publication cancelled"));
+          else if (!options.stall && (options.fault === "empty" || options.fault === "split")) fs.writeFileSync(publishGo, "go");
+        },
+        // The short stall bound starts only once the report is incomplete, after acquisition.
+      }));
+    }));
+    if (options.fault === "empty" || options.fault === "split") assert.ok(incompleteObservations >= 2, "parent observed incomplete publication without consuming it");
+    assert.deepEqual([...outcomes].sort(), ["lost", "won"]);
+    phase = "release";
+    fs.writeFileSync(finish, "go");
+    await Promise.all(processes.map(process => track((async () => {
+      const deadline = performance.now() + contenderWaitMs;
+      while (!process.closed()) {
+        signal.throwIfAborted();
+        if (performance.now() >= deadline) throw new Error(`contender release timeout; ${process.status()}`);
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      assert.equal(process.child.exitCode, 0, `contender release failed; ${process.status()}`);
+      assert.equal(process.child.signalCode, null, process.status());
+    })())));
+    nativePass(home);
+    assert.equal(helperPass(home).status, 0);
+    return outcomes;
+  } finally {
+    cancellation.abort(new Error("fixture readiness cleanup"));
+    await Promise.allSettled(pending);
+    await Promise.all(reapers.map(reap => reap()));
+    t.signal.removeEventListener("abort", interrupted);
+    try { options.onCleanup?.(home, processes); }
+    finally { fs.rmSync(home, { recursive: true, force: true }); }
   }
-  await Promise.all([ready(children[0]!, nativeReady, () => output), ready(children[1]!, helperReady, () => output)]);
-  fs.writeFileSync(gate, "go");
-  await Promise.all([ready(children[0]!, nativeResult, () => output), ready(children[1]!, helperResult, () => output)]);
-  const results = [nativeResult, helperResult].map((path) => fs.readFileSync(path, "utf8")).sort();
-  assert.deepEqual(results, ["lost", "won"]);
-  const ended = children.filter((child) => child.exitCode === null && child.signalCode === null).map((child) => new Promise<void>((resolve) => child.once("close", () => resolve())));
-  fs.writeFileSync(finish, "go");
-  await Promise.all(ended);
-  nativePass(home);
-  assert.equal(helperPass(home).status, 0);
+}
+
+test("real native and helper contenders elect one owner on a compacted chain", { skip: process.platform !== "linux", timeout: 30_000 }, async t => {
+  await checkpointContenders(t);
 });
+for (const delayed of ["native", "helper"] as const) {
+  for (const fault of ["empty", "split"] as const) {
+    test(`checkpoint contender ${delayed} waits for complete ${fault} publication`, { skip: process.platform !== "linux", timeout: 30_000 }, async t => {
+      await checkpointContenders(t, { delayed, fault });
+    });
+  }
+  for (const fault of ["invalid", "exit", "error"] as const) {
+    test(`checkpoint contender ${delayed} rejects ${fault} publication and awaits cleanup`, { skip: process.platform !== "linux", timeout: 30_000 }, async t => {
+      await assert.rejects(checkpointContenders(t, { delayed, fault, onCleanup: (home, processes) => {
+        assert.ok(processes.every(process => process.closed()), "only fixture children are closed before HOME removal");
+        assert.ok(fs.existsSync(home));
+      } }), error => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, new RegExp(`${delayed} result publication; report=.*; ${delayed}: exit=`));
+        assert.match(error.message, /invalid report|incomplete report at exit|child failed/);
+        assert.ok(!error.message.includes("private") && !error.message.includes(tmpdir()), "sanitized diagnostics");
+        return true;
+      });
+    });
+  }
+  test(`checkpoint contender ${delayed} cancellation reaps a stalled publisher`, { skip: process.platform !== "linux", timeout: 30_000 }, async t => {
+    const reason = await checkpointContenders(t, { delayed, fault: "split", stall: "cancel", onCleanup: (home, processes) => {
+      assert.ok(processes.every(process => process.closed()));
+      assert.equal(processes[delayed === "native" ? 0 : 1]!.child.signalCode, "SIGKILL");
+      nativePass(home); assert.equal(helperPass(home).status, 0, "journal recovers after publisher cancellation");
+    } }).then(() => undefined, error => error);
+    assert.ok(reason instanceof Error);
+    assert.match(reason.message, /result publication; report=.*; .*cancelled/);
+    assert.match(String(reason.cause), /fixture publication cancelled/);
+  });
+}
+
+for (const delayed of ["native", "helper"] as const) {
+  test(`checkpoint contender ${delayed} reporting timeout reaps a stalled publisher`, { skip: process.platform !== "linux", timeout: 30_000 }, async t => {
+    await assert.rejects(checkpointContenders(t, { delayed, fault: "empty", stall: "timeout", onCleanup: (home, processes) => {
+      assert.ok(processes.every(process => process.closed()));
+      assert.equal(processes[delayed === "native" ? 0 : 1]!.child.signalCode, "SIGKILL");
+      nativePass(home); assert.equal(helperPass(home).status, 0, "journal recovers after reporting timeout");
+    } }), new RegExp(`${delayed} result publication; report=empty; ${delayed}: exit=pending, signal=none, spawn=ok; reporting timeout`));
+  });
+}
 
 test("retained evidence stays within the complete checkpoint work budget", { skip: process.platform !== "linux" }, (t) => {
   const home = fixture(t);
