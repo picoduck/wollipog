@@ -115,6 +115,7 @@ function harness(sourceBytes?: Buffer, validation = false) {
     gate: { authority: "human", status: "pending", resourceDigest: sha(JSON.stringify(snapshot)), policyRevision: boundary.revision },
     source: { artifactId: "source", sha256: sha(source), sizeBytes: source.length, manifestSha256: sha("synthetic native manifest"),
       orderedFramesSha256: sha(JSON.stringify(syntheticValidationFrames())), criteriaSha256: sha("synthetic criteria"),
+      privateOracleCommitmentSha256: sha("disclosed synthetic test commitment, never a blind oracle"),
       frames: 360, width: 1280, height: 720, durationUs: 12_000_000 },
     context, target, request: runtime.resolve(identity, subject)!.request, providerExecutableSha256: sha("synthetic installed exe"),
     nativeToolProfileSha256: sha("synthetic installed media tools"), namespaceLaunchSha256: sha("synthetic launch"), authoritySha256: sha("synthetic current authority"),
@@ -170,6 +171,7 @@ test("validation worker messages, changed authority/profile/source, expiry/revoc
     (h: ReturnType<typeof harness>) => { h.setValidationScope(null); },
     (h: ReturnType<typeof harness>) => { h.validationScope()!.nativeToolProfileSha256 = sha("replacement tool profile"); },
     (h: ReturnType<typeof harness>) => { h.validationScope()!.source.criteriaSha256 = sha("replacement criteria"); },
+    (h: ReturnType<typeof harness>) => { h.validationScope()!.source.privateOracleCommitmentSha256 = sha("changed truth after mint"); },
     (h: ReturnType<typeof harness>) => { h.db.raw().prepare("UPDATE workflow_decisions SET authority='orchestrator'").run(); },
     (h: ReturnType<typeof harness>) => { h.db.raw().prepare("UPDATE workflow_decisions SET resource_digest=?").run(sha("replacement occurrence")); },
     (h: ReturnType<typeof harness>) => { const resolve = h.runtime.resolve;
