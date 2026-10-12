@@ -464,7 +464,21 @@ export function NavigationRailPanel() {
   const isMobile = useIsMobile();
   const digits = railDigits(visibleRailViews(preferences, flags));
   return (
-    <SettingsGroup title="Navigation">
+    <SettingsGroup
+      title="Navigation"
+      // The group's one action and its foot line (§8.2): every child of its surface is a row.
+      action={(
+        <button
+          type="button"
+          className="btn ghost sm"
+          disabled={railPreferencesAreDefault(preferences)}
+          onClick={() => resetRailPreferences(instanceScope)}
+        >
+          Reset to Default
+        </button>
+      )}
+      foot="The visible order assigns the digit shortcuts. Hidden destinations stay reachable from search and direct links, and keep their place here for when they return."
+    >
       {!isMobile && (
         <SwitchRow
           title="Show Labels in Rail"
@@ -534,20 +548,6 @@ export function NavigationRailPanel() {
           );
         })}
       </ul>
-      <p className="rail-order-hint">
-        The visible order assigns the digit shortcuts. Hidden destinations stay reachable from search
-        and direct links, and keep their place here for when they return.
-      </p>
-      <div className="rail-order-actions">
-        <button
-          type="button"
-          className="btn ghost sm"
-          disabled={railPreferencesAreDefault(preferences)}
-          onClick={() => resetRailPreferences(instanceScope)}
-        >
-          Reset to Default
-        </button>
-      </div>
     </SettingsGroup>
   );
 }

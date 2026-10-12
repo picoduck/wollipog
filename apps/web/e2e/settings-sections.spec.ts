@@ -88,7 +88,17 @@ test("at 1440px every section's row titles share one left edge and its controls 
   let measuredControls = 0;
   for (const { id } of SETTINGS_SECTIONS) {
     await openSection(page, "dark", id);
-    const rows = await page.locator(".settings-panel .settings-group-surface .setting-row").evaluateAll((elements) => elements.map((row) => {
+    // Appearance's Navigation editor rows are not setting rows yet (#3021 rebuilds them), but they sit
+    // in the same group surface and are held to the same two edges: the icon on the left one, the
+    // last control on the right one.
+    const rows = await page.locator(".settings-panel .settings-group-surface :is(.setting-row, .rail-order-row)").evaluateAll((elements) => elements.map((row) => {
+      if (row.classList.contains("rail-order-row")) {
+        return {
+          title: (row.querySelector(".rail-order-title")?.textContent ?? "").trim(),
+          titleLeft: row.firstElementChild!.getBoundingClientRect().left,
+          controlRight: row.querySelector(".rail-order-controls")!.getBoundingClientRect().right,
+        };
+      }
       const control = row.querySelector(":scope > .setting-row-control");
       // The rightmost thing the control column draws: a select keeps an unrendered list root after
       // its trigger, and a disabled select its reason under it.
