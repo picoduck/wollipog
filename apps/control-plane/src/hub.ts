@@ -1483,9 +1483,12 @@ export class Hub {
     for (const id of [...this.queuedBySession.keys()]) {
       const s = this.db.getSession(id);
       if (!s || s.runnerId === runnerId) {
-        if (this.queuedBySession.get(id)?.activeTurnId) this.db.derivedSessionStateChanged?.();
+        const hadLiveTurn = Boolean(this.queuedBySession.get(id)?.activeTurnId);
         this.queuedBySession.delete(id);
-        if (s) this.publishSessionUpsert(s);
+        if (hadLiveTurn) this.db.derivedSessionStateChanged?.();
+        // Read again once the live turn is gone: a held-back result it hid may now be blocked (#3073).
+        const current = s && hadLiveTurn ? this.db.getSession(id) : s;
+        if (current) this.publishSessionUpsert(current);
       }
     }
   }

@@ -669,6 +669,14 @@ test("a held-back background result follows the live turn, and the bound sweep r
   assert.notEqual(db.sessionListRevision(), sweptRevision, "a cached session list is rebuilt when a bound passes");
   assert.equal(messages.length, before + 1, "the session is republished when its bound passes");
   assert.deepEqual(shown(), [["turn-a", "continuation_blocked", 1]]);
+
+  // A disconnect that clears a live parent turn republishes the session as it now stands, even when
+  // the session is already terminal and gets no other upsert.
+  db.raw().prepare("UPDATE sessions SET status='failed' WHERE id=?").run(session.id);
+  hub.setSessionQueue(session.id, [], false, "turn-a");
+  assert.deepEqual(shown(), [["turn-a", null, 1]]);
+  hub.clearRunnerQueues(runnerId);
+  assert.deepEqual(shown(), [["turn-a", "continuation_blocked", 1]], "the cleared turn no longer hides the blocked result");
   db.close();
 });
 
