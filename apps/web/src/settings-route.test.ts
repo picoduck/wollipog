@@ -72,8 +72,8 @@ test("/settings alone keeps no section, so a phone can show the index (#3018)", 
 
 test("every section has an icon-free one-line description and at most one scope (#3018)", () => {
   for (const section of SETTINGS_SECTIONS) {
-    // 48 characters is what a 390px index row shows before its ellipsis.
-    assert.ok(section.description.length > 0 && section.description.length <= 48,
+    // A 390px index row shows about 44 characters before its ellipsis in CI's fonts; 38 leaves room.
+    assert.ok(section.description.length > 0 && section.description.length <= 38,
       `${section.title}: one untruncated line on a 390px phone row`);
     assert.match(section.description, /^[A-Z][^.]*\.$/, `${section.title}: one sentence, in sentence case`);
     assert.ok(section.scope === undefined || section.scope === "This Device" || section.scope === "Your Account");

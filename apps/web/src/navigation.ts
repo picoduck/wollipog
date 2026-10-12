@@ -52,11 +52,11 @@ export interface SettingsSectionEntry {
 export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSectionEntry> = [
   { id: "appearance", title: "Appearance", description: "Theme, colors, density and navigation.", scope: "This Device" },
   { id: "notifications", title: "Notifications", description: "Alerts when a session needs you.", scope: "This Device" },
-  { id: "keyboard", title: "Keyboard", description: "Shortcuts for moving around without a mouse." },
-  { id: "behavior", title: "Behavior", description: "Typing, transcripts, privacy and agent defaults." },
-  { id: "approvals", title: "Approvals", description: "Questions and tool policies for your agents." },
-  { id: "orchestrator", title: "Orchestrator", description: "Defaults for sessions that manage others.", scope: "Your Account" },
-  { id: "network", title: "Network", description: "Reach this machine from your other devices." },
+  { id: "keyboard", title: "Keyboard", description: "Shortcuts for getting around faster." },
+  { id: "behavior", title: "Behavior", description: "Typing, privacy and agent defaults." },
+  { id: "approvals", title: "Approvals", description: "Question answers and tool policies." },
+  { id: "orchestrator", title: "Orchestrator", description: "Defaults for sessions that run others.", scope: "Your Account" },
+  { id: "network", title: "Network", description: "Reach this machine from other devices." },
   { id: "experimental", title: "Experimental", description: "Features that are still being tested.", scope: "This Device" },
   { id: "about", title: "About", description: "Versions and updates." },
 ];
