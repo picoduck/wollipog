@@ -2348,11 +2348,30 @@ pointers only; its tooltip names the chord.
 of `.code-well` and `.copy-field`.
 
 - `--bg` (the sunken ground), 1px `--border`, `--radius-md`, padding 4px 4px 4px 12px, the copy
-  button trailing at the top.
+  button trailing at the top (centered on the value in the single-line form below).
 - The value (`code` or `pre`) is `--type-small` in `--font-mono` and `--text`, and wraps anywhere:
-  the whole value is what gets copied, so it is never clipped. A single-line form for one-line
-  secrets and URLs (`.code-well` with the value on one line, ellipsis, and the copy button centered)
-  lands with its first consumer.
+  commands, build output and error details are never clipped.
+- `.code-well.one-line` (#2950) is the single-line form, for a one-line secret, key or address (a
+  pairing code, a signing secret, a webhook address): `align-items: center`, and the value, always a
+  `code`, stays on one line with `white-space: nowrap`, `overflow: hidden` and
+  `text-overflow: ellipsis`. Only the paint is clipped: the whole value stays in the DOM, so Copy and
+  screen readers get all of it. The trailing copy button is a `CopyButton` `.icon-btn.sm`: 28px,
+  centered on the value, with the shared copy confirmation (§18) and a 44px hit area on a coarse
+  pointer (§15.3).
+- `OneLineCodeWell` renders it: `<OneLineCodeWell value={secret} name="Signing Secret" />` draws the
+  well and names its button **Copy Signing Secret**. A well that needs a name sits in a `.field` with
+  its label (`.field-label`) above it; the well itself carries no label.
+
+  ```tsx
+  <div className="field">
+    <span className="field-label">Signing Secret</span>
+    <OneLineCodeWell value={secret} name="Signing Secret" />
+  </div>
+  ```
+
+- Never use `.one-line` for a command, output or error: only a value whose whole text Copy puts on
+  the clipboard may be shortened on screen. The primitives harness shows both forms
+  (`primitives-e2e.html?view=code-well`).
 - Replaces `.connection-details-code`.
 
 ### 11.8 Masked Personal Identifier
@@ -3147,6 +3166,10 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
 `@media (pointer: coarse)` applies the control and row sizes in §2.8 regardless of width (tablets at
 834px get 44px targets). Hover styles are wrapped in `@media (hover: hover)`.
 
+A small icon button inside a component takes its touch target from that block rather than adding
+its own: the single-line code well's Copy (§11.7) is a `.icon-btn.sm`, 36px on a coarse pointer
+plus the 4px it borrows on every side, so it is a 44×44 target with no rule in `.code-well.one-line`.
+
 The browser's tap highlight is off on the phone tab bar and the More sheet (its rows, Close and
 scrim), and nowhere else (#2084). Chromium paints it above every layer, so a tap on More left a
 translucent rectangle over the sheet it had just opened. A tab gives its own feedback instead: the
@@ -3406,7 +3429,7 @@ green. Area work adopts the component instead of writing the class again.
 | `.menu.flip-up` | `.flip-up`, `.drop-up` | §9.1 | Already delivered: `Menu.tsx` placement (#1803) |
 | `.menu-note` | one area class | §9.1 | Already delivered: `MenuNote` (#1803) |
 | `.menu-scroll` | one area class | §9.1 | Already delivered: the one `Menu` height cap (#1803) |
-| `.code-well` (with a single-line form) | `.code-well`, `.copy-field` | §11.7 | Connection details (the single-line form lands with its first consumer) |
+| `.code-well` (`.code-well.one-line` for a single-line value) | `.code-well`, `.copy-field` | §11.7 | Connection details; `.code-well.one-line` through `OneLineCodeWell` (#2950) |
 | `.pid` | `.pid`, `.masked-field` | §11.8 | `PersonalIdentifier` |
 | `.split` (split button) | three area classes | §3.2 | `EditorSelect` |
 | `.seg.block` (full-width segmented) | two area classes | §10.2 | The Projects visibility filter |

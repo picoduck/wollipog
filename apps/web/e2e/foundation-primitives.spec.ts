@@ -287,3 +287,82 @@ test.describe("at 390px", () => {
     });
   }
 });
+
+// The single-line code well (#2950, §11.7) in the primitives harness: a 400-character secret stays on
+// one line and ends in an ellipsis at both widths, with its copy button centered on the value, while
+// the wrapping well beside it still wraps the same value.
+for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+  for (const pointer of ["fine", "coarse"] as const) {
+    test.describe(`the single-line code well at ${viewport.width}px with a ${pointer} pointer`, () => {
+      test.use({ viewport, hasTouch: pointer === "coarse" });
+
+      test("keeps a 400-character value on one line with an ellipsis and Copy centered on it", async ({ page }) => {
+        await page.goto("/primitives-e2e.html?view=code-well");
+        await expect(page.locator('[data-well="long"] .code-well.one-line')).toBeVisible();
+        expect(await coarse(page)).toBe(pointer === "coarse");
+        const measure = (well: string) => page.locator(`[data-well="${well}"] .code-well`).evaluate((element) => {
+          const code = element.querySelector("code")!;
+          const range = document.createRange();
+          range.selectNodeContents(code);
+          const value = code.getBoundingClientRect();
+          const copy = element.querySelector("button")!.getBoundingClientRect();
+          return {
+            length: code.textContent!.length,
+            // Each line of text is its own client rect, so distinct tops count lines.
+            lines: new Set([...range.getClientRects()].map((rect) => Math.round(rect.top))).size,
+            clipped: code.scrollWidth > code.clientWidth,
+            ellipsis: getComputedStyle(code).textOverflow,
+            offCenter: Math.abs((copy.top + copy.bottom) / 2 - (value.top + value.bottom) / 2),
+            copyInside: copy.left >= value.right && copy.right <= element.getBoundingClientRect().right,
+            copyHeight: copy.height,
+          };
+        });
+        const long = await measure("long");
+        expect(long).toMatchObject({ length: 400, lines: 1, clipped: true, ellipsis: "ellipsis", copyInside: true });
+        expect(long.offCenter, "the copy button is centered on the value").toBeLessThan(1);
+        expect(long.copyHeight).toBe(pointer === "fine" ? 28 : 36);
+
+        const short = await measure("short");
+        expect(short).toMatchObject({ lines: 1, clipped: false, copyInside: true });
+        expect(short.offCenter).toBeLessThan(1);
+
+        const wrapping = await measure("wrapping");
+        expect(wrapping.length).toBe(400);
+        expect(wrapping.lines, "the wrapping well still wraps").toBeGreaterThan(1);
+        expect(wrapping.clipped).toBe(false);
+
+        expect(await page.evaluate(() => document.scrollingElement!.scrollWidth - innerWidth), "no sideways scroll")
+          .toBeLessThanOrEqual(0);
+      });
+
+      if (pointer === "coarse") {
+        test("Copy is a 44px target that copies the whole value", async ({ page, context }) => {
+          await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+          await page.goto("/primitives-e2e.html?view=code-well");
+          const copy = page.getByRole("button", { name: "Copy Signing Secret" });
+          await expect(copy).toBeVisible();
+          const hits = await copy.evaluate((button) => {
+            const box = button.getBoundingClientRect();
+            const x = box.left + box.width / 2;
+            const y = box.top + box.height / 2;
+            const at = (px: number, py: number) => button.contains(document.elementFromPoint(px, py));
+            // 3.5px past each visible edge is inside the 4px it borrows on every side: 36 + 8 = 44.
+            return {
+              size: [box.width, box.height],
+              above: at(x, box.top - 3.5),
+              below: at(x, box.bottom + 3.5),
+              left: at(box.left - 3.5, y),
+              right: at(box.right + 3.5, y),
+            };
+          });
+          expect(hits).toEqual({ size: [36, 36], above: true, below: true, left: true, right: true });
+          // A tap in the borrowed band above the button still copies, and it copies all 400 characters.
+          const box = (await copy.boundingBox())!;
+          await page.touchscreen.tap(box.x + box.width / 2, box.y - 3);
+          await expect(copy).toHaveClass(/copy-status-copied/);
+          expect((await page.evaluate(() => navigator.clipboard.readText())).length).toBe(400);
+        });
+      }
+    });
+  }
+}
