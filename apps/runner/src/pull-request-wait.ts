@@ -384,10 +384,14 @@ export function evaluateCommitChecks(
     const named = [...latest.values()].filter((node) => node.name === name);
     const apps = appsFor(name);
     // One result per requirement: every reported run of an unrestricted name, or each required
-    // app's own run; a status context (which names no app here) stands in for an app with no run.
+    // app's own run plus every same-name status context, which must pass as well. A status context
+    // names no app here, so it also stands in for a required app that has no run.
+    const statuses = named.filter((node) => node.kind === "StatusContext");
     const results: Array<CheckState | undefined> = apps
-      ? apps.map((app) => (named.find((node) => node.kind === "CheckRun" && node.appId === app) ??
-        named.find((node) => node.kind === "StatusContext"))?.state)
+      ? [
+        ...apps.map((app) => (named.find((node) => node.kind === "CheckRun" && node.appId === app) ?? statuses[0])?.state),
+        ...statuses.map((node) => node.state),
+      ]
       : named.length > 0 ? named.map((node) => node.state) : [undefined];
     const state: CheckState = results.includes("failed") ? "failed"
       : results.every((result) => result === "passed") ? "passed" : "pending";

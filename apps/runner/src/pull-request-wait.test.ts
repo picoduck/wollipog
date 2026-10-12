@@ -561,6 +561,11 @@ test("every app a required check is bound to must report", () => {
     appRun(123, "SUCCESS"), { __typename: "StatusContext", context: "CI", state: "FAILURE", createdAt: "x" },
   ]), ["CI"], { CI: [123, 456] });
   assert.equal(status.requiredState, "failed", "a status context stands in for an app with no run");
+  const masked = evaluateCommitChecks(HEAD, rollup([
+    appRun(123, "SUCCESS"), { __typename: "StatusContext", context: "CI", state: "FAILURE", createdAt: "x", isRequired: true },
+  ]), ["CI"], { CI: [123] });
+  assert.equal(masked.requiredState, "failed", "the required app's run never masks a failing same-name status");
+  assert.deepEqual(masked.summary.failedJobs.map(({ name, required }) => ({ name, required })), [{ name: "CI", required: true }]);
 });
 
 test("check names that collide with object prototype keys evaluate normally", () => {
