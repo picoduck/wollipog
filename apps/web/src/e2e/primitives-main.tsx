@@ -2,6 +2,8 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import { FieldError } from "../components/FieldError.js";
 import { FieldWarning } from "../components/FieldWarning.js";
+import { FeedbackProvider, useFeedback } from "../components/FeedbackProvider.js";
+import { DetailBar } from "../components/PageHeader.js";
 import { SaveBar } from "../components/SaveBar.js";
 import "../styles.css";
 
@@ -16,6 +18,8 @@ import "../styles.css";
  * Field anatomy (#2270, §8.1): a `.field-head` label row with a control beside the label, and a field
  * warning under a helper, so a spec can measure label to control, control to helper and helper to
  * warning.
+ * `?view=actions-menu` shows instead a detail bar whose ⋯ item confirms with the menu's `reopen` as
+ * its Back (#2949, §7.5): on a phone the confirmation replaces the ⋯ sheet and Back brings it back.
  * `?theme=light` switches theme.
  */
 
@@ -67,9 +71,54 @@ function WarnField() {
   );
 }
 
+function ConfirmingDetailBar() {
+  const { confirm } = useFeedback();
+  const [answers, setAnswers] = React.useState<string[]>([]);
+  return (
+    <>
+      <DetailBar
+        title="Nightly Digest"
+        backLabel="Back to Automations"
+        onBack={() => {}}
+        menu={[
+          { label: "Run Now", onClick: () => {} },
+          { label: "Duplicate…", onClick: () => {} },
+          {
+            label: "Delete Automation…",
+            danger: true,
+            onClick: ({ reopen }) => {
+              void confirm({
+                title: "Delete Automation",
+                message: "Nightly Digest and its run history are deleted. This cannot be undone.",
+                confirmLabel: "Delete Automation",
+                tone: "danger",
+                back: { label: "Back to More Actions", run: reopen },
+              }).then((confirmed) => setAnswers((list) => [...list, String(confirmed)]));
+            },
+          },
+        ]}
+      />
+      {answers.length > 0 && (
+        <p className="muted sm" style={{ padding: 16 }}>
+          Confirmation resolved: <span data-confirmation-answers>{answers.join(", ")}</span>
+        </p>
+      )}
+    </>
+  );
+}
+
 function Harness() {
-  document.documentElement.setAttribute("data-theme",
-    new URLSearchParams(window.location.search).get("theme") === "light" ? "light" : "dark");
+  const params = new URLSearchParams(window.location.search);
+  document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
+  if (params.get("view") === "actions-menu") {
+    return (
+      <FeedbackProvider>
+        <div style={{ minHeight: "100vh", background: "var(--bg)" }}>
+          <ConfirmingDetailBar />
+        </div>
+      </FeedbackProvider>
+    );
+  }
   return (
     <div style={{ minHeight: "100vh", padding: 24, background: "var(--bg)" }}>
       <form className="form" noValidate

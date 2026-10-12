@@ -3,7 +3,9 @@ import { after, before, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import { DetailBar, PageHeader } from "./PageHeader.js";
+import { DetailBar, PageHeader, type PageMenuAction } from "./PageHeader.js";
+import { FeedbackProvider, useFeedback } from "./FeedbackProvider.js";
+import { SkillDetailHeader } from "./SkillDetailHeader.js";
 import { ErrorBoundary } from "./ErrorBoundary.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
@@ -16,6 +18,7 @@ const priorElementGlobals = {
   HTMLElement: (globalThis as Record<string, unknown>)["HTMLElement"],
   HTMLButtonElement: (globalThis as Record<string, unknown>)["HTMLButtonElement"],
   MutationObserver: (globalThis as Record<string, unknown>)["MutationObserver"],
+  React: (globalThis as Record<string, unknown>)["React"],
 };
 
 before(() => {
@@ -25,6 +28,8 @@ before(() => {
   Object.defineProperty(globalThis, "HTMLElement", { configurable: true, writable: true, value: domWindow.HTMLElement });
   Object.defineProperty(globalThis, "HTMLButtonElement", { configurable: true, writable: true, value: domWindow.HTMLButtonElement });
   Object.defineProperty(globalThis, "MutationObserver", { configurable: true, writable: true, value: domWindow.MutationObserver });
+  // SkillDetailHeader relies on the app's automatic JSX runtime, which a run from the repository root lacks.
+  Object.defineProperty(globalThis, "React", { configurable: true, writable: true, value: React });
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, writable: true, value: true });
 });
 
@@ -35,6 +40,7 @@ after(() => {
   Object.defineProperty(globalThis, "HTMLElement", { configurable: true, writable: true, value: priorElementGlobals.HTMLElement });
   Object.defineProperty(globalThis, "HTMLButtonElement", { configurable: true, writable: true, value: priorElementGlobals.HTMLButtonElement });
   Object.defineProperty(globalThis, "MutationObserver", { configurable: true, writable: true, value: priorElementGlobals.MutationObserver });
+  Object.defineProperty(globalThis, "React", { configurable: true, writable: true, value: priorElementGlobals.React });
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, writable: true, value: priorActEnvironment });
 });
 
@@ -635,5 +641,102 @@ test("a crashed route keeps its page title above the error notice", async () => 
   } finally {
     await view.unmount();
     console.error = priorError;
+  }
+});
+
+/**
+ * A ⋯ item that confirms, handing the confirmation the menu's `reopen` as its phone Back (§7.5,
+ * #2949). Each settled answer is recorded.
+ */
+function ConfirmingActions({ host, settled }: { host: "detail-bar" | "page-header" | "skill-header"; settled: boolean[] }) {
+  const { confirm } = useFeedback();
+  const menu: PageMenuAction[] = [
+    { label: "Run Now", onClick: () => undefined },
+    {
+      label: "Delete Automation…",
+      danger: true,
+      onClick: ({ reopen }) => {
+        void confirm({
+          title: "Delete Automation",
+          message: "Nightly Digest and its run history are deleted. This cannot be undone.",
+          confirmLabel: "Delete Automation",
+          tone: "danger",
+          back: { label: "Back to More Actions", run: reopen },
+        }).then((answer) => settled.push(answer));
+      },
+    },
+  ];
+  if (host === "page-header") return <PageHeader title="Automations" menu={menu} />;
+  if (host === "skill-header") {
+    return (
+      <SkillDetailHeader
+        skill={{ id: "skill-1", name: "Release Notes" }}
+        showTitle
+        addAssignment={{ label: "Add Assignment…", onClick: () => undefined }}
+        menu={menu}
+      />
+    );
+  }
+  return <DetailBar title="Nightly Digest" backLabel="Back to Automations" onBack={() => undefined} menu={menu} />;
+}
+
+const setViewportWidth = (width: number) => act(async () => domWindow.happyDOM.setWindowSize({ width, height: 844 }));
+
+async function mountConfirmingActions(host: "detail-bar" | "page-header" | "skill-header") {
+  const settled: boolean[] = [];
+  const view = await mount(<FeedbackProvider><ConfirmingActions host={host} settled={settled} /></FeedbackProvider>);
+  const body = domWindow.document.body as unknown as HTMLElement;
+  const more = view.container.querySelector<HTMLButtonElement>('[aria-label="More Actions"]')!;
+  const sheet = () => body.querySelector<HTMLElement>('[role="menu"][aria-label="More Actions"]');
+  const dialog = () => body.querySelector<HTMLElement>('[role="dialog"]');
+  const chooseDelete = async () => {
+    await act(async () => more.click());
+    const item = [...sheet()!.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+      .find((candidate) => candidate.textContent === "Delete Automation…")!;
+    await act(async () => item.click());
+  };
+  return { view, settled, sheet, dialog, chooseDelete };
+}
+
+for (const host of ["detail-bar", "page-header", "skill-header"] as const) {
+  test(`at 390px a confirmation from ${host}'s ⋯ replaces its sheet, and Back reopens the sheet on that item (§7.5, #2949)`, async () => {
+    const priorWidth = domWindow.innerWidth;
+    await setViewportWidth(390);
+    const { view, settled, sheet, dialog, chooseDelete } = await mountConfirmingActions(host);
+    try {
+      await chooseDelete();
+      assertNoDomNode(sheet(), "the confirmation does not stack on the ⋯ sheet");
+      const back = dialog()!.querySelector<HTMLButtonElement>(".modal-back");
+      assert.equal(back?.getAttribute("aria-label"), "Back to More Actions");
+
+      await act(async () => back!.click());
+      // The confirmation settles, then hands focus back on a later task.
+      await act(async () => new Promise((resolve) => domWindow.setTimeout(resolve, 0)));
+      assertNoDomNode(dialog(), "Back closes the confirmation");
+      assert.deepEqual(settled, [false], "Back resolves the confirmation as cancelled");
+      assert.ok(sheet(), "and brings the ⋯ sheet back");
+      assert.equal(domWindow.document.activeElement?.textContent, "Delete Automation…",
+        "with focus on the item that was chosen, not the first one");
+    } finally {
+      await view.unmount();
+      await setViewportWidth(priorWidth);
+    }
+  });
+}
+
+test("at 1440px a confirmation from ⋯ stacks as before and draws no Back (§7.5, #2949)", async () => {
+  const priorWidth = domWindow.innerWidth;
+  await setViewportWidth(1440);
+  const { view, settled, dialog, chooseDelete } = await mountConfirmingActions("detail-bar");
+  try {
+    await chooseDelete();
+    assert.ok(dialog(), "the confirmation opens");
+    assertNoDomNode(dialog()!.querySelector(".modal-back"), "desktop draws no Back");
+    const cancel = [...dialog()!.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Cancel")!;
+    await act(async () => cancel.click());
+    assert.deepEqual(settled, [false]);
+  } finally {
+    await view.unmount();
+    await setViewportWidth(priorWidth);
   }
 });

@@ -28,7 +28,18 @@ export interface PagePrimaryAction extends PageAction {
   shortcut?: string;
 }
 
-export interface PageMenuAction extends PageAction {
+/** What ⋯ hands the item chosen from it (§7.5). */
+export interface ActionsMenuChoice {
+  /**
+   * Opens the same ⋯ again (its sheet on a phone) with focus on the item that was chosen. An item
+   * that confirms passes it as the confirmation's Back: `back: { label: "Back to More Actions", run: reopen }`.
+   */
+  reopen: () => void;
+}
+
+export interface PageMenuAction extends Omit<PageAction, "onClick"> {
+  /** Called once ⋯ has closed and handed focus back to its trigger. */
+  onClick: (choice: ActionsMenuChoice) => void;
   /** Destructive: drawn last, after a separator, in the danger text colour (§3.3). */
   danger?: boolean;
   /** The item's second line: a folded menu button's description, or why a disabled item is unavailable (§9.1). */
@@ -416,7 +427,8 @@ function slotButtonShown(trigger: HTMLElement | null, slot: number): boolean {
 
 /**
  * The ⋯ menu shared by the page header, the detail bar and an in-page header such as the skill
- * detail's (#1962). Destructive items sort last.
+ * detail's (#1962). Destructive items sort last. Each item is called with `reopen`, so a
+ * confirmation it opens can bring this menu back as its phone Back (§7.5, #2949).
  *
  * The menu is the shared MenuSurface, portalled: the page header is an inline-size query container,
  * and engines at the build floor that give `container-type` layout containment would make it the
@@ -431,6 +443,21 @@ export function ActionsMenu({ className, overflow = "always", items }: { classNa
     ? items.filter((item) => item.slot === undefined || !slotButtonShown(menu.triggerRef.current, item.slot))
     : [];
   const { close, triggerRef, menuRef } = menu;
+  // The label of the item a `reopen` brings focus back to. Declared after the menu hook, so this
+  // effect runs after its opening focus and moves it from the first item to that one.
+  const reopenFocus = useRef<string | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const label = reopenFocus.current;
+    reopenFocus.current = null;
+    if (label === null) return;
+    // One element per listed item, in the order drawn; an item that has gone or become unavailable
+    // since leaves focus where the menu put it.
+    const index = ordered.findIndex((item) => item.label === label && !item.disabled);
+    const rows = menuRef.current?.querySelectorAll<HTMLElement>(".menu-item");
+    if (index >= 0) rows?.[index]?.focus();
+    // Only an opening reads the label, against that render's `ordered`.
+  }, [open, menuRef]);
   // Whether keyboard focus is in the pop. A width change can drop the focused item from a menu
   // that stays open (its button reappeared); focus then stays in the menu, not on <body>. A layout
   // effect, so it runs in the same commit, before the shell's route and layout focus rescue.
@@ -484,10 +511,15 @@ export function ActionsMenu({ className, overflow = "always", items }: { classNa
   }, [open, items, close, triggerRef, menuRef]);
   const ordered = [...shown.filter((item) => !item.danger), ...shown.filter((item) => item.danger)];
   const firstDanger = ordered.findIndex((item) => item.danger);
-  const choose = (action: () => void) => {
+  const choose = (item: ActionsMenuItem) => {
     menu.close(false);
     menu.triggerRef.current?.focus();
-    action();
+    item.onClick({
+      reopen: () => {
+        reopenFocus.current = item.label;
+        setOpen(true);
+      },
+    });
   };
   return (
     <div className={`overflow-menu${className ? ` ${className}` : ""}`} data-overflow={overflow}>
@@ -540,7 +572,7 @@ export function ActionsMenu({ className, overflow = "always", items }: { classNa
                 // The trailing slot is decorative, so a count joins the name in words as it shows.
                 aria-label={(item.count ?? 0) > 0 ? `${item.label}, ${item.count}` : undefined}
                 trail={(item.count ?? 0) > 0 ? <span className="count">{item.count}</span> : undefined}
-                onClick={() => choose(item.onClick)}
+                onClick={() => choose(item)}
               >
                 {item.label}
               </MenuItem>

@@ -528,11 +528,12 @@ test("the Sessions header's New Session uses the active tab's preset, and ⋯ ex
   };
   const presets: unknown[] = [];
   let shortcutsOpened = 0;
+  const shortcutArguments: unknown[][] = [];
   await act(async () => {
     root.render(
       <StoreProvider connection={connection} navigation={navigation}>
         <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined}
-          onNewSession={(preset) => presets.push(preset)} onOpenShortcuts={() => { shortcutsOpened += 1; }} />
+          onNewSession={(preset) => presets.push(preset)} onOpenShortcuts={(...args: unknown[]) => { shortcutsOpened += 1; shortcutArguments.push(args); }} />
       </StoreProvider>,
     );
   });
@@ -575,6 +576,8 @@ test("the Sessions header's New Session uses the active tab's preset, and ⋯ ex
   assert.equal(items()[0]!.disabled, false);
   await act(async () => { items()[1]!.click(); });
   assert.equal(shortcutsOpened, 1);
+  // The opener reads an argument as the element to return focus to, so ⋯ must not hand it its choice.
+  assert.deepEqual(shortcutArguments, [[]]);
 
   // Projects unavailable: New Project… stays in the menu, disabled, with its reason as its second line.
   await act(async () => { socket.push(snapshot([session("project-session", 10)])); });
