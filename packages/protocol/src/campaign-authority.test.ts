@@ -24,7 +24,8 @@ const evaluate = (request: PendingApproval, override: Partial<Parameters<typeof 
 
 test("Full Control planning uses trusted provenance; Custom preserves keyword-based protection", () => {
   for (const text of ["Which authentication library should we implement?", "Should the OAuth flow use PKCE?",
-    "Which validation test should use sample@example.com?", "Which approach should the login component use?"]) {
+    "Which validation test should use sample@example.com?", "Which approach should the login component use?",
+    "Which API key schema should the component implement?", "Which password hashing algorithm should the component use?"]) {
     assert.equal(evaluate(question(text)).owner, "orchestrator", text);
     assert.equal(evaluate(question(text), { trustedSource: undefined }).reason, "unverified_intent");
   }
@@ -40,7 +41,8 @@ test("actual credentials, sign-in, access enlargement and missing or contradicto
   for (const text of ["Paste the API key for the implementation test", "What is your password for the mock feature?",
     "Which production access token should the design use?", "Should I sign in for the OAuth flow?",
     "Grant access to implement the feature", "Enter secret value here", "Please share database credentials for the test",
-    "Which credentials?", "Read ~/.ssh/id_rsa to implement the test"]) {
+    "Which credentials?", "Read ~/.ssh/id_rsa to implement the test", "Which password should I use?",
+    "Which API key should I use?", "Which credentials should we use to implement the feature?", "What password will the app use?"]) {
     assert.equal(evaluate(question(text)).owner, "human", text);
   }
   assert.equal(evaluate(question("Which approach?", { questions: [{ id: "q", question: "Which approach?", secret: true, options: [] }] })).owner, "human");

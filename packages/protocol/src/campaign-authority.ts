@@ -66,6 +66,9 @@ export function validCampaignControl(value: unknown): value is CampaignControl {
 // access. Mentioning an authentication implementation is deliberately insufficient on its own.
 const protectedAction = /(?:\b(?:paste|enter|provide|supply|reveal|show|print|read|retrieve|extract|send|upload|copy|use|share|give|fetch|load|export)\b.{0,80}\b(?:password|passphrases?|secrets?|credentials?|api[ _-]?key|access[ _-]?token|private[ _-]?key|cookie|bearer)\b|\b(?:sign[ -]?in|log[ -]?in|authenticate|authorize)\b.{0,60}\b(?:me|your|my|account|device|browser|now)\b|\b(?:grant|enlarge|increase|broaden|disable|bypass|remove)\b.{0,60}\b(?:access|permission|guardrail|sandbox|policy|limit|protection)\b|\b(?:passwords?|secrets?|credentials?|tokens?|api[ _-]?key)\b.{0,40}\b(?:value|here|please)\b|\b(?:gh|railway|vercel|npm|aws)\s+(?:auth\s+)?login\b|\b(?:chmod|chown|sudo)\b|(?:\.ssh|\.aws|\.env)(?:\/|\b)|\b(?:sk-[a-z0-9]{12,}|gh[pousr]_[a-z0-9]{12,})\b)/iu;
 const credentialIdentity = /(?:\b(?:your|my|real|production|existing)\b.{0,50}\b(?:password|passphrases?|secrets?|credentials?|api[ _-]?key|access[ _-]?token|private[ _-]?key)\b|\b(?:passwords?|secrets?|credentials?|tokens?|api[ _-]?key)\b.{0,40}\b(?:your|my|account)\b|\b(?:I|you|we|please)\s+(?:sign[ -]?in|log[ -]?in|authenticate|authorize)\b)/iu;
+// Selecting a credential value is not implementation planning. A missing secret marker or a
+// trailing "for the implementation" cannot turn a value-selection form into trusted code intent.
+const credentialValueChoice = /\b(?:passwords?|passphrases?|secrets?|credentials?|tokens?|api[ _-]?keys?|access[ _-]?tokens?|private[ _-]?keys?|cookies?)\b\s+(?:values?\s+)?(?:should|shall|will|can|do|does|may)\s+(?:I|we|you|(?:the|our)\s+(?:app|application|client|provider))\s+(?:use|enter|provide|supply|send|paste|choose|select)\b/iu;
 const sensitiveSubject = /\b(?:auth(?:entication)?|passwords?|secrets?|credentials?|tokens?|api[ _-]?key|oauth|identity|login|account|permission|access)\b/iu;
 const planningIntent = /\b(?:implement(?:ation)?|design|approach|schema|library|framework|test|mock|fixture|component|feature|architecture|provider|flow|validation|review|tradeoff|format|should)\b/iu;
 
@@ -154,7 +157,7 @@ export function campaignRequestProtected(request: PendingApproval, verifiedPlann
     return request.questions.some((q) => {
       if (q.secret || q.inputFormat === "email") return true;
       const text = [q.id, q.header, q.question, q.context, ...q.options.flatMap((o) => [o.label, o.description])].join(" ");
-      return protectedAction.test(text) || credentialIdentity.test(text) || (sensitiveSubject.test(text) && (!verifiedPlanning || !planningIntent.test(text)));
+      return protectedAction.test(text) || credentialIdentity.test(text) || credentialValueChoice.test(text) || (sensitiveSubject.test(text) && (!verifiedPlanning || !planningIntent.test(text)));
     });
   }
   if (verifiedCodeOperation) return false;
