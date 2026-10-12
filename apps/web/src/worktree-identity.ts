@@ -99,9 +99,3 @@ export function sessionBranchState(
   if (session.useWorktree) return { kind: "unknown" };
   return { kind: "none" };
 }
-
-/** Title Case label for the Git state shown on a session card's third line. */
-export function branchStateLabel(state: SessionBranchState): string {
-  if (state.kind === "branch") return state.worktree.branch;
-  return state.kind === "none" ? "No Branch" : "Branch Unavailable";
-}

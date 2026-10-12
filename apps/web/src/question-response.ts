@@ -151,37 +151,6 @@ function resolveQuestionOtherResponse(question: AgentQuestion, rawValue: string)
   return freeTextError ? { error: `Response ${freeTextError}.` } : { answer: value };
 }
 
-export function questionAnswers(
-  questions: AgentQuestion[],
-  values: Record<string, string>,
-): { answers: Record<string, string | string[]>; errors: Record<string, string> } {
-  const answers: Record<string, string | string[]> = {};
-  const errors: Record<string, string> = {};
-  for (const question of questions) {
-    const rawValue = Object.hasOwn(values, question.id) ? values[question.id]! : "";
-    const resolved = resolveQuestionResponse(question, rawValue);
-    const target = resolved.error ? errors : answers;
-    const value = resolved.error ?? resolved.answer;
-    if (value !== undefined) {
-      Object.defineProperty(target, question.id, {
-        value,
-        configurable: true,
-        enumerable: true,
-        writable: true,
-      });
-    }
-  }
-  return { answers, errors };
-}
-
-export function toggleQuestionChoice(question: AgentQuestion, rawValue: string, label: string): string {
-  if (!question.multiSelect) return label;
-  const labels = offeredQuestionChoices(question, rawValue) ?? [];
-  return formatQuestionChoiceLabels(labels.includes(label)
-    ? labels.filter((candidate) => candidate !== label)
-    : [...labels, label]);
-}
-
 export function questionDraftText(draft: QuestionResponseDraft | undefined): string {
   return draft?.kind === "choice" ? formatQuestionChoiceLabels(draft.labels) : draft?.value ?? "";
 }

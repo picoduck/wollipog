@@ -6,7 +6,6 @@ import {
   projectAssignmentAudienceConfirmation,
   projectAudienceVisibilityLabel,
   projectAudienceVisibilitySummary,
-  projectAudienceLabel,
   projectMoveNotice,
   projectMovePlan,
   projectMoveRowDescription,
@@ -203,10 +202,6 @@ test("linking a missing Location remains actionable for the current Project", ()
 test("Project assignment copy identifies audiences and fails closed when sharing metadata is absent", () => {
   const team = { ...project("team-project", "runner-1", "workspace-1"), audience: "team" as const };
   const organization = { ...project("org-project", "runner-1", "workspace-1"), audience: "organization" as const };
-  assert.equal(projectAudienceLabel("user"), "Personal Project");
-  assert.equal(projectAudienceLabel("team"), "Team Project");
-  assert.equal(projectAudienceLabel("organization"), "Organization Project");
-  assert.equal(projectAudienceLabel(undefined), null);
   assert.equal(projectAudienceVisibilityLabel("user"), "Only the Project Owner");
   assert.equal(projectAudienceVisibilityLabel("team"), "Everyone on the Owning Team");
   assert.equal(projectAudienceVisibilityLabel("organization"), "Everyone in Your Organization");

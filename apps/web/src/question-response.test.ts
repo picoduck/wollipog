@@ -6,12 +6,13 @@ import {
   claimQuestionResponseOperation,
   isAnswerableAgentQuestion,
   offeredQuestionChoices,
-  questionAnswers,
   questionDraftAnswers,
+  questionDraftSelections,
+  questionDraftText,
   resolveQuestionResponse,
   storedQuestionDrafts,
   storeQuestionDrafts,
-  toggleQuestionChoice,
+  type QuestionResponseDraft,
 } from "./question-response.js";
 
 test("question operations are exclusive per request and release for retry", () => {
@@ -79,7 +80,8 @@ test("multi-select text responses deterministically resolve comma-separated choi
   assert.match(resolveQuestionResponse(question, "1, Unit Tests").error ?? "", /more than once/);
   assert.deepEqual(offeredQuestionChoices(question, "1"), ["Unit Tests"],
     "incomplete exact choices remain available to Interactive Form toggles");
-  assert.equal(toggleQuestionChoice(question, "1, 2", "Unit Tests"), "Browser Tests");
+  assert.deepEqual(questionDraftSelections(question, { kind: "entry", value: "1, 2" }), ["Unit Tests", "Browser Tests"],
+    "a typed entry shows its exact choices as the selection the Interactive Form toggles from");
 });
 
 test("quoted multi-select labels preserve commas and quotes without changing provider values", () => {
@@ -88,10 +90,14 @@ test("quoted multi-select labels preserve commas and quotes without changing pro
     multiSelect: true,
     options: [{ label: "North, America" }, { label: 'Say "Hello"' }],
   };
-  const raw = toggleQuestionChoice(question, "", "North, America");
-  const both = toggleQuestionChoice(question, raw, 'Say "Hello"');
-  assert.equal(both, '"North, America", "Say ""Hello"""');
-  assert.deepEqual(resolveQuestionResponse(question, both), { answer: ["North, America", 'Say "Hello"'] });
+  const labels = ["North, America", 'Say "Hello"'];
+  const text = questionDraftText({ kind: "choice", labels });
+  assert.equal(text, '"North, America", "Say ""Hello"""');
+  assert.deepEqual(resolveQuestionResponse(question, text), { answer: labels });
+  // The choice draft's text returns through a typed entry as the same exact labels.
+  assert.deepEqual(questionDraftSelections(question, { kind: "entry", value: text }), labels);
+  assert.deepEqual(questionDraftAnswers([question], { language: { kind: "entry", value: text } }),
+    { answers: { language: labels }, errors: {} });
 });
 
 test("free text is accepted only when declared and retains provider validation", () => {
@@ -110,13 +116,23 @@ test("free text is accepted only when declared and retains provider validation",
 });
 
 test("answer maps omit blank optional fields and report every invalid response", () => {
-  const result = questionAnswers([
+  const result = questionDraftAnswers([
     single,
     { ...single, id: "optional", required: false },
+    { ...single, id: "optionalChoice", required: false },
+    { ...single, id: "optionalOther", required: false, allowOther: true },
     { ...single, id: "required" },
-  ], { language: "1", optional: "", required: "" });
+    { ...single, id: "requiredChoice" },
+  ], {
+    language: { kind: "entry", value: "1" },
+    optional: { kind: "entry", value: "" },
+    optionalChoice: { kind: "choice", labels: [] },
+    optionalOther: { kind: "other", value: "  " },
+    required: { kind: "entry", value: "" },
+    requiredChoice: { kind: "choice", labels: [] },
+  });
   assert.deepEqual(result.answers, { language: "TypeScript" });
-  assert.deepEqual(Object.keys(result.errors), ["required"]);
+  assert.deepEqual(Object.keys(result.errors), ["required", "requiredChoice"]);
 });
 
 test("page-lifetime draft storage is request-correlated and explicitly clearable", () => {
@@ -183,10 +199,18 @@ test("questions with neither choices nor free text fail as unsupported with trut
 
 test("opaque prototype-chain question ids remain own answer keys", () => {
   const question = { ...single, id: "__proto__" };
-  const result = questionAnswers([question], { [question.id]: "1" });
-  assert.equal(Object.hasOwn(result.answers, "__proto__"), true);
-  assert.equal(result.answers.__proto__, "TypeScript");
-  assert.deepEqual(result.errors, {});
+  const drafts: QuestionResponseDraft[] = [{ kind: "entry", value: "1" }, { kind: "choice", labels: ["TypeScript"] }];
+  for (const draft of drafts) {
+    const result = questionDraftAnswers([question], { [question.id]: draft });
+    assert.equal(Object.hasOwn(result.answers, "__proto__"), true, draft.kind);
+    assert.equal(result.answers.__proto__, "TypeScript", draft.kind);
+    assert.equal(Object.getPrototypeOf(result.answers), Object.prototype, "the answer map's prototype is untouched");
+    assert.deepEqual(result.errors, {});
+  }
+  const invalid = questionDraftAnswers([question], { [question.id]: { kind: "entry", value: "" } });
+  assert.equal(Object.hasOwn(invalid.errors, "__proto__"), true);
+  assert.equal(invalid.errors.__proto__, "Enter a response.");
+  assert.equal(Object.getPrototypeOf(invalid.errors), Object.prototype, "the error map's prototype is untouched");
 });
 
 test("Other intents are independent for every question and preserve numeric and label-like text (#1595)", () => {

@@ -2206,19 +2206,6 @@ export function automaticSubagentOpen(depth: number, itemCount: number): boolean
   return depth === 0 && itemCount > 0 && itemCount <= 40;
 }
 
-export function automaticSubagentOpenAfterChange(
-  depth: number,
-  previousCount: number,
-  itemCount: number,
-  userToggled: boolean,
-  current: boolean,
-): boolean {
-  if (userToggled) return current;
-  if (previousCount === 0 && itemCount > 0) return automaticSubagentOpen(depth, itemCount);
-  if (itemCount > 40) return false;
-  return current;
-}
-
 /** Memoized on item identity: the builder clones-on-write, so only the row whose item actually
  * changed re-renders on a streamed chunk — the rest of a long transcript is skipped entirely. */
 /** A transcript row. Its props are identity-stable for a row whose data did not change, so the

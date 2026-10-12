@@ -4,7 +4,6 @@ import type {
   SessionStatus,
 } from "@wollipog/protocol";
 import { deliveryReason, type MessageReceiptStatus } from "../conversation-steering.js";
-import { statusMeta, type StatusMeta } from "../status-meta.js";
 import { Markdown } from "./Markdown.js";
 import { ReceiptAttachmentChip, ReceiptLine, ReceiptRow, receiptRowId } from "./TranscriptReceipt.js";
 
@@ -28,11 +27,6 @@ export function pendingPromptReceiptStatus(prompt: PendingPromptView): MessageRe
         ? "not_sent"
         : prompt.errorCode === "COMMAND_CANCELLED" ? "cancelled" : "failed";
   }
-}
-
-/** A pending message's status label and tone. */
-export function pendingPromptStatus(prompt: PendingPromptView): StatusMeta {
-  return statusMeta("messageReceipt", pendingPromptReceiptStatus(prompt));
 }
 
 /** A message the person sent that did not reach the agent (Delivery Failed or Not Sent, not Canceled). */

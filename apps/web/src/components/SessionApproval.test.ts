@@ -8,7 +8,6 @@ import {
   approvalFocusDestination,
   SessionApprovalRegion,
   SessionQuestionBanner,
-  questionSelectionForRequest,
 } from "./SessionApproval.js";
 
 test("the approval region only owns focus and announcements: a pending question is on the request dock (#2205)", () => {
@@ -150,12 +149,6 @@ test("a choice question keeps its text field behind Something Else, and Submit A
   assert.match(html, /<button[^>]*class="btn primary"[^>]*>Submit Answers<kbd aria-hidden="true">Enter<\/kbd><\/button>/);
   assert.doesNotMatch(html, /<button[^>]*disabled=""[^>]*>Submit Answers/);
   assert.doesNotMatch(html, /field-error|Complete all required responses/);
-});
-
-test("question selection is empty immediately when a new request replaces the old one", () => {
-  const stale = { requestId: "ask-a", picked: { repeated: ["old answer"] } };
-  assert.deepEqual(questionSelectionForRequest(stale, "ask-a"), stale.picked);
-  assert.deepEqual(questionSelectionForRequest(stale, "ask-b"), {});
 });
 
 test("approval focus follows owned replacements and final resolution only", () => {

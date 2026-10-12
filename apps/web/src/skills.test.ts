@@ -46,7 +46,6 @@ import {
   skillsFromPayload,
   skillUncheckedMachineSentence,
   skillVersionChangeDetail,
-  validateSkillDraft,
   validateSkillFiles,
   agentTypeLabel,
   agentsReachedBySelector,
@@ -612,20 +611,17 @@ test("folder uploads strip the picked root, sort by path, and split text from bi
   assert.equal(traversal.errors.length, 1);
 });
 
-test("draft validation mirrors the protocol validators and limits", () => {
+test("file validation mirrors the protocol validators and limits", () => {
   const md = (name: string): SkillFile => ({ path: "SKILL.md", content: `---\nname: ${name}\n---\nBody\n`, encoding: "utf8" });
-  assert.deepEqual(validateSkillDraft({ name: "code-review", files: [md("code-review")] }), []);
+  assert.deepEqual(validateSkillFiles({ name: "code-review", files: [md("code-review")] }), []);
 
-  assert.deepEqual(validateSkillDraft({ name: "Bad Name", files: [md("Bad Name")] }), ["Start with a lowercase letter or digit."]);
   // Without a usable name the files are still checked, but not against the name.
   assert.deepEqual(validateSkillFiles({ files: [md("other-name")] }), []);
   assert.ok(validateSkillFiles({ name: "code-review", files: [md("other-name")] })
     .some((error) => error.includes("must match the skill name")));
-  assert.ok(validateSkillDraft({ name: "code-review", files: [] })[0]!.includes("SKILL.md"));
-  assert.ok(validateSkillDraft({ name: "code-review", files: [{ path: "notes.md", content: "x", encoding: "utf8" }] })
+  assert.deepEqual(validateSkillFiles({ name: "code-review", files: [] }), ["A skill needs at least a SKILL.md file."]);
+  assert.ok(validateSkillFiles({ name: "code-review", files: [{ path: "notes.md", content: "x", encoding: "utf8" }] })
     .some((error) => error.includes("SKILL.md must exist")));
-  assert.ok(validateSkillDraft({ name: "code-review", files: [md("other-name")] })
-    .some((error) => error.includes("must match the skill name")));
   // A SKILL.md the library reads no name from is reported, not skipped (#2377).
   const noName = (content: string): SkillFile => ({ path: "SKILL.md", content, encoding: "utf8" });
   const needsName = 'SKILL.md has no frontmatter name. Put "name: code-review" between two "---" lines at its top.';
@@ -634,13 +630,13 @@ test("draft validation mirrors the protocol validators and limits", () => {
   assert.deepEqual(validateSkillFiles({ name: "code-review", files: [noName("# no frontmatter")] }), [needsName]);
   assert.deepEqual(validateSkillFiles({ files: [noName("# no frontmatter")] }), []);
   assert.deepEqual(validateSkillFiles({ name: "code-review", files: [noName('---\nname: "code\\u002dreview"\n---\n')] }), []);
-  assert.ok(validateSkillDraft({ name: "code-review", files: [md("code-review"), md("code-review")] })
+  assert.ok(validateSkillFiles({ name: "code-review", files: [md("code-review"), md("code-review")] })
     .some((error) => error.includes("more than once")));
 
   const many = Array.from({ length: SKILL_MAX_FILES + 1 }, (_, index): SkillFile => (
     { path: `extra-${index}.md`, content: "x", encoding: "utf8" }
   ));
-  assert.ok(validateSkillDraft({ name: "code-review", files: [md("code-review"), ...many] })
+  assert.ok(validateSkillFiles({ name: "code-review", files: [md("code-review"), ...many] })
     .some((error) => error.includes(`${SKILL_MAX_FILES} files`)));
 
   assert.equal(skillFileByteLength({ path: "a", content: "héllo", encoding: "utf8" }), 6);

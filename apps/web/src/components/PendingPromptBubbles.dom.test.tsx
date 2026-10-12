@@ -6,7 +6,7 @@ import { Window } from "happy-dom";
 import type { PendingPromptView } from "@wollipog/protocol";
 import {
   hasNewPendingPrompt,
-  pendingPromptStatus,
+  pendingPromptReceiptStatus,
   PendingPromptBubbles,
   queuedPromptsWithControls,
   shouldShowOptimisticPrompt,
@@ -59,14 +59,16 @@ test("durable transcript projection retains the live queue's steering controls",
   assert.deepEqual(queuedPromptsWithControls(undefined), []);
 });
 
+// The receipt status is the one ReceiptLine labels; "not_sent" reads as the danger-toned
+// "Not Sent" through the messageReceipt table in status-meta.test.ts.
 test("worktree-blocked durable prompts are clearly labelled Not Sent", () => {
-  const status = pendingPromptStatus(pending({
+  assert.equal(pendingPromptReceiptStatus(pending({
     state: "failed",
     errorCode: "WORKTREE_RECOVERY_REQUIRED",
     canRetry: true,
-  }));
-  assert.equal(status.label, "Not Sent");
-  assert.equal(status.tone, "danger");
+  })), "not_sent");
+  assert.equal(pendingPromptReceiptStatus(pending({ state: "failed", errorCode: "COMMAND_CANCELLED" })), "cancelled");
+  assert.equal(pendingPromptReceiptStatus(pending({ state: "failed", errorCode: "QUEUE_FULL" })), "failed");
 });
 
 test("worktree-blocked Retry remains visible but waits for confirmed recovery", async () => {

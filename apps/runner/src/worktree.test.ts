@@ -14,7 +14,14 @@ import { SessionManager } from "./session-manager.js";
 import { WorktreePortAllocator } from "./worktree-port-allocator.js";
 import { WorktreeSetupTrustStore } from "./worktree-setup.js";
 import { anchorTurnRef, captureWorktreeTree, setGitRunnerForTests, type GitRunOpts } from "./git-ops.js";
-import { branchStateLabel, sessionBranchState } from "../../web/src/worktree-identity.js";
+import { sessionBranchState } from "../../web/src/worktree-identity.js";
+
+/** The branch a session card names, read as InboxRow and SessionPreviewBar read it: through
+ * `sessionBranchState`. A session without a named branch reports its state's kind instead. */
+function cardBranch(session: Parameters<typeof sessionBranchState>[0]): string {
+  const state = sessionBranchState(session);
+  return state.kind === "branch" ? state.worktree.branch : state.kind;
+}
 
 function haveGit(): boolean {
   try { execFileSync("git", ["--version"], { stdio: "ignore" }); return true; } catch { return false; }
@@ -4623,9 +4630,9 @@ test("an automatic worktree reaches snapshots and renders its verified branch", 
     const snapshot = store.snapshots().find((candidate) => candidate.id === sessionId);
     assert.ok(snapshot?.worktreePath, "the automatic worktree is selected in the snapshot");
     assert.equal(
-      branchStateLabel(sessionBranchState(snapshot)),
+      cardBranch(snapshot),
       `agent/${sessionId}`,
-      "the session card renders the verified current branch instead of Branch Unavailable",
+      "the session card names the verified current branch instead of an unknown branch",
     );
   } finally {
     manager?.shutdownAll();
@@ -8616,7 +8623,7 @@ test("worktree reconciliation records the identity a legacy row implied, and onl
       .find((snapshot) => snapshot.id === "s_missing_inventory");
     assert.ok(recoveredSnapshot);
     assert.equal(
-      branchStateLabel(sessionBranchState(recoveredSnapshot)),
+      cardBranch(recoveredSnapshot),
       missingInventory.branch,
       "the recovered identity propagates through the snapshot to the branch renderer",
     );
@@ -8624,7 +8631,7 @@ test("worktree reconciliation records the identity a legacy row implied, and onl
       message.type === "session_runtime_updated" && message.snapshot.id === "s_missing_inventory");
     assert.ok(recoveredUpdate && recoveredUpdate.type === "session_runtime_updated");
     assert.equal(
-      branchStateLabel(sessionBranchState(recoveredUpdate.snapshot)),
+      cardBranch(recoveredUpdate.snapshot),
       missingInventory.branch,
       "the recovery is pushed to the control plane instead of waiting for another snapshot",
     );

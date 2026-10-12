@@ -35,12 +35,6 @@ export async function persistProjectAssignment(
   await setProject(sessionId, projectId, { linkLocation });
 }
 
-export function projectAudienceLabel(audience: ProjectView["audience"]): string | null {
-  return audience === "team" ? "Team Project"
-    : audience === "organization" ? "Organization Project"
-      : audience === "user" ? "Personal Project" : null;
-}
-
 export function projectAudienceVisibilityLabel(audience: ProjectView["audience"]): string | null {
   return audience === "team" ? "Everyone on the Owning Team"
     : audience === "organization" ? "Everyone in Your Organization"

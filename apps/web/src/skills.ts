@@ -1068,11 +1068,6 @@ export function skillMarkdownBody(markdown: string): string {
   return end === -1 ? markdown : lines.slice(end + 1).join("\n").replace(/^\n+/, "");
 }
 
-export function validateSkillDraft(input: { name: string; files: SkillFile[] }): string[] {
-  const nameError = skillNameError(input.name);
-  return [...(nameError ? [nameError] : []), ...validateSkillFiles(input)];
-}
-
 /** The draft's file errors: count, paths, sizes, and a top-level SKILL.md whose frontmatter name,
  * read as the library reads it, is `name`. The name itself is checked by `skillNameError`; without
  * a usable name the frontmatter name is not compared. */

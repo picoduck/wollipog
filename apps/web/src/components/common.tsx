@@ -11,7 +11,6 @@ import {
   type SessionStatus,
   type SessionView,
   type SessionAttentionGroup,
-  type SessionReminderView,
   sessionAttentionBreakdown,
 } from "@wollipog/protocol";
 import { BACKGROUND_DELIVERY_STATUS, backgroundDeliveryAccessibleName } from "../background-delivery-status.js";
@@ -25,7 +24,6 @@ import {
 } from "../status-meta.js";
 
 export { quarantinedStatusMeta, sessionLifecycleMeta };
-import { reminderBadgeDescription, reminderBadgeLabel, type SnoozedAttentionReason } from "../session-reminders.js";
 import { useOptionalStoreSelector } from "../store.js";
 import { CheckIcon, CopyIcon, ErrorIcon, PinIcon } from "./Icons.js";
 import { StatusBadge, StatusCount } from "./StatusBadge.js";
@@ -395,61 +393,6 @@ export function SessionStatusIndicators({
 export function backgroundWorkAccessibleName(state: Exclude<BackgroundWorkState, "resumed">): string {
   const label = state === "orphaned" ? statusMeta("job", "lost").label : statusMeta("background_work", state).label;
   return `Background Work: ${label}`;
-}
-
-export function BackgroundWorkBadge({ state, compact = false, announce = true, onOpen }: {
-  state: BackgroundWorkState;
-  compact?: boolean;
-  announce?: boolean;
-  onOpen?: () => void;
-}) {
-  // Rolling deployments may briefly receive the retired terminal sentinel from an older control
-  // plane. Completion remains available in the durable Background Work inventory, never here.
-  if (state === "resumed") return null;
-  const meta = statusMeta("background_work", state);
-  const label = backgroundWorkAccessibleName(state);
-  const visible = compact ? (
-    <>
-      <span className="sr-only">{label}</span>
-      <span aria-hidden="true">{meta.label}</span>
-    </>
-  ) : label;
-  if (onOpen) {
-    return (
-      <>
-        <StatusBadge meta={meta} label={visible} dataGroup="background-work" ariaLabel={label}
-          ariaControls="right-panel" title={`Open ${label}`} onClick={onOpen} />
-        {announce && <span className="sr-only" role="status" aria-label={label}>{label}</span>}
-      </>
-    );
-  }
-  return (
-    <StatusBadge meta={meta} label={visible} dataGroup="background-work" role={announce ? "status" : undefined}
-      ariaLabel={label} title={compact ? label : undefined} />
-  );
-}
-
-/** The attention a snoozed session keeps showing beside its reminder: lost background work, or a
- * background result that has not come back. */
-export function SnoozedAttentionBadge({ reason }: {
-  reason: Extract<SnoozedAttentionReason, { kind: "orphaned_background_work" | "background_delivery_watchdog" }>;
-}) {
-  return (
-    <StatusBadge
-      tone={reason.kind === "orphaned_background_work" ? "danger" : reason.severity === "pending" ? "info" : "warning"}
-      label={reason.label}
-      title={reason.description}
-      ariaLabel={reason.kind === "background_delivery_watchdog" ? reason.accessibleName : `Attention: ${reason.label}`}
-    />
-  );
-}
-
-export function ReminderBadge({ reminder }: { reminder: SessionReminderView }) {
-  return (
-    <StatusBadge meta={statusMeta("session", "snoozed")} label={reminderBadgeLabel(reminder)}
-      title={reminderBadgeDescription(reminder)}
-      ariaLabel={`Reminder: ${reminder.state === "fired" ? reminderBadgeDescription(reminder) : reminderBadgeLabel(reminder)}`} />
-  );
 }
 
 export function BackgroundDeliveryBadge({ state, onOpen }: { state: BackgroundDeliveryWatchdogState; onOpen?: () => void }) {
