@@ -1,4 +1,7 @@
 import { acknowledgementRepairFrame } from "./claude-cost-repair.js";
+import type { HumanPrincipal } from "./identity.js";
+import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl } from "./campaign-authority.js";
+import { campaignAuthorityPreflight, standingRootQuestionAnswers, type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary } from "@wollipog/protocol";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, campaignNeedsEpicScope } from "./campaign-issue-scope.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
 import { normalizeCampaignIssueScopeSnapshot, titleFromPrompt, type CampaignIssueScopeRequest, type CampaignIssueScopeView } from "@wollipog/protocol";
@@ -3632,6 +3635,13 @@ export class SessionsService {
     if (!this.hub.isRunnerOnline(req.runnerId)) return fail(`runner '${req.runnerId}' is offline`, 409);
     const runner = this.db.getRunner(req.runnerId);
     if (!runner) return fail("runner not found", 404);
+    if (campaignController?.orchestratorPolicy?.control?.mode === "full_control") {
+      const preflight = campaignAuthorityPreflight(campaignController.orchestratorPolicy.control, launch.driver, runner.protocolVersion);
+      if (!preflight.supported || !campaignBoundaryCurrent(campaignController)) return fail(preflight.reason ?? "campaign authority boundary is stale", 409);
+      if (req.runnerId !== campaignController.runnerId || req.workspaceId !== campaignController.workspaceId || req.workspacePath) {
+        return fail("Full Control children must use the campaign's repository workspace and runner", 409);
+      }
+    }
     if (launch.driver === "pi") {
       const unsupported = this.capabilityFailure(req.runnerId, "piHarness", "Pi RPC sessions");
       if (unsupported) return unsupported;
@@ -3956,6 +3966,11 @@ export class SessionsService {
         inheritedCampaign ? "active_campaign" : parentSessionId ? "system_default" : configured?.source ?? "system_default",
         inheritedCampaign ? {} : overrides,
       );
+      if (inheritedCampaign?.control) {
+        orchestratorPolicy.control = structuredClone(inheritedCampaign.control);
+        const preflight = campaignAuthorityPreflight(orchestratorPolicy.control, launch.driver, runner.protocolVersion);
+        if (!preflight.supported) return fail(preflight.reason!, 409);
+      }
       // A saved account default must remain portable across a mixed runner fleet. Capabilities
       // that predate the selected runner fail closed without turning an otherwise supported
       // Orchestrator launch into a regression. Explicit per-session authority never downgrades
@@ -7268,20 +7283,116 @@ export class SessionsService {
   }
 
   private orchestratorOwnsGenericRequest(session: SessionView, request: PendingApproval): boolean {
-    if (!session.parentSessionId || !runnerSupportsProtocol(
-      this.db.getRunner(session.runnerId)?.protocolVersion,
-      "delegatedParentControl",
-    )) return false;
-    const controller = this.orchestratorCampaignController(this.db.getSession(session.parentSessionId));
+    const controller = this.orchestratorCampaignController(session);
     // Beneath a refused ancestry no Orchestrator owns the request; it stays with the human.
     return Boolean(controller && controller !== "refused" &&
-      parentControlRequestEligible(controller.parentControl ?? "off", request));
+      this.genericCampaignAuthority(controller, session, request).owner === "orchestrator");
+  }
+
+  private genericCampaignAuthority(controller: SessionView, requester: Pick<SessionView, "id" | "driver" | "runnerId"> & Partial<Pick<SessionView, "workspaceId">>, request: PendingApproval): CampaignAuthorityEvaluation {
+    const repositoryRoot = controller.orchestratorPolicy?.control?.mode === "full_control" && request.context?.operation
+      ? this.db.sessionRepositoryRoot(requester.id) : undefined;
+    const workspaceId = requester.workspaceId ?? (controller.orchestratorPolicy?.control?.mode === "full_control" ? this.db.getSession(requester.id)?.workspaceId : undefined);
+    return evaluateCampaignAuthority(controller, { ...requester, workspaceId, repositoryRoot: repositoryRoot ?? undefined }, this.db.getRunner(requester.runnerId)?.protocolVersion, this.db.campaignPolicyRequest(requester.id, controller.orchestratorPolicy?.control, request), controller.parentControlPolicy,
+      controller.orchestratorPolicy?.control?.mode === "full_control" ? this.db.getRunner(controller.runnerId)?.protocolVersion : undefined);
+  }
+
+  /** Synchronous provider requests park the root model. Settle only eligible exact occurrences
+   * from its existing human authorization; never wait for the root to grant itself permission. */
+  private executeStandingRootRequest(sessionId: string, request: PendingApproval): boolean {
+    const session = this.db.getSession(sessionId);
+    if (!session || !request.occurrenceId || pendingRequests(session.pendingApproval).some(isPolicyApproval)) return false;
+    const controller = this.orchestratorCampaignController(session);
+    if (!controller || controller === "refused" || controller.id !== sessionId) return false;
+    const evaluation = this.genericCampaignAuthority(controller, session, request);
+    if (evaluation.owner !== "orchestrator" || evaluation.basis !== "standing_authorization") return false;
+    const actor: GovernanceActor = { kind: "system", id: "campaign-standing-authorization" };
+    const answers = request.kind === "question" ? standingRootQuestionAnswers(request) : null;
+    const optionId = request.options.find((option) => option.kind === "allow_once")?.optionId;
+    const result = request.kind === "question" && answers
+      ? this.answerQuestion(sessionId, request.requestId, answers, actor, "submit", sessionId, request.occurrenceId)
+      : request.kind !== "question" && optionId
+        ? this.approve(sessionId, request.requestId, optionId, actor, sessionId)
+        : null;
+    if (!result?.ok) {
+      const pending = this.db.getSession(sessionId)?.pendingApproval;
+      if (pendingRequests(pending).some((candidate) => candidate.requestId === request.requestId && candidate.occurrenceId === request.occurrenceId)) {
+        this.db.setPendingApproval(sessionId, replacePendingApproval(pending, { ...request, standingAdmissionFailure: "provider_delivery_unavailable" }));
+      }
+      return false;
+    }
+    this.log.info(JSON.stringify({ event: "campaign_authority_evaluated", entryPoint: "root_provider_admission",
+      sessionId, requestId: request.requestId, occurrenceId: request.occurrenceId,
+      policyRevision: session.parentControlPolicy?.revision, ...evaluation }));
+    return true;
+  }
+
+  /** Foundation for the human-only launch/live integration. No agent route calls this method. */
+  setCampaignControl(sessionId: string, proposal: { mode: "custom" } | {
+    mode: "full_control"; objective: string; operations: CampaignAuthorityBoundary["operations"];
+    delegatablePolicyIds: string[];
+  }, expectedRevision: number, principal: HumanPrincipal): ServiceResult<SessionView> {
+    const session = this.db.getSession(sessionId);
+    if (!session || principal.kind !== "human" || !this.db.isSessionOwner(principal, sessionId)) return fail("campaign not found", 404);
+    const root = this.orchestratorCampaignController(session);
+    if (!root || root === "refused" || root.id !== sessionId || isTerminal(session.status)) return fail("only a live root campaign can change control", 409);
+    const scope = session.orchestratorPolicy?.issueScope;
+    const now = Date.now();
+    const control = proposal.mode === "custom" ? { mode: "custom" as const } : scope &&
+      authorizeFullControl(principal, scope, proposal, expectedRevision + 1, now);
+    if (!control) return fail("Full Control requires authenticated repository scope and a valid boundary", 400);
+    if (control.mode === "full_control") {
+      if (!session.workspaceId) return fail("Full Control requires a repository workspace binding", 409);
+      for (const id of [sessionId, ...this.db.campaignDescendantIds(sessionId)]) {
+        const participant = this.db.getSession(id);
+        if (!participant || isTerminal(participant.status)) continue;
+        if (participant.runnerId !== session.runnerId || participant.workspaceId !== session.workspaceId) return fail("campaign participants must share the repository workspace and runner", 409);
+        const preflight = campaignAuthorityPreflight(control, participant.driver, this.db.getRunner(participant.runnerId)?.protocolVersion);
+        if (!preflight.supported) return fail(preflight.reason!, 409);
+      }
+      if (control.boundary.delegatablePolicyIds.some((id) => !this.governancePolicies().some((rule) =>
+          rule.policyId === id && rule.enabled && rule.effect === "ask" && !rule.builtin && !rule.conditions?.humanRequired))) {
+        return fail("Full Control cannot delegate unknown, disabled or Human Required policy rules", 400);
+      }
+    }
+    const outstanding = this.db.unconsumedWorkflowDecisionsForController(sessionId);
+    if (!this.db.updateSessionCampaignControl(sessionId, control, expectedRevision, now)) return fail("campaign authority revision changed; refresh and retry", 409);
+    for (const decision of outstanding) {
+      this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now);
+      this.recordWorkflowDecisionAudit(decision, "revoked", { kind: "human", id: principal.userId }, now);
+    }
+    if (control.mode === "full_control") {
+      for (const pending of pendingRequests(this.db.getSession(sessionId)?.pendingApproval)) {
+        if (pending.kind !== "workflow_decision") this.executeStandingRootRequest(sessionId, pending);
+      }
+    }
+    this.publishCampaignAttentionTransition(session);
+    this.log.info(JSON.stringify({ event: "campaign_control_changed", sessionId,
+      mode: control.mode, policyRevision: expectedRevision + 1, authorizedByUserId: principal.userId,
+      revokedOccurrences: outstanding.length }));
+    this.hub.sessionChangedById(sessionId);
+    return ok(this.db.getSession(sessionId)!);
+  }
+
+  /** A root can exercise its existing human authorization, but cannot manufacture a campaign or
+   * resolve protected requests by treating itself as a descendant. */
+  private workflowDecisionRelationship(controllerId: string, requesterId: string): boolean {
+    if (this.db.isSessionDescendant(controllerId, requesterId)) return true;
+    const controller = this.db.getSession(controllerId);
+    const root = this.orchestratorCampaignController(controller);
+    return controllerId === requesterId && controller?.orchestratorPolicy?.control?.mode === "full_control" &&
+      campaignBoundaryCurrent(controller) && root !== "refused" && root?.id === controllerId;
   }
 
   private campaignChildBehaviorError(session: SessionView, config: SessionConfig | undefined): string | null {
     if (!session.parentSessionId || !config) return null;
     const controller = this.orchestratorCampaignController(this.db.getSession(session.parentSessionId));
     if (controller === "refused") return MALFORMED_ANCESTRY_AUTHORITY_REFUSAL;
+    if (controller?.orchestratorPolicy?.control?.mode === "full_control") {
+      const preflight = campaignAuthorityPreflight(controller.orchestratorPolicy.control, session.driver,
+        this.db.getRunner(session.runnerId)?.protocolVersion);
+      if (!preflight.supported || !campaignBoundaryCurrent(controller)) return preflight.reason ?? "campaign authority boundary is stale";
+    }
     const behavior = controller?.orchestratorPolicy?.behavior;
     if (behavior && behavior.childModel !== null && config.model !== undefined && config.model !== behavior.childModel) {
       return `child model is fixed by campaign policy at ${behavior.childModel}`;
@@ -7771,6 +7882,14 @@ export class SessionsService {
       } };
     }
     const authority = evaluated.effectiveOwner;
+    const authorityEvaluation = evaluateCampaignAuthority(controller.session, child,
+      this.db.getRunner(child.runnerId)?.protocolVersion, normalized.data, controller.policy,
+      this.db.getRunner(controller.session.runnerId)?.protocolVersion);
+    if (authorityEvaluation.owner !== authority) {
+      authorityEvaluation.owner = authority;
+      authorityEvaluation.basis = "human_required";
+      authorityEvaluation.reason = "evidence_review_unavailable";
+    }
     if (authority === "orchestrator") {
       const parentUnsupported = this.capabilityFailure(
         controller.session.runnerId,
@@ -7792,6 +7911,7 @@ export class SessionsService {
       resourceDigest,
       policyRevision: controller.policy.revision,
       authority,
+      authorityEvaluation,
       ...(evaluated.effectiveOwner === "human" && evaluated.fallback ? { humanFallback: evaluated.fallback } : {}),
       createdAt: now,
     });
@@ -7817,6 +7937,9 @@ export class SessionsService {
       this.recordWorkflowDecisionAudit(superseded, "superseded", { kind: "agent", id: sessionId }, now);
     }
     this.recordWorkflowDecisionAudit(decision, "pending", { kind: "agent", id: sessionId }, now);
+    this.log.info(JSON.stringify({ event: "campaign_authority_evaluated", entryPoint: "workflow_request",
+      sessionId, controllingSessionId: controller.session.id, requestId: request.requestId,
+      occurrenceId: decision.occurrenceId, policyRevision: decision.policyRevision, ...authorityEvaluation }));
     if (decision.authority === "human") {
       this.notifyTransition(child, sessionId);
     }
@@ -7852,7 +7975,7 @@ export class SessionsService {
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
     if (!decision || decision.sessionId !== childSessionId || decision.controllingSessionId !== parentSessionId ||
         !((decision.category === "issue_closure" || decision.category === "campaign_issue_scope") && parentSessionId === childSessionId ||
-          this.db.isSessionDescendant(parentSessionId, childSessionId)) ||
+          this.workflowDecisionRelationship(parentSessionId, childSessionId)) ||
         !canAccess(parentSessionId) || !canAccess(childSessionId)) {
       return fail("workflow decision not found", 404);
     }
@@ -7881,6 +8004,11 @@ export class SessionsService {
     }
     if (decision.authority !== authority) {
       return fail(`this workflow decision requires a ${decision.authority} response`, 403);
+    }
+    if (authority === "orchestrator" && parentSessionId === childSessionId &&
+        evaluateCampaignAuthority(currentParent, currentChild, this.db.getRunner(currentChild.runnerId)?.protocolVersion,
+          decision.resourceSnapshot, currentPolicy, this.db.getRunner(currentParent.runnerId)?.protocolVersion).basis !== "standing_authorization") {
+      return fail("a root request requires standing human campaign authorization", 403);
     }
     if ((decision.category === "issue_closure" || decision.category === "campaign_issue_scope") && (authority !== "human" || actor.kind !== "human")) {
       return fail("issue closure always requires an authenticated human response", 403);
@@ -8047,7 +8175,7 @@ export class SessionsService {
     const policy = parent?.parentControlPolicy;
     if (!child || !parent || isTerminal(child.status) || isTerminal(parent.status) ||
         !canAccess(child.id) || !canAccess(parent.id) ||
-        !this.db.isSessionDescendant(parent.id, child.id) || !policy ||
+        !this.workflowDecisionRelationship(parent.id, child.id) || !policy ||
         policy.revision !== decision.policyRevision ||
         !this.workflowDecisionAuthorityCurrent(parent, policy, decision)) {
       this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
@@ -8189,9 +8317,9 @@ export class SessionsService {
     if (!child || (child.driver !== "codex-app-server" && child.driver !== "claude-code") ||
         !parent || isTerminal(child.status) ||
         isTerminal(parent.status) || !canAccess(child.id) || !canAccess(parent.id) ||
-        !this.db.isSessionDescendant(parent.id, child.id) || !policy ||
+        !this.workflowDecisionRelationship(parent.id, child.id) || !policy ||
         policy.revision !== decision.policyRevision ||
-        this.effectiveWorkflowDecisionAuthority(parent, policy, "pr_merge") !== decision.authority) {
+        !this.workflowDecisionAuthorityCurrent(parent, policy, decision)) {
       return fail("workflow decision authority was revoked or ancestry changed before reconciliation", 409);
     }
     for (const owner of [child, parent]) {
@@ -8278,9 +8406,9 @@ export class SessionsService {
     const currentPolicy = currentParent?.parentControlPolicy;
     if (!currentChild || !currentParent || isTerminal(currentChild.status) || isTerminal(currentParent.status) ||
         !canAccess(currentChild.id) || !canAccess(currentParent.id) ||
-        !this.db.isSessionDescendant(currentParent.id, currentChild.id) || !currentPolicy ||
+        !this.workflowDecisionRelationship(currentParent.id, currentChild.id) || !currentPolicy ||
         currentPolicy.revision !== decision.policyRevision ||
-        this.effectiveWorkflowDecisionAuthority(currentParent, currentPolicy, "pr_merge") !== decision.authority) {
+        !this.workflowDecisionAuthorityCurrent(currentParent, currentPolicy, decision)) {
       return fail("workflow decision authority or ancestry changed during reconciliation", 409);
     }
     for (const owner of [currentChild, currentParent]) {
@@ -8432,9 +8560,9 @@ export class SessionsService {
       "workflow decision action admission",
     ));
     if (!child || child.id !== session.id || !parent || isTerminal(child.status) || isTerminal(parent.status) ||
-        unsupported || !this.db.isSessionDescendant(parent.id, child.id) || !policy ||
+        unsupported || !this.workflowDecisionRelationship(parent.id, child.id) || !policy ||
         policy.revision !== decision.policyRevision ||
-        this.effectiveWorkflowDecisionAuthority(parent, policy, "pr_merge") !== decision.authority ||
+        !this.workflowDecisionAuthorityCurrent(parent, policy, decision) ||
         canonicalPrMergeEnqueueCommand(decision.resourceSnapshot as Extract<
           WorkflowDecisionResourceSnapshot, { category: "pr_merge" }
         >) !== command) {
@@ -8448,6 +8576,10 @@ export class SessionsService {
     session: SessionView;
     policy: ParentControlPolicy;
   } | null {
+    if (child.orchestratorPolicy?.control?.mode === "full_control" && child.parentControlPolicy &&
+        this.workflowDecisionRelationship(child.id, child.id)) {
+      return { session: child, policy: child.parentControlPolicy };
+    }
     if ((category === "issue_closure" || category === "campaign_issue_scope") && sessionRole(child) === "orchestrator" && child.parentControlPolicy) {
       return { session: child, policy: child.parentControlPolicy };
     }
@@ -8471,14 +8603,6 @@ export class SessionsService {
    * and the events about it never disagree about the same ancestry, including at the bound. */
   private decisionControllerRoot(child: SessionView): ReturnType<ControlPlaneDb["campaignAncestryRoot"]> {
     return child.parentSessionId ? this.db.campaignAncestryRoot(child.parentSessionId) : "none";
-  }
-
-  private effectiveWorkflowDecisionAuthority(
-    controller: SessionView,
-    policy: ParentControlPolicy,
-    category: Exclude<WorkflowDecisionCategory, "ui_evidence_approval">,
-  ): WorkflowDecisionAuthority {
-    return category === "issue_closure" || category === "campaign_issue_scope" ? "human" : policy.decisions[category];
   }
 
   /** Verify the immutable source and every server-created frame that the decision manifest names. */
@@ -8518,15 +8642,18 @@ export class SessionsService {
     childSessionId: string,
     snapshot: WorkflowDecisionResourceSnapshot,
   ): UiEvidenceReviewEvaluation {
+    const requester = this.db.getSession(childSessionId);
+    const authority = requester ? evaluateCampaignAuthority(controller, requester,
+      this.db.getRunner(requester.runnerId)?.protocolVersion, snapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion).owner : "human";
     if (snapshot.category !== "ui_evidence_approval") {
-      return { effectiveOwner: this.effectiveWorkflowDecisionAuthority(controller, policy, snapshot.category) };
+      return { effectiveOwner: authority };
     }
     if (snapshot.videoReview && !this.videoFrameReviewEnabledFor(controller.id)) {
       return { effectiveOwner: "human", fallback: { code: "media_video_unsupported",
         reason: "Delegated video-frame validation is not enabled for this controlling Session." } };
     }
     const client = evaluateUiEvidenceReviewClient(
-      this.db.uiEvidenceReviewClient(controller, policy.decisions.ui_evidence_approval),
+      this.db.uiEvidenceReviewClient(controller, authority),
     );
     if (client.effectiveOwner === "human") return client;
     if (snapshot.videoReview && ![controller, this.db.getSession(childSessionId)].every((owner) =>
@@ -8568,6 +8695,11 @@ export class SessionsService {
     policy: ParentControlPolicy,
     decision: WorkflowDecisionView,
   ): boolean {
+    const requester = this.db.getSession(decision.sessionId);
+    if (decision.authorityEvaluation?.boundaryRevision !== undefined && (!requester ||
+        evaluateCampaignAuthority(controller, requester, this.db.getRunner(requester.runnerId)?.protocolVersion,
+          decision.resourceSnapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion).boundaryRevision !== decision.authorityEvaluation.boundaryRevision ||
+        !campaignBoundaryCurrent(controller))) return false;
     if (decision.category === "ui_evidence_approval" && decision.authority === "human") return true;
     return this.evaluateWorkflowDecisionAuthority(
       controller, policy, decision.sessionId, decision.resourceSnapshot,
@@ -8594,7 +8726,7 @@ export class SessionsService {
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
     if (!decision || decision.sessionId !== childSessionId || decision.controllingSessionId !== parentSessionId ||
         decision.resourceSnapshot.category !== "ui_evidence_approval" ||
-        !this.db.isSessionDescendant(parentSessionId, childSessionId) ||
+        !this.workflowDecisionRelationship(parentSessionId, childSessionId) ||
         !canAccess(parentSessionId) || !canAccess(childSessionId)) {
       return fail("workflow decision not found", 404);
     }
@@ -9278,9 +9410,9 @@ export class SessionsService {
     if (!child || !parent || !policy || child.driver !== "claude-code" ||
         (requireLive && (isTerminal(child.status) || isTerminal(parent.status))) ||
         !canAccess(child.id) || !canAccess(parent.id) ||
-        !this.db.isSessionDescendant(parent.id, child.id) ||
+        !this.workflowDecisionRelationship(parent.id, child.id) ||
         policy.revision !== decision.policyRevision ||
-        this.effectiveWorkflowDecisionAuthority(parent, policy, "pr_merge") !== decision.authority) {
+        !this.workflowDecisionAuthorityCurrent(parent, policy, decision)) {
       return false;
     }
     return [child, parent].every((owner) => !this.capabilityFailure(
@@ -9424,7 +9556,7 @@ export class SessionsService {
     if (viewer === "human" && !rootCampaign) {
       return fail("descendant request supervision is available only for an Orchestrator campaign", 403);
     }
-    if (viewer === "orchestrator" && mode === "off" && !Object.values(typedPolicy.decisions).includes("orchestrator")) {
+    if (viewer === "orchestrator" && parent.orchestratorPolicy?.control?.mode !== "full_control" && mode === "off" && !Object.values(typedPolicy.decisions).includes("orchestrator")) {
       // Parent Control governs answering requests. A held child has nothing to answer, so its hold
       // is still reported, but only to the campaign Orchestrator its campaign event wakes (#1650);
       // any other parent with Parent Control off is refused as before.
@@ -9438,7 +9570,7 @@ export class SessionsService {
         if ((viewer === "orchestrator" && decision.authority !== "orchestrator") ||
             decision.policyRevision !== typedPolicy.revision ||
             !this.workflowDecisionAuthorityCurrent(parent, typedPolicy, decision) ||
-            !this.db.isSessionDescendant(parentSessionId, decision.sessionId) || !canAccess(decision.sessionId)) return [];
+            !this.workflowDecisionRelationship(parentSessionId, decision.sessionId) || !canAccess(decision.sessionId)) return [];
         const session = this.db.getSession(decision.sessionId);
         if (!session || isTerminal(session.status) || !runnerSupportsProtocol(
           this.db.getRunner(session.runnerId)?.protocolVersion,
@@ -9452,22 +9584,22 @@ export class SessionsService {
           eventEpoch: session.eventEpoch ?? 0,
           createdAt: decision.createdAt,
           responseOwner: decision.authority,
+          authorityEvaluation: decision.authorityEvaluation,
           occurrenceId: decision.occurrenceId,
           request: this.workflowDecisionApproval(decision),
           ...(viewer === "human" ? descendantAccountFacts(session) : {}),
         }];
       },
     );
-    const generic = this.db.listSessionDescendantRequestCandidates(parentSessionId).flatMap((session): DescendantRequestView[] => {
+    const genericCandidates = this.db.listSessionDescendantRequestCandidates(parentSessionId);
+    if (parent.orchestratorPolicy?.control?.mode === "full_control") genericCandidates.push({ ...parent, eventEpoch: parent.eventEpoch ?? 0, requestCreatedAtById: {}, pendingApproval: parent.pendingApproval ?? null });
+    const generic = genericCandidates.flatMap((session): DescendantRequestView[] => {
       if (!canAccess(session.id)) return [];
       return pendingRequests(session.pendingApproval).flatMap((request): DescendantRequestView[] => {
         if (!request.occurrenceId) return [];
         if (request.kind === "workflow_decision") return [];
-        const orchestratorOwned = runnerSupportsProtocol(
-          this.db.getRunner(session.runnerId)?.protocolVersion,
-          "delegatedParentControl",
-        ) && parentControlRequestEligible(mode, request);
-        const responseOwner = orchestratorOwned ? "orchestrator" as const : "human" as const;
+        const authorityEvaluation = this.genericCampaignAuthority(parent, session, request);
+        const responseOwner = authorityEvaluation.owner;
         if (viewer === "orchestrator" && responseOwner !== "orchestrator") return [];
         return [{
           sessionId: session.id,
@@ -9477,6 +9609,7 @@ export class SessionsService {
           eventEpoch: session.eventEpoch,
           createdAt: session.requestCreatedAtById[request.requestId] ?? session.updatedAt,
           responseOwner,
+          authorityEvaluation,
           occurrenceId: request.occurrenceId,
           request,
           ...(viewer === "human" ? descendantAccountFacts(session) : {}),
@@ -9510,10 +9643,10 @@ export class SessionsService {
     const typedPolicy = parent.parentControlPolicy ?? {
       revision: 0, decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY },
     };
-    if (mode === "off" && !Object.values(typedPolicy.decisions).includes("orchestrator")) {
+    if (parent.orchestratorPolicy?.control?.mode !== "full_control" && mode === "off" && !Object.values(typedPolicy.decisions).includes("orchestrator")) {
       return fail("Parent Control is off", 403);
     }
-    if (!this.db.isSessionDescendant(parentSessionId, childSessionId) || !canAccess(childSessionId)) {
+    if (!this.workflowDecisionRelationship(parentSessionId, childSessionId) || !canAccess(parentSessionId) || !canAccess(childSessionId)) {
       return fail("session not found", 404);
     }
     const child = this.db.getSession(childSessionId);
@@ -9535,7 +9668,7 @@ export class SessionsService {
     if (pending.kind === "workflow_decision") {
       return fail("typed workflow decisions require a typed workflow resolution", 409);
     }
-    if (!parentControlRequestEligible(mode, pending)) {
+    if (parent.orchestratorPolicy?.control?.mode !== "full_control" && !parentControlRequestEligible(mode, pending)) {
       return fail("this request requires a human response", 403);
     }
     const unsupported = this.capabilityFailure(
@@ -9544,6 +9677,19 @@ export class SessionsService {
       "delegated parent control",
     );
     if (unsupported) return unsupported;
+    if (this.genericCampaignAuthority(parent, child, pending).owner !== "orchestrator") {
+      return fail("this request requires a human response", 403);
+    }
+    if (parent.orchestratorPolicy?.control?.mode === "full_control" && pending.kind !== "question") {
+      const currentRule = evaluateApprovalPolicies({ scope: approvalScope(child, pending), status: child.status,
+        costUsd: child.costUsd, toolCallCount: this.db.countToolCalls(child.id), escalated: Boolean(pending.context?.escalatedBy) },
+      this.governancePolicies());
+      if (currentRule.effect === "deny" || (currentRule.policy && currentRule.effect === "ask" &&
+          (currentRule.policy.builtin || currentRule.policy.conditions?.humanRequired ||
+            !parent.orchestratorPolicy.control.boundary.delegatablePolicyIds.includes(currentRule.policy.policyId)))) {
+        return fail("current policy requires a human or denies this operation", 403);
+      }
+    }
     const actor: GovernanceActor = { kind: "agent", id: parentSessionId };
     let result: ServiceResult<SessionView>;
     if (resolution.action === "answer" || resolution.action === "dismiss") {
@@ -12692,6 +12838,7 @@ export class SessionsService {
       ...(payload.ownerToolUseId ? { ownerToolUseId: payload.ownerToolUseId } : {}),
       requestId: payload.requestId,
       ...(payload.occurrenceId ? { occurrenceId: payload.occurrenceId } : {}),
+      ...(payload.requestSource ? { requestSource: payload.requestSource } : {}),
       title: payload.title,
       options: payload.options,
       ...(payload.purpose === "authentication" ? { kind: "authentication" as const } : {}),
@@ -12700,6 +12847,7 @@ export class SessionsService {
       ...(payload.ownerToolUseId ? { ownerToolUseId: payload.ownerToolUseId } : {}),
       requestId: payload.requestId,
       ...(payload.occurrenceId ? { occurrenceId: payload.occurrenceId } : {}),
+      ...(payload.requestSource ? { requestSource: payload.requestSource } : {}),
       title: payload.questions[0]?.question ?? "The agent has a question",
       options: [],
       kind: "question",
@@ -12731,6 +12879,7 @@ export class SessionsService {
       // Ownership and reminder routing must see the same policy-enriched request that is stored.
       if (effectiveEffect === "ask" && policyDecision.policy) {
         approval.governancePolicyId = policyDecision.policy.policyId;
+        if (policyDecision.policy.builtin || policyDecision.policy.conditions?.humanRequired) approval.humanRequired = true;
       }
       return { escalatedBy, policyDecision, policyOption, effectiveEffect };
     })() : null;
@@ -12961,7 +13110,7 @@ export class SessionsService {
         );
       }
 
-      const actionAdmission = effectiveEffect === "deny"
+      const actionAdmission = effectiveEffect === "deny" || approval.humanRequired
         ? null
         : this.workflowDecisionActionForPermission(session(), approval);
       if (actionAdmission) {
@@ -13077,6 +13226,7 @@ export class SessionsService {
       );
       this.db.updateSessionStatus(sessionId, "input_required", now);
       // Push BEFORE any runner-side trailing status event (which would then be a non-transition).
+      if (this.executeStandingRootRequest(sessionId, approval)) return;
       this.notifyTransition(session(), sessionId);
     }
 
@@ -13240,6 +13390,7 @@ export class SessionsService {
       );
       if (!payload.async) {
         this.db.updateSessionStatus(sessionId, "input_required", now);
+        if (this.executeStandingRootRequest(sessionId, approval)) return;
         this.notifyTransition(session(), sessionId);
       }
     }
@@ -13868,6 +14019,7 @@ export class SessionsService {
       return addPendingRequest(trailingAsk, {
         requestId: payload.requestId,
         ...(payload.occurrenceId ? { occurrenceId: payload.occurrenceId } : {}),
+        ...(payload.requestSource ? { requestSource: payload.requestSource } : {}),
         title: payload.title,
         options: payload.options,
         ...(payload.purpose === "authentication" ? { kind: "authentication" as const } : {}),
@@ -13879,6 +14031,7 @@ export class SessionsService {
       return addPendingRequest(trailingAsk, {
         requestId: payload.requestId,
         ...(payload.occurrenceId ? { occurrenceId: payload.occurrenceId } : {}),
+        ...(payload.requestSource ? { requestSource: payload.requestSource } : {}),
         title: payload.questions[0]?.question ?? "The agent has a question",
         options: [],
         kind: "question",

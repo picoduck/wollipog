@@ -2813,6 +2813,7 @@ test("Codex tool user input keeps the provider request id and returns native ans
 
   assert.deepEqual(h.events.at(-1), {
     kind: "question_request",
+    requestSource: "provider_question",
     requestId: "701",
     questions: [
       {
@@ -3009,6 +3010,7 @@ test("MCP URL elicitation exposes Accept, Decline, and Cancel and uses the selec
   }, "mcp-url-5");
   assert.deepEqual(h.events.at(-1), {
     kind: "permission_request",
+    requestSource: "provider_elicitation",
     requestId: "mcp-url-5",
     title: "Payments MCP requests a browser flow",
     options: [
@@ -4100,7 +4102,9 @@ test("approvalContext exposes bounded Codex tool/path/network/branch selectors",
     reason: "apply patch",
   }, true), {
     toolName: "fileChange",
+    providerPermissionExpansion: true,
     input: "apply patch",
+    operation: { kind: "file", path: "/repo/a.ts", filesystem: { targets: [{ path: "/repo/a.ts", resolvedPath: "/repo/a.ts" }] } },
     path: "/repo/a.ts",
     network: "requested",
     branch: "feature/x",
@@ -4110,6 +4114,27 @@ test("approvalContext exposes bounded Codex tool/path/network/branch selectors",
   assert.equal(approvalContext("item/fileChange/requestApproval", {
     changes: [{ path: "/repo/a.ts" }, { path: "/outside/b.ts" }],
   }, false).path, undefined, "multi-file approvals cannot be authorized by only their first path");
+});
+
+test("authority provenance uses concrete operations, never display reasons or a misleading first file", () => {
+  assert.equal(approvalContext("item/commandExecution/requestApproval", {
+    reason: "cat src/authentication.ts", operation: { kind: "command", input: "cat src/authentication.ts" },
+  }, false).operation, undefined, "provider reason and authored metadata do not attest an operation");
+  assert.deepEqual(approvalContext("item/commandExecution/requestApproval", {
+    command: "git diff -- src/authentication.ts", cwd: "/repo",
+  }, false).operation, { kind: "command", input: "git diff -- src/authentication.ts", cwd: "/repo" });
+  assert.equal(approvalContext("item/commandExecution/requestApproval", { command: "x".repeat(3000) }, false).operation, undefined);
+  assert.equal(approvalContext("item/fileChange/requestApproval", {
+    path: "/repo/auth.ts", changes: [{ path: "/repo/auth.ts" }, { path: "/outside/auth.ts" }],
+  }, false).operation, undefined);
+  assert.equal(approvalContext("item/fileChange/requestApproval", {
+    path: "/repo/auth.ts", changes: [{ path: "/outside/auth.ts" }],
+  }, false).operation, undefined);
+  assert.deepEqual(approvalContext("item/permissions/requestApproval", { permissions: { network: true } }, false).operation,
+    { kind: "permission_grant", lifetime: "session" });
+  for (const envelope of [{ networkApprovalContext: { host: "fixture.invalid" } }, { additionalPermissions: { fileSystem: {} } }]) {
+    assert.equal(approvalContext("item/commandExecution/requestApproval", { command: "git status --short", cwd: "/repo", ...envelope }, false).providerPermissionExpansion, true);
+  }
 });
 
 test("approvalResponse: command/file approvals use {decision: accept|decline}", () => {

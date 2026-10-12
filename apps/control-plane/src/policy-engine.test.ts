@@ -313,6 +313,9 @@ test("policy validation rejects typo-broadened scopes, unknown conditions, and b
   assert.match(validateGovernancePolicy({ ...input, scope: { network: "https://good.example@evil.example/*" } })!, /credential-free/);
   assert.match(validateGovernancePolicy({ ...input, conditions: { escalated: true } })!, /runner-asserted/);
   assert.equal(validateGovernancePolicy({ ...input, effect: "ask", askTimeout: 30 }), null);
+  assert.equal(validateGovernancePolicy({ ...input, effect: "ask", conditions: { humanRequired: true } }), null);
+  assert.match(validateGovernancePolicy({ ...input, effect: "ask", conditions: { humanRequired: "true" } } as never)!, /Human Required/);
+  assert.match(validateGovernancePolicy({ ...input, effect: "allow", conditions: { humanRequired: true } })!, /Human Required/);
   assert.match(validateGovernancePolicy({ ...input, effect: "ask", askTimeout: 0 })!, /askTimeout/);
   assert.match(validateGovernancePolicy({ ...input, effect: "deny", askTimeout: 30 })!, /only valid/);
 });

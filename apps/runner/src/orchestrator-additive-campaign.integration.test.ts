@@ -608,7 +608,8 @@ test("a non-strict Claude Orchestrator campaign runs end to end as an additive r
     assert.deepEqual(db.getSession(child.id)?.pendingRequestOwners, {
       human: 0,
       orchestrator: 1,
-      requests: [{ requestId: "child-question", occurrenceId, owner: "orchestrator" }],
+      requests: [{ requestId: "child-question", occurrenceId, owner: "orchestrator",
+        authorityEvaluation: { owner: "orchestrator", operation: "question", basis: "custom_policy", reason: "custom_owner" } }],
     }, "the child's question is owned by the Orchestrator, resolved through the persisted role");
     const listed = service.descendantRequests(parent.id, () => true);
     assert.ok(listed.ok && listed.data, listed.error ?? "descendant requests unavailable");

@@ -7,13 +7,14 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, symlinkSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pendingRequests, type RunnerToControlPlane } from "@wollipog/protocol";
 import { SessionManager, type DurableCommandLifecycle } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 import { DurableCommandStore, durableCommandPayloadDigest } from "./durable-command-store.js";
+import { campaignOperationEvidence } from "./campaign-operation-evidence.js";
 
 function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
   return {
@@ -135,6 +136,25 @@ test("delegated resolutions persist the controlling parent in runner history", (
   } finally {
     cleanup();
   }
+});
+
+test("a delegated approval cancels when its canonical source target changes while the provider is parked", () => {
+  const h = makeHarness(true);
+  const root = mkdtempSync(join(tmpdir(), "campaign-parked-target-"));
+  try {
+    const source = join(root, "source.ts"), other = join(root, "other.ts"), link = join(root, "link.ts");
+    writeFileSync(source, "benign source\n"); writeFileSync(other, "different benign source\n"); symlinkSync(source, link);
+    const operation = campaignOperationEvidence("Read", { kind: "file", path: link });
+    (h.sm as any).emitEvent("s_perm", { kind: "permission_request", requestId: "canonical", title: "Inspect Source",
+      requestSource: "provider_tool", context: { toolName: "Read", operation },
+      options: [{ optionId: "allow", name: "Allow Once", kind: "allow_once" }] });
+    const received: Array<string | null> = [];
+    (h.sm as any).active.get("s_perm").client.resolvePermission = (_id: string, option: string | null) => { received.push(option); return true; };
+    unlinkSync(link); symlinkSync(other, link);
+    h.sm.resolvePermission("s_perm", "canonical", "allow", "parent-session");
+    assert.deepEqual(received, [null], "changed target receives cancellation, never the delegated grant");
+    assert.equal((eventsOf(h.sent, "permission_resolved").at(-1) as { payload: { optionId: string | null } }).payload.optionId, null);
+  } finally { h.cleanup(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test("a permission's resolution records who settled that exact occurrence, and only that (#2628)", () => {

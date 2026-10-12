@@ -664,7 +664,12 @@
 // 212: lightweight session summaries and byte-bounded dashboard snapshot pages (#2769).
 // 213: authoritative bounded history previews in an explicit runner coordinate space (#2881).
 // 214: read-only descendant workflow decision inspection and nonterminal keyset pages.
-export const PROTOCOL_VERSION = 214;
+// 215: human-authorized Full Control boundary and shared, reasoned campaign authority; trusted
+//      provider request-source envelopes. Omission preserves Custom and older-peer behavior.
+export const PROTOCOL_VERSION = 215;
+
+export * from "./campaign-authority.js";
+import type { CampaignControl, CampaignRequestSource, CampaignAuthorityEvaluation } from "./campaign-authority.js";
 export const SESSION_SUMMARY_UI_PROTOCOL = 212;
 export const SKILL_REPORT_REQUEST_LIFETIME_MS = 30_000;
 export const MAX_SKILL_REPORT_REQUESTS = 64;
@@ -914,6 +919,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   backgroundMissingResultRecovery: 134,
   delegatedParentControl: 136,
   typedWorkflowDecisionDelegation: 139,
+  fullControlAuthority: 215,
   workflowDecisionActionAdmission: 151,
   workflowDecisionActionReconciliation: 153,
   /** Control plane retains and delivers a resolver's child-facing workflow-decision message. */
@@ -2424,6 +2430,8 @@ export interface OrchestratorPolicySources {
  * and source; editing user defaults never reaches an existing session. */
 export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
   version: 1;
+  /** Server-owned human authorization. Never accepted from child config or ordinary prompts. */
+  control?: CampaignControl;
   /** Human initial epic request, persisted before runner echo; this is a proposal seed, never authority. */
   issueScopeProposalEpic?: number;
   /** Finite GitHub issue-write scope admitted from the initial request or an exact human-approved scope change. */
@@ -3590,6 +3598,15 @@ export type StructuredRequestResolutionReason =
 /** Bounded rendering of WHAT is being approved (tool name + its input) — the trust surface:
  * an Allow button without the command/diff it authorizes defeats confirm-before-apply. */
 export interface ApprovalContext {
+  /** Trusted bridge reports requested provider access expansion; never a delegatable code intent. */
+  providerPermissionExpansion?: boolean;
+  /** Concrete operation recovered by the provider bridge. Display reasons and tool input's
+   * claimed intent never populate it. Missing/truncated operation stays unverified. */
+  operation?: ({ kind: "command"; input: string; cwd?: string } | { kind: "file"; path: string } |
+    { kind: "permission_grant"; lifetime: "session" }) & {
+      /** Runner-derived physical targets. Provider-authored claims never populate this evidence. */
+      filesystem?: { cwd?: string; targets: Array<{ path: string; resolvedPath: string }> };
+    };
   toolName?: string;
   /** Human-readable input rendering (command text, file path + content excerpt, JSON), bounded
    * by the emitter — never the raw multi-MB payload. */
@@ -4336,6 +4353,8 @@ export interface WorkflowDecisionView {
   resourceDigest: string;
   policyRevision: number;
   authority: WorkflowDecisionAuthority;
+  /** Live server evaluation; never used as a grant supplied by a caller. */
+  authorityEvaluation?: CampaignAuthorityEvaluation;
   /** Why a decision whose saved owner is the Orchestrator was routed to the human instead. */
   humanFallback?: { code: UiEvidenceReviewUnavailableCode; reason: string };
   status: WorkflowDecisionStatus;
@@ -4380,6 +4399,13 @@ export interface ConsumeWorkflowDecisionRequest {
 }
 
 export interface PendingApproval {
+  /** Server-derived exception when a parked root callback could not be delivered. */
+  standingAdmissionFailure?: "provider_delivery_unavailable";
+  /** CP-derived mandatory human rule on this occurrence. Provider input cannot set it. */
+  humanRequired?: boolean;
+  /** Runner bridge envelope, not question/tool input. Missing provenance fails closed in Full
+   * Control when sensitivity cannot otherwise be verified. */
+  requestSource?: CampaignRequestSource;
   /** Control-plane occurrence time. Reconnects preserve it; provider timestamps do not own it. */
   requestedAt?: number;
   /** v108: runner-verified spawning tool identity; never a raw provider thread id. */
@@ -4519,6 +4545,8 @@ export interface GovernancePolicyScope {
 
 /** Stateful predicates evaluated from the authoritative session view at request time. */
 export interface GovernancePolicyConditions {
+  /** A matching ask is never delegatable, even under Full Control or an exact workflow grant. */
+  humanRequired?: boolean;
   statuses?: SessionStatus[];
   minCostUsd?: number;
   maxCostUsd?: number;
@@ -4689,6 +4717,7 @@ export interface ApprovalQueueRejectResult {
 
 /** One descendant request projected only through an explicitly enabled Parent Control surface. */
 export interface DescendantRequestView {
+  authorityEvaluation?: CampaignAuthorityEvaluation;
   sessionId: string;
   sessionTitle: string;
   runnerId: string;
@@ -5293,7 +5322,7 @@ export type SessionEventPayload =
   | PolicyHookDecisionEvent
   | WorkflowActionAdmissionArmedEvent
   | ({ kind: "review_decision" } & ReviewDecision)
-  | { kind: "permission_request"; requestId: string; occurrenceId?: string; title: string; options: PermissionOption[]; context?: ApprovalContext; purpose?: "authentication"; ownerToolUseId?: string }
+  | { kind: "permission_request"; requestId: string; occurrenceId?: string; title: string; options: PermissionOption[]; context?: ApprovalContext; purpose?: "authentication"; ownerToolUseId?: string; requestSource?: CampaignRequestSource }
   | {
       kind: "permission_resolved";
       requestId: string;
@@ -5307,7 +5336,7 @@ export type SessionEventPayload =
        * names the member relative to the viewer and the policy by its name. */
       resolvedBy?: PermissionResolver;
     }
-  | { kind: "question_request"; requestId: string; occurrenceId?: string; questions: AgentQuestion[]; ownerToolUseId?: string; async?: boolean }
+  | { kind: "question_request"; requestId: string; occurrenceId?: string; questions: AgentQuestion[]; ownerToolUseId?: string; async?: boolean; requestSource?: CampaignRequestSource }
   | { kind: "question_policy_answered"; requestId: string; questionEventSeq?: number; policies: { policyId: string; name: string }[] }
   | {
       kind: "question_resolved";
@@ -6845,6 +6874,7 @@ export interface SessionView {
       requestId: string;
       occurrenceId?: string;
       owner: WorkflowDecisionAuthority;
+      authorityEvaluation?: CampaignAuthorityEvaluation;
     }>;
   };
   /** Compact exact-owner joins for current pending requests. The full child registry remains
