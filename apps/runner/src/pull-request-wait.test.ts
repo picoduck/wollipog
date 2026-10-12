@@ -6,6 +6,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { GhOutcome, GhRunner } from "./campaign-forge-status.js";
+import { runContextCommand } from "./context-command.js";
 import {
   evaluateCommitChecks,
   parsePullRequestRef,
@@ -595,13 +596,27 @@ test("slow reads cannot carry the call past the timeout plus one read's grace", 
   assert.equal(starts.length, 4);
 });
 
-test("a read hung past the budget is abandoned on the real clock", async () => {
+test("a read hung past the budget is killed on the real clock", async () => {
   const startedAt = Date.now();
-  const hung: GhRunner = () => new Promise(() => {});
+  let killed = false;
+  const hung: GhRunner = (_args, signal) => new Promise(() => {
+    signal?.addEventListener("abort", () => { killed = true; }, { once: true });
+  });
   const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 1 }, { gh: hung, readGraceMs: 50 });
   assert.equal(result.ok, false);
   assert.match(!result.ok ? result.error : "", /forge_unreachable/u);
   assert.ok(Date.now() - startedAt < 2_000);
+  assert.equal(killed, true, "the read's process is told to stop, not merely abandoned");
+});
+
+test("aborting a context command kills its process", async () => {
+  const startedAt = Date.now();
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 50);
+  await assert.rejects(runContextCommand({ kind: "native" }, process.execPath, ["-e", "setTimeout(() => {}, 20000)"], {
+    cwd: process.cwd(), signal: controller.signal,
+  }));
+  assert.ok(Date.now() - startedAt < 5_000);
 });
 
 test("a read that fails once the timeout has passed reports the last observation as a timeout", async () => {

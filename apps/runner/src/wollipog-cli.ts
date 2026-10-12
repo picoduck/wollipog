@@ -17,6 +17,7 @@ import {
 } from "./session-management-mcp.js";
 import { VERSION } from "./version.js";
 import { contextGhRunner, type GhRunner } from "./campaign-forge-status.js";
+import { PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS, PULL_REQUEST_WAIT_MAX_TIMEOUT_MS } from "./pull-request-wait.js";
 import { defaultHostAdminIo, hostAdminUsage, runHostAdminCli, type HostAdminIo } from "./host-admin-cli.js";
 import { defaultServiceHost, defaultServiceIo, runServiceCli, serviceUsage } from "./service-cli.js";
 import {
@@ -178,16 +179,24 @@ export async function runPullRequestCli(
     return fail("--timeout and --interval take milliseconds", 2);
   }
   let repository = option(args, "--repo");
+  let remainingMs = timeoutMs;
   if (!repository && /^#?\d+$/u.test(words[2]!)) {
-    const resolved = await gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
+    // Discovery comes out of the same budget as the wait, so the command still ends in time.
+    const budgetMs = Math.min(PULL_REQUEST_WAIT_MAX_TIMEOUT_MS, Math.max(1, timeoutMs ?? PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS));
+    const startedAt = Date.now();
+    const discovery = AbortSignal.timeout(budgetMs);
+    const resolved = await gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
+      signal ? AbortSignal.any([discovery, signal]) : discovery);
     repository = resolved.code === null ? resolved.stdout.trim() : "";
     if (!repository) return fail("could not resolve this directory's GitHub repository; pass --repo <owner/name>", 1);
+    remainingMs = budgetMs - (Date.now() - startedAt);
+    if (remainingMs < 1) return fail("resolving the repository used the whole timeout; pass --repo <owner/name>", 1);
   }
   const result = await executeManagerTool("wait_pull_request", {
     pullRequest: words[2],
     ...(repository ? { repository } : {}),
     ...(option(args, "--head") !== undefined ? { headSha: option(args, "--head") } : {}),
-    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    ...(remainingMs !== undefined ? { timeoutMs: remainingMs } : {}),
     ...(intervalMs !== undefined ? { intervalMs } : {}),
     ...(flag(args, "--any-failure") ? { returnOnAnyFailure: true } : {}),
   }, { fetch: () => Promise.reject(new Error("no control plane")), cpUrl: "", selfSessionId: "", token: "", gh, ...(signal ? { signal } : {}) });

@@ -585,20 +585,27 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
   };
 
   // Every read shares one budget, so the call returns within the timeout plus one read's grace: no
-  // read starts once it is spent, and one still in flight then is abandoned (reads have no effects).
+  // read starts once it is spent, and one still in flight then is killed (reads have no effects).
   const stopAt = deadline + (deps.readGraceMs ?? PULL_REQUEST_WAIT_READ_GRACE_MS);
   const gh: GhRunner = async (args) => {
     const budget = stopAt - now();
     if (budget <= 0) return BUDGET_SPENT;
+    const read = new AbortController();
+    const cancel = () => read.abort();
+    deps.signal?.addEventListener("abort", cancel, { once: true });
     let timer: ReturnType<typeof setTimeout> | undefined;
     const spent = new Promise<GhOutcome>((resolve) => {
-      timer = setTimeout(() => resolve(BUDGET_SPENT), budget);
+      timer = setTimeout(() => {
+        read.abort();
+        resolve(BUDGET_SPENT);
+      }, budget);
       timer.unref?.();
     });
     try {
-      return await Promise.race([deps.gh(args), spent]);
+      return await Promise.race([deps.gh(args, read.signal), spent]);
     } finally {
       clearTimeout(timer);
+      deps.signal?.removeEventListener("abort", cancel);
     }
   };
   /** The latest complete observation, reported if a read fails once the timeout has passed. */

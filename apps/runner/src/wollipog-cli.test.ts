@@ -227,6 +227,29 @@ test("pr wait runs locally through gh with outcome exit codes and never contacts
   assert.equal(unreadable.code, 1);
   assert.match(JSON.parse(unreadable.stdout).error, /forge_unauthenticated/u);
 
+  // Resolving the repository comes out of the wait's own budget.
+  const startedAt = Date.now();
+  let discoveryKilled = false;
+  const hungDiscovery: GhRunner = (_args, signal) => new Promise((resolve) => {
+    signal?.addEventListener("abort", () => {
+      discoveryKilled = true;
+      resolve({ stdout: "", stderr: "killed", code: "ABORT_ERR", timedOut: true });
+    }, { once: true });
+  });
+  const slow = await run(["pr", "wait", "7", "--timeout", "100", "--json"], hungDiscovery);
+  assert.equal(slow.code, 1);
+  assert.match(JSON.parse(slow.stdout).error, /pass --repo/u);
+  assert.equal(discoveryKilled, true);
+  assert.ok(Date.now() - startedAt < 2_000);
+  const late: GhRunner = async (args) => {
+    if (args[0] !== "repo") return passed.gh(args);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    return { stdout: "picoduck/wollipog\n", stderr: "", code: null, timedOut: false };
+  };
+  const spent = await run(["pr", "wait", "7", "--timeout", "100", "--json"], late);
+  assert.equal(spent.code, 1);
+  assert.match(JSON.parse(spent.stdout).error, /whole timeout/u);
+
   for (const args of [["pr"], ["pr", "wait"], ["pr", "watch", "7"], ["pr", "wait", "7", "--timeout", "soon"]]) {
     const usage = await run(args, passed.gh);
     assert.equal(usage.code, 2, args.join(" "));
