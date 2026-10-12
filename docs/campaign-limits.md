@@ -41,6 +41,10 @@ ceiling or reduce already spent usage. It needs no additional human confirmation
 cannot be reduced until cancellation/completion settles; redistributing them sooner would reuse
 capacity held by a provider with asynchronous configuration delivery. Failed delivery retains its
 reservation conservatively. Reconnect reuses durable allocations rather than minting a new lease.
+Registration redelivers the existing generation and absolute limits, including to terminal workers
+whose first allocation was missed. Terminal delivery returns final evidence without resuming a
+recovery queue. A definitively unsent restart restores the prior generation and pending checkpoint;
+an ambiguous or accepted dispatch keeps its new generation fenced.
 
 Accepting a unique follow-up work item consumes one durable count in the same transaction as the
 ledger disposition. Duplicate acceptance is idempotent. Rejection, deletion or later cancellation
@@ -97,6 +101,9 @@ Unsuccessful paid attempts also consume allowance. Durable per-PR/base epochs en
 rounds and two launched attempts per round across replay/restart. Recovery validates the same
 completed transcript without relaunching a provider; ambiguous or unpriced termination keeps
 capacity reserved and blocks protected admission. Host/provider slot admission is also required.
+A replay of an already admitted live job retains its lease even when unrelated sessions are
+waiting. A restart in the durable pre-dispatch preparation phase reports known-zero `not_launched`
+without consuming an attempt or relaunching; persisted launch intent remains conservative.
 Each independent job contributes once to its original work-item attempt and the campaign cost
 summary as well as the allowance ledger. Replacement attempts and deleted workers cannot refund
 that charge. Pending/unpriced review usage remains unavailable rather than a zero-cost worker;

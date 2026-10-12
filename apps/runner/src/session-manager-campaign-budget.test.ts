@@ -83,3 +83,32 @@ test("normal terminal completion settles once; outstanding ownership fences supp
     (h.manager as any).active.delete("worker");
   } finally {h.cleanup();}
 });
+
+test("an existing native review lease survives unrelated admission waiters",()=>{
+  const h=harness();
+  try {
+    (h.manager as any).executionIsolation={mode:"provider"};
+    assert.equal(h.manager.reserveControlledReviewAdmission("native","claude"),true);
+    (h.manager as any).admissionQueue.push({});
+    assert.equal(h.manager.reserveControlledReviewAdmission("native","claude"),true);
+    assert.equal(h.manager.reserveControlledReviewAdmission("native","other"),false);
+    assert.equal(h.manager.reserveControlledReviewAdmission("new-native","claude"),false,"queue fairness still applies to new jobs");
+    (h.manager as any).admissionQueue.length=0;
+    h.manager.releaseControlledReviewAdmission("native");
+  } finally {h.cleanup();}
+});
+
+test("late allocation delivery attests a terminal nonresident worker without resuming recovery",()=>{
+  const h=harness();
+  try {
+    const dispatch=h.store.readMeta("worker")!.campaignBudgetDispatch!;
+    h.store.patchMeta("worker",{status:"stopped",campaignBudgetDispatch:undefined});
+    (h.manager as any).recoveryQueues.set("worker",[{text:"must remain stopped"}]);
+    (h.manager as any).recoveryHolds.add("worker");
+    h.manager.rearmGovernance("worker",{costBudgetUsd:20,maxToolCalls:20},undefined,dispatch);
+    h.settle();
+    assert.equal(h.store.readMeta("worker")!.status,"stopped");
+    assert.equal((h.manager as any).recoveryHolds.has("worker"),true);
+    (h.manager as any).recoveryQueues.clear();
+  } finally {h.cleanup();}
+});

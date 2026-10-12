@@ -7,6 +7,7 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 import type {CampaignReviewJobCommand,CampaignReviewJobUpdate} from "@wollipog/protocol";
 import {SessionStore} from "./session-store.js";
+import {SessionManager} from "./session-manager.js";
 import {ControlledCampaignReviewer,controlledReviewForgeTarget,controlledReviewUsage} from "./campaign-review-jobs.js";
 
 const init={type:"system",subtype:"init",model:"claude-opus-5-5",session_id:"native",tools:["Read"],permissionMode:"dontAsk"};
@@ -56,8 +57,53 @@ function jobHarness() {
   const store=new SessionStore(join(root,"sessions"));
   const manager=()=>new ControlledCampaignReviewer(root,store,(u)=>updates.push(u),(id)=>{reserved.push(id);return true;},(id)=>released.push(id));
   const persist=(extra:Record<string,unknown>={})=>writeFileSync(join(dir,"state.json"),JSON.stringify({command,repo:root,args:["--expected-diff-sha256","e".repeat(64)],phase:"running",...extra}));
-  return {root,dir,command,updates,released,reserved,manager,persist,cleanup:()=>rmSync(root,{recursive:true,force:true})};
+  return {root,dir,command,store,updates,released,reserved,manager,persist,cleanup:()=>rmSync(root,{recursive:true,force:true})};
 }
+
+test("restart during durable preparation is known zero and never reacquires a provider slot",async()=>{
+  const h=jobHarness();
+  try {
+    h.persist({phase:"prepared",args:[]});
+    const manager=h.manager();await manager.dispatch(h.command);
+    assert.equal(h.updates.at(-1)!.state,"not_launched");assert.equal(h.updates.at(-1)!.costUsd,0);
+    assert.equal(h.updates.at(-1)!.attemptConsumed,false);assert.deepEqual(h.reserved,[]);
+    assert.deepEqual(h.released,[h.command.jobId]);
+    await manager.dispatch(h.command);
+    assert.equal(h.updates.at(-1)!.state,"not_launched");assert.deepEqual(h.reserved,[]);
+  } finally {h.cleanup();}
+});
+
+test("replayed live native dispatch survives a queued session and cannot send SIGTERM",async()=>{
+  const h=jobHarness();
+  const sm=new SessionManager(()=>{},()=>{},h.store,"r");
+  (sm as any).executionIsolation={mode:"provider"};
+  const child=spawn(process.execPath,["-e","process.on('SIGTERM',()=>console.log('sigterm'));console.log('ready');setTimeout(()=>{},10000)"],{detached:true,stdio:["ignore","pipe","ignore"]});
+  const closed=once(child,"close");let signalled=false;
+  child.stdout!.on("data",(data)=>{if(String(data).includes("sigterm")) signalled=true;});
+  let manager:ControlledCampaignReviewer|undefined;
+  try {
+    await once(child.stdout!,"data");
+    const stat=readFileSync(`/proc/${child.pid}/stat`,"utf8");
+    h.persist({pid:child.pid,startIdentity:stat.slice(stat.lastIndexOf(")")+2).split(" ")[19]});
+    writeFileSync(join(h.dir,"provider.jsonl"),raw(init,tool("a")));
+    manager=new ControlledCampaignReviewer(h.root,h.store,(u)=>h.updates.push(u),
+      (id,agent)=>sm.reserveControlledReviewAdmission(id,agent),(id)=>sm.releaseControlledReviewAdmission(id));
+    await manager.dispatch(h.command);
+    (sm as any).admissionQueue.push({});
+    await manager.dispatch(h.command);
+    await new Promise((r)=>setTimeout(r,50));
+    assert.equal(signalled,false);assert.ok(h.updates.length>=2);
+    assert.equal(h.updates.every((u)=>u.state==="running"),true);
+    (sm as any).admissionQueue.length=0;
+    child.kill("SIGKILL");await closed;
+    await manager.dispatch(h.command); // Reconcile the same dead process, never launch a provider.
+    assert.equal(h.updates.at(-1)!.state,"accounting_unavailable");
+  } finally {
+    child.kill("SIGKILL");await closed;(sm as any).admissionQueue.length=0;
+    if(manager && h.updates.at(-1)?.state==="running") await manager.dispatch(h.command);
+    sm.shutdownAll();h.cleanup();
+  }
+});
 
 test("durable native final artifacts settle paid invalid reviews and replay without dispatch",async()=>{
   const h=jobHarness();

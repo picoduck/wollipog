@@ -173,6 +173,15 @@ export class ControlledCampaignReviewer {
     if(existsSync(join(dir,"state.json"))) {
       const state=JSON.parse(readFileSync(join(dir,"state.json"),"utf8")) as State;
       if(JSON.stringify(state.command)!==JSON.stringify(command)) return;
+      if(state.phase==="prepared") {
+        // Launch intent is persisted before spawn. Prepared therefore proves that this process
+        // never dispatched a provider; reconcile it as known zero instead of inventing ambiguity.
+        this.emit(dir,state,{type:"campaign_review_job_update",jobId:command.jobId,nonce:command.nonce,state:"not_launched",
+          costUsd:0,toolCalls:0,attemptValid:false,attemptConsumed:false,
+          receiptSha256:sha(JSON.stringify({jobId:command.jobId,nonce:command.nonce,phase:"prepared"})),
+          reason:"controlled reviewer preflight refused"});
+        return;
+      }
       if(state.phase==="finished" && state.update) {
         if(state.update.state==="accounting_unavailable") this.releaseFinishedAdmissionWhenReaped(state);
         this.send(state.update);

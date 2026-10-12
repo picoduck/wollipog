@@ -180,6 +180,47 @@ test("a restart refused by occupied campaign slots preserves its stop fence",()=
   } finally {h.db.close();}
 });
 
+test("a definitively unsent restart restores its generation and pending final checkpoint",async()=>{
+  const h=harness();
+  try {
+    assert.ok(h.enable(allowance({costUsd:120})).ok);
+    h.make("worker","root",{costBudgetUsd:20,maxToolCalls:20});
+    h.db.updateSessionStatus("worker","stopped",7,RUNNER_REPORTED_STOP);
+    h.db.reconcileRunnerHistory("worker",0,0);
+    const checkpoint={generation:h.db.campaignBudgets.dispatch("worker")!.generation,historyEpoch:0,throughSeq:0,costUsd:2};
+    h.db.campaignBudgets.recordCheckpoint("worker",checkpoint);
+    const before=h.db.campaignBudgets.dispatchState("worker");
+    h.hub.sendToRunner=()=>false;
+    assert.equal(h.svc.restart("worker").ok,false);
+    assert.deepEqual(h.db.campaignBudgets.dispatchState("worker"),before,"a known-unsent dispatch cannot destroy old retirement evidence");
+    h.hub.sendToRunner=()=>true;
+    h.svc.onSessionStatus("worker","stopped",undefined,undefined,"r",undefined,undefined,checkpoint);
+    await new Promise((r)=>setImmediate(r));
+    assert.equal(h.db.campaignBudgets.active("worker"),false,"normal service hydration settles the restored old receipt");
+    assert.equal(h.db.campaignBudgets.view("root")!.actual.costUsd,2);
+  } finally {h.db.close();}
+});
+
+test("reconnect redelivers existing allocations without changing generation or admission",()=>{
+  const h=harness();
+  try {
+    h.make("worker","root");
+    h.hub.sendToRunner=()=>false;
+    assert.ok(h.enable(allowance({costUsd:120})).ok);
+    const before=h.db.campaignBudgets.dispatchState("worker");
+    h.sent.length=0;
+    h.hub.sendToRunner=(_,message)=>{h.sent.push(message);return true;};
+    h.svc.recoverCampaignBudgetAllocations("r");
+    const frame=h.sent.find((m)=>(m as any).type==="rearm_governance" && (m as any).sessionId==="worker") as any;
+    assert.ok(frame);assert.equal(frame.campaignBudgetDispatch.generation,before.generation);
+    assert.deepEqual(frame.config,{costBudgetUsd:h.db.campaignBudgets.allocation("worker")!.costUsd,maxToolCalls:h.db.campaignBudgets.allocation("worker")!.toolCalls});
+    assert.deepEqual(h.db.campaignBudgets.dispatchState("worker"),before);
+    h.db.registerRunner(h.metadata,10,216);
+    h.sent.length=0;h.svc.recoverCampaignBudgetAllocations("r");
+    assert.equal(h.sent.some((m)=>(m as any).type==="rearm_governance"),false,"unsupported peers receive no budget rearm");
+  } finally {h.db.close();}
+});
+
 test("preauthorized checkpoints do not ask; tighter session ceilings cannot be enlarged", () => {
   const h = harness();
   try {
