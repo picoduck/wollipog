@@ -99,7 +99,8 @@ const digest = (snapshot: GithubIssueClosureSnapshot) => createHash("sha256").up
 
 test("bounded Full Control scope synchronization persists the advanced boundary for restart", async (t) => {
   const f=fixture(t);
-  const scope={repository:"example/project",issueNumbers:[issue],revision:2,authorizedByUserId:"owner",authorizedAt:1000};
+  const scope={repository:"example/project",issueNumbers:[issue],revision:2,authorizedByUserId:"owner",authorizedAt:1000,
+    disposition:{bySessionId:sessionId,at:2000,occurrenceId:"scope-once",boundaryRevision:3}};
   const control: import("@wollipog/protocol").CampaignControl={mode:"full_control",boundary:{version:1,revision:3,issueScopeRevision:2,repository:"example/project",objective:"Implement scoped work",
     authorizedByUserId:"owner",authorizedAt:2000,operations:["campaign_issue_scope","issue_closure"],delegatablePolicyIds:[],issueAuthority:{epics:[issue],relatedFollowUps:false,maxIssues:3,closureReasons:["completed"]}}};
   assert.equal((await f.scope({operation:"synchronize",scope,control})).ok,true);

@@ -14057,13 +14057,17 @@ export class ControlPlaneDb {
   }
 
   admittedCampaignPublicationIssue(rootId: string, publicationOccurrenceId: string): number | null {
-    const row = this.stmt(`SELECT json_extract(resource_snapshot, '$.additions[0]') AS issue FROM workflow_decisions
+    const row = this.stmt(`SELECT json_extract(proof.value, '$.issue') AS issue FROM workflow_decisions decision,
+        json_each(decision.resource_snapshot, '$.verifiedPublications') proof
+      WHERE decision.controlling_session_id=? AND decision.category='campaign_issue_scope' AND decision.status='consumed'
+        AND json_extract(proof.value, '$.publicationOccurrenceId')=?
+      UNION ALL SELECT json_extract(resource_snapshot, '$.additions[0]') AS issue FROM workflow_decisions
       WHERE controlling_session_id=? AND category='campaign_issue_scope' AND status='consumed'
         AND json_type(resource_snapshot, '$.issueAdmission')='object'
         AND json_extract(resource_snapshot, '$.lineage.kind')='follow_up'
         AND json_extract(resource_snapshot, '$.lineage.publicationOccurrenceId')=?
         AND json_array_length(resource_snapshot, '$.additions')=1 LIMIT 1`)
-      .get(rootId, publicationOccurrenceId) as { issue: number } | undefined;
+      .get(rootId, publicationOccurrenceId, rootId, publicationOccurrenceId) as { issue: number } | undefined;
     return row?.issue ?? null;
   }
 

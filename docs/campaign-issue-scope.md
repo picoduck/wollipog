@@ -12,7 +12,8 @@ Dependencies, cross-repository members, and incidental references never grant au
 oversized inspection fails closed; use an explicit set of up to 100 repository-qualified issues instead.
 
 The root agent can use `get_campaign_issue_scope` and `request_campaign_issue_scope_change` to prepare the
-same proposal after a human's prompt. Its approval is always human-owned. The exact payload includes the
+same proposal after a human's prompt. Custom approval is human-owned; bounded Full Control admission
+is described below. The exact payload includes the
 expected revision, before list, additions, removals, affected assignments, and decisions that will be revoked.
 Approval, persistence of the approving human/revision, and one-time consumption share one database
 transaction. Pending/denied/stale/replayed requests cannot mutate scope. Changes to scope or affected work
@@ -25,7 +26,8 @@ The control plane persists the authoritative policy on matching Orchestrator mem
 scope revision and updates live Claude permission classification, then restores it on reconnect/restart.
 Closure inspection and execution are fenced against both repository and scope revision. Synchronization
 failure is recoverable by reconnecting/updating the runner; closure remains refused until synchronization.
-GitHub credentials, governance, and separate human-owned issue closure approval remain authoritative.
+GitHub credentials, governance, and the independent exact issue-closure decision remain authoritative;
+Custom closure approval is human-owned.
 
 Operational questions: which human approved the change, which revision is authoritative, and did every
 active participant synchronize? Workflow audit plus `campaign_issue_scope_approved`,
@@ -80,6 +82,11 @@ Fresh duplicate and lineage checks repeat immediately before one-shot consumptio
 publication grants remain reserved until the verified issue enters scope, and cannot be reissued.
 Only a consumed scope decision carrying server-verified publication lineage settles that reservation;
 editing a recommendation's resulting issue never frees capacity.
+Publication admission also retains the original human and objective digest. A compatible renewed
+boundary can admit that already-published issue under its current relationship, origins and limits;
+this never republishes it. Reauthorization counts outstanding reservations. A human scope approval
+can settle an older publication only after the server independently verifies the exact issue payload.
+Each publication occurrence settles through scope once, even if another issue copies its payload.
 After publication, read back the exact payload, record the resulting issue on its recommendation,
 then propose the scope addition against that publication occurrence. Ledger acceptance alone grants
 neither publication nor scope.

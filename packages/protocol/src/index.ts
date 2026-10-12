@@ -4160,6 +4160,13 @@ export interface CampaignIssueScopeRequest {
   lineage?: { kind: "epic"; epic: number } | { kind: "follow_up"; publicationOccurrenceId: string };
 }
 
+export interface CampaignIssueAdmission {
+  boundaryRevision: number;
+  evidenceDigest: string;
+  /** Original publication authority survives compatible reauthorization, never a new grant. */
+  publicationAuthority?: { authorizedByUserId: string; objectiveDigest: string };
+}
+
 export interface CampaignIssueScopeSnapshot {
   category: "campaign_issue_scope";
   repository: string;
@@ -4172,7 +4179,9 @@ export interface CampaignIssueScopeSnapshot {
   affectedDecisions: string[];
   activeChildren: Array<{ sessionId: string; title: string; assignmentDigest: string }>;
   lineage?: CampaignIssueScopeRequest["lineage"];
-  issueAdmission?: { boundaryRevision: number; evidenceDigest: string };
+  issueAdmission?: CampaignIssueAdmission;
+  /** Server-inspected exact payloads, including settlements approved through the human route. */
+  verifiedPublications?: Array<{ publicationOccurrenceId: string; issue: number }>;
 }
 
 export interface CampaignIssueScopeView {
@@ -4239,7 +4248,7 @@ export interface GithubIssueClosureSnapshot extends Omit<GithubIssueClosureInspe
   evidence: string[];
   comment?: string;
   activeChildren: Array<{ sessionId: string; title: string; assignmentDigest: string }>;
-  issueAdmission?: { boundaryRevision: number; evidenceDigest: string };
+  issueAdmission?: CampaignIssueAdmission;
   dispositionRecommendationId?: string;
 }
 
@@ -4288,7 +4297,7 @@ export type WorkflowDecisionResourceSnapshot =
       sanitizedBody: string;
       labels: string[];
       recommendationId?: string;
-      issueAdmission?: { boundaryRevision: number; evidenceDigest: string };
+      issueAdmission?: CampaignIssueAdmission;
     }
   | {
       category: "ui_evidence_approval";

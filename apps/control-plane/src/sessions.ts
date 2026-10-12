@@ -6,7 +6,7 @@ import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, campai
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
 import { issueBoundary, issueEvidenceDigest, issueWork, closureEvidence, publicationEvidence, reservedPublicationSlots } from "./campaign-issue-authority.js";
 import { validIssueAdmission, campaignPublicationSafe } from "@wollipog/protocol";
-import { normalizeCampaignIssueScopeSnapshot, titleFromPrompt, type CampaignIssueScopeRequest, type CampaignIssueScopeView } from "@wollipog/protocol";
+import { normalizeCampaignIssueScopeSnapshot, titleFromPrompt, type CampaignIssueScopeRequest, type CampaignIssueScopeView, type CampaignIssueScopeSnapshot } from "@wollipog/protocol";
 import { normalizeIssueClosureSnapshot, issueClosureActiveChildren } from "./github-issue-closure.js";
 import { observeReconciliationSnapshot, reconciliationSnapshotAvailable, correctionFrame, latestReconciliationRepair, normalizeReconciledSnapshot, reconciliationRevision } from "./claude-cost-reconciliation.js";
 import type { GithubIssueClosureRequest, GithubIssueClosureResult, GithubIssueClosureSnapshot } from "@wollipog/protocol";
@@ -7348,7 +7348,7 @@ export class SessionsService {
       authorizeFullControl(principal, scope, proposal, expectedRevision + 1, now);
     if (!control) return fail("Full Control requires authenticated repository scope and a valid boundary", 400);
     if (control.mode === "full_control") {
-      if (control.boundary.issueAuthority && (scope!.issueNumbers.length > control.boundary.issueAuthority.maxIssues ||
+      if (control.boundary.issueAuthority && (scope!.issueNumbers.length + reservedPublicationSlots(this.db, session) > control.boundary.issueAuthority.maxIssues ||
           scopeCompatibility(this.db, { ...session, orchestratorPolicy: { ...session.orchestratorPolicy!, control } }))) return fail("The issue boundary exceeds its human-set scope limit or requires protocol-v216 participants", 409);
       if (!session.workspaceId) return fail("Full Control requires a repository workspace binding", 409);
       for (const id of [sessionId, ...this.db.campaignDescendantIds(sessionId)]) {
@@ -7455,7 +7455,18 @@ export class SessionsService {
   ): Promise<ServiceResult<WorkflowDecisionView>> {
     const normalized = normalizeWorkflowDecisionSnapshot(request?.resourceSnapshot);
     if (normalized.ok && normalized.data?.category === "follow_up_issue_publication" && normalized.data.recommendationId) {
-      return this.admitCampaignPublication(sessionId, request, normalized.data, canAccess);
+      if (normalized.data.issueAdmission) return this.createWorkflowDecision(sessionId, request, canAccess);
+      const initialCaller = this.db.getSession(sessionId);
+      const initialController = initialCaller && this.workflowDecisionController(initialCaller, "follow_up_issue_publication");
+      const admitted = await this.admitCampaignPublication(sessionId, request, normalized.data, canAccess);
+      if (admitted.ok) return admitted;
+      const currentCaller = this.db.getSession(sessionId);
+      const currentController = currentCaller && this.workflowDecisionController(currentCaller, "follow_up_issue_publication");
+      if (initialController?.session.id !== currentController?.session.id || initialController?.policy.revision !== currentController?.policy.revision) return admitted;
+      // Recommendation metadata is a claim. When it cannot establish bounded admission,
+      // preserve the original configured/human request path without a standing issue grant.
+      const { recommendationId: _recommendationId, ...snapshot } = normalized.data;
+      return this.createWorkflowDecision(sessionId, { ...request, resourceSnapshot: snapshot }, canAccess);
     }
     if (!normalized.ok || normalized.data?.category !== "ui_evidence_approval") {
       return this.createWorkflowDecision(sessionId, request, canAccess);
@@ -7656,8 +7667,22 @@ export class SessionsService {
         boundaryRevision: evidence.boundaryRevision, scopeRevision: evidence.scopeRevision, recommendationId: snapshot.recommendationId, outcome: "admitted" }));
       return this.createWorkflowDecision(sessionId, { ...request, resourceKey: `publication:${snapshot.recommendationId}`,
         resourceSnapshot: { ...snapshot, issueAdmission: { boundaryRevision: evidence.boundaryRevision,
-          evidenceDigest: issueEvidenceDigest({ evidence, publicationDigest: result.publicationDigest }) } } }, canAccess, { trustedPublication: true });
+          evidenceDigest: issueEvidenceDigest({ evidence, publicationDigest: result.publicationDigest }),
+          publicationAuthority: { authorizedByUserId: issueBoundary(current)!.authorizedByUserId, objectiveDigest: issueEvidenceDigest(issueBoundary(current)!.objective) } } } }, canAccess, { trustedPublication: true });
     } catch { return fail("Publication inspection failed; no issue was published", 409); }
+  }
+
+  private async inspectPublishedScopeIssue(sessionId: string, grant: WorkflowDecisionView, issue: number): Promise<boolean> {
+    if (grant.status !== "consumed" || grant.controllingSessionId !== sessionId || grant.resourceSnapshot.category !== "follow_up_issue_publication" ||
+        !grant.resourceSnapshot.issueAdmission || this.db.admittedCampaignPublicationIssue(sessionId, grant.occurrenceId) !== null) return false;
+    const publication = grant.resourceSnapshot;
+    const root = this.db.getSession(sessionId)!;
+    const requestId = `publication_verify_${randomUUID()}`;
+    const inspected = await this.hub.requestFromRunner(root.runnerId, requestId, { type: "campaign_issue_scope", operation: "inspect", requestId,
+      sessionId, issues: [issue], publication: { sanitizedTitle: publication.sanitizedTitle, sanitizedBody: publication.sanitizedBody, labels: publication.labels } }, 60_000);
+    return inspected.type === "campaign_issue_scope_result" && inspected.ok && inspected.sessionId === sessionId &&
+      inspected.repository?.toLowerCase() === publication.repository && Boolean(inspected.candidates?.some((c) => c.issue.number === issue &&
+        c.issue.repository.toLowerCase() === publication.repository && c.title === publication.sanitizedTitle));
   }
 
   async campaignIssueScope(sessionId: string, epic?: number, canAccess: (id: string) => boolean = () => true, resolveInitialEpic = true): Promise<ServiceResult<CampaignIssueScopeView>> {
@@ -7716,6 +7741,18 @@ export class SessionsService {
           !snapshot.additions.every((n) => response.candidates?.some((c) => c.issue.number === n && c.issue.repository.toLowerCase() === snapshot.repository))) return fail("GitHub could not verify every proposed addition in the campaign repository.", 409);
       const latest = this.db.getSession(sessionId);
       if (!latest || (latest.orchestratorPolicy?.issueScope?.revision ?? 0) !== snapshot.expectedRevision) return fail("Campaign scope changed during inspection; refresh and propose again.", 409);
+      if (human) {
+        const settlements: NonNullable<CampaignIssueScopeSnapshot["verifiedPublications"]> = [];
+        for (const candidate of response.candidates ?? []) {
+          if (!snapshot.additions.includes(candidate.issue.number) || candidate.issue.repository.toLowerCase() !== snapshot.repository) continue;
+          const grant = this.db.campaignPublicationReservations(sessionId).find((d) => d.status === "consumed" &&
+            !settlements.some((p) => p.publicationOccurrenceId === d.occurrenceId) &&
+            d.resourceSnapshot.category === "follow_up_issue_publication" && d.resourceSnapshot.repository === snapshot.repository &&
+            d.resourceSnapshot.sanitizedTitle === candidate.title && this.db.admittedCampaignPublicationIssue(sessionId, d.occurrenceId) === null);
+          if (grant && await this.inspectPublishedScopeIssue(sessionId, grant, candidate.issue.number)) settlements.push({ publicationOccurrenceId: grant.occurrenceId, issue: candidate.issue.number });
+        }
+        if (settlements.length) snapshot.verifiedPublications = settlements;
+      }
       const boundary = issueBoundary(latest);
       if (!human && boundary && boundary.operations.includes("campaign_issue_scope")) {
         const excludedReservation = snapshot.lineage?.kind === "follow_up" ? snapshot.lineage.publicationOccurrenceId : undefined;
@@ -7730,9 +7767,12 @@ export class SessionsService {
           } else if (snapshot.lineage?.kind === "follow_up" && boundary.issueAuthority!.relatedFollowUps && snapshot.additions.length === 1) {
             const grant = this.db.workflowDecisionByOccurrence(snapshot.lineage.publicationOccurrenceId);
             if (!grant || grant.controllingSessionId !== sessionId || grant.status !== "consumed" || grant.resourceSnapshot.category !== "follow_up_issue_publication" ||
-                !grant.resourceSnapshot.issueAdmission || grant.resourceSnapshot.issueAdmission.boundaryRevision !== boundary.revision || grant.resourceSnapshot.repository !== snapshot.repository) return fail("Follow-up scope requires its exact consumed bounded publication grant", 409);
-            const publicationId = `publication_verify_${randomUUID()}`;
+                !grant.resourceSnapshot.issueAdmission || grant.resourceSnapshot.repository !== snapshot.repository ||
+                this.db.admittedCampaignPublicationIssue(sessionId, grant.occurrenceId) !== null) return fail("Follow-up scope requires an unused exact consumed bounded publication grant", 409);
             const publication = grant.resourceSnapshot;
+            const authority = publication.issueAdmission!.publicationAuthority;
+            if (publication.issueAdmission!.boundaryRevision !== boundary.revision && (!authority || authority.authorizedByUserId !== boundary.authorizedByUserId ||
+                authority.objectiveDigest !== issueEvidenceDigest(boundary.objective))) return fail("The publication's original human/objective authority does not match the current boundary; use fresh human scope review", 403);
             const recommendation = publication.recommendationId && this.db.campaignWorkLedger.recommendation(sessionId, publication.recommendationId);
             if (!recommendation || recommendation.disposition !== "accepted" || recommendation.duplicateOfId ||
                 !recommendation.resultingIssue || recommendation.resultingIssue.number !== snapshot.additions[0] || recommendation.resultingIssue.repository.toLowerCase() !== snapshot.repository) return fail("Record the verified published issue on its accepted recommendation before admitting scope", 409);
@@ -7740,9 +7780,8 @@ export class SessionsService {
               const origin = this.db.campaignWorkLedger.detail(sessionId, id, Date.now())?.issue;
               return !origin || origin.repository.toLowerCase() !== snapshot.repository || !snapshot.before.includes(origin.number);
             })) return fail("The published follow-up's authorized origins were removed from scope", 409);
-            const inspected = await this.hub.requestFromRunner(root.runnerId, publicationId, { type: "campaign_issue_scope", operation: "inspect", requestId: publicationId,
-              sessionId, issues: snapshot.additions, publication: { sanitizedTitle: publication.sanitizedTitle, sanitizedBody: publication.sanitizedBody, labels: publication.labels } }, 60_000);
-            if (inspected.type !== "campaign_issue_scope_result" || !inspected.ok || inspected.repository?.toLowerCase() !== snapshot.repository) return fail("Published issue does not match the exact authorized payload", 409);
+            if (!await this.inspectPublishedScopeIssue(sessionId, grant, snapshot.additions[0]!)) return fail("Published issue does not match the exact authorized payload or its lineage was already consumed", 409);
+            snapshot.verifiedPublications = [{ publicationOccurrenceId: grant.occurrenceId, issue: snapshot.additions[0]! }];
             evidence = { occurrenceId: grant.occurrenceId, payloadDigest: grant.resourceDigest, issue: snapshot.additions[0] };
           } else return fail("Scope additions require authorized epic or exact related-publication lineage; incidental references cannot grant scope", 403);
         }
@@ -7847,8 +7886,8 @@ export class SessionsService {
           this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "closure_proposal", sessionId, requestId: request.requestId,
             boundaryRevision: fullBoundary.revision, scopeRevision: snapshot.scopeRevision, outcome: "human_fallback", reason: "delivery_or_disposition_unverified" }));
         }
-        if (request.comment && !campaignPublicationSafe("Closure", `## Problem\n${request.comment}\n## Proposed Behavior\nClose\n## Acceptance Criteria\n- Verified\n## Security and Compatibility\nNone`, [])) return fail("Closure comment requires sanitized public content", 400);
-        if (proof) snapshot.issueAdmission = { boundaryRevision: fullBoundary.revision, evidenceDigest: issueEvidenceDigest(proof) };
+        const commentSafe = !request.comment || campaignPublicationSafe("Closure", `## Problem\n${request.comment}\n## Proposed Behavior\nClose\n## Acceptance Criteria\n- Verified\n## Security and Compatibility\nNone`, []);
+        if (proof && commentSafe) snapshot.issueAdmission = { boundaryRevision: fullBoundary.revision, evidenceDigest: issueEvidenceDigest(proof) };
       }
       const created = this.createWorkflowDecision(sessionId, {
         requestId: request.requestId,
@@ -8186,6 +8225,8 @@ export class SessionsService {
         ...(snapshot.lineage === undefined ? {} : { lineage: snapshot.lineage }) };
       const latest = scopeSnapshot(this.db, currentChild, snapshot.repository, request);
       if (latest && snapshot.issueAdmission) latest.issueAdmission = snapshot.issueAdmission;
+      if (latest && snapshot.verifiedPublications) latest.verifiedPublications = snapshot.verifiedPublications;
+      if (snapshot.verifiedPublications?.some((p) => this.db.admittedCampaignPublicationIssue(childSessionId, p.publicationOccurrenceId) !== null)) return fail("Publication lineage was already admitted; refresh the scope proposal", 409);
       const boundary = issueBoundary(currentChild);
       const reserved = reservedPublicationSlots(this.db, currentChild, snapshot.lineage?.kind === "follow_up" ? snapshot.lineage.publicationOccurrenceId : undefined);
       if (authority === "orchestrator" && (!boundary || snapshot.before.length + snapshot.additions.length - snapshot.removals.length + reserved > boundary.issueAuthority!.maxIssues)) return fail("Scope capacity or its human boundary changed before resolution", 409);
