@@ -1282,6 +1282,74 @@ test("provider refusal marks a late async answer replaced", async () => {
   }
 });
 
+test("a turn/start rejection after an async answer keeps the question answerable and surfaces the provider error (#3085)", async () => {
+  const { sm, sent, store, cleanup } = makeHarness(true);
+  try {
+    const entry = (sm as any).active.get("s_perm");
+    const providerError = "turn/start failed: Invalid request: invalid type: null, expected a string";
+    const prompts: string[] = [];
+    let reject = true;
+    entry.running = false;
+    entry.launchGeneration = 1;
+    entry.context = { kind: "native" };
+    entry.providerReady = true;
+    entry.steerFenceIds = new Set();
+    entry.reservedPromotions = new Map();
+    entry.client.agentSessionId = () => "codex-thread";
+    entry.client.prompt = async (text: string) => {
+      prompts.push(text);
+      return reject ? "refusal" as const : "end_turn" as const;
+    };
+    entry.client.lastTurnError = () => reject ? providerError : null;
+    entry.client.lastPromptUndelivered = () => reject;
+    store.patchMeta("s_perm", { driver: "codex-app-server", command: "codex", agentSessionId: "codex-thread" });
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request", async: true, requestId: "codex-async:rejected",
+      questions: [{ id: "0", question: "Choose", options: [{ label: "Patch" }] }],
+    });
+    const occurrence = store.readMeta("s_perm")!.pendingApproval!.recoveryId!;
+    const lifecycle = (commandId: string, transitions: string[]): DurableCommandLifecycle => ({
+      commandId,
+      queued: () => { transitions.push("queued"); },
+      started: () => { transitions.push("started"); },
+      completed: () => { transitions.push("completed"); },
+      failed: (error) => { transitions.push(`failed:${error}`); },
+      uncertain: () => { transitions.push("uncertain"); },
+    });
+    const first: string[] = [];
+    sm.answerRecoveredQuestion("s_perm", "codex-async:rejected", occurrence, { "0": "Patch" },
+      lifecycle("rejected_answer.retry-1", first));
+    for (let attempt = 0; attempt < 40 && !first.some((step) => step.startsWith("failed")); attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.deepEqual(first, ["queued", "started", `failed:provider refusal: ${providerError}`]);
+
+    const reasked = store.readMeta("s_perm")!.pendingApproval!;
+    assert.equal(reasked.kind, "question");
+    assert.equal(reasked.async, true);
+    assert.equal(reasked.requestId, "codex-async:rejected");
+    assert.notEqual(reasked.recoveryId, occurrence, "a fresh occurrence escapes the fenced durable identity");
+    assert.equal(store.readMeta("s_perm")!.status, "input_required");
+    const blocker = sent.filter((message) => message.type === "session_status").at(-1) as
+      Extract<RunnerToControlPlane, { type: "session_status" }>;
+    assert.equal(blocker.status, "input_required");
+    assert.match(blocker.detail ?? "", /Codex rejected the turn that would deliver this answer: turn\/start failed: Invalid request/u);
+
+    reject = false;
+    const second: string[] = [];
+    sm.answerRecoveredQuestion("s_perm", "codex-async:rejected", reasked.recoveryId!, { "0": "Patch" },
+      lifecycle("reasked_answer", second));
+    for (let attempt = 0; attempt < 40 && !second.includes("completed"); attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.deepEqual(second, ["queued", "started", "completed"]);
+    assert.deepEqual(prompts, ["Question: Choose\nAnswer: Patch", "Question: Choose\nAnswer: Patch"]);
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+  } finally {
+    cleanup();
+  }
+});
+
 test("Codex async question remains an idle actionable card after runner restart", () => {
   const { sm, store, cleanup } = makeHarness("none");
   try {

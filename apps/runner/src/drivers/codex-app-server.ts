@@ -339,6 +339,22 @@ export function buildCodexTurnParams(
   return params;
 }
 
+/** Paths of null values in turn/start params, for diagnostics (#3085). Codex reports a null where
+ * it expects a string without naming the field, so the runner names it. Exported for tests. */
+export function nullCodexParameterPaths(value: Json, path = "", depth = 0, found: string[] = []): string[] {
+  if (found.length >= 16 || depth > 6) return found;
+  if (value === null) {
+    found.push(path || "<params>");
+  } else if (Array.isArray(value)) {
+    value.forEach((item, index) => nullCodexParameterPaths(item, `${path}[${index}]`, depth + 1, found));
+  } else if (typeof value === "object") {
+    for (const [key, item] of Object.entries(value)) {
+      nullCodexParameterPaths(item, path ? `${path}.${key}` : key, depth + 1, found);
+    }
+  }
+  return found;
+}
+
 /** A persisted Codex thread could not be resumed. Callers may retry conflicts after the
  * other app-server releases the thread, but must never replace it with a fresh thread. */
 export class CodexAppServerResumeError extends Error {
@@ -510,6 +526,11 @@ export class CodexAppServerDriver implements Driver {
   /** The request response is the causal boundary between predecessor notifications and this
    * prompt. A turn/started notification before it is provisional and cannot bind ownership. */
   private turnStartResponseGeneration: number | null = null;
+  /** Why the latest submission never started a turn, and whether that is proven (#3085). Codex
+   * answering turn/start with an error, or the driver refusing to send it, proves non-delivery;
+   * a transport failure after the write does not. */
+  private turnStartError: string | null = null;
+  private turnStartUndelivered = false;
   private promptBusy = false;
   /** Provider diagnostics are held until startup succeeds so an expected unsupported-feature
    * retry does not surface a false session error. */
@@ -571,6 +592,14 @@ export class CodexAppServerDriver implements Driver {
 
   agentSessionId(): string | null {
     return this.threadId;
+  }
+
+  lastTurnError(): string | null {
+    return this.turnStartError;
+  }
+
+  lastPromptUndelivered(): boolean {
+    return this.turnStartUndelivered;
   }
 
   async reconcileCompletedCommand(
@@ -1169,6 +1198,10 @@ export class CodexAppServerDriver implements Driver {
   }
 
   private async submitTurn(base: string, images: PromptImage[] | undefined, commandItems: Json[]): Promise<StopReason> {
+    // An in-flight turn has not settled, so its own outcome is still unset; clearing here keeps a
+    // refused submission from reporting the previous one.
+    this.turnStartError = null;
+    this.turnStartUndelivered = false;
     if (this.promptBusy) {
       this.cb.onEvent({ kind: "error", message: "codex app-server already has a turn in progress" });
       return "refusal";
@@ -1225,6 +1258,20 @@ export class CodexAppServerDriver implements Driver {
         this.threadCarriesLegacySandboxPolicy ? null : this.permissionProfileBase,
         this.managedWorktreeGuardActive,
       );
+      const nullParameters = nullCodexParameterPaths(params);
+      if (nullParameters.length) {
+        this.cb.onStderr(JSON.stringify({ event: "codex_turn_start_null_parameter", parameters: nullParameters }));
+      }
+      if (typeof params.threadId !== "string" || !params.threadId) {
+        // Codex rejects this with "invalid type: null, expected a string" and no field name. The
+        // thread is not established yet (#3085), so the turn is never sent and stays retriable.
+        this.turnStartUndelivered = true;
+        this.turnStartError = "turn/start not sent: threadId is null because the Codex thread is not established";
+        this.emitDriverError(this.turnStartError);
+        this.closeTurnUsage();
+        this.settleTurn("refusal");
+        return;
+      }
       if (params.sandboxPolicy !== undefined) this.threadCarriesLegacySandboxPolicy = true;
 
       this.peer!.request("turn/start", params).then((response: Json) => {
@@ -1238,7 +1285,11 @@ export class CodexAppServerDriver implements Driver {
         }
       }).catch((e: Json) => {
         if (generation !== this.promptGeneration || !this.turnResolve) return;
-        this.emitDriverError(`turn/start failed: ${e?.message ?? String(e)}`);
+        this.turnStartError = `turn/start failed: ${e?.message ?? String(e)}`;
+        // Codex's own error response proves no turn started; a broken transport after the write
+        // cannot say whether Codex saw the request.
+        this.turnStartUndelivered = !e?.transportFailure || e?.notSent === true;
+        this.emitDriverError(this.turnStartError);
         this.closeTurnUsage();
         this.settleTurn("refusal");
       });

@@ -7018,3 +7018,83 @@ test("artifact preference refresh reaches the next provider launch and resume wi
     assert.equal(h.store.readMeta("resume-session")!.artifactUploads, "external_hosting");
   } finally { h.manager.shutdownAll(); h.cleanup(); }
 });
+
+test("an async answer admitted while the provider launch is still starting waits for that launch (#3085)", async () => {
+  let releaseInitialize!: () => void;
+  const initialize = new Promise<void>((resolve) => { releaseInitialize = resolve; });
+  const h = harness({}, initialize);
+  const transitions: string[] = [];
+  const answer: DurableCommandLifecycle = {
+    commandId: "async-answer.retry-1",
+    queued: () => transitions.push("queued"),
+    started: () => transitions.push("started"),
+    completed: () => transitions.push("completed"),
+    failed: (error) => transitions.push(`failed:${error}`),
+    uncertain: (error) => transitions.push(`uncertain:${error}`),
+  };
+  try {
+    (h.manager as any).emitEvent("resume-session", {
+      kind: "question_request", async: true, requestId: "codex-async:launch-race",
+      questions: [{ id: "0", question: "Which path?", options: [{ label: "Patch" }] }],
+    });
+    const occurrence = h.store.readMeta("resume-session")!.pendingApproval!.recoveryId!;
+    // A launch publishes its session entry before the provider thread exists.
+    h.manager.prompt("resume-session", "Continue the campaign.");
+    for (let index = 0; index < 20 && !(h.manager as any).active.get("resume-session"); index += 1) await tick();
+    assert.ok((h.manager as any).active.get("resume-session"), "the launch publishes its entry before initialization");
+
+    h.manager.answerRecoveredQuestion("resume-session", "codex-async:launch-race", occurrence, { "0": "Patch" }, answer);
+    for (let index = 0; index < 20; index += 1) await tick();
+    assert.deepEqual(h.prompts, [], "no turn may reach a provider whose session is not established");
+    assert.deepEqual(transitions, ["queued"]);
+    assert.equal(h.store.readEvents("resume-session").some((event) =>
+      event.payload.kind === "question_resolved" && event.payload.resolutionReason === "replaced"), false);
+
+    releaseInitialize();
+    for (let index = 0; index < 60 && h.prompts.length < 2; index += 1) await shortDelay();
+    assert.equal(h.prompts.filter((text) => text.includes("Answer: Patch")).length, 1);
+    assert.equal(h.prompts.filter((text) => text === "Continue the campaign.").length, 1);
+    assert.deepEqual(transitions, ["queued", "started", "completed"]);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("an async answer admitted during a launch that fails is settled as never sent (#3085)", async () => {
+  let failInitialize!: (error: Error) => void;
+  const initialize = new Promise<void>((_resolve, reject) => { failInitialize = reject; });
+  const h = harness({}, initialize);
+  const transitions: string[] = [];
+  const answer: DurableCommandLifecycle = {
+    commandId: "async-answer-failed-launch",
+    queued: () => transitions.push("queued"),
+    started: () => transitions.push("started"),
+    completed: () => transitions.push("completed"),
+    failed: (error) => transitions.push(`failed:${error}`),
+    uncertain: (error) => transitions.push(`uncertain:${error}`),
+  };
+  try {
+    (h.manager as any).emitEvent("resume-session", {
+      kind: "question_request", async: true, requestId: "codex-async:failed-launch",
+      questions: [{ id: "0", question: "Which path?", options: [{ label: "Patch" }] }],
+    });
+    const occurrence = h.store.readMeta("resume-session")!.pendingApproval!.recoveryId!;
+    h.manager.prompt("resume-session", "Continue the campaign.");
+    for (let index = 0; index < 20 && !(h.manager as any).active.get("resume-session"); index += 1) await tick();
+    h.manager.answerRecoveredQuestion("resume-session", "codex-async:failed-launch", occurrence, { "0": "Patch" }, answer);
+    for (let index = 0; index < 20; index += 1) await tick();
+    assert.deepEqual(transitions, ["queued"]);
+
+    failInitialize(new Error("thread/resume never answered"));
+    for (let index = 0; index < 60 && transitions.length < 2; index += 1) await shortDelay();
+    assert.deepEqual(h.prompts, []);
+    // The receipt fails without a correlated user event, which keeps a fresh delivery stageable.
+    assert.deepEqual(transitions, ["queued", "failed:the provider launch ended before this message was sent"]);
+    assert.equal(h.store.readEvents("resume-session").some((event) =>
+      event.payload.kind === "question_resolved" && event.payload.commandId === answer.commandId), false);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});

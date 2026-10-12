@@ -1634,6 +1634,7 @@ test("identified turn/failed stays inert until the matching turn/start response"
 
 test("the first pre-response terminal notification wins for one provider turn", async () => {
   const h = makeHarness();
+  (h.driver as any).threadId = "thread-live";
   const notifications = notificationHandlers(h.driver);
   let respond!: (value: unknown) => void;
   (h.driver as any).peer = {
@@ -1656,6 +1657,7 @@ test("the first pre-response terminal notification wins for one provider turn", 
 test("completion-only messages wait for a successful root turn boundary", async () => {
   for (const status of ["completed", "failed", "interrupted"]) {
     const h = makeHarness();
+    (h.driver as any).threadId = "thread-live";
     const notifications = notificationHandlers(h.driver);
     (h.driver as any).peer = { request: async () => ({ turn: { id: "whole-turn", status: "inProgress" } }), notify: () => {} };
     const pending = h.driver.prompt("work");
@@ -1743,6 +1745,7 @@ test("a second prompt missing turn/started cannot reuse the first completed turn
 
 test("turn/start response recovers steering without a notification and publishes both availability edges", async () => {
   const h = makeHarness();
+  (h.driver as any).threadId = "thread-live";
   const notifications = notificationHandlers(h.driver);
   const changes: (string | null)[] = [];
   (h.driver as any).cb.onSteeringTurnChanged = () => changes.push(h.driver.activeSteeringTurnId());
@@ -1769,6 +1772,7 @@ test("turn/start response recovers steering without a notification and publishes
 
 test("late turn/start responses cannot resurrect a completed turn or overwrite a newer notification", async () => {
   const h = makeHarness();
+  (h.driver as any).threadId = "thread-live";
   const notifications = notificationHandlers(h.driver);
   let respond!: (value: unknown) => void;
   (h.driver as any).peer = { request: () => new Promise((resolve) => { respond = resolve; }) };
@@ -1888,6 +1892,7 @@ test("the turn/start response preserves provider requests admitted after an earl
 
 test("missing coordinates explain the running server identity rather than assuming the installed CLI version", async () => {
   const h = makeHarness();
+  (h.driver as any).threadId = "thread-live";
   const notifications = notificationHandlers(h.driver);
   (h.driver as any).serverIdentity = "codex/0.149.1";
   (h.driver as any).peer = { request: async () => ({}) };
@@ -4599,3 +4604,83 @@ for (const lifecycle of ["fresh", "resume", "fork"] as const) {
     }
   });
 }
+
+test("a discarded oversized resume leaves no thread, and turn/start is never sent with a null thread id (#3085)", async () => {
+  const h = makeHarness({ resumeId: "large-thread" });
+  const toServer = new PassThrough();
+  const fromServer = new PassThrough();
+  const transportErrors: string[] = [];
+  // A small record bound stands in for the 64 MiB limit that a full-history resume exceeded.
+  const peer = new JsonRpcPeer(toServer, fromServer, (error) => transportErrors.push(error.message), 4_096);
+  const turnStarts: any[] = [];
+  toServer.setEncoding("utf8");
+  let buffered = "";
+  toServer.on("data", (chunk: string) => {
+    buffered += chunk;
+    for (let index = buffered.indexOf("\n"); index >= 0; index = buffered.indexOf("\n")) {
+      const message = JSON.parse(buffered.slice(0, index));
+      buffered = buffered.slice(index + 1);
+      const reply = (body: object) => fromServer.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, ...body }) + "\n");
+      if (message.method === "thread/read") {
+        reply({ result: { thread: { id: "large-thread", status: { type: "idle" } } } });
+      } else if (message.method === "thread/resume") {
+        reply({ result: { thread: { id: "large-thread", turns: [{ id: "old", text: "x".repeat(8_192) }] } } });
+      } else if (message.method === "turn/start") {
+        turnStarts.push(message.params);
+        // Codex deserializes threadId as a String and reports serde errors without a field path.
+        if (typeof message.params.threadId !== "string") {
+          reply({ error: { code: -32600, message: "Invalid request: invalid type: null, expected a string" } });
+        } else {
+          reply({ result: { turn: { id: "turn-1" } } });
+        }
+      } else if (message.id !== undefined) {
+        reply({ result: {} });
+      }
+    }
+  });
+  (h.driver as any).peer = peer;
+
+  const session = h.driver.newSession("/resume");
+  await waitForCondition(() => transportErrors.length > 0);
+  assert.deepEqual(transportErrors, ["discarded oversized JSON-RPC stdout record"]);
+  assert.equal(h.driver.agentSessionId(), null, "the discarded resume response never settles the thread");
+
+  assert.equal(await h.driver.prompt("Question: Which path?\nAnswer: Patch"), "refusal");
+  assert.deepEqual(turnStarts, [], "a turn without a thread id is refused before it reaches Codex");
+  assert.ok(h.stderr.some((line) => {
+    try {
+      const diagnostic = JSON.parse(line);
+      return diagnostic.event === "codex_turn_start_null_parameter" &&
+        JSON.stringify(diagnostic.parameters) === JSON.stringify(["threadId"]);
+    } catch { return false; }
+  }), "the runner names the null turn/start parameter");
+  assert.match(h.driver.lastTurnError() ?? "", /threadId/u);
+  assert.equal(h.driver.lastPromptUndelivered(), true);
+  assert.ok(h.events.some((event) => event.kind === "error" && /threadId/u.test(event.message)));
+  void session;
+});
+
+test("a Codex turn/start rejection is reported as undelivered with the provider error (#3085)", async () => {
+  for (const [rejection, undelivered] of [
+    [{ code: -32600, message: "Invalid request: invalid type: null, expected a string" }, true],
+    [{ code: -32000, message: "connection closed", transportFailure: true }, false],
+    [{ code: -32000, message: "connection closed (cannot call turn/start)", transportFailure: true, notSent: true }, true],
+  ] as const) {
+    const h = makeHarness();
+    (h.driver as any).threadId = "thread-ready";
+    const sent: any[] = [];
+    (h.driver as any).peer = {
+      request: async (method: string, params: any) => {
+        if (method !== "turn/start") return {};
+        sent.push(params);
+        throw rejection;
+      },
+      requestWithDeadline: async () => ({}),
+    };
+    assert.equal(await h.driver.prompt("Answer: Patch"), "refusal");
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].threadId, "thread-ready");
+    assert.equal(h.driver.lastTurnError(), `turn/start failed: ${rejection.message}`);
+    assert.equal(h.driver.lastPromptUndelivered(), undelivered, rejection.message);
+  }
+});
