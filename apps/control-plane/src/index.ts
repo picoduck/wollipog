@@ -1,3 +1,5 @@
+import { mediaSessionMutationAllowed } from "./media-session-route-policy.js";
+import { MEDIA_SESSION_PURPOSE_ERROR } from "./prepared-media-session-runtime.js";
 import { registerCampaignIssueScopeRoutes } from "./campaign-issue-scope-routes.js";
 /**
  * Control plane: routes UI commands to runners, ingests runner events, persists
@@ -577,7 +579,9 @@ function authedApiPrincipal(
   if (local) return local;
   const routePath = req.routeOptions?.url ?? req.url.split("?")[0] ?? "";
   const agentControl = authedAgentControl(req);
-  if (agentControl && isAgentControlApiRouteAllowed(req.method, routePath, sessionRole(agentControl))) {
+  const mediaPurpose = agentControl ? svc.mediaSessionPurposes.owns(agentControl.id) : false;
+  if (agentControl && mediaPurpose && !svc.mediaSessionPurposes.credentialCurrent(agentControl.id)) return null;
+  if (agentControl && isAgentControlApiRouteAllowed(req.method, routePath, sessionRole(agentControl), mediaPurpose)) {
     const delegatedScope = db.sessionScope(agentControl.id);
     if (!delegatedScope) return null;
     return {
@@ -668,6 +672,8 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   const mutationError = mutationAuthorizationError(req.method, routePath, principal);
   if (mutationError) return mutationError;
   if (!principal) return null;
+  const mediaTarget = routePath.startsWith("/api/sessions/:id/") ? (req.params as { id?: unknown }).id : null;
+  if (typeof mediaTarget === "string" && svc.mediaSessionPurposes.owns(mediaTarget) && !mediaSessionMutationAllowed(req.method, routePath)) return MEDIA_SESSION_PURPOSE_ERROR;
 
   const memberScopedRoute = routePath === "/api/instance" || routePath === "/api/compatibility" ||
     routePath === "/api/identity" || routePath === "/api/runners" ||
