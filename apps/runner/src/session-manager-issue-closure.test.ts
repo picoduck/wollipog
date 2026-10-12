@@ -107,7 +107,7 @@ test("publication inspection through the runner handler binds payload across dis
   const inspect=(requestId:string) => f.manager().campaignIssueScope({type:"campaign_issue_scope",operation:"publication_inspect",sessionId,requestId,...publication});
   const proposal=await inspect("publication_inspect_first");
   const consumption=await inspect("publication_consume_second");
-  assert.equal(proposal.ok,true,proposal.error); assert.equal(consumption.ok,true,consumption.error);
+  assert.equal(proposal.ok,true,proposal.error ?? "proposal inspection"); assert.equal(consumption.ok,true,consumption.error ?? "consumption inspection");
   assert.equal(proposal.publicationDigest,consumption.publicationDigest,"transport request IDs cannot change payload evidence");
   assert.equal(proposal.publicationDigest,createHash("sha256").update(JSON.stringify(publication)).digest("hex"));
   const changed=await f.manager().campaignIssueScope({type:"campaign_issue_scope",operation:"publication_inspect",sessionId,requestId:"third",...publication,labels:["bug"]});
