@@ -7632,6 +7632,7 @@ export class SessionsService {
           scopeCompatibility(this.db, { ...session, orchestratorPolicy: { ...session.orchestratorPolicy!, control } }))) return fail("The issue boundary exceeds its human-set scope limit or requires protocol-v217 participants", 409);
       if (!session.workspaceId) return fail("Full Control requires a repository workspace binding", 409);
       if(control.boundary.budgetAuthority?.controlledReview) {
+        if(this.db.sessionScope(sessionId)?.owner.kind!=="user") return fail("Controlled native review requires a user-owned campaign charge scope.",409);
         const capability=this.db.getRunner(session.runnerId)?.runtime?.campaignReview;
         if(!capability || controlledReviewCapabilityKey(capability)!==controlledReviewCapabilityKey(control.boundary.budgetAuthority.controlledReview)) return fail("Required native reviewer profile is unsupported or differs from current runner discovery.",409);
       }
@@ -7766,6 +7767,7 @@ export class SessionsService {
         !root.orchestratorPolicy?.issueScope?.issueNumbers.includes(item.issue.number) ||
         !item.stage?.pullRequests?.some((pr)=>pr.repository.toLowerCase()===request.pullRequest.repository.toLowerCase() && pr.number===request.pullRequest.number)) return fail("review target must be the authorized assigned work item and its recorded canonical PR",409);
     const ownerScope=this.db.sessionScope(root.id);
+    if(ownerScope?.owner.kind!=="user") return fail("Required native review accounting for non-user campaign ownership is unsupported.",409);
     if(ownerScope && this.db.getUsageDailyBudget(ownerScope.organizationId).perUserUsd!==null) return fail("Required native review admission with organization daily limits is unsupported; no daily allowance may be bypassed.",409);
     for(const id of [root.id,worker.id]) {
       const personal=this.db.campaignBudgets.userLimits(id);

@@ -17577,7 +17577,7 @@ export class ControlPlaneDb {
       });
       const supported=budget.state==="active" && Boolean(profile && capability && (runner?.protocolVersion??0)>=217 &&
         controlledReviewCapabilityKey(profile)===controlledReviewCapabilityKey(capability)) && !tighter &&
-        (!scope || this.getUsageDailyBudget(scope.organizationId).perUserUsd===null);
+        scope?.owner.kind==="user" && this.getUsageDailyBudget(scope.organizationId).perUserUsd===null;
       budget.requiredNativeReview={supported,reason:supported?
         "Matching native reviewer capability is available; exact job admission and integrated live proof remain required.":
         "Required native reviewer admission is unsupported or blocked by an additional accounting boundary; this campaign is not unattended-ready for that path."};
