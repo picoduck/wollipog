@@ -161,6 +161,26 @@ for (const theme of ["dark", "light"] as const) {
   });
 }
 
+test("in forced colors the current section keeps a visible bar", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.emulateMedia({ forcedColors: "active" });
+  await page.goto(frame("/settings/behavior"));
+  const current = page.getByRole("navigation", { name: "Settings Sections" }).locator('a[aria-current="page"]');
+  await expect(current).toHaveText("Behavior");
+  const paint = await current.evaluate((element) => {
+    const probe = document.createElement("div");
+    probe.style.background = "Canvas";
+    document.body.append(probe);
+    const canvas = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    const bar = getComputedStyle(element, "::before");
+    return { canvas, bar: bar.backgroundColor, width: bar.width };
+  });
+  expect(paint.width, "wider than the 2px bar, as the Sessions list's is").toBe("4px");
+  expect(paint.bar, "the bar is not the page colour, so it is seen").not.toBe(paint.canvas);
+  expect(paint.bar).not.toBe("rgba(0, 0, 0, 0)");
+});
+
 test("at 1440px the section nav stays in view after Behavior scrolls 600px", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 600 });
   await page.goto(`${frame("/settings/behavior")}&defaults=agent`);

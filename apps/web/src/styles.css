@@ -18328,6 +18328,11 @@ a.tab { text-decoration: none; }
 .settings-nav-item > .row-title { font: var(--type-body); }
 .settings-nav-item.is-selected { color: var(--text); }
 .settings-nav-item.is-selected > .row-icon { color: var(--accent); }
+/* Forced colors drops fills, so the current section's bar is painted in a system colour and widened,
+   as the Sessions list's is, to keep the selection visible. */
+@media (forced-colors: active) {
+  .settings-nav-item.is-selected::before { width: var(--space-1); background: Highlight; }
+}
 @media (hover: hover) {
   .settings-nav-item:hover { color: var(--text); }
   /* The shared row hover would otherwise replace the selected fill under the pointer. */
