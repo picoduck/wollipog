@@ -39,7 +39,14 @@
     "videoProfile": "paced-silent-complete-frames-v1",
     "allSourceFrames": true,
     "candidateOnly": false,
-    "originalGateSnapshotPreserved": true
+    "originalGateSnapshotPreserved": true,
+    "normalVideoCertification": {
+      "proofId": null,
+      "proofSha256": null,
+      "capabilitiesSha256": null,
+      "separateOperatorReservationId": null,
+      "completedBeforeAuthorization": true
+    }
   },
   "oracle": {
     "operatorDirectory": "/tmp/wollipog-2939-live/operator/oracle",

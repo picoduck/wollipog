@@ -18,7 +18,7 @@ pnpm exec playwright test apps/web/e2e/delegated-ui-evidence-live.spec.ts apps/w
 ```
 
 `run-deterministic` uses a static suite allowlist and no shell interpolation, removes injected
-hosting Session/control-plane/runner configuration, and stops on a failure. The selected suites
+hosting Session/control-plane/runner configuration including legacy MAM names, and stops on a failure. The selected suites
 run real production services/storage/driver parsers against synthetic runners and isolated local
 data. A subprocess restriction must be resolved by the execution harness rather than counted as
 a passing test. No suite invokes a live model or publishes to a real tracker. Browser tests use
@@ -74,6 +74,8 @@ The matrix's criterion names describe its target surfaces; the current descendan
 exercise audience and own-child decisions, not the unfinished #1469 ancestor enumeration API.
 Scope/budget/evidence composition and exhaustion tests remain pending until those production
 contracts exist together. Do not fill that gap with a synthetic all-approved owner table.
+The executable matrix lists unfinished ancestor enumeration and agent steering recovery separately
+under `pending`; passing the listed existing contracts does not claim those APIs are implemented.
 
 ## Concrete Live Proposal, Awaiting Human Limits and Operator Resources
 
@@ -182,3 +184,6 @@ during the measured campaign invalidates the zero-prompt positive result. Any ca
 invalidating the prior proof ends that attempt rather than moving the boundary silently. A read-only
 operator can compare the final campaign's blind response to its oracle afterward; that comparison
 must not be a required intervention that unblocks a campaign stage.
+The executable ordering places certification before measured authorization, and the plan checker
+requires its proof reference/digest, capability binding, separate operator reservation and completion
+timing flag. These are proposed evidence references only; the checker cannot verify their authenticity.

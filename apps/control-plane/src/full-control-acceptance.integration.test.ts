@@ -210,7 +210,7 @@ for (const driver of ["codex-app-server", "claude-code"] as const) {
   });
 }
 
-test("foundation scope and normal video remain genuine human exceptions rather than a synthetic complete positive campaign", async () => {
+test("foundation scope and attached video remain genuine human exceptions rather than a synthetic complete positive campaign", async () => {
   const h = stack("codex-app-server");
   try {
     assert.ok(h.enable().ok);
@@ -222,6 +222,7 @@ test("foundation scope and normal video remain genuine human exceptions rather t
       { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok, false);
     assert.equal((await h.svc.consumeWorkflowDecision("root", scope.data!.occurrenceId,
       { resourceSnapshot: scope.data!.resourceSnapshot })).ok, false);
+    // A short fixture proves the current attached-video refusal; it supplies no normal-profile temporal proof.
     const bytes = readFileSync(fileURLToPath(new URL("../test-fixtures/video-review-one-frame-transient.webm", import.meta.url)));
     const video = h.svc.attachSessionVideo("worker", { name: "fixture.webm",
       mimeType: "video/webm", data: bytes.toString("base64") }, { kind: "agent", id: "worker" });
