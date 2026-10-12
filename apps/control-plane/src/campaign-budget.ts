@@ -167,6 +167,10 @@ export class CampaignBudgetLedger {
     return (this.sql.prepare("SELECT session_id FROM campaign_budget_members WHERE root_id=?").all(rootId) as unknown as Member[]).map((r) => r.session_id);
   }
 
+  active(sessionId: string): boolean {
+    return Boolean((this.sql.prepare("SELECT active FROM campaign_budget_members WHERE session_id=?").get(sessionId) as Member | undefined)?.active);
+  }
+
   admissionError(sessionId: string): string | null {
     const rootId = this.root(sessionId); if (!rootId) return null;
     const v = this.view(rootId)!;

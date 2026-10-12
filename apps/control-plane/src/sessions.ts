@@ -7426,12 +7426,24 @@ export class SessionsService {
   /** Production reviewer adapters must use this preflight rather than treating a shell worker
    * as free. A managed worker must already have a durable same-campaign admission. */
   campaignBudgetWorkerPreflight(campaignId: string, worker: { kind: "managed"; sessionId: string } | { kind: "external" }):
-    ServiceResult<{ rootSessionId: string; allocation: import("@wollipog/protocol").CampaignBudgetAllocation }> {
+    ServiceResult<{ rootSessionId: string; authorityRevision: number; allocationDigest: string;
+      allocation: import("@wollipog/protocol").CampaignBudgetAllocation;
+      worker: { sessionId: string; driver: string; model: string | null; effort: string | null } }> {
     if (worker.kind === "external") return fail("External reviewer accounting/admission is unsupported; this path is not ready for unattended protected work.", 409);
     if (this.db.campaignBudgets.root(worker.sessionId) !== campaignId) return fail("review worker lacks same-campaign budget admission", 409);
+    const root = this.db.getSession(campaignId), member = this.db.getSession(worker.sessionId);
+    const control = root?.orchestratorPolicy?.control;
+    if (!root || !member || control?.mode !== "full_control" || !control.boundary.budgetAuthority || !campaignBoundaryCurrent(root) ||
+        !this.db.campaignBudgets.active(member.id) || isTerminal(member.status) || hasBlockingPendingRequest(member.pendingApproval) ||
+        member.runnerId !== root.runnerId || member.workspaceId !== root.workspaceId) return fail("review worker is not an active admitted participant in the current campaign boundary", 409);
+    const accountingError = this.db.campaignBudgetAccountingError(member.driver, member.model, control.boundary.budgetAuthority.costUsd !== undefined);
+    if (accountingError) return fail(accountingError, 409);
     const error = this.db.campaignBudgets.admissionError(worker.sessionId);
     if (error) return fail(error, 409);
-    return ok({ rootSessionId: campaignId, allocation: this.db.campaignBudgets.allocation(worker.sessionId)! });
+    const admission = { rootSessionId: campaignId, authorityRevision: control.boundary.revision,
+      allocation: this.db.campaignBudgets.allocation(worker.sessionId)!,
+      worker: { sessionId: member.id, driver: member.driver, model: member.resolvedModel ?? member.model ?? null, effort: member.effort ?? null } };
+    return ok({ ...admission, allocationDigest: createHash("sha256").update(JSON.stringify(admission)).digest("hex") });
   }
 
   allocateCampaignBudget(callerSessionId: string, allocation: import("@wollipog/protocol").CampaignBudgetAllocation,
