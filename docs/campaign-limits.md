@@ -108,7 +108,8 @@ spending. Enabling that unsupported boundary while a job runs cancels it and sto
 This initial native path conservatively refuses organization daily limits and inherited tighter
 session limits, whose accounting adapters are not integrated into this job path. It never bypasses
 them. The supported path is an explicitly authorized campaign envelope without those additional
-limits, the exact matching native profile, and available host/provider capacity. Integrated live
+limits, the exact matching native profile, and available host/provider capacity. The native path
+requires a user-owned root so its immutable dispatch-owner charge scope is known. Integrated live
 cost, dispatch and zero-prompt proof remains a separate prerequisite before claiming production
 readiness; parser fixtures and manual legacy reviews do not establish it.
 
