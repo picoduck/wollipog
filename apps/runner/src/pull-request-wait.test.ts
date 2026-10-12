@@ -157,7 +157,7 @@ test("required checks are the union of rulesets, classic protection, and GitHub'
   const branch = ok({ protection: { enabled: true, required_status_checks: { contexts: ["ci/legacy"], checks: [{ context: "Build" }] } } });
   const fake = fakeGh([ok(pr({}, [run("Marked", null, { isRequired: true })]))], { branch });
   const names = await requiredCheckNames(fake.gh, "o/r", "main");
-  assert.deepEqual(names, { ok: true, names: ["Build", AGGREGATOR, "ci/legacy"] });
+  assert.deepEqual(names, { ok: true, names: ["Build", AGGREGATOR, "ci/legacy"], apps: {} });
   const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 1 }, { gh: fake.gh, ...clock() });
   assert.ok(result.ok);
   assert.deepEqual(result.summary.checks.required.map((check) => check.name), ["Build", "Marked", AGGREGATOR, "ci/legacy"]);
@@ -169,17 +169,98 @@ test("an unreadable base never reads as nothing required", async () => {
   assert.deepEqual(result, { ok: false, error: "could not read the rules for main: http_404 (gh: Not Found (HTTP 404))" });
 });
 
-test("of several runs sharing a name, the latest started wins", () => {
+test("of several runs sharing a name, the newest wins", () => {
   const verdict = evaluateCommitChecks(HEAD, rollup([
     run(AGGREGATOR, "FAILURE", { startedAt: "2026-10-12T09:00:00Z" }),
     run(AGGREGATOR, "SUCCESS", { startedAt: "2026-10-12T11:00:00Z" }),
   ]), [AGGREGATOR]);
   assert.equal(verdict.requiredState, "passed");
+  // Check run ids grow in creation order, so a re-run that has not started yet is still newer...
   const queued = evaluateCommitChecks(HEAD, rollup([
-    run(AGGREGATOR, "SUCCESS", { startedAt: "2026-10-12T09:00:00Z" }),
-    run(AGGREGATOR, null, { status: "QUEUED", startedAt: null }),
+    run(AGGREGATOR, "SUCCESS", { databaseId: 10, startedAt: "2026-10-12T09:00:00Z" }),
+    run(AGGREGATOR, null, { databaseId: 11, status: "QUEUED", startedAt: null }),
   ]), [AGGREGATOR]);
   assert.equal(queued.requiredState, "pending");
+  // ...while an older run cancelled before it started never displaces a newer success.
+  const cancelled = evaluateCommitChecks(HEAD, rollup([
+    run(AGGREGATOR, "CANCELLED", { databaseId: 10, startedAt: null }),
+    run(AGGREGATOR, "SUCCESS", { databaseId: 11, startedAt: "2026-10-12T11:00:00Z" }),
+  ]), [AGGREGATOR]);
+  assert.equal(cancelled.requiredState, "passed");
+  const untimed = evaluateCommitChecks(HEAD, rollup([
+    run(AGGREGATOR, "SUCCESS", { startedAt: "2026-10-12T11:00:00Z" }),
+    run(AGGREGATOR, "CANCELLED", { startedAt: null }),
+  ]), [AGGREGATOR]);
+  assert.equal(untimed.requiredState, "passed", "an unknown time never displaces a known one");
+});
+
+test("a required check restricted to an app counts only that app's runs", async () => {
+  const appRun = (app: number, conclusion: string | null, databaseId: number) =>
+    run("CI", conclusion, { databaseId, checkSuite: { app: { databaseId: app } } });
+  const rules = ok([{ type: "required_status_checks", parameters: { required_status_checks: [{ context: "CI", integration_id: 123 }] } }]);
+  const names = await requiredCheckNames(fakeGh([], { rules }).gh, "o/r", "main");
+  assert.deepEqual(names, { ok: true, names: ["CI"], apps: { CI: [123] } });
+
+  const impostor = evaluateCommitChecks(HEAD, rollup([appRun(999, "SUCCESS", 2)]), ["CI"], { CI: [123] });
+  assert.equal(impostor.requiredState, "pending");
+  assert.deepEqual(impostor.summary.required, [{ name: "CI", state: "pending", reported: false }]);
+  assert.deepEqual(impostor.summary.other, { passed: 1, failed: 0, pending: 0 });
+  const genuine = evaluateCommitChecks(HEAD, rollup([appRun(123, "SUCCESS", 1), appRun(999, "FAILURE", 2)]), ["CI"], { CI: [123] });
+  assert.equal(genuine.requiredState, "passed", "another app's newer run neither replaces nor fails the required one");
+
+  const branch = ok({ protection: { enabled: true, required_status_checks: { contexts: ["CI"], checks: [{ context: "CI", app_id: 77 }, { context: "Any", app_id: null }] } } });
+  const classic = await requiredCheckNames(fakeGh([], { rules: ok([]), branch }).gh, "o/r", "main");
+  assert.deepEqual(classic, { ok: true, names: ["Any", "CI"], apps: { CI: [77] } });
+
+  const waited = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 1 },
+    { gh: fakeGh([ok(pr({}, [appRun(999, "SUCCESS", 2)]))], { rules }).gh, ...clock() });
+  assert.ok(waited.ok);
+  assert.equal(waited.summary.outcome, "timeout");
+});
+
+test("past one page of contexts a pass also needs GitHub's merge state to confirm it", async () => {
+  const page = (status: string) => ({ data: { repository: { defaultBranchRef: { name: "main" }, pullRequest: {
+    ...pr().data.repository.pullRequest, mergeStateStatus: status,
+    commits: { nodes: [{ commit: { oid: HEAD, statusCheckRollup: rollup([run(AGGREGATOR, "SUCCESS")], true) } }] },
+  } } } });
+  const unconfirmed = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 60_000 },
+    { gh: fakeGh([ok(page("BLOCKED"))]).gh, ...clock() });
+  assert.ok(unconfirmed.ok);
+  assert.equal(unconfirmed.summary.outcome, "timeout");
+  assert.equal(unconfirmed.summary.checks.truncated, true);
+  const confirmed = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh: fakeGh([ok(page("CLEAN"))]).gh, ...clock() });
+  assert.ok(confirmed.ok);
+  assert.equal(confirmed.summary.outcome, "checks_passed");
+});
+
+test("a persistent required-rules outage exhausts the retry budget instead of the whole timeout", async () => {
+  const fake = fakeGh([ok(pr({}, [run(AGGREGATOR, null)]))], { rules: failed("gh: Bad Gateway (HTTP 502)") });
+  const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 10_800_000 }, { gh: fake.gh, ...clock() });
+  assert.deepEqual(result, { ok: false, error: "could not read the rules for main: forge_unreachable (gh: Bad Gateway (HTTP 502))" });
+  assert.equal(fake.graphqlCalls(), 4);
+});
+
+test("an ejection needs the entry missing for the whole confirmation interval", async () => {
+  const entry = { position: 1, state: "AWAITING_CHECKS", enqueuedAt: null, headCommit: null };
+  const time = clock();
+  const early = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 30_001 },
+    { gh: fakeGh([ok(pr({ mergeQueueEntry: entry })), ok(pr())]).gh, ...time });
+  assert.ok(early.ok);
+  assert.equal(early.summary.outcome, "timeout", "1 ms of absence is not a confirmed ejection");
+  assert.deepEqual(time.sleeps, [30_000, 1]);
+});
+
+test("cancellation during a GitHub read stops before any further read", async () => {
+  const controller = new AbortController();
+  const fake = fakeGh([ok(pr({}, [run(AGGREGATOR, "SUCCESS")]))]);
+  const gh: GhRunner = async (args) => {
+    const answer = await fake.gh(args);
+    controller.abort();
+    return answer;
+  };
+  const result = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh, ...clock(), signal: controller.signal });
+  assert.deepEqual(result, { ok: false, error: "request cancelled" });
+  assert.equal(fake.calls.length, 1, "no rules read after the cancelled GraphQL read");
 });
 
 test("status contexts and skipped or neutral check runs follow GitHub's required-check rules", () => {

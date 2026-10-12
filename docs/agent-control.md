@@ -97,12 +97,15 @@ Orchestrator's broker runs it with the distro's own `gh`, never the Windows host
 CLI form needs `owner/name#number`, a URL, or `--repo`. Required checks are
 the union of the base branch's active ruleset `required_status_checks`, classic branch protection,
 and any reported check GitHub marks required; a check run and a status context sharing a required
-name must both pass. A required check with no reported run is `pending`
+name must both pass, a name restricted to an app (`integration_id`, `app_id`) counts only that app's
+check runs, and the newest run of a name (by check run id) wins. When a commit has more than one
+page of check contexts, a pass also needs GitHub's `mergeStateStatus` to confirm it, because an
+unseen context could still fail. A required check with no reported run is `pending`
 (`reported: false`), never passing, and a base whose rules require nothing returns
 `no_required_checks` at once. An unreadable base is an error, never an empty requirement, and a
 GraphQL answer carrying any error is retried rather than trusted. A queue
-entry that disappears without a merge is reported as `queue_ejected` only after a confirming read
-10 seconds later. Timeouts are clamped to 1 ms–3 hours (default 4 minutes) and polling to
+entry that disappears without a merge is reported as `queue_ejected` only once it has stayed missing
+for 10 seconds. Timeouts are clamped to 1 ms–3 hours (default 4 minutes) and polling to
 10 seconds–10 minutes (default 30 seconds); lists are capped at 30 required checks and 20 failed jobs.
 
 `wollipog session steering` (MCP `list_steering_attempts`) returns at most 50 receipts, prioritizing

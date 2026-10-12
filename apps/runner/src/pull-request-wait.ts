@@ -117,6 +117,8 @@ export type PullRequestWaitResult =
   | { ok: false; error: string };
 
 const SHA = /^[0-9a-f]{40}$/u;
+/** `mergeStateStatus` values under which GitHub has every required check reported and passing. */
+const REQUIREMENTS_MET = new Set(["CLEAN", "HAS_HOOKS", "UNSTABLE"]);
 const PASS_CONCLUSIONS = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -196,18 +198,32 @@ function parseJson(text: string): unknown {
   }
 }
 
+/** The base branch's required checks: names, plus the GitHub App ids a name is restricted to. */
+export interface RequiredChecks {
+  names: string[];
+  /** Names a rule restricts to particular apps (ruleset `integration_id`, protection `app_id`). */
+  apps: Record<string, number[]>;
+}
+
 /**
- * The base branch's required status check names: every active ruleset's `required_status_checks`
- * rule plus classic branch protection. Both endpoints need only read access. Any failure is an
- * error rather than an empty set, so an unreadable base can never look like "nothing required".
+ * The base branch's required status checks: every active ruleset's `required_status_checks` rule
+ * plus classic branch protection. Both endpoints need only read access. Any failure is an error
+ * rather than an empty set, so an unreadable base can never look like "nothing required".
  */
 export async function requiredCheckNames(
   gh: GhRunner,
   repository: string,
   branch: string,
-): Promise<{ ok: true; names: string[] } | { ok: false; error: string; transient: boolean }> {
+  signal?: AbortSignal,
+): Promise<({ ok: true } & RequiredChecks) | { ok: false; error: string; transient: boolean }> {
   const ref = encodeURIComponent(branch);
   const names = new Set<string>();
+  const apps = new Map<string, Set<number>>();
+  const add = (context: unknown, app: unknown) => {
+    if (typeof context !== "string" || !context) return;
+    names.add(context);
+    if (Number.isSafeInteger(app) && (app as number) > 0) apps.set(context, (apps.get(context) ?? new Set()).add(app as number));
+  };
   const rules = await gh(["api", "--hostname", "github.com", `repos/${repository}/rules/branches/${ref}?per_page=100`]);
   if (rules.code !== null) return { ok: false, error: ghError(`could not read the rules for ${branch}`, rules), transient: transient(rules) };
   const ruleList = parseJson(rules.stdout);
@@ -216,11 +232,9 @@ export async function requiredCheckNames(
     const value = record(rule);
     if (value?.type !== "required_status_checks") continue;
     const checks = record(value.parameters)?.required_status_checks;
-    for (const check of Array.isArray(checks) ? checks : []) {
-      const context = record(check)?.context;
-      if (typeof context === "string" && context) names.add(context);
-    }
+    for (const check of Array.isArray(checks) ? checks : []) add(record(check)?.context, record(check)?.integration_id);
   }
+  if (signal?.aborted) return { ok: false, error: "request cancelled", transient: false };
   const branchInfo = await gh(["api", "--hostname", "github.com", `repos/${repository}/branches/${ref}`]);
   if (branchInfo.code !== null) {
     return { ok: false, error: ghError(`could not read branch ${branch}`, branchInfo), transient: transient(branchInfo) };
@@ -228,20 +242,19 @@ export async function requiredCheckNames(
   const protection = record(record(parseJson(branchInfo.stdout))?.protection);
   const classic = record(protection?.required_status_checks);
   if (protection?.enabled !== false && classic) {
-    for (const context of Array.isArray(classic.contexts) ? classic.contexts : []) {
-      if (typeof context === "string" && context) names.add(context);
-    }
-    for (const check of Array.isArray(classic.checks) ? classic.checks : []) {
-      const context = record(check)?.context;
-      if (typeof context === "string" && context) names.add(context);
-    }
+    for (const context of Array.isArray(classic.contexts) ? classic.contexts : []) add(context, null);
+    for (const check of Array.isArray(classic.checks) ? classic.checks : []) add(record(check)?.context, record(check)?.app_id);
   }
-  return { ok: true, names: [...names].sort() };
+  return {
+    ok: true,
+    names: [...names].sort(),
+    apps: Object.fromEntries([...apps].map(([name, ids]) => [name, [...ids].sort((a, b) => a - b)])),
+  };
 }
 
 const CONTEXT_FIELDS = `contexts(first:${CONTEXTS_PER_COMMIT}){pageInfo{hasNextPage} nodes{
   __typename
-  ... on CheckRun{name status conclusion startedAt detailsUrl isRequired(pullRequestNumber:$number)}
+  ... on CheckRun{databaseId name status conclusion startedAt detailsUrl checkSuite{app{databaseId}} isRequired(pullRequestNumber:$number)}
   ... on StatusContext{context state createdAt targetUrl isRequired(pullRequestNumber:$number)}
 }}`;
 
@@ -262,7 +275,12 @@ interface CheckNode {
   name: string;
   state: CheckState;
   conclusion: string;
+  /** Check run id (assigned in creation order), absent for a status context. */
+  id?: number;
+  /** When the run started or the status was created; empty when unknown. */
   at: string;
+  /** The GitHub App that reported a check run. */
+  appId?: number;
   url?: string;
   isRequired: boolean;
 }
@@ -273,12 +291,15 @@ function checkNode(raw: unknown): CheckNode | null {
   if (node.__typename === "CheckRun" && typeof node.name === "string") {
     const completed = node.status === "COMPLETED";
     const conclusion = typeof node.conclusion === "string" ? node.conclusion : "";
+    const appId = record(record(node.checkSuite)?.app)?.databaseId;
     return {
       kind: "CheckRun",
       name: node.name,
       state: !completed ? "pending" : PASS_CONCLUSIONS.has(conclusion) ? "passed" : "failed",
       conclusion: completed ? conclusion || "UNKNOWN" : String(node.status ?? "PENDING"),
+      ...(Number.isSafeInteger(node.databaseId) ? { id: node.databaseId as number } : {}),
       at: typeof node.startedAt === "string" ? node.startedAt : "",
+      ...(Number.isSafeInteger(appId) ? { appId: appId as number } : {}),
       url: httpsUrl(node.detailsUrl),
       isRequired: node.isRequired === true,
     };
@@ -298,15 +319,28 @@ function checkNode(raw: unknown): CheckNode | null {
   return null;
 }
 
-/** Fold one commit's rollup into a bounded summary. Of several runs of one kind sharing a name
- * (re-runs), the latest started wins; a run that has not started yet counts as the latest. A check
- * run and a status context that share a required name must both pass. The verdict covers every
- * required check, including any cut from the bounded list. */
+/** Whether `node` supersedes `previous`, a run of the same kind and name: check run ids grow in
+ * creation order, so a re-run (even one not started yet) has the larger id; otherwise the later
+ * known time wins, and an unknown time never displaces a known one. */
+function newer(node: CheckNode, previous: CheckNode): boolean {
+  if (node.id !== undefined && previous.id !== undefined) return node.id > previous.id;
+  return node.at !== "" && (previous.at === "" || node.at > previous.at);
+}
+
+/**
+ * Fold one commit's rollup into a bounded summary. Of several runs of one kind sharing a name
+ * (re-runs), the newest wins. A check run and a status context that share a required name must
+ * both pass, and a name a rule restricts to particular apps counts only check runs from those apps
+ * (a status context carries no app here, so it still matches by name). The verdict covers every
+ * required check, including any cut from the bounded list; `complete` is false when GitHub had
+ * more contexts than one page, so an unseen context could still change it.
+ */
 export function evaluateCommitChecks(
   sha: string,
   rollup: unknown,
   requiredNames: readonly string[],
-): { summary: CommitChecksSummary; requiredState: CheckState | "none" } {
+  requiredApps: Readonly<Record<string, readonly number[]>> = {},
+): { summary: CommitChecksSummary; requiredState: CheckState | "none"; complete: boolean } {
   const contexts = record(record(rollup)?.contexts);
   const rawNodes = Array.isArray(contexts?.nodes) ? contexts.nodes : [];
   const moreContexts = record(contexts?.pageInfo)?.hasNextPage === true;
@@ -314,15 +348,22 @@ export function evaluateCommitChecks(
   for (const raw of rawNodes) {
     const node = checkNode(raw);
     if (!node) continue;
-    const key = `${node.kind}\0${node.name}`;
+    // Restricted names keep each app's runs apart, so another app's run cannot replace them.
+    const app = node.kind === "CheckRun" && requiredApps[node.name] ? String(node.appId ?? "") : "";
+    const key = `${node.kind}\0${app}\0${node.name}`;
     const previous = latest.get(key);
-    if (!previous || (previous.at !== "" && (node.at === "" || node.at > previous.at))) latest.set(key, node);
+    if (!previous || newer(node, previous)) latest.set(key, node);
   }
+  const counts = (node: CheckNode, name: string): boolean => {
+    const apps = requiredApps[name];
+    return node.name === name &&
+      (node.kind === "StatusContext" || !apps || (node.appId !== undefined && apps.includes(node.appId)));
+  };
   // Rules are the authority; a check GitHub itself marks required is added, never removed.
   const required = new Set(requiredNames);
-  for (const node of latest.values()) if (node.isRequired) required.add(node.name);
+  for (const node of latest.values()) if (node.isRequired && !requiredApps[node.name]) required.add(node.name);
   const requiredList: RequiredCheckSummary[] = [...required].sort().map((name) => {
-    const nodes = [...latest.values()].filter((node) => node.name === name);
+    const nodes = [...latest.values()].filter((node) => counts(node, name));
     const state: CheckState = nodes.some((node) => node.state === "failed") ? "failed"
       : nodes.length > 0 && nodes.every((node) => node.state === "passed") ? "passed" : "pending";
     return { name: clip(name, MAX_NAME), state, reported: nodes.length > 0 };
@@ -330,7 +371,7 @@ export function evaluateCommitChecks(
   const other = { passed: 0, failed: 0, pending: 0 };
   const failed: FailedJob[] = [];
   for (const node of latest.values()) {
-    const isRequired = required.has(node.name);
+    const isRequired = required.has(node.name) && counts(node, node.name);
     if (!isRequired) other[node.state]++;
     if (node.state === "failed") {
       failed.push({ name: clip(node.name, MAX_NAME), required: isRequired, conclusion: node.conclusion, ...(node.url ? { url: node.url } : {}) });
@@ -351,11 +392,17 @@ export function evaluateCommitChecks(
       ...(truncated ? { truncated: true as const } : {}),
     },
     requiredState,
+    complete: !moreContexts,
   };
 }
 
-export function summarizeCommitChecks(sha: string, rollup: unknown, requiredNames: readonly string[]): CommitChecksSummary {
-  return evaluateCommitChecks(sha, rollup, requiredNames).summary;
+export function summarizeCommitChecks(
+  sha: string,
+  rollup: unknown,
+  requiredNames: readonly string[],
+  requiredApps: Readonly<Record<string, readonly number[]>> = {},
+): CommitChecksSummary {
+  return evaluateCommitChecks(sha, rollup, requiredNames, requiredApps).summary;
 }
 
 interface Observation {
@@ -444,9 +491,10 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
   const deadline = started + timeoutMs;
   const repository = `${ref.owner}/${ref.name}`;
   let expectedHead = input.headSha;
-  let required: { base: string; names: string[] } | null = null;
+  let required: ({ base: string } & RequiredChecks) | null = null;
   let sawQueue = false;
-  let vanishedQueue = false;
+  /** When the queue entry was first seen missing without a merge; null while it is present. */
+  let vanishedAt: number | null = null;
   let transientFailures = 0;
   let polls = 0;
 
@@ -464,13 +512,15 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
     defaultBranch: seen.defaultBranch,
     mergeStateStatus: seen.mergeStateStatus,
     requiredCheckNames: required ? required.names.slice(0, MAX_LISTED_CHECKS).map((name) => clip(name, MAX_NAME)) : null,
-    checks: summarizeCommitChecks(seen.headSha, seen.rollup, required?.names ?? []),
+    checks: summarizeCommitChecks(seen.headSha, seen.rollup, required?.names ?? [], required?.apps),
     mergeQueue: seen.queue
       ? {
           state: seen.queue.state,
           position: seen.queue.position,
           enqueuedAt: seen.queue.enqueuedAt,
-          checks: seen.queue.headSha ? summarizeCommitChecks(seen.queue.headSha, seen.queue.rollup, required?.names ?? []) : null,
+          checks: seen.queue.headSha
+            ? summarizeCommitChecks(seen.queue.headSha, seen.queue.rollup, required?.names ?? [], required?.apps)
+            : null,
         }
       : null,
     waitedMs: Math.max(0, now() - started),
@@ -492,6 +542,7 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
       "-f", `query=${PULL_REQUEST_WAIT_QUERY}`,
       "-f", `owner=${ref.owner}`, "-f", `name=${ref.name}`, "-F", `number=${ref.number}`,
     ]);
+    if (deps.signal?.aborted) return { ok: false, error: "request cancelled" };
     const response = record(parseJson(outcome.stdout));
     const errors = Array.isArray(response?.errors) ? response.errors.map(record) : [];
     const observed = observation(response?.data);
@@ -510,7 +561,6 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
         ? `could not read ${repository}#${ref.number}: unexpected response`
         : ghError(`could not read ${repository}#${ref.number}`, outcome) };
     }
-    transientFailures = 0;
 
     if (seen.state === "merged") return { ok: true, summary: summarize("merged", seen) };
     if (seen.state === "closed") return { ok: true, summary: summarize("closed", seen) };
@@ -518,7 +568,8 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
     expectedHead = seen.headSha;
 
     if (!required || required.base !== seen.baseRef) {
-      const names = await requiredCheckNames(deps.gh, repository, seen.baseRef);
+      const names = await requiredCheckNames(deps.gh, repository, seen.baseRef, deps.signal);
+      if (deps.signal?.aborted) return { ok: false, error: "request cancelled" };
       if (!names.ok) {
         if (names.transient && ++transientFailures <= MAX_TRANSIENT_FAILURES && now() < deadline) {
           if (!await pause(intervalMs)) return { ok: false, error: "request cancelled" };
@@ -526,32 +577,42 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
         }
         return { ok: false, error: names.error };
       }
-      required = { base: seen.baseRef, names: names.names };
+      required = { base: seen.baseRef, names: names.names, apps: names.apps };
     }
+    // Only a complete observation, rules included, resets the transient-failure budget.
+    transientFailures = 0;
 
     if (seen.queue) {
       sawQueue = true;
-      vanishedQueue = false;
-      const group = seen.queue.headSha ? evaluateCommitChecks(seen.queue.headSha, seen.queue.rollup, required.names) : null;
+      vanishedAt = null;
+      const group = seen.queue.headSha
+        ? evaluateCommitChecks(seen.queue.headSha, seen.queue.rollup, required.names, required.apps)
+        : null;
       if (seen.queue.state === "UNMERGEABLE" || group?.requiredState === "failed" ||
           (input.returnOnAnyFailure && (group?.summary.failedJobs.length ?? 0) > 0)) {
         return { ok: true, summary: summarize("queue_failed", seen) };
       }
     } else if (sawQueue) {
-      // GitHub can drop the entry a moment before the pull request reads MERGED: confirm once.
-      if (vanishedQueue) return { ok: true, summary: summarize("queue_ejected", seen) };
-      vanishedQueue = true;
+      // GitHub can drop the entry a moment before the pull request reads MERGED, so an ejection
+      // stands only once the entry has stayed missing for the whole confirmation interval.
+      vanishedAt ??= now();
+      const missingFor = now() - vanishedAt;
+      if (missingFor >= EJECTION_CONFIRM_MS) return { ok: true, summary: summarize("queue_ejected", seen) };
       // Unconfirmed at the deadline: report a timeout rather than an ejection that may be a merge.
       if (now() >= deadline) return { ok: true, summary: summarize("timeout", seen) };
-      if (!await pause(EJECTION_CONFIRM_MS)) return { ok: false, error: "request cancelled" };
+      if (!await pause(EJECTION_CONFIRM_MS - missingFor)) return { ok: false, error: "request cancelled" };
       continue;
     } else {
-      const checks = evaluateCommitChecks(seen.headSha, seen.rollup, required.names);
+      const checks = evaluateCommitChecks(seen.headSha, seen.rollup, required.names, required.apps);
       if (checks.requiredState === "failed" || (input.returnOnAnyFailure && checks.summary.failedJobs.length > 0)) {
         return { ok: true, summary: summarize("checks_failed", seen) };
       }
       if (checks.requiredState === "none") return { ok: true, summary: summarize("no_required_checks", seen) };
-      if (checks.requiredState === "passed") return { ok: true, summary: summarize("checks_passed", seen) };
+      // Past one page of contexts an unseen one could still fail, so a pass then also needs GitHub's
+      // own merge state to confirm that every requirement is met.
+      if (checks.requiredState === "passed" && (checks.complete || REQUIREMENTS_MET.has(seen.mergeStateStatus ?? ""))) {
+        return { ok: true, summary: summarize("checks_passed", seen) };
+      }
     }
 
     if (now() >= deadline) return { ok: true, summary: summarize("timeout", seen) };
