@@ -2112,6 +2112,26 @@ test("a prompt event behind a full delivery slice still wakes the Orchestrator p
   }
 });
 
+test("an unverified child report keeps asking for the sweep after its own event was consumed (#3083)", () => {
+  const { db, svc, root, child, deliver } = continuationCampaign("questions");
+  try {
+    db.appendEvent(child.id, { kind: "agent_message", text: "Final child report", final: true }, Date.now());
+    svc.onSessionStatus(child.id, "idle");
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    assert.match(deliver(Date.now() + CAMPAIGN_CONTINUATION_FAN_IN_MS + 1_000) ?? "", /"kind":"child_ready"/u,
+      "the report wakes the Orchestrator, whose turn then ends without verifying it");
+    assert.equal(db.campaignContinuationEvents(root.id).length, 0);
+    db.recordCampaignContinuationEvent({ eventId: "settled-later", campaignSessionId: root.id,
+      kind: "request_actionable", subjectSessionId: child.id, occurrenceId: "request_gone", now: Date.now() });
+    const text = deliver(Date.now() + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000);
+    assert.ok(text);
+    assert.match(text, /"occurrenceId":"request_gone","pending":false/u);
+    assert.match(text, /Action needed: yes/u, "the unverified report is still outstanding work");
+  } finally {
+    db.close();
+  }
+});
+
 test("a human answer whose resolver could not be recorded still wakes the Orchestrator for a full sweep (#3083)", () => {
   const { db, svc, root, child, deliver, ask } = continuationCampaign("questions");
   try {

@@ -368,7 +368,7 @@ function campaignContinuationPrompt(
   eventThroughSeq: number,
   details: readonly CampaignContinuationEventDetail[],
   projection: OrchestratorCampaignProjection,
-  backlog: boolean,
+  outstanding: boolean,
 ): string {
   const counts = {
     status: projection.status,
@@ -378,7 +378,7 @@ function campaignContinuationPrompt(
       orchestrator: projection.pendingRequests?.orchestrator ?? projection.pendingDecisions.orchestrator,
     },
   };
-  const actionable = backlog || details.some((detail) => detail.actionable) || counts.pendingRequests.orchestrator > 0 ||
+  const actionable = outstanding || details.some((detail) => detail.actionable) || counts.pendingRequests.orchestrator > 0 ||
     projection.children.blocked > 0 || projection.children.cleanupPending > 0;
   return [
     `[Wollipog Campaign Continuation — ${continuationId}]`,
@@ -5132,11 +5132,13 @@ export class SessionsService {
       const continuationId = `campaign_cont_${randomUUID().replaceAll("-", "")}`;
       const eventFromSeq = events[0]!.seq;
       const eventThroughSeq = events.at(-1)!.seq;
-      // Whatever lies beyond this bounded slice has not been described, so it cannot be judged
-      // to need nothing.
-      const backlog = this.db.hasCampaignContinuationEventAfter(campaignSessionId, eventThroughSeq);
+      // Work this range does not show can still be outstanding: events beyond the bounded slice,
+      // and a child report whose own child_ready event was consumed without verification (an
+      // interrupted turn whose result was dismissed). Neither can be judged to need nothing.
+      const outstanding = this.db.hasCampaignContinuationEventAfter(campaignSessionId, eventThroughSeq) ||
+        this.db.campaignContinuationChildCandidates(campaignSessionId).length > 0;
       const prompt = campaignContinuationPrompt(continuationId, campaignSessionId, eventFromSeq, eventThroughSeq,
-        details, projection, backlog);
+        details, projection, outstanding);
       this.promptOutbox.stageCampaignContinuation({
         continuationId,
         campaignSessionId,
