@@ -251,8 +251,9 @@ jobs:
     # on current main: the slowest non-install remainder was 1448 seconds, including other setup,
     # tests, shard 1's production pass and cleanup. Queue wait is separate. The active cache-hit OR
     # cache-miss install path allows two six-minute attempts; do not add both exclusive paths.
-    # 720s attempts + 1450s rounded remainder + 30s timeout enforcement + 180s reserve = 2380s.
-    # Forty minutes leaves 20s more rounding slack. This replaces the stale 16.3-minute envelope
+    # 720s attempts + 1450s rounded remainder + 60s timeout enforcement + 180s reserve
+    # + 120s diagnostics = 2530s. Forty-three minutes leaves 50s more rounding slack.
+    # This replaces the stale 16.3-minute envelope
     # behind #2067's below-thirty goal; it remains finite so hung or doubled workloads fail loudly.
     # scripts/workflow-browser-budget.test.mjs derives the allowance from the actual steps and
     # recorded phase evidence. Remeasure when changing the workload; docs/ci-browser-budget.md
