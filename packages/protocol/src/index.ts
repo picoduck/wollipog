@@ -676,6 +676,7 @@ export * from "./campaign-authority.js";
 export * from "./campaign-issue-publication.js";
 export * from "./campaign-budget.js";
 export * from "./campaign-review-job.js";
+export * from "./campaign-evidence-authority.js";
 import type { CampaignControl, CampaignRequestSource, CampaignAuthorityEvaluation } from "./campaign-authority.js";
 export const SESSION_SUMMARY_UI_PROTOCOL = 212;
 export const SKILL_REPORT_REQUEST_LIFETIME_MS = 30_000;

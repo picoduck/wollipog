@@ -1,3 +1,4 @@
+import { campaignEvidenceAuthorityBound, type CampaignEvidenceAuthority } from "./campaign-evidence-authority.js";
 import { parentControlRequestEligible } from "./index.js";
 import { validCampaignBudgetAuthority, type CampaignBudgetAuthority } from "./campaign-budget.js";
 import type { ApprovalContext, ParentControlDecisionPolicy, ParentControlMode, PendingApproval, WorkflowDecisionCategory, WorkflowDecisionResourceSnapshot } from "./index.js";
@@ -28,6 +29,8 @@ export interface CampaignAuthorityBoundary {
     closureReasons: Array<"completed" | "not_planned">;
   };
   budgetAuthority?: CampaignBudgetAuthority;
+  /** Narrowed destination/provider disclosure. UI Evidence Approval remains the sole authority. */
+  evidenceAuthority?: CampaignEvidenceAuthority;
 }
 
 export type CampaignControl = { mode: "custom" } | { mode: "full_control"; boundary: CampaignAuthorityBoundary };
@@ -63,7 +66,7 @@ export function validCampaignControl(value: unknown): value is CampaignControl {
   const b = control.boundary;
   const bounded = (v: unknown, max: number) => typeof v === "string" && v.trim().length > 0 && v.length <= max && !/[\x00-\x1f\x7f]/u.test(v);
   return Boolean(b && !Array.isArray(b) && b.version === 1 &&
-    Object.keys(b).every((key) => ["version", "revision", "issueScopeRevision", "repository", "objective", "authorizedByUserId", "authorizedAt", "operations", "delegatablePolicyIds", "issueAuthority", "budgetAuthority"].includes(key)) &&
+    Object.keys(b).every((key) => ["version", "revision", "issueScopeRevision", "repository", "objective", "authorizedByUserId", "authorizedAt", "operations", "delegatablePolicyIds", "issueAuthority", "budgetAuthority", "evidenceAuthority"].includes(key)) &&
     (b.issueAuthority === undefined || validIssueAuthority(b.issueAuthority)) &&
     (b.budgetAuthority === undefined || validCampaignBudgetAuthority(b.budgetAuthority)) &&
     Number.isSafeInteger(b.revision) && b.revision > 0 && bounded(b.repository, 256) && /^[\w.-]+\/[\w.-]+$/u.test(b.repository) &&
@@ -72,7 +75,8 @@ export function validCampaignControl(value: unknown): value is CampaignControl {
     Array.isArray(b.operations) && b.operations.length <= operations.length && new Set(b.operations).size === b.operations.length &&
     b.operations.every((operation) => operations.includes(operation)) &&
     Array.isArray(b.delegatablePolicyIds) && b.delegatablePolicyIds.length <= 100 &&
-    new Set(b.delegatablePolicyIds).size === b.delegatablePolicyIds.length && b.delegatablePolicyIds.every((id) => bounded(id, 256)));
+    new Set(b.delegatablePolicyIds).size === b.delegatablePolicyIds.length && b.delegatablePolicyIds.every((id) => bounded(id, 256)) &&
+    (b.evidenceAuthority === undefined || campaignEvidenceAuthorityBound(b.evidenceAuthority, b)));
 }
 
 function validIssueAuthority(value: NonNullable<CampaignAuthorityBoundary["issueAuthority"]>): boolean {
