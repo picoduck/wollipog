@@ -28,6 +28,11 @@ function loadFailure(caught: unknown): LoadFailure {
   };
 }
 
+/** A saved default stays editable even when its agent offers nothing now, so it can be cleared. */
+function hasEdit(option: AgentHarnessDefaultOption): boolean {
+  return !!option.preference || isConfigurable(option);
+}
+
 /**
  * Settings › Behavior › Agent Defaults (#3024): the model, reasoning effort and permission mode each
  * agent starts new sessions with, one row per discovered agent and nothing to expand.
@@ -83,13 +88,14 @@ export function AgentDefaultsPanel({
     const requestApi = api;
     const generation = ++loadGeneration.current;
     setLoading(true);
-    setFailure(null);
+    // A failure stays up while it is retried, so its Retry keeps focus and shows it is busy.
     if (reset) setView(null);
     try {
       const next = await requestApi.agentHarnessDefaults();
       if (!requestIsCurrent(requestApi, generation)) return false;
       if (mutating.current) return false;
       setView(next);
+      setFailure(null);
       // The agent being edited is gone: its dialog closes, and focus falls back to Refresh.
       const editingKey = editingRef.current;
       if (editingKey && !next.defaults.some((option) => harnessIdentityKey(option) === editingKey)) setEditing(null);
@@ -106,6 +112,7 @@ export function AgentDefaultsPanel({
   useEffect(() => {
     setView(null);
     setEditing(null);
+    setFailure(null);
     mutating.current = false;
     void load(true);
     return () => { loadGeneration.current += 1; };
@@ -134,8 +141,9 @@ export function AgentDefaultsPanel({
     });
   };
 
+  /** A read the person asked for. Once it works, the notice and its Retry go: focus moves to Refresh. */
   const reload = (reset: boolean) => {
-    void load(reset).then(() => restoreFocusIfLost(() => refreshRef.current));
+    void load(reset).then((loaded) => restoreFocusIfLost(() => (loaded ? null : retryRef.current) ?? refreshRef.current));
   };
 
   /**
@@ -197,12 +205,13 @@ export function AgentDefaultsPanel({
   ));
 
   const editingOption = editing ? view?.defaults.find((option) => harnessIdentityKey(option) === editing) : undefined;
-  // Read when the dialog closes: the row's Edit…, or Refresh when the agent has gone. The dialog
-  // unmounts before the row in the same commit, so the list decides, not whether the row is attached.
+  // Read when the dialog closes: the row's Edit…, or Refresh when the row has none now (the agent has
+  // gone, or a reset left it Not Configurable). The dialog unmounts before the row changes in the same
+  // commit, so the list decides, not whether the old button is still attached.
   const returnFocusRef = {
     get current(): HTMLElement | null {
-      const listed = viewRef.current?.defaults.some((option) => harnessIdentityKey(option) === editing);
-      return (listed && editing ? editButtons.current.get(editing) : undefined) ?? refreshRef.current;
+      const next = viewRef.current?.defaults.find((option) => harnessIdentityKey(option) === editing);
+      return (next && editing && hasEdit(next) ? editButtons.current.get(editing) : undefined) ?? refreshRef.current;
     },
   };
 
@@ -225,8 +234,7 @@ export function AgentDefaultsPanel({
   } else if (view) {
     rows = view.defaults.map((option) => {
       const key = harnessIdentityKey(option);
-      // A saved default stays editable even when its agent offers nothing now, so it can be cleared.
-      if (!option.preference && !isConfigurable(option)) {
+      if (!hasEdit(option)) {
         return (
           <SettingRow
             key={key}

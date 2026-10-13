@@ -24,6 +24,11 @@ const HELPER_ID = "agent-defaults-helper";
 
 type Pending = "save" | "reset" | null;
 
+/** Validation (unchanged from the inline editor): a chosen model that has efforts needs one. */
+function needsEffort(option: AgentHarnessDefaultOption, draft: AgentHarnessDefaultConfig): boolean {
+  return !!draft.model && !draft.effort && effortsForDraft(option, draft).length > 0;
+}
+
 interface Failure {
   title: string;
   sentence: string;
@@ -74,6 +79,8 @@ export function AgentDefaultsDialog({
     const notice = draftRepairNotice(repairedDraftFields(draftRef.current, repaired));
     setDraft(repaired);
     if (notice) setRepairNotice(notice);
+    // The missing-effort error is about a model the repair may have removed, or whose efforts it did.
+    if (!needsEffort(option, repaired)) setEffortError(null);
   }, [option]);
 
   const models = uniqueModels(option);
@@ -115,7 +122,7 @@ export function AgentDefaultsDialog({
 
   const save = () => {
     // A model that has efforts needs one (§8.5: the primary stays enabled and reveals the error).
-    if (draft.model && efforts.length > 0 && !draft.effort) {
+    if (needsEffort(option, draft)) {
       setEffortError("Choose a reasoning effort for this model.");
       effortFieldRef.current?.querySelector<HTMLElement>("button")?.focus();
       return;

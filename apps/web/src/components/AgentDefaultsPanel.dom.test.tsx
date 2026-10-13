@@ -111,6 +111,8 @@ function transport(request: ApiTransport["request"]): ApiTransport {
 }
 
 const body = () => domWindow.document.body as unknown as HTMLElement;
+/** What has focus, as the DOM types know it (happy-dom has its own). */
+const focused = () => domWindow.document.activeElement as unknown as Element | null;
 
 function buttonNamed(name: string | RegExp, scope: HTMLElement = body()): HTMLButtonElement {
   const button = [...scope.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => {
@@ -272,7 +274,7 @@ test("Edit… opens the agent's dialog; Save Defaults saves, closes, updates the
     assertNoDomNode(body().querySelector('[role="dialog"]'));
     assert.equal(row(fixture.container, "Codex App Server").querySelector(".setting-row-desc")?.textContent,
       "Luna, high effort, Full Access (No Sandbox)");
-    assert.equal(domWindow.document.activeElement, edit);
+    assert.ok(focused() === edit, "focus is on Edit…");
   } finally {
     await fixture.cleanup();
   }
@@ -292,7 +294,7 @@ test("a model with efforts needs an effort, shown on the field instead of saving
     assert.deepEqual(methods, ["GET"]);
     const effort = buttonNamed(/^Reasoning Effort:/, dialog());
     assert.equal(effort.getAttribute("aria-invalid"), "true");
-    assert.equal(domWindow.document.activeElement, effort);
+    assert.ok(focused() === effort, "focus is on Reasoning Effort");
     assert.match(dialog().querySelector(".field-error")?.textContent ?? "", /Choose a reasoning effort for this model\./);
 
     await choose("Reasoning Effort", "Extra High");
@@ -323,7 +325,7 @@ test("Use Wollipog Defaults clears the saved preference", async () => {
     assertNoDomNode(body().querySelector('[role="dialog"]'));
     assert.equal(row(fixture.container, "Codex App Server").querySelector(".setting-row-desc")?.textContent,
       "Uses Wollipog defaults");
-    assert.equal(domWindow.document.activeElement, edit);
+    assert.ok(focused() === edit, "focus is on Edit…");
   } finally {
     await fixture.cleanup();
   }
@@ -383,7 +385,7 @@ test("an older server shows Update Wollipog with Retry, and Retry brings the row
     await nextFrame();
     assertNoDomNode(fixture.container.querySelector(".notice"));
     row(fixture.container, "Codex App Server");
-    assert.equal(domWindow.document.activeElement, buttonNamed("Refresh Agents"));
+    assert.ok(focused() === buttonNamed("Refresh Agents"), "focus is on Refresh Agents");
   } finally {
     await fixture.cleanup();
   }
@@ -482,7 +484,7 @@ test("a discovery refresh repairs the open draft, says which fields changed, and
     await fixture.render({ revision: 2 });
     assert.match(buttonNamed(/^Model:/, dialog()).getAttribute("aria-label") ?? "", /Wollipog Default/);
     assert.match(buttonNamed(/^Permission Mode:/, dialog()).getAttribute("aria-label") ?? "", /Full Access/);
-    assert.equal(dialog().querySelector('[role="status"][aria-atomic="true"]'), status);
+    assert.ok(dialog().querySelector('[role="status"][aria-atomic="true"]') === status, "the same status region");
     assert.match(status.textContent ?? "", /Model and Reasoning Effort/);
     assert.doesNotMatch(status.textContent ?? "", /Permission Mode/);
 
@@ -490,7 +492,7 @@ test("a discovery refresh repairs the open draft, says which fields changed, and
     await nextFrame();
     assertNoDomNode(body().querySelector('[role="dialog"]'));
     assert.equal(fixture.container.textContent?.includes("Codex App Server"), false);
-    assert.equal(domWindow.document.activeElement, buttonNamed("Refresh Agents"));
+    assert.ok(focused() === buttonNamed("Refresh Agents"), "focus is on Refresh Agents");
   } finally {
     await fixture.cleanup();
   }
@@ -554,6 +556,75 @@ test("an older overlapping read never replaces a newer one", async () => {
     assert.equal(row(fixture.container, "Codex App Server").querySelector(".setting-row-desc")?.textContent,
       "Luna, low effort, Full Access (No Sandbox)");
     assert.equal(gets, 3);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("resetting an agent that offers nothing now returns focus to Refresh Agents, since its row loses Edit…", async () => {
+  const saved = view();
+  saved.defaults[2]!.preference = { permissionMode: "retired-mode" };
+  saved.defaults[2]!.compatibleInstallations = 0;
+  let current = saved;
+  const fixture = await renderPanel(transport(async (_path, init) => {
+    if (init?.method === "DELETE") current = view();
+    return json(current);
+  }));
+  try {
+    // A saved default keeps Edit… even though the agent has nothing to choose, so it can be cleared.
+    await openEditor(fixture.container, "Plain Agent");
+    await act(async () => buttonNamed("Use Wollipog Defaults").click());
+    await nextFrame();
+    assertNoDomNode(body().querySelector('[role="dialog"]'));
+    assert.equal(row(fixture.container, "Plain Agent").querySelector(".setting-row-control")?.textContent, "Not Configurable");
+    assert.ok(focused() === buttonNamed("Refresh Agents"), "focus is on Refresh Agents");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("Retry keeps focus while it fails again, and hands it to Refresh Agents once it works", async () => {
+  let gets = 0;
+  const fixture = await renderPanel(transport(async () => {
+    gets += 1;
+    return gets <= 2 ? json({ error: "connection reset by peer" }, 503) : json(view());
+  }));
+  try {
+    const retry = buttonNamed("Retry", fixture.container.querySelector<HTMLElement>(".notice")!);
+    retry.focus();
+    await act(async () => retry.click());
+    await nextFrame();
+    assert.equal(gets, 2);
+    const again = buttonNamed("Retry", fixture.container.querySelector<HTMLElement>(".notice")!);
+    assert.ok(focused() === again, "focus stays on Retry after another failure");
+    await act(async () => again.click());
+    await nextFrame();
+    assertNoDomNode(fixture.container.querySelector(".notice"));
+    assert.ok(focused() === buttonNamed("Refresh Agents"), "focus is on Refresh Agents");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("a repair that removes the chosen model clears the missing-effort error", async () => {
+  let gets = 0;
+  const withoutSol = view();
+  withoutSol.defaults[0]!.installations[0]!.models = [{ id: "luna", displayName: "Luna", efforts: ["low", "high"] }];
+  const fixture = await renderPanel(transport(async () => {
+    gets += 1;
+    return json(gets === 1 ? view() : withoutSol);
+  }));
+  try {
+    await openEditor(fixture.container, "Codex App Server");
+    await choose("Model", "Sol");
+    await act(async () => buttonNamed("Save Defaults").click());
+    await settle();
+    assert.ok(dialog().querySelector(".field-error"), "the missing-effort error shows");
+    await fixture.render({ revision: 1 });
+    assertNoDomNode(dialog().querySelector(".field-error"));
+    const effort = buttonNamed(/^Reasoning Effort:/, dialog());
+    assert.equal(effort.getAttribute("aria-invalid"), null);
+    assert.equal(dialog().querySelector("#agent-defaults-effort-helper")?.textContent, "Choose a model first.");
   } finally {
     await fixture.cleanup();
   }
