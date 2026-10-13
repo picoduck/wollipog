@@ -55,6 +55,19 @@ that binding are held for reconciliation through existing management operations.
 can be cancelled before current work is restaged; a possibly delivered command keeps its original
 receipt identity and cannot be treated as permission to replay.
 
+Recovery wake metadata names its exact durable server record and attempt, with content-safe
+action, reason and resource fields. It is actionable only while that reservation is dispatched
+under the current policy. A repaired or cancelled wake remains informational when the coalesced
+turn is staged; settled-only turns do not require another campaign sweep. Recovery IDs are not
+workflow decision occurrences and never supply their approvals.
+
+Verified child reports do not finish an original scoped PR. Projection, recovery reservation,
+scheduling and delivery share a fresh control-plane rule: only an exact current-scope original
+work item and a current owned forge fact can make a known repair eligible. Stale, unknown,
+unsupported, denied or exhausted obligations stay held; no attempt is spent on an undeliverable
+wake. Actual merged facts and verified cleanup restore completion. A fourth already-reserved
+repair remains deliverable; another signal cannot reset its four-attempt ceiling.
+
 Recovery metadata grants no authority. Every effect still passes the existing exact typed decision,
 provider permissions, policy rules, scope, budget, fixed-worker configuration and evidence contracts.
 The recovery layer cannot enlarge scope, reset budgets, acquire credentials, change preferences or

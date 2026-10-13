@@ -92,10 +92,26 @@ export class CampaignRecoveryStore {
     });
   }
 
+  activeRecords(campaignId: string): CampaignRecoveryRecord[] {
+    return this.rows(campaignId).map(row => JSON.parse(row.record_json) as CampaignRecoveryRecord);
+  }
+
   requestRecord(campaignId: string, sessionId: string, occurrenceId: string): CampaignRecoveryRecord | undefined {
     return this.rows(campaignId).map(row => JSON.parse(row.record_json) as CampaignRecoveryRecord)
       .find(record => record.resource.kind === "request" && record.resource.sessionId === sessionId &&
         record.resource.occurrenceId === `sha256:${createHash("sha256").update(occurrenceId).digest("hex")}` && !terminal.has(record.state));
+  }
+
+  /** Exact server-created wake, including its attempt. Never interpret a recovery ID as a
+   * workflow decision or let a stale/cross-campaign event describe another reservation. */
+  eventRecord(campaignId: string, sessionId: string | undefined, recoveryId: string | undefined,
+    eventId: string): CampaignRecoveryRecord | undefined {
+    if (!recoveryId) return undefined;
+    const row = this.db.prepare("SELECT record_json FROM campaign_recovery WHERE campaign_session_id=? AND id=?")
+      .get(campaignId, recoveryId) as { record_json: string } | undefined;
+    const record = row ? JSON.parse(row.record_json) as CampaignRecoveryRecord : undefined;
+    return record && record.resource.sessionId === sessionId && eventId === `${record.id}:${record.attempts}`
+      ? record : undefined;
   }
 
   private rows(campaignId: string): Row[] {
@@ -129,7 +145,8 @@ export class CampaignRecoveryStore {
           old.resource.sessionId !== observation.resource.sessionId);
         const dispatchFenced = (!authorized || old?.dispatchFenced === true || old?.state === "cancelled" ||
           old !== undefined && old.policyRevision !== policyRevision) && !(authorized && freshOccurrence);
-        let reason = attempts >= CAMPAIGN_RECOVERY_LIMITS.maxAttempts && !observation.resolved
+        const currentDispatch = old?.state === "dispatched" && row?.signal === observation.signal && !changedResource;
+        let reason = attempts >= CAMPAIGN_RECOVERY_LIMITS.maxAttempts && !observation.resolved && !currentDispatch
           ? "attempts_exhausted" : old && hard.has(old.reason) && !terminal.has(old.state) && !observation.resolved
             ? old.reason : observation.reason;
         const state = observation.resolved ? "resolved" : !authorized && observation.owner !== "human"
@@ -167,14 +184,15 @@ export class CampaignRecoveryStore {
   /** Event creation and reservation share one transaction. A crash cannot lose a wake or admit
    * a second wake for the same observation. Current authority and lifecycle are checked by caller. */
   dispatchDue(campaignId: string, policyRevision: number, now: number,
-    wake: (record: CampaignRecoveryRecord, eventId: string) => void): number {
+    wake: (record: CampaignRecoveryRecord, eventId: string) => void,
+    eligible: (record: CampaignRecoveryRecord) => boolean = () => true): number {
     return this.atomic(() => {
       let dispatched = 0;
       for (const row of this.rows(campaignId)) {
         const record = JSON.parse(row.record_json) as CampaignRecoveryRecord;
         if (dispatched >= CAMPAIGN_RECOVERY_LIMITS.dispatchPerPass) break;
         if (record.dispatchFenced || record.policyRevision !== policyRevision || record.effectiveOwner !== "orchestrator" ||
-            !["ready", "backoff"].includes(record.state) || (record.nextAttemptAt ?? 0) > now) continue;
+            !["ready", "backoff"].includes(record.state) || (record.nextAttemptAt ?? 0) > now || !eligible(record)) continue;
         const next: CampaignRecoveryRecord = { ...record, state: "dispatched", attempts: record.attempts + 1,
           attemptedRecovery: [...record.attemptedRecovery, record.action], updatedAt: now };
         delete next.nextAttemptAt;

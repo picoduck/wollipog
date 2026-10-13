@@ -198,6 +198,9 @@ export class CampaignRecoveryService {
         kind: "request_actionable", subjectSessionId: record.resource.sessionId,
         occurrenceId: record.id, now });
       committedDispatches.push({ recoveryId: record.id, action: record.action, reason: record.reason, attempt: record.attempts });
+    }, record => {
+      const completion = this.db.campaignRecoveryCompletion(root.id, now);
+      return completion.state === "children_unfinished" || completion.recoveryIds.includes(record.id);
     }) : 0;
     for (const dispatch of committedDispatches) this.log.info(JSON.stringify({
       event: "campaign_recovery_dispatched", entryPoint: "recovery_sweep", campaignId: root.id,

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
-  type CampaignBudgetAuthority, type PendingApproval, type RunnerMetadata } from "@wollipog/protocol";
+  type CampaignBudgetAuthority, type CampaignForgePullRequestObservation, type PendingApproval, type RunnerMetadata } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
@@ -606,6 +606,283 @@ test("same-millisecond replacement decisions supersede stale denied recovery", (
     assert.equal(h.db.campaignProjection("root")!.recovery!.blocked, 0);
   } finally { h.db.close(); }
 });
+
+function completedPrFixture() {
+  const h = fixture(), now = Date.now();
+  const plan = h.db.campaignWorkLedger.recordPlan("root", "root", { items: [{ key: "original:2938",
+    issue: { repository: "picoduck/wollipog", number: 2938 } }], planComplete: true }, now);
+  assert.ok(plan.ok);
+  const itemId = plan.data.items[0]!.workItemId, ref = { repository: "picoduck/wollipog", number: 42 };
+  assert.ok(h.db.campaignWorkLedger.updateItem("root", "root", { workItemId: itemId,
+    stage: { stage: "awaiting_checks", pullRequests: [ref] } }, now).ok);
+  const checks = { state: "failing" as const, failing: 1, passing: 0, pending: 0 };
+  const observation: CampaignForgePullRequestObservation = { state: "open", draft: false, headSha: "a".repeat(40),
+    baseRef: "main", reviewDecision: "approved", checks, requiredChecks: checks, mergeQueue: null, mergeCommitSha: null };
+  h.db.campaignForgeObservations.record("root", "r", [{ ref, observation }], now);
+  for (const child of ["child", "unaffected"]) {
+    h.db.updateSessionStatus(child, "idle", now);
+    const report = h.db.appendEvent(child, { kind: "agent_message", text: "Component fixture completed.", final: true }, now);
+    h.db.verifyCampaignChildReport("root", child, report.seq, now);
+    h.db.setSessionArchived(child, true, now);
+  }
+  h.db.updateSessionStatus("root", "idle", now);
+  return { ...h, now, itemId, ref, observation };
+}
+
+for (const kind of ["checks", "forge_review", "steering", "native_objection", "native_invalid"] as const) {
+  test(`recovery-only ${kind} wake delivers an actionable parent prompt`, () => {
+    const h = kind.startsWith("native") ? nativeRecoveryFixture() : fixture();
+    const now = Date.now();
+    try {
+      if (kind.startsWith("native")) {
+        const command = (h as ReturnType<typeof nativeRecoveryFixture>).reserve(kind);
+        h.svc.onCampaignReviewJobUpdate("r", { type: "campaign_review_job_update", jobId: command.jobId,
+          nonce: command.nonce, state: "completed", costUsd: 1, toolCalls: 2,
+          attemptValid: kind === "native_objection", attemptConsumed: true,
+          ...(kind === "native_objection" ? { vote: "DOWNVOTE" as const } : {}), receiptSha256: "c".repeat(64) });
+      } else if (kind === "steering") {
+        h.db.createSteeringAttempt({ requestId: "lost-steering", sessionId: "child", submissionId: "original-submission",
+          turnId: "original-turn", source: "direct", requestSha256: "a".repeat(64), text: "private prompt", now });
+        h.db.markSteeringAttemptUncertain("lost-steering", now);
+      } else {
+        const plan = h.db.campaignWorkLedger.recordPlan("root", "root", { items: [{ key: "original:2938" }], planComplete: true }, now);
+        assert.ok(plan.ok);
+        assert.ok(h.db.campaignWorkLedger.updateItem("root", "root", { workItemId: plan.data.items[0]!.workItemId,
+          stage: { stage: "awaiting_checks", pullRequests: [{ repository: "picoduck/wollipog", number: 42 }] } }, now).ok);
+        const rollup = { state: kind === "checks" ? "failing" as const : "passing" as const,
+          failing: kind === "checks" ? 1 : 0, passing: kind === "checks" ? 0 : 1, pending: 0 };
+        h.db.campaignForgeObservations.record("root", "r", [{ ref: { repository: "picoduck/wollipog", number: 42 },
+          observation: { state: "open", draft: false, headSha: "a".repeat(40), baseRef: "main",
+            reviewDecision: kind === "forge_review" ? "changes_requested" : "approved", checks: rollup, requiredChecks: rollup,
+            mergeQueue: null, mergeCommitSha: null } }], now);
+      }
+      h.db.updateSessionStatus("root", "idle", now);
+      h.recovery.maintain(now);
+      h.recovery.maintain(now + 1_000); // Invalid review attempts retain their bounded backoff.
+      const record = h.db.campaignRecovery.projection("root").records[0]!;
+      assert.equal(record.state, "dispatched", kind);
+      h.svc.retryDuePrompts(now + 32_000);
+      const continuation = h.db.latestCampaignContinuation("root");
+      assert.ok(continuation, kind);
+      const command = JSON.parse(h.db.getSessionPromptCommand(continuation.commandId)!.payloadJson);
+      assert.match(command.text, /Action needed: yes/u, kind);
+      assert.ok(command.text.includes(record.id), "prompt names the exact server-derived recovery record");
+      assert.equal(command.text.includes("private prompt"), false);
+      assert.equal(h.db.campaignRecovery.projection("root").records[0]!.attempts, 1);
+      h.svc.retryDuePrompts(now + 33_000);
+      assert.equal(h.db.latestCampaignContinuation("root")!.continuationId, continuation.continuationId,
+        "repeated recovery creates no duplicate parent turn");
+    } finally { h.db.close(); }
+  });
+}
+
+test("a repaired recovery-only wake is informational when its coalesced prompt is staged", () => {
+  const h = fixture();
+  const now = Date.now();
+  try {
+    const plan = h.db.campaignWorkLedger.recordPlan("root", "root", { items: [{ key: "original:2938" }], planComplete: true }, now);
+    assert.ok(plan.ok);
+    assert.ok(h.db.campaignWorkLedger.updateItem("root", "root", { workItemId: plan.data.items[0]!.workItemId,
+      stage: { stage: "awaiting_checks", pullRequests: [{ repository: "picoduck/wollipog", number: 42 }] } }, now).ok);
+    const ref = { repository: "picoduck/wollipog", number: 42 };
+    const checks = { state: "failing" as const, failing: 1, passing: 0, pending: 0 };
+    const observation = { state: "open" as const, draft: false, headSha: "a".repeat(40), baseRef: "main",
+      reviewDecision: "approved" as const, checks, requiredChecks: checks, mergeQueue: null, mergeCommitSha: null };
+    h.db.campaignForgeObservations.record("root", "r", [{ ref, observation }], now);
+    h.db.updateSessionStatus("root", "idle", now);
+    h.recovery.maintain(now);
+    const record = h.db.campaignRecovery.projection("root").records[0]!;
+    assert.equal(record.state, "dispatched");
+    const passing = { state: "passing" as const, failing: 0, passing: 1, pending: 0 };
+    h.db.campaignForgeObservations.record("root", "r", [{ ref,
+      observation: { ...observation, checks: passing, requiredChecks: passing } }], now + 1);
+    h.svc.retryDuePrompts(now + 31_000);
+    const continuation = h.db.latestCampaignContinuation("root")!;
+    assert.ok(continuation);
+    const command = JSON.parse(h.db.getSessionPromptCommand(continuation.commandId)!.payloadJson);
+    assert.match(command.text, /Action needed: no/u, "settled work does not undo compact no-op turns");
+    assert.equal(command.text.includes("Read get_campaign.recovery"), false, "settled-only turns do not require another sweep");
+    assert.ok(command.text.includes(`"recoveryId":"${record.id}"`));
+    assert.match(command.text, /"pending":false/u);
+    assert.equal(h.db.campaignRecovery.projection("root").records.length, 0);
+  } finally { h.db.close(); }
+});
+
+test("verified children with an unfinished original scoped PR admit exactly one real runner repair turn", () => {
+  const h = fixture();
+  const now = Date.now();
+  try {
+    const plan = h.db.campaignWorkLedger.recordPlan("root", "root", { items: [{ key: "original:2938",
+      issue: { repository: "picoduck/wollipog", number: 2938 } }], planComplete: true }, now);
+    assert.ok(plan.ok);
+    assert.ok(h.db.campaignWorkLedger.updateItem("root", "root", { workItemId: plan.data.items[0]!.workItemId,
+      stage: { stage: "awaiting_checks", pullRequests: [{ repository: "picoduck/wollipog", number: 42 }] } }, now).ok);
+    const checks = { state: "failing" as const, failing: 1, passing: 0, pending: 0 };
+    h.db.campaignForgeObservations.record("root", "r", [{ ref: { repository: "picoduck/wollipog", number: 42 },
+      observation: { state: "open", draft: false, headSha: "a".repeat(40), baseRef: "main", reviewDecision: "approved",
+        checks, requiredChecks: checks, mergeQueue: null, mergeCommitSha: null } }], now);
+    for (const child of ["child", "unaffected"]) {
+      h.db.updateSessionStatus(child, "idle", now);
+      const report = h.db.appendEvent(child, { kind: "agent_message", text: "Component fixture completed.", final: true }, now);
+      h.db.verifyCampaignChildReport("root", child, report.seq, now);
+      h.db.setSessionArchived(child, true, now);
+    }
+    h.db.updateSessionStatus("root", "idle", now);
+    assert.equal(h.db.campaignProjection("root")!.status, "blocked", "child reports alone cannot finish an original open PR");
+    h.recovery.maintain(now);
+    h.svc.retryDuePrompts(now + 31_000);
+    const continuation = h.db.latestCampaignContinuation("root")!;
+    assert.ok(continuation);
+    const projection = h.db.campaignProjection("root")!;
+    assert.equal(projection.status, "active");
+    assert.equal(projection.children.verified, 2);
+    const message = h.sent.find(m => (m as {type:string}).type === "durable_session_command");
+    assert.ok(isDurableSessionCommandMessage(message));
+    assert.equal(message.command.type, "prompt_session");
+    if (message.command.type !== "prompt_session") assert.fail("repair must use the original parent continuation lane");
+    assert.match(message.command.text, /Action needed: yes/u);
+    assert.match(message.command.text, /"action":"repair_checks"/u);
+    const directory = mkdtempSync(join(tmpdir(), "verified-repair-journal-"));
+    try {
+      const journal = new DurableCommandStore(directory, { ownerId: "fixture-runner", now: () => now + 31_000 });
+      assert.equal(journal.claim(message).kind, "new");
+      assert.equal(journal.claim({ ...message, requestId: "reconnect" }).kind, "duplicate");
+    } finally { rmSync(directory, { recursive: true, force: true }); }
+    h.svc.retryDuePrompts(now + 32_000);
+    assert.equal(h.db.latestCampaignContinuation("root")!.continuationId, continuation.continuationId);
+    assert.equal(h.db.campaignRecovery.projection("root").records[0]!.attempts, 1);
+    assert.ok(h.svc.onDurablePromptReceipt("r", { type: "durable_session_command_result", requestId: message.requestId,
+      commandId: message.commandId, sessionId: "root", state: "accepted", revision: 1, duplicate: false }));
+    assert.ok(h.svc.onDurablePromptReceipt("r", { type: "durable_session_command_update",
+      commandId: message.commandId, sessionId: "root", state: "completed", revision: 2 }));
+    h.db.campaignForgeObservations.record("root", "r", [{ ref: { repository: "picoduck/wollipog", number: 42 },
+      observation: { state: "merged", draft: false, headSha: "a".repeat(40), baseRef: "main", reviewDecision: "approved",
+        checks: { state: "passing", failing: 0, passing: 1, pending: 0 },
+        requiredChecks: { state: "passing", failing: 0, passing: 1, pending: 0 },
+        mergeQueue: null, mergeCommitSha: "b".repeat(40) } }], now + 33_000);
+    h.recovery.maintain(now + 33_000);
+    assert.equal(h.db.campaignProjection("root")!.status, "verified_complete", "actual merged fact and existing verified cleanup finish the obligation");
+    assert.equal(h.db.campaignRecovery.projection("root").records.length, 0);
+  } finally { h.db.close(); }
+});
+
+test("an original unknown outcome cannot reopen a child-verified campaign or spend a recovery turn", () => {
+  const h = completedPrFixture();
+  try {
+    const passing = { state: "passing" as const, failing: 0, passing: 1, pending: 0 };
+    h.db.campaignForgeObservations.record("root", "r", [{ ref: h.ref,
+      observation: { ...h.observation, checks: passing, requiredChecks: passing } }], h.now);
+    h.db.createSteeringAttempt({ requestId: "lost-original", sessionId: "child", submissionId: "original-submission",
+      turnId: "original-turn", source: "direct", requestSha256: "a".repeat(64), text: "private prompt", now: h.now });
+    h.db.markSteeringAttemptUncertain("lost-original", h.now);
+    h.svc.retryDuePrompts(h.now + 31_000);
+    const record = h.db.campaignRecovery.projection("root").records.find(r => r.resource.kind === "steering")!;
+    assert.equal(record.reason, "uncertain_outcome");
+    assert.equal(record.attempts, 0);
+    assert.equal(record.resource.occurrenceId, recoveryCoordinate("original-submission"));
+    assert.equal(h.db.listSteeringAttempts("child")[0]!.state, "uncertain");
+    assert.equal(h.db.latestCampaignContinuation("root"), null);
+    assert.equal(h.db.campaignProjection("root")!.status, "blocked");
+  } finally { h.db.close(); }
+});
+
+test("a child-verified repair staged before forge freshness loss remains fenced at delivery", () => {
+  const h = completedPrFixture();
+  try {
+    h.hub.isRunnerOnline = () => false;
+    h.recovery.maintain(h.now);
+    h.svc.retryDuePrompts(h.now + 31_000);
+    const staged = h.db.latestCampaignContinuation("root")!;
+    assert.ok(staged);
+    h.db.campaignForgeObservations.record("root", "r", [{ ref: h.ref, observation: h.observation }], h.now - 700_000);
+    h.hub.isRunnerOnline = () => true;
+    h.sent.length = 0;
+    h.svc.retryDuePrompts(h.now + 32_000);
+    assert.equal(h.sent.some(m => (m as {type:string}).type === "durable_session_command"), false);
+    assert.equal(h.db.getSessionPromptCommand(staged.commandId)!.state, "pending", "known unsent original command remains intact");
+    assert.equal(h.db.latestCampaignContinuation("root")!.commandId, staged.commandId);
+    assert.equal(h.db.campaignRecovery.projection("root").records[0]!.attempts, 1);
+  } finally { h.db.close(); }
+});
+
+test("all four scoped repair reservations deliver; a fifth head cannot reset their ceiling", () => {
+  const h = completedPrFixture();
+  const delivered = new Set<string>();
+  try {
+    for (let n = 1; n <= 4; n++) {
+      const at = h.now + (n - 1) * 40_000;
+      h.db.campaignForgeObservations.record("root", "r", [{ ref: h.ref,
+        observation: { ...h.observation, headSha: n.toString().repeat(40) } }], at);
+      h.db.updateSessionStatus("root", "idle", at);
+      h.recovery.maintain(at);
+      h.svc.retryDuePrompts(at + 31_000);
+      const continuation = h.db.latestCampaignContinuation("root")!;
+      assert.ok(continuation);
+      assert.equal(delivered.has(continuation.commandId), false, "each reserved repair reaches its own new turn");
+      delivered.add(continuation.commandId);
+      assert.ok(h.sent.some(m => (m as {commandId?:string}).commandId === continuation.commandId), "the turn actually reaches the runner");
+      const command = JSON.parse(h.db.getSessionPromptCommand(continuation.commandId)!.payloadJson);
+      assert.match(command.text, /Action needed: yes/u, `repair ${n} is delivered, not retired before coalescing`);
+      assert.ok(command.text.includes(n.toString().repeat(40)), "the delivered metadata carries this exact repaired head");
+      assert.equal(h.db.campaignRecovery.projection("root").records[0]!.attempts, n);
+      assert.ok(h.svc.onDurablePromptReceipt("r", { type: "durable_session_command_update",
+        commandId: continuation.commandId, sessionId: "root", state: "completed", revision: 1 }));
+    }
+    const latest = h.db.latestCampaignContinuation("root")!;
+    h.db.updateSessionStatus("root", "idle", h.now + 160_000);
+    h.db.campaignForgeObservations.record("root", "r", [{ ref: h.ref,
+      observation: { ...h.observation, headSha: "5".repeat(40) } }], h.now + 160_000);
+    h.recovery.maintain(h.now + 160_000);
+    h.svc.retryDuePrompts(h.now + 191_000);
+    assert.equal(h.db.latestCampaignContinuation("root")!.continuationId, latest.continuationId);
+    const exhausted = h.db.campaignRecovery.projection("root").records[0]!;
+    assert.equal(exhausted.reason, "attempts_exhausted");
+    assert.equal(exhausted.attempts, 4);
+    assert.equal(h.db.campaignProjection("root")!.status, "blocked");
+  } finally { h.db.close(); }
+});
+
+for (const fence of ["stale", "out_of_scope", "wrong_subject", "hard_denial", "exhausted", "unsupported", "budget", "stop", "archive", "pause", "revoke"] as const) {
+  test(`verified children cannot admit original PR recovery through the ${fence} fence`, () => {
+    const h = completedPrFixture();
+    try {
+      h.db.updateSessionStatus("root", "running", h.now);
+      h.recovery.maintain(h.now); // Derive the record without spending or staging a turn.
+      const original = h.db.campaignRecovery.projection("root").records[0]!;
+      h.db.updateSessionStatus("root", "idle", h.now);
+      if (fence === "stale") h.db.campaignForgeObservations.record("root", "r", [{ ref: h.ref, observation: h.observation }], h.now - 700_000);
+      if (fence === "out_of_scope") assert.ok(h.db.campaignWorkLedger.updateItem("root", "root", { workItemId: h.itemId,
+        issue: { repository: "picoduck/wollipog", number: 999 } }, h.now).ok); // Untrusted ledger claim cannot expand current scope.
+      if (fence === "wrong_subject" || fence === "hard_denial" || fence === "exhausted") {
+        const record = { ...original, ...(fence === "wrong_subject" ? { resource: { ...original.resource, sessionId: "foreign-campaign" } } : {}),
+          ...(fence === "hard_denial" ? { reason: "hard_denial", state: "blocked" } : {}),
+          ...(fence === "exhausted" ? { attempts: 4, reason: "attempts_exhausted", state: "blocked" } : {}) };
+        h.db.raw().prepare("UPDATE campaign_recovery SET record_json=? WHERE id=?").run(JSON.stringify(record), original.id);
+      }
+      if (fence === "wrong_subject") {
+        assert.equal(h.db.campaignRecoveryCompletion("root").state, "recovery_held", "a foreign subject cannot supply repair authority");
+        const passing = { state: "passing" as const, failing: 0, passing: 1, pending: 0 };
+        h.db.campaignForgeObservations.record("root", "r", [{ ref: h.ref,
+          observation: { ...h.observation, checks: passing, requiredChecks: passing } }], h.now);
+      }
+      if (fence === "unsupported") h.db.registerRunner(h.metadata, h.now, 1);
+      if (fence === "budget") {
+        h.db.updateSessionCostBudget("root", 1, h.now);
+        h.db.appendEvent("root", { kind: "token_usage", inputTokens: 1, costUsd: 2 }, h.now, { accrueUsage: true });
+      }
+      if (fence === "stop") h.svc.stop("root");
+      if (fence === "archive") h.db.setSessionArchived("root", true, h.now);
+      if (fence === "pause") h.db.updateSessionStatus("root", "input_required", h.now);
+      if (fence === "revoke") h.db.updateSessionCampaignControl("root", { mode: "custom" }, 2, h.now);
+      h.sent.length = 0;
+      h.svc.retryDuePrompts(h.now + 31_000);
+      assert.equal(h.db.latestCampaignContinuation("root"), null);
+      assert.equal(h.sent.some(m => (m as {type:string}).type === "durable_session_command"), false);
+      assert.ok(h.db.campaignRecovery.activeRecords("root").every(record => record.attempts === (fence === "exhausted" ? 4 : 0)),
+        "the fence cannot spend or reset retained ceilings");
+    } finally { h.db.close(); }
+  });
+}
 
 test("fresh check/review failures route to repair; stale facts cannot resolve their exceptions", () => {
   const h = fixture();

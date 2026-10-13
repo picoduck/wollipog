@@ -233,7 +233,14 @@ const projectionFor = (rev: number) => campaignProjection(
     ...(recoveryRecord ? { recovery: { unattendedReady: false, automatic: recoveryRecord.state === "dispatched" ? 1 : 0,
       waitingHuman: recoveryRecord.state === "waiting_human" ? 1 : 0, blocked: recoveryRecord.state === "blocked" ? 1 : 0,
       records: [recoveryRecord], truncated: false } } : {}),
-    heldChildren: [{
+    ...(params.get("completedChildren") === "1" && recoveryRecord?.reason === "failed_checks" ? {
+      // Static rendering only. Actual fresh authority/forge/completion composition is separately
+      // exercised in the CP-to-runner journal test; these values cannot attest live readiness.
+      status: "active" as const,
+      children: { total: 2, active: 0, waitingHuman: 0, blocked: 0, verified: 2, cleanupPending: 0 },
+      limits: { maximumConcurrentChildren: 4, occupied: 0, remaining: 4, costBudgetUsd: 40, maxToolCalls: null },
+    } : {}),
+    heldChildren: params.get("completedChildren") === "1" ? [] : [{
       sessionId: "s_child_3",
       holds: [{
         kind: "provider_account_switch", holdId: "hold_1", since: NOW - 6 * MINUTE,

@@ -5237,6 +5237,12 @@ export class ControlPlaneDb {
     if (full && !campaignBoundaryCurrent({ orchestratorPolicy: policy, parentControlPolicy: this.parentControlPolicy(campaignId) ?? undefined })) {
       return { state: "authority_unavailable", reason: "The current authority boundary is unavailable; recovery cannot enlarge it." };
     }
+    const completion = this.campaignRecoveryCompletion(campaignId);
+    if (completion.state === "complete" || completion.state === "recovery_held") {
+      return { state: "lifecycle_held", reason: completion.state === "complete"
+        ? "The campaign has no unfinished original scoped recovery obligation."
+        : "Original scoped work remains unfinished, but no current known recovery is eligible. Reconcile its original obligation before continuing." };
+    }
     const active = this.activeCampaignContinuation(campaignId);
     if (active) {
       const binding = active.authorityDigest;
@@ -5272,6 +5278,75 @@ export class ControlPlaneDb {
       return { state: "budget_held", reason: "Automatic continuation is blocked by current accounting or an existing allowance. Recovery cannot reset spend or request an override." };
     }
     return { state: "available" };
+  }
+
+  /** Shared completion boundary for projection, recovery reservation, scheduler and outbox.
+   * No SessionView/projection reads: those contain this admission check. A child report cannot
+   * finish an original scoped PR. Agent stage prose/retained records alone cannot admit repair. */
+  campaignRecoveryCompletion(campaignId: string, now = Date.now()): {
+    state: "children_unfinished" | "complete" | "recovery_ready" | "recovery_held";
+    recoveryIds: string[];
+  } {
+    const row = this.stmt("SELECT * FROM sessions WHERE id=?").get(campaignId) as unknown as SessionRow | undefined;
+    const policy = row ? orchestratorCampaignPolicyFromJson(row.orchestrator_policy) : undefined;
+    const children = this.campaignDescendantIds(campaignId), verified = this.validCampaignChildReportIds(campaignId);
+    const childRows = children.map(id => this.stmt("SELECT archived FROM sessions WHERE id=?").get(id) as { archived: number });
+    if (!row || !policy || children.length === 0 || children.some((id, i) => !verified.has(id) ||
+        policy.behavior.completion !== "retain" && (childRows[i]!.archived !== 1 || this.campaignWorktreeCleanup(id).length > 0)) ||
+        pendingRequests(parseJson<PendingApproval>(row.pending_approval)).length > 0 ||
+        this.stmt("SELECT 1 FROM workflow_decisions WHERE controlling_session_id=? AND status='pending'").get(campaignId)) {
+      return { state: "children_unfinished", recoveryIds: [] };
+    }
+    const scope = policy.issueScope;
+    if (policy.control?.mode !== "full_control" || !scope ||
+        !campaignBoundaryCurrent({ orchestratorPolicy: policy, parentControlPolicy: this.parentControlPolicy(campaignId) ?? undefined })) {
+      return { state: "complete", recoveryIds: [] };
+    }
+    const records = this.campaignRecovery.activeRecords(campaignId);
+    const recoveryIds = new Set<string>();
+    let unfinished = false, cursor: string | undefined;
+    do {
+      const page = this.campaignWorkLedger.page(campaignId, { state: "unfinished", origin: "original", limit: 100,
+        ...(cursor ? { cursor } : {}) }, now);
+      if (!page.ok) return { state: "recovery_held", recoveryIds: [] };
+      for (const item of page.data.items) {
+        if (item.commitment !== "committed" || !item.issue || item.issue.repository.toLowerCase() !== scope.repository.toLowerCase() ||
+            !scope.issueNumbers.includes(item.issue.number) || !policy.issueNumbers?.includes(item.issue.number)) continue;
+        const refs = item.stage?.pullRequests.filter(ref => ref.repository.toLowerCase() === scope.repository.toLowerCase()) ?? [];
+        if (refs.length === 0) { unfinished = true; continue; }
+        for (const { ref, fact } of this.campaignForgeObservations.facts(campaignId, refs, now)) {
+          if (fact.availability === "fresh" && fact.value.state === "merged" && fact.value.mergeCommitSha) continue;
+          unfinished = true;
+          if (fact.availability !== "fresh" || fact.value.state !== "open" ||
+              (this.stmt("SELECT runner_id FROM campaign_forge_observations WHERE campaign_session_id=? AND repository_key=? AND number=?")
+                .get(campaignId, ref.repository.toLowerCase(), ref.number) as { runner_id: string } | undefined)?.runner_id !== row.runner_id) continue;
+          for (const record of records) {
+            if (record.policyRevision !== row.parent_control_policy_revision || record.dispatchFenced ||
+                record.effectiveOwner !== "orchestrator" || !["ready", "backoff", "dispatched"].includes(record.state) ||
+                (record.attempts > record.maxAttempts || record.attempts === record.maxAttempts && record.state !== "dispatched") ||
+                record.resource.repository?.toLowerCase() !== ref.repository.toLowerCase() ||
+                record.resource.pullRequest !== ref.number) continue;
+            if (record.resource.kind === "pull_request" && record.resource.sessionId === campaignId &&
+                record.resource.occurrenceId === fact.value.headSha &&
+                (record.action === "repair_checks" && record.reason === "failed_checks" &&
+                  (fact.value.checks.state === "failing" || fact.value.requiredChecks.state === "failing") ||
+                 record.action === "rereview" && record.reason === "reviewer_objection" && fact.value.reviewDecision === "changes_requested")) {
+              recoveryIds.add(record.id);
+            } else if (record.resource.kind === "review_job" && record.action === "rereview") {
+              const job = this.campaignReviewJobs.view(record.resource.occurrenceId);
+              if (job?.rootSessionId === campaignId && job.request.workItemId === item.id &&
+                  job.worktreeSessionId === record.resource.sessionId && job.request.headSha === fact.value.headSha &&
+                  job.usageSettlement === "settled" &&
+                  (record.reason === "reviewer_objection" && job.attemptValid === true && job.vote === "DOWNVOTE" && job.round < 4 ||
+                   record.reason === "transient_failure" && job.attemptValid === false &&
+                    (job.attemptConsumed !== true || job.attempt < 2))) recoveryIds.add(record.id);
+            }
+          }
+        }
+      }
+      cursor = page.data.nextCursor ?? undefined;
+    } while (cursor);
+    return { state: recoveryIds.size ? "recovery_ready" : unfinished ? "recovery_held" : "complete", recoveryIds: [...recoveryIds] };
   }
 
   campaignRecoveryRequest(sessionId: string, request: PendingApproval): PendingApproval {
@@ -17674,11 +17749,17 @@ export class ControlPlaneDb {
     }, effectiveOwners.ui_evidence_approval));
     effectiveOwners.ui_evidence_approval = uiEvidenceReview.effectiveOwner;
     const total = rows.length;
-    const childStatus = waitingHuman > 0 || (policy.control?.mode === "full_control" && (pendingHuman.length > 0 || pendingGenericHuman > 0)) ? "waiting_human" as const
+    let childStatus: OrchestratorCampaignProjection["status"] = waitingHuman > 0 || (policy.control?.mode === "full_control" && (pendingHuman.length > 0 || pendingGenericHuman > 0)) ? "waiting_human" as const
       : active > 0 || pendingOrchestrator.length > 0 || cleanupPending > 0 || total === 0 ? "active" as const
       : blocked > 0 ? "blocked" as const
       : fullyVerified === total ? "verified_complete" as const
       : "active" as const;
+    if (childStatus === "verified_complete") {
+      const completion = this.campaignRecoveryCompletion(resolvedCampaignId);
+      if (completion.state === "recovery_ready") childStatus = this.campaignContinuationAdmission(resolvedCampaignId).state === "available"
+        ? "active" : "blocked";
+      else if (completion.state === "recovery_held") childStatus = "blocked";
+    }
     // The continuation reads the child-derived status (its `held` state depends on it), and the
     // final status reads the continuation, so derive them in that order and never the reverse.
     const continuation = resolvedCampaignId === campaignSessionId

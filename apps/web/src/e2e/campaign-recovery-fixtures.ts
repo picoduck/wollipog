@@ -13,7 +13,9 @@ export function campaignRecoveryFixture(reason: CampaignRecoveryReason, now: num
   const action = reason === "failed_checks" ? "repair_checks" : reason === "reviewer_objection" ? "rereview"
     : reason === "uncertain_outcome" ? "reconcile_outcome" : "answer_request";
   return { id: "recovery_fixture", action,
-    resource: { kind: "request", sessionId: "s_child_3", occurrenceId: `sha256:${"a".repeat(64)}` }, reason,
+    resource: reason === "failed_checks" || reason === "reviewer_objection"
+      ? { kind: "pull_request", sessionId: "s_root", repository: "team/repo", pullRequest: 123, occurrenceId: "a".repeat(40) }
+      : { kind: "request", sessionId: "s_child_3", occurrenceId: `sha256:${"a".repeat(64)}` }, reason,
     state: blocked ? "blocked" : automatic ? "dispatched" : "waiting_human", effectiveOwner: automatic || blocked ? "orchestrator" : "human",
     policyRevision: 1, attempts: reason === "attempts_exhausted" ? 4 : automatic ? 1 : 0, maxAttempts: 4,
     attemptedRecovery: reason === "attempts_exhausted" ? [action, action, action, action] : automatic ? [action] : [],
