@@ -21,7 +21,8 @@ repository and never publishes.
 Hard rules:
 
 1. Do not edit, create, or delete any file in the workspace. Do not commit, branch, stage, stash,
-   push, or open a pull request.
+   push, or open a pull request. A detached analysis worktree under this run's scratch directory
+   is the sole exception to creating workspace files; use it only as described below.
 2. Do not run installs, migrations, formatters, code generators, or any command whose purpose is to
    change the tree. Analysis tooling that writes only to caches, `node_modules/.cache`, or the
    scratch directory below is allowed. One exception: the preflight install in the ground-truth
@@ -35,7 +36,10 @@ Hard rules:
    namespaced per run, because a session that loses its conversation context can otherwise find
    another session's files and mistake them for its own — which happened, and turned one lost
    session into a false "already published" claim. At the start of each run, delete this job's
-   own scratch directories older than 30 days, as a standalone command scoped to the job's
+   own scratch directories older than 30 days. Before the prune below, list its candidates and
+   check them against `git worktree list --porcelain`. Safely remove any analysis worktree using
+   the cleanup rule below first; if any removal is refused, defer the prune and report why.
+   Run it as a standalone command scoped to the job's
    prefix — `find ~/.cache/wollipog-maintenance -mindepth 1 -maxdepth 1 -type d -name
    '<job-id>-*' -mtime +30 -exec rm -rf {} +` — never a sweep of the whole location chained onto
    other commands. Each job cleans only what it wrote; nothing else cleans this location. The
@@ -103,8 +107,25 @@ reported. One sweep ran two commits behind and produced three findings in a file
 twelve files that had merely moved on. The primary checkout is not fast-forwarded on a schedule,
 and Phase 1 forbids this run from pulling it.
 
+When a job needs to execute code and the shared checkout is dirty or differs from `origin/main`,
+pin `git rev-parse origin/main` and create a detached analysis worktree with
+`git worktree add --detach <scratch>/tree <baseline-sha>`. This is an analysis-only exception to
+Phase 1: it may register its own detached worktree in Git metadata, but may not change the primary
+checkout, create a branch, commit, or publish. Run the job and its install preflight inside that
+worktree; do not share or symlink the primary checkout's `node_modules`. Record the primary tree
+state separately from the analysis baseline. If `<scratch>/tree` already exists on resume, verify
+its registered ownership, pinned HEAD, cleanliness, and absence of in-flight installs or tests
+before reusing it. A mismatch is an `environment` item; do not reset or overwrite it.
+
+After all of this run's processes have ended, remove only its clean, unlinked analysis worktree
+with `git worktree remove <scratch>/tree`, keeping logs and verdicts in the parent scratch
+directory. Never force removal or prune shared worktree registrations. A worktree linked to a
+Wollipog session must instead use `wollipog worktree discard`. If cleanup is refused, report the
+path and reason and leave it intact; do not prune an old scratch directory containing a registered
+worktree until this same safe removal check succeeds.
+
 Check install freshness before any job that executes code (tests, coverage, knip, type checks):
-compare the installed lockfile with the checkout's wanted lockfile using
+compare the installed lockfile with the analysis checkout's wanted lockfile using
 `cmp -s node_modules/.pnpm/lock.yaml pnpm-lock.yaml`. A missing installed lockfile or a content
 mismatch requires `pnpm install --frozen-lockfile --prefer-offline` as preflight, before the first
 test or analysis command. Do not use an install timestamp versus a lockfile commit timestamp:
