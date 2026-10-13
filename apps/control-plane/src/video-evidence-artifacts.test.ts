@@ -6,6 +6,16 @@ import { ControlPlaneVideoFrameStorage, createControlPlaneVideoReviewStore } fro
 import type { VideoReviewRecord } from "./video-evidence-runtime.js";
 const hash = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
 const image = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3]);
+/** Actual referenced Session rows in an in-memory CODE fixture, never managed provider work. */
+function fixtureDb(): ControlPlaneDb {
+  const db = ControlPlaneDb.open(":memory:");
+  db.registerRunner({ runnerId: "synthetic-runner", hostname: "synthetic", os: "linux", version: "test",
+    workspaces: [{ id: "synthetic-workspace", name: "Synthetic Workspace", path: "/synthetic-workspace" }], agents: [] }, 1);
+  for (const id of ["root", "child", "reviewer"]) db.createSession({ id, runnerId: "synthetic-runner",
+    workspaceId: "synthetic-workspace", agentId: "synthetic-agent", title: "Synthetic Storage Session",
+    driver: "codex-app-server", useWorktree: false, config: {}, now: 1 });
+  return db;
+}
 /** Metadata/blob boundary test only. Actual valid complete PNG derivation uses the real decoder
  * in runtime tests; this tiny fixture is not evidence or live model validation. */
 function review(): VideoReviewRecord {
@@ -30,7 +40,7 @@ function review(): VideoReviewRecord {
   };
 }
 test("concrete private artifact writer stages complete frames without nested SQLite transactions or inline bytes", (t) => {
-  const db = ControlPlaneDb.open(":memory:"); t.after(() => db.close());
+  const db = fixtureDb(); t.after(() => db.close());
   const record = review();
   const store = createControlPlaneVideoReviewStore(db);
   store.saveDerived(record, [image, image]);
@@ -45,7 +55,7 @@ test("concrete private artifact writer stages complete frames without nested SQL
   assert.deepEqual(store.readFrame(record.reviewId, 0), image);
 });
 test("failed concrete derivation removes only its created frames and never publishes a partial review", (t) => {
-  const db = ControlPlaneDb.open(":memory:"); t.after(() => db.close());
+  const db = fixtureDb(); t.after(() => db.close());
   const record = review();
   record.manifest.frames[1]!.sha256 = hash("wrong expected bytes");
   const store = createControlPlaneVideoReviewStore(db);
@@ -54,7 +64,7 @@ test("failed concrete derivation removes only its created frames and never publi
   assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM artifacts").get()!.n, 0);
 });
 test("artifact author, manifest metadata and timing tampering fail closed; colliding artifacts survive rollback", (t) => {
-  const db = ControlPlaneDb.open(":memory:"); t.after(() => db.close());
+  const db = fixtureDb(); t.after(() => db.close());
   const record = review();
   const store = createControlPlaneVideoReviewStore(db);
   store.saveDerived(record, [image, image]);
@@ -72,7 +82,7 @@ test("artifact author, manifest metadata and timing tampering fail closed; colli
 
 test("source deletion and attachment retention remove only server-authored same-source temporal frames", (t) => {
   for (const retention of [false, true]) {
-    const db = ControlPlaneDb.open(":memory:"); t.after(() => db.close());
+    const db = fixtureDb(); t.after(() => db.close());
     const record = review();
     const source = Buffer.from("source");
     db.createWorkflowArtifactBytes({
@@ -97,7 +107,7 @@ test("source deletion and attachment retention remove only server-authored same-
 });
 
 test("bounded expiry sweep removes crashed staging and expired frames without trusting agent metadata", (t) => {
-  const db = ControlPlaneDb.open(":memory:"); t.after(() => db.close());
+  const db = fixtureDb(); t.after(() => db.close());
   const record = review(), frames = new ControlPlaneVideoFrameStorage(db);
   // A crash before review publication leaves private rows without any usable review grant.
   frames.writeFrame(record, 0, image);
