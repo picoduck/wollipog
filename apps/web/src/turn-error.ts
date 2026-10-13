@@ -10,13 +10,6 @@ export const TURN_ERROR_FALLBACK = "The agent stopped because of an error.";
  */
 const TURN_ERROR_SHAPES: ReadonlyArray<{ pattern: RegExp; sentence: string }> = [
   {
-    // The runner's own hold notice (#3100). It quotes the provider's error, which may match a later
-    // shape, so it is tested first.
-    pattern: /\bAutomatic turns are held until you send a message or restart the session\.$/,
-    sentence: "The provider rejected two turns in a row with the same error, so automatic turns are held. " +
-      "Send a message or restart the session to continue.",
-  },
-  {
     pattern: /\b(?:rate[ -]?limit|usage limit|quota|too many requests|429|credit balance (?:is )?too low|hit your limit)\b/i,
     sentence: "The provider's usage limit was reached. Wait for it to reset, then retry.",
   },
@@ -33,6 +26,20 @@ const TURN_ERROR_SHAPES: ReadonlyArray<{ pattern: RegExp; sentence: string }> = 
     sentence: "The provider rejected the content of this turn.",
   },
 ];
+
+/** The runner's notice that it holds automatic turns after repeated identical provider rejections
+ * (#3100). It ends with this sentence and quotes the provider's error before it. */
+const AUTOMATIC_TURNS_HELD = /\bAutomatic turns are held until you send a message or restart the session\.$/;
+
+export const AUTOMATIC_TURNS_HELD_SENTENCE =
+  "The provider rejected two turns in a row with the same error, so automatic turns are held. " +
+  "Send a message or restart the session to continue.";
+
+/** Whether an error row is the rejection hold rather than a failed turn of its own. Decided before
+ * any turn-error shape, because the quoted provider error could match one. */
+export function isAutomaticTurnsHeld(message: string): boolean {
+  return AUTOMATIC_TURNS_HELD.test(withoutPromptFailedPrefix(message));
+}
 
 /** A failed turn's error in plain words (docs/design-system.md §13.2): what happened and, where
  * one exists, what to do. The raw provider message stays behind Show Details. */
