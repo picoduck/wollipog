@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { linkSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -62,4 +62,31 @@ test("native snapshots tolerate publication staging cleanup and writes (#2414)",
     assert.equal(registry.acquireHome(home), true, "the canonical journal remains usable");
     registry.releaseAll();
   }
+});
+
+test("a crashed publisher staging alias remains recoverable (#2414)", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-publication-alias-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const owner = "a".repeat(64);
+  const crashed = new ProviderHomeLeaseRegistry(owner, {
+    pid: 101, hostname: "synthetic-host",
+    afterInitializationPublishForTest: () => { throw new Error("synthetic crash before mkdir"); },
+  });
+  assert.throws(() => crashed.acquireHome(home), /quarantine the entire/);
+  const root = join(home, ".agent-manager", "provider-home-leases-v1");
+  const anchor = join(root, "mutable-home.recovery.json");
+  // A crash after exclusive publication but before unlinking leaves the immutable inode aliased.
+  linkSync(anchor, join(root, temporary));
+  const registry = new ProviderHomeLeaseRegistry(owner, {
+    pid: 202, hostname: "synthetic-host", isProcessAlive: (pid) => pid === 202,
+  });
+  assert.equal(registry.acquireHome(home), true, "recovery preserves the published staging witness");
+  assert.deepEqual(registry.getDiagnostics(), [], "checkpointing retains canonical mirror preimages");
+  const competitor = new ProviderHomeLeaseRegistry(owner, {
+    pid: 303, hostname: "synthetic-host", isProcessAlive: (pid) => pid === 202,
+  });
+  assert.throws(() => competitor.acquireHome(home), /already in use by process 202/);
+  assert.equal(registry.releaseAll(), true);
+  assert.equal(competitor.acquireHome(home), true);
+  assert.equal(competitor.releaseAll(), true);
 });

@@ -237,10 +237,15 @@ function capture(root: string): LeaseIoSnapshot {
   spendVerificationWork(result.work.records, result.work.bytes);
   return result;
 }
+/** Publication staging has validated physical identity, but its bytes are mutable/non-authoritative. */
+function publicationTemporary(entry: LeaseIoEntry): boolean {
+  return entry.directory === "root" && /^\.provider-home-lease-[0-9a-f-]{36}\.tmp$/u.test(entry.name);
+}
+
 const decodedEntries = new WeakMap<LeaseIoEntry, ReadLeaseRecord>();
 function readRecord(path: string): ReadLeaseRecord {
   const cachedEntry = physicalSnapshot ? snapshotEntry(path) : undefined;
-  if (cachedEntry?.links === 3 && physicalSnapshot!.entries.filter((entry) => entry.device === cachedEntry.device && entry.inode === cachedEntry.inode && entry.raw.equals(cachedEntry.raw)).length < 3) throw new Error("unproven lease metadata alias");
+  if (cachedEntry?.links === 3 && physicalSnapshot!.entries.filter((entry) => entry.device === cachedEntry.device && entry.inode === cachedEntry.inode && (entry.raw.equals(cachedEntry.raw) || publicationTemporary(entry))).length < 3) throw new Error("unproven lease metadata alias");
   if (cachedEntry && decodedEntries.has(cachedEntry)) return decodedEntries.get(cachedEntry)!;
   spendVerificationWork(1, 0);
   let bytes: Buffer;
@@ -605,7 +610,7 @@ function lstatExists(path: string): boolean {
   try { lstatSync(path); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
 }
 function ioPlan(snapshot: LeaseIoSnapshot, tip: ReadLeaseRecord, jobs: LeaseIoJob[], barrier?: ProviderHomeLeaseOptions["nativeCheckpointBarrierForTest"]) {
-  const tipIndex = snapshot.entries.findIndex((entry) => entry.directory === "root" && entry.raw.toString("utf8") === tip.raw);
+  const tipIndex = snapshot.entries.findIndex((entry) => entry.directory === "root" && !publicationTemporary(entry) && entry.raw.toString("utf8") === tip.raw);
   if (tipIndex < 0) throw new Error("acquired immutable tip is unavailable");
   const guard = snapshot.entries.find((entry) => entry.directory === "lock" && entry.name === FORMAT_GUARD)?.raw ?? Buffer.alloc(0);
   return { snapshot, guard, guardTemp: `.provider-home-lease-${randomUUID()}.tmp`, tipIndex,
@@ -1135,7 +1140,7 @@ export class ProviderHomeLeaseRegistry {
         // Absent optional mirrors carry exact canonical identities. A late rollback writer can
         // finish only that same immutable alias; the helper verifies it under the fence too.
         for (const item of retired.values()) if (!snapshot.entries.some((entry) => entry.directory === item.directory && entry.name === item.name)) {
-          const source = snapshot.entries.find((entry) => entry.device === item.device && entry.inode === item.inode);
+          const source = snapshot.entries.find((entry) => !publicationTemporary(entry) && entry.device === item.device && entry.inode === item.inode);
           if (source) snapshot.entries.push({ ...source, directory: item.directory, name: item.name, optional: true });
         }
         apply(chain, [{ name: pendingName, raw, copiesOwner: true, retire: indexes([...retired.values()]) }]);
