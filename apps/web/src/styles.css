@@ -2114,7 +2114,6 @@ button.status { cursor: pointer; }
 .notice-error { color: var(--danger-text); }
 /* A setting row's reason or failure sits under its description, clear of the words above it. */
 .setting-row-desc > .notice { margin-top: var(--space-2); }
-.agent-defaults-list > .toolbar > .notice { flex: 1 1 auto; }
 /* Session-level notices sit in the session column under its bar. */
 .session-detail > .notice { margin: var(--space-2) var(--space-3); }
 /* A missing session's state sits on the page gutter, under the bar's Back (#2202). */
@@ -18467,57 +18466,17 @@ a.tab { text-decoration: none; }
   .rail-order-controls > :last-child { min-width: 0; }
 }
 
-.agent-defaults-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  margin-left: var(--space-4);
-  padding-left: var(--space-2);
-  border-left: 1px solid var(--border);
-}
-.agent-defaults-item { display: flex; flex-direction: column; min-width: 0; }
-.agent-defaults-list > .toolbar {
-  flex-wrap: wrap;
-  min-height: var(--control-h);
-  padding: 0 var(--space-2);
-}
-.agent-defaults-editor {
+/* Agent Defaults' dialog (#3024): Model, Reasoning Effort and Permission Mode share one row, and stack
+   on a phone sheet like every `.field-row` (§8.1). A `.field-row` fits only two columns in a 560px
+   dialog, so this row asks for three. */
+.agent-defaults-fields {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--space-3);
-  margin: 0 var(--space-2) var(--space-2);
-  padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-elev-1);
 }
-.agent-defaults-field { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; font-size: var(--text-sm); }
-.agent-defaults-field > span { color: var(--text-dim); font-weight: var(--weight-medium); }
-.agent-defaults-field .ui-select,
-.agent-defaults-field .ui-select-trigger { width: 100%; min-width: 0; }
-.agent-defaults-actions {
-  grid-column: 1 / -1;
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  flex-wrap: wrap;
-}
-.agent-defaults-action-spacer { flex: 1; }
-.agent-defaults-empty { margin: var(--space-2); }
-.agent-defaults-editor > p { grid-column: 1 / -1; margin: 0; }
-.agent-defaults-draft-notice {
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid color-mix(in srgb, var(--blue) 35%, transparent);
-  border-radius: var(--radius-sm);
-  color: var(--blue-on-tint);
-  background: color-mix(in srgb, var(--blue) 10%, transparent);
-  font-size: var(--text-xs);
-}
+.agent-defaults-fields > .field { min-width: 0; }
 @media (max-width: 760px) {
-  .agent-defaults-list { margin-left: var(--space-2); }
-  .agent-defaults-editor { grid-template-columns: minmax(0, 1fr); }
-  .agent-defaults-actions { grid-column: auto; }
-  .agent-defaults-actions .agent-defaults-action-spacer { display: none; }
+  .agent-defaults-fields { grid-template-columns: minmax(0, 1fr); }
 }
 
 .session-naming-editor {

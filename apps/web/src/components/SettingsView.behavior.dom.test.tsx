@@ -10,6 +10,7 @@ import type { SettingsFocus } from "../navigation.js";
 import { SHOW_SHORTCUTS_ID, shortcutDisplay } from "../shortcuts.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { BehaviorPanel } from "./SettingsView.js";
+import { SettingsGroup } from "./ui/SettingsRows.js";
 
 /**
  * Settings › Behavior (#3023): six groups in a fixed order, each naming where it is kept; the rows
@@ -81,7 +82,10 @@ async function renderPanel(options: { on?: Device; focus?: SettingsFocus; opened
   const root = createRoot(container);
   const draw = (focus?: SettingsFocus) => root.render(
     <BehaviorPanel
-      agentHarnessDefaults={<div className="setting-row">Agent defaults slot</div>}
+      // The Agent Defaults panel is its own group (#3024), so the shell supplies the whole group.
+      agentHarnessDefaults={(
+        <SettingsGroup title="Agent Defaults" scope="Your Account"><div className="setting-row">Agent defaults slot</div></SettingsGroup>
+      )}
       sessionNaming={<div className="setting-row">Session naming slot</div>}
       onOpenShortcuts={(returnFocus) => options.opened?.push(returnFocus)}
       focus={focus}
@@ -118,7 +122,8 @@ test("Behavior is six groups in order, each naming once where it is kept", async
       ["Session Titles", "Your Account"],
       ["Evidence", "Your Account"],
     ]);
-    // The slots hold what the shell supplies, under the heads drawn here.
+    // The slots hold what the shell supplies: Agent Defaults a whole group, Session Titles rows under
+    // the head drawn here.
     const groups = [...view.container.querySelectorAll(".settings-group")];
     assert.match(groups[3]!.querySelector(".settings-group-surface")!.textContent ?? "", /^Agent defaults slot$/);
     assert.match(groups[4]!.querySelector(".settings-group-surface")!.textContent ?? "", /^Session naming slot$/);

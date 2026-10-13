@@ -133,7 +133,7 @@ const AboutPanel = lazy(() => import("./components/SettingsView.js").then((modul
 const AppearancePanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.AppearancePanel })));
 const NavigationRailPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.NavigationRailPanel })));
 const BehaviorPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.BehaviorPanel })));
-const AgentHarnessDefaultsPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.AgentHarnessDefaultsPanel })));
+const AgentDefaultsPanel = lazy(() => import("./components/AgentDefaultsPanel.js").then((module) => ({ default: module.AgentDefaultsPanel })));
 const ExperimentalPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.ExperimentalPanel })));
 const NetworkPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.NetworkPanel })));
 const NotificationsPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.NotificationsPanel })));
@@ -975,7 +975,12 @@ export function Shell() {
                 notifications: <NotificationsPanel notify={notify} push={push} />,
                 behavior: (
                   <BehaviorPanel
-                    agentHarnessDefaults={<AgentHarnessDefaultsPanel discoveryRevision={runners} />}
+                    agentHarnessDefaults={(
+                      <AgentDefaultsPanel
+                        discoveryRevision={runners}
+                        onOpenConnections={() => navigate({ name: "runners", section: "machines" })}
+                      />
+                    )}
                     sessionNaming={<SessionNamingPanel />}
                     onOpenShortcuts={openShortcutReference}
                     focus={view.focus}

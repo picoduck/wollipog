@@ -37,7 +37,7 @@ interface HarnessOptions {
   topology?: "full" | "minimal";
   section?: SettingsSection;
   copy?: "default" | "long";
-  defaults?: "pending" | "agent" | "agent-missing" | "agent-repair";
+  defaults?: "pending" | "agent" | "agent-missing" | "agent-repair" | "agent-empty" | "agent-loading" | "agent-save-fails";
   /** Notifications where the browser blocks alerts, or where neither kind can work (#3022). */
   alerts?: "available" | "blocked" | "unavailable";
   /** Settings › Network's Tailnet Access in one reported state, or `browser` (#3027). */
@@ -1211,9 +1211,9 @@ test("tabbing through each section reaches every row kind", async ({ page }) => 
   // Appearance is not here because its rows are not focusable: they are containers, and the thing
   // Tab lands on is the pill or the trigger inside. That claim is the Appearance block's, at the
   // end of this file, and it is the same claim — it just has a different element to make it about.
-  // Behavior with its agent defaults loaded holds a navigation row: Keyboard Shortcuts, the row this
-  // reached before, folded into Behavior as an action row (#3023).
-  for (const [section, wanted] of [["notifications", "setting-row-switch"], ["behavior", "setting-row-link"]] as const) {
+  // Approvals' tool policies are navigation rows. Behavior held one before: its agent defaults were a
+  // row that expanded, and are rows with Edit… now (#3024).
+  for (const [section, wanted] of [["notifications", "setting-row-switch"], ["approvals", "setting-row-link"]] as const) {
     await useHarness(page, "dark", { section, defaults: "agent" });
     for (let press = 0; press < 24; press += 1) {
       await page.keyboard.press("Tab");
@@ -1237,108 +1237,118 @@ test.describe("with a touch pointer", () => {
   // Its phone-width target size is a touch size, keyed to the pointer rather than the viewport (#1799).
   test.use({ hasTouch: true });
 
-  test("Agent Harness defaults are keyboard-operable, cascade by model, and keep one editor open", async ({ page }) => {
+  test("Agent Defaults are rows with Edit…, edited in a dialog that cascades by model and returns focus", async ({ page }) => {
     await useHarness(page, "dark", { section: "behavior", defaults: "agent" });
-    const defaults = page.getByRole("button", { name: /Default Models, Efforts, and Permissions/ });
-    await defaults.focus();
-    await page.keyboard.press("Enter");
-    await expect(defaults).toHaveAttribute("aria-expanded", "true");
-    const refresh = page.getByRole("button", { name: "Refresh" });
-    await expect(refresh).toBeVisible();
+    const group = page.locator("section.settings-group", { has: page.getByRole("heading", { name: "Agent Defaults", exact: true }) });
+    const row = (name: string) => group.locator(".setting-row").filter({ has: page.locator(".setting-row-title", { hasText: name }) });
+    // Every agent is a row at once: nothing expands, nothing has a chevron (#3024).
+    await expect(group.locator(".settings-group-surface > .setting-row")).toHaveCount(3);
+    await expect(group.locator("[aria-expanded]")).toHaveCount(0);
+    await expect(group.locator(".setting-row-chevron")).toHaveCount(0);
+    await expect(row("Codex App Server").locator(".setting-row-desc")).toHaveText("Luna, low effort, Approve for Me");
+    await expect(row("Claude Code").locator(".setting-row-desc")).toHaveText("Uses Wollipog defaults");
+    await expect(row("Fixture ACP Agent").locator(".setting-row-control")).toHaveText("Not Configurable");
+    await expect(row("Fixture ACP Agent").getByRole("button")).toHaveCount(0);
+
+    const refresh = group.getByRole("button", { name: "Refresh Agents" });
     await page.setViewportSize({ width: 390, height: 844 });
-    // A small button on touch: 36px to look at, with a 44px hit area that reaches 4px past each edge.
-    expect((await refresh.boundingBox())?.height).toBeGreaterThanOrEqual(36);
+    // A small icon button on touch: its hit area reaches 44px.
     expect(await refresh.evaluate((element) => {
       element.scrollIntoView({ block: "center" });
       const rect = element.getBoundingClientRect();
       const x = rect.left + rect.width / 2;
-      return [rect.top - 3.5, rect.bottom + 3.5].every((y) => element.contains(document.elementFromPoint(x, y)));
-    }), "the Refresh hit area is 44px tall").toBe(true);
+      return [rect.top + rect.height / 2 - 21.5, rect.top + rect.height / 2 + 21.5]
+        .every((y) => element.contains(document.elementFromPoint(x, y)));
+    }), "the Refresh Agents hit area is 44px tall").toBe(true);
 
-    const harnessRows = page.locator(".agent-defaults-item > .setting-row-link");
-    const codex = harnessRows.filter({ hasText: "Codex App Server" });
-    await codex.focus();
+    const codexEdit = row("Codex App Server").getByRole("button", { name: /^Edit…/ });
+    expect((await codexEdit.boundingBox())?.height).toBeGreaterThanOrEqual(44);
+    await codexEdit.focus();
     await page.keyboard.press("Enter");
-    await expect(codex).toHaveAttribute("aria-expanded", "true");
-    const model = page.getByRole("button", { name: /^Codex App Server Model:/ });
-    await model.focus();
-    await page.keyboard.press("Enter");
-    const modelList = page.getByRole("listbox", { name: "Codex App Server Model" });
-    await expect(modelList).toBeFocused();
-    await page.keyboard.press("End");
-    await page.keyboard.press("Enter");
-    await expect(model).toHaveAccessibleName(/Sol/);
-    await expect(page.getByRole("button", { name: /^Codex App Server Reasoning Effort:/ }))
-      .toHaveAccessibleName(/Choose Effort/);
+    const dialog = page.getByRole("dialog", { name: "Codex App Server Defaults" });
+    await expect(dialog).toBeVisible();
 
-    const claude = harnessRows.filter({ hasText: "Claude Code" });
-    await claude.click();
-    await expect(codex).toHaveAttribute("aria-expanded", "false");
-    await expect(claude).toHaveAttribute("aria-expanded", "true");
+    // A bottom sheet at 390px: full-width fields, stacked, and two equal 44px footer buttons.
+    const sheet = await dialog.boundingBox();
+    expect(sheet?.width).toBeGreaterThanOrEqual(389);
+    expect(Math.round((sheet?.y ?? 0) + (sheet?.height ?? 0))).toBeGreaterThanOrEqual(843);
+    const fields = dialog.locator(".agent-defaults-fields > .field");
+    await expect(fields).toHaveCount(3);
+    const fieldBoxes = await fields.evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().toJSON() as DOMRect));
+    expect(new Set(fieldBoxes.map((box) => Math.round(box.x))).size, "the fields stack").toBe(1);
+    for (const trigger of await dialog.locator(".ui-select-trigger").all()) {
+      expect((await trigger.boundingBox())?.height).toBeGreaterThanOrEqual(44);
+    }
+    const footer = await dialog.locator(".modal-foot > button").evaluateAll((nodes) =>
+      nodes.map((node) => ({ text: node.textContent, ...node.getBoundingClientRect().toJSON() as DOMRect })));
+    expect(footer.map((button) => button.text)).toEqual(["Cancel", "Save Defaults"]);
+    expect(Math.abs(footer[0]!.width - footer[1]!.width)).toBeLessThanOrEqual(1);
+    for (const button of footer) expect(button.height).toBeGreaterThanOrEqual(44);
+    // Use Wollipog Defaults leaves the two-button footer for the body's end on a phone.
+    await expect(dialog.locator(".modal-body .modal-tertiary").getByRole("button", { name: "Use Wollipog Defaults" })).toBeVisible();
 
-    const cancel = page.getByRole("button", { name: "Cancel" });
-    await cancel.focus();
-    await page.keyboard.press("Enter");
-    await expect(claude).toBeFocused();
-    await expect(claude).not.toHaveAttribute("aria-controls", /.+/);
+    // The saved choice is the draft; choosing Sol leaves the effort for the person to pick.
+    const model = dialog.getByRole("button", { name: /^Model:/ });
+    await expect(model).toHaveAccessibleName(/Luna/);
+    await model.click();
+    await page.getByRole("option", { name: "Sol" }).click();
+    await expect(dialog.getByRole("button", { name: /^Reasoning Effort:/ })).toHaveAccessibleName(/Wollipog Default/);
 
-    await codex.click();
-    const save = page.getByRole("button", { name: "Save" });
-    await save.focus();
-    await page.keyboard.press("Enter");
-    await expect(codex).toBeFocused();
-    await expect(codex).not.toHaveAttribute("aria-controls", /.+/);
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(codexEdit).toBeFocused();
 
-    await codex.click();
-    const reset = page.getByRole("button", { name: "Use Wollipog Default" });
-    await reset.focus();
-    await page.keyboard.press("Enter");
-    await expect(codex).toBeFocused();
-    await expect(codex).not.toHaveAttribute("aria-controls", /.+/);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await codexEdit.click();
+    await dialog.getByRole("button", { name: /^Model:/ }).click();
+    await page.getByRole("option", { name: "Sol" }).click();
+    await dialog.getByRole("button", { name: "Save Defaults" }).click();
+    // A model with efforts needs one: the field says so and nothing is saved.
+    await expect(dialog.locator(".field-error")).toHaveText("Choose a reasoning effort for this model.");
+    await dialog.getByRole("button", { name: /^Reasoning Effort:/ }).click();
+    await page.getByRole("option", { name: "Extra High" }).click();
+    await dialog.getByRole("button", { name: "Save Defaults" }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(row("Codex App Server").locator(".setting-row-desc")).toHaveText("Sol, extra high effort, Approve for Me");
+    await expect(codexEdit).toBeFocused();
 
-    await codex.click();
-    await expect(codex).toHaveAttribute("aria-expanded", "true");
-    await page.keyboard.press("Enter");
-    await expect(codex).toBeFocused();
-    await expect(codex).toHaveAttribute("aria-expanded", "false");
-    await expect(codex).not.toHaveAttribute("aria-controls", /.+/);
+    await codexEdit.click();
+    await dialog.getByRole("button", { name: "Use Wollipog Defaults" }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(row("Codex App Server").locator(".setting-row-desc")).toHaveText("Uses Wollipog defaults");
+    await expect(codexEdit).toBeFocused();
   });
 });
 
-test("Agent Harness defaults distinguish version skew and politely explain repaired drafts", async ({ page }) => {
+test("Agent Defaults explain an older server, no agents and a rejected save", async ({ page }) => {
   await useHarness(page, "light", { section: "behavior", defaults: "agent-missing" });
-  await expect(page.getByText("Wollipog Update Required", { exact: true })).toBeVisible();
-  await expect(page.getByText(/This version of Wollipog does not support Agent Harness defaults/)).toBeVisible();
-  await expect(page.getByText(/Update or restart Wollipog so it matches this dashboard/)).toBeVisible();
+  const notice = page.locator(".notice").filter({ hasText: "Update Wollipog to Use Agent Defaults" });
+  await expect(notice).toBeVisible();
+  await expect(notice).toContainText("This version of Wollipog doesn't support agent defaults.");
   // Agent Defaults' own Retry, and no other: the harness answers Evidence's read (#3023).
   await expect(page.getByRole("button", { name: "Retry", exact: true })).toHaveCount(1);
-  await expect(page.locator(".setting-row-static").filter({
-    hasText: "This version of Wollipog does not support Agent Harness defaults",
-  }).getByRole("button", { name: "Retry" })).toBeVisible();
-  await expect(page.getByText("Load Failed", { exact: true })).toHaveCount(0);
+  await expect(notice.getByRole("button", { name: "Retry" })).toBeVisible();
 
-  await useHarness(page, "dark", { section: "behavior", defaults: "agent-repair" });
-  await page.getByRole("button", { name: /Default Models, Efforts, and Permissions/ }).click();
-  const codex = page.locator(".agent-defaults-item > .setting-row-link").filter({ hasText: "Codex App Server" });
-  await codex.click();
-  await page.getByRole("button", { name: /^Codex App Server Model:/ }).click();
-  await page.getByRole("option", { name: "Sol" }).click();
-  await page.getByRole("button", { name: /^Codex App Server Reasoning Effort:/ }).click();
-  await page.getByRole("option", { name: "Extra High" }).click();
-  await page.getByRole("button", { name: /^Codex App Server Permission Mode:/ }).click();
-  await page.getByRole("option", { name: "Full Access" }).click();
+  await useHarness(page, "dark", { section: "behavior", defaults: "agent-empty" });
+  const empty = page.locator(".settings-state-surface > .state");
+  await expect(empty).toContainText("No Agents Connected");
+  await expect(empty.getByRole("button", { name: "Open Connections" })).toBeVisible();
 
-  const refresh = page.getByRole("button", { name: "Refresh" });
-  await page.evaluate(() => history.replaceState(null, "", `${location.pathname}${location.search}#repair`));
-  await refresh.focus();
-  await refresh.click();
-  const notice = page.locator('.agent-defaults-draft-notice[role="status"]');
-  await expect(notice).toContainText("Model and Reasoning Effort");
-  await expect(notice).not.toContainText("Permission Mode");
-  await expect(page.locator('[role="alert"]').filter({ hasText: "Capabilities changed" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: /^Codex App Server Permission Mode:/ }))
-    .toHaveAccessibleName(/Full Access/);
-  await expect(refresh).toBeFocused();
+  await useHarness(page, "dark", { section: "behavior", defaults: "agent-save-fails" });
+  await page.getByRole("button", { name: /^Edit… Claude Code/ }).click();
+  const dialog = page.getByRole("dialog", { name: "Claude Code Defaults" });
+  await dialog.getByRole("button", { name: /^Permission Mode:/ }).click();
+  await page.getByRole("option", { name: "Plan Only (Read-Only)" }).click();
+  await dialog.getByRole("button", { name: "Save Defaults" }).click();
+  const failure = dialog.locator('.notice[role="alert"]');
+  await expect(failure).toContainText("Defaults Not Saved");
+  await expect(failure).not.toContainText("database is locked");
+  await failure.getByRole("button", { name: "Show Details" }).click();
+  await expect(failure).toContainText("database is locked");
+  // Directly above the footer, and the draft is kept.
+  const [failureBox, footBox] = await Promise.all([failure.boundingBox(), dialog.locator(".modal-foot").boundingBox()]);
+  expect((footBox?.y ?? 0) - ((failureBox?.y ?? 0) + (failureBox?.height ?? 0))).toBeLessThanOrEqual(24);
+  await expect(dialog.getByRole("button", { name: /^Permission Mode:/ })).toHaveAccessibleName(/Plan Only/);
 });
 
 /**

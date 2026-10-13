@@ -1833,7 +1833,10 @@ Window" or "This Machine"; at most one head action), an optional one-sentence de
 `--type-small` `--text-dim`, one `.surface` (`.settings-group-surface`) with hairlines between its
 rows, and an optional foot line, or a §5.5 disclosure where the group needs more than one line
 (Behavior's About Artifact Uploads, #3023). The surface is the size container for the 560px rule. A
-failed instant save that is not a switch shows a compact danger `Notice` above the surface with Retry. Rows
+failed instant save that is not a switch shows a compact danger `Notice` above the surface with Retry;
+any other notice about the whole group (`notice`, such as a list that could not be read) takes the same
+place, and a group with no rows to show draws no surface, only its head and that notice (Behavior's
+Agent Defaults, #3024). Rows
 inside a surface never turn into cards: hover is a `--bg-elev-2` fill without a border, only on rows
 that are one link or button, on fine pointers. A switch row with `saved` or `failure` is one framed
 child of the surface (`.setting-row-frame`), its status region inside the frame, and so is any other
@@ -1925,8 +1928,8 @@ to these form choice groups.
 | Model | Where | Pattern |
 | --- | --- | --- |
 | Instant | Toggles, selects in settings rows. | Applies on change; a quiet "Saved" check appears for 2s at the row's right edge (`SwitchRow`'s `saved`, announced by a polite region beside the row). |
-| Dialog | Creation and focused edits. | Footer Cancel + primary. |
-| Editor | Multi-field editors in a page (Agent Defaults, Orchestrator, Automation editor). | A sticky save bar at the bottom of the page region, visible only when dirty: "Unsaved changes" + Discard (ghost) + Save (primary). A new record shows its bar from the start, with Cancel and its create label. |
+| Dialog | Creation and focused edits, including one item of a settings list (Agent Defaults' Edit…, #3024). | Footer Cancel + primary. |
+| Editor | Multi-field editors in a page (Orchestrator, Automation editor). | A sticky save bar at the bottom of the page region, visible only when dirty: "Unsaved changes" + Discard (ghost) + Save (primary). A new record shows its bar from the start, with Cancel and its create label. |
 
 The editor save bar is `.save-bar` (`SaveBar`): sticky at the bottom of its region, `--bg-elev`,
 1px `--border-strong`, `--radius-md`, `--elev-2`, padding 12px 16px, gap 8px, and rendered only
