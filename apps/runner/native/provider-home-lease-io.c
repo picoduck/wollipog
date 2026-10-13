@@ -162,12 +162,15 @@ static Entry read_entry(unsigned dir, const char *name) {
   int named_status = fstatat(directory(dir), name, &named, AT_SYMLINK_NOFOLLOW);
   if (named_status != 0 && temporary && errno == ENOENT) { close(fd); return (Entry){0}; }
   require(named_status == 0 && same_identity(&before, &named), "lease record identity changed");
+  struct stat guard;
+  int immutable = !temporary || (guard_fd >= 0 && fstat(guard_fd, &guard) == 0 && same_identity(&before, &guard));
   // Staging is mutable and removed by the writer after publication. It carries no ownership
   // authority: validate its metadata and charge its maximum size, without reading its bytes.
-  uint32_t size = temporary ? 4096 : (uint32_t)before.st_size;
+  // A staging alias of the permanent format guard is an immutable witness, retaining exact bytes.
+  uint32_t size = immutable ? (uint32_t)before.st_size : 4096;
   require(++work_reads <= allowed_reads && (work_bytes += size) <= allowed_bytes, "lease verification work limit exceeded");
   unsigned char *raw = calloc((size_t)size + 1, 1); require(raw != NULL, "lease read allocation failed");
-  if (!temporary) {
+  if (immutable) {
     uint32_t offset = 0; while (offset < size) { ssize_t n = read(fd, raw + offset, size - offset); require(n > 0, "lease record changed during read"); offset += (uint32_t)n; }
     unsigned char extra; require(read(fd, &extra, 1) == 0 && fstat(fd, &after) == 0 && same_stamp(&before, &after), "lease record changed during read");
     require(fstatat(directory(dir), name, &named, AT_SYMLINK_NOFOLLOW) == 0 && same_stamp(&before, &named), "lease record pathname changed");
