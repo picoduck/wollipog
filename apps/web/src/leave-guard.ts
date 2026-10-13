@@ -4,10 +4,14 @@ import { useEffect, useRef } from "react";
  * Leaving an editor with unsaved changes (docs/design-system.md §8.6, #3026).
  *
  * An editor whose draft is dirty registers a guard. Every in-app navigation (the store's `navigate`,
- * so a Settings section link, the rail, the palette, a phone's Back to Settings, and browser Back)
- * asks it first: the guard takes over and later calls `leave` to go ahead, or never calls it to
- * stay. Closing or reloading the window gets the browser's own leave prompt instead, because a page
- * cannot show its own dialog there.
+ * so a Settings section link, the rail, the palette and a phone's Back to Settings) asks it first:
+ * the guard takes over and later calls `leave` to go ahead, or never calls it to stay. Closing or
+ * reloading the window gets the browser's own leave prompt instead, because a page cannot show its
+ * own dialog there.
+ *
+ * Browser Back and Forward are not asked: by the time a page hears of them the history position has
+ * moved, and pushing the editor's address back would drop every forward entry. Holding them needs
+ * the history index of each entry, which the router does not record yet.
  *
  * One guard at a time: there is one editor on screen. A second registration replaces the first.
  */

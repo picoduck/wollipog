@@ -17473,11 +17473,13 @@ button.setting-row { cursor: pointer; }
 }
 .orchestrator-human-only {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: var(--space-1);
   margin: var(--space-1) 0 0;
 }
-.orchestrator-human-only > svg { flex: none; }
+/* On the first line's centre when the sentence wraps on a phone. */
+.orchestrator-human-only > svg { flex: none; margin-top: 2px; }
+.orchestrator-about[open] + .orchestrator-human-only { margin-top: var(--space-3); }
 .orchestrator-policy-control input {
   width: 100%;
   color: var(--text);

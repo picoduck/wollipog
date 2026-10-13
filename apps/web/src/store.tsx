@@ -2267,13 +2267,9 @@ export class Store {
   };
   navigateFromHistory = (view: View): void => {
     const { view: activated, activation } = this.activate(view);
+    // Not asked of a leave guard: Back and Forward have already moved the history position, and
+    // putting the editor's address back would truncate the forward entries (#3026's review).
     if (!sameView(this.state.view, activated) || activation) {
-      // Back and Forward have already moved the address bar, so while an editor asks, the address
-      // goes back to the view still on screen; leaving then navigates as a link would.
-      if (!sameView(this.state.view, activated) && interceptLeave(() => this.navigate(view))) {
-        this.onNavigate?.(this.state.view);
-        return;
-      }
       this.dispatch({ type: "navigate", view: activated });
     }
   };

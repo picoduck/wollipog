@@ -333,7 +333,7 @@ test("with no installation, a warning notice leads Children and the model and ef
       const trigger = container.querySelector(`[aria-label^="${select}:"]`)!;
       assert.equal(trigger.getAttribute("aria-disabled"), "true", `${select} is disabled`);
       const described = (trigger.getAttribute("aria-describedby") ?? "").split(" ").map((id) => document.getElementById(id)?.textContent);
-      assert.ok(described.includes(reason), `${select} is described by the reason`);
+      assert.ok(described.includes("Unavailable until a machine advertises models and efforts."), `${select} says why it is disabled`);
     }
     assertNoDomNode(container.querySelector(".form-error"), "no red paragraph after the groups");
     assertNoDomNode(container.querySelector('[role="alert"]'));
@@ -638,6 +638,55 @@ test("leaving with a dirty draft asks Keep Editing or Discard Changes, and Keep 
     assert.equal(container.querySelector(".settings-panel-scope")?.textContent, "This Device", "the head goes back to the section's own");
   } finally {
     await view.cleanup();
+  }
+});
+
+test("leaving while a save is in flight waits for it, and asks only if the save is refused", async () => {
+  for (const outcome of ["saved", "refused"] as const) {
+    let setView: (view: View) => void = () => undefined;
+    const store = new Store({ name: "settings", section: "orchestrator" }, (view) => setView(view));
+    const { transport, writes, state } = server(settings());
+    let release: () => void = () => undefined;
+    const held: ApiTransport = {
+      ...transport,
+      async request(path, init) {
+        if (init?.method === "PUT") await new Promise<void>((resolve) => { release = resolve; });
+        if (init?.method === "PUT" && outcome === "refused") state.reject = "Wollipog couldn't store your defaults.";
+        return transport.request(path, init);
+      },
+    };
+    const view = await mount(<SettingsShell store={store} transport={held} onView={(set) => { setView = set; }} />);
+    try {
+      const { container } = view;
+      const limit = container.querySelector<HTMLInputElement>("#orchestrator-max-children")!;
+      await act(async () => { fireDomEvent.change(limit, { target: { value: "7" } }); });
+      await act(async () => button(container.querySelector(".save-bar")!, "Save Defaults")!.click());
+      await act(async () => {
+        container.querySelector('nav.settings-nav a[href="/settings/appearance"]')!
+          .dispatchEvent(new domWindow.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }) as never);
+      });
+      await settle();
+      assertNoDomNode(document.querySelector('[role="dialog"]'), `${outcome}: no Discard is offered for a save in flight`);
+      assert.deepEqual(store.getState().view, { name: "settings", section: "orchestrator" }, `${outcome}: held while saving`);
+
+      await act(async () => release());
+      await settle();
+      if (outcome === "saved") {
+        assert.equal(writes[0]?.defaults.behavior.maximumConcurrentChildren, 7);
+        assertNoDomNode(document.querySelector('[role="dialog"]'));
+        assert.deepEqual(store.getState().view, { name: "settings", section: "appearance" }, "a saved draft leaves without asking");
+      } else {
+        assert.equal(writes.length, 0);
+        const dialog = document.querySelector('[role="dialog"]');
+        assert.ok(dialog, "a refused save leaves a dirty draft, which asks");
+        await act(async () => button(dialog, "Keep Editing")!.click());
+        await settle();
+        assert.deepEqual(store.getState().view, { name: "settings", section: "orchestrator" });
+        assert.ok(container.querySelector(".save-bar.is-error"), "with the failure still on the bar");
+      }
+    } finally {
+      await view.cleanup();
+    }
   }
 });
 

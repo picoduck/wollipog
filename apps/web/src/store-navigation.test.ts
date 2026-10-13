@@ -118,7 +118,7 @@ test("direct Settings entry has an Inbox fallback and browser traversal shares r
   assert.equal(store.getState().settingsReturnView, null);
 });
 
-test("an editor's leave guard holds in-app and history navigation until it lets the person leave (#3026)", () => {
+test("an editor's leave guard holds in-app navigation until it lets the person leave (#3026)", () => {
   const pushed: View[] = [];
   const store = new Store({ name: "settings", section: "orchestrator" }, (view) => pushed.push(view));
   const asked: Array<() => void> = [];
@@ -132,19 +132,28 @@ test("an editor's leave guard holds in-app and history navigation until it lets 
     assert.deepEqual(store.getState().view, { name: "settings", section: "orchestrator" }, "held while it asks");
     assert.deepEqual(pushed, []);
 
-    // Back has already moved the address bar, so it is put back to the view still on screen.
-    store.navigateFromHistory({ name: "usage" });
-    assert.equal(asked.length, 2);
-    assert.deepEqual(store.getState().view, { name: "settings", section: "orchestrator" });
-    assert.deepEqual(pushed, [{ name: "settings", section: "orchestrator" }]);
-
-    // Choosing to leave goes where Back was going, and the guard does not ask again.
-    asked[1]!();
-    assert.deepEqual(store.getState().view, { name: "usage" });
-    assert.deepEqual(pushed.at(-1), { name: "usage" });
+    // Choosing to leave goes where the link was going, and the guard does not ask again.
+    asked[0]!();
+    assert.deepEqual(store.getState().view, { name: "settings", section: "appearance" });
+    assert.deepEqual(pushed, [{ name: "settings", section: "appearance" }]);
     store.navigate({ name: "inbox" });
-    assert.equal(asked.length, 2, "the guard released itself before leaving");
+    assert.equal(asked.length, 1, "the guard released itself before leaving");
     assert.deepEqual(store.getState().view, { name: "inbox" });
+  } finally {
+    release();
+  }
+});
+
+test("browser Back and Forward are never held, so no history entry is rewritten (#3026)", () => {
+  const pushed: View[] = [];
+  const store = new Store({ name: "settings", section: "orchestrator" }, (view) => pushed.push(view));
+  const asked: Array<() => void> = [];
+  const release = registerLeaveGuard((leave) => asked.push(leave));
+  try {
+    store.navigateFromHistory({ name: "usage" });
+    assert.equal(asked.length, 0);
+    assert.deepEqual(store.getState().view, { name: "usage" });
+    assert.deepEqual(pushed, [], "pushing the editor's address back would drop the forward entries");
   } finally {
     release();
   }

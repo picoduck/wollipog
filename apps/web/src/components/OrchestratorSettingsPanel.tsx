@@ -167,7 +167,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
     meta: view ? (view.source === "user_default" ? "Your Defaults" : "Wollipog Defaults") : null,
   });
 
-  useLeaveGuard(dirty, (leave) => {
+  const askToLeave = (leave: () => void) => {
     void confirm({
       title: "Discard Changes",
       message: "Your Orchestrator defaults have changes that aren't saved. Discarding them keeps the saved defaults.",
@@ -176,6 +176,15 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
       // Danger opens with focus on Keep Editing, the choice that loses nothing (§7.4).
       tone: "danger",
     }).then((discard) => { if (discard) leave(); });
+  };
+  // A save in flight cannot be discarded (Discard is disabled while busy, §8.6), so leaving waits
+  // for it: a saved draft then leaves without asking, and a refused one asks as any dirty draft does.
+  const busyRef = useRef(false);
+  busyRef.current = busy;
+  const leaveAfterSave = useRef<(() => void) | null>(null);
+  useLeaveGuard(dirty, (leave) => {
+    if (busyRef.current) leaveAfterSave.current = leave;
+    else askToLeave(leave);
   });
 
   const updateBehavior = <K extends keyof OrchestratorDefaults["behavior"]>(
@@ -363,21 +372,33 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
       ? capabilities.reason ?? "No machine advertises child models and efforts yet."
       : !harnessPolicySupported ? HARNESS_UNSUPPORTED : null;
   const noInstallations = capabilities?.status === "unavailable" && capabilities.installations === 0;
+  // Under each disabled select, pointing at the notice rather than repeating its sentences.
+  const noInstallationsReason = noInstallations ? "Unavailable until a machine advertises models and efforts." : undefined;
 
   const save = async () => {
     if (!draft || busy || invalidCount > 0) return;
     generation.current += 1;
+    busyRef.current = true;
     setBusy(true);
     setSaveError(null);
+    let saved = false;
     try {
       const next = await api.updateOrchestratorSettings({ defaults: draft });
       setView(next);
       setDraft(cloneDefaults(next.defaults));
+      saved = true;
     } catch (caught) {
       // The draft stays as typed, and the bar offers Try Again (§8.6).
       setSaveError(saveFailure(caught));
     } finally {
+      busyRef.current = false;
       setBusy(false);
+    }
+    const leave = leaveAfterSave.current;
+    leaveAfterSave.current = null;
+    if (leave) {
+      if (saved) leave();
+      else askToLeave(leave);
     }
   };
   const discard = () => {
@@ -462,7 +483,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
         value={draft.behavior.childModel ?? AUTO}
         // A saved model stays changeable, so it can be put back to Automatic.
         disabled={noInstallations && !selectedModel}
-        disabledReason={capabilityNotice ?? undefined}
+        disabledReason={noInstallationsReason}
         error={modelError}
         onChange={(value) => {
           const childModel = value === AUTO ? null : value;
@@ -483,7 +504,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
         options={effortOptions}
         value={draft.behavior.childEffort ?? AUTO}
         disabled={noInstallations && !selectedEffort}
-        disabledReason={capabilityNotice ?? undefined}
+        disabledReason={noInstallationsReason}
         error={effortError}
         onChange={(value) => updateBehavior("childEffort", value === AUTO ? null : value)}
       />
