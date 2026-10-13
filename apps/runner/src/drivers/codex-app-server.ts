@@ -943,10 +943,15 @@ export class CodexAppServerDriver implements Driver {
         capabilities: { experimentalApi: true },
       });
     } catch (error) {
+      const failure = this.initializationFailure(error);
       if (this.opts.isolation?.backend === "wsl-bwrap") {
         await waitForWslProviderAttemptTeardown(child, this.kill);
+        // That teardown killed a provider whose handshake stalled. Its exit is ours, not a crash:
+        // reporting it through onExit would hand held prompts to crash recovery, which relaunches
+        // into the same stall instead of settling them as never sent (#3099).
+        if (failure instanceof CodexAppServerInitializationStalledError) this.initializationExit = null;
       }
-      throw this.initializationFailure(error);
+      throw failure;
     }
     this.serverIdentity = diagnosticValue(initialized?.userAgent);
     peer.notify("initialized", {});

@@ -4808,6 +4808,34 @@ test("an initialize request that is never answered fails initialization within t
   assert.deepEqual(stderr, []);
 });
 
+test("tearing down a stalled Direct WSL initialize is not reported as a provider exit (#3099)", async () => {
+  const child = fakeAgentProcess();
+  child.wslReapCompletion = Promise.resolve(true);
+  const exits: Array<number | null> = [];
+  const driver = new CodexAppServerDriver({
+    command: "codex", args: [], cwd: "/tmp/work", env: {}, config: {}, context: { kind: "native" },
+    isolation: { backend: "wsl-bwrap" } as DriverOptions["isolation"],
+  }, { onEvent: () => {}, onStderr: () => {}, onExit: (code) => exits.push(code) }, undefined, {
+    spawn: () => child,
+    // The intentional teardown kill closes the provider, exactly as a real process exit would.
+    kill: (target) => { setImmediate(() => target.emit("close", null)); },
+    initializationRequestTimeoutMs: 30,
+  });
+  try {
+    await assert.rejects(driver.initialize(), (error: unknown) => {
+      assert.ok(error instanceof CodexAppServerInitializationStalledError);
+      assert.equal(error.method, "initialize");
+      return true;
+    });
+    await nextTask();
+    // An onExit here would send the session's held prompts to crash recovery, which relaunches into
+    // the same stall instead of settling them as never sent.
+    assert.deepEqual(exits, []);
+  } finally {
+    driver.dispose();
+  }
+});
+
 test("the initialization bound defaults to two minutes per request (#3099)", () => {
   assert.equal(CODEX_INITIALIZATION_REQUEST_TIMEOUT_MS, 120_000);
   assert.equal(new CodexAppServerInitializationStalledError("thread/resume", "timeout", CODEX_INITIALIZATION_REQUEST_TIMEOUT_MS).message,
