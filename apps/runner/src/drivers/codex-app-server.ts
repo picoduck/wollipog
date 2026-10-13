@@ -2911,6 +2911,9 @@ const MAX_QUESTION_OPTIONS = 20;
 const MAX_QUESTION_ID = 256;
 const MAX_QUESTION_HEADER = 80;
 const MAX_QUESTION_TEXT = 2000;
+// Async titles carry the complete decision brief, including review details and evidence links.
+// Preserve that context verbatim while bounding provider-controlled input separately from labels.
+const MAX_ASYNC_QUESTION_TEXT = 64 * 1024;
 /** Provider free-text bound. The shared protocol default keeps the driver, the dashboard's submit
  * gate, and the control plane's authoritative validation on one number. */
 const MAX_FREE_TEXT = DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH;
@@ -2960,7 +2963,7 @@ export function normalizeCodexAsyncQuestions(raw: unknown): AgentQuestion[] | nu
   const questions: AgentQuestion[] = [];
   for (let index = 0; index < raw.length; index++) {
     const entry = raw[index];
-    const title = boundedString(entry?.title, MAX_QUESTION_TEXT);
+    const title = boundedString(entry?.title, MAX_ASYNC_QUESTION_TEXT);
     if (!title || (entry.options != null && !Array.isArray(entry.options))) return null;
     const options = entry.options == null ? [] : entry.options.map((value: unknown) => boundedString(value, MAX_QUESTION_ID));
     if (options.length > MAX_QUESTION_OPTIONS || options.some((value: string | null) => !value) ||

@@ -2323,6 +2323,32 @@ test("completed async agentMessage retains its text and exposes structured quest
   });
 });
 
+for (const length of [2001, 2264, 4750, 5348, 64 * 1024]) {
+  test(`an async question with ${length} characters retains its full approval context and choices`, () => {
+    const h = makeHarness();
+    const prefix = "Approve the reviewed change?\n\nCommit: `" + "a".repeat(40) + "`\n\n";
+    const title = prefix + "Context\n".repeat(Math.ceil(length / 8)).slice(0, length - prefix.length);
+    const options = ["Approve After CI Passes", "Wait"];
+    h.onItem({ type: "agentMessage", id: `long-${length}`, text: title, delivery: "async",
+      questions: [{ title, options }] }, true);
+    assert.deepEqual(h.events.map(event => event.kind), ["agent_message", "question_request"]);
+    const question = h.events.find(event => event.kind === "question_request");
+    assert.equal(question?.kind, "question_request");
+    if (question?.kind !== "question_request") assert.fail("expected the long question to remain answerable");
+    assert.equal(question.questions[0]!.question, title, "approval context must never be truncated");
+    assert.deepEqual(question.questions[0]!.options, options.map(label => ({ label })));
+    assert.equal(question.questions[0]!.allowOther, true);
+    assert.equal(question.requestId, `codex-async:long-${length}`);
+  });
+}
+
+test("an async question exceeding the supported context bound remains a compatibility failure", () => {
+  const h = makeHarness();
+  h.onItem({ type: "agentMessage", id: "oversized-question", text: "Context is too large.", delivery: "async",
+    questions: [{ title: "a".repeat(64 * 1024 + 1), options: ["Approve", "Wait"] }] }, true);
+  assert.deepEqual(h.events.map(event => event.kind), ["agent_message", "error"]);
+});
+
 test("a later Codex turn may reuse an async message item id", async () => {
   const h = makeHarness();
   const message = { type: "agentMessage", id: "ask", text: "First turn", delivery: "async",
