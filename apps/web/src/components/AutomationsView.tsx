@@ -182,17 +182,29 @@ export function AutomationsView() {
   useEffect(() => { setAlternateWorkflowBindingEdits({}); }, [editingId]);
   const [showForm, setShowForm] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ source: "poll" | "mutation"; message: string } | null>(null);
+  // A user action owns its error even if an earlier poll settles later. Effect cleanup also
+  // revokes that ownership so an obsolete API client cannot publish or clear a newer error.
+  const errorRevision = useRef(0);
+  const beginMutation = () => {
+    const revision = ++errorRevision.current;
+    setError(null);
+    return revision;
+  };
+  const mutationFailed = (revision: number, cause: unknown) => {
+    setError((previous) => revision === errorRevision.current
+      ? { source: "mutation", message: (cause as Error).message } : previous);
+  };
 
   // Polls skip a busy refresh. A mutation waits for it and then reads its own authoritative result.
-  const refreshInFlight = useRef<Promise<void> | null>(null);
+  const refreshInFlight = useRef<Promise<boolean> | null>(null);
   const refreshGeneration = useRef(0);
 
-  const refresh = useCallback(async (onlyWhileVisible = false) => {
+  const refresh = useCallback(async (onlyWhileVisible = false, active?: () => boolean) => {
     while (refreshInFlight.current) {
       await refreshInFlight.current.catch(() => {});
     }
-    if (onlyWhileVisible && document.visibilityState === "hidden") return;
+    if (active?.() === false || (onlyWhileVisible && document.visibilityState === "hidden")) return false;
     const work = (async () => {
       const generation = (refreshGeneration.current += 1);
       const current = () => generation === refreshGeneration.current;
@@ -200,7 +212,7 @@ export function AutomationsView() {
       // Commit the authoritative list independently, so a workflow failure cannot leave a deleted
       // automation's editor open and allow Save to send an ID the control plane no longer has.
       const automationResult = await api.automations();
-      if (!current()) return;
+      if (!current()) return false;
       setItems(automationResult.automations);
       setListLoaded(true);
 
@@ -227,10 +239,11 @@ export function AutomationsView() {
       // Keep the refresh busy until every fan-out request settles, even when one endpoint fails.
       const results = await Promise.allSettled([workflowsLoaded, detailsLoaded]);
       for (const result of results) if (result.status === "rejected") throw result.reason;
+      return current();
     })();
     refreshInFlight.current = work;
     try {
-      await work;
+      return await work;
     } finally {
       refreshInFlight.current = null;
     }
@@ -244,12 +257,22 @@ export function AutomationsView() {
       // change. The new effect must refresh after it, rather than wait for the first interval.
       if (refreshInFlight.current && !initialRefresh) return;
       initialRefresh = false;
-      void refresh(true).catch((cause) => active && setError((cause as Error).message));
+      const revision = errorRevision.current;
+      void refresh(true, () => active).then((recovered) => {
+        if (!active || !recovered) return;
+        setError((previous) => revision === errorRevision.current && previous?.source === "poll"
+          ? null : previous);
+      }).catch((cause) => {
+        if (!active) return;
+        setError((previous) => revision === errorRevision.current && previous?.source !== "mutation"
+          ? { source: "poll", message: (cause as Error).message } : previous);
+      });
     };
     const stopPolling = startVisiblePolling(load, 5_000);
     return () => {
       active = false;
       refreshGeneration.current += 1;
+      errorRevision.current += 1;
       stopPolling();
     };
   }, [refresh]);
@@ -442,7 +465,7 @@ export function AutomationsView() {
 
   const save = async () => {
     setBusy(true);
-    setError(null);
+    const revision = beginMutation();
     try {
       const spec = currentSpec();
       if (editingId) await api.updateAutomation(editingId, spec);
@@ -457,9 +480,9 @@ export function AutomationsView() {
       setAlternateWorkflowBindingEdits({});
       setForm(defaults());
       setShowForm(false);
-      await refresh();
+      if (revision === errorRevision.current) await refresh(false, () => revision === errorRevision.current);
     } catch (cause) {
-      setError((cause as Error).message);
+      mutationFailed(revision, cause);
     } finally {
       setBusy(false);
     }
@@ -509,12 +532,12 @@ export function AutomationsView() {
 
   const mutate = async (work: () => Promise<unknown>) => {
     setBusy(true);
-    setError(null);
+    const revision = beginMutation();
     try {
       await work();
-      await refresh();
+      if (revision === errorRevision.current) await refresh(false, () => revision === errorRevision.current);
     } catch (cause) {
-      setError((cause as Error).message);
+      mutationFailed(revision, cause);
     } finally {
       setBusy(false);
     }
@@ -536,7 +559,7 @@ export function AutomationsView() {
   const createTrigger = async () => {
     if (!triggerDraft) return;
     setBusy(true);
-    setError(null);
+    const revision = beginMutation();
     try {
       const parameterNames = [...new Set(triggerDraft.parameterNames.split(",")
         .map((name) => name.trim()).filter(Boolean))];
@@ -552,9 +575,9 @@ export function AutomationsView() {
       });
       setCredential(created);
       setTriggerDraft(null);
-      await refresh();
+      if (revision === errorRevision.current) await refresh(false, () => revision === errorRevision.current);
     } catch (cause) {
-      setError((cause as Error).message);
+      mutationFailed(revision, cause);
     } finally {
       setBusy(false);
     }
@@ -562,13 +585,13 @@ export function AutomationsView() {
 
   const rotateTrigger = async (automationId: string, triggerId: string) => {
     setBusy(true);
-    setError(null);
+    const revision = beginMutation();
     try {
       const rotated = await api.rotateAutomationTrigger(automationId, triggerId);
       setCredential(rotated);
-      await refresh();
+      if (revision === errorRevision.current) await refresh(false, () => revision === errorRevision.current);
     } catch (cause) {
-      setError((cause as Error).message);
+      mutationFailed(revision, cause);
     } finally {
       setBusy(false);
     }
@@ -576,13 +599,13 @@ export function AutomationsView() {
 
   const revokeTrigger = async (automationId: string, triggerId: string) => {
     setBusy(true);
-    setError(null);
+    const revision = beginMutation();
     try {
       await api.deleteAutomationTrigger(automationId, triggerId);
       if (credential?.trigger.triggerId === triggerId) setCredential(null);
-      await refresh();
+      if (revision === errorRevision.current) await refresh(false, () => revision === errorRevision.current);
     } catch (cause) {
-      setError((cause as Error).message);
+      mutationFailed(revision, cause);
     } finally {
       setBusy(false);
     }
@@ -595,7 +618,7 @@ export function AutomationsView() {
         description={destination("automations").description}
         primary={{ label: "New Automation", onClick: openNewAutomation }}
       />
-      {error && <div className="automation-error" role="alert">{error}</div>}
+      {error && <div className="automation-error" role="alert">{error.message}</div>}
 
       <OutboundEventSubscriptions projects={[...projects.values()]} automations={items} />
 

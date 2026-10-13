@@ -162,6 +162,7 @@ interface Fixture {
   updates: Array<{ id: string; spec: AutomationSpec }>;
   triggerCreates: Array<{ id: string; request: CreateAutomationTriggerRequest }>;
   outboundCreates: CreateOutboundEventSubscriptionRequest[];
+  replaceClient: (overrides: Partial<ApiClient>) => Promise<void>;
 }
 
 let fixtureSequence = 0;
@@ -195,7 +196,7 @@ async function mountFixture(
     createSocket: () => socket,
     close() {},
   };
-  const client = {
+  let client = {
     ...api,
     // A NEW array on every poll, exactly like the control plane's response. Returning the same
     // reference would let expansion state survive for the wrong reason and pass a test the real
@@ -245,18 +246,24 @@ async function mountFixture(
     ...clientOverrides,
   } as unknown as ApiClient;
 
-  await act(async () => {
-    root.render(
-      <ApiProvider client={client}>
-        <StoreProvider connection={connection} navigation={navigation}>
-          <AutomationsWhenReady />
-        </StoreProvider>
-      </ApiProvider>,
-    );
-  });
+  const render = () => root.render(
+    <ApiProvider client={client}>
+      <StoreProvider connection={connection} navigation={navigation}>
+        <AutomationsWhenReady />
+      </StoreProvider>
+    </ApiProvider>,
+  );
+  await act(async () => { render(); });
   await act(async () => { socket.push(snapshot(runnerViews)); });
   await act(settle);
-  return { container, root, updates, triggerCreates, outboundCreates };
+  return {
+    container, root, updates, triggerCreates, outboundCreates,
+    replaceClient: async (overrides) => {
+      client = { ...client, ...overrides };
+      await act(async () => { render(); });
+      await act(settle);
+    },
+  };
 }
 
 async function unmountFixture(fixture: Fixture): Promise<void> {
@@ -1321,3 +1328,261 @@ test("execution history shows content-free signed delivery provenance", async ()
     await unmountFixture(fixture);
   }
 });
+
+function pageError(fixture: Fixture): string | null {
+  return fixture.container.querySelector('.automation-error[role="alert"]')?.textContent ?? null;
+}
+
+async function invokePolls(intervals: Set<() => void>): Promise<void> {
+  await act(async () => { for (const poll of intervals) poll(); });
+  await act(settle);
+}
+
+for (const failedEndpoint of ["list", "workflow", "detail", "trigger"] as const) {
+  test(`polling recovery clears a ${failedEndpoint} error only after the complete refresh`, async () => {
+    const items = [schedule("automation-a", "Alpha")];
+    const intervals = new Set<() => void>();
+    let fail = false;
+    let holdRecovery = false;
+    let release: (() => void) | undefined;
+    let listCalls = 0;
+    await withScopedClockOverrides(domWindow, {
+      setInterval: (poll: () => void) => { intervals.add(poll); return 1; },
+      clearInterval: () => {},
+    }, async () => {
+      const reject = (endpoint: typeof failedEndpoint) => {
+        if (fail && endpoint === failedEndpoint) throw new Error("Polling unavailable");
+      };
+      const fixture = await mountFixture(items, {}, {}, [], {}, runners, [], {
+        automations: async () => {
+          listCalls++;
+          reject("list");
+          return { automations: structuredClone(items) };
+        },
+        workflowDefinitions: async () => { reject("workflow"); return []; },
+        automation: async (id) => {
+          reject("detail");
+          return { automation: items.find((item) => item.automationId === id)!, executions: [], events: [] };
+        },
+        automationTriggers: async () => {
+          reject("trigger");
+          if (holdRecovery) await new Promise<void>((resolve) => { release = resolve; });
+          return { triggers: [] };
+        },
+      });
+      const visibility = Object.getOwnPropertyDescriptor(domWindow.document, "visibilityState");
+      try {
+        fail = true;
+        await invokePolls(intervals);
+        assert.equal(pageError(fixture), "Polling unavailable");
+        Object.defineProperty(domWindow.document, "visibilityState", { configurable: true, value: "hidden" });
+        fail = false;
+        await invokePolls(intervals);
+        assert.equal(listCalls, 2, "a hidden skip cannot read or report recovery");
+        assert.equal(pageError(fixture), "Polling unavailable");
+        Object.defineProperty(domWindow.document, "visibilityState", { configurable: true, value: "visible" });
+        holdRecovery = true;
+        items[0] = { ...items[0]!, name: "Recovered" };
+        await invokePolls(intervals);
+        assert.ok(maybeCardToggle(fixture.container, "Recovered"));
+        assert.equal(pageError(fixture), "Polling unavailable", "list success alone is not recovery");
+        await invokePolls(intervals);
+        assert.equal(listCalls, 3, "a pending fan-out read retains serialization");
+        holdRecovery = false;
+        await act(async () => { release?.(); });
+        await act(settle);
+        assert.equal(pageError(fixture), null);
+        await invokePolls(intervals);
+        assert.equal(pageError(fixture), null);
+      } finally {
+        release?.();
+        if (visibility) Object.defineProperty(domWindow.document, "visibilityState", visibility);
+        else Reflect.deleteProperty(domWindow.document, "visibilityState");
+        await unmountFixture(fixture);
+      }
+    });
+  });
+}
+
+test("partial polling recovery retains the remaining failure and a later complete poll clears it", async () => {
+  const intervals = new Set<() => void>();
+  let failure: "list" | "workflow" | null = null;
+  await withScopedClockOverrides(domWindow, {
+    setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => {},
+  }, async () => {
+    const fixture = await mountFixture([], {}, {}, [], {}, runners, [], {
+      automations: async () => {
+        if (failure === "list") throw new Error("List unavailable");
+        return { automations: [] };
+      },
+      workflowDefinitions: async () => {
+        if (failure === "workflow") throw new Error("Workflow unavailable");
+        return [];
+      },
+    });
+    try {
+      failure = "list";
+      await invokePolls(intervals);
+      assert.equal(pageError(fixture), "List unavailable");
+      failure = "workflow";
+      await invokePolls(intervals);
+      assert.equal(pageError(fixture), "Workflow unavailable");
+      failure = null;
+      await invokePolls(intervals);
+      assert.equal(pageError(fixture), null);
+    } finally { await unmountFixture(fixture); }
+  });
+});
+
+for (const pollFails of [false, true]) {
+  test(`a ${pollFails ? "failed" : "successful"} earlier poll cannot replace a newer failed action`, async () => {
+    const item = schedule("automation-a", "Alpha");
+    const intervals = new Set<() => void>();
+    let holdPoll = false;
+    let release: (() => void) | undefined;
+    await withScopedClockOverrides(domWindow, {
+      setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => {},
+    }, async () => {
+      const fixture = await mountFixture([item], {}, {}, [], {}, runners, [], {
+        automationTriggers: async () => {
+          if (holdPoll) {
+            await new Promise<void>((resolve) => { release = resolve; });
+            if (pollFails) throw new Error("Old polling failure");
+          }
+          return { triggers: [] };
+        },
+        updateAutomation: async () => { throw new Error("Pause failed"); },
+      });
+      try {
+        await expandCard(fixture, "Alpha");
+        holdPoll = true;
+        await invokePolls(intervals);
+        await act(async () => { button(fixture.container, "Pause").click(); });
+        await act(settle);
+        assert.equal(pageError(fixture), "Pause failed");
+        await act(async () => { release?.(); });
+        await act(settle);
+        assert.equal(pageError(fixture), "Pause failed");
+        holdPoll = false;
+        await invokePolls(intervals);
+        assert.equal(pageError(fixture), "Pause failed", "later successful polling preserves action provenance");
+        holdPoll = true;
+        await invokePolls(intervals);
+        await act(async () => { release?.(); });
+        await act(settle);
+        assert.equal(pageError(fixture), "Pause failed", "later failures also preserve the failed action");
+      } finally { release?.(); await unmountFixture(fixture); }
+    });
+  });
+}
+
+for (const oldPollFails of [false, true]) {
+  test(`API replacement ignores an obsolete ${oldPollFails ? "failure" : "success"} and skips revoked queued refreshes`, async () => {
+    const item = schedule("automation-a", "Alpha");
+    const intervals = new Set<() => void>();
+    let holdOld = false;
+    let release: (() => void) | undefined;
+    let obsoleteQueuedReads = 0;
+    let newReads = 0;
+    await withScopedClockOverrides(domWindow, {
+      setInterval: (poll: () => void) => { intervals.add(poll); return 1; },
+      clearInterval: () => { intervals.clear(); },
+    }, async () => {
+      const fixture = await mountFixture([item], {}, {}, [], {}, runners, [], {
+        automationTriggers: async () => {
+          if (holdOld) {
+            await new Promise<void>((resolve) => { release = resolve; });
+            if (oldPollFails) throw new Error("Obsolete poll failed");
+          }
+          return { triggers: [] };
+        },
+      });
+      try {
+        await expandCard(fixture, "Alpha");
+        holdOld = true;
+        await invokePolls(intervals);
+        await fixture.replaceClient({
+          automations: async () => { obsoleteQueuedReads++; return { automations: [item] }; },
+        });
+        await fixture.replaceClient({
+          automations: async () => { newReads++; return { automations: [item] }; },
+          automationTriggers: async () => ({ triggers: [] }),
+          updateAutomation: async () => { throw new Error("New client Pause failed"); },
+        });
+        await act(async () => { button(fixture.container, "Pause").click(); });
+        await act(settle);
+        assert.equal(pageError(fixture), "New client Pause failed");
+        assert.equal(newReads, 0, "replacement refresh waits for every old request");
+        await act(async () => { release?.(); });
+        await act(settle);
+        assert.equal(obsoleteQueuedReads, 0, "a cleaned-up effect must not start its queued read");
+        assert.equal(newReads, 1);
+        assert.equal(pageError(fixture), "New client Pause failed");
+        await invokePolls(intervals);
+        assert.equal(pageError(fixture), "New client Pause failed");
+      } finally { release?.(); await unmountFixture(fixture); }
+    });
+  });
+}
+
+test("unmount revokes a pending poll and removes its timer before its rejection settles", async () => {
+  const intervals = new Set<() => void>();
+  let hold = false;
+  let release: (() => void) | undefined;
+  let reads = 0;
+  await withScopedClockOverrides(domWindow, {
+    setInterval: (poll: () => void) => { intervals.add(poll); return 1; },
+    clearInterval: () => { intervals.clear(); },
+  }, async () => {
+    const fixture = await mountFixture([], {}, {}, [], {}, runners, [], {
+      automations: async () => {
+        reads++;
+        if (hold) {
+          await new Promise<void>((resolve) => { release = resolve; });
+          throw new Error("Unmounted polling failure");
+        }
+        return { automations: [] };
+      },
+    });
+    hold = true;
+    await invokePolls(intervals);
+    await unmountFixture(fixture);
+    assert.equal(intervals.size, 0);
+    await act(async () => { release?.(); });
+    await invokePolls(intervals);
+    assert.equal(reads, 2);
+    assert.equal(fixture.container.childNodes.length, 0);
+  });
+});
+
+for (const mutationFails of [false, true]) {
+  test(`API replacement revokes an old action's ${mutationFails ? "failure" : "post-mutation read"}`, async () => {
+    const item = schedule("automation-a", "Alpha");
+    const intervals = new Set<() => void>();
+    let release: (() => void) | undefined;
+    let oldReads = 0;
+    await withScopedClockOverrides(domWindow, {
+      setInterval: (poll: () => void) => { intervals.add(poll); return 1; },
+      clearInterval: () => { intervals.clear(); },
+    }, async () => {
+      const fixture = await mountFixture([item], {}, {}, [], {}, runners, [], {
+        automations: async () => { oldReads++; return { automations: [item] }; },
+        updateAutomation: async () => {
+          await new Promise<void>((resolve) => { release = resolve; });
+          if (mutationFails) throw new Error("Obsolete action failed");
+          return item;
+        },
+      });
+      try {
+        await expandCard(fixture, "Alpha");
+        await act(async () => { button(fixture.container, "Pause").click(); });
+        await fixture.replaceClient({ automations: async () => { throw new Error("New client polling failed"); } });
+        assert.equal(pageError(fixture), "New client polling failed");
+        await act(async () => { release?.(); });
+        await act(settle);
+        assert.equal(pageError(fixture), "New client polling failed");
+        assert.equal(oldReads, 1, "the obsolete action cannot read with its old client");
+      } finally { release?.(); await unmountFixture(fixture); }
+    });
+  });
+}
