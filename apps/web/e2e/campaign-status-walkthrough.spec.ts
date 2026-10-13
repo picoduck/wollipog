@@ -117,7 +117,16 @@ class WalkthroughStack {
 
 let stack: WalkthroughStack;
 
-test.describe.configure({ mode: "serial" });
+/**
+ * How long a full navigation may take to load its view (#3114). Each one opens a new UI socket, and
+ * the control plane admits 16 per device in a 10s window (hub.ts). A test here makes up to 13, so
+ * consecutive tests can cross that limit. The refused page waits to reconnect and retries with
+ * jittered backoff doubling from 1.5s (#3057), which is admitted again within about 23s.
+ */
+const SESSION_LOAD_TIMEOUT_MS = 30_000;
+
+// Room for one such reconnect on top of a walk through every variant.
+test.describe.configure({ mode: "serial", timeout: 60_000 });
 
 test.beforeAll(async ({}, testInfo) => {
   testInfo.setTimeout(240_000);
@@ -141,7 +150,7 @@ const forgePr = (page: Page, number: number) => page.locator(".campaign-forge-pr
 
 async function signIn(page: Page, token: string, title: string) {
   await page.goto(`${stack.base}/#pair=${token}`);
-  await expect(page.getByText(title).first()).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText(title).first()).toBeVisible({ timeout: SESSION_LOAD_TIMEOUT_MS });
 }
 
 async function setScheme(page: Page, scheme: (typeof SCHEMES)[number]) {
@@ -151,6 +160,11 @@ async function setScheme(page: Page, scheme: (typeof SCHEMES)[number]) {
 
 async function openSession(page: Page, sessionId: string) {
   await page.goto(`${stack.base}${viewPath({ name: "session", id: sessionId })}`);
+  // The session view mounts only once the session has loaded; until then its surface carries a
+  // placeholder such as Loading Session… or Waiting to Reconnect. Only a loaded view can be missing
+  // its Side Panel toggle.
+  await expect(page.locator(`.session-detail[data-session-surface-id="${sessionId}"]:not([data-placeholder])`))
+    .toBeAttached({ timeout: SESSION_LOAD_TIMEOUT_MS });
   // A remembered open panel covers a phone's session bar, toggle included (#2843).
   await expect(page.getByRole("button", { name: "Side Panel" }).first().or(page.locator("#right-panel")).first()).toBeVisible();
   if (!await page.locator("#right-panel").isVisible()) await page.getByRole("button", { name: "Side Panel" }).first().click();
