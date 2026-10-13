@@ -109,7 +109,7 @@ test("human control updates compose issue and budget authority without bypassing
     const proposal = { mode: "full_control" as const, objective: "Implement #2936", operations: ["implementation_question" as const],
       delegatablePolicyIds: [], issueAuthority, budgetAuthority: allowance() };
     const enabled = h.svc.setCampaignControl("root", proposal, 1, h.principal);
-    assert.ok(enabled.ok, enabled.error);
+    assert.ok(enabled.ok, enabled.error ?? "composed human authority was refused");
     const current = h.db.getSession("root")!.orchestratorPolicy!.control!;
     assert.equal(current.mode, "full_control");
     if (current.mode !== "full_control") throw new Error("missing Full Control");
