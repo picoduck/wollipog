@@ -167,6 +167,7 @@ async function startLiveStack(
   restartRecovery = false,
   asyncDelivery?: "accepted" | "rejected",
   journalFault = false,
+  asyncQuestionTitle?: string,
 ): Promise<LiveStack> {
   const port = await reservePort();
   const httpBase = `http://127.0.0.1:${port}`;
@@ -283,6 +284,7 @@ async function startLiveStack(
           env: {
             WOLLIPOG_FAKE_CODEX_SCENARIO: codexScenario,
             WOLLIPOG_FAKE_CODEX_RECEIPT: receiptPath,
+            ...(asyncQuestionTitle ? { WOLLIPOG_FAKE_CODEX_ASYNC_TITLE: asyncQuestionTitle } : {}),
             ...(asyncDelivery ? {
               WOLLIPOG_FAKE_CODEX_ASYNC_DELIVERY: asyncDelivery,
               WOLLIPOG_FAKE_CODEX_ASYNC_RELEASE: receiptPath + ".release",
@@ -537,24 +539,28 @@ for (const style of ["interactive", "composer"] as const) test(`Codex structured
 for (const viewport of [
   { name: "desktop", width: 1280, height: 800 },
   { name: "mobile", width: 390, height: 844 },
-]) test(`Codex async question remains answerable after continued work on ${viewport.name}`, async ({ page }) => {
+]) test(`long Codex async question remains answerable after continued work on ${viewport.name}`, async ({ page: fixturePage, browser, baseURL }) => {
   test.setTimeout(120_000);
+  const title = "Which path should I use?\n\n" +
+    Array.from({ length: 50 }, (_, index) =>
+      `Context ${index + 1}: Preserve the complete approval details so the decision can be reviewed with its validation results and implementation scope.`)
+      .join("\n\n") + "\n\nEnd of Context. Choose the next action.";
+  expect(title.length).toBeGreaterThan(2000);
+  const stack = await startLiveStack("codex", "async-question", false, undefined, false, title);
+  const evidenceDir = process.env.WOLLIPOG_ISSUE_1602_EVIDENCE_DIR;
+  const recording = evidenceDir ? await browser.newContext({
+    baseURL, viewport: { width: viewport.width, height: viewport.height },
+    recordVideo: { dir: evidenceDir, size: { width: viewport.width, height: viewport.height } },
+  }) : null;
+  const page = recording ? await recording.newPage() : fixturePage;
   await page.setViewportSize(viewport);
-  const stack = await startLiveStack("codex", "async-question");
+  const beat = async (milliseconds: number) => {
+    if (evidenceDir) await page.waitForTimeout(milliseconds);
+  };
   try {
     // Question and turn completion arrive separately; asking is not proof work has settled.
     await expect.poll(async () => (await fetchSession(stack)).status, { timeout: 30_000 }).toBe("idle");
     const pending = await fetchSession(stack);
-    expect(pending.status).toBe("idle");
-    expect(pending.pendingApproval).toMatchObject({
-      kind: "question", async: true, requestId: "codex-async:async-ask",
-    });
-    const events = await fetchEvents(stack);
-    const kinds = events.events.map((event) => event.payload.kind);
-    expect(kinds.filter((kind) => kind === "agent_message")).toHaveLength(1);
-    expect(kinds.indexOf("question_request")).toBeLessThan(kinds.indexOf("tool_call"));
-    expect(events.events.find((event) => event.payload.kind === "question_request")?.payload).toMatchObject({ async: true });
-
     const fragment = new URLSearchParams({
       origin: stack.httpBase, token: stack.ownerToken,
       sessionId: stack.sessionId, actualAsyncMessage: "1",
@@ -563,8 +569,25 @@ for (const viewport of [
     await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
     await expect(page.locator(".tl-agent-msg")).toHaveCount(1);
     await expect(page.locator(".tl-agent-msg")).toContainText("I will keep investigating.");
+    if (evidenceDir) {
+      mkdirSync(evidenceDir, { recursive: true });
+      await beat(2_500);
+      await page.screenshot({ path: join(evidenceDir, `async-loaded-${viewport.name}-dark.png`) });
+    }
+    expect(pending.status).toBe("idle");
+    expect(pending.pendingApproval).toMatchObject({
+      kind: "question", async: true, requestId: "codex-async:async-ask",
+      questions: [{ question: title }],
+    });
+    const events = await fetchEvents(stack);
+    const kinds = events.events.map((event) => event.payload.kind);
+    expect(kinds.filter((kind) => kind === "agent_message")).toHaveLength(1);
+    expect(kinds.indexOf("question_request")).toBeLessThan(kinds.indexOf("tool_call"));
+    expect(events.events.find((event) => event.payload.kind === "question_request")?.payload).toMatchObject({ async: true });
+
     const card = page.getByRole("region", { name: "Agent Questions" });
     await expect(card.locator(".request-card-kind")).toHaveText("Async Question");
+    await expect(card.locator(".question-text")).toContainText("End of Context. Choose the next action.");
     await page.reload();
     await expect(card.locator(".request-card-kind")).toHaveText("Async Question");
     if (viewport.name === "desktop") {
@@ -572,7 +595,11 @@ for (const viewport of [
       await page.reload();
       await expect(card.locator(".request-card-kind")).toHaveText("Async Question");
     }
-    const evidenceDir = process.env.WOLLIPOG_ISSUE_1602_EVIDENCE_DIR;
+    await card.getByRole("button", { name: "Show Full Question", exact: true }).click();
+    await card.getByText("End of Context. Choose the next action.", { exact: true }).scrollIntoViewIfNeeded();
+    await beat(2_500);
+    await card.getByRole("radio", { name: "Patch" }).click();
+    await beat(1_500);
     if (evidenceDir) {
       mkdirSync(evidenceDir, { recursive: true });
       for (const theme of ["dark", "light"] as const) {
@@ -580,7 +607,6 @@ for (const viewport of [
         await page.screenshot({ path: join(evidenceDir, `async-question-${viewport.name}-${theme}.png`) });
       }
     }
-    await card.getByRole("radio", { name: "Patch" }).click();
     await card.getByRole("button", { name: "Submit Answers" }).click();
     await expect.poll(async () => {
       try { return JSON.parse(await readFile(stack.receiptPath, "utf8")); }
@@ -588,6 +614,7 @@ for (const viewport of [
     }, { timeout: 30_000 }).toEqual({ requestId: "codex-async:async-ask", answer: "Patch" });
     await expect.poll(async () => (await fetchSession(stack)).pendingApproval).toBeNull();
     await expect.poll(async () => (await fetchSession(stack)).preview).toContain("Async answer received by Codex.");
+    await beat(3_500);
     if (evidenceDir) {
       await page.screenshot({ path: join(evidenceDir, `async-answer-${viewport.name}-light.png`) });
     }
@@ -596,6 +623,11 @@ for (const viewport of [
       `session: ${JSON.stringify(await fetchSession(stack))}\n` +
       `events: ${JSON.stringify((await fetchEvents(stack)).events.map((event) => event.payload))}\n${stack.logs()}`);
   } finally {
+    if (recording) {
+      const video = page.video();
+      await recording.close();
+      if (video) await video.saveAs(join(evidenceDir!, `async-question-${viewport.name}.webm`));
+    }
     await stack.stop();
   }
 });

@@ -9353,7 +9353,10 @@ export class SessionManager {
     }
     const entry = this.active.get(request.sessionId);
     if (!entry) return this.makeSteeringResult(request, "rejected", "no_active_provider_turn");
-    const activeEligibility = this.steeringEligibility(entry);
+    const promoted = request.promotePromptId
+      ? entry.queue.find((prompt) => prompt.id === request.promotePromptId)
+      : undefined;
+    const activeEligibility = this.steeringEligibility(entry, promoted);
     if (!activeEligibility.eligible) {
       return hasDirect && activeEligibility.reason === "no_active_provider_turn"
         ? this.handleDefiniteSteeringFailure(operation, activeEligibility.reason, activeEligibility.message)
@@ -9396,6 +9399,11 @@ export class SessionManager {
     return null;
   }
 
+  private isSteerableAsyncAnswer(prompt: QueuedPrompt | undefined): boolean {
+    return Boolean(prompt?.recoveredQuestion?.pendingQuestion.async &&
+      prompt.durable?.beginSteering && prompt.durable.steeringRejected);
+  }
+
   /** Authoritative runner-known steering admission gates. Protocol negotiation is owned by the
    * control plane, so callers must additionally require the steering protocol before presenting
    * this projection as actionable. */
@@ -9403,7 +9411,9 @@ export class SessionManager {
     if (entry.historyIntegrityFailure) {
       return { eligible: false, reason: "history_integrity_failure", message: entry.historyIntegrityFailure };
     }
-    if (entry.currentDurable || entry.currentSessionCommand) {
+    // An answer continues work requested by the automation without taking ownership of its
+    // command receipt. Ordinary steering still cannot alter an automation-owned turn.
+    if ((entry.currentDurable && !this.isSteerableAsyncAnswer(prompt)) || entry.currentSessionCommand) {
       return {
         eligible: false,
         reason: "policy_blocked",
@@ -9462,8 +9472,7 @@ export class SessionManager {
       };
     }
     if (!prompt) return { eligible: true };
-    if ((prompt.durable && (!prompt.recoveredQuestion?.pendingQuestion.async ||
-        !prompt.durable.beginSteering || !prompt.durable.steeringRejected)) ||
+    if ((prompt.durable && !this.isSteerableAsyncAnswer(prompt)) ||
         prompt.sessionCommand || (prompt.syntheticRecovery || prompt.providerRecovery)) {
       return {
         eligible: false,
@@ -9526,7 +9535,9 @@ export class SessionManager {
         "Resolve the pending agent input before steering the active turn.",
       );
     }
-    if (entry.currentDurable) return this.handleDefiniteSteeringFailure(operation, "policy_blocked", "automation-owned turns cannot be steered");
+    if (entry.currentDurable && !this.isSteerableAsyncAnswer(operation.source)) {
+      return this.handleDefiniteSteeringFailure(operation, "policy_blocked", "automation-owned turns cannot be steered");
+    }
     if (entry.cancelRequested || entry.interruptRequested || this.queueHeld(entry)) {
       return this.handleDefiniteSteeringFailure(operation, "policy_blocked");
     }
@@ -9571,7 +9582,9 @@ export class SessionManager {
         "Resolve the pending agent input before steering the active turn.",
       );
     }
-    if (entry.currentDurable) return this.handleDefiniteSteeringFailure(operation, "policy_blocked", "automation-owned turns cannot be steered");
+    if (entry.currentDurable && !this.isSteerableAsyncAnswer(operation.source)) {
+      return this.handleDefiniteSteeringFailure(operation, "policy_blocked", "automation-owned turns cannot be steered");
+    }
     if (entry.cancelRequested || entry.interruptRequested || this.queueHeld(entry)) {
       return this.handleDefiniteSteeringFailure(operation, "policy_blocked");
     }
@@ -15586,9 +15599,9 @@ export class SessionManager {
     this.emitStatus(sessionId, status);
   }
 
-  /** Deliver a structured answer as a later user turn when the original callback was lost or
-   * the question was async. The durable command journal owns deduplication; runPrompt records
-   * the correlated resolution before invoking the continuation turn. */
+  /** Deliver an async answer by steering the active turn when eligible, or as a later user turn
+   * when steering is unavailable or the original callback was lost. The durable command journal
+   * owns deduplication; runPrompt records the correlated resolution before invoking the continuation turn. */
   answerRecoveredQuestion(
     sessionId: string,
     requestId: string,
