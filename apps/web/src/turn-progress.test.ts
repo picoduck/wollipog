@@ -147,6 +147,19 @@ test("pending approval and pending question expose distinct authoritative waitin
   });
 });
 
+test("input required without a blocking request is a session held between turns, not a working turn (#3100)", () => {
+  seq = 0;
+  const events = [
+    event({ kind: "user_message", text: "Continue the campaign." }, 1_000),
+    event({ kind: "error", message: "turn/start failed: Invalid request" }, 1_100),
+  ];
+  assert.equal(derive(events, "input_required"), null);
+  assert.equal(derive(events, "input_required", {
+    requestId: "async-question", title: "Choose", options: [], kind: "question", questions: [], async: true,
+  }), null, "an async question does not pause a turn either");
+  assert.notEqual(derive(events, "running"), null);
+});
+
 test("a long silent command remains active without being labeled stalled", () => {
   seq = 0;
   const events = [

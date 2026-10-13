@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { describeTurnError, TURN_ERROR_FALLBACK } from "./turn-error.js";
+import { describeTurnError, isAutomaticTurnsHeld, TURN_ERROR_FALLBACK } from "./turn-error.js";
 
 test("describeTurnError says known failures in plain words", () => {
   const cases: Array<[string, string]> = [
@@ -16,6 +16,16 @@ test("describeTurnError says known failures in plain words", () => {
     ["Your request was flagged as potentially violating our usage policy", "The provider rejected the content of this turn."],
   ];
   for (const [message, sentence] of cases) assert.equal(describeTurnError(message), sentence, message);
+});
+
+test("the runner's rejection hold is recognised whatever provider error it quotes (#3100)", () => {
+  const held = (error: string) =>
+    `Codex rejected two turns in a row with the same error: ${error}. ` +
+    "Automatic turns are held until you send a message or restart the session.";
+  assert.equal(isAutomaticTurnsHeld(held("turn/start failed: Invalid request")), true);
+  assert.equal(isAutomaticTurnsHeld(held("turn/start failed: 429 Too Many Requests")), true);
+  assert.equal(isAutomaticTurnsHeld("prompt failed: Rate limit reached"), false);
+  assert.equal(isAutomaticTurnsHeld("Automatic turns are held until you send a message or restart the session. Then more"), false);
 });
 
 test("describeTurnError never guesses at an unknown message", () => {

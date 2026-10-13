@@ -27,6 +27,20 @@ const TURN_ERROR_SHAPES: ReadonlyArray<{ pattern: RegExp; sentence: string }> = 
   },
 ];
 
+/** The runner's notice that it holds automatic turns after repeated identical provider rejections
+ * (#3100). It ends with this sentence and quotes the provider's error before it. */
+const AUTOMATIC_TURNS_HELD = /\bAutomatic turns are held until you send a message or restart the session\.$/;
+
+export const AUTOMATIC_TURNS_HELD_SENTENCE =
+  "The provider rejected two turns in a row with the same error, so automatic turns are held. " +
+  "Send a message or restart the session to continue.";
+
+/** Whether an error row is the rejection hold rather than a failed turn of its own. Decided before
+ * any turn-error shape, because the quoted provider error could match one. */
+export function isAutomaticTurnsHeld(message: string): boolean {
+  return AUTOMATIC_TURNS_HELD.test(withoutPromptFailedPrefix(message));
+}
+
 /** A failed turn's error in plain words (docs/design-system.md §13.2): what happened and, where
  * one exists, what to do. The raw provider message stays behind Show Details. */
 export function describeTurnError(message: string): string {

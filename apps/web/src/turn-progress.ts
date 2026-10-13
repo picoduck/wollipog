@@ -430,6 +430,9 @@ export class IncrementalActiveTurnProgress {
       .filter((value): value is number => Number.isFinite(value))
       .reduce<number | undefined>((latest, value) => latest == null ? value : Math.max(latest, value), undefined);
     const waiting = waitingReason(options.pendingApproval);
+    // Input Required pauses a turn only while a blocking request is open. Without one the session
+    // is held between turns, such as after repeated provider rejections (#3100); nothing is working.
+    if (options.status === "input_required" && !waiting) return null;
     return {
       turnEventId: this.turnStart.seq,
       ...(Number.isFinite(this.turnStart.ts) ? { turnStartedAt: this.turnStart.ts } : {}),

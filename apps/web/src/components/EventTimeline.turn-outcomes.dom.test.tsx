@@ -69,6 +69,35 @@ const notices = (container: Element) =>
 const button = (container: Element, name: string) =>
   [...container.querySelectorAll("button")].find((candidate) => candidate.textContent === name);
 
+test("the rejection hold is its own Automatic Turns Held notice, without Retry Turn (#3100)", async () => {
+  const providerError = "turn/start failed: Invalid request: invalid type: null, expected a string";
+  const blocker = `Codex rejected two turns in a row with the same error: ${providerError}. ` +
+    "Automatic turns are held until you send a message or restart the session.";
+  const builder = new TimelineBuilder();
+  for (const ev of [
+    event(1, at(25), { kind: "user_message", text: "Continue the campaign." }),
+    event(2, at(25, 1), { kind: "error", message: providerError }),
+    event(3, at(25, 1), { kind: "error", message: blocker }),
+  ] as SessionEvent[]) builder.push(ev);
+  const retries: string[] = [];
+  const retry: TurnRetryControl = { onRetry: (prompt) => retries.push(prompt.text) };
+  await withView(<EventTimeline items={builder.snapshot()} turnRetry={retry} />, async (view) => {
+    assert.equal(notices(view.container).length, 1, "only the real rejection is a failed turn");
+    const held = [...view.container.querySelectorAll(".notice")].filter((notice) =>
+      notice.querySelector(".notice-title")?.textContent === "Automatic Turns Held");
+    assert.equal(held.length, 1);
+    const notice = held[0]!;
+    assert.match(notice.textContent ?? "",
+      /The provider rejected two turns in a row with the same error, so automatic turns are held\. Send a message or restart the session to continue\./u);
+    assert.equal([...notice.querySelectorAll("button")].some((candidate) => candidate.textContent === "Retry Turn"), false);
+    assert.equal((notice.textContent ?? "").includes(providerError), false, "the provider's words wait behind Show Details");
+    const details = [...notice.querySelectorAll("button")].find((candidate) => candidate.textContent === "Show Details");
+    assert.ok(details, "Show Details reveals the provider's words");
+    await act(async () => details.click());
+    assert.equal((notice.textContent ?? "").includes(blocker), true);
+  });
+});
+
 test("a provider error reported twice renders one Turn Failed notice, the transcript's last row", async () => {
   const items = failedTurnItems();
   assert.deepEqual(items.filter((item) => item.kind === "error").map((item) => item.kind === "error" && item.message),

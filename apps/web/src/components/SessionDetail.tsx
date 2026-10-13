@@ -4589,6 +4589,8 @@ function SessionDetailLoaded({
     policyPaused,
     stopFailed: session.stopOperation?.status === "stop_failed",
     restarting: restartPending || headerRestartPending,
+    heldBetweenTurns: session.status === "input_required" &&
+      !pendingRequests(session.pendingApproval).some((request) => !request.async),
   });
   const [retryingTurnPromptId, setRetryingTurnPromptId] = useState<number>();
   const [turnRetryError, setTurnRetryError] = useState<{ promptId: number; message: string }>();
