@@ -132,13 +132,20 @@ return an HTTP error; callers must not treat that error as successful recovery.
 `wollipog session events` (MCP `get_session_events`) without `--after` returns the newest `--limit`
 events (default 30, at most 100). With `--after SEQ` it pages forward: the first `--limit` events
 whose seq is greater than `SEQ`, oldest first. Pass the returned `lastSeq` as the next `--after` while
-`hasMore` is true to read every event exactly once. Each call is one bounded control-plane read; it
-falls back to the full read only while the control plane's event cache is still hydrating. If the
+`hasMore` is true to read every event exactly once. Each call is one bounded control-plane event read,
+including while the control plane's event cache is still hydrating. If the
 cache still cannot hold the whole log (for example, the runner is offline), the result carries
 `historyIncomplete: true` and a forward page keeps `hasMore` true, so retry later instead of stopping.
 Every result carries `eventEpoch`; pass it back with `--event-epoch` (MCP `eventEpoch`) alongside
 `--after`, and the call fails if the session's history was replaced instead of applying the old
 cursor to the new log.
+
+Direct HTTP consumers use a default page of 200 events when `limit` is omitted. A missing limit
+never requests the whole log. See [the session events API migration guide](./session-events-api.md)
+for continuation cursors, incomplete-cache retries, and history replacement handling.
+Upgrade CLI/MCP installations to the protocol-220 reader before rolling out this server change.
+Identifiable older agent-session unpaged fallbacks receive upgrade guidance; human-principal
+paired-device CLI calls must follow the documented upgrade-first migration.
 
 `wollipog admin` is host administration for an SSH operator on the control-plane machine. It
 authenticates with the control plane's protected local credential over loopback instead of a

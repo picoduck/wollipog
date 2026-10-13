@@ -151,7 +151,10 @@ events, so after a crash the control plane is consistently behind rather than ho
      a runner sequence number that is not the cursor plus one. It does not store the event out of
      order; it calls `hydrateHistory` instead.
    - **Any read of the session's history.** `GET /api/sessions/:id/events` and the child-session page
-     route call `hydrateHistory`. Until it finishes, responses report `cacheComplete: false`.
+     route call `hydrateHistory`. Event reads, including reads without `limit`, return a bounded
+     cached page immediately while hydration runs in the background. Until it finishes, responses
+     report `cacheComplete: false`; consumers must keep paging or retry the same cursor when empty.
+     See [the events API migration guide](./session-events-api.md).
    - **Campaign verification**, which force-hydrates the child session.
 4. `hydrateHistory` requests contiguous pages from the cursor (`session_history_page`) and applies
    them with `appendHydratedPage`.

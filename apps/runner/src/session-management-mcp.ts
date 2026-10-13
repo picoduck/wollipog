@@ -661,10 +661,9 @@ function renderEventLine(ev: Json): string {
  * epoch: the caller's, when it passes the epoch its cursor came from, so a replaced history fails
  * instead of silently applying an old cursor to a new log; otherwise the session's current epoch,
  * retrying once if it is replaced mid-read. The CP cache hydrates forward from the runner, so a
- * short page from an incomplete cache is not authoritative. Only then does this fall back to the
- * unbounded read, which waits for hydration, and then re-reads the cache state at the same epoch:
- * hydration cannot finish while the runner is offline, so the result reports `incomplete` (and a
- * forward page `hasMore`) until the cache holds the whole log.
+ * short page from an incomplete cache is not the end of the log. Return the available page with
+ * `incomplete` (and a forward page `hasMore`) until the cache holds the whole log. Repeated bounded
+ * reads drive hydration without fetching or waiting for the entire log in one request.
  */
 async function readSessionEventPage(
   deps: McpDeps,
@@ -703,32 +702,9 @@ async function readSessionEventPage(
       const hasMore = after !== undefined && events.length > limit;
       return { ok: true, events: select(events), hasMore, incomplete: false, eventEpoch: epoch };
     }
-    if (r.data.cacheComplete === true) {
-      const hasMore = after !== undefined && r.data.hasMoreCached === true;
-      return { ok: true, events, hasMore, incomplete: false, eventEpoch: epoch };
-    }
-    if (after !== undefined && events.length === limit) {
-      return { ok: true, events, hasMore: true, incomplete: true, eventEpoch: epoch };
-    }
-    const full = await cpFetch(deps, "GET", `${base}/events?after=${after ?? 0}`);
-    if (!full.ok) return full;
-    const all: Json[] = Array.isArray(full.data?.events) ? full.data.events : [];
-    const page = select(all);
-    // The unbounded read carries no epoch. This same-epoch read proves the page came from the log the
-    // cursor belongs to (epochs only increase) and reports whether the cache is now complete.
-    const lastSeq = page.at(-1)?.seq;
-    const probeAfter = after === undefined ? undefined : typeof lastSeq === "number" ? lastSeq : after;
-    const state = await bounded(probeAfter, 1, epoch);
-    if (!state.ok) {
-      // Without this proof the page may belong to another log, so it is never returned unverified.
-      if (state.status !== 409) return state;
-      if (retry) continue;
-      return replaced;
-    }
-    const complete = state.data?.cacheComplete === true;
-    const beyond = Array.isArray(state.data?.events) && state.data.events.length > 0;
-    const hasMore = after !== undefined && (all.length > limit || !complete || beyond);
-    return { ok: true, events: page, hasMore, incomplete: !complete, eventEpoch: epoch };
+    const incomplete = !r.data.cacheComplete;
+    const hasMore = after !== undefined && (r.data.hasMoreCached === true || incomplete);
+    return { ok: true, events, hasMore, incomplete, eventEpoch: epoch };
   }
 }
 

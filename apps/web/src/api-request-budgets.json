@@ -16,7 +16,6 @@
     { "method": "POST", "route": "/api/orphaned-skill-copies/:id/import", "budget": "unboundedServerWait", "why": "Waits for a skill sync, which has no total bound." },
     { "method": "POST", "route": "/api/runners/:id/orphaned-skill-copies/discard", "budget": "unboundedServerWait", "why": "Waits for a skill sync, which has no total bound." },
     { "method": "GET", "route": "/api/sessions/:id/child-sessions", "budget": "unboundedServerWait", "why": "Loads the session's whole history first, page by page, with a deadline per page but none in total." },
-    { "method": "GET", "route": "/api/sessions/:id/events", "unlessQuery": "limit", "budget": "unboundedServerWait", "why": "An event read without a page limit loads the session's whole history first, with a deadline per page but none in total." },
     { "method": "POST", "route": "/api/sessions/:id/worktrees/select", "budget": "serverBoundUpTo150s", "why": "A 150s runner wait." },
     { "method": "POST", "route": "/api/sessions/:id/worktrees/generate-setup", "budget": "serverBoundUpTo150s", "why": "A 150s runner wait." },
     { "method": "GET", "route": "/api/projects/:id/locations/:id/worktree-setup", "budget": "serverBoundUpTo150s", "why": "A 150s runner wait." },

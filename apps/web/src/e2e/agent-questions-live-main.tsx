@@ -4,6 +4,7 @@ import { prioritizedPendingRequests, type SessionView } from "@wollipog/protocol
 import { createApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { createBrowserApiTransport } from "../api-transport.js";
+import { readSessionEventHistory } from "./read-session-event-history.js";
 import { EventTimeline } from "../components/EventTimeline.js";
 import { SessionApprovalRegion, focusSessionRequest } from "../components/SessionApproval.js";
 import { SessionNoticeSlot } from "../components/SessionNoticeSlot.js";
@@ -62,16 +63,13 @@ function LiveQuestionFixture() {
   useEffect(() => {
     if (!showActualAsyncMessage) return;
     let active = true;
-    void fetch(`${origin}/api/sessions/${sessionId}/events`, {
-      headers: { authorization: `Bearer ${token}` },
-    }).then(async (response) => {
-      if (!response.ok) throw new Error(`Transcript request failed: ${response.status}`);
-      return response.json() as Promise<{ events: Array<{ payload: { kind: string; text?: string } }> }>;
-    }).then(({ events }) => {
-      const text = events.find((event) => event.payload.kind === "agent_message")?.payload.text;
+    const controller = new AbortController();
+    void readSessionEventHistory(origin, token, sessionId, controller.signal).then(({ events }) => {
+      const payload = events.find((event) => event.payload.kind === "agent_message")?.payload;
+      const text = payload?.kind === "agent_message" ? payload.text : undefined;
       if (active && text) setActualAsyncMessage(text);
     }).catch((cause) => { if (active) setError((cause as Error).message); });
-    return () => { active = false; };
+    return () => { active = false; controller.abort(); };
   }, []);
 
   const pendingQuestion = session?.pendingApproval?.kind === "question" ? session.pendingApproval : null;

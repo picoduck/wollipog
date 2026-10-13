@@ -672,7 +672,8 @@
 // 218: durable campaign allowance, final managed usage and controlled native review admission.
 // 219: session snapshots carry cumulative rate-priced usage per pricing key, with cache buckets, so
 //      a snapshot covering unseen records prices them as event-first ingestion would (#3111).
-export const PROTOCOL_VERSION = 219;
+// 220: CLI/MCP event readers never use the legacy unpaged hydration fallback.
+export const PROTOCOL_VERSION = 220;
 
 export * from "./campaign-authority.js";
 export * from "./campaign-issue-publication.js";
@@ -888,6 +889,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   automationCommandReceipts: 53,
   runnerLocalAgentEnv: 54,
   indexedHistory: 55,
+  /** CLI/MCP event reader keeps incomplete-cache reads paged. Older readers assume the unpaged
+   * hydration fallback returns the whole log and can mislabel a bounded prefix as its newest tail. */
+  boundedSessionEventReads: 220,
   authoritativeHistoryWindow: 213,
   promptImageReferences: 56,
   durableSessionShells: 57,
