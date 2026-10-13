@@ -540,7 +540,7 @@ test("Keyboard folds into Behavior: /settings/keyboard replaces itself and lands
   assert.deepEqual(SETTINGS_SECTIONS.map((section) => section.title),
     ["Appearance", "Notifications", "Behavior", "Approvals", "Orchestrator", "Network", "Experimental", "About"]);
   const view = viewFromPath("/settings/keyboard");
-  assert.deepEqual(view, { name: "settings", section: "behavior", focus: "keyboard-shortcuts" });
+  assert.deepEqual(view, { name: "settings", section: "behavior", focus: { target: "keyboard-shortcuts" } });
   assert.equal(viewPath(view!), "/settings/behavior", "the focus target is not part of the address");
   assert.ok(sameView(view!, { name: "settings", section: "behavior" }));
   // A replacing navigation: Back never returns to the old address.

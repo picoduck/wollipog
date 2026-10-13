@@ -95,3 +95,44 @@ test("instance routes round-trip query-bearing views and reject malformed or non
     assert.equal(instanceRouteFromPath(parsed.pathname, parsed.search), null, invalid);
   }
 });
+
+test("an instance's old Settings address opens its new view and replaces its own entry (#3023)", () => {
+  const encoded = instanceViewPath("remote-a", { name: "inbox" }).replace(/\/$/, "");
+  const behavior = { name: "settings", section: "behavior" } as const;
+  const keyboard = { ...behavior, focus: { target: "keyboard-shortcuts" } };
+  assert.deepEqual(instanceRouteFromPath(`${encoded}/settings/keyboard`), { instanceId: "remote-a", view: keyboard });
+  assert.deepEqual(instanceRouteFromPath(`${encoded}/settings/session-naming`), { instanceId: "remote-a", view: behavior });
+  // Only the alias itself: a query or a noncanonical instance encoding is still refused.
+  assert.equal(instanceRouteFromPath(`${encoded}/settings/keyboard`, "?x=1"), null);
+  assert.equal(instanceRouteFromPath(`${encoded}=/settings/keyboard`), null);
+
+  const listeners = new Set<() => void>();
+  const location = { pathname: `${encoded}/settings/keyboard`, search: "", hash: "" };
+  const writes: string[] = [];
+  const target = {
+    location,
+    history: {
+      state: null,
+      pushState() {},
+      replaceState(_state: unknown, _unused: string, path?: string | URL | null) {
+        const url = new URL(String(path), "https://app.local");
+        location.pathname = url.pathname;
+        location.search = url.search;
+        writes.push(`${url.pathname}${url.search}`);
+      },
+    },
+    addEventListener(_type: "popstate", listener: () => void) { listeners.add(listener); },
+    removeEventListener(_type: "popstate", listener: () => void) { listeners.delete(listener); },
+  };
+  const navigation = new DesktopInstanceNavigation("remote-a", target);
+  assert.deepEqual(navigation.current(), keyboard);
+  assert.deepEqual(writes, [instanceViewPath("remote-a", behavior)], "the alias replaces its own entry");
+
+  // Back onto an entry recorded before the fold: the view keeps its focus target, and the entry is replaced.
+  const seen: unknown[] = [];
+  navigation.listen((view) => seen.push(view));
+  location.pathname = `${encoded}/settings/keyboard`;
+  for (const listener of listeners) listener();
+  assert.deepEqual(seen, [keyboard]);
+  assert.deepEqual(writes, [instanceViewPath("remote-a", behavior), instanceViewPath("remote-a", behavior)]);
+});

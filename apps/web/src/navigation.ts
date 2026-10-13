@@ -21,7 +21,7 @@ export type View =
   | { name: "projects"; id?: string }
   | { name: "session"; id: string; location?: SourceLocation; attention?: AttentionTarget }
   | { name: "run"; id: string }
-  | { name: "settings"; section?: SettingsSection; policyId?: string; focus?: SettingsFocusTarget }
+  | { name: "settings"; section?: SettingsSection; policyId?: string; focus?: SettingsFocus }
   | { name: "pod"; id: string };
 
 /**
@@ -38,8 +38,23 @@ export type SettingsSection = "appearance" | "notifications" | "behavior" | "app
  * A control a redirect lands on, so an old link arrives where its setting went (#3023):
  * `/settings/keyboard` opens Behavior on the Keyboard Shortcuts row. Ephemeral like
  * `AttentionTarget.activationId`: `viewPath` omits it, so the replaced address is the section's.
+ * The store gives each arrival its own `activationId`, so arriving again focuses it again.
  */
 export type SettingsFocusTarget = "keyboard-shortcuts";
+export type SettingsFocus = { target: SettingsFocusTarget; activationId?: number };
+
+/** Old Settings addresses and the view each now opens; each replaces its own history entry. */
+const SETTINGS_ALIASES: Readonly<Record<string, View>> = {
+  // Session Naming lives compactly under Behavior.
+  "/settings/session-naming": { name: "settings", section: "behavior" },
+  // Keyboard folded into Behavior › Input (#3023): the old section's address lands on its one row.
+  "/settings/keyboard": { name: "settings", section: "behavior", focus: { target: "keyboard-shortcuts" } },
+};
+
+/** Whether `path` is an old Settings address that opens another view (see `SETTINGS_ALIASES`). */
+export function isSettingsAlias(path: string): boolean {
+  return Object.hasOwn(SETTINGS_ALIASES, path);
+}
 
 /** Where a section's settings are kept, when every one of them is kept in the same place. */
 export type SettingsScope = "This Device" | "Your Account";
@@ -435,10 +450,8 @@ export function viewFromPath(pathname: string, search = ""): View | null {
   if (path === "/archived") return { name: "archived" };
   // No section: a phone shows the section index, and wider layouts open the first section (§6.1, §6.2).
   if (path === "/settings") return { name: "settings" };
-  // Keep old bookmarks useful while Session Naming now lives compactly under Behavior.
-  if (path === "/settings/session-naming") return { name: "settings", section: "behavior" };
-  // Keyboard folded into Behavior › Input (#3023): the old section's address lands on its one row.
-  if (path === "/settings/keyboard") return { name: "settings", section: "behavior", focus: "keyboard-shortcuts" };
+  // Keep old bookmarks useful: a copy, so a caller that annotates the view cannot change the table.
+  if (isSettingsAlias(path)) return structuredClone(SETTINGS_ALIASES[path]!);
   const settingsMatch = /^\/settings\/(appearance|notifications|behavior|approvals|orchestrator|network|experimental|about)$/.exec(path);
   if (settingsMatch) return { name: "settings", section: settingsMatch[1] as SettingsSection };
   const approvalsPolicyMatch = /^\/settings\/approvals\/~([^/]+)$/.exec(path);

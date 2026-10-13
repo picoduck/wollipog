@@ -6,7 +6,7 @@ import { Window } from "happy-dom";
 import { api } from "../api.js";
 import { ENTER_KEY_STORAGE_KEY } from "../enter-key.js";
 import { SHOW_AGENT_LOGS_STORAGE_KEY } from "../agent-logs.js";
-import type { SettingsFocusTarget } from "../navigation.js";
+import type { SettingsFocus } from "../navigation.js";
 import { SHOW_SHORTCUTS_ID, shortcutDisplay } from "../shortcuts.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { BehaviorPanel } from "./SettingsView.js";
@@ -74,21 +74,26 @@ after(() => {
   api.artifactUploadSettings = priorArtifactUploadSettings;
 });
 
-async function renderPanel(options: { on?: Device; focus?: SettingsFocusTarget; opened?: Array<HTMLElement | null> } = {}) {
+async function renderPanel(options: { on?: Device; focus?: SettingsFocus; opened?: Array<HTMLElement | null> } = {}) {
   device = options.on ?? "desktop";
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  await act(async () => root.render(
+  const draw = (focus?: SettingsFocus) => root.render(
     <BehaviorPanel
       agentHarnessDefaults={<div className="setting-row">Agent defaults slot</div>}
       sessionNaming={<div className="setting-row">Session naming slot</div>}
       onOpenShortcuts={(returnFocus) => options.opened?.push(returnFocus)}
-      focus={options.focus}
+      focus={focus}
     />,
-  ));
+  );
+  await act(async () => draw(options.focus));
   return {
     container,
+    /** The shell re-rendering the panel, as for a later arrival on the same address. */
+    async rerender(focus?: SettingsFocus) {
+      await act(async () => draw(focus));
+    },
     async unmount() {
       await act(async () => root.unmount());
       container.remove();
@@ -228,13 +233,13 @@ for (const on of ["phone", "touch-tablet"] as const) {
 }
 
 test("the /settings/keyboard redirect focuses Show Shortcuts, or the Input group where it is withheld", async () => {
-  let view = await renderPanel({ focus: "keyboard-shortcuts" });
+  let view = await renderPanel({ focus: { target: "keyboard-shortcuts" } });
   try {
     assert.equal(domWindow.document.activeElement?.id, SHOW_SHORTCUTS_ID);
   } finally {
     await view.unmount();
   }
-  view = await renderPanel({ on: "phone", focus: "keyboard-shortcuts" });
+  view = await renderPanel({ on: "phone", focus: { target: "keyboard-shortcuts" } });
   try {
     const active = domWindow.document.activeElement as unknown as HTMLElement | null;
     assert.equal(active?.className, "settings-group-title");
@@ -246,6 +251,15 @@ test("the /settings/keyboard redirect focuses Show Shortcuts, or the Input group
   view = await renderPanel();
   try {
     assert.equal(domWindow.document.activeElement, domWindow.document.body, "an ordinary visit moves nothing");
+    // Back onto /settings/keyboard while Behavior is open: the store hands over a new activation.
+    const arrival = { target: "keyboard-shortcuts" as const, activationId: 1 };
+    await view.rerender(arrival);
+    assert.equal(domWindow.document.activeElement?.id, SHOW_SHORTCUTS_ID);
+    (domWindow.document.activeElement as unknown as HTMLElement).blur();
+    await view.rerender(arrival);
+    assert.equal(domWindow.document.activeElement, domWindow.document.body, "a re-render of the same arrival moves nothing");
+    await view.rerender({ target: "keyboard-shortcuts", activationId: 2 });
+    assert.equal(domWindow.document.activeElement?.id, SHOW_SHORTCUTS_ID, "the next arrival focuses again");
   } finally {
     await view.unmount();
   }

@@ -58,7 +58,7 @@ import { useSessionsPreviewLayout } from "../use-sessions-preview-layout.js";
 import { setTerminalPlacement, useTerminalPlacement, type TerminalPlacement } from "../terminal-placement.js";
 import { setEnterKeyBehavior, useEnterKeyBehavior, type EnterKeyBehavior } from "../enter-key.js";
 import { setShowAgentLogs, useShowAgentLogs } from "../agent-logs.js";
-import { SETTINGS_SECTIONS, viewPath, type SettingsFocusTarget, type SettingsSection, type SettingsSectionEntry, type View } from "../navigation.js";
+import { SETTINGS_SECTIONS, viewPath, type SettingsFocus, type SettingsSection, type SettingsSectionEntry, type View } from "../navigation.js";
 import { SHOW_SHORTCUTS_ID, shortcutDisplay } from "../shortcuts.js";
 import type { ExperimentFlags, ExperimentId } from "../experiments.js";
 import { effortLabel, permissionModeLabel, titleCaseLabel } from "../format.js";
@@ -586,8 +586,8 @@ export function BehaviorPanel({
   sessionNaming?: ReactNode;
   /** Opens the Keyboard Shortcuts reference, which returns focus to the element it is given. */
   onOpenShortcuts?: (returnFocus: HTMLElement | null) => void;
-  /** Set by a redirect: the control to focus once the panel is in. */
-  focus?: SettingsFocusTarget;
+  /** Set by a redirect: the control to focus. Each arrival is a new object, so it focuses again. */
+  focus?: SettingsFocus;
 } = {}) {
   const privacy = useAccountEmailPrivacy();
   const enterKey = useEnterKeyBehavior();
@@ -600,7 +600,7 @@ export function BehaviorPanel({
   const shortcutsRef = useRef<HTMLButtonElement>(null);
   const inputHeadingRef = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
-    if (focus !== "keyboard-shortcuts") return;
+    if (focus?.target !== "keyboard-shortcuts") return;
     // Where the row is withheld, the group it would be in.
     (shortcutsRef.current ?? inputHeadingRef.current)?.focus();
   }, [focus]);
