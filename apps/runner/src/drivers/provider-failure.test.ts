@@ -32,7 +32,7 @@ test("Codex request errors retain structured data and local transport evidence",
   assert.equal(codexFailureCategory({ data: { codexErrorInfo: "serverOverloaded" } }), "capacity");
   assert.equal(codexFailureCategory({ transportFailure: true, data: { codexErrorInfo: "serverOverloaded" } }), "transport");
   for (const key of ["httpConnectionFailed", "responseStreamConnectionFailed", "responseStreamDisconnected", "responseTooManyFailedAttempts"]) {
-    assert.equal(codexFailureCategory({ codexErrorInfo: { [key]: { httpStatusCode: 503 } } }), "transport");
+    assert.equal(codexFailureCategory({ codexErrorInfo: { [key]: { httpStatusCode: 502 } } }), "transport");
     assert.equal(codexFailureCategory({ codexErrorInfo: { [key]: { httpStatusCode: 429 } } }), "rate_limit");
   }
 });
@@ -41,4 +41,15 @@ test("standard JSON-RPC request rejection cannot become capacity from display wo
   for (const code of [-32600, -32601, -32602]) {
     assert.equal(isProviderCapacityFailure("overloaded_error", codexFailureCategory({ code })), false);
   }
+});
+
+
+test("unknown Codex HTTP status evidence retains conservative text fallback", () => {
+  for (const status of [503, 599]) {
+    const category = codexFailureCategory({ codexErrorInfo: { responseTooManyFailedAttempts: { httpStatusCode: status } } });
+    assert.equal(category, null);
+    assert.equal(isProviderCapacityFailure("overloaded_error", category), true);
+    assert.equal(isProviderCapacityFailure("billing quota exceeded", category), false);
+  }
+  assert.equal(codexFailureCategory({ codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: null } } }), "transport");
 });

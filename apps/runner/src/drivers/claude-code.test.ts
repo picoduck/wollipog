@@ -5514,3 +5514,19 @@ test("Claude structured capacity evidence outranks conflicting authentication pr
   assert.equal(h.authenticationFailures, 0);
   assert.doesNotMatch(JSON.stringify([h.events, h.stderr, h.driver.lastTurnError()]), /synthetic-secret/);
 });
+
+
+test("a local Claude capability rejection cannot inherit prior capacity evidence", async () => {
+  const h = makeHarness({
+    config: { effort: "max" },
+    capabilities: { models: [], effortLevels: ["low"], slashCommands: [], supportsImages: false,
+      supportsApprovals: false, permissionModes: ["acceptEdits"] },
+  });
+  h.feed({ type: "result", is_error: true, api_error_status: 529, result: "provider capacity unavailable" });
+  assert.equal(h.driver.lastTurnFailureCategory(), "capacity");
+  assert.equal(await h.driver.prompt("next task"), "refusal");
+  assert.match(h.driver.lastTurnError()!, /effort/);
+  assert.equal(h.driver.lastTurnFailureCategory(), null);
+  assert.equal((h.driver as any).turnFailureCategory, "capacity", "an active provider accumulator remains owned by its turn");
+  h.driver.dispose();
+});

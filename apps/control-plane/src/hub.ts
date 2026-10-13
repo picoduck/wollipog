@@ -1718,7 +1718,8 @@ export class Hub {
       if (!this.isSubscribed(info, msg)) continue;
       if (!(predicate ? predicate(info.principal, info) : this.canReceive(info.principal, msg, info))) continue;
       const projectedMessages = this.compatibilityProjection(info, msg);
-      for (const projected of projectedMessages) {
+      for (const compatible of projectedMessages) {
+        const projected = projectBackgroundRetryExhaustionForUi(compatible, info.uiProtocolVersion);
         let clientData = projected === msg ? data : JSON.stringify(projected);
         if (projected.type === "runner_upsert" && info.principal !== undefined) {
           const runner = this.db.listRunnersForPrincipal(info.principal)

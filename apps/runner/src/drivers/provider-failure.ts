@@ -34,6 +34,10 @@ export function codexFailureCategory(error: unknown): ProviderFailureCategory | 
       if (status === 402) return "billing";
       if (status === 403) return "permission";
       if (status === 429) return "rate_limit";
+      if (status === 400 || status === 404 || status === 409 || status === 413) return "invalid_request";
+      // The wrapper can carry service/capacity failures as well as transport errors. Preserve
+      // fallback for statuses whose category is not established, including ambiguous HTTP 503.
+      if (status != null && status !== 500 && status !== 502 && status !== 504) return null;
       return "transport";
     }
   }

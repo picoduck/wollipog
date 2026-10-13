@@ -429,7 +429,7 @@ export function BackgroundWorkPanel({
                             <StatusBadge meta={statusMeta("job", state)} />
                           </span>
                           <span className="row-line">
-                            <span className="row-sub">{backgroundJobRowSentence(job, state, unfinishedSiblings, now)}</span>
+                            <span className="row-sub">{backgroundJobRowSentence(job, state, unfinishedSiblings, now, group.deliveries)}</span>
                             <span className="row-trail">{formatDuration(Math.max(0, end - job.registeredAt))}</span>
                           </span>
                         </span>

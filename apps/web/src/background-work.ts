@@ -198,6 +198,13 @@ export function backgroundJobGroupStatus(
 
 const finishedStates: ReadonlySet<BackgroundJobCurrentState> = new Set(["completed", "failed", "killed"]);
 
+/** Delivery evidence supplements the bounded job view without rewriting its lifecycle. */
+function backgroundJobRetryExhausted(job: ManagedBackgroundJobView, deliveries: readonly BackgroundDeliveryView[]): boolean {
+  return job.continuationId != null && job.continuationAcceptedAt == null && job.assistantResultPersistedAt == null &&
+    deliveries.some((delivery) => delivery.continuationId === job.continuationId && delivery.retryExhaustedAt != null &&
+      delivery.acceptedAt == null && delivery.runnerResultPersistedAt == null);
+}
+
 /**
  * A job row's second line (#2858): one sentence about its result, "Started 10m ago", "Result waits
  * for the other job", "Result returned 50m ago", "Last seen 12m ago". `unfinishedSiblings` counts
@@ -208,12 +215,14 @@ export function backgroundJobRowSentence(
   state: BackgroundJobCurrentState,
   unfinishedSiblings: number,
   now: number,
+  deliveries: readonly BackgroundDeliveryView[] = [],
 ): string {
   const ago = (timestamp: number | undefined) => formatRecordedRelativeTime(timestamp, now);
   if (state === "running" || state === "stalled") return `Started ${ago(job.registeredAt)}`;
   if (!finishedStates.has(state)) return `Last seen ${ago(job.lastObservedAt)}`;
   if (job.assistantResultPersistedAt != null) return `Result returned ${ago(job.assistantResultPersistedAt)}`;
   if (job.continuationMissingResultAt != null) return "Result never arrived";
+  if (backgroundJobRetryExhausted(job, deliveries)) return "Result return stopped";
   if (job.continuationAcceptedAt != null || job.continuationSubmittedAt != null || job.continuationQueuedAt != null) {
     return "Returning result";
   }
@@ -229,11 +238,13 @@ export function backgroundJobResultSentence(
   state: BackgroundJobCurrentState,
   unfinishedSiblings: number,
   now: number,
+  deliveries: readonly BackgroundDeliveryView[] = [],
 ): string {
   if (job.assistantResultPersistedAt != null) {
     return `Returned to this conversation ${formatRecordedRelativeTime(job.assistantResultPersistedAt, now)}`;
   }
   if (job.continuationMissingResultAt != null) return "Never reached this conversation";
+  if (backgroundJobRetryExhausted(job, deliveries)) return "Automatic capacity retries ended before this result was accepted";
   if (job.continuationAcceptedAt != null || job.continuationSubmittedAt != null || job.continuationQueuedAt != null) {
     return "Returning to this conversation now";
   }

@@ -70,7 +70,7 @@ export function createNativeApiTransport(options: NativeApiTransportOptions): Ap
       const allowedHeaders: Array<[string, string]> = [];
       headers.forEach((value, name) => {
         const lower = name.toLowerCase();
-        if (lower === "content-type" || lower === "accept") allowedHeaders.push([lower, value]);
+        if (lower === "content-type" || lower === "accept" || lower === "x-wollipog-ui-protocol") allowedHeaders.push([lower, value]);
       });
       const requestId = `request-${++nextRequest}`;
       const frame = encodeNativeHttpRequest({

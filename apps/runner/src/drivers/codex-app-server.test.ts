@@ -4977,3 +4977,20 @@ test("Codex structured capacity evidence outranks conflicting authentication pro
   assert.equal(h.authenticationFailures(), 0);
   assert.doesNotMatch(JSON.stringify([h.events, h.stderr, h.driver.lastTurnError()]), /synthetic-secret/);
 });
+
+
+test("uncategorized Codex authentication rejection retains safe sign-in recovery", async () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "thread-ready";
+  (h.driver as any).peer = {
+    request: async (method: string) => {
+      if (method === "turn/start") throw { code: -32000, message: "401 Unauthorized: invalid api key synthetic-secret" };
+      return {};
+    },
+    requestWithDeadline: async () => ({}),
+  };
+  assert.equal(await h.driver.prompt("task"), "refusal");
+  assert.equal(h.driver.lastTurnFailureCategory(), null);
+  assert.equal(h.authenticationFailures(), 1);
+  assert.doesNotMatch(JSON.stringify([h.events, h.stderr, h.driver.lastTurnError()]), /synthetic-secret/);
+});

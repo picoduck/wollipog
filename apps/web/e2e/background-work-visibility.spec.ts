@@ -596,6 +596,7 @@ for (const width of [390, 1440]) {
     await expect(notice).toBeVisible();
     await expect(notice.locator(".notice-title")).toHaveText("Retry Exhausted");
     await expect(notice).toContainText("The return step was not confirmed.");
+    await expect(panel).toContainText("Result return stopped");
     await expect(notice.getByRole("button", { name: "Acknowledge", exact: true })).toBeVisible();
     await expect(notice.getByRole("button", { name: /retry|rerun/i })).toHaveCount(0);
     await notice.getByRole("button", { name: "Show Details", exact: true }).click();

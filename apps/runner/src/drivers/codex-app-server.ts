@@ -1368,7 +1368,9 @@ export class CodexAppServerDriver implements Driver {
         // Codex's own error response proves no turn started; a broken transport after the write
         // cannot say whether Codex saw the request.
         this.turnStartUndelivered = !e?.transportFailure || e?.notSent === true;
-        this.emitDriverError(this.turnStartError, this.turnFailureCategory);
+        // Route from original evidence before its safe replacement loses the auth pattern.
+        if (this.turnFailureCategory == null && authenticationDiagnostic) this.signalAuthenticationFailure();
+        else this.emitDriverError(this.turnStartError, this.turnFailureCategory);
         this.closeTurnUsage();
         this.settleTurn("refusal");
       });

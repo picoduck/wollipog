@@ -1077,6 +1077,9 @@ export class ClaudeCodeDriver implements Driver {
       this.opts.orchestrator?.strictProjectIsolation !== false,
     );
     if (capabilityError) {
+      // This submission never owns the provider stream. Bind its local refusal without erasing
+      // an unsolicited turn's accumulator or inheriting the previous runner turn's category.
+      this.settledRunnerTurnFailureCategory = null;
       this.settledRunnerTurnErrorText = capabilityError;
       this.cb.onEvent({ kind: "error", message: capabilityError });
       return Promise.resolve("refusal");
