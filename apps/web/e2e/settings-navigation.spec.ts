@@ -187,9 +187,9 @@ test("at 1440px the section nav stays in view after Behavior scrolls 600px", asy
   const scroller = page.locator(".main-body");
   const nav = page.getByRole("navigation", { name: "Settings Sections" });
   await expect(nav.locator('a[aria-current="page"]')).toHaveText("Behavior");
-  // Behavior's agent defaults and About Artifact Uploads, open, make it tall enough to scroll 600px
-  // in a 600px window.
-  await page.getByRole("button", { name: /^Default Models, Efforts, and Permissions/ }).click();
+  // Behavior's agent rows, listed without expanding (#3024), and About Artifact Uploads, open, make
+  // it tall enough to scroll 600px in a 600px window.
+  await expect(page.getByRole("button", { name: /^Edit… Codex App Server/ })).toBeVisible();
   await page.getByText("About Artifact Uploads", { exact: true }).click();
   await expect.poll(() => scroller.evaluate((element) => element.scrollHeight - element.clientHeight)).toBeGreaterThan(600);
   const scrolled = await scroller.evaluate((element) => {
