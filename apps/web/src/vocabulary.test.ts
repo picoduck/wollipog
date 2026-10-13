@@ -171,9 +171,8 @@ test("machine selectors render disambiguated Machine labels", () => {
 const UPDATE_REQUIRED_COPY: ReadonlyArray<[string, string]> = [
   ["./components/OrchestratorSettingsPanel.tsx",
     "This version of Wollipog does not support Orchestrator settings. Update or restart Wollipog so it matches this dashboard, then try again."],
-  ["./components/OrchestratorSettingsPanel.tsx", "Update Wollipog to configure a fixed Child Harness."],
-  ["./components/OrchestratorSettingsPanel.tsx",
-    "Fixed Child Harness policy is unavailable on this version of Wollipog. Update or restart Wollipog to enable this control."],
+  ["./components/OrchestratorSettingsPanel.tsx", "Update Wollipog on a machine to choose a fixed Child Harness."],
+  ["./components/OrchestratorSettingsPanel.tsx", "\"Orchestrator Settings Need a Newer Wollipog\""],
   ["./session-preset-defaults.ts", "Update Wollipog to configure Integration Isolation."],
   ["./components/ProjectLocationDialog.tsx",
     "This version of Wollipog does not support creating a Location from a new folder. Update or restart Wollipog so it matches this dashboard, then try again."],

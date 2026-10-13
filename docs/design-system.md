@@ -1925,7 +1925,11 @@ The editor save bar is `.save-bar` (`SaveBar`): sticky at the bottom of its regi
 while there is something to save or a save failed. When a save fails it becomes `.save-bar.is-error`:
 the notice's danger wash (7% `--red` over `--bg-elev`, a 32% `--red` edge), a `CircleAlert`, the
 failure in one sentence (`role="alert"`), and Save becomes **Try Again**. In Settings it floats 16px
-above the bottom of the settings panel. No screen uses it yet.
+above the bottom of the settings panel; on a phone its two actions share the bar's full width under
+the message. Settings › Orchestrator is its first screen (#3026): the editor's groups are the
+settings panel's own children so the bar is too, a field error at a setting (`NumberRow`'s or
+`SelectRow`'s `error`) blocks Save with "Fix N settings to save", and leaving the section or the
+page with a dirty draft asks **Keep Editing** or **Discard Changes** first (`useLeaveGuard`).
 
 An editor names its actions and states with four props, and changes nothing in `SaveBar` itself:
 

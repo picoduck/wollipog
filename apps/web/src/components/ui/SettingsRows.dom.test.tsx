@@ -1783,6 +1783,37 @@ test("an action row is one --control-h button named by its label and the row", a
   }
 });
 
+test("an invalid select is aria-invalid in a .field with its error under the trigger, which it points at first", async () => {
+  const { container, cleanup } = await render(
+    <SelectRow
+      title="Child Model"
+      description="Automatic lets each child's agent choose."
+      options={SCHEMES_FIXTURE}
+      value="wollipog"
+      error="Choose another model."
+      onChange={() => undefined}
+    />,
+  );
+  try {
+    const trigger = container.querySelector(".ui-select-trigger")!;
+    assert.equal(trigger.getAttribute("aria-invalid"), "true");
+    // The control column is the .field, so the shared invalid edge reaches the trigger (§8.5).
+    const error = container.querySelector(".setting-row-control.field > .field-error")!;
+    assert.equal(error.textContent, "Choose another model.");
+    assert.equal(error.getAttribute("role"), null);
+    assert.deepEqual(describedBy(trigger), ["Choose another model.", "Automatic lets each child's agent choose."]);
+  } finally {
+    await cleanup();
+  }
+  const valid = await render(<SelectRow title="Child Model" options={SCHEMES_FIXTURE} value="wollipog" onChange={() => undefined} />);
+  try {
+    assert.equal(valid.container.querySelector(".ui-select-trigger")!.getAttribute("aria-invalid"), null);
+    assertNoDomNode(valid.container.querySelector(".field"));
+  } finally {
+    await valid.cleanup();
+  }
+});
+
 test("a disabled select row shows its reason as visible text, and the trigger is described by it", async () => {
   const { container, cleanup } = await render(
     <SelectRow

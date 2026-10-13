@@ -13,6 +13,8 @@ import {
 } from "../components/SettingsView.js";
 import { DEFAULT_ORCHESTRATOR_DEFAULTS, type AgentHarnessDefaultsView } from "@wollipog/protocol";
 import { OrchestratorSettingsPanel } from "../components/OrchestratorSettingsPanel.js";
+import { FeedbackProvider } from "../components/FeedbackProvider.js";
+import { interceptLeave } from "../leave-guard.js";
 import { StaticRow } from "../components/ui/SettingsRows.js";
 import { RowKinds } from "./setting-row-kinds.js";
 import { ApprovalsPanel } from "../components/ApprovalsPanel.js";
@@ -123,6 +125,8 @@ harnessDefaultsRepairedView.defaults[0]!.installations[0]!.effortLevels = ["low"
 
 /** Behavior › Evidence's preference, kept for the page's life so a saved change reads back. */
 let artifactUploadPreference = "manual";
+/** What a save in Settings › Orchestrator stored, for as long as the page is open. */
+let orchestratorSaved: typeof DEFAULT_ORCHESTRATOR_DEFAULTS | null = null;
 
 const harnessDefaultsTransport: ApiTransport = {
   instanceId: "settings-fixture",
@@ -165,12 +169,34 @@ const harnessDefaultsTransport: ApiTransport = {
     }
     if (path === "/api/identity") return Response.json({ context: { userId: "fixture-user", organizationId: "fixture-org" } });
     if (path === "/api/orchestrator-settings") {
-      const drifted = new URLSearchParams(window.location.search).get("defaults") === "agent-repair";
-      const defaults = structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS);
+      const params = new URLSearchParams(window.location.search);
+      const drifted = params.get("defaults") === "agent-repair";
+      // `orchestrator=unavailable`: no machine advertises child capabilities (#3026's warning);
+      // `orchestrator=save-fails`: every save is refused, for the save bar's error state.
+      const mode = params.get("orchestrator");
+      if (init?.method === "PUT") {
+        if (mode === "save-fails") {
+          return new Response(JSON.stringify({ error: "Wollipog couldn't store your defaults. Try again in a moment." }),
+            { status: 503, headers: { "content-type": "application/json" } });
+        }
+        orchestratorSaved = (JSON.parse(String(init.body)) as { defaults: typeof DEFAULT_ORCHESTRATOR_DEFAULTS }).defaults;
+      }
+      const defaults = orchestratorSaved ? structuredClone(orchestratorSaved) : structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS);
       if (drifted) defaults.behavior.childModel = "retired-model";
+      if (mode === "unavailable") {
+        return new Response(JSON.stringify({
+          defaults,
+          source: orchestratorSaved ? "user_default" : "system_default",
+          capabilities: {
+            harnesses: [], models: [], effortLevels: [], supportedPairs: [],
+            installations: 0, compatibleInstallations: 0, status: "unavailable",
+            reason: "No current Agent Harness installation advertises child model and effort capabilities. Connect or update a runner, then retry.",
+          },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
       return new Response(JSON.stringify({
         defaults,
-        source: "user_default",
+        source: orchestratorSaved || drifted ? "user_default" : "system_default",
         capabilities: {
           harnesses: [{
             agentId: "codex-app-server",
@@ -279,6 +305,8 @@ function Harness() {
   }, []);
   const routed = route === null ? null : viewFromPath(route);
   const navigate = (view: View) => {
+    // As the store's navigate does: an editor with unsaved changes asks first (#3026).
+    if (interceptLeave(() => navigate(view))) return;
     const next = new URLSearchParams(window.location.search);
     next.set("route", viewPath(view));
     window.history.pushState(null, "", `?${next}`);
@@ -406,7 +434,12 @@ function Harness() {
                   <ApprovalsPanel policyId={routed?.name === "settings" ? routed.policyId : undefined} />
                 </ApiProvider>
               ),
-              orchestrator: <ApiProvider client={harnessDefaultsApi}><OrchestratorSettingsPanel /></ApiProvider>,
+              // With the confirmation provider its leave prompt opens in, as the shell has.
+              orchestrator: (
+                <FeedbackProvider>
+                  <ApiProvider client={harnessDefaultsApi}><OrchestratorSettingsPanel /></ApiProvider>
+                </FeedbackProvider>
+              ),
               network: (
                 <NetworkPanel
                   tailnet={{

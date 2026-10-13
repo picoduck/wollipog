@@ -12,6 +12,7 @@ import {
   parseSessionFilters,
 } from "./store.js";
 import { encodeResourceId, viewFromPath, type View } from "./navigation.js";
+import { registerLeaveGuard } from "./leave-guard.js";
 import { uiStreamSubscriptions } from "./ui-subscriptions.js";
 import { saveInstanceStorageValue, type KeyValueStorage } from "./instance-storage.js";
 import type { SessionEvent, SessionView } from "@wollipog/protocol";
@@ -115,6 +116,47 @@ test("direct Settings entry has an Inbox fallback and browser traversal shares r
   assert.deepEqual(store.getState().settingsReturnView, { name: "inbox" });
   store.navigateFromHistory({ name: "usage" });
   assert.equal(store.getState().settingsReturnView, null);
+});
+
+test("an editor's leave guard holds in-app navigation until it lets the person leave (#3026)", () => {
+  const pushed: View[] = [];
+  const store = new Store({ name: "settings", section: "orchestrator" }, (view) => pushed.push(view));
+  const asked: Array<() => void> = [];
+  const release = registerLeaveGuard((leave) => asked.push(leave));
+  try {
+    store.navigate({ name: "settings", section: "orchestrator" });
+    assert.equal(asked.length, 0, "the view already on screen is not a leave");
+
+    store.navigate({ name: "settings", section: "appearance" });
+    assert.equal(asked.length, 1);
+    assert.deepEqual(store.getState().view, { name: "settings", section: "orchestrator" }, "held while it asks");
+    assert.deepEqual(pushed, []);
+
+    // Choosing to leave goes where the link was going, and the guard does not ask again.
+    asked[0]!();
+    assert.deepEqual(store.getState().view, { name: "settings", section: "appearance" });
+    assert.deepEqual(pushed, [{ name: "settings", section: "appearance" }]);
+    store.navigate({ name: "inbox" });
+    assert.equal(asked.length, 1, "the guard released itself before leaving");
+    assert.deepEqual(store.getState().view, { name: "inbox" });
+  } finally {
+    release();
+  }
+});
+
+test("browser Back and Forward are never held, so no history entry is rewritten (#3026)", () => {
+  const pushed: View[] = [];
+  const store = new Store({ name: "settings", section: "orchestrator" }, (view) => pushed.push(view));
+  const asked: Array<() => void> = [];
+  const release = registerLeaveGuard((leave) => asked.push(leave));
+  try {
+    store.navigateFromHistory({ name: "usage" });
+    assert.equal(asked.length, 0);
+    assert.deepEqual(store.getState().view, { name: "usage" });
+    assert.deepEqual(pushed, [], "pushing the editor's address back would drop the forward entries");
+  } finally {
+    release();
+  }
 });
 
 test("Inbox state preserves one selection per split and clamps the persisted ratio", () => {

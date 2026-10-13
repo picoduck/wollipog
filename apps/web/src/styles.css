@@ -3033,6 +3033,13 @@ button.status { cursor: pointer; }
 }
 /* In Settings the bar floats 16px above the panel's bottom edge. */
 .settings-panel > .save-bar { bottom: var(--space-4); }
+/* On a phone its two actions share the full width under the message (and a failure's icon, which
+   the message leaves room for), as a phone sheet's footer does (§7.5). */
+@media (max-width: 760px) {
+  .settings-panel > .save-bar { flex-wrap: wrap; }
+  .settings-panel > .save-bar > .save-bar-message { flex: 1 1 calc(100% - var(--space-6)); }
+  .settings-panel > .save-bar > .btn { flex: 1; max-width: none; }
+}
 
 /* ---------------------------------- Steps ----------------------------------
    Numbered instructions (docs/design-system.md §8.7), rendered by Steps.tsx. Each step is an <li>
@@ -17448,9 +17455,31 @@ button.setting-row { cursor: pointer; }
 .policy-meta-item + .policy-meta-item { margin-inline-start: var(--space-3); }
 .policy-meta-item > svg { display: inline-block; margin-right: var(--space-1); vertical-align: text-bottom; }
 
-/* Orchestrator defaults keep Behavior and Decision Delegation visibly separate while reusing the
-   settings row controls and their keyboard contracts. */
-.orchestrator-settings { display: grid; gap: var(--space-5); color: var(--text); }
+/* Settings › Orchestrator (#3026): the groups are the panel's own children, so its save bar is the
+   settings panel's and floats above its bottom edge (§8.6). What remains here is the gate label
+   inside Decision Delegation's surface and the two group feet. */
+/* At a setting row's own inset, so the label starts where the row titles under it do. */
+.orchestrator-gates-label {
+  margin: 0;
+  padding: var(--space-2) var(--space-4) var(--space-1);
+  color: var(--text-dim);
+  font: var(--type-small);
+  font-weight: var(--weight-semibold);
+}
+.orchestrator-about > .disclosure-body > p { margin: 0; }
+/* A touch target on touch, as every other control in the panel is. */
+@media (pointer: coarse) {
+  .orchestrator-about > summary { min-height: var(--control-h); }
+}
+.orchestrator-human-only {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-1);
+  margin: var(--space-1) 0 0;
+}
+/* On the first line's centre when the sentence wraps on a phone. */
+.orchestrator-human-only > svg { flex: none; margin-top: 2px; }
+.orchestrator-about[open] + .orchestrator-human-only { margin-top: var(--space-3); }
 .orchestrator-policy-control input {
   width: 100%;
   color: var(--text);
@@ -17460,8 +17489,6 @@ button.setting-row { cursor: pointer; }
   padding: 7px 9px;
   font: inherit;
 }
-.orchestrator-settings .form-error { margin: 0 var(--row-pad-x); }
-.orchestrator-settings-actions { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
 
 .new-session-orchestrator-policy { display: grid; gap: var(--space-3); margin-top: var(--space-2); }
 .new-session-provider-permissions { display: grid; gap: var(--space-1); margin-top: var(--space-2); }
@@ -17541,7 +17568,7 @@ button.setting-row { cursor: pointer; }
 
 @media (max-width: 760px) {
   .orchestrator-policy-control { grid-template-columns: minmax(0, 1fr); }
-  .orchestrator-settings-actions, .orchestrator-policy-unavailable { align-items: stretch; flex-direction: column; }
+  .orchestrator-policy-unavailable { align-items: stretch; flex-direction: column; }
 }
 
 @media (prefers-reduced-motion: reduce) {
