@@ -242,7 +242,7 @@ const harnessDefaultsTransport: ApiTransport = {
     if (path === "/api/orchestrator-settings") {
       const params = new URLSearchParams(window.location.search);
       const drifted = params.get("defaults") === "agent-repair";
-      // `orchestrator=unavailable`: no machine advertises child capabilities (#3026's warning);
+      // `orchestrator=unavailable`: no connected machine reports child capabilities (#3026's warning);
       // `orchestrator=save-fails`: every save is refused, for the save bar's error state.
       const mode = params.get("orchestrator");
       if (init?.method === "PUT") {

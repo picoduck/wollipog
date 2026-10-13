@@ -333,7 +333,7 @@ test("with no installation, a warning notice leads Children and the model and ef
       const trigger = container.querySelector(`[aria-label^="${select}:"]`)!;
       assert.equal(trigger.getAttribute("aria-disabled"), "true", `${select} is disabled`);
       const described = (trigger.getAttribute("aria-describedby") ?? "").split(" ").map((id) => document.getElementById(id)?.textContent);
-      assert.ok(described.includes("Unavailable until a machine advertises models and efforts."), `${select} says why it is disabled`);
+      assert.ok(described.includes("Unavailable until a connected machine reports models and efforts."), `${select} says why it is disabled`);
     }
     assertNoDomNode(container.querySelector(".form-error"), "no red paragraph after the groups");
     assertNoDomNode(container.querySelector('[role="alert"]'));
