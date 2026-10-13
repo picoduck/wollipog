@@ -681,9 +681,6 @@ interface ActiveSession {
   authenticationBlocked?: boolean;
   /** Only a terminal refusal paired with a capacity diagnostic can trigger a continuation. */
   providerCapacityFailure?: boolean;
-  /** Provider error of the immediately preceding submission the provider provably rejected without
-   * starting a turn (#3100). Any other outcome, an uncertain failure included, clears it. */
-  lastProviderRejection?: string;
   /** A runner prompt has crossed its provider boundary in this logical turn. */
   providerPromptSubmitted?: boolean;
   /** Only an interrupted runner prompt, rather than an idle process or manual command, resumes. */
@@ -1268,6 +1265,10 @@ export class SessionManager {
    * provider. Session-scoped so a provider exit and its automatic recovery keep it. A person's
    * prompt dispatches ahead of the held turns and clears it; Restart and Stop discard it. */
   private readonly providerRejectionHolds = new Map<string, string>();
+  /** Provider error of the immediately preceding submission the provider provably rejected without
+   * starting a turn (#3100). Any other outcome, an uncertain failure included, clears it. Scoped like
+   * the hold, so a provider exit between two rejections does not hide the pattern. */
+  private readonly lastProviderRejections = new Map<string, string>();
   /** Prompts received after a session was materialized but before capacity admission. They must
    * join the original launch instead of starting a competing resume generation. Durable command
    * lifecycles make this in-memory FIFO recoverable after a runner restart. */
@@ -7137,7 +7138,11 @@ export class SessionManager {
 
   private idleProviderCanPark(sessionId: string, entry: ActiveSession): boolean {
     const meta = this.store.readMeta(sessionId);
-    return !!meta && entry.status === "idle" && !entry.running && !entry.providerInitiatedTurnActive &&
+    // A rejection hold reports the idle process as input_required. The hold is session-scoped, so
+    // parking keeps it, and the process is as reclaimable as any idle one (#3100).
+    const idle = entry.status === "idle" ||
+      (entry.status === "input_required" && this.providerRejectionHolds.has(sessionId));
+    return !!meta && idle && !entry.running && !entry.providerInitiatedTurnActive &&
       entry.queue.length === 0 && !entry.pendingWorktreeRebind && !entry.pendingProviderAccountSwitch &&
       !entry.authenticationBlocked &&
       !entry.historyQuarantined && !entry.historyIntegrityFailure && !entry.governanceTripped &&
@@ -12709,8 +12714,7 @@ export class SessionManager {
       : prompt;
     if (queued.sessionCommand) {
       // A provider command between two rejections means they were not consecutive (#3100).
-      const commandEntry = this.active.get(sessionId);
-      if (commandEntry) commandEntry.lastProviderRejection = undefined;
+      this.lastProviderRejections.delete(sessionId);
       await this.runSessionCommand(sessionId, queued);
       return;
     }
@@ -13263,7 +13267,7 @@ export class SessionManager {
       entry.currentBackgroundJobIds = undefined;
     } catch (err) {
       // A thrown prompt proves nothing about delivery, so it never extends a rejection streak.
-      entry.lastProviderRejection = undefined;
+      this.lastProviderRejections.delete(sessionId);
       this.settleModelStoppedJobs(sessionId, queued.id, false);
       if (backgroundJobIds?.length && !entry.backgroundPromptAccepted) {
         this.resetBackgroundContinuationSubmission(sessionId, backgroundJobIds);
@@ -15717,8 +15721,9 @@ export class SessionManager {
       !entry.authenticationBlocked && entry.client.lastPromptUndelivered?.() === true
       ? entry.client.lastTurnError?.()?.trim() || undefined
       : undefined;
-    const repeated = rejection !== undefined && rejection === entry.lastProviderRejection;
-    entry.lastProviderRejection = rejection;
+    const repeated = rejection !== undefined && rejection === this.lastProviderRejections.get(sessionId);
+    if (rejection === undefined) this.lastProviderRejections.delete(sessionId);
+    else this.lastProviderRejections.set(sessionId, rejection);
     if (!repeated || !automaticTurn(prompt)) return undefined;
     this.providerRejectionHolds.set(sessionId, rejection);
     this.log(JSON.stringify({ event: "provider_rejection_hold", sessionId, queued: entry.queue.length }));
@@ -16102,6 +16107,7 @@ export class SessionManager {
     this.recoveryLaunching.delete(sessionId);
     this.recoveryHolds.delete(sessionId);
     this.providerRejectionHolds.delete(sessionId);
+    this.lastProviderRejections.delete(sessionId);
   }
 
   /** Returns whether every provider driver was disposed cleanly. When false, some provider process

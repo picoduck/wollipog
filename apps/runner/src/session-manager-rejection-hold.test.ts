@@ -423,3 +423,48 @@ test("a provider command between two rejections means they were not consecutive 
     h.cleanup();
   }
 });
+
+test("a provider exit between two rejections does not hide that they repeat (#3100)", { skip: !haveGit() }, async () => {
+  const provider = fakeProvider();
+  const h = setup("exit_between", provider, "codex-app-server");
+  try {
+    await h.manager.start(h.spec);
+    h.continuation("first");
+    await waitFor(() => h.settled("first"), "the first continuation did not settle");
+    provider.callbacks[0]!.onExit(1);
+    await settle();
+
+    // The next continuation resumes the conversation in a fresh provider process.
+    h.continuation("second");
+    await waitFor(() => h.settled("second"), "the second continuation did not settle");
+    assert.equal(provider.prompts.at(-1)?.provider, 1);
+    assert.equal(h.statuses().at(-1)?.status, "input_required");
+    h.continuation("third");
+    await settle();
+    assert.equal(provider.prompts.length, 2, "the third continuation is held");
+    assert.deepEqual(h.log.filter((step) => step.startsWith("third:")), ["third:queued"]);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("an idle provider under a rejection hold can still be parked for capacity (#3100)", { skip: !haveGit() }, async () => {
+  const provider = fakeProvider();
+  const h = setup("park", provider, "codex-app-server");
+  try {
+    await h.manager.start(h.spec);
+    await engageHold(h);
+    const internals = h.manager as unknown as {
+      active: Map<string, unknown>;
+      idleProviderCanPark: (sessionId: string, entry: unknown) => boolean;
+    };
+    const canPark = () => internals.idleProviderCanPark(h.spec.sessionId, internals.active.get(h.spec.sessionId));
+    assert.equal(h.statuses().at(-1)?.status, "input_required");
+    assert.equal(canPark(), true, "no provider work is running, so the process is reclaimable");
+    h.continuation("third");
+    await settle();
+    assert.equal(canPark(), false, "a held turn in the FIFO keeps the process, as any queued work does");
+  } finally {
+    h.cleanup();
+  }
+});
