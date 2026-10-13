@@ -19,9 +19,23 @@ export interface RpcError {
   transportFailure?: true;
   /** Local-only marker: this request exhausted its caller-supplied deadline. */
   requestTimeout?: true;
+  /** Local-only marker: an oversized stdout record was discarded while this request was pending,
+   * so its response may never arrive. Set only for requests that opted into failOnDiscardedRecord. */
+  discardedRecord?: true;
+  /** Local-only: the request a deadline or discarded-record rejection belongs to. */
+  method?: string;
   /** Local-only marker: the request was refused before anything was written to the transport, so
    * the agent provably never saw it. Absent whenever a write may have happened. */
   notSent?: true;
+}
+
+export interface RequestOptions {
+  /** Absolute deadline: the request is removed from the pending map and rejected once it passes. */
+  deadlineAt?: number;
+  /** Reject as soon as an oversized stdout record is discarded while this request is pending. A
+   * discarded record cannot be attributed to an id, so use this only where nothing else large is
+   * expected while the request is outstanding, such as a serial handshake. */
+  failOnDiscardedRecord?: boolean;
 }
 
 export type RequestHandler = (params: Params, requestId: number | string) => Promise<unknown> | unknown;
@@ -31,6 +45,8 @@ interface Pending {
   resolve: (value: unknown) => void;
   reject: (err: RpcError) => void;
   timer?: ReturnType<typeof setTimeout>;
+  method: string;
+  failOnDiscardedRecord?: boolean;
 }
 
 interface RpcMessage {
@@ -66,7 +82,10 @@ export class JsonRpcPeer {
   ) {
     this.input = new BoundedNdjsonBuffer(
       (line) => this.processLine(line),
-      () => this.onTransportError?.(new Error("discarded oversized JSON-RPC stdout record")),
+      () => {
+        this.onTransportError?.(new Error("discarded oversized JSON-RPC stdout record"));
+        this.failDiscardSensitive();
+      },
       maxLineBytes,
     );
     stdout.setEncoding("utf8");
@@ -86,16 +105,17 @@ export class JsonRpcPeer {
     this.notificationHandlers.set(method, handler);
   }
 
-  request<T = unknown>(method: string, params?: Params): Promise<T> {
-    return this.requestInternal<T>(method, params);
+  request<T = unknown>(method: string, params?: Params, options: RequestOptions = {}): Promise<T> {
+    return this.requestInternal<T>(method, params, options);
   }
 
   /** Send a request that is removed from the pending map if its absolute deadline expires. */
   requestWithDeadline<T = unknown>(method: string, params: Params, deadlineAt: number): Promise<T> {
-    return this.requestInternal<T>(method, params, deadlineAt);
+    return this.requestInternal<T>(method, params, { deadlineAt });
   }
 
-  private requestInternal<T>(method: string, params?: Params, deadlineAt?: number): Promise<T> {
+  private requestInternal<T>(method: string, params: Params | undefined, options: RequestOptions): Promise<T> {
+    const { deadlineAt } = options;
     // Reject immediately if the transport is gone — otherwise the pending promise
     // would be stored and never settle (write() silently no-ops when closed).
     if (this.closed) {
@@ -112,11 +132,17 @@ export class JsonRpcPeer {
         message: `request deadline exceeded (cannot call ${method})`,
         requestTimeout: true,
         notSent: true,
+        method,
       });
     }
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
-      const pending: Pending = { resolve: resolve as (v: unknown) => void, reject };
+      const pending: Pending = {
+        resolve: resolve as (v: unknown) => void,
+        reject,
+        method,
+        ...(options.failOnDiscardedRecord ? { failOnDiscardedRecord: true } : {}),
+      };
       if (deadlineAt !== undefined) {
         const remainingMs = Math.max(0, deadlineAt - Date.now());
         pending.timer = setTimeout(() => {
@@ -126,6 +152,7 @@ export class JsonRpcPeer {
             code: -32002,
             message: `request deadline exceeded (${method})`,
             requestTimeout: true,
+            method,
           });
         }, Math.min(remainingMs, 2_147_483_647));
       }
@@ -146,6 +173,23 @@ export class JsonRpcPeer {
       p.reject({ code: -32000, message: reason, transportFailure: true });
     }
     this.pending.clear();
+  }
+
+  /** The discarded record may have been the response to any opted-in request, which would then
+   * never settle. Fail those now rather than leave them waiting for their deadline (#3099). */
+  private failDiscardSensitive(): void {
+    for (const [id, p] of this.pending) {
+      if (!p.failOnDiscardedRecord) continue;
+      this.pending.delete(id);
+      if (p.timer) clearTimeout(p.timer);
+      p.reject({
+        code: -32003,
+        message: `discarded an oversized JSON-RPC record while awaiting ${p.method}`,
+        transportFailure: true,
+        discardedRecord: true,
+        method: p.method,
+      });
+    }
   }
 
   private write(obj: RpcMessage): void {

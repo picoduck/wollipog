@@ -13,7 +13,9 @@ import {
   approvalResponse,
   codexAppServerArgs,
   buildCodexTurnParams,
+  CODEX_INITIALIZATION_REQUEST_TIMEOUT_MS,
   CodexAppServerDriver,
+  CodexAppServerInitializationStalledError,
   CodexAppServerResumeError,
   DEFAULT_MODE_QUESTION_FEATURE,
   diagnosticValue,
@@ -4630,7 +4632,7 @@ for (const lifecycle of ["fresh", "resume", "fork"] as const) {
   });
 }
 
-test("a discarded oversized resume leaves no thread, and turn/start is never sent with a null thread id (#3085)", async () => {
+test("a discarded oversized resume fails the launch, and turn/start is never sent with a null thread id (#3085, #3099)", async () => {
   const h = makeHarness({ resumeId: "large-thread" });
   const toServer = new PassThrough();
   const fromServer = new PassThrough();
@@ -4665,8 +4667,15 @@ test("a discarded oversized resume leaves no thread, and turn/start is never sen
   });
   (h.driver as any).peer = peer;
 
-  const session = h.driver.newSession("/resume");
-  await waitForCondition(() => transportErrors.length > 0);
+  const started = Date.now();
+  await assert.rejects(h.driver.newSession("/resume"), (error: unknown) => {
+    assert.ok(error instanceof CodexAppServerResumeError);
+    assert.equal(error.retryable, false);
+    assert.equal(error.message, "could not resume Codex thread large-thread: Codex app-server sent a record larger " +
+      "than the JSON-RPC limit while thread/resume was pending; it was discarded");
+    return true;
+  });
+  assert.ok(Date.now() - started < 5_000, "the discard fails the launch without waiting for the initialization bound");
   assert.deepEqual(transportErrors, ["discarded oversized JSON-RPC stdout record"]);
   assert.equal(h.driver.agentSessionId(), null, "the discarded resume response never settles the thread");
 
@@ -4682,7 +4691,6 @@ test("a discarded oversized resume leaves no thread, and turn/start is never sen
   assert.match(h.driver.lastTurnError() ?? "", /threadId/u);
   assert.equal(h.driver.lastPromptUndelivered(), true);
   assert.ok(h.events.some((event) => event.kind === "error" && /threadId/u.test(event.message)));
-  void session;
 });
 
 test("a Codex turn/start rejection is reported as undelivered with the provider error (#3085)", async () => {
@@ -4709,3 +4717,204 @@ test("a Codex turn/start rejection is reported as undelivered with the provider 
     assert.equal(h.driver.lastPromptUndelivered(), undelivered, rejection.message);
   }
 });
+
+/** A fake app server over in-memory streams that answers every request except `silent`. */
+function silentAppServer(silent: string, resumeId = "thread-held") {
+  const toServer = new PassThrough();
+  const fromServer = new PassThrough();
+  const methods: string[] = [];
+  toServer.setEncoding("utf8");
+  let buffered = "";
+  toServer.on("data", (chunk: string) => {
+    buffered += chunk;
+    for (let index = buffered.indexOf("\n"); index >= 0; index = buffered.indexOf("\n")) {
+      const message = JSON.parse(buffered.slice(0, index));
+      buffered = buffered.slice(index + 1);
+      if (message.id === undefined) continue;
+      methods.push(message.method);
+      if (message.method === silent) continue;
+      const thread = { id: message.method === "thread/start" ? "thread-new" : resumeId, status: { type: "idle" } };
+      const result = message.method === "initialize" ? { userAgent: "codex-test" } :
+        message.method.startsWith("thread/") ? { thread } : {};
+      fromServer.write(JSON.stringify({ id: message.id, result }) + "\n");
+    }
+  });
+  return { toServer, fromServer, methods };
+}
+
+for (const [method, resumeId] of [
+  ["thread/read", "thread-held"],
+  ["thread/resume", "thread-held"],
+  ["thread/start", undefined],
+] as const) {
+  test(`a ${method} that is never answered fails the launch within the initialization bound (#3099)`, async () => {
+    const timeoutMs = 40;
+    const server = silentAppServer(method);
+    const driver = new CodexAppServerDriver({
+      command: "codex", args: [], cwd: "/tmp/work", env: {}, config: {}, context: { kind: "native" },
+      ...(resumeId ? { resumeId } : {}),
+    }, { onEvent: () => {}, onStderr: () => {}, onExit: () => {} }, undefined, {
+      kill: () => {}, initializationRequestTimeoutMs: timeoutMs,
+    });
+    (driver as any).peer = new JsonRpcPeer(server.toServer, server.fromServer);
+    const started = Date.now();
+    try {
+      await assert.rejects(driver.newSession("/tmp/work"), (error: unknown) => {
+        const stalled = `Codex app-server did not answer ${method} within ${timeoutMs} ms`;
+        if (resumeId) {
+          assert.ok(error instanceof CodexAppServerResumeError);
+          assert.equal(error.retryable, false, "a stalled resume is a failed launch, not a busy thread");
+          assert.equal(error.message, `could not resume Codex thread ${resumeId}: ${stalled}`);
+        } else {
+          assert.ok(error instanceof CodexAppServerInitializationStalledError);
+          assert.equal(error.method, method);
+          assert.equal(error.reason, "timeout");
+          assert.equal(error.message, stalled);
+        }
+        return true;
+      });
+      const elapsed = Date.now() - started;
+      assert.ok(elapsed >= timeoutMs - 5 && elapsed < 2_000, `failed after ${elapsed} ms`);
+      assert.equal(server.methods.at(-1), method);
+      assert.equal(driver.agentSessionId(), null);
+    } finally {
+      driver.dispose();
+    }
+  });
+}
+
+test("an initialize request that is never answered fails initialization within the bound (#3099)", async () => {
+  const child = fakeAgentProcess();
+  const killed: AgentProcess[] = [];
+  const stderr: string[] = [];
+  const driver = new CodexAppServerDriver({
+    command: "codex", args: [], cwd: "/tmp/work", env: {}, config: {}, context: { kind: "native" },
+  }, { onEvent: () => {}, onStderr: (line) => stderr.push(line), onExit: () => {} }, undefined, {
+    spawn: () => child,
+    kill: (target) => { killed.push(target); },
+    initializationRequestTimeoutMs: 30,
+  });
+  try {
+    await assert.rejects(driver.initialize(), (error: unknown) => {
+      assert.ok(error instanceof CodexAppServerInitializationStalledError);
+      assert.equal(error.method, "initialize");
+      assert.equal(error.message, "Codex app-server did not answer initialize within 30 ms");
+      return true;
+    });
+  } finally {
+    driver.dispose();
+  }
+  assert.deepEqual(killed, [child], "disposing the failed launch stops the unresponsive app server");
+  assert.deepEqual(stderr, []);
+});
+
+for (const reapProven of [true, false]) test(`tearing down a stalled Direct WSL initialize is not reported as a provider exit (reap ${reapProven ? "proven" : "unproven"}) (#3099)`, async () => {
+  const child = fakeAgentProcess();
+  child.wslReapCompletion = Promise.resolve(reapProven);
+  const exits: Array<number | null> = [];
+  const driver = new CodexAppServerDriver({
+    command: "codex", args: [], cwd: "/tmp/work", env: {}, config: {}, context: { kind: "native" },
+    isolation: { backend: "wsl-bwrap" } as DriverOptions["isolation"],
+  }, { onEvent: () => {}, onStderr: () => {}, onExit: (code) => exits.push(code) }, undefined, {
+    spawn: () => child,
+    // The intentional teardown kill closes the provider, exactly as a real process exit would.
+    kill: (target) => { setImmediate(() => target.emit("close", null)); },
+    initializationRequestTimeoutMs: 30,
+  });
+  try {
+    await assert.rejects(driver.initialize(), (error: unknown) => {
+      if (reapProven) {
+        assert.ok(error instanceof CodexAppServerInitializationStalledError);
+        assert.equal(error.method, "initialize");
+      } else {
+        // The teardown refusal still names the stalled method rather than replacing it.
+        assert.equal((error as Error).message, "Codex app-server did not answer initialize within 30 ms; " +
+          "Direct WSL provider process-group reap was not proven");
+      }
+      return true;
+    });
+    await nextTask();
+    // An onExit here would send the session's held prompts to crash recovery, which relaunches into
+    // the same stall instead of settling them as never sent.
+    assert.deepEqual(exits, []);
+  } finally {
+    driver.dispose();
+  }
+});
+
+test("the initialization bound defaults to two minutes per request (#3099)", () => {
+  assert.equal(CODEX_INITIALIZATION_REQUEST_TIMEOUT_MS, 120_000);
+  assert.equal(new CodexAppServerInitializationStalledError("thread/resume", "timeout", CODEX_INITIALIZATION_REQUEST_TIMEOUT_MS).message,
+    "Codex app-server did not answer thread/resume within 120 seconds");
+});
+
+test("a successful launch handshake carries the bound without changing its requests (#3099)", async () => {
+  const server = silentAppServer("none");
+  const options: unknown[] = [];
+  const peer = new JsonRpcPeer(server.toServer, server.fromServer);
+  const request = peer.request.bind(peer);
+  peer.request = ((method: string, params?: unknown, requestOptions?: unknown) => {
+    options.push([method, requestOptions]);
+    return request(method, params, requestOptions as never);
+  }) as typeof peer.request;
+  const driver = new CodexAppServerDriver({
+    command: "codex", args: [], cwd: "/tmp/work", env: {}, config: {}, context: { kind: "native" },
+    resumeId: "thread-held",
+  }, { onEvent: () => {}, onStderr: () => {}, onExit: () => {} }, undefined, { kill: () => {} });
+  (driver as any).peer = peer;
+  try {
+    const before = Date.now();
+    assert.equal(await driver.newSession("/tmp/work"), "thread-held");
+    const handshake = options.filter(([method]) => method === "thread/read" || method === "thread/resume") as
+      Array<[string, { deadlineAt: number; failOnDiscardedRecord: boolean }]>;
+    assert.deepEqual(handshake.map(([method]) => method), ["thread/read", "thread/resume"]);
+    for (const [, requestOptions] of handshake) {
+      assert.equal(requestOptions.failOnDiscardedRecord, true);
+      assert.ok(requestOptions.deadlineAt >= before + CODEX_INITIALIZATION_REQUEST_TIMEOUT_MS);
+      assert.ok(requestOptions.deadlineAt <= Date.now() + CODEX_INITIALIZATION_REQUEST_TIMEOUT_MS);
+    }
+  } finally {
+    driver.dispose();
+  }
+});
+
+for (const resumeId of [undefined, "thread-held"] as const) {
+  test(`a ${resumeId ? "thread/resume" : "thread/start"} response still precedes thread settings sent in the same chunk (#3099)`, async () => {
+    const h = makeHarness(resumeId ? { resumeId } : {});
+    const threadId = resumeId ?? "thread-new";
+    const toServer = new PassThrough();
+    const fromServer = new PassThrough();
+    const peer = new JsonRpcPeer(toServer, fromServer);
+    toServer.setEncoding("utf8");
+    let buffered = "";
+    toServer.on("data", (chunk: string) => {
+      buffered += chunk;
+      for (let index = buffered.indexOf("\n"); index >= 0; index = buffered.indexOf("\n")) {
+        const message = JSON.parse(buffered.slice(0, index));
+        buffered = buffered.slice(index + 1);
+        if (message.id === undefined) continue;
+        if (message.method === "thread/read") {
+          fromServer.write(JSON.stringify({ id: message.id, result: { thread: { id: threadId, status: { type: "idle" } } } }) + "\n");
+        } else if (message.method === "thread/start" || message.method === "thread/resume") {
+          // The response and the settings notification that follows it arrive in one later stdout
+          // chunk, as from a real child process (a synchronous reply would settle before the await).
+          setImmediate(() => fromServer.write(
+            JSON.stringify({ id: message.id, result: { thread: { id: threadId } } }) + "\n" +
+            JSON.stringify({ method: "thread/settings/updated", params: { threadId, threadSettings: { serviceTier: "flex" } } }) + "\n",
+          ));
+        } else {
+          fromServer.write(JSON.stringify({ id: message.id, result: {} }) + "\n");
+        }
+      }
+    });
+    (h.driver as any).registerHandlers(peer);
+    (h.driver as any).peer = peer;
+    try {
+      assert.equal(await h.driver.newSession("/tmp/work"), threadId);
+      await waitForCondition(() => h.serviceTiers.length > 0);
+      assert.deepEqual(h.serviceTiers, ["flex"], "the notification is attributed to the thread its response established");
+    } finally {
+      h.driver.dispose();
+    }
+  });
+}
