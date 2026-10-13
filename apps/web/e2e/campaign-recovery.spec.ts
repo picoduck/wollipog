@@ -41,16 +41,23 @@ for (const theme of ["dark", "light"] as const) {
       const summary = page.locator(".campaign-status-summary");
       await expect(summary.locator("dt", { hasText: /^State$/ }).locator("..")).toContainText("Active");
       await expect(summary).not.toContainText("Verified Complete");
+      const directory = process.env.CAMPAIGN_RECOVERY_EVIDENCE_DIR;
+      if (directory) {
+        mkdirSync(directory, { recursive: true });
+        await summary.evaluate(element => element.scrollIntoView({ block: "start" }));
+        await page.screenshot({ path: join(directory, `verified-state-${device}-${theme}.png`) });
+      }
       const notice = page.locator(".campaign-status .notice", { hasText: "Authorized Recovery" });
       await expect(notice).toBeVisible();
       await notice.getByRole("button", { name: "Show Details" }).click();
       await expect(notice).toContainText("Repair Checks");
       await expect(notice).toContainText("team/repo#123");
       await expect(notice).toContainText("1 of 4");
+      await expect(page.locator(".campaign-detail-section", { hasText: "Authorized Issue Scope" })).toContainText("team/repo#123");
+      await expect(page.locator(".campaign-status")).not.toContainText("Issue Scope Needs Confirmation");
       await expect(notice.getByRole("button", { name: /approve|override|retry/i })).toHaveCount(0);
       const geometry = await page.locator(".campaign-status").evaluate(element => ({ width: element.clientWidth, scroll: element.scrollWidth }));
       expect(geometry.scroll).toBeLessThanOrEqual(geometry.width + 1);
-      const directory = process.env.CAMPAIGN_RECOVERY_EVIDENCE_DIR;
       if (directory) {
         mkdirSync(directory, { recursive: true });
         await notice.evaluate(element => element.scrollIntoView({ block: "start" }));

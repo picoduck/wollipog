@@ -301,7 +301,11 @@ const client = {
   campaignIssueScope: async (id: string) => ({ campaignSessionId: id, repository: "team/repo", issueNumbers: [], revision: 0,
     supported: true, canPropose: true, outsideScope: [{ workItemId: "scope-fixture", title: "Member work", issue: { repository: "team/repo", number: 124 }, sessionId: "s_child" }],
     candidates: [{ issue: { repository: "team/repo", number: 123 }, title: "Composer Epic", source: "umbrella" as const },
-      { issue: { repository: "team/repo", number: 124 }, title: "Member Work", source: "member_checklist" as const }] }),
+      { issue: { repository: "team/repo", number: 124 }, title: "Member Work", source: "member_checklist" as const }],
+    ...(params.get("completedChildren") === "1" && recoveryRecord?.reason === "failed_checks" ? {
+      // Disclosed static scope data, not a live mint/approval or supported-profile assertion.
+      issueNumbers: [123], revision: 1, canPropose: false, outsideScope: [], candidates: [],
+    } : {}) }),
   proposeCampaignIssueScope: async (_id: string, proposal: import("@wollipog/protocol").CampaignIssueScopeRequest) => {
     (window as unknown as { __SCOPE_PROPOSAL__: unknown }).__SCOPE_PROPOSAL__ = proposal;
     return { status: "pending" } as import("@wollipog/protocol").WorkflowDecisionView;
