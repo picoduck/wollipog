@@ -1931,6 +1931,12 @@ to these form choice groups.
 | Dialog | Creation and focused edits, including one item of a settings list (Agent Defaults' Edit…, #3024). | Footer Cancel + primary. |
 | Editor | Multi-field editors in a page (Orchestrator, Automation editor). | A sticky save bar at the bottom of the page region, visible only when dirty: "Unsaved changes" + Discard (ghost) + Save (primary). A new record shows its bar from the start, with Cancel and its create label. |
 
+A choice whose options need different amounts of setup mixes the first two. Settings › Behavior ›
+Session Titles (#3025) is one `SelectRow`: First Message applies at once with the Saved check, while
+Agent and Custom Endpoint open their setup dialog, and the stored choice changes only when that
+dialog saves (Cancel keeps the previous one selected and stored). Once set up, an `ActionRow` under
+it says which, in sentence case, with Edit….
+
 The editor save bar is `.save-bar` (`SaveBar`): sticky at the bottom of its region, `--bg-elev`,
 1px `--border-strong`, `--radius-md`, `--elev-2`, padding 12px 16px, gap 8px, and rendered only
 while there is something to save or a save failed. When a save fails it becomes `.save-bar.is-error`:

@@ -519,7 +519,9 @@ function Harness() {
                       </SettingsGroup>
                     )}
                     sessionNaming={(
-                      <StaticRow title="Session Naming" description="The visual fixture does not connect to a control plane." />
+                      <SettingsGroup title="Session Titles" scope="Your Account">
+                        <StaticRow title="Title Source" description="The visual fixture does not connect to a control plane." />
+                      </SettingsGroup>
                     )}
                     onOpenShortcuts={() => undefined}
                   />

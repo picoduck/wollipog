@@ -138,7 +138,7 @@ const ExperimentalPanel = lazy(() => import("./components/SettingsView.js").then
 const NetworkPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.NetworkPanel })));
 const NotificationsPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.NotificationsPanel })));
 const SettingsView = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.SettingsView })));
-const SessionNamingPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.SessionNamingPanel })));
+const SessionTitlesPanel = lazy(() => import("./components/SessionTitlesPanel.js").then((module) => ({ default: module.SessionTitlesPanel })));
 
 /**
  * Move focus somewhere sensible when a layout change has dropped it on <body>.
@@ -981,7 +981,7 @@ export function Shell() {
                         onOpenConnections={() => navigate({ name: "runners", section: "machines" })}
                       />
                     )}
-                    sessionNaming={<SessionNamingPanel />}
+                    sessionNaming={<SessionTitlesPanel />}
                     onOpenShortcuts={openShortcutReference}
                     focus={view.focus}
                   />

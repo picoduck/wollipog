@@ -82,11 +82,14 @@ async function renderPanel(options: { on?: Device; focus?: SettingsFocus; opened
   const root = createRoot(container);
   const draw = (focus?: SettingsFocus) => root.render(
     <BehaviorPanel
-      // The Agent Defaults panel is its own group (#3024), so the shell supplies the whole group.
+      // Agent Defaults (#3024) and Session Titles (#3025) are each their own group, so the shell
+      // supplies the whole group.
       agentHarnessDefaults={(
         <SettingsGroup title="Agent Defaults" scope="Your Account"><div className="setting-row">Agent defaults slot</div></SettingsGroup>
       )}
-      sessionNaming={<div className="setting-row">Session naming slot</div>}
+      sessionNaming={(
+        <SettingsGroup title="Session Titles" scope="Your Account"><div className="setting-row">Session naming slot</div></SettingsGroup>
+      )}
       onOpenShortcuts={(returnFocus) => options.opened?.push(returnFocus)}
       focus={focus}
     />,
@@ -122,8 +125,7 @@ test("Behavior is six groups in order, each naming once where it is kept", async
       ["Session Titles", "Your Account"],
       ["Evidence", "Your Account"],
     ]);
-    // The slots hold what the shell supplies: Agent Defaults a whole group, Session Titles rows under
-    // the head drawn here.
+    // The slots hold what the shell supplies: Agent Defaults and Session Titles each a whole group.
     const groups = [...view.container.querySelectorAll(".settings-group")];
     assert.match(groups[3]!.querySelector(".settings-group-surface")!.textContent ?? "", /^Agent defaults slot$/);
     assert.match(groups[4]!.querySelector(".settings-group-surface")!.textContent ?? "", /^Session naming slot$/);
