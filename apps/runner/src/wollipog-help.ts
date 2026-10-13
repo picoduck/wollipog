@@ -145,7 +145,7 @@ Commands:
   adjudicate <recommendation-id> --input '<json>'
                                                  Record {disposition, reason, resultingWorkItemKey?,
                                                  resultingIssue?, publicationRequired?}
-  allocate --input '<json>'                      Reserve a managed worker's allowance (protocol v217+)
+  allocate --input '<json>'                      Reserve a managed worker's allowance (protocol v218+)
   review --input '<json>'                        Dispatch/read a bounded controlled native review job
   review-job <job-id>                            Read a review receipt without new spending
   review-jobs [--limit <n>] [--cursor <job-id>] [--item <work-item-id>]
