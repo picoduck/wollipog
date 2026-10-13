@@ -84,8 +84,18 @@ test.describe("desktop", () => {
     await timeout.fill("30000");
     expect(await cutText(dialog, "input[inputmode=numeric]", true)).toEqual([]);
     await expect(timeout.locator("xpath=following-sibling::*[1]")).toHaveText("ms");
+    // The UI font is the system's, so the digits must fit in a wide one too (CI's Ubuntu falls back
+    // to a DejaVu-class face, whose digits cut "30000" in the shared affix spacing).
+    await withWideFont(page);
+    expect(await cutText(dialog, "input[inputmode=numeric]", true)).toEqual([]);
   });
 });
+
+/** Draws every field in DejaVu Sans, a wide system face, so a fit check does not depend on the host. */
+async function withWideFont(page: Page) {
+  await page.addStyleTag({ content: ':root input { font-family: "DejaVu Sans", sans-serif !important; }' });
+  await page.evaluate(() => document.fonts.ready);
+}
 
 test.describe("phone", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
@@ -146,6 +156,8 @@ test("a narrow window's 16px fields still show the longest timeout whole", async
   const dialog = await openSavedEndpoint(page, "source=endpoint");
   await dialog.getByLabel("Timeout").fill("30000");
   await dialogMotionSettled(page);
+  expect(await cutText(dialog, "input[inputmode=numeric]", true)).toEqual([]);
+  await withWideFont(page);
   expect(await cutText(dialog, "input[inputmode=numeric]", true)).toEqual([]);
 });
 

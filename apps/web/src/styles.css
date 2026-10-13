@@ -18487,6 +18487,14 @@ a.tab { text-decoration: none; }
   gap: var(--space-3);
 }
 .title-endpoint-pair > .field { min-width: 0; }
+/* The shared affix keeps 12px insets and 2em for its suffix, which leaves a 96px field about 40px for
+   digits: too little for 30,000 in a wide system face (DejaVu Sans). "ms" needs 1.5em, and 8px
+   insets keep it clear of the edge. */
+.title-endpoint-pair .input-affix:has(> .input-affix-text:last-child) > input {
+  padding-inline-start: var(--space-2);
+  padding-inline-end: calc(var(--space-2) + 1.5em + var(--space-1));
+}
+.title-endpoint-pair .input-affix-text:last-child { inset-inline-end: var(--space-2); }
 .title-endpoint-secret {
   display: flex;
   flex-wrap: wrap;
