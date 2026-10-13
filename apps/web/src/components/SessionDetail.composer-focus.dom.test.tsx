@@ -866,9 +866,9 @@ function sendButton(fixture: Fixture): HTMLButtonElement {
  * after its draft cleanup, which awaits SubtleCrypto work off the main thread, so how many ticks
  * that takes depends on the machine; a single flush loses the race on a loaded runner (#2558). */
 async function waitForSettled(settled: () => boolean, message: string, timeoutMs = 5_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
+  const deadline = performance.now() + timeoutMs;
   while (!settled()) {
-    assert.ok(Date.now() < deadline, `${message} within the bounded test deadline`);
+    assert.ok(performance.now() < deadline, `${message} within the bounded test deadline`);
     await flushAsyncWork(10);
   }
 }
@@ -6596,7 +6596,7 @@ async function pointer(button: HTMLButtonElement, type: "pointerdown" | "pointer
   });
 }
 
-test("the mic toggles on a tap and stops a hold on release, showing a Listening strip in place of the left group (#2193)", async () => {
+test("the mic toggles on a tap and stops a hold on release, showing a Listening strip in place of the left group (#2193)", async (t) => {
   await withTrackedRecognition(async () => {
     const draft = deferred<ComposerDraft | null>();
     const fixture = await mountFixture(draft, { sessionCapabilities: PAUSED_LOOK_CAPABILITIES });
@@ -6609,6 +6609,11 @@ test("the mic toggles on a tap and stops a hold on release, showing a Listening 
       assert.equal(mic.disabled, false);
       assert.ok(fixture.container.querySelector(".cbar-left"), "the left group shows while idle");
       assertNoDomNode(fixture.container.querySelector(".dictation-strip"));
+
+      // Pin elapsed time while allowing real timer delivery to take as long as the bounded
+      // settle wait needs on a loaded host. The other gestures resume the real clock below.
+      let now = Date.now();
+      const clock = t.mock.method(Date, "now", () => now);
 
       // A tap: down and straight up, from a focused composer.
       await act(async () => fixture.composer.focus());
@@ -6626,8 +6631,14 @@ test("the mic toggles on a tap and stops a hold on release, showing a Listening 
       assertNoDomNode(fixture.container.querySelector(".cbar-left"), "the strip replaces the left group");
       assert.ok(fixture.composer.ownerDocument.activeElement === fixture.composer, "the composer keeps focus");
 
-      await flushAsyncWork(1_050);
+      now += 1_000;
+      await waitForSettled(
+        () => fixture.container.querySelector(".dictation-timer")?.textContent === "00:01",
+        "the Listening strip timer did not advance",
+      );
       assert.equal(fixture.container.querySelector(".dictation-timer")?.textContent, "00:01", "the timer advances each second");
+
+      clock.mock.restore();
 
       // The next tap stops.
       await pointer(mic, "pointerdown");
@@ -6658,6 +6669,7 @@ test("the mic toggles on a tap and stops a hold on release, showing a Listening 
       assert.equal(mic.getAttribute("aria-pressed"), "false");
       assert.deepEqual(TrackedRecognition.log, ["start", "stop", "start", "stop", "start", "stop"]);
     } finally {
+      t.mock.restoreAll();
       await unmountFixture(fixture);
     }
   });
