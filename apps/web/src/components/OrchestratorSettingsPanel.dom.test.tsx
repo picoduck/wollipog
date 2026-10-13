@@ -690,6 +690,45 @@ test("leaving while a save is in flight waits for it, and asks only if the save 
   }
 });
 
+test("a leave waiting on a save is dropped if the editor goes away first", async () => {
+  for (const outcome of ["saved", "refused"] as const) {
+    let setView: (view: View) => void = () => undefined;
+    const store = new Store({ name: "settings", section: "orchestrator" }, (view) => setView(view));
+    const { transport, state } = server(settings());
+    let release: () => void = () => undefined;
+    const held: ApiTransport = {
+      ...transport,
+      async request(path, init) {
+        if (init?.method === "PUT") await new Promise<void>((resolve) => { release = resolve; });
+        if (init?.method === "PUT" && outcome === "refused") state.reject = "Wollipog couldn't store your defaults.";
+        return transport.request(path, init);
+      },
+    };
+    const view = await mount(<SettingsShell store={store} transport={held} onView={(set) => { setView = set; }} />);
+    let unmounted = false;
+    try {
+      const { container } = view;
+      const limit = container.querySelector<HTMLInputElement>("#orchestrator-max-children")!;
+      await act(async () => { fireDomEvent.change(limit, { target: { value: "7" } }); });
+      await act(async () => button(container.querySelector(".save-bar")!, "Save Defaults")!.click());
+      await act(async () => {
+        container.querySelector('nav.settings-nav a[href="/settings/appearance"]')!
+          .dispatchEvent(new domWindow.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }) as never);
+      });
+      // Browser Back is not held, so it can take the editor away while the save is in flight.
+      await view.cleanup();
+      unmounted = true;
+      await act(async () => release());
+      await settle();
+      assert.deepEqual(store.getState().view, { name: "settings", section: "orchestrator" },
+        `${outcome}: the stale destination is not navigated to`);
+      assertNoDomNode(document.querySelector('[role="dialog"]'), `${outcome}: no prompt for an editor that is gone`);
+    } finally {
+      if (!unmounted) await view.cleanup();
+    }
+  }
+});
+
 test("closing the window with a dirty draft asks the browser to confirm", async () => {
   const { transport } = server(settings());
   const view = await mount(panel(transport));

@@ -182,6 +182,8 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
   const busyRef = useRef(false);
   busyRef.current = busy;
   const leaveAfterSave = useRef<(() => void) | null>(null);
+  // Gone before the save settled (browser Back is not held): nothing is left to leave from.
+  useEffect(() => () => { leaveAfterSave.current = null; }, []);
   useLeaveGuard(dirty, (leave) => {
     if (busyRef.current) leaveAfterSave.current = leave;
     else askToLeave(leave);
