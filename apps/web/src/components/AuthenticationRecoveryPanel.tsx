@@ -120,7 +120,7 @@ export function signInSentence({ situation, provider, signingIn, loginStatus, ac
       return `${provider} is signed out. Start Sign-In signs in on this machine, and the session continues.`;
     case "read_only":
       return `Wollipog can't start a sign-in here. Sign in to ${provider} on the machine as the request details ` +
-        "describe, then choose Recheck Authentication.";
+        "describe, then choose Retry.";
     default:
       return null;
   }
@@ -131,8 +131,8 @@ export function signInSentence({ situation, provider, signingIn, loginStatus, ac
  * one sentence saying what the card's primary will do. The provider-reported email lives only in
  * this component's memory for the open card and is dropped whenever the card or account changes.
  *
- * Check Again on the Last Checked fact runs the runner's recheck (`onRecheck`); it is absent when
- * Recheck Authentication is the card's primary. While a sign-in runs only the session's account is
+ * Retry on the Last Checked fact runs the runner's recheck (`onRecheck`); it is absent when
+ * Retry is the card's primary. While a sign-in runs only the session's account is
  * a fact, and the runner's sign-in renders below it. The Machine's other accounts are not on the
  * card: Choose Another Account… opens them in a dialog (ChooseAccountDialog, #2208).
  */
@@ -148,7 +148,7 @@ export function AuthenticationRecoveryPanel({
   approval: PendingApproval;
   runner: RunnerView | undefined;
   runnerOnline: boolean;
-  /** The Last Checked fact's Check Again, when Recheck Authentication is not the card's primary. */
+  /** The Last Checked fact's Retry, when Retry is not the card's primary. */
   recheck?: { run: () => Promise<void>; busy: boolean; disabled: boolean; describedBy?: string };
   /** Changes when something else may have changed the signed-in account (a refused account choice),
    * so the identity is read again. */
