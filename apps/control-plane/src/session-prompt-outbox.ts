@@ -174,7 +174,12 @@ export class SessionPromptOutbox {
         const projection = lifecycleEligible
           ? this.db.campaignProjection(command.campaignContinuation.campaignSessionId)
           : null;
-        if (!lifecycleEligible || !projection || this.db.campaignContinuationAdmission(row.sessionId).state !== "available" ||
+        // A transport downgrade must still reach the existing receipt classifier below:
+        // known non-delivery becomes failed and possibly delivered work becomes uncertain.
+        // Holding it here would let a reconnect replay that sent command without reconciliation.
+        const transportSupported = runnerSupportsProtocol(this.db.getRunner(row.runnerId)?.protocolVersion, "campaignContinuations");
+        if (!lifecycleEligible || !projection || (transportSupported &&
+            this.db.campaignContinuationAdmission(row.sessionId).state !== "available") ||
             (projection.status === "waiting_human" &&
             !this.db.campaignMayContinueWhileHumanWaiting(command.campaignContinuation.campaignSessionId)) ||
             projection.status === "verified_complete") {
