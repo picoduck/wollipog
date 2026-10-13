@@ -669,10 +669,13 @@
 // 216: live Claude Code usage (#3086): display-only provisional per-request `token_usage` records
 //      closed by a `settled` record. Runners send them only to a v216+ control plane.
 // 217: bounded Full Control issue lineage, publication admission and verified closure.
-export const PROTOCOL_VERSION = 217;
+// 218: durable campaign allowance, final managed usage and controlled native review admission.
+export const PROTOCOL_VERSION = 218;
 
 export * from "./campaign-authority.js";
 export * from "./campaign-issue-publication.js";
+export * from "./campaign-budget.js";
+export * from "./campaign-review-job.js";
 import type { CampaignControl, CampaignRequestSource, CampaignAuthorityEvaluation } from "./campaign-authority.js";
 export const SESSION_SUMMARY_UI_PROTOCOL = 212;
 export const SKILL_REPORT_REQUEST_LIFETIME_MS = 30_000;
@@ -924,6 +927,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   delegatedParentControl: 136,
   typedWorkflowDecisionDelegation: 139,
   fullControlAuthority: 215,
+  campaignBudgetAdmission: 218,
   workflowDecisionActionAdmission: 151,
   workflowDecisionActionReconciliation: 153,
   /** Control plane retains and delivers a resolver's child-facing workflow-decision message. */
@@ -2528,6 +2532,7 @@ export interface UiEvidenceReviewDelivery {
 /** Credential-free, server-derived campaign state. The stored policy remains the source of truth;
  * this projection applies runtime compatibility fallbacks without mutating or broadening it. */
 export interface OrchestratorCampaignProjection {
+  budget?: import("./campaign-budget.js").CampaignBudgetView;
   status: OrchestratorCampaignStatus;
   policyRevision: number;
   decisionOwners: ParentControlDecisionPolicy;
@@ -3107,6 +3112,8 @@ export interface RunnerMetadata {
 }
 
 export interface RunnerRuntimeInfo {
+  /** Guarded capability, independent of numeric protocol support. Missing is unsupported. */
+  campaignReview?: import("./campaign-review-job.js").ControlledReviewCapability;
   /** Native-host runner data root. WSL contexts use the same `.agent-manager` layout in-distro. */
   dataDir: string;
   worktreeRoot: string;
@@ -7062,6 +7069,7 @@ export interface SideChatView {
  */
 export interface SessionSnapshot {
   id: string;
+  campaignBudgetCheckpoint?: import("./campaign-budget.js").CampaignBudgetUsageCheckpoint;
   roleConversionReceipt?: SessionRoleConversionReceipt;
   /** Opaque CP launch identity echoed by runners that accepted a replacement start. */
   controlPlaneLaunchId?: string;
@@ -8132,6 +8140,8 @@ export interface SessionStatusMessage {
   worktreePath?: string | null;
   /** Opaque identity of the accepted start_session command that owns this lifecycle. */
   controlPlaneLaunchId?: string;
+  /** v218; emitted only after the provider has finished producing usage. */
+  campaignBudgetCheckpoint?: import("./campaign-budget.js").CampaignBudgetUsageCheckpoint;
 }
 
 export interface StopSessionResultMessage {
@@ -8695,6 +8705,7 @@ export interface SessionNamingCustomModelResultMessage {
 }
 
 export type RunnerToControlPlane =
+  | import("./campaign-review-job.js").CampaignReviewJobUpdate
   | RegisterMessage
   | HeartbeatMessage
   | SessionStatusMessage
@@ -8810,6 +8821,8 @@ export interface RegisterRejectedMessage {
 
 /** Everything the runner needs to launch an agent session locally. */
 export interface SessionLaunchSpec {
+  /** Server-owned accounting lifecycle; never part of user session configuration. */
+  campaignBudgetDispatch?: import("./campaign-budget.js").CampaignBudgetDispatch;
   artifactUploads?: ArtifactUploadPreference;
   projectMemory?: SessionProjectMemory;
   sessionId: string;
@@ -9143,6 +9156,7 @@ export interface StopSessionMessage {
 export interface RearmGovernanceMessage {
   type: "rearm_governance";
   sessionId: string;
+  campaignBudgetDispatch?: import("./campaign-budget.js").CampaignBudgetDispatch;
   config: { costBudgetUsd?: number | null; maxToolCalls?: number | null };
   /** Another serialized rule is already tripped. Update thresholds but keep queued work held. */
   /** A runner-enforced threshold names itself. `control_plane` (v105+) holds the queue for a
@@ -10466,6 +10480,8 @@ export interface GitActionResultMessage {
 }
 
 export type ControlPlaneToRunner =
+  | import("./campaign-review-job.js").CampaignReviewJobCommand
+  | { type: "cancel_campaign_review_job"; jobId: string; nonce: string }
   | RegisteredMessage
   | ConfigureHarnessInstallationChoicesMessage
   | RegisterRejectedMessage

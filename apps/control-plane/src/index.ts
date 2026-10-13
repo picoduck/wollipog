@@ -1327,6 +1327,8 @@ app.register(async (instance) => {
         else svc.reconcileRunnerSessions(runnerId, msg.liveSessions ?? []);
         svc.reconcileArchivedCampaignWorktrees(runnerId);
         svc.recoverWorkflowRunner(runnerId);
+        svc.recoverCampaignBudgetAllocations(runnerId);
+        svc.recoverCampaignReviewJobs(runnerId);
         automations.tick(Date.now());
         automations.commandOutbox.flush(Date.now(), runnerId);
         hub.runnerChanged(runnerId);
@@ -1362,10 +1364,14 @@ app.register(async (instance) => {
           runnerId ?? undefined,
           msg.controlPlaneLaunchId,
           msg.capacityWait,
+          msg.campaignBudgetCheckpoint,
         );
         break;
       case "stop_session_result":
         if (runnerId) svc.onStopSessionResult(runnerId, msg);
+        break;
+      case "campaign_review_job_update":
+        if(runnerId) svc.onCampaignReviewJobUpdate(runnerId,msg);
         break;
       case "policy_hook_credential":
         {
@@ -3955,6 +3961,50 @@ function campaignLedgerPrincipal(req: FastifyRequest, reply: FastifyReply, id: s
   }
   return principal;
 }
+
+app.post("/api/sessions/:id/orchestrator-campaign/budget-allocations", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = campaignLedgerPrincipal(req, reply, id);
+  if (!principal) return reply;
+  return respond(reply, svc.allocateCampaignBudget(id, req.body as import("@wollipog/protocol").CampaignBudgetAllocation,
+    (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+app.post("/api/sessions/:id/orchestrator-campaign/review-jobs", async (req, reply) => {
+  const id=(req.params as {id:string}).id;
+  const principal=campaignLedgerPrincipal(req,reply,id);
+  if(!principal) return reply;
+  return respond(reply,svc.requestCampaignReviewJob(id,req.body as import("@wollipog/protocol").CampaignReviewJobRequest,
+    (sessionId)=>db.canAccessSession(principal,sessionId)));
+});
+app.get("/api/sessions/:id/orchestrator-campaign/review-jobs/:jobId",async(req,reply)=>{
+  const {id,jobId}=req.params as {id:string;jobId:string};
+  const principal=campaignLedgerPrincipal(req,reply,id);
+  if(!principal) return reply;
+  return respond(reply,svc.campaignReviewJob(id,jobId,(sessionId)=>db.canAccessSession(principal,sessionId)));
+});
+app.get("/api/sessions/:id/orchestrator-campaign/review-jobs",async(req,reply)=>{
+  const id=(req.params as {id:string}).id,principal=campaignLedgerPrincipal(req,reply,id);
+  if(!principal) return reply;
+  const query=req.query as {limit?:string;afterJobId?:string;workItemId?:string};
+  return respond(reply,svc.campaignReviewJobs(id,{...query,...(query.limit===undefined?{}:{limit:Number(query.limit)})} as {limit?:number;afterJobId?:string;workItemId?:string},
+    (sessionId)=>db.canAccessSession(principal,sessionId)));
+});
+app.get("/api/sessions/:id/orchestrator-campaign/review-jobs/:jobId/report",async(req,reply)=>{
+  const {id,jobId}=req.params as {id:string;jobId:string},principal=campaignLedgerPrincipal(req,reply,id);
+  if(!principal) return reply;
+  return respond(reply,svc.campaignReviewReport(id,jobId,(sessionId)=>db.canAccessSession(principal,sessionId)));
+});
+
+// Budget minting shares the foundation's human-only CAS and revocation contract. No agent
+// allowlist entry exists for this endpoint; account defaults never establish an envelope.
+app.post("/api/sessions/:id/orchestrator-campaign/control", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "human") return reply.code(403).send({ error: "authenticated human authorization is required" });
+  const body = req.body as { proposal?: Parameters<SessionsService["setCampaignControl"]>[1]; expectedRevision?: number } | null;
+  if (!body?.proposal || !Number.isSafeInteger(body.expectedRevision)) return reply.code(400).send({ error: "proposal and expectedRevision are required" });
+  return respond(reply, svc.setCampaignControl(id, body.proposal, body.expectedRevision!, principal));
+});
 
 app.post("/api/sessions/:id/orchestrator-campaign/plan", async (req, reply) => {
   const id = (req.params as { id: string }).id;

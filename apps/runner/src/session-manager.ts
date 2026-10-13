@@ -1424,6 +1424,7 @@ export class SessionManager {
    * released on stop/exit/failure. Oldest-eligible selection plus bounded bypass prevents both
    * head-of-line capacity waste and starvation. */
   private readonly admitted = new Set<string>();
+  private readonly controlledReviewAdmissions = new Map<string,string>();
   private readonly admissionQueue: Array<{
     request: AdmissionRequest;
     bypasses: number;
@@ -4443,6 +4444,21 @@ export class SessionManager {
     assertExecutionIsolationContextSupported(this.executionIsolation, context);
   }
 
+  reserveControlledReviewAdmission(jobId:string,agentId:string):boolean {
+    if(this.shuttingDown || this.executionIsolation.mode!=="provider") return false;
+    if(this.controlledReviewAdmissions.has(jobId)) return this.controlledReviewAdmissions.get(jobId)===agentId;
+    if(this.admissionQueue.length) return false;
+    const admitted=this.boxAdmission.acquire({sessionId:jobId,agentId,weight:this.admissionPolicy.agentWeights[agentId]??1,
+      ...(this.admissionPolicy.agentLimits[agentId]===undefined?{}:{agentLimit:this.admissionPolicy.agentLimits[agentId]})});
+    if(admitted) {this.controlledReviewAdmissions.set(jobId,agentId);this.reportCapacity();}
+    return admitted;
+  }
+
+  releaseControlledReviewAdmission(jobId:string):void {
+    this.controlledReviewAdmissions.delete(jobId);
+    this.boxAdmission.release(jobId);this.reportCapacity();this.drainAdmissionQueue();
+  }
+
   async prepareSessionNamingExecution(
     agent: AgentDefinition,
     env: Record<string, string>,
@@ -5772,6 +5788,8 @@ export class SessionManager {
       title: spec.title ?? "",
       titleSource: spec.titleSource ?? "generated",
       config: spec.config ?? {},
+      campaignBudgetDispatch: spec.campaignBudgetDispatch,
+      campaignBudgetCheckpoint: undefined,
       projectMemory: spec.projectMemory ?? prior?.projectMemory,
       artifactUploads: spec.artifactUploads ?? prior?.artifactUploads ?? "manual",
       orchestrator: (prior?.orchestrator?.issueScope?.revision ?? 0) > (spec.orchestrator?.issueScope?.revision ?? 0) ? prior?.orchestrator : spec.orchestrator ?? prior?.orchestrator,
@@ -14204,11 +14222,25 @@ export class SessionManager {
     sessionId: string,
     config: { costBudgetUsd?: number | null; maxToolCalls?: number | null },
     holdFor?: "cost_budget" | "max_tool_calls" | "control_plane",
+    campaignBudgetDispatch?: import("@wollipog/protocol").CampaignBudgetDispatch,
   ): void {
     const meta = this.store.readMeta(sessionId);
     if (!meta) return;
+    if (campaignBudgetDispatch) this.store.patchMeta(sessionId, { campaignBudgetDispatch,
+      ...(campaignBudgetDispatch.generation!==meta.campaignBudgetDispatch?.generation?{campaignBudgetCheckpoint:undefined}:{}) });
     const costBudgetUsd = config.costBudgetUsd;
     const maxToolCalls = config.maxToolCalls;
+    if(campaignBudgetDispatch && ["completed","failed","stopped"].includes(meta.status)) {
+      // Reconnect can deliver the first allocation after the provider already ended. Persist its
+      // exact provenance and attest final history, without rearming any terminal recovery queue.
+      const merged={...meta.config};
+      if(typeof costBudgetUsd==="number" && Number.isFinite(costBudgetUsd) && costBudgetUsd>0) merged.costBudgetUsd=costBudgetUsd;
+      if(typeof maxToolCalls==="number" && Number.isSafeInteger(maxToolCalls) && maxToolCalls>0) merged.maxToolCalls=maxToolCalls;
+      this.store.patchMeta(sessionId,{config:merged});
+      const entry=this.active.get(sessionId);
+      if(!entry || !entry.running && !entry.providerInitiatedTurnActive) this.emitStatus(sessionId,meta.status,undefined,undefined,undefined,!entry);
+      return;
+    }
     // No live process: whatever the re-arm carries, the hold change applies to what recovery
     // holds for this session, and a release re-enters recovery. Thresholds ride into the queued
     // prompts' configs when the replacement process picks them up.
@@ -14370,7 +14402,8 @@ export class SessionManager {
             ? { providerAuthDismissedCommandIds: authenticationDismissedCommandIds }
             : {}),
         });
-        this.emitStatus(sessionId, "stopped");
+        this.emitStatus(sessionId, "stopped", undefined, undefined, undefined,
+          !this.closing.has(sessionId) && !rebinding && !accountSwitching);
       }
       if (!this.closing.has(sessionId) && !rebinding && !accountSwitching) {
         this.releaseAdmissionIfInactive(sessionId);
@@ -14477,6 +14510,11 @@ export class SessionManager {
       this.reportCapacity();
     }
     if (this.shuttingDown) return;
+    const settledMeta=this.store.readMeta(sessionId);
+    // The exact provider has retired, even if Stop interrupted a running turn. Its last usage
+    // callbacks have been persisted; stale in-memory turn flags cannot keep the reservation live.
+    if(!this.active.has(sessionId) && settledMeta?.campaignBudgetDispatch &&
+        ["completed","failed","stopped"].includes(settledMeta.status)) this.emitStatus(sessionId,settledMeta.status,undefined,undefined,undefined,true);
     if (this.pendingDeletions.delete(sessionId)) {
       // Deletion reaps every journal record this session owns, so it supersedes the replay below.
       setImmediate(() => {
@@ -16010,6 +16048,7 @@ export class SessionManager {
     detail?: string,
     worktreePath?: string | null,
     capacityWait?: RunnerCapacityBlocker,
+    finalProviderUsage=false,
   ): void {
     const latchedBeforeFlush = this.active.get(sessionId)?.historyIntegrityFailure;
     this.flushTextDeltas(sessionId);
@@ -16048,6 +16087,14 @@ export class SessionManager {
           ? { ...firstAsync, ...(otherAsync.length ? { additionalRequests: otherAsync } : {}) } : null,
           capacityWait: status === "queued" ? capacityWait : undefined }
       : { status: projectedStatus, capacityWait: status === "queued" ? capacityWait : undefined });
+    const finalMeta=this.store.readMeta(sessionId)!;
+    const checkpoint=terminal && finalMeta.campaignBudgetDispatch && !this.closing.has(sessionId) &&
+      !this.worktreeRebindings.has(sessionId) && !this.providerAccountSwitches.has(sessionId) &&
+      (finalProviderUsage || entry && !entry.running && !entry.providerInitiatedTurnActive) &&
+      runnerSupportsProtocol(this.controlPlaneProtocolVersion(),"campaignBudgetAdmission")
+      ? {generation:finalMeta.campaignBudgetDispatch.generation,historyEpoch:this.snapshot(finalMeta).historyEpoch??0,
+        throughSeq:finalMeta.seq,costUsd:finalMeta.costUsd}:undefined;
+    if(checkpoint) this.store.patchMeta(sessionId,{campaignBudgetCheckpoint:checkpoint});
     this.send({
       type: "session_status",
       sessionId,
@@ -16056,6 +16103,7 @@ export class SessionManager {
       capacityWait: status === "queued" ? capacityWait : undefined,
       worktreePath,
       controlPlaneLaunchId: this.store.readMeta(sessionId)?.controlPlaneLaunchId,
+      ...(checkpoint?{campaignBudgetCheckpoint:checkpoint}:{}),
     });
   }
 

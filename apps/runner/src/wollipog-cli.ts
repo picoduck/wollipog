@@ -258,6 +258,17 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       return value && !value.startsWith("--") ? value : undefined;
     };
     const input = () => jsonObjectOption(args, "--input");
+    if (verb === "allocate") {
+      const body = input();
+      return "error" in body ? body : { tool: "allocate_campaign_budget", input: body.value };
+    }
+    if (verb === "review") {
+      const body=jsonObjectOption(args,"--input");
+      return "error" in body?body:{tool:"run_campaign_review_job",input:body.value};
+    }
+    if(verb==="review-job") return {tool:"get_campaign_review_job",input:{jobId:operand(2)}};
+    if(verb==="review-report") return {tool:"get_campaign_review_report",input:{jobId:operand(2)}};
+    if(verb==="review-jobs") return {tool:"list_campaign_review_jobs",input:{limit:numeric(option(args,"--limit")),afterJobId:option(args,"--cursor"),workItemId:option(args,"--item")}};
     if (verb === "plan") {
       const body = input();
       return "error" in body ? body : { tool: "record_campaign_plan", input: body.value };
@@ -737,6 +748,8 @@ export async function runWollipogCli(
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignIssueScopeChanges
     : ["request_github_issue_closure", "close_github_issue"].includes(parsed.tool)
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueClosure
+    : ["allocate_campaign_budget","run_campaign_review_job","get_campaign_review_job","list_campaign_review_jobs","get_campaign_review_report"].includes(parsed.tool)
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignBudgetAdmission
     : ["record_campaign_plan", "update_campaign_work_item", "assign_campaign_work_item",
       "adjudicate_campaign_recommendation", "get_campaign_work_items"].includes(parsed.tool)
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorkLedger

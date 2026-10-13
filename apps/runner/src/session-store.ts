@@ -95,6 +95,8 @@ export interface SessionMeta {
   sessionId: string;
   /** Opaque control-plane identity of the start command that created or replaced this runtime. */
   controlPlaneLaunchId?: string;
+  campaignBudgetDispatch?: import("@wollipog/protocol").CampaignBudgetDispatch;
+  campaignBudgetCheckpoint?: import("@wollipog/protocol").CampaignBudgetUsageCheckpoint;
   /** Human-correlated two-phase role change. Retiring/prepared fence every provider submission. */
   roleConversion?: {
     command: import("@wollipog/protocol").PrepareSessionRoleMessage;
@@ -4011,6 +4013,9 @@ export function metaToSnapshot(
     adopted: isAdoptedSession(m),
     seq: m.seq,
     historyEpoch: m.logEpoch ?? 0,
+    ...(runnerSupportsProtocol(controlPlaneProtocolVersion,"campaignBudgetAdmission") &&
+        ["completed","failed","stopped"].includes(m.status) && m.campaignBudgetCheckpoint?.generation===m.campaignBudgetDispatch?.generation
+      ? {campaignBudgetCheckpoint:m.campaignBudgetCheckpoint}:{}),
     createdAt: m.createdAt,
     updatedAt: m.updatedAt,
   };
