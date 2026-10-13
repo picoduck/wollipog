@@ -7086,7 +7086,7 @@ export class SessionManager {
     if (liveDetachedWork) return true;
     const continuationPending = meta.backgroundWorkState === "continuation_pending" ||
       !!meta.backgroundJobs?.some((job) => job.continuationRequired &&
-        !job.assistantResultPersistedAt && !job.continuationMissingResultAt);
+        !job.assistantResultPersistedAt && !job.continuationMissingResultAt && !job.continuationRetryExhaustedAt);
     return continuationPending && automaticClaudeRecoveryAllowed(meta) && !this.backgroundRecoveryHeld(meta);
   }
 

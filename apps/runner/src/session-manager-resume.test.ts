@@ -7337,6 +7337,10 @@ for (const hold of [false, true]) test(`unaccepted capacity continuation ${hold 
       assert.equal(meta.backgroundJobs![0]!.continuationMissingResultAt, undefined);
       assert.ok(meta.backgroundJobs![0]!.continuationRetryExhaustedAt);
       assert.equal(meta.backgroundWorkState, undefined);
+      assert.equal((h.manager as any).hasAuthoritativeBackgroundWork(meta), false,
+        "exhausted audit state must not consume active-turn capacity");
+      assert.equal((h.manager as any).activeTurnAdmitted.has("resume-session"), false,
+        "the exhausted continuation releases its active-work permit");
       await (h.manager as any).runBackgroundContinuation("resume-session");
       await shortDelay();
       assert.equal(h.prompts.length, 4, "exhaustion cannot start a second automatic burst");
