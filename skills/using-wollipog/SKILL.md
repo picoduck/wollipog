@@ -50,7 +50,7 @@ end of the log. Without `--after`, an incomplete result is the newest cached win
 without `--after` for the true newest window once hydration catches up. Direct HTTP reads of
 `GET /api/sessions/:id/events` default to 200 events when `limit` is omitted; use `nextAfter` and
 `eventEpoch` to continue rather than treating one response as the whole log.
-Protocol-220 runners use the bounded reader throughout hydration. Update older CLI/MCP
+Protocol-222 runners use the bounded reader throughout hydration. Update older CLI/MCP
 installations before upgrading a control plane that serves default pages: an old reader's
 whole-log fallback can mistake a bounded first page for the newest window. Identifiable old
 agent-session fallbacks fail with runner-upgrade guidance; paired-device CLI calls need the
@@ -129,6 +129,9 @@ CLI). Every record lands in the root campaign, including from a nested Orchestra
 
 - `record_campaign_plan` upserts work items by a stable key (issue or planned slice) with dispatch
   state, queue position, and dependencies; set `planComplete` once the original scope is listed.
+- Pass `campaignWorkItemId` to `create_session` (`session create --work-item`, protocol v220+) so the
+  child's attempt is recorded before its first prompt; if the attempt cannot be recorded, no child is
+  created.
 - `assign_campaign_work_item` records which descendant works on an item. Reusing a child for another
   item or moving an item to another child opens a new attempt; earlier attempts keep their
   verification and accounting.
@@ -302,10 +305,10 @@ The root Orchestrator can propose closing an issue in its human-authorized campa
 `explanation`, `evidence`, and an optional exact `comment`). The runner derives the repository,
 current issue, and related open pull requests; the server includes the assignments of active
 children whose work can bear on the issue. A child is left out only when its launch prompt is
-recorded, it has an open `assign_campaign_work_item` attempt, and every attempt it has ever had is
-on a work item that has never tracked the issue and has no follow-up links. Record each child's
-assignment so unrelated activity does not revoke the approval; a prompt that mentions the issue
-does not bind an unassigned child by itself.
+recorded, it has an open attempt (from `create_session` or `assign_campaign_work_item`), and every
+attempt it has ever had is on a work item that has never tracked the issue and has no follow-up
+links. Pass each child's work item at creation so unrelated activity does not revoke the approval;
+a prompt that mentions the issue does not bind an unassigned child by itself.
 Custom campaigns require a human-owned typed decision. Full Control delegates only when the server
 confirms a human-established issue boundary, verified delivered report and actual default-branch
 merges, or a supported recorded not-planned disposition. Never infer this authority from a prompt.

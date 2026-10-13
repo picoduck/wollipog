@@ -133,12 +133,12 @@ const AboutPanel = lazy(() => import("./components/SettingsView.js").then((modul
 const AppearancePanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.AppearancePanel })));
 const NavigationRailPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.NavigationRailPanel })));
 const BehaviorPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.BehaviorPanel })));
-const AgentHarnessDefaultsPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.AgentHarnessDefaultsPanel })));
+const AgentDefaultsPanel = lazy(() => import("./components/AgentDefaultsPanel.js").then((module) => ({ default: module.AgentDefaultsPanel })));
 const ExperimentalPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.ExperimentalPanel })));
 const NetworkPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.NetworkPanel })));
 const NotificationsPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.NotificationsPanel })));
 const SettingsView = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.SettingsView })));
-const SessionNamingPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.SessionNamingPanel })));
+const SessionTitlesPanel = lazy(() => import("./components/SessionTitlesPanel.js").then((module) => ({ default: module.SessionTitlesPanel })));
 
 /**
  * Move focus somewhere sensible when a layout change has dropped it on <body>.
@@ -975,8 +975,13 @@ export function Shell() {
                 notifications: <NotificationsPanel notify={notify} push={push} />,
                 behavior: (
                   <BehaviorPanel
-                    agentHarnessDefaults={<AgentHarnessDefaultsPanel discoveryRevision={runners} />}
-                    sessionNaming={<SessionNamingPanel />}
+                    agentHarnessDefaults={(
+                      <AgentDefaultsPanel
+                        discoveryRevision={runners}
+                        onOpenConnections={() => navigate({ name: "runners", section: "machines" })}
+                      />
+                    )}
+                    sessionNaming={<SessionTitlesPanel />}
                     onOpenShortcuts={openShortcutReference}
                     focus={view.focus}
                   />

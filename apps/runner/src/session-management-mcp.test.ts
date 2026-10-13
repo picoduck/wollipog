@@ -1609,6 +1609,37 @@ test("create_session fails closed on explicit effort with an older control plane
   assert.deepEqual((omitted.calls[0]!.body as { config: unknown }).config, { model: "opus" });
 });
 
+test("create_session sends a campaign work item only to a v220 control plane and reports the recorded attempt (#3106)", async () => {
+  const args = { runnerId: "r1", agentId: "claude-code", workspaceId: "ws", prompt: "Deliver it", campaignWorkItemId: "cwi_item" };
+  const older = makeDeps(() => ({
+    status: 200, body: { protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorkItemAtCreation - 1 },
+  }));
+  const rejected = await callTool(older.deps, "create_session", args);
+  assert.equal(rejected.isError, true);
+  assert.match(resultText(rejected), /requires control plane protocol v220/u);
+  assert.match(resultText(rejected), /no child was created/u);
+  assert.deepEqual(older.calls.map((call) => call.url), [`${CP_URL}/api/compatibility`],
+    "an older control plane would ignore the item, so nothing is sent");
+
+  const unverifiable = makeDeps(() => ({ status: 503, body: { error: "unavailable" } }));
+  assert.equal((await callTool(unverifiable.deps, "create_session", args)).isError, true);
+  assert.equal(unverifiable.calls.length, 1, "unknown compatibility refuses too");
+
+  const membership = { campaignSessionId: "s_root", currentWorkItemId: "cwi_item", currentAttemptId: "catt_1" };
+  const current = makeDeps((call) => call.url.endsWith("/api/compatibility")
+    ? { status: 200, body: { protocolVersion: PROTOCOL_VERSION } }
+    : { status: 201, body: { id: "s_new", title: "t", status: "starting", runnerId: "r1", campaignMembership: membership } });
+  const created = await callTool(current.deps, "create_session", args);
+  assert.equal(created.isError, undefined);
+  assert.equal((current.calls[1]!.body as { campaignWorkItemId?: string }).campaignWorkItemId, "cwi_item");
+  assert.deepEqual(resultJson(created).session.campaignMembership, membership);
+
+  for (const campaignWorkItemId of ["", "  ", 7]) {
+    const blank = makeDeps(() => assert.fail("no request"));
+    assert.equal((await callTool(blank.deps, "create_session", { ...args, campaignWorkItemId })).isError, true);
+  }
+});
+
 test("create_session polls an exact pending spawn approval until it can create the child", async () => {
   let attempts = 0;
   const { deps, calls } = makeDeps((call) => call.url.endsWith("/api/compatibility")

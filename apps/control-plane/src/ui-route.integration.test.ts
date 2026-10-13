@@ -32,7 +32,7 @@ test("missing-limit event reads page 50,000 cached events with exact continuatio
   seed.registerRunner({
     runnerId: "offline-default-events", hostname: "fixture", os: "linux", version: "fixture",
     workspaces: [{ id: "fixture", name: "Fixture", path: temp }], agents: [],
-  }, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads - 1);
+  }, Date.now(), 220); // Merged #3149 advertises v220 while retaining the unsafe fallback.
   seed.createSession({
     id: "default-events", runnerId: "offline-default-events", workspaceId: "fixture",
     agentId: "fixture", title: "Fixture", useWorktree: false, driver: "claude-code", config: {}, now: 1,

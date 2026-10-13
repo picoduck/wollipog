@@ -70,6 +70,45 @@ test("service launches use the exact reservation and agent reallocations preserv
   } finally { h.db.close(); }
 });
 
+test("a child creation refused or failing while recording its work item leaves no child, reservation, or parent charge (#3106)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ toolCalls: 120, concurrency: 1 })).ok);
+    h.db.updateSessionMaxToolCalls("root", 60, 4);
+    const plan = h.svc.recordCampaignPlan("root", { items: [{ key: "item" }], planComplete: true });
+    assert.ok(plan.ok && plan.data, plan.error ?? "plan refused");
+    const workItemId = plan.data.items[0]!.workItemId;
+    const request = { runnerId: "r", workspaceId: "w", agentId: "claude", config: { model: "claude-opus-5-5" },
+      prompt: "Implement authorized #2936", campaignWorkItemId: workItemId };
+    const create = () => h.svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: "root" });
+    const sql = (h.db as unknown as { db: { prepare(query: string): { get(): unknown } } }).db;
+    const state = () => ({
+      occupied: h.db.campaignBudgets.view("root")!.occupied,
+      members: h.db.campaignBudgets.members("root").filter((id) => id !== "root"),
+      children: sql.prepare("SELECT COUNT(*) AS n FROM sessions WHERE parent_session_id='root'").get(),
+      reserved: sql.prepare("SELECT child_cost_reserved_usd AS cost, child_tool_calls_reserved AS tools FROM sessions WHERE id='root'").get(),
+      launches: h.sent.length,
+    });
+    const before = JSON.stringify(state());
+    const ledger = h.db.campaignWorkLedger;
+    const assign = ledger.assign;
+    for (const [label, replacement, status] of [
+      ["returned refusal", () => ({ ok: false as const, status: 409, error: "ledger refused" }), 409],
+      ["thrown failure", () => { throw new Error("SQLITE_ABORT: attempt insert failed"); }, 500],
+    ] as const) {
+      ledger.assign = replacement as unknown as typeof assign;
+      const refused = create();
+      ledger.assign = assign;
+      assert.equal(refused.status, status, `${label}: ${refused.error}`);
+      assert.match(refused.error ?? "", /cannot record the child's attempt on campaign work item/u, label);
+      assert.equal(JSON.stringify(state()), before, `${label}: creation rolled back completely`);
+    }
+    const retried = create();
+    assert.ok(retried.ok && retried.data, retried.error ?? "retry refused");
+    assert.equal(retried.data.campaignMembership?.currentWorkItemId, workItemId);
+  } finally { h.db.close(); }
+});
+
 test("budget authority accepts bounded contracts and rejects clearing, unknown accounting, and malformed limits", () => {
   assert.ok(validCampaignBudgetAuthority(allowance({ acceptedFollowUps: 0, costUsd: 10, checkpointsUsd: [2, 10] })));
   for (const value of [null, {}, allowance({ costUsd: 0 }), allowance({ toolCalls: 1.5 }), allowance({ concurrency: 0 }),

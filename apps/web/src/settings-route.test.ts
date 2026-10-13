@@ -206,9 +206,9 @@ test("the section panel takes focus only when the panel that had it is gone", ()
 test("the settings sections name the things the plan says stay discoverable", () => {
   const view = readFileSync(fileURLToPath(new URL("./components/SettingsView.tsx", import.meta.url)), "utf8");
   // §11.3: never hide a setting that could exist. A missing section teaches a user it is not
-  // possible; a disabled one with a sentence teaches them where it lives.
+  // possible; a disabled one with a sentence teaches them where it lives. Agent defaults are no longer
+  // one row here: every agent is a row of its own in AgentDefaultsPanel (#3024).
   for (const named of [
-    "Default Models, Efforts, and Permissions",
     "Manage Instances",
     "Updates",
     "Open-Source Licenses",

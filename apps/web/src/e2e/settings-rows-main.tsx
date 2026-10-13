@@ -2,7 +2,6 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import {
   AboutPanel,
-  AgentHarnessDefaultsPanel,
   AppearancePanel,
   BehaviorPanel,
   ExperimentalPanel,
@@ -11,11 +10,12 @@ import {
   NotificationsPanel,
   SettingsView,
 } from "../components/SettingsView.js";
-import { DEFAULT_ORCHESTRATOR_DEFAULTS, type AgentHarnessDefaultsView } from "@wollipog/protocol";
+import { DEFAULT_ORCHESTRATOR_DEFAULTS, type AgentHarnessDefaultConfig, type AgentHarnessDefaultsView } from "@wollipog/protocol";
+import { AgentDefaultsPanel } from "../components/AgentDefaultsPanel.js";
 import { OrchestratorSettingsPanel } from "../components/OrchestratorSettingsPanel.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { interceptLeave } from "../leave-guard.js";
-import { StaticRow } from "../components/ui/SettingsRows.js";
+import { SettingsGroup, StaticRow } from "../components/ui/SettingsRows.js";
 import { RowKinds } from "./setting-row-kinds.js";
 import { ApprovalsPanel } from "../components/ApprovalsPanel.js";
 import { createApiClient } from "../api.js";
@@ -166,8 +166,27 @@ const harnessDefaultsView: AgentHarnessDefaultsView = {
       }],
       compatibleInstallations: 1,
     },
+    {
+      // Nothing to choose: the row says Not Configurable instead of offering Edit… (#3024).
+      agentId: "fixture-acp",
+      driver: "acp",
+      context: { kind: "native" },
+      name: "Fixture ACP Agent",
+      installations: [{
+        runnerId: "fixture-runner",
+        machineName: "Build Machine",
+        online: true,
+        models: [],
+        effortLevels: [],
+        permissionModes: [],
+      }],
+      compatibleInstallations: 1,
+    },
   ],
 };
+
+/** What a save or reset leaves on the server, for the page's life, so the row reads it back. */
+let harnessDefaultsState = structuredClone(harnessDefaultsView);
 
 const harnessDefaultsRepairedView = structuredClone(harnessDefaultsView);
 harnessDefaultsRepairedView.defaults[0]!.installations[0]!.models = [
@@ -277,9 +296,26 @@ const harnessDefaultsTransport: ApiTransport = {
         headers: { "content-type": "application/json" },
       });
     }
+    // `agent-loading` never answers, for the skeleton rows; `agent-empty` has no agents.
+    if (mode === "agent-loading") return new Promise<Response>(() => undefined);
+    if (mode === "agent-empty") return Response.json({ defaults: [] });
+    const method = init?.method ?? "GET";
+    if (method !== "GET") {
+      // `agent-save-fails` refuses a save the way an overloaded server does.
+      if (mode === "agent-save-fails") {
+        return Response.json({ error: "agent harness default update failed: database is locked" }, { status: 503 });
+      }
+      const request = JSON.parse(String(init?.body ?? "{}")) as { agentId: string; config?: AgentHarnessDefaultConfig };
+      harnessDefaultsState = structuredClone(harnessDefaultsState);
+      for (const option of harnessDefaultsState.defaults) {
+        if (option.agentId !== request.agentId) continue;
+        if (method === "PUT" && request.config) option.preference = request.config;
+        else delete option.preference;
+      }
+    }
     const body = mode === "agent-repair" && window.location.hash === "#repair"
       ? harnessDefaultsRepairedView
-      : harnessDefaultsView;
+      : harnessDefaultsState;
     return new Response(JSON.stringify(body), {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -343,7 +379,8 @@ function Harness() {
   const askedFor = params.get("topology") as Topology | null;
   const topology: Topology = askedFor && TOPOLOGIES.includes(askedFor) ? askedFor : "full";
   const requestedSection = params.get("section") as SettingsSection | null;
-  const showAgentDefaults = ["agent", "agent-missing", "agent-repair"].includes(params.get("defaults") ?? "");
+  const showAgentDefaults = ["agent", "agent-missing", "agent-repair", "agent-loading", "agent-empty", "agent-save-fails"]
+    .includes(params.get("defaults") ?? "");
   const requestedUpdates = params.get("updates") as UpdateState | null;
   const update = updateFixture(requestedUpdates && UPDATE_STATES.includes(requestedUpdates) ? requestedUpdates : null);
   // `route` drives the frame itself (#3018): parsed as the shell parses the address, with links and
@@ -473,14 +510,18 @@ function Harness() {
               behavior: (
                 <ApiProvider client={harnessDefaultsApi}>
                   <BehaviorPanel
-                    agentHarnessDefaults={showAgentDefaults ? <AgentHarnessDefaultsPanel /> : (
-                      <StaticRow
-                        title="Default Models, Efforts, and Permissions"
-                        description="The visual fixture does not load agent defaults."
-                      />
+                    agentHarnessDefaults={showAgentDefaults ? <AgentDefaultsPanel onOpenConnections={() => undefined} /> : (
+                      <SettingsGroup title="Agent Defaults" scope="Your Account">
+                        <StaticRow
+                          title="Default Models, Efforts, and Permissions"
+                          description="The visual fixture does not load agent defaults."
+                        />
+                      </SettingsGroup>
                     )}
                     sessionNaming={(
-                      <StaticRow title="Session Naming" description="The visual fixture does not connect to a control plane." />
+                      <SettingsGroup title="Session Titles" scope="Your Account">
+                        <StaticRow title="Title Source" description="The visual fixture does not connect to a control plane." />
+                      </SettingsGroup>
                     )}
                     onOpenShortcuts={() => undefined}
                   />

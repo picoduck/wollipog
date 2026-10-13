@@ -804,8 +804,9 @@ export function SwitchRow({
  * - An optional foot line, or a disclosure (§5.5) holding what the rows leave out.
  *
  * `failure` is for an instant save that is not a switch (a switch fails in place): a compact danger
- * notice above the surface, with Retry. `notice` is any other compact notice about the whole group,
- * in the same place, such as a capability the group's settings are waiting for.
+ * notice above the surface, with Retry. `notice` is any other notice about the whole group, in the
+ * same place: a capability the group's settings are waiting for, or a list that could not be read.
+ * With no `children` there is no surface: the group is its head and that notice (#3024).
  */
 export function SettingsGroup({
   title,
@@ -830,11 +831,11 @@ export function SettingsGroup({
   intro?: ReactNode;
   /** One line under the surface, or a disclosure with the rest of what the group needs to say. */
   foot?: ReactNode;
-  /** A compact `Notice` (§13.2) between the description and the surface. */
+  /** A `Notice` (§13.2) about the whole group, between the description and the surface. */
   notice?: ReactNode;
   failure?: RowFailure | null;
   className?: string;
-  children: ReactNode;
+  children?: ReactNode;
 }) {
   const id = useId();
   const titleId = `${id}-title`;
@@ -861,7 +862,7 @@ export function SettingsGroup({
           <span title={failure.detail}>{failure.message}</span>
         </Notice>
       )}
-      <div className="settings-group-surface surface">{children}</div>
+      {children != null && children !== false && <div className="settings-group-surface surface">{children}</div>}
       {/* A block, not a paragraph, so the foot can be a disclosure (§5.5) as well as a line. */}
       {foot && <div className="settings-group-foot">{foot}</div>}
     </section>

@@ -58,7 +58,7 @@ human-principal requests and do not send an agent-session claim header.
 wollipog session list [--archived] --json
 wollipog session get ID --json
 wollipog session events ID [--after SEQ [--event-epoch EPOCH]] [--limit COUNT] --json
-wollipog session create --runner ID --agent ID (--workspace ID | --path PATH) [--prompt TEXT] [--model MODEL] [--effort EFFORT] [--cost-budget USD] [--max-tool-calls N] [--max-child-sessions N] --json
+wollipog session create --runner ID --agent ID (--workspace ID | --path PATH) [--prompt TEXT] [--model MODEL] [--effort EFFORT] [--cost-budget USD] [--max-tool-calls N] [--max-child-sessions N] [--work-item CAMPAIGN_WORK_ITEM_ID] --json
 wollipog session prompt ID TEXT --json
 wollipog session steering ID --json
 wollipog session steering-get ID SUBMISSION_ID --json
@@ -143,7 +143,7 @@ cursor to the new log.
 Direct HTTP consumers use a default page of 200 events when `limit` is omitted. A missing limit
 never requests the whole log. See [the session events API migration guide](./session-events-api.md)
 for continuation cursors, incomplete-cache retries, and history replacement handling.
-Upgrade CLI/MCP installations to the protocol-220 reader before rolling out this server change.
+Upgrade CLI/MCP installations to the protocol-222 reader before rolling out this server change.
 Identifiable older agent-session unpaged fallbacks receive upgrade guidance; human-principal
 paired-device CLI calls must follow the documented upgrade-first migration.
 

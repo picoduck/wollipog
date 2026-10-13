@@ -5354,6 +5354,9 @@ export class ControlPlaneDb {
   /** Server-only wrapper: reserve an entire managed fan-out before any launch is sent. */
   campaignBudgetTransaction<T>(work: () => T): T { return this.atomic(work); }
 
+  /** Server-only wrapper: insert a campaign child and open its work-item attempt together (#3106). */
+  campaignChildCreationTransaction<T>(work: () => T): T { return this.atomic(work); }
+
   static open(location: string, options: { artifactBlobDir?: string; hostBootId?: string } = {}): ControlPlaneDb {
     if (location !== ":memory:") mkdirSync(dirname(location), { recursive: true });
     const artifactBlobs = location === ":memory:" && !options.artifactBlobDir

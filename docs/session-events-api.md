@@ -49,12 +49,12 @@ include additional rows within their separate alignment caps; they are not whole
 ## Migrating Consumers
 
 Upgrade installed CLI/MCP readers **before rolling out this control-plane change**. Runner
-protocol 220 introduces the reader that never requests the old whole-history fallback.
+protocol 222 introduces the reader that never requests the old whole-history fallback.
 Older readers can otherwise slice events 171–200 from a bounded first page and wrongly present
 them as the newest window of a much longer log if a later completeness probe succeeds.
 
 The server rejects that identifiable legacy fallback (`after` present, no `limit`, and no
-`eventEpoch`) from an authenticated agent session whose credential's runner is below protocol 220,
+`eventEpoch`) from an authenticated agent session whose credential's runner is below protocol 222,
 with HTTP 426, `code: "session_event_reader_upgrade_required"`, and runner-upgrade guidance.
 The capability comes from the authenticated actor's registered runner, never a request header
 or the runner hosting the target session. Ordinary default requests, epoch-pinned continuation,

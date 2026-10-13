@@ -20,7 +20,7 @@ import { type TurnUsage,
 import { Markdown } from "./Markdown.js";
 import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
-import { describeTurnError } from "../turn-error.js";
+import { AUTOMATIC_TURNS_HELD_SENTENCE, describeTurnError, isAutomaticTurnsHeld } from "../turn-error.js";
 import {
   MeasuredVirtualList,
   type VirtualRevealOutcome,
@@ -2392,7 +2392,9 @@ function TimelineRowContent({
     case "stderr":
       return <AgentLogStep item={item} open={disclosureOpen} onToggle={onDisclosureToggle} />;
     case "error":
-      return <TurnFailedNotice message={item.message} prompt={failedTurnPrompt} />;
+      return isAutomaticTurnsHeld(item.message)
+        ? <AutomaticTurnsHeldNotice message={item.message} />
+        : <TurnFailedNotice message={item.message} prompt={failedTurnPrompt} />;
     case "turn_interrupted":
       // The row shows only its turn's footer ("Stopped at …"); EventTimelineBody renders that.
       return null;
@@ -2968,6 +2970,21 @@ function TurnFailedNotice({ message, prompt }: { message: string; prompt?: UserM
       {prompt !== undefined && retry?.error?.promptId === prompt.id && (
         <p className="notice-meta" role="alert">Couldn't retry the turn: {retry.error.message}</p>
       )}
+    </Notice>
+  );
+}
+
+/** The runner holding automatic turns after repeated identical provider rejections (#3100). No turn
+ * failed here, so it has its own heading and no Retry Turn: a person's message is what clears it. The
+ * provider's own words stay behind Show Details. */
+function AutomaticTurnsHeldNotice({ message }: { message: string }) {
+  return (
+    <Notice
+      tone="warning"
+      title="Automatic Turns Held"
+      details={<div className="code-well"><pre>{withoutPromptFailedPrefix(message)}</pre></div>}
+    >
+      <p>{AUTOMATIC_TURNS_HELD_SENTENCE}</p>
     </Notice>
   );
 }

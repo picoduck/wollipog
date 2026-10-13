@@ -687,6 +687,35 @@ test("CLI rejects explicit effort against pre-v138 control planes without creati
   assert.deepEqual(requests, ["http://cp/api/compatibility"]);
 });
 
+test("CLI sends a campaign work item at creation only to a v220 control plane (#3106)", async () => {
+  const create = ["node", "cli.js", "--wollipog-cli", "session", "create", "--runner", "r1", "--agent", "codex",
+    "--workspace", "ws", "--effort", "high", "--work-item", "cwi_item", "--json"];
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "paired-device" };
+  for (const protocolVersion of [RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorkItemAtCreation - 1, PROTOCOL_VERSION]) {
+    const requests: Array<{ url: string; body?: string }> = [];
+    const fetch: McpFetch = async (url, init) => {
+      requests.push({ url, body: init?.body });
+      return { ok: true, status: 200, text: async () => JSON.stringify(url.endsWith("/api/compatibility")
+        ? { protocolVersion } : { id: "s_new", status: "starting", runnerId: "r1", title: "New" }) };
+    };
+    let output = "";
+    const code = await runWollipogCli(create, env, { stdout: (text) => { output += text; }, stderr: () => {} }, fetch);
+    if (protocolVersion < RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorkItemAtCreation) {
+      assert.equal(code, 1);
+      assert.match(JSON.parse(output).error, /requires v220/u, "an older control plane would ignore the item, so it is refused");
+      assert.deepEqual(requests.map((request) => request.url), ["http://cp/api/compatibility"]);
+    } else {
+      assert.equal(code, 0);
+      assert.equal(JSON.parse(requests[1]!.body!).campaignWorkItemId, "cwi_item");
+    }
+  }
+  for (const suffix of [["--work-item"], ["--work-item="], ["--work-item", "  "], ["--work-item", "--json"]]) {
+    const result = await captureCli(["session", "create", "--runner", "r1", "--agent", "codex", "--workspace", "ws", ...suffix]);
+    assert.equal(result.code, 2, suffix.join(" "));
+    assert.match(suffix.includes("--json") ? result.stdout : result.stderr, /--work-item requires a campaign work item ID/u);
+  }
+});
+
 test("CLI rejects a missing or blank effort before compatibility or session creation", async () => {
   for (const suffix of [["--effort"], ["--effort="], ["--effort", "   "], ["--effort", "--json"]]) {
     const result = await captureCli([

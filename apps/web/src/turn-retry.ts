@@ -38,6 +38,9 @@ export interface TurnRetryInput {
   /** The composer's Restart Session is in flight; Retry Turn waits for it rather than restarting
    * the session a second time. */
   restarting?: boolean;
+  /** Input Required with no blocking request: no turn is paused, and the session waits for a
+   * person's message, as it does after repeated provider rejections hold automatic turns (#3100). */
+  heldBetweenTurns?: boolean;
 }
 
 export const TURN_RETRY_BUSY_REASON = "The agent is working on another turn.";
@@ -66,6 +69,8 @@ export function turnRetryPlan(input: TurnRetryInput): TurnRetryPlan {
     return { kind: "restart_then_prompt" };
   }
   if (input.policyPaused) return unavailable("Session is paused by guardrails. Review the pending decision to continue.");
-  if (input.status !== "idle") return unavailable(TURN_RETRY_BUSY_REASON);
+  if (input.status !== "idle" && !(input.status === "input_required" && input.heldBetweenTurns)) {
+    return unavailable(TURN_RETRY_BUSY_REASON);
+  }
   return { kind: "prompt" };
 }

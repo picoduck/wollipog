@@ -42,7 +42,7 @@ Record each issue's harness, exact model and effort, whether each was fixed or A
 
 ### Verify Model and Effort Before Implementation
 
-Use `create_session` with `useWorktree: true`, the resolved harness, an advertised worker permission mode (not Orchestrator mode), and the resolved `model` and `effort` in the same call. The CLI equivalent is `wollipog session create ... --model <model> --effort <effort> --worktree`. Omit a dimension only when it is fixed by policy (the server supplies it) or `not applicable`. Explicit values apply before the initial prompt. Prefer structured tool inputs for task text.
+Use `create_session` with `useWorktree: true`, the resolved harness, an advertised worker permission mode (not Orchestrator mode), and the resolved `model` and `effort` in the same call, plus `campaignWorkItemId` naming the child's recorded work item. The CLI equivalent is `wollipog session create ... --model <model> --effort <effort> --work-item <id> --worktree`. Omit a dimension only when it is fixed by policy (the server supplies it) or `not applicable`. Explicit values apply before the initial prompt. Prefer structured tool inputs for task text.
 
 Read the effective pair back from the creation result or `get_session` and confirm it matches the resolved combination. If it does not, stop that child before it does work, record the mismatch, and report it; do not accept an unverified default. A client and server that do not support explicit effort fail closed; report that blocker rather than retrying without effort.
 
@@ -73,7 +73,7 @@ For publication, retain the exact sanitized payload and approval, the child/conv
 
 ## Dispatch and Supervise
 
-Use [the child assignment](references/child-assignment.md) when releasing each verified child. Record each assignment with `assign_campaign_work_item` when a child starts a work item, and again whenever a child is reused for another item or an item moves to another child; earlier attempts keep their verification and accounting. Reuse a suitable idle child for related follow-ups when possible; give it a fresh issue worktree based on the current default branch. Create another verified child if the old selected worktree has been retired or the session cannot resume safely. Count all campaign children for final verification and, under Stop and Archive, archival.
+Use [the child assignment](references/child-assignment.md) when releasing each verified child. Pass the work item to `create_session` so the child's attempt is recorded before its first prompt; if creation refuses the item, fix the plan rather than creating the child without it. Use `assign_campaign_work_item` whenever a child is reused for another item or an item moves to another child; earlier attempts keep their verification and accounting. Reuse a suitable idle child for related follow-ups when possible; give it a fresh issue worktree based on the current default branch. Create another verified child if the old selected worktree has been retired or the session cannot resume safely. Count all campaign children for final verification and, under Stop and Archive, archival.
 
 Never assign a child to update or restart the Wollipog installation (control plane, runner, or development stack) that hosts the campaign, and never
 approve or prompt such an action as post-merge cleanup. A detached helper is not an exception: it
@@ -127,10 +127,10 @@ The root Orchestrator can propose closing an issue in its human-authorized campa
 `explanation`, `evidence`, and an optional exact `comment`). The runner derives the repository,
 current issue, and related open pull requests; the server includes the assignments of active
 children whose work can bear on the issue. A child is left out only when its launch prompt is
-recorded, it has an open `assign_campaign_work_item` attempt, and every attempt it has ever had is
-on a work item that has never tracked the issue and has no follow-up links. Record each child's
-assignment so unrelated activity does not revoke the approval; a prompt that mentions the issue
-does not bind an unassigned child by itself.
+recorded, it has an open attempt (from `create_session` or `assign_campaign_work_item`), and every
+attempt it has ever had is on a work item that has never tracked the issue and has no follow-up
+links. Pass each child's work item at creation so unrelated activity does not revoke the approval;
+a prompt that mentions the issue does not bind an unassigned child by itself.
 Custom campaigns require a human-owned typed decision. Full Control delegates only when the server
 confirms a human-established issue boundary, verified delivered report and actual default-branch
 merges, or a supported recorded not-planned disposition. Never infer this authority from a prompt.
