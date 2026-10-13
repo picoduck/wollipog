@@ -71,6 +71,9 @@ async function render(node: React.ReactNode) {
   await act(async () => root.render(node));
   return {
     container,
+    async rerender(next: React.ReactNode) {
+      await act(async () => root.render(next));
+    },
     switchNamed(title: string) {
       const control = [...container.querySelectorAll<HTMLButtonElement>('[role="switch"]')]
         .find((element) => element.textContent?.includes(title));
@@ -165,6 +168,37 @@ test("Try Again clears the notice when the browser will ask again", async () => 
     await act(async () => view.container.querySelector<HTMLButtonElement>(".notice button")!.click());
     assertNoDomNode(view.container.querySelector(".notice"));
     assert.equal(view.switchNamed("Desktop Alerts").disabled, false, "turning it on will show the prompt");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("refusing the push prompt blocks Desktop Alerts too, once push settles", async () => {
+  // Push asks for the same permission. Its refusal never passes through this hook's toggle, so a
+  // permission held in state stayed "default" and Desktop Alerts looked operable (#3117 review).
+  const browser = stubNotification("default");
+  const view = await render(<LiveNotifications setting={push({ state: "busy", confirmed: false })} />);
+  try {
+    assertNoDomNode(view.container.querySelector(".notice"));
+    browser.permission = "denied";
+    // The shell re-renders the panel when push settles back to off.
+    await view.rerender(<LiveNotifications setting={push({ state: "off", confirmed: false })} />);
+    assert.ok(view.container.querySelector(".notice.t-warning"), "the refusal is explained");
+    assert.equal(view.switchNamed("Desktop Alerts").disabled, true);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("coming back to the window re-reads a permission changed in the browser's settings", async () => {
+  const browser = stubNotification("denied");
+  const view = await render(<LiveNotifications setting={push()} />);
+  try {
+    assert.ok(view.container.querySelector(".notice.t-warning"));
+    browser.permission = "granted";
+    await act(async () => window.dispatchEvent(new domWindow.Event("focus") as unknown as Event));
+    assertNoDomNode(view.container.querySelector(".notice"), "allowed in the browser, without Try Again");
+    assert.equal(view.switchNamed("Desktop Alerts").disabled, false);
   } finally {
     await view.unmount();
   }
