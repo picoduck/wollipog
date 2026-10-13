@@ -14053,6 +14053,7 @@ export class SessionManager {
         tokensIn: 0,
         tokensOut: 0,
         costUsd: 0,
+        ratePricedUsage: undefined,
         costReconciliationRevision: undefined,
         costReconciliationDeltaUsd: undefined,
         costReconciliationIdentity: undefined,

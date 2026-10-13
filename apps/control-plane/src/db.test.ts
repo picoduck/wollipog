@@ -8931,6 +8931,24 @@ test("malformed snapshot entries fall back to flat totals", () => {
   assert.deepEqual([usage.inputTokens, usage.cachedInputTokens], [10, 0]);
 });
 
+test("a runner rotating pricing keys cannot grow the per-key ledger without bound", () => {
+  const db = withRunner();
+  db.setUsageRateTable(parseRateTable(ratePricedRateDocument));
+  const base = snapshot({ id: "rotating", driver: "codex-app-server", config: { model: "gpt-test-codex" }, historyEpoch: 1 });
+  db.createSessionFromSnapshot(base, "runner-1", 1_000);
+  let tokensIn = 0;
+  for (let batch = 0; batch < 3; batch++) {
+    const entries = Array.from({ length: 32 }, (_, index) => ({ model: `rotating-${batch}-${index}`, inputTokens: 1, outputTokens: 0,
+      cachedInputTokens: 0, cacheCreationInputTokens: 0, reasoningOutputTokens: 0 }));
+    tokensIn += 32;
+    db.updateSessionFromSnapshot("rotating", { ...base, seq: batch + 1, tokensIn, ratePricedUsage: entries }, 2_000 + batch);
+  }
+  const rows = (db.raw().prepare("SELECT COUNT(*) AS n FROM usage_session_rate_priced WHERE session_id='rotating'").get() as { n: number }).n;
+  assert.equal(rows, 64);
+  assert.equal(db.raw().prepare("SELECT rate_priced_status AS s FROM usage_session_state WHERE session_id='rotating'").get()!.s, 2);
+  assert.equal(db.sessionUsageByModel("rotating").totals.inputTokens, 96, "the abandoned batch still books its flat residual");
+});
+
 test("existing usage ledgers are marked to adopt their first snapshot entries on upgrade", () => {
   const temp = mkdtempSync(join(tmpdir(), "wollipog-rate-priced-"));
   const location = join(temp, "control-plane.db");

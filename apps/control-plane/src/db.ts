@@ -13320,8 +13320,8 @@ export class ControlPlaneDb {
     // Each entry's excess over what this ledger ingested under the same key is usage it never saw,
     // with its cache buckets intact. A ledger row that predates per-key counting adopts the first
     // entries as its baseline, and the flat totals below price that one catch-up as before.
-    const ratePricedStatus = row?.rate_priced_status ?? 0;
-    const entries = snapshot.ratePricedUsage === undefined || ratePricedStatus === 2
+    let ratePricedStatus = row?.rate_priced_status ?? 0;
+    let entries = snapshot.ratePricedUsage === undefined || ratePricedStatus === 2
       ? null : parseRatePricedUsage(snapshot.ratePricedUsage);
     type Ingested = Omit<RatePricedUsageTotal, "model" | "serviceTier" | "requestInputTokens">;
     const ingested = new Map<string, Ingested>();
@@ -13336,6 +13336,14 @@ export class ControlPlaneDb {
           cachedInputTokens: Number(counted.cached_input_tokens), cacheCreationInputTokens: Number(counted.cache_creation_tokens),
           reasoningOutputTokens: Number(counted.reasoning_tokens),
         });
+      }
+      // Keys a runner introduces are bounded like ingested ones; beyond that the session abandons
+      // per-key reconciliation and its snapshots price from flat totals.
+      if (ingested.size + entries.filter((entry) => !ingested.has(ratePricedUsageKey(entry))).length >
+          RATE_PRICED_USAGE_MAX_ENTRIES * 2) {
+        if (row) this.stmt("UPDATE usage_session_state SET rate_priced_status=2 WHERE session_id=?").run(sessionId);
+        entries = null;
+        ratePricedStatus = 2;
       }
     }
     const ratePricedResiduals = entries && ratePricedStatus === 0
