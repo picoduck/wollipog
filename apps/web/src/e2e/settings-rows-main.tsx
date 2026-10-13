@@ -21,7 +21,7 @@ import { ApprovalsPanel } from "../components/ApprovalsPanel.js";
 import { createApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ApiTransport } from "../api-transport.js";
-import type { DesktopUpdateSetting, DesktopUpdateStatus } from "../desktop-updates.js";
+import { aboutUpdateFixture, isAboutUpdateState } from "./about-update-fixtures.js";
 import { DEFAULT_EXPERIMENT_FLAGS } from "../experiments.js";
 import {
   COLOR_SCHEMES,
@@ -324,51 +324,6 @@ const harnessDefaultsTransport: ApiTransport = {
 };
 const harnessDefaultsApi = createApiClient(harnessDefaultsTransport);
 
-/**
- * #1646's desktop update states, injected the way the shell's hook would report them. Absent, the
- * About panel renders as it does in a browser.
- */
-const UPDATE_STATES = ["current", "available", "release-page", "disabled", "unchecked"] as const;
-type UpdateState = (typeof UPDATE_STATES)[number];
-
-function updateFixture(state: UpdateState | null): DesktopUpdateSetting | undefined {
-  if (!state) return undefined;
-  const available = {
-    state: "available" as const,
-    version: "0.28.0",
-    releaseUrl: "https://github.com/picoduck/wollipog/releases/tag/v0.28.0",
-    checkedAt: Date.UTC(2026, 8, 23, 16, 5),
-  };
-  const status: DesktopUpdateStatus = {
-    currentVersion: "0.27.0",
-    install: state === "release-page"
-      ? { mode: "releasePage", reason: "This app was installed from a .deb package. Install the new package from the release page." }
-      : { mode: "inPlace" },
-    automaticChecks: state !== "disabled",
-    prereleaseUpdates: false,
-    checksAllowed: state !== "disabled",
-    releasesUrl: "https://github.com/picoduck/wollipog/releases",
-    lastCheck: state === "current"
-      ? { state: "current", checkedAt: Date.UTC(2026, 8, 23, 16, 5) }
-      : state === "unchecked" || state === "disabled" ? null : available,
-  };
-  return {
-    desktop: true,
-    status,
-    loading: false,
-    checking: false,
-    installing: false,
-    savingAutomatic: false,
-    savingPrerelease: false,
-    error: null,
-    check: () => undefined,
-    install: () => undefined,
-    openRelease: () => undefined,
-    toggleAutomatic: () => undefined,
-    togglePrerelease: () => undefined,
-  };
-}
-
 function Harness() {
   const params = new URLSearchParams(window.location.search);
   // Selected by query string rather than by a control on the page: a control would sit inside the
@@ -381,8 +336,9 @@ function Harness() {
   const requestedSection = params.get("section") as SettingsSection | null;
   const showAgentDefaults = ["agent", "agent-missing", "agent-repair", "agent-loading", "agent-empty", "agent-save-fails"]
     .includes(params.get("defaults") ?? "");
-  const requestedUpdates = params.get("updates") as UpdateState | null;
-  const update = updateFixture(requestedUpdates && UPDATE_STATES.includes(requestedUpdates) ? requestedUpdates : null);
+  // #1646's and #3028's desktop update states; absent, the About panel renders as it does in a browser.
+  const requestedUpdates = params.get("updates");
+  const update = isAboutUpdateState(requestedUpdates) ? aboutUpdateFixture(requestedUpdates) : undefined;
   // `route` drives the frame itself (#3018): parsed as the shell parses the address, with links and
   // Back pushing the next one, so a phone's index and its section pages are real routes. Without
   // it, `section` picks a section directly.

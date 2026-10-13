@@ -178,6 +178,20 @@ export function errorMessage(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
+/** What the Updates settings asked the shell to do. */
+export type DesktopUpdateAction = "read" | "check" | "install" | "openRelease" | "automatic" | "prerelease";
+
+/** The last request that failed, and the shell's words for why. Settings › About shows each one where
+ * it happened: a failed check is the status block's own state, a switch fails in place. */
+export interface DesktopUpdateFailure {
+  action: DesktopUpdateAction;
+  message: string;
+}
+
+function clearCheckFailure(failure: DesktopUpdateFailure | null): DesktopUpdateFailure | null {
+  return failure?.action === "check" ? null : failure;
+}
+
 export interface DesktopUpdateSetting {
   /** False in a browser or PWA: those are updated by upgrading the control plane that serves them. */
   desktop: boolean;
@@ -187,7 +201,7 @@ export interface DesktopUpdateSetting {
   installing: boolean;
   savingAutomatic: boolean;
   savingPrerelease: boolean;
-  error: string | null;
+  failure: DesktopUpdateFailure | null;
   check: () => void;
   /** Install and Restart. A hold for running work opens the held-update confirmation, which is the
    * only thing that confirms. */
@@ -215,7 +229,13 @@ export function useDesktopUpdateSetting(
   const [installing, setInstalling] = useState(false);
   const [savingAutomatic, setSavingAutomatic] = useState(false);
   const [savingPrerelease, setSavingPrerelease] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [failure, setFailure] = useState<DesktopUpdateFailure | null>(null);
+  const fail = (action: DesktopUpdateAction) => (cause: unknown) => setFailure({ action, message: errorMessage(cause) });
+  // A check answered since the failed one — the background notifier's, another window's, or a
+  // channel change clearing the old answer — replaces the failure with what it found. Keyed on the
+  // accepted answer, so the guards above decide what counts as newer.
+  const lastCheck = status?.lastCheck;
+  useEffect(() => { setFailure(clearCheckFailure); }, [lastCheck]);
 
   useEffect(() => {
     if (!inDesktop) return;
@@ -246,7 +266,7 @@ export function useDesktopUpdateSetting(
     void subscribed
       .then(() => readDesktopUpdateStatus(desktop))
       .then((next) => { if (!disposed) setStatus(next && newer(heardStatus ?? next)); })
-      .catch((cause) => { if (!disposed) setError(errorMessage(cause)); })
+      .catch((cause) => { if (!disposed) fail("read")(cause); })
       .finally(() => { if (!disposed) setLoading(false); });
     return () => { disposed = true; stops.forEach((stop) => stop()); };
   }, [desktop, inDesktop]);
@@ -254,12 +274,17 @@ export function useDesktopUpdateSetting(
   const check = useCallback(() => {
     if (!status || checking || installing || savingPrerelease) return;
     setChecking(true);
-    setError(null);
+    // A failed check stays up while it is retried, so Retry is the button that shows it running.
+    setFailure((current) => (current?.action === "check" ? current : null));
     checkForDesktopUpdate(false, desktop)
-      .then((lastCheck) => setStatus((current) => (current && lastCheck && updateCheckMatchesStatus(lastCheck, current)
-        && (!current.lastCheck || lastCheck.checkedAt >= current.lastCheck.checkedAt)
-        ? { ...current, lastCheck } : current)))
-      .catch((cause) => setError(errorMessage(cause)))
+      .then((lastCheck) => {
+        // Only the check's own failure: a switch that failed while the check ran keeps its Try Again.
+        setFailure(clearCheckFailure);
+        setStatus((current) => (current && lastCheck && updateCheckMatchesStatus(lastCheck, current)
+          && (!current.lastCheck || lastCheck.checkedAt >= current.lastCheck.checkedAt)
+          ? { ...current, lastCheck } : current));
+      })
+      .catch(fail("check"))
       .finally(() => setChecking(false));
   }, [checking, desktop, installing, savingPrerelease, status]);
 
@@ -274,7 +299,7 @@ export function useDesktopUpdateSetting(
       if (result.outcome !== "restarting") setInstalling(false);
     };
     setInstalling(true);
-    setError(null);
+    setFailure(null);
     installDesktopUpdate(false, desktop)
       .then((result) => {
         settle(result);
@@ -300,7 +325,7 @@ export function useDesktopUpdateSetting(
         });
       })
       .catch((cause) => {
-        setError(errorMessage(cause));
+        fail("install")(cause);
         setInstalling(false);
       });
   }, [checking, confirm, desktop, installing, links, savingPrerelease, status]);
@@ -308,28 +333,29 @@ export function useDesktopUpdateSetting(
   const openRelease = useCallback(() => {
     const url = status?.lastCheck?.state === "available" ? status.lastCheck.releaseUrl : status?.releasesUrl;
     if (!url) return;
-    openReleasePage(url, desktop).catch((cause) => setError(errorMessage(cause)));
+    setFailure(null);
+    openReleasePage(url, desktop).catch(fail("openRelease"));
   }, [desktop, status]);
 
   const toggleAutomatic = useCallback(() => {
     if (!status || savingAutomatic) return;
     setSavingAutomatic(true);
-    setError(null);
+    setFailure(null);
     writeAutomaticUpdateChecks(!status.automaticChecks, desktop)
       .then((automaticChecks) => setStatus((current) => (current ? { ...current, automaticChecks } : current)))
-      .catch((cause) => setError(errorMessage(cause)))
+      .catch(fail("automatic"))
       .finally(() => setSavingAutomatic(false));
   }, [desktop, savingAutomatic, status]);
 
   const togglePrerelease = useCallback(() => {
     if (!status || savingPrerelease || checking || installing) return;
     setSavingPrerelease(true);
-    setError(null);
+    setFailure(null);
     writePrereleaseUpdates(!status.prereleaseUpdates, desktop)
       .then((next) => setStatus((current) => current?.lastCheck && updateCheckMatchesStatus(current.lastCheck, next)
         && (!next.lastCheck || current.lastCheck.checkedAt >= next.lastCheck.checkedAt)
         ? { ...next, lastCheck: current.lastCheck } : next))
-      .catch((cause) => setError(errorMessage(cause)))
+      .catch(fail("prerelease"))
       .finally(() => setSavingPrerelease(false));
   }, [checking, desktop, installing, savingPrerelease, status]);
 
@@ -341,7 +367,7 @@ export function useDesktopUpdateSetting(
     installing,
     savingAutomatic,
     savingPrerelease,
-    error,
+    failure,
     check,
     install,
     openRelease,

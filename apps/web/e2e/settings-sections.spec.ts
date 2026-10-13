@@ -142,7 +142,9 @@ test("every Settings group is one surface with hairlines between its rows, and a
         };
       }));
       expect(groups.length, `${id}: the section renders its groups`).toBeGreaterThan(0);
-      if (groups.length === 1) expect(groups[0]!.title, `${id}: its only group has no heading`).toBeNull();
+      // About draws its own head, the identity header (#3028), which does not name its one group in a
+      // browser, so that group keeps its title; every other section's heading names its only group.
+      if (groups.length === 1 && id !== "about") expect(groups[0]!.title, `${id}: its only group has no heading`).toBeNull();
       for (const group of groups) {
         const name = `${id} › ${group.title ?? "its group"}`;
         if (groups.length > 1) expect(group.title, `${name}: each of several groups is headed`).not.toBeNull();
