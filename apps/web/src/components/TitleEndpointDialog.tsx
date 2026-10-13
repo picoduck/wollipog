@@ -90,7 +90,8 @@ export function TitleEndpointDialog({
   const validate = (field: Field, values = draft): string | null => {
     switch (field) {
       case "machine": return values.runnerId ? null : "Choose a machine to send through.";
-      case "endpoint": return endpointUrlError(values.endpoint, values.apiKey !== "");
+      // A key already saved on the machine travels with every request, just as a new one would.
+      case "endpoint": return endpointUrlError(values.endpoint, keySaved || values.apiKey !== "");
       case "model": return modelIdError(values.model);
       case "timeout": return timeoutError(values.timeout);
     }

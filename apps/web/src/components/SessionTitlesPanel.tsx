@@ -74,12 +74,17 @@ export function SessionTitlesPanel() {
     return () => window.clearTimeout(timer);
   }, [saved]);
 
-  /** Runs a change against the API it started with; a reload or another instance drops its answer. */
-  const request = async <T,>(operation: (requestApi: typeof api) => Promise<T>): Promise<T | undefined> => {
+  /** Whether a change started now still belongs to what is shown: a reload or another instance ends it. */
+  const owner = () => {
     const requestApi = api;
     const started = generation.current;
-    const result = await operation(requestApi);
-    return mounted.current && currentApi.current === requestApi && generation.current === started ? result : undefined;
+    return () => mounted.current && currentApi.current === requestApi && generation.current === started;
+  };
+  /** Runs a change against the API it started with; a reload or another instance drops its answer. */
+  const request = async <T,>(operation: (requestApi: typeof api) => Promise<T>): Promise<T | undefined> => {
+    const current = owner();
+    const result = await operation(api);
+    return current() ? result : undefined;
   };
   /** A dialog's change: the settings it returns are shown, and the dialog closes. Failures reject to it. */
   const applyFromDialog = async (operation: (requestApi: typeof api) => Promise<SessionNamingSettingsView>) => {
@@ -101,6 +106,8 @@ export function SessionTitlesPanel() {
     setSaving(true);
     setSaved(false);
     setError(null);
+    // Its failure and its end are as much the old instance's as its answer.
+    const current = owner();
     try {
       const next = await request((requestApi) => requestApi.updateSessionNamingSettings({ mode: "prompt_text_only" }));
       if (next) {
@@ -108,9 +115,9 @@ export function SessionTitlesPanel() {
         setSaved(true);
       }
     } catch (cause) {
-      if (mounted.current) setError({ ...plainFailure(cause, "The title source wasn't saved."), action: "save" });
+      if (current()) setError({ ...plainFailure(cause, "The title source wasn't saved."), action: "save" });
     } finally {
-      if (mounted.current) setSaving(false);
+      if (current()) setSaving(false);
     }
   };
 

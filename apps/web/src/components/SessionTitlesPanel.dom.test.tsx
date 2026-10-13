@@ -563,6 +563,69 @@ test("a failed dialog save is a danger notice above the footer, with Show Detail
   }
 });
 
+test("a save that fails after switching instances never touches the new instance's state", async () => {
+  const deferred = () => {
+    let reject!: (cause: unknown) => void;
+    const promise = new Promise<Response>((_resolve, fail) => { reject = fail; });
+    return { promise, reject };
+  };
+  const saves = { a: deferred(), b: deferred() };
+  const transport = (name: "a" | "b"): ApiTransport => ({
+    instanceId: name,
+    publicOrigin: "http://localhost",
+    close() {},
+    async request(_path, init) {
+      return (init?.method ?? "GET") === "PUT" ? saves[name].promise : json(baseView("session_agent_account"));
+    },
+  });
+  const clients = { a: createApiClient(transport("a")), b: createApiClient(transport("b")) };
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const draw = (name: "a" | "b") => root.render(
+    <ApiProvider client={clients[name]}><FeedbackProvider><SessionTitlesPanel /></FeedbackProvider></ApiProvider>,
+  );
+  const sourceDisabled = () => container.querySelector('[aria-label^="Title Source:"]')?.getAttribute("aria-disabled");
+  try {
+    await act(async () => draw("a"));
+    await selectOption(container, "Title Source", "First Message");
+    await act(async () => draw("b"));
+    await selectOption(container, "Title Source", "First Message");
+    assert.equal(sourceDisabled(), "true", "B's save is running");
+    await act(async () => {
+      saves.a.reject(new TypeError("Failed to fetch"));
+      await saves.a.promise.catch(() => undefined);
+    });
+    await settle();
+    assert.equal(sourceDisabled(), "true", "A's failure does not end B's save");
+    assertNoDomNode(container.querySelector('[role="alert"]'), "A's failure is not shown on B");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("with a saved key, an http URL off this machine is refused before anything is sent", async () => {
+  const { transport, calls } = recordingTransport(() => savedEndpoint(true));
+  const view = await renderPanel(transport);
+  try {
+    await act(async () => buttonNamed(view.container, "Edit…").click());
+    const panel = dialog()!;
+    const url = input(panel, "Endpoint URL");
+    await type(url, "http://models.internal/v1");
+    await leave(url);
+    assert.equal(url.getAttribute("aria-invalid"), "true");
+    assert.equal(byId(url.getAttribute("aria-describedby")!)?.textContent, "Use an https:// URL to send an API key.");
+    await act(async () => fireDomEvent.submit(panel.querySelector("form")!));
+    assert.equal(domWindow.document.activeElement, url);
+    assert.deepEqual(calls.filter((call) => call.method !== "GET"), []);
+    await type(url, "http://127.0.0.1:8080/v1");
+    assert.equal(url.getAttribute("aria-invalid"), null, "a loopback endpoint may keep its key");
+  } finally {
+    await cleanup(view);
+  }
+});
+
 test("an unavailable source says in its row that new sessions use their first message", async () => {
   const drifted: SessionNamingSettingsView = {
     ...baseView("session_agent_account"),
