@@ -8957,7 +8957,66 @@ test("a runner rotating pricing keys cannot grow the per-key ledger without boun
   assert.equal(db.sessionUsageByModel("rotating").totals.inputTokens, 96, "the abandoned batch still books its flat residual");
 });
 
-test("existing usage ledgers are marked to adopt their first snapshot entries on upgrade", () => {
+test("a v219 runner's registration snapshot books nothing before its buffered events and negotiated snapshot", () => {
+  const record = claudeRepublished("claude-test-model", 10, 5, 1_000, 200);
+  const entries = [...accrueRatePricedUsage([], record)!];
+  const book = (protocolVersion: number | null) => {
+    const db = ControlPlaneDb.open(":memory:");
+    db.registerRunner(meta(), 500, protocolVersion);
+    db.setUsageRateTable(parseRateTable(ratePricedRateDocument));
+    const base = snapshot({ id: "buffered", driver: "claude-code", config: { model: "claude-test-model" }, historyEpoch: 1 });
+    db.createSessionFromSnapshot(base, "runner-1", 1_000);
+    // Registration: pre-negotiation, so seq 0 and no history epoch, but cumulative totals.
+    db.updateSessionsFromSnapshots([{ ...base, seq: 0, historyEpoch: undefined, tokensIn: 10, tokensOut: 5, ratePricedUsage: entries }], 2_000);
+    // The runner then flushes its buffered event and publishes its negotiated snapshot.
+    db.appendHydratedPage("buffered", { afterSeq: 0, historyEpoch: 1, eventEpoch: 0 }, [{ seq: 1, ts: 3_000, payload: record }]);
+    db.updateSessionFromSnapshot("buffered", { ...base, seq: 1, tokensIn: 10, tokensOut: 5, ratePricedUsage: entries }, 4_000);
+    return db.sessionUsageByModel("buffered").totals;
+  };
+  const eventFirst = ingestRatePriced("event", "claude-code", "claude-test-model", [record]).usage.totals;
+  assert.deepEqual(book(PROTOCOL_VERSION), eventFirst);
+  assert.equal(book(218).inputTokens, 20, "an older runner's registration keeps today's flat catch-up");
+});
+
+test("cost the runner already acknowledged is not charged again for its rate-priced residual", () => {
+  const record = claudeRepublished("claude-test-model", 10, 5, 1_000, 200);
+  const eventFirst = ingestRatePriced("event", "claude-code", "claude-test-model", [record]);
+  const acknowledged = eventFirst.costUsd;
+  // A restored or new control plane: the runner's cost is the acknowledged price of that record.
+  const db = withRunner();
+  db.setUsageRateTable(parseRateTable(ratePricedRateDocument));
+  db.createSessionFromSnapshot(snapshot({ id: "restored", driver: "claude-code", config: { model: "claude-test-model" },
+    historyEpoch: 1, seq: 1, tokensIn: 10, tokensOut: 5, costUsd: acknowledged, acknowledgedCostUsd: acknowledged,
+    ratePricedUsage: [...accrueRatePricedUsage([], record)!] }), "runner-1", 1_000);
+  const restored = db.sessionUsageByModel("restored").totals;
+  assert.equal(db.getSession("restored")!.costUsd, acknowledged);
+  assert.deepEqual([restored.cachedInputTokens, restored.cacheCreationTokens], [1_000, 200]);
+
+  // Beside missing provider-costed tokens the split is unknowable: never twice, and flagged.
+  const mixed = withRunner();
+  mixed.setUsageRateTable(parseRateTable(ratePricedRateDocument));
+  mixed.createSessionFromSnapshot(snapshot({ id: "mixed", driver: "claude-code", config: { model: "claude-test-model" },
+    historyEpoch: 1, seq: 2, tokensIn: 50, tokensOut: 25, costUsd: acknowledged + 0.25, acknowledgedCostUsd: acknowledged,
+    costIsEstimate: true, ratePricedUsage: [...accrueRatePricedUsage([], record)!] }), "runner-1", 1_000);
+  assert.ok(Math.abs(mixed.getSession("mixed")!.costUsd - (acknowledged + 0.25)) < 1e-12);
+  assert.equal(mixed.sessionUsageByModel("mixed").totals.costSource, "unpriced");
+});
+
+test("flat catch-up without entries leaves the per-key counts incomplete", () => {
+  const record = claudeRepublished("claude-test-model", 10, 5, 1_000, 200);
+  const db = withRunner();
+  db.setUsageRateTable(parseRateTable(ratePricedRateDocument));
+  const base = snapshot({ id: "downgraded", driver: "claude-code", config: { model: "claude-test-model" }, historyEpoch: 1 });
+  db.createSessionFromSnapshot(base, "runner-1", 1_000);
+  db.updateSessionFromSnapshot("downgraded", { ...base, seq: 1, tokensIn: 10, tokensOut: 5 }, 2_000);
+  const flat = db.sessionUsageByModel("downgraded").totals;
+  db.updateSessionFromSnapshot("downgraded", { ...base, seq: 1, tokensIn: 10, tokensOut: 5,
+    ratePricedUsage: [...accrueRatePricedUsage([], record)!] }, 3_000);
+  assert.deepEqual(db.sessionUsageByModel("downgraded").totals, flat);
+  assert.equal(db.raw().prepare("SELECT rate_priced_status AS s FROM usage_session_state WHERE session_id='downgraded'").get()!.s, 1);
+});
+
+test("existing usage ledgers are marked incomplete on upgrade", () => {
   const temp = mkdtempSync(join(tmpdir(), "wollipog-rate-priced-"));
   const location = join(temp, "control-plane.db");
   try {

@@ -5809,6 +5809,7 @@ export class SessionManager {
       tokensIn: retainAccounting ? (prior?.tokensIn ?? 0) : 0,
       tokensOut: retainAccounting ? (prior?.tokensOut ?? 0) : 0,
       ratePricedUsage: retainAccounting ? prior?.ratePricedUsage : [],
+      acknowledgedCostUsd: retainAccounting ? prior?.acknowledgedCostUsd : undefined,
       contextTokensUsed: priorResumeId ? prior?.contextTokensUsed : undefined,
       contextWindow: priorResumeId ? prior?.contextWindow : undefined,
       costUsd: retainAccounting ? (prior?.costUsd ?? 0) : 0,
@@ -5875,6 +5876,7 @@ export class SessionManager {
           meta.tokensIn = latest.tokensIn;
           meta.tokensOut = latest.tokensOut;
           meta.ratePricedUsage = latest.ratePricedUsage;
+          meta.acknowledgedCostUsd = latest.acknowledgedCostUsd;
           meta.costReconciliationRevision = latest.costReconciliationRevision;
           meta.costReconciliationDeltaUsd = latest.costReconciliationDeltaUsd;
           meta.costReconciliationIdentity = latest.costReconciliationIdentity;
@@ -14055,6 +14057,7 @@ export class SessionManager {
         tokensOut: 0,
         costUsd: 0,
         ratePricedUsage: [],
+        acknowledgedCostUsd: undefined,
         costReconciliationRevision: undefined,
         costReconciliationDeltaUsd: undefined,
         costReconciliationIdentity: undefined,
@@ -14316,7 +14319,7 @@ export class SessionManager {
       const adjusted = current.costUsd + correctionDeltaUsd! - (current.costReconciliationDeltaUsd ?? 0);
       costUsd = Math.max(costUsd, adjusted);
     }
-    const updated = this.store.patchMeta(sessionId, { costUsd,
+    const updated = this.store.patchMeta(sessionId, { costUsd, acknowledgedCostUsd: costUsd,
       ...(revision !== undefined ? { costReconciliationRevision: revision } : {}),
       ...(correctionDeltaUsd !== undefined ? { costReconciliationDeltaUsd: correctionDeltaUsd } : {}),
       ...(identity !== undefined ? { costReconciliationIdentity: identity } : {}),

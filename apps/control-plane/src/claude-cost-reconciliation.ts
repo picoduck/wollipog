@@ -571,9 +571,13 @@ export function normalizeReconciledSnapshot(db: ControlPlaneDb, snapshot: Sessio
   const sum = db.raw().prepare(`SELECT COALESCE(SUM(r.delta_microusd),0) AS delta, COALESCE(SUM(p.delta_remainder_picousd),0) AS remainder
     FROM usage_cost_reconciliations r LEFT JOIN usage_cost_reconciliation_precision p ON p.digest=r.digest
     WHERE r.session_id=? AND r.revision>?`).get(snapshot.id, acknowledged);
-  const adjusted = picoUsd(snapshot.costUsd) + BigInt(Number(sum?.delta ?? 0)) * PICO_PER_MICRO + BigInt(Number(sum?.remainder ?? 0));
+  const correction = BigInt(Number(sum?.delta ?? 0)) * PICO_PER_MICRO + BigInt(Number(sum?.remainder ?? 0));
+  const adjusted = picoUsd(snapshot.costUsd) + correction;
+  const acknowledgedCost = snapshot.acknowledgedCostUsd === undefined ? undefined : picoUsd(snapshot.acknowledgedCostUsd) + correction;
   const target = reconciliationCoordinate(db, snapshot.id);
-  return { ...snapshot, costUsd: Number(adjusted > 0n ? adjusted : 0n) / 1e12, costReconciliationRevision: revision,
+  return { ...snapshot, costUsd: Number(adjusted > 0n ? adjusted : 0n) / 1e12,
+    ...(acknowledgedCost === undefined ? {} : { acknowledgedCostUsd: Number(acknowledgedCost > 0n ? acknowledgedCost : 0n) / 1e12 }),
+    costReconciliationRevision: revision,
     costReconciliationIdentity: target.identity, costReconciliationDeltaUsd: target.deltaUsd };
 }
 

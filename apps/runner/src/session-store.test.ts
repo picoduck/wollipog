@@ -806,6 +806,9 @@ test("rate-priced usage rides registration and v219 snapshots but never an older
   assert.deepEqual(metaToSnapshot(meta({ ratePricedUsage }), null).ratePricedUsage, ratePricedUsage,
     "registration is pre-negotiation and is where a reconnect prices unseen usage");
   assert.deepEqual(metaToSnapshot(meta({ ratePricedUsage }), 219).ratePricedUsage, ratePricedUsage);
+  assert.equal(metaToSnapshot(meta({ ratePricedUsage, acknowledgedCostUsd: 0.5 }), 219).acknowledgedCostUsd, 0.5);
+  assert.equal("acknowledgedCostUsd" in metaToSnapshot(meta({ acknowledgedCostUsd: 0.5 }), 219), false,
+    "the acknowledgement only qualifies entries");
   assert.equal("ratePricedUsage" in metaToSnapshot(meta({ ratePricedUsage }), 218), false);
   assert.equal("ratePricedUsage" in metaToSnapshot(meta({ ratePricedUsage: null }), null), false, "an overflowed session reports none");
   assert.equal("ratePricedUsage" in metaToSnapshot(meta(), 219), false);

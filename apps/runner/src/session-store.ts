@@ -211,6 +211,8 @@ export interface SessionMeta {
    * session's first usage. Absent for a session whose usage predates counting, and null once the
    * key bound was exceeded: either way it is never reported. */
   ratePricedUsage?: RatePricedUsageTotal[] | null;
+  /** The last control-plane priced cost applied to `costUsd` (#3111); travels with ratePricedUsage. */
+  acknowledgedCostUsd?: number;
   preview: string | null;
   pendingApproval: PendingApproval | null;
   /** One-time upgrade scan repaired any question that an older startup path stranded in history. */
@@ -4014,7 +4016,8 @@ export function metaToSnapshot(
     // carries the entries; an older control plane ignores the field.
     ...(Array.isArray(m.ratePricedUsage) &&
         (controlPlaneProtocolVersion === null || runnerSupportsProtocol(controlPlaneProtocolVersion, "ratePricedSnapshotUsage"))
-      ? { ratePricedUsage: m.ratePricedUsage } : {}),
+      ? { ratePricedUsage: m.ratePricedUsage,
+          ...(m.acknowledgedCostUsd === undefined ? {} : { acknowledgedCostUsd: m.acknowledgedCostUsd }) } : {}),
     ...(m.costReconciliationRevision ? { costReconciliationRevision: m.costReconciliationRevision } : {}),
     ...(m.costReconciliationIdentity ? { costReconciliationIdentity: m.costReconciliationIdentity } : {}),
     ...(m.costReconciliationDeltaUsd !== undefined ? { costReconciliationDeltaUsd: m.costReconciliationDeltaUsd } : {}),

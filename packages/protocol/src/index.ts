@@ -7139,6 +7139,10 @@ export interface SessionSnapshot {
    * Absent from older runners, from negotiated snapshots to older control planes, and once a
    * session exceeds the key bound; the control plane then prices residuals from flat totals. */
   ratePricedUsage?: import("./rate-priced-usage.js").RatePricedUsageTotal[];
+  /** Protocol 219: the last control-plane priced cost this runner applied to `costUsd`, sent with
+   * `ratePricedUsage`. Cost growth beyond the control plane's ledger is provider cost unless the
+   * ledger fell below this acknowledgement, which already priced some rate-priced usage. */
+  acknowledgedCostUsd?: number;
   /** Protocol 197: SDK-computed cost retains estimate provenance during snapshot catch-up. */
   costIsEstimate?: true;
   /** Protocol 210: acknowledged cumulative adjustment, never inferred from scalar cost. */
