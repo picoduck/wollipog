@@ -232,7 +232,7 @@ export interface InboxThreadChild {
 
 /** What a parent card says about its thread, whether or not the thread is expanded. */
 export interface InboxThreadChildren {
-  followUpLabel?: "Needs Your Input" | "Result Available";
+  followUpLabel?: "Needs Your Input" | "Ready for Review";
   count: number;
   /** Working descendants, including those hidden by a collapsed nested thread. */
   working?: number;
@@ -328,7 +328,7 @@ export function threadInboxRows<T extends { session: SessionView }>(
     const strongest = members.map(sessionFollowUp).sort((a, b) => b.priority - a.priority)[0];
     const summary: InboxThreadChildren | null = children.length === 0 ? null : {
       ...(strongest && strongest.priority >= 2 ? { followUpLabel: strongest.group === "needs_input"
-        ? "Needs Your Input" as const : "Result Available" as const } : {}),
+        ? "Needs Your Input" as const : "Ready for Review" as const } : {}),
       count: children.length,
       working: members.filter((child) => !stalledSessionIds.has(child.id) && inboxThreadChildState(child, false) === "running").length,
       waiting: children.filter((child) => isInboxBlocked(child)).length,

@@ -295,7 +295,7 @@ test("a returned result keeps one review badge and meaningful time despite newer
     session("working", { status: "running", lastEventAt: Date.now(), attention })] });
   try {
     const card = board.card("result");
-    assert.deepEqual([...card.querySelectorAll(".status")].map((badge) => badge.textContent), ["Result Available"]);
+    assert.deepEqual([...card.querySelectorAll(".status")].map((badge) => badge.textContent), ["Ready for Review"]);
     // A session still working shows its working status, not its earlier result (#3074).
     assert.deepEqual([...board.card("working").querySelectorAll(".status")].map((badge) => badge.textContent), ["Running"]);
     assert.equal(card.querySelector("time.card-time")?.getAttribute("datetime"), new Date(meaningfulAt).toISOString());

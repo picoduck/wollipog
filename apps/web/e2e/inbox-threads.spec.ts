@@ -262,11 +262,11 @@ test("phone parents visibly identify review work and suppress controller-owned r
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`${PAGE}&family-follow-up=review`);
   const parent = parentRow(page);
-  await expect(parent.locator(".status")).toHaveText("Result Available");
+  await expect(parent.locator(".status")).toHaveText("Ready for Review");
   await expect(parent.locator(".status")).toBeVisible();
   await parent.locator(".inbox-thread-toggle").click();
   await expect(page.locator(".inbox-row-shell.thread-child")).toHaveCount(0);
-  await expect(parent.locator(".status")).toHaveText("Result Available");
+  await expect(parent.locator(".status")).toHaveText("Ready for Review");
   await expect(parent.locator(".status")).toBeVisible();
   const box = await parent.locator(".status").evaluate((badge) => ({
     width: badge.clientWidth, contentWidth: badge.scrollWidth, right: badge.getBoundingClientRect().right,
@@ -280,7 +280,7 @@ test("phone parents visibly identify review work and suppress controller-owned r
   await page.goto(`${PAGE}&family-follow-up=controlled`);
   await expect(parent.locator(".status")).toHaveText("Running");
   await expect(parent.locator(".status")).toHaveCount(1);
-  await expect(parent.locator(".inbox-thread-family")).not.toContainText(/Needs Your Input|Result Available/);
+  await expect(parent.locator(".inbox-thread-family")).not.toContainText(/Needs Your Input|Ready for Review/);
 });
 
 test("the mobile thread toggle confines paint beside both provider icons at both densities", async ({ page }) => {

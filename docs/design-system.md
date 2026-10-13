@@ -1284,7 +1284,7 @@ Rules
   name and tooltip keep the full rollup. On narrow lists, dots give up space before the working
   count so a large family cannot hide ongoing work. List rollups count nested descendants; Board
   chips count direct children because Board cards remain flat. The list count remains visible
-  when collapsed. Available human-owned results use a neutral **Result Available** badge; questions
+  when collapsed. Available human-owned results use a neutral **Ready for Review** badge; questions
   retain the amber **Answer Required** badge. A result is available for assessment independently of
   lifecycle and does not imply that the session or its campaign has finished.
   Children indent under a 2px `--border-strong` spine with a tick into each row. A stalled parent or

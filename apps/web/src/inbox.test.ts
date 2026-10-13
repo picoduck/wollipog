@@ -157,7 +157,7 @@ test("agent-owned child results and requests stay unattended; handed-off results
   const handedOff = { ...child, attention: { ...child.attention!, result: { ...child.attention!.result!, at: 4, owner: "human" as const } } };
   const rows = threadInboxRows(sortInboxSessions([parent, handedOff, human]).map((session) => ({ session })), new Set());
   assert.deepEqual(rows.map(({ session }) => session.id), ["parent", "child", "human"]);
-  assert.match(inboxThreadChildrenLabel(rows[0]!.thread.children!), /Result Available/);
+  assert.match(inboxThreadChildrenLabel(rows[0]!.thread.children!), /Ready for Review/);
 });
 
 test("a family's Ready for Review counts only descendants at rest, and a working parent keeps its status (#3074)", () => {
@@ -761,10 +761,10 @@ test("collapsed families retain working descendants alongside an available human
   const collapsed = threadInboxRows(rows, new Set(["parent"]));
   assert.equal(collapsed.length, 1);
   assert.equal(collapsed[0]!.thread.children?.working, 2);
-  assert.match(inboxThreadChildrenLabel(collapsed[0]!.thread.children!), /Result Available.*2 Working/);
+  assert.match(inboxThreadChildrenLabel(collapsed[0]!.thread.children!), /Ready for Review.*2 Working/);
   const stalled = threadInboxRows(rows, new Set(["parent"]), new Set(["grandchild"]));
   assert.equal(stalled[0]!.thread.children?.working, 1, "a silent grandchild is not presented as working");
-  assert.match(inboxThreadChildrenLabel(stalled[0]!.thread.children!), /Result Available.*1 Working/);
+  assert.match(inboxThreadChildrenLabel(stalled[0]!.thread.children!), /Ready for Review.*1 Working/);
   const stopped = threadInboxRows(rows.map((row) => ({ session: { ...row.session,
     status: "completed" as const } })), new Set(["parent"]));
   assert.equal(stopped[0]!.thread.children?.working, 0);

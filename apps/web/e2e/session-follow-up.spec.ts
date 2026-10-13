@@ -45,7 +45,7 @@ for (const width of [1440, 390]) {
       .find((s) => s.id === "session-review")!.attention!.acknowledgedRevision)).toBeNull();
     await row(page, result).click({ button: "right" });
     await page.getByRole("menuitem", { name: "Mark Reviewed", exact: true }).click();
-    await expect(row(page, result).getByText("Result Available", { exact: true })).toHaveCount(0);
+    await expect(row(page, result).getByText("Ready for Review", { exact: true })).toHaveCount(0);
     expect(await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.model().sessions
       .find((s) => s.id === "session-review")!.attention!.acknowledgedRevision)).toBe("result-2");
     await page.reload();
@@ -134,7 +134,7 @@ test("mobile touch menu keeps its target while a result changes priority", async
   await page.getByRole("menuitem", { name: "Mark Reviewed", exact: true }).click();
   expect(await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.model().sessions
     .find((s) => s.id === "session-review")!.attention!.acknowledgedRevision)).toBe("result-1");
-  await expect(row(page, work).getByText("Result Available", { exact: true })).toBeVisible();
+  await expect(row(page, work).getByText("Ready for Review", { exact: true })).toBeVisible();
 });
 
 if (process.env.WOLLIPOG_CAPTURE_EVIDENCE === "1") {
@@ -168,7 +168,7 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
     const parent = row(page, result);
     const resultBadge = parent.locator(".status");
     const answerBadge = row(page, input).locator(".status");
-    await expect(resultBadge).toHaveText("Result Available");
+    await expect(resultBadge).toHaveText("Ready for Review");
     await expect(resultBadge).toHaveClass(/t-neutral/);
     await expect(answerBadge).toHaveText("Answer Required");
     await expect(answerBadge).toHaveClass(/t-warning/);
@@ -192,14 +192,14 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.emulateMedia({ forcedColors: "active" });
     await expect(answerBadge).toHaveAccessibleName("Status: Answer Required");
-    await expect(resultBadge).toHaveAccessibleName("Status: Result Available");
+    await expect(resultBadge).toHaveAccessibleName("Status: Ready for Review");
     await expect(working).toBeVisible();
     await page.emulateMedia({ forcedColors: "none" });
     await page.evaluate(() => {
       window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-working", { status: "completed" });
     });
     await expect(parent.locator(".inbox-thread-working")).toHaveCount(0);
-    await expect(resultBadge).toHaveText("Result Available");
+    await expect(resultBadge).toHaveText("Ready for Review");
     await parent.click({ button: "right" });
     await page.getByRole("menuitem", { name: "Mark Reviewed", exact: true }).click();
     await expect(resultBadge).toHaveText("Running");

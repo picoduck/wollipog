@@ -62,9 +62,9 @@ const badges = (container: Element) => [...container.querySelectorAll<HTMLElemen
 const minutesAgo = (minutes: number): SessionActivity => recordSessionActivity(undefined, NOW - minutes * ACTIVITY_BUCKET_MS);
 
 test("a parent keeps its human family reason in the single badge across phone and desktop shapes", async () => {
-  // A working parent keeps its own Running over the family's Result Available (#3074).
+  // A working parent keeps its own Running over the family's Ready for Review (#3074).
   for (const [reason, status, shown] of [["Needs Your Input", "running", "Needs Your Input"],
-    ["Result Available", "idle", "Result Available"], ["Result Available", "running", "Running"]] as const) {
+    ["Ready for Review", "idle", "Ready for Review"], ["Ready for Review", "running", "Running"]] as const) {
     await withRow(baseSession({ status }), async (container, rerender) => {
       assert.deepEqual(badges(container).map((badge) => badge.textContent), [shown]);
       await rerender({ threeRow: false });
@@ -505,14 +505,14 @@ test("a result remains neutral beside a visible compact working count on collaps
   const attention = { version: 1 as const, humanActions: [], meaningfulAt: NOW,
     result: { revision: "r1", at: NOW, owner: "human" as const }, acknowledgedRevision: null };
   await withRow(baseSession({ attention }), async (container, rerender) => {
-    assert.equal(badges(container)[0]?.textContent, "Result Available");
+    assert.equal(badges(container)[0]?.textContent, "Ready for Review");
     assert.ok(badges(container)[0]?.classList.contains("t-neutral"));
     assert.equal(container.querySelector(".inbox-thread-working")?.textContent, "2 Working");
     assert.match(container.querySelector(".inbox-thread-family")?.getAttribute("aria-label") ?? "", /2 Working/);
     await rerender({ threadChildren: JSON.stringify({ count: 1, waiting: 0, working: 0,
       children: [{ id: "child", title: "Child", state: "done" }] }) });
     assertNoDomNode(container.querySelector(".inbox-thread-working"));
-    assert.equal(badges(container)[0]?.textContent, "Result Available");
+    assert.equal(badges(container)[0]?.textContent, "Ready for Review");
   }, { threeRow: true, threadCollapsed: true, threadChildren: JSON.stringify({ count: 1, waiting: 0, working: 2,
     children: [{ id: "child", title: "Child", state: "running" }] }) });
 });
