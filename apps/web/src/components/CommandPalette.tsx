@@ -18,12 +18,13 @@ import { useRailPreferences } from "../use-rail-preferences.js";
 import { loadRecentSessions } from "../recent-sessions.js";
 import { requestArchiveSearch } from "../archive-search-handoff.js";
 import { shortcutDisplay } from "../shortcuts.js";
-import { useIsMobile } from "./useIsMobile.js";
+import { useIsMobile, useIsTouchOnly } from "./useIsMobile.js";
 import { VIEW_ICONS } from "./Rail.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { Spinner } from "./common.js";
 import {
   BoardIcon,
+  KeyboardIcon,
   ListIcon,
   PanelLeftCloseIcon,
   PanelLeftOpenIcon,
@@ -78,6 +79,7 @@ function EntryIcon({ entry }: { entry: PaletteEntry }): ReactNode {
     }
     case "action":
       return entry.icon === "board" ? <BoardIcon size={ICON_SIZE} />
+        : entry.icon === "keyboard" ? <KeyboardIcon size={ICON_SIZE} />
         : entry.icon === "list" ? <ListIcon size={ICON_SIZE} />
           : entry.icon === "labels-on" ? <PanelLeftOpenIcon size={ICON_SIZE} />
             : <PanelLeftCloseIcon size={ICON_SIZE} />;
@@ -91,14 +93,17 @@ function EntryIcon({ entry }: { entry: PaletteEntry }): ReactNode {
  * destinations and actions it names. A meta-harness aggregating N machines is unusable without
  * global search.
  */
-export function CommandPalette({ initialQuery = "", onClose }: {
+export function CommandPalette({ initialQuery = "", onClose, onOpenShortcuts }: {
   /** The query the palette opens with: Sessions' Search Transcripts passes its own (#2200). */
   initialQuery?: string;
   onClose: () => void;
+  /** Opens the Keyboard Shortcuts reference, returning focus to what had it before the palette. */
+  onOpenShortcuts?: (returnFocus: HTMLElement | null) => void;
 }) {
   const api = useApi();
   const instanceScope = useInstanceScope();
   const isMobile = useIsMobile();
+  const touchOnly = useIsTouchOnly();
   const { navigate, loadSession } = useStoreActions();
   const sessions = useStoreSelector((s) => s.sessions);
   const view = useStoreSelector((s) => s.view);
@@ -229,11 +234,20 @@ export function CommandPalette({ initialQuery = "", onClose }: {
         label: railPreferences.labels ? "Hide Navigation Labels" : "Show Navigation Labels",
         icon: railPreferences.labels ? "labels-off" as const : "labels-on" as const,
       }]),
+      // Where Settings › Behavior offers Show Shortcuts (#3023): not on a phone or a touch-only device.
+      ...(isMobile || touchOnly || !onOpenShortcuts ? [] : [{
+        kind: "action" as const,
+        key: "action:open-shortcut-reference",
+        action: "open-shortcut-reference" as const,
+        label: "Keyboard Shortcuts",
+        icon: "keyboard" as const,
+        keys: shortcutDisplay("shortcut-reference"),
+      }]),
     ];
     const merged = new Map(catalogSessions);
     for (const session of sessions.values()) merged.set(session.id, session);
     return paletteSections({ query: q, sessions: merged, recent, hits: hits.results, destinations, actions });
-  }, [catalogSessions, sessions, q, hits, flags, railPreferences, isMobile, sessionsMode, view.name, recent]);
+  }, [catalogSessions, sessions, q, hits, flags, railPreferences, isMobile, touchOnly, onOpenShortcuts, sessionsMode, view.name, recent]);
 
   const entries = useMemo(() => sections.flatMap((section) => section.entries), [sections]);
   const found = entries.findIndex((entry) => entry.key === activeKey);
@@ -248,6 +262,13 @@ export function CommandPalette({ initialQuery = "", onClose }: {
   const pick = (entry: PaletteEntry | undefined) => {
     if (!entry) return;
     if (entry.kind === "action") {
+      if (entry.action === "open-shortcut-reference") {
+        // The reference takes the palette's place, and closing it returns to what the palette would.
+        const returnFocus = (lazyReturnFocusRef ?? returnFocusRef).current;
+        onClose();
+        onOpenShortcuts?.(returnFocus);
+        return;
+      }
       if (entry.action === "toggle-rail-labels") setRailLabels(!railPreferences.labels, instanceScope);
       else navigate({ name: sessionsMode === "board" ? "inbox" : "board" });
       onClose();

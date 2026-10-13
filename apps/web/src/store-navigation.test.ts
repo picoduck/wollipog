@@ -11,7 +11,7 @@ import {
   parseInboxSplitRatio,
   parseSessionFilters,
 } from "./store.js";
-import { encodeResourceId, type View } from "./navigation.js";
+import { encodeResourceId, viewFromPath, type View } from "./navigation.js";
 import { uiStreamSubscriptions } from "./ui-subscriptions.js";
 import { saveInstanceStorageValue, type KeyValueStorage } from "./instance-storage.js";
 import type { SessionEvent, SessionView } from "@wollipog/protocol";
@@ -46,6 +46,26 @@ test("repeated identical attention activation updates an ephemeral nonce without
   assert.deepEqual(pushed, [], "repeat activation must not add an identical browser history entry");
 });
 
+test("Back onto /settings/keyboard while Behavior is open still delivers its focus target (#3023)", () => {
+  const pushed: View[] = [];
+  const store = new Store({ name: "settings", section: "behavior" }, (view) => pushed.push(view));
+  const focusOf = () => {
+    const view = store.getState().view;
+    return view.name === "settings" ? view.focus : undefined;
+  };
+
+  store.navigateFromHistory(viewFromPath("/settings/keyboard")!);
+  assert.deepEqual(focusOf(), { target: "keyboard-shortcuts", activationId: 1 },
+    "the same address is still an arrival the panel must answer");
+  store.navigateFromHistory(viewFromPath("/settings/keyboard")!);
+  assert.equal(focusOf()?.activationId, 2, "each arrival is a new activation");
+  store.navigate(viewFromPath("/settings/keyboard")!);
+  assert.equal(focusOf()?.activationId, 3);
+  assert.deepEqual(pushed, [], "an activation on the same address writes no history");
+  store.navigateFromHistory({ name: "settings", section: "behavior" });
+  assert.equal(focusOf()?.activationId, 3, "a plain visit to the same address changes nothing");
+});
+
 test("history traversal updates view state without writing a new entry", () => {
   const pushed: View[] = [];
   const store = new Store({ name: "board" }, (view) => pushed.push(view));
@@ -70,7 +90,7 @@ test("Settings records one exact return view without accumulating nested Setting
   store.navigate({ name: "settings" });
   assert.deepEqual(store.getState().settingsReturnView, origin);
 
-  store.navigate({ name: "settings", section: "keyboard" });
+  store.navigate({ name: "settings", section: "behavior" });
   store.navigate({ name: "settings", section: "network" });
   assert.deepEqual(store.getState().settingsReturnView, origin,
     "section navigation must not replace the non-Settings origin");

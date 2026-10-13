@@ -137,7 +137,7 @@ const policyNames = { names: new Map([["deny-shell", "Deny Shell Commands"]]), l
  */
 function ApprovalsFixture() {
   const [section, setSection] = useState<SettingsSection>("approvals");
-  const empty = { appearance: null, notifications: null, keyboard: null, behavior: null, orchestrator: null, network: null, experimental: null, about: null };
+  const empty = { appearance: null, notifications: null, behavior: null, orchestrator: null, network: null, experimental: null, about: null };
   return (
     <div className="app">
       <main className="main">
@@ -145,7 +145,6 @@ function ApprovalsFixture() {
           <SettingsView
             section={section}
             onNavigate={(view) => { if (view.name === "settings" && view.section) setSection(view.section); }}
-            onOpenShortcuts={() => undefined}
             panels={{ ...empty, approvals: <ApprovalsPanel policyId={params.get("policy") ?? undefined} /> }}
           />
         </div>

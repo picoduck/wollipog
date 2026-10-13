@@ -2238,22 +2238,32 @@ export class Store {
    */
   reconnectNow = (): boolean => this.reconnectHandler?.() ?? false;
 
+  /**
+   * A view that asks for something to be focused — a session's attention target, or a Settings
+   * control a redirect lands on (#3023) — is an activation: each arrival gets a fresh id, so arriving
+   * again on the same address focuses it again rather than being dropped as the same view.
+   */
+  private activate(view: View): { view: View; activation: boolean } {
+    if (view.name === "session" && view.attention) {
+      return { view: { ...view, attention: { ...view.attention, activationId: ++this.attentionActivation } }, activation: true };
+    }
+    if (view.name === "settings" && view.focus) {
+      return { view: { ...view, focus: { ...view.focus, activationId: ++this.attentionActivation } }, activation: true };
+    }
+    return { view, activation: false };
+  }
   navigate = (view: View): void => {
-    const activated = view.name === "session" && view.attention
-      ? { ...view, attention: { ...view.attention, activationId: ++this.attentionActivation } }
-      : view;
+    const { view: activated, activation } = this.activate(view);
     if (sameView(this.state.view, activated)) {
-      if (activated.name === "session" && activated.attention) this.dispatch({ type: "navigate", view: activated });
+      if (activation) this.dispatch({ type: "navigate", view: activated });
       return;
     }
     this.dispatch({ type: "navigate", view: activated });
     this.onNavigate?.(activated);
   };
   navigateFromHistory = (view: View): void => {
-    const activated = view.name === "session" && view.attention
-      ? { ...view, attention: { ...view.attention, activationId: ++this.attentionActivation } }
-      : view;
-    if (!sameView(this.state.view, activated) || (activated.name === "session" && activated.attention)) {
+    const { view: activated, activation } = this.activate(view);
+    if (!sameView(this.state.view, activated) || activation) {
       this.dispatch({ type: "navigate", view: activated });
     }
   };

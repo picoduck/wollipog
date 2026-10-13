@@ -608,6 +608,12 @@ export function isMacPlatform(platform = typeof navigator === "undefined" ? "" :
   return /mac|iphone|ipad|ipod/i.test(platform);
 }
 
+/**
+ * Settings › Behavior's Show Shortcuts button (#3023). The reference returns focus to it, and finds it
+ * again by this id when a breakpoint crossing has remounted it while the reference was open.
+ */
+export const SHOW_SHORTCUTS_ID = "settings-show-shortcuts";
+
 export function shortcutDisplay(id: ShortcutId, mac = isMacPlatform()): string {
   return shortcutBindingDisplay(shortcut(id).binding, mac);
 }

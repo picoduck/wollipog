@@ -114,6 +114,17 @@ export function useIsCoarsePointer(): boolean {
   return useMediaQuery("(pointer: coarse)");
 }
 
+/** A device whose only pointer is a finger: no hover and a coarse pointer (§15.1, §15.3). */
+export const TOUCH_ONLY_QUERY = "(hover: none) and (pointer: coarse)";
+
+/**
+ * Live touch-only flag: a device whose primary pointer is a finger, where a hardware keyboard is
+ * unlikely. A touch laptop's primary pointer is its trackpad, so it does not match.
+ */
+export function useIsTouchOnly(): boolean {
+  return useMediaQuery(TOUCH_ONLY_QUERY);
+}
+
 /** Live flag for a viewport at most SHORT_VIEWPORT_PX tall. */
 export function useIsShortViewport(): boolean {
   return useMediaQuery(SHORT_QUERY);

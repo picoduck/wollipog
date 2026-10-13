@@ -186,9 +186,9 @@ test("focus is rescued when a layout swap drops it", () => {
 });
 
 test("the shortcut reference always has somewhere to return focus", () => {
-  // Opened from the Settings Keyboard row, then Back while it is still open: the row is gone and a
-  // selector that only knew about the gear resolved to null, dropping focus on <body>.
-  assert.match(app, /\.settings-view \.setting-row-link/, "the Settings opener needs its own fallback");
+  // Opened from Settings › Behavior's Show Shortcuts, then Back while it is still open: the button is
+  // gone and a selector that only knew about the gear resolved to null, dropping focus on <body>.
+  assert.match(app, /`#\$\{SHOW_SHORTCUTS_ID\}`/, "the Settings opener needs its own fallback");
   assert.match(app, /\(reresolved \?\? document\.getElementById\("page-title"\)\)\?\.focus\(\)/,
     "and a last resort that exists on every page");
 });
@@ -220,8 +220,10 @@ test("the settings sections name the things the plan says stay discoverable", ()
   }
   // Every one of them carries a reason, which is the half that makes a disabled row informative
   // rather than a dead end.
+  // Behavior's Reduce Motion, Confirm Before Deleting and Default Models fallback are gone (#3023);
+  // Network and About keep theirs until #3027 and #3028.
   const pending = view.match(/<PendingSetting[\s\S]*?\/>/g) ?? [];
-  assert.ok(pending.length >= 8, "the named-but-unbuilt settings must all be rendered");
+  assert.ok(pending.length >= 5, "the named-but-unbuilt settings must all be rendered");
   for (const block of pending) {
     assert.match(block, /reason=/, "a disabled setting without a reason is worse than none");
   }

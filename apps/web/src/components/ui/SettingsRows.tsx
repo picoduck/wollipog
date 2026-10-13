@@ -534,6 +534,8 @@ export function ActionRow({
   icon,
   badge,
   actionLabel,
+  actionIcon,
+  actionId,
   onAction,
   disabled,
   hasPopup,
@@ -545,12 +547,17 @@ export function ActionRow({
   badge?: ReactNode;
   /** Title Case, with an ellipsis when it opens a dialog: "Edit…". */
   actionLabel: string;
+  /** A 14px icon before the label. Icons are `aria-hidden`, so the label alone names the button. */
+  actionIcon?: ReactNode;
+  /** A stable id for the button, for a caller that finds it again after it remounts. */
+  actionId?: string;
   onAction: () => void;
   disabled?: boolean;
   hasPopup?: "dialog";
   buttonRef?: Ref<HTMLButtonElement>;
 }) {
   const id = useId();
+  const buttonId = actionId ?? `${id}-action`;
   return (
     <div className={rowClass("setting-row setting-row-trailing", { disabled })}>
       <RowText
@@ -564,15 +571,16 @@ export function ActionRow({
       <span className="setting-row-control">
         <button
           ref={buttonRef}
-          id={`${id}-action`}
+          id={buttonId}
           type="button"
           className="btn"
           disabled={disabled}
           aria-haspopup={hasPopup}
-          aria-labelledby={`${id}-action ${id}-title`}
+          aria-labelledby={`${buttonId} ${id}-title`}
           aria-describedby={description ? `${id}-desc` : undefined}
           onClick={onAction}
         >
+          {actionIcon}
           {actionLabel}
         </button>
       </span>
@@ -769,16 +777,19 @@ export function SettingsGroup({
   foot,
   failure,
   className,
+  headingRef,
   children,
 }: {
   title?: string;
+  /** For a caller that moves focus to the group: the title becomes a programmatic focus target. */
+  headingRef?: Ref<HTMLHeadingElement>;
   /** Who or what the group's settings apply to, in Title Case. */
   scope?: string;
   /** One `.btn.sm` (or `.btn.sm.ghost`) for the whole group, such as Reset to Default. */
   action?: ReactNode;
   /** One sentence in sentence case, between the head and the surface. */
   intro?: ReactNode;
-  /** One line under the surface. */
+  /** One line under the surface, or a disclosure with the rest of what the group needs to say. */
   foot?: ReactNode;
   failure?: RowFailure | null;
   className?: string;
@@ -790,7 +801,9 @@ export function SettingsGroup({
     <section className={`settings-group${className ? ` ${className}` : ""}`} aria-labelledby={title ? titleId : undefined}>
       {(title || scope || action) && (
         <div className="settings-group-head">
-          {title && <h3 className="settings-group-title" id={titleId}>{title}</h3>}
+          {title && (
+            <h3 ref={headingRef} className="settings-group-title" id={titleId} tabIndex={headingRef ? -1 : undefined}>{title}</h3>
+          )}
           {scope && <span className="settings-group-scope">{scope}</span>}
           {action && <span className="settings-group-action">{action}</span>}
         </div>
@@ -807,7 +820,8 @@ export function SettingsGroup({
         </Notice>
       )}
       <div className="settings-group-surface surface">{children}</div>
-      {foot && <p className="settings-group-foot">{foot}</p>}
+      {/* A block, not a paragraph, so the foot can be a disclosure (§5.5) as well as a line. */}
+      {foot && <div className="settings-group-foot">{foot}</div>}
     </section>
   );
 }

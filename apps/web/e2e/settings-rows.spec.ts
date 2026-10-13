@@ -70,6 +70,17 @@ async function useRow(page: Page, theme: Theme, key: RowKey, options: Omit<Harne
   return rowOf(page, key);
 }
 
+/**
+ * A disabled navigation row inside the real Settings page. The harness's `disabled` state reached one
+ * through the Keyboard section, which folded into Behavior (#3023), and no production navigation row
+ * takes a harness-driven disable; the row-kinds gallery's disabled Manage Instances row is that state.
+ */
+async function useDisabledNavRow(page: Page, theme: Theme) {
+  await page.goto(`/settings-rows-e2e.html?theme=${theme}&view=kinds`);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  return page.getByRole("button", { name: /^Manage Instances/ });
+}
+
 interface Rgba { r: number; g: number; b: number; a: number }
 
 const RGB_FUNCTION = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)\s*(?:[,/]\s*([\d.]+)\s*)?\)$/;
@@ -217,7 +228,7 @@ async function inkOf(page: Page, locator: Locator, options: InkOptions = {}): Pr
  *   theme (an on track is the low end: its edge is its fill), and 124–180 with the knob hidden, so
  *   `track` is 215, between the two.
  */
-const INK = { track: 215, knob: 80, chevron: 20, icon: 55 } as const;
+const INK = { track: 215, knob: 80, chevron: 20 } as const;
 
 /**
  * Floors for the Appearance controls, set as ANTI-ERASURE bars rather than as tuned baselines.
@@ -254,8 +265,9 @@ const ROWS = {
   switchOff: { section: "notifications", role: "switch", name: /^Desktop Alerts/, affordance: ".ui-switch", minSize: 16, floor: INK.track },
   switchOn: { section: "notifications", role: "switch", name: /^Push Notifications/, affordance: ".ui-switch", minSize: 16, floor: INK.track },
   tailnetOn: { section: "network", role: "switch", name: /^Enable Tailnet Access/, affordance: ".ui-switch", minSize: 16, floor: INK.track },
-  navChevron: { section: "keyboard", role: "button", name: /^Keyboard Shortcuts/, affordance: ".setting-row-chevron", minSize: 8, floor: INK.chevron },
-  navIcon: { section: "keyboard", role: "button", name: /^Keyboard Shortcuts/, affordance: ".setting-row-icon", minSize: 8, floor: INK.icon },
+  // A tool policy: Keyboard Shortcuts, the row this used to be, folded into Behavior as an action
+  // row (#3023), and Behavior's navigation rows are being rebuilt (#3024, #3025).
+  navChevron: { section: "approvals", role: "button", name: /^Review Agent-Created Sessions/, affordance: ".setting-row-chevron", minSize: 8, floor: INK.chevron },
 } as const satisfies Record<string, {
   section: SettingsSection;
   role: "switch" | "button";
@@ -524,9 +536,7 @@ const PIXELS = { threshold: 0.1, animations: "disabled" } as const;
 
 for (const theme of THEMES) {
   test(`every affordance is painted in ${theme} @production`, async ({ page }) => {
-    // Every row in the registry, each on the section that owns it. The nav row's leading icon is in
-    // here because nothing else looks at it: `.setting-row-icon { opacity: 0 }` takes it off the
-    // production Keyboard Shortcuts row and every other assertion stays green.
+    // Every row in the registry, each on the section that owns it.
     for (const key of Object.keys(ROWS) as RowKey[]) {
       const spec = ROWS[key];
       const row = await useRow(page, theme, key);
@@ -639,7 +649,9 @@ for (const theme of THEMES) {
     // `.setting-row-switch.is-disabled[aria-checked="false"] .ui-switch { opacity: 0 }` green.
     for (const label of Object.keys(ROWS) as RowKey[]) {
       const { affordance, minSize, floor } = ROWS[label];
-      const row = await useRow(page, theme, label, { state: "disabled" });
+      const row = label === "navChevron"
+        ? await useDisabledNavRow(page, theme)
+        : await useRow(page, theme, label, { state: "disabled" });
       await expect(row).toBeDisabled();
       await expect(row).toHaveClass(/is-disabled/);
       expectPainted(await painted(row.locator(affordance)), `the disabled ${label}`, minSize);
@@ -824,7 +836,6 @@ for (const width of [1440, 390]) {
   test(`navigation rows without an icon start their titles where switch rows do at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     let iconless = 0;
-    let withIcon = 0;
     for (const { id, title } of SETTINGS_SECTIONS) {
       await useHarness(page, "dark", { section: id, defaults: "agent" });
       const rows = await page.locator(".settings-panel .setting-row").evaluateAll((elements) => elements.map((row) => {
@@ -841,7 +852,6 @@ for (const width of [1440, 390]) {
       expect(switchOffsets.length, `${title}: every switch title starts at one x`).toBeLessThanOrEqual(1);
       for (const row of rows.filter((candidate) => candidate.kind === "nav")) {
         if (row.iconWidth !== null) {
-          withIcon += 1;
           expect(row.iconWidth, `${title}: "${row.name}" keeps its 16px icon`).toBe(16);
           expect(row.offset, `${title}: "${row.name}" starts its title after its icon`).toBeGreaterThan(16);
         } else if (switchOffsets.length === 1) {
@@ -850,10 +860,10 @@ for (const width of [1440, 390]) {
         }
       }
     }
-    // Behavior has icon-less navigation rows beside switch rows, and Keyboard has a row with an
-    // icon; without them this test would pass having measured nothing.
+    // Behavior has icon-less navigation rows beside switch rows; without them this test would pass
+    // having measured nothing. No production navigation row has an icon since Keyboard folded into
+    // Behavior (#3023); one that gains one is still measured above.
     expect(iconless, "icon-less navigation rows were measured beside switch rows").toBeGreaterThanOrEqual(1);
-    expect(withIcon, "a navigation row with an icon was measured").toBeGreaterThanOrEqual(1);
   });
 }
 
@@ -979,7 +989,6 @@ for (const theme of THEMES) {
       ["switch-off", "switchOff"],
       ["switch-on", "switchOn"],
       ["chevron", "navChevron"],
-      ["nav-icon", "navIcon"],
     ] as const) {
       const locator = (await useRow(page, theme, key)).locator(ROWS[key].affordance);
       await locator.scrollIntoViewIfNeeded();
@@ -1170,8 +1179,10 @@ test("tabbing through each section reaches every row kind", async ({ page }) => 
   // Appearance is not here because its rows are not focusable: they are containers, and the thing
   // Tab lands on is the pill or the trigger inside. That claim is the Appearance block's, at the
   // end of this file, and it is the same claim — it just has a different element to make it about.
-  for (const section of ["notifications", "keyboard"] as const) {
-    await useHarness(page, "dark", { section });
+  // Behavior with its agent defaults loaded holds a navigation row: Keyboard Shortcuts, the row this
+  // reached before, folded into Behavior as an action row (#3023).
+  for (const [section, wanted] of [["notifications", "setting-row-switch"], ["behavior", "setting-row-link"]] as const) {
+    await useHarness(page, "dark", { section, defaults: "agent" });
     for (let press = 0; press < 24; press += 1) {
       await page.keyboard.press("Tab");
       const kind = await page.evaluate(() => {
@@ -1182,10 +1193,8 @@ test("tabbing through each section reaches every row kind", async ({ page }) => 
         }
         return null;
       });
-      if (kind) {
-        reached.add(kind);
-        break;
-      }
+      if (kind) reached.add(kind);
+      if (kind === wanted) break;
     }
   }
   expect([...reached].sort(), "every row kind must be reachable by Tab")
@@ -1265,16 +1274,12 @@ test.describe("with a touch pointer", () => {
 });
 
 test("Agent Harness defaults distinguish version skew and politely explain repaired drafts", async ({ page }) => {
-  await page.route("**/api/artifact-upload-settings", (route) => route.fulfill({
-    status: 503,
-    contentType: "application/json",
-    body: JSON.stringify({ error: "Artifact preferences are temporarily unavailable" }),
-  }));
   await useHarness(page, "light", { section: "behavior", defaults: "agent-missing" });
   await expect(page.getByText("Wollipog Update Required", { exact: true })).toBeVisible();
   await expect(page.getByText(/This version of Wollipog does not support Agent Harness defaults/)).toBeVisible();
   await expect(page.getByText(/Update or restart Wollipog so it matches this dashboard/)).toBeVisible();
-  await expect(page.getByRole("button", { name: "Retry", exact: true })).toHaveCount(2);
+  // Agent Defaults' own Retry, and no other: the harness answers Evidence's read (#3023).
+  await expect(page.getByRole("button", { name: "Retry", exact: true })).toHaveCount(1);
   await expect(page.locator(".setting-row-static").filter({
     hasText: "This version of Wollipog does not support Agent Harness defaults",
   }).getByRole("button", { name: "Retry" })).toBeVisible();

@@ -46,11 +46,11 @@ import {
 } from "../rail-preferences.js";
 import { useRailPreferences } from "../use-rail-preferences.js";
 import { useInstanceScope } from "../instance-scope.js";
-import { useIsCompact, useIsMobile } from "./useIsMobile.js";
+import { useIsCompact, useIsMobile, useIsTouchOnly } from "./useIsMobile.js";
 import { EXPERIMENT_COPY, experimentForViewName } from "../experiments.js";
 import { useExperiments } from "../use-experiments.js";
 import { destination } from "../navigation.js";
-import { LinkRow, SegmentedRow, SelectRow, SettingsGroup, StaticRow, SwitchRow } from "./ui/SettingsRows.js";
+import { ActionRow, LinkRow, SegmentedRow, SelectRow, SettingsGroup, StaticRow, SwitchRow } from "./ui/SettingsRows.js";
 import { Select } from "./ui/ChoiceControls.js";
 import { SCHEME_SWATCHES, type ColorScheme, type ResolvedTheme } from "../theme.js";
 import type { SessionsPreviewLayout } from "../sessions-preview-layout.js";
@@ -58,7 +58,8 @@ import { useSessionsPreviewLayout } from "../use-sessions-preview-layout.js";
 import { setTerminalPlacement, useTerminalPlacement, type TerminalPlacement } from "../terminal-placement.js";
 import { setEnterKeyBehavior, useEnterKeyBehavior, type EnterKeyBehavior } from "../enter-key.js";
 import { setShowAgentLogs, useShowAgentLogs } from "../agent-logs.js";
-import { SETTINGS_SECTIONS, viewPath, type SettingsSection, type SettingsSectionEntry, type View } from "../navigation.js";
+import { SETTINGS_SECTIONS, viewPath, type SettingsFocus, type SettingsSection, type SettingsSectionEntry, type View } from "../navigation.js";
+import { SHOW_SHORTCUTS_ID, shortcutDisplay } from "../shortcuts.js";
 import type { ExperimentFlags, ExperimentId } from "../experiments.js";
 import { effortLabel, permissionModeLabel, titleCaseLabel } from "../format.js";
 import { useFeedback } from "./FeedbackProvider.js";
@@ -81,7 +82,6 @@ export interface SettingsViewProps {
   /** Absent for `/settings` itself: the index on a phone, the first section elsewhere. */
   section?: SettingsSection;
   onNavigate: (view: View) => void;
-  onOpenShortcuts: (returnFocus: HTMLElement | null) => void;
   /** Each section's content, supplied by the shell that owns the underlying state. */
   panels: Record<SettingsSection, ReactNode>;
 }
@@ -93,7 +93,6 @@ export const SETTINGS_DESCRIPTION = "Preferences for this device and your accoun
 const SECTION_ICONS: Record<SettingsSection, (props: { size?: number }) => ReactNode> = {
   appearance: AppearanceIcon,
   notifications: NotificationsIcon,
-  keyboard: KeyboardIcon,
   behavior: TuningIcon,
   approvals: ShieldCheckIcon,
   orchestrator: OrchestratorControlsIcon,
@@ -553,31 +552,6 @@ export function NavigationRailPanel() {
   );
 }
 
-export function KeyboardPanel({
-  shortcutLabel,
-  disabled = false,
-  onOpenShortcuts,
-}: {
-  shortcutLabel: string;
-  /** Production never disables this; the Playwright harness renders the state to measure it. */
-  disabled?: boolean;
-  onOpenShortcuts: (returnFocus: HTMLElement | null) => void;
-}) {
-  return (
-    <SettingsGroup>
-      <LinkRow
-        title="Keyboard Shortcuts"
-        description={shortcutLabel}
-        icon={<KeyboardIcon size={16} />}
-        disabled={disabled}
-        // Resolved from the DOM rather than a ref, as the dialog version did: the reference dialog
-        // returns focus here, and this row is the thing to return it to.
-        onClick={() => onOpenShortcuts(document.querySelector<HTMLElement>(".settings-view .setting-row-link"))}
-      />
-    </SettingsGroup>
-  );
-}
-
 /**
  * A setting that exists but cannot be changed here yet.
  *
@@ -594,74 +568,96 @@ export function PendingSetting({ title, description, reason }: { title: string; 
   );
 }
 
+/**
+ * Settings › Behavior (#3023): six groups, each naming once where its settings are kept (§11.3), so
+ * no row repeats "Stored on this device." Keyboard is not a section of its own: its one row is here,
+ * under Input, and `/settings/keyboard` lands on it (`focus`).
+ *
+ * Agent Defaults and Session Titles are slots: the shell supplies their panels' rows, and the head is
+ * drawn here so the order and the scope labels are one decision.
+ */
 export function BehaviorPanel({
   agentHarnessDefaults,
   sessionNaming,
-}: { agentHarnessDefaults?: ReactNode; sessionNaming?: ReactNode } = {}) {
+  onOpenShortcuts,
+  focus,
+}: {
+  agentHarnessDefaults?: ReactNode;
+  sessionNaming?: ReactNode;
+  /** Opens the Keyboard Shortcuts reference, which returns focus to the element it is given. */
+  onOpenShortcuts?: (returnFocus: HTMLElement | null) => void;
+  /** Set by a redirect: the control to focus. Each arrival is a new object, so it focuses again. */
+  focus?: SettingsFocus;
+} = {}) {
   const privacy = useAccountEmailPrivacy();
   const enterKey = useEnterKeyBehavior();
   const agentLogs = useShowAgentLogs();
+  // Shortcuts need a hardware keyboard (§15.1, §15.3): not offered on a phone or a touch-only
+  // device. `?` still opens the reference wherever a keyboard is attached.
+  const phone = useIsMobile();
+  const touchOnly = useIsTouchOnly();
+  const showShortcuts = !phone && !touchOnly;
+  const shortcutsRef = useRef<HTMLButtonElement>(null);
+  const inputHeadingRef = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    if (focus?.target !== "keyboard-shortcuts") return;
+    // A dialog open over the page keeps its focus: Back onto an old Keyboard entry with the
+    // reference open must not move focus behind the dialog, where Tab would wander the page.
+    if (document.activeElement?.closest('[aria-modal="true"]')) return;
+    // Where the row is withheld, the group it would be in.
+    (shortcutsRef.current ?? inputHeadingRef.current)?.focus();
+  }, [focus]);
   return (
     <>
-      <SettingsGroup title="Defaults">
-      {/* Stored per device and only on an explicit choice; the unstored default derives from the
-          device class (touch phones get newline, everything else send), so this row shows each
-          device's own effective behavior. The pair swaps as a unit — see enter-key.ts. */}
-      <SegmentedRow
-        title="Enter Key"
-        options={[
-          {
-            value: "send",
-            label: "Send Message",
-            description: "Enter sends; Shift+Enter inserts a new line. Stored on this device.",
-          },
-          {
-            value: "newline",
-            label: "Insert New Line",
-            description: "Enter inserts a new line; Shift+Enter sends. Stored on this device.",
-          },
-        ]}
-        value={enterKey}
-        onChange={(value) => setEnterKeyBehavior(value as EnterKeyBehavior)}
-      />
-      <ArtifactUploadSettings />
-      <PendingSetting
-        title="Reduce Motion"
-        description="Follows your system setting."
-        reason="Change it in your operating system's accessibility settings; an in-app override is not built yet."
-      />
-      <PendingSetting
-        title="Confirm Before Deleting"
-        description="Ask before removing a session, project, or connection."
-        reason="Not built yet."
-      />
-      {agentHarnessDefaults ?? (
-        <PendingSetting
-          title="Default Models, Efforts, and Permissions"
-          description="What each Agent Harness uses for a new session."
-          reason="Chosen per session when you create it; defaults are not available in this client."
+      <SettingsGroup title="Input" scope="This Device" headingRef={inputHeadingRef}>
+        {/* Stored per device and only on an explicit choice; the unstored default derives from the
+            device class (touch phones get newline, everything else send), so this row shows each
+            device's own effective behavior. The pair swaps as a unit — see enter-key.ts. */}
+        <SegmentedRow
+          title="Enter Key"
+          options={[
+            { value: "send", label: "Send Message", description: "Shift+Enter adds a new line." },
+            { value: "newline", label: "New Line", description: "Shift+Enter sends the message." },
+          ]}
+          value={enterKey}
+          onChange={(value) => setEnterKeyBehavior(value as EnterKeyBehavior)}
         />
-      )}
+        {showShortcuts && (
+          <ActionRow
+            title="Keyboard Shortcuts"
+            description={`Press ${shortcutDisplay("shortcut-reference")} anywhere to see them.`}
+            actionLabel="Show Shortcuts"
+            actionIcon={<KeyboardIcon size={14} />}
+            actionId={SHOW_SHORTCUTS_ID}
+            hasPopup="dialog"
+            buttonRef={shortcutsRef}
+            onAction={() => onOpenShortcuts?.(shortcutsRef.current)}
+          />
+        )}
       </SettingsGroup>
-      <SettingsGroup title="Transcript">
+      <SettingsGroup title="Transcript" scope="This Device">
         <SwitchRow
           title="Show Agent Logs"
-          description="Show work that holds only an agent harness's own output, such as its startup line. Stored on this device."
+          description={agentLogs
+            ? "Work that only holds agent startup logs is shown."
+            : "Work that only holds agent startup logs stays hidden."}
           checked={agentLogs}
           onClick={() => setShowAgentLogs(!agentLogs)}
         />
       </SettingsGroup>
-      <SettingsGroup title="Privacy">
+      <SettingsGroup title="Privacy" scope="This Device">
         <SwitchRow
           title="Hide Account Emails"
           description={privacy.persistent
-            ? "Hide account emails until you choose Show. Stored on this device."
+            ? "Hide account emails until you choose Show."
             : "This choice lasts until reload because this device could not save it."}
           checked={privacy.hide}
           onClick={() => setHideAccountEmails(!privacy.hide)}
         />
       </SettingsGroup>
-      {sessionNaming}
+      {agentHarnessDefaults && <SettingsGroup title="Agent Defaults" scope="Your Account">{agentHarnessDefaults}</SettingsGroup>}
+      {sessionNaming && <SettingsGroup title="Session Titles" scope="Your Account">{sessionNaming}</SettingsGroup>}
+      <ArtifactUploadSettings />
     </>
   );
 }
@@ -1487,8 +1483,9 @@ export function SessionNamingPanel() {
     (draftMode === "session_agent_account" && (legacyFollowAvailable || Boolean(machine && harness && harnessModel && effort))) ||
     (draftMode === "custom_model_endpoint" && (customDraftChanged ? customFormComplete : Boolean(custom)));
 
+  // Rows only: Behavior draws the Session Titles group around them (#3023).
   return (
-    <SettingsGroup title="Session Naming">
+    <>
       <LinkRow
         title="Session Naming"
         description={summaryStatus}
@@ -1712,7 +1709,7 @@ export function SessionNamingPanel() {
           </div>
         </div>
       )}
-    </SettingsGroup>
+    </>
   );
 }
 

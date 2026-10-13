@@ -1455,7 +1455,15 @@ const navigation: ViewNavigation = {
     if (fixtureView === "run") return { name: "run", id: activeRun.id };
     // `?fullShell=1&path=/skills` opens any destination in the real Shell.
     const fixturePath = new URLSearchParams(window.location.search).get("path");
-    return (fixturePath ? viewFromPath(fixturePath) : null) ?? { name: "inbox" };
+    const view = (fixturePath ? viewFromPath(fixturePath) : null) ?? { name: "inbox" };
+    // With real history, a redirect replaces its own entry as `BrowserNavigation` does, so Back
+    // never returns to `/settings/keyboard` (#3023).
+    if (FIXTURE_QUERY.get("history") === "1" && fixturePath && viewPath(view) !== fixturePath) {
+      const url = new URL(window.location.href);
+      url.searchParams.set("path", viewPath(view));
+      window.history.replaceState(window.history.state, "", url);
+    }
+    return view;
   },
   // `&history=1` makes navigation real history (#1947): a push rewrites `path=` in a new entry, and
   // the browser's Back returns to the previous one.

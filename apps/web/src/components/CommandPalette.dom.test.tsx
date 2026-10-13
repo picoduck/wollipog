@@ -15,6 +15,7 @@ import { assertNoDomNode } from "../dom-test-assertions.js";
 import { getRailPreferences, resetRailPreferencesForTest, setRailViewHidden } from "../rail-preferences.js";
 import { RECENT_SESSIONS_KEY } from "../recent-sessions.js";
 import { saveInstanceStorageValue } from "../instance-storage.js";
+import { shortcutDisplay } from "../shortcuts.js";
 import { takeArchiveSearch } from "../archive-search-handoff.js";
 import { CommandPalette, useSearchShortcut } from "./CommandPalette.js";
 import { AppBarSearchProvider, DetailBar, PageHeader } from "./PageHeader.js";
@@ -89,6 +90,8 @@ async function mount(options: {
   catalog?: () => Promise<{ sessions: SessionView[] }>;
   /** The query the palette opens with, as Sessions' Search Transcripts passes it (#2200). */
   initialQuery?: string;
+  /** Given, the palette can open the Keyboard Shortcuts reference; each opening records its return target. */
+  shortcutsOpened?: Array<HTMLElement | null>;
 } = {}) {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
@@ -137,7 +140,13 @@ async function mount(options: {
         </AppBarSearchProvider>
         <input aria-label="Elsewhere" />
         <ViewProbe />
-        {open && <CommandPalette initialQuery={options.initialQuery} onClose={() => setOpen(false)} />}
+        {open && (
+          <CommandPalette
+            initialQuery={options.initialQuery}
+            onClose={() => setOpen(false)}
+            onOpenShortcuts={options.shortcutsOpened ? (returnFocus) => options.shortcutsOpened!.push(returnFocus) : undefined}
+          />
+        )}
       </>
     );
   }
@@ -260,6 +269,35 @@ test("Show Navigation Labels turns the labelled rail on through the one preferen
   await ui.key(ui.doc.body, "k", { ctrlKey: true });
   await ui.type("navigation labels");
   assert.deepEqual(ui.sections(), [["Actions", ["Hide Navigation Labels"]]], "the action names the state it switches to");
+});
+
+test("Keyboard Shortcuts opens the reference in the palette's place, and Settings has no Keyboard section (#3023)", async () => {
+  const shortcutsOpened: Array<HTMLElement | null> = [];
+  const ui = await mount({ shortcutsOpened });
+  const opener = ui.doc.querySelector<HTMLElement>('[aria-label="Elsewhere"]')!;
+  await act(async () => opener.focus());
+  await ui.key(ui.doc.body, "k", { ctrlKey: true });
+  const goTo = ui.sections().find(([label]) => label === "Go To")![1] as string[];
+  assert.ok(!goTo.includes("Keyboard"), "the folded section is not a destination");
+  await ui.type("keyboard");
+  assert.deepEqual(ui.sections(), [["Actions", ["Keyboard Shortcuts"]]]);
+  const option = ui.doc.querySelector<HTMLElement>('[role="option"]')!;
+  assert.equal(option.querySelector("kbd")?.textContent, shortcutDisplay("shortcut-reference"), "with the key that opens it anywhere");
+  await ui.key(ui.input(), "Enter");
+  assertNoDomNode(ui.palette());
+  assert.deepEqual(shortcutsOpened, [opener], "closing the reference returns to what had focus before the palette");
+});
+
+test("at 760px and below the palette does not offer Keyboard Shortcuts", async () => {
+  await act(async () => { domWindow.happyDOM.setViewport({ width: 390, height: 844 }); });
+  try {
+    const ui = await mount({ shortcutsOpened: [] });
+    await act(async () => { ui.doc.querySelector<HTMLElement>('.page-app-bar [aria-label="Search"]')!.click(); });
+    await ui.type("keyboard");
+    assert.equal(ui.sections().some(([, labels]) => (labels as string[]).includes("Keyboard Shortcuts")), false);
+  } finally {
+    await act(async () => { domWindow.happyDOM.setViewport({ width: 1440, height: 900 }); });
+  }
 });
 
 test("transcript search: a hint under three characters, a searching row, and earlier hits kept until replaced", async () => {
