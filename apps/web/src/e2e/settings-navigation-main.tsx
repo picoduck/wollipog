@@ -21,11 +21,11 @@ function fixtureView(): View {
   const entry = params.get("entry");
   if (entry === "settings") {
     const section = params.get("section");
-    if (section === "appearance" || section === "notifications" || section === "keyboard" ||
+    if (section === "appearance" || section === "notifications" ||
         section === "behavior" || section === "network" || section === "experimental" || section === "about") {
       return { name: "settings", section };
     }
-    return { name: "settings", section: "keyboard" };
+    return { name: "settings", section: "behavior" };
   }
   if (entry === "session") return { name: "session", id: params.get("id") || "session-alpha" };
   if (entry === "project") return { name: "projects", id: params.get("id") || "project-alpha" };

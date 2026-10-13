@@ -21,7 +21,7 @@ export type View =
   | { name: "projects"; id?: string }
   | { name: "session"; id: string; location?: SourceLocation; attention?: AttentionTarget }
   | { name: "run"; id: string }
-  | { name: "settings"; section?: SettingsSection; policyId?: string }
+  | { name: "settings"; section?: SettingsSection; policyId?: string; focus?: SettingsFocusTarget }
   | { name: "pod"; id: string };
 
 /**
@@ -32,7 +32,14 @@ export type View =
  * section is deep-linkable, which is what makes "see Settings → Appearance" a thing you can send
  * someone.
  */
-export type SettingsSection = "appearance" | "notifications" | "keyboard" | "behavior" | "approvals" | "orchestrator" | "network" | "experimental" | "about";
+export type SettingsSection = "appearance" | "notifications" | "behavior" | "approvals" | "orchestrator" | "network" | "experimental" | "about";
+
+/**
+ * A control a redirect lands on, so an old link arrives where its setting went (#3023):
+ * `/settings/keyboard` opens Behavior on the Keyboard Shortcuts row. Ephemeral like
+ * `AttentionTarget.activationId`: `viewPath` omits it, so the replaced address is the section's.
+ */
+export type SettingsFocusTarget = "keyboard-shortcuts";
 
 /** Where a section's settings are kept, when every one of them is kept in the same place. */
 export type SettingsScope = "This Device" | "Your Account";
@@ -63,7 +70,6 @@ export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSectionEntry> = [
     panelDescription: "Alerts for approvals and finished turns.",
     scope: "This Device",
   },
-  { id: "keyboard", title: "Keyboard", description: "Shortcuts for getting around faster." },
   { id: "behavior", title: "Behavior", description: "Typing, privacy and agent defaults." },
   { id: "approvals", title: "Approvals", description: "Question answers and tool policies." },
   { id: "orchestrator", title: "Orchestrator", description: "Defaults for sessions that run others.", scope: "Your Account" },
@@ -431,7 +437,9 @@ export function viewFromPath(pathname: string, search = ""): View | null {
   if (path === "/settings") return { name: "settings" };
   // Keep old bookmarks useful while Session Naming now lives compactly under Behavior.
   if (path === "/settings/session-naming") return { name: "settings", section: "behavior" };
-  const settingsMatch = /^\/settings\/(appearance|notifications|keyboard|behavior|approvals|orchestrator|network|experimental|about)$/.exec(path);
+  // Keyboard folded into Behavior › Input (#3023): the old section's address lands on its one row.
+  if (path === "/settings/keyboard") return { name: "settings", section: "behavior", focus: "keyboard-shortcuts" };
+  const settingsMatch = /^\/settings\/(appearance|notifications|behavior|approvals|orchestrator|network|experimental|about)$/.exec(path);
   if (settingsMatch) return { name: "settings", section: settingsMatch[1] as SettingsSection };
   const approvalsPolicyMatch = /^\/settings\/approvals\/~([^/]+)$/.exec(path);
   if (approvalsPolicyMatch) {

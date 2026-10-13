@@ -70,7 +70,7 @@ test("Settings records one exact return view without accumulating nested Setting
   store.navigate({ name: "settings" });
   assert.deepEqual(store.getState().settingsReturnView, origin);
 
-  store.navigate({ name: "settings", section: "keyboard" });
+  store.navigate({ name: "settings", section: "behavior" });
   store.navigate({ name: "settings", section: "network" });
   assert.deepEqual(store.getState().settingsReturnView, origin,
     "section navigation must not replace the non-Settings origin");

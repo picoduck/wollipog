@@ -77,7 +77,7 @@ async function render(at: Tier, section?: SettingsSection) {
   document.body.append(scroller);
   const root = createRoot(scroller);
   const view = (next?: SettingsSection) => (
-    <SettingsView section={next} onNavigate={(target) => navigated.push(target)} onOpenShortcuts={() => undefined} panels={panels} />
+    <SettingsView section={next} onNavigate={(target) => navigated.push(target)} panels={panels} />
   );
   await act(async () => root.render(view(section)));
   return {
@@ -160,7 +160,7 @@ test("compact: the sections are link tabs in the page header, and the side colum
     assert.ok(links.every((link) => link.getAttribute("role") === null && link.getAttribute("aria-selected") === null));
     assert.deepEqual(links.filter((link) => link.getAttribute("aria-current") === "page").map((link) => link.textContent), ["About"]);
     assert.equal(click(links[2]!), true);
-    assert.deepEqual(view.navigated, [{ name: "settings", section: "keyboard" }]);
+    assert.deepEqual(view.navigated, [{ name: "settings", section: "behavior" }]);
   } finally {
     await view.unmount();
   }

@@ -1804,7 +1804,7 @@ Only a disabled row dims, and only its title (`--text-faint`, never opacity, §3
 | `NumberRow` | A `.w-xs` (96px) field with its unit inside (§8.3). | Named by the title and unit; a long unit goes in the title or description. An invalid value is `aria-invalid` with a `FieldError` under the field (§8.5). |
 | `ValueRow` | A read-only value, right-aligned. | `mono` for addresses, versions and ids; `copy` adds Copy, an `.icon-btn.sm` named "Copy <Title>". |
 | `LinkRow` | Trailing `ChevronRight`, after an optional trailing word. | Navigation only; the whole row is the button. |
-| `ActionRow` | One `.btn` (`--control-h`), such as Edit…. | Named by its label and the row's title ("Edit… Claude Code"). |
+| `ActionRow` | One `.btn` (`--control-h`), such as Edit…, with an optional 14px icon before its label. | Named by its label and the row's title ("Edit… Claude Code"). |
 | `StaticRow` | None. | States something; its title is full contrast and it has no role. |
 
 **States.** A busy row (`busy`) keeps its control's confirmed value and leads its description with a
@@ -1823,8 +1823,9 @@ section: an optional head (the title in `--type-section`, written in Title Case 
 `text-transform`; an optional scope label as §11.3 meta, such as "This Device", "Your Account", "This
 Window" or "This Machine"; at most one head action), an optional one-sentence description in
 `--type-small` `--text-dim`, one `.surface` (`.settings-group-surface`) with hairlines between its
-rows, and an optional foot line. The surface is the size container for the 560px rule. A failed
-instant save that is not a switch shows a compact danger `Notice` above the surface with Retry. Rows
+rows, and an optional foot line, or a §5.5 disclosure where the group needs more than one line
+(Behavior's About Artifact Uploads, #3023). The surface is the size container for the 560px rule. A
+failed instant save that is not a switch shows a compact danger `Notice` above the surface with Retry. Rows
 inside a surface never turn into cards: hover is a `--bg-elev-2` fill without a border, only on rows
 that are one link or button, on fine pointers. A switch row with `saved` or `failure` is one framed
 child of the surface (`.setting-row-frame`), its status region inside the frame, and so is any other

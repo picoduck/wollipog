@@ -6,16 +6,14 @@ import {
   AppearancePanel,
   BehaviorPanel,
   ExperimentalPanel,
-  KeyboardPanel,
   NavigationRailPanel,
   NetworkPanel,
   NotificationsPanel,
-  PendingSetting,
   SettingsView,
 } from "../components/SettingsView.js";
 import { DEFAULT_ORCHESTRATOR_DEFAULTS, type AgentHarnessDefaultsView } from "@wollipog/protocol";
 import { OrchestratorSettingsPanel } from "../components/OrchestratorSettingsPanel.js";
-import { SettingsGroup } from "../components/ui/SettingsRows.js";
+import { StaticRow } from "../components/ui/SettingsRows.js";
 import { RowKinds } from "./setting-row-kinds.js";
 import { ApprovalsPanel } from "../components/ApprovalsPanel.js";
 import { createApiClient } from "../api.js";
@@ -123,11 +121,24 @@ harnessDefaultsRepairedView.defaults[0]!.installations[0]!.models = [
 ];
 harnessDefaultsRepairedView.defaults[0]!.installations[0]!.effortLevels = ["low"];
 
+/** Behavior › Evidence's preference, kept for the page's life so a saved change reads back. */
+let artifactUploadPreference = "manual";
+
 const harnessDefaultsTransport: ApiTransport = {
   instanceId: "settings-fixture",
   publicOrigin: window.location.origin,
   close() {},
-  async request(path) {
+  async request(path, init) {
+    // Behavior › Evidence (#3023). Unstubbed, the read fell through to the agent defaults below and
+    // every Behavior capture showed a load failure. `artifact=save-fails` makes a change fail the way
+    // a dropped connection does, for the danger notice and its Retry.
+    if (path === "/api/artifact-upload-settings") {
+      if (init?.method === "PUT") {
+        if (new URLSearchParams(window.location.search).get("artifact") === "save-fails") throw new TypeError("Failed to fetch");
+        artifactUploadPreference = (JSON.parse(String(init.body)) as { preference: string }).preference;
+      }
+      return Response.json({ preference: artifactUploadPreference });
+    }
     if (path === "/api/instance") {
       return new Response(JSON.stringify({
         service: "wollipog-control-plane",
@@ -327,7 +338,6 @@ function Harness() {
           <SettingsView
             section={section}
             onNavigate={navigate}
-            onOpenShortcuts={() => undefined}
             panels={kinds ? Object.fromEntries(SETTINGS_SECTIONS.map((entry) => [entry.id, groupWidth
               ? <div className="settings-panel" style={{ width: groupWidth }}><RowKinds /></div>
               : <RowKinds />])) as Record<SettingsSection, React.ReactNode> : {
@@ -373,22 +383,23 @@ function Harness() {
                   disabled={disabled}
                 />
               ),
-              keyboard: <KeyboardPanel shortcutLabel="Reference · ?" disabled={disabled} onOpenShortcuts={() => undefined} />,
+              // Both slots are always filled, as the shell fills them; the fixture rows stand in for
+              // panels that need a control plane.
               behavior: (
-                <BehaviorPanel
-                  agentHarnessDefaults={showAgentDefaults ? (
-                    <ApiProvider client={harnessDefaultsApi}><AgentHarnessDefaultsPanel /></ApiProvider>
-                  ) : undefined}
-                  sessionNaming={(
-                    <SettingsGroup title="Session Naming">
-                      <PendingSetting
-                        title="Session Naming"
-                        description="Controls automatic session titles."
-                        reason="The visual fixture does not connect to a control plane."
+                <ApiProvider client={harnessDefaultsApi}>
+                  <BehaviorPanel
+                    agentHarnessDefaults={showAgentDefaults ? <AgentHarnessDefaultsPanel /> : (
+                      <StaticRow
+                        title="Default Models, Efforts, and Permissions"
+                        description="The visual fixture does not load agent defaults."
                       />
-                    </SettingsGroup>
-                  )}
-                />
+                    )}
+                    sessionNaming={(
+                      <StaticRow title="Session Naming" description="The visual fixture does not connect to a control plane." />
+                    )}
+                    onOpenShortcuts={() => undefined}
+                  />
+                </ApiProvider>
               ),
               approvals: (
                 <ApiProvider client={harnessDefaultsApi}>

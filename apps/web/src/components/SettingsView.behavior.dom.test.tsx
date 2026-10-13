@@ -3,105 +3,168 @@ import { after, before, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
+import { api } from "../api.js";
 import { ENTER_KEY_STORAGE_KEY } from "../enter-key.js";
 import { SHOW_AGENT_LOGS_STORAGE_KEY } from "../agent-logs.js";
+import type { SettingsFocusTarget } from "../navigation.js";
+import { SHOW_SHORTCUTS_ID, shortcutDisplay } from "../shortcuts.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { BehaviorPanel } from "./SettingsView.js";
 
 /**
- * The Enter Key row writes the store the composer reads.
+ * Settings › Behavior (#3023): six groups in a fixed order, each naming where it is kept; the rows
+ * whose sentences follow their value; Keyboard Shortcuts folded into Input and withheld where no
+ * hardware keyboard is likely; and the redirect from `/settings/keyboard` landing on it.
  *
- * The composer tests pin how a stored value changes the keydown contract; this pins that the
- * Settings control actually produces that stored value — without it, renaming the storage key on
- * either side leaves both suites green while the setting silently stops doing anything.
+ * The Enter Key and Show Agent Logs rows also write the stores the composer and the transcript read:
+ * the composer tests pin how a stored value changes the keydown contract, and this pins that the
+ * Settings control actually produces that stored value.
  */
 
+/** Which media queries match: a desktop with a mouse, a phone, or a touch-only tablet. */
+type Device = "desktop" | "phone" | "touch-tablet";
+let device: Device = "desktop";
+
 const domWindow = new Window();
-const priorWindow = globalThis.window;
-const priorDocument = globalThis.document;
-const priorNavigator = globalThis.navigator;
-const priorLocalStorage = (globalThis as Record<string, unknown>)["localStorage"];
-const priorActEnvironment = (globalThis as unknown as Record<string, unknown>)["IS_REACT_ACT_ENVIRONMENT"];
-const priorElementGlobals = {
-  HTMLElement: (globalThis as Record<string, unknown>)["HTMLElement"],
-  HTMLButtonElement: (globalThis as Record<string, unknown>)["HTMLButtonElement"],
+Object.defineProperty(domWindow, "matchMedia", {
+  configurable: true,
+  writable: true,
+  value: (query: string) => ({
+    get matches() {
+      if (query === "(max-width: 760px)") return device === "phone";
+      if (query === "(hover: none) and (pointer: coarse)") return device !== "desktop";
+      return false;
+    },
+    media: query, onchange: null,
+    addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
+    dispatchEvent: () => false,
+  }),
+});
+const previous = new Map<string, unknown>();
+const globals: Record<string, unknown> = {
+  window: domWindow,
+  document: domWindow.document,
+  navigator: domWindow.navigator,
+  localStorage: domWindow.localStorage,
+  HTMLElement: domWindow.HTMLElement,
+  HTMLButtonElement: domWindow.HTMLButtonElement,
   // The setter announces its change with `new Event(...)`; a Node-global Event never reaches
   // happy-dom's listeners, and the row silently stops tracking the store it just wrote.
-  Event: (globalThis as Record<string, unknown>)["Event"],
-  requestAnimationFrame: (globalThis as Record<string, unknown>)["requestAnimationFrame"],
-  cancelAnimationFrame: (globalThis as Record<string, unknown>)["cancelAnimationFrame"],
-  getComputedStyle: (globalThis as Record<string, unknown>)["getComputedStyle"],
+  Event: domWindow.Event,
+  requestAnimationFrame: domWindow.requestAnimationFrame.bind(domWindow),
+  cancelAnimationFrame: domWindow.cancelAnimationFrame.bind(domWindow),
+  getComputedStyle: domWindow.getComputedStyle.bind(domWindow),
+  IS_REACT_ACT_ENVIRONMENT: true,
 };
+const priorArtifactUploadSettings = api.artifactUploadSettings;
 
 before(() => {
-  Object.defineProperty(globalThis, "window", { configurable: true, writable: true, value: domWindow });
-  Object.defineProperty(globalThis, "document", { configurable: true, writable: true, value: domWindow.document });
-  Object.defineProperty(globalThis, "navigator", { configurable: true, writable: true, value: domWindow.navigator });
-  Object.defineProperty(globalThis, "localStorage", { configurable: true, writable: true, value: domWindow.localStorage });
-  Object.defineProperty(globalThis, "HTMLElement", { configurable: true, writable: true, value: domWindow.HTMLElement });
-  Object.defineProperty(globalThis, "HTMLButtonElement", { configurable: true, writable: true, value: domWindow.HTMLButtonElement });
-  Object.defineProperty(globalThis, "Event", { configurable: true, writable: true, value: domWindow.Event });
-  Object.defineProperty(globalThis, "requestAnimationFrame", { configurable: true, writable: true, value: domWindow.requestAnimationFrame.bind(domWindow) });
-  Object.defineProperty(globalThis, "cancelAnimationFrame", { configurable: true, writable: true, value: domWindow.cancelAnimationFrame.bind(domWindow) });
-  Object.defineProperty(globalThis, "getComputedStyle", { configurable: true, writable: true, value: domWindow.getComputedStyle.bind(domWindow) });
-  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, writable: true, value: true });
+  for (const [name, value] of Object.entries(globals)) {
+    previous.set(name, (globalThis as Record<string, unknown>)[name]);
+    Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+  }
+  // Evidence reads the account's preference; its own suite covers that row.
+  api.artifactUploadSettings = async () => ({ preference: "manual" });
 });
 
 after(() => {
-  Object.defineProperty(globalThis, "window", { configurable: true, writable: true, value: priorWindow });
-  Object.defineProperty(globalThis, "document", { configurable: true, writable: true, value: priorDocument });
-  Object.defineProperty(globalThis, "navigator", { configurable: true, writable: true, value: priorNavigator });
-  Object.defineProperty(globalThis, "localStorage", { configurable: true, writable: true, value: priorLocalStorage });
-  Object.defineProperty(globalThis, "HTMLElement", { configurable: true, writable: true, value: priorElementGlobals.HTMLElement });
-  Object.defineProperty(globalThis, "HTMLButtonElement", { configurable: true, writable: true, value: priorElementGlobals.HTMLButtonElement });
-  Object.defineProperty(globalThis, "Event", { configurable: true, writable: true, value: priorElementGlobals.Event });
-  Object.defineProperty(globalThis, "requestAnimationFrame", { configurable: true, writable: true, value: priorElementGlobals.requestAnimationFrame });
-  Object.defineProperty(globalThis, "cancelAnimationFrame", { configurable: true, writable: true, value: priorElementGlobals.cancelAnimationFrame });
-  Object.defineProperty(globalThis, "getComputedStyle", { configurable: true, writable: true, value: priorElementGlobals.getComputedStyle });
-  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, writable: true, value: priorActEnvironment });
+  for (const [name, value] of previous) {
+    Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+  }
+  api.artifactUploadSettings = priorArtifactUploadSettings;
 });
 
-test("the Enter Key row stores the choice and reflects it back", async () => {
+async function renderPanel(options: { on?: Device; focus?: SettingsFocusTarget; opened?: Array<HTMLElement | null> } = {}) {
+  device = options.on ?? "desktop";
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  try {
-    await act(async () => root.render(<BehaviorPanel />));
+  await act(async () => root.render(
+    <BehaviorPanel
+      agentHarnessDefaults={<div className="setting-row">Agent defaults slot</div>}
+      sessionNaming={<div className="setting-row">Session naming slot</div>}
+      onOpenShortcuts={(returnFocus) => options.opened?.push(returnFocus)}
+      focus={options.focus}
+    />,
+  ));
+  return {
+    container,
+    async unmount() {
+      await act(async () => root.unmount());
+      container.remove();
+      device = "desktop";
+    },
+  };
+}
 
+const groupHeads = (container: HTMLElement) => [...container.querySelectorAll(".settings-group-head")].map((head) => [
+  head.querySelector(".settings-group-title")?.textContent,
+  head.querySelector(".settings-group-scope")?.textContent,
+]);
+
+test("Behavior is six groups in order, each naming once where it is kept", async () => {
+  const view = await renderPanel();
+  try {
+    assert.deepEqual(groupHeads(view.container), [
+      ["Input", "This Device"],
+      ["Transcript", "This Device"],
+      ["Privacy", "This Device"],
+      ["Agent Defaults", "Your Account"],
+      ["Session Titles", "Your Account"],
+      ["Evidence", "Your Account"],
+    ]);
+    // The slots hold what the shell supplies, under the heads drawn here.
+    const groups = [...view.container.querySelectorAll(".settings-group")];
+    assert.match(groups[3]!.querySelector(".settings-group-surface")!.textContent ?? "", /^Agent defaults slot$/);
+    assert.match(groups[4]!.querySelector(".settings-group-surface")!.textContent ?? "", /^Session naming slot$/);
+    const text = view.container.textContent ?? "";
+    assert.doesNotMatch(text, /Stored on this device/, "the scope label says it once per group");
+    assert.doesNotMatch(text, /not built yet|Reduce Motion|Confirm Before Deleting/i, "no placeholder rows");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("the Enter Key row stores the choice, reflects it back and describes the value", async () => {
+  const view = await renderPanel();
+  const { container } = view;
+  try {
     const optionByName = (name: string) => {
       const options = [...container.querySelectorAll<HTMLElement>("[role=radio]")];
-      const match = options.find((option) =>
-        (option.getAttribute("aria-label") ?? option.textContent ?? "").includes(name));
+      const match = options.find((option) => option.textContent?.trim() === name);
       assert.ok(match, `the Enter Key row must offer "${name}"`);
       return match;
     };
+    const radios = [...container.querySelectorAll<HTMLElement>("[role=radio]")].map((option) => option.textContent?.trim());
+    assert.deepEqual(radios, ["Send Message", "New Line"]);
+    const description = () => container.querySelector(".settings-group .setting-row .setting-row-desc")?.textContent;
 
-    // No stored value: the row shows this device's derived default. happy-dom reports a fine
-    // pointer, so that is "send" — the same derivation the composer uses.
+    // No stored value: the row shows this device's derived default. The fine pointer here makes
+    // that "send", the same derivation the composer uses.
     assert.equal(domWindow.localStorage.getItem(ENTER_KEY_STORAGE_KEY), null,
       "rendering the panel must not write the default");
     assert.equal(optionByName("Send Message").getAttribute("aria-checked"), "true");
+    assert.equal(description(), "Shift+Enter adds a new line.");
 
-    await act(async () => { optionByName("Insert New Line").click(); });
+    await act(async () => { optionByName("New Line").click(); });
     assert.equal(domWindow.localStorage.getItem(ENTER_KEY_STORAGE_KEY), "newline",
       "choosing an option must store it under the key the composer reads");
-    assert.equal(optionByName("Insert New Line").getAttribute("aria-checked"), "true");
+    assert.equal(optionByName("New Line").getAttribute("aria-checked"), "true");
+    assert.equal(description(), "Shift+Enter sends the message.");
 
     await act(async () => { optionByName("Send Message").click(); });
     assert.equal(domWindow.localStorage.getItem(ENTER_KEY_STORAGE_KEY), "send");
     assert.equal(optionByName("Send Message").getAttribute("aria-checked"), "true");
   } finally {
     domWindow.localStorage.removeItem(ENTER_KEY_STORAGE_KEY);
-    await act(async () => root.unmount());
-    container.remove();
+    await view.unmount();
   }
 });
 
-test("the Show Agent Logs switch is off by default and stores the choice on this device", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+test("the Show Agent Logs switch is off by default, stores the choice and describes the value", async () => {
+  const view = await renderPanel();
+  const { container } = view;
   try {
-    await act(async () => root.render(<BehaviorPanel />));
     const toggle = () => {
       const match = [...container.querySelectorAll<HTMLElement>("[role=switch]")].find((control) => {
         const title = domWindow.document.getElementById(control.getAttribute("aria-labelledby") ?? "");
@@ -110,19 +173,80 @@ test("the Show Agent Logs switch is off by default and stores the choice on this
       assert.ok(match, "Behavior offers a Show Agent Logs switch row");
       return match;
     };
+    const description = () => domWindow.document.getElementById(toggle().getAttribute("aria-describedby") ?? "")?.textContent;
 
     assert.equal(domWindow.localStorage.getItem(SHOW_AGENT_LOGS_STORAGE_KEY), null,
       "rendering the panel must not write the default");
     assert.equal(toggle().getAttribute("aria-checked"), "false", "off by default");
+    assert.equal(description(), "Work that only holds agent startup logs stays hidden.");
     await act(async () => { toggle().click(); });
     assert.equal(domWindow.localStorage.getItem(SHOW_AGENT_LOGS_STORAGE_KEY), "true");
     assert.equal(toggle().getAttribute("aria-checked"), "true");
+    assert.equal(description(), "Work that only holds agent startup logs is shown.");
     await act(async () => { toggle().click(); });
     assert.equal(domWindow.localStorage.getItem(SHOW_AGENT_LOGS_STORAGE_KEY), "false");
     assert.equal(toggle().getAttribute("aria-checked"), "false");
   } finally {
     domWindow.localStorage.removeItem(SHOW_AGENT_LOGS_STORAGE_KEY);
-    await act(async () => root.unmount());
-    container.remove();
+    await view.unmount();
+  }
+});
+
+test("with a mouse, Keyboard Shortcuts is an Input row whose Show Shortcuts opens the reference", async () => {
+  const opened: Array<HTMLElement | null> = [];
+  const view = await renderPanel({ opened });
+  try {
+    const input = view.container.querySelector(".settings-group")!;
+    assert.equal(input.querySelector(".settings-group-title")?.textContent, "Input");
+    const titles = [...input.querySelectorAll(".setting-row-title")].map((title) => title.textContent);
+    assert.deepEqual(titles, ["Enter Key", "Keyboard Shortcuts"]);
+    const button = domWindow.document.getElementById(SHOW_SHORTCUTS_ID) as unknown as HTMLButtonElement;
+    assert.ok(button, "the button has the id the reference's focus return looks for");
+    assert.equal(button.textContent, "Show Shortcuts");
+    assert.ok(button.querySelector("svg"), "with the keyboard icon");
+    assert.equal(button.getAttribute("aria-haspopup"), "dialog");
+    const describedBy = domWindow.document.getElementById(button.getAttribute("aria-describedby") ?? "");
+    assert.equal(describedBy?.textContent, `Press ${shortcutDisplay("shortcut-reference")} anywhere to see them.`);
+    await act(async () => button.click());
+    assert.deepEqual(opened, [button], "the reference returns focus to the button that opened it");
+  } finally {
+    await view.unmount();
+  }
+});
+
+for (const on of ["phone", "touch-tablet"] as const) {
+  test(`on a ${on} the Keyboard Shortcuts row is absent`, async () => {
+    const view = await renderPanel({ on });
+    try {
+      assertNoDomNode(domWindow.document.getElementById(SHOW_SHORTCUTS_ID), "no Show Shortcuts without a keyboard");
+      assert.doesNotMatch(view.container.textContent ?? "", /Keyboard Shortcuts/);
+      assert.equal(groupHeads(view.container)[0]![0], "Input", "Input keeps Enter Key");
+    } finally {
+      await view.unmount();
+    }
+  });
+}
+
+test("the /settings/keyboard redirect focuses Show Shortcuts, or the Input group where it is withheld", async () => {
+  let view = await renderPanel({ focus: "keyboard-shortcuts" });
+  try {
+    assert.equal(domWindow.document.activeElement?.id, SHOW_SHORTCUTS_ID);
+  } finally {
+    await view.unmount();
+  }
+  view = await renderPanel({ on: "phone", focus: "keyboard-shortcuts" });
+  try {
+    const active = domWindow.document.activeElement as unknown as HTMLElement | null;
+    assert.equal(active?.className, "settings-group-title");
+    assert.equal(active?.textContent, "Input");
+    assert.equal(active?.getAttribute("tabindex"), "-1", "a programmatic target, not a tab stop");
+  } finally {
+    await view.unmount();
+  }
+  view = await renderPanel();
+  try {
+    assert.equal(domWindow.document.activeElement, domWindow.document.body, "an ordinary visit moves nothing");
+  } finally {
+    await view.unmount();
   }
 });

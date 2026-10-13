@@ -535,6 +535,30 @@ test("browser history canonicalizes once, preserves state, and never pushes duri
   assert.equal(listeners.size, 0);
 });
 
+test("Keyboard folds into Behavior: /settings/keyboard replaces itself and lands on Keyboard Shortcuts (#3023)", () => {
+  assert.equal(SETTINGS_SECTIONS.some((section) => section.id === ("keyboard" as never)), false);
+  assert.deepEqual(SETTINGS_SECTIONS.map((section) => section.title),
+    ["Appearance", "Notifications", "Behavior", "Approvals", "Orchestrator", "Network", "Experimental", "About"]);
+  const view = viewFromPath("/settings/keyboard");
+  assert.deepEqual(view, { name: "settings", section: "behavior", focus: "keyboard-shortcuts" });
+  assert.equal(viewPath(view!), "/settings/behavior", "the focus target is not part of the address");
+  assert.ok(sameView(view!, { name: "settings", section: "behavior" }));
+  // A replacing navigation: Back never returns to the old address.
+  const writes: Array<{ kind: string; path: string }> = [];
+  const target = {
+    location: { pathname: "/settings/keyboard", search: "", hash: "" },
+    history: {
+      state: null,
+      pushState(_state: unknown, _unused: string, path: string | URL | null) { writes.push({ kind: "push", path: String(path) }); },
+      replaceState(_state: unknown, _unused: string, path: string | URL | null) { writes.push({ kind: "replace", path: String(path) }); },
+    },
+    addEventListener() {},
+    removeEventListener() {},
+  };
+  assert.deepEqual(new BrowserNavigation(target).current(), view);
+  assert.deepEqual(writes, [{ kind: "replace", path: "/settings/behavior" }]);
+});
+
 test("unknown browser routes fall back to the canonical Inbox home", () => {
   const writes: string[] = [];
   const target = {

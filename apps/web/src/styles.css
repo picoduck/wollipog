@@ -17323,6 +17323,8 @@ button.setting-row { cursor: pointer; }
 .settings-group-action { margin-inline-start: auto; }
 .settings-group-desc,
 .settings-group-foot { margin: 0; color: var(--text-dim); font: var(--type-small); }
+/* A foot that is a disclosure (§5.5) holds sentences, spaced by the disclosure body's gap. */
+.settings-group-foot p { margin: 0; }
 /* The surface is the size container for the rows' 560px rule. Select lists stay in place inside it
    and correct for its containing block (§2.10), so it can be one. */
 .settings-group-surface { container-type: inline-size; }
@@ -18428,10 +18430,6 @@ a.tab { text-decoration: none; }
   .rail-order-row { gap: var(--space-2); }
   .rail-order-controls > :last-child { min-width: 0; }
 }
-
-/* Settings › Behavior › Artifact Uploads: what its last change did, under the row's text. */
-.artifact-upload-status { display: grid; gap: var(--space-2); padding: 0 var(--space-4) var(--space-3); }
-.artifact-upload-status > p { margin: 0; color: var(--text-dim); font: var(--type-small); }
 
 .agent-defaults-list {
   display: flex;
