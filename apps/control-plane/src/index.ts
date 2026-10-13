@@ -4411,17 +4411,15 @@ app.get("/api/sessions/:id/events", async (req, reply) => {
   };
   const after = Number(query.after ?? 0);
   const currentTurnOpening = query.opening === "current-turn";
-  if (query.opening !== undefined && (!currentTurnOpening || query.limit === undefined ||
+  if (query.opening !== undefined && (!currentTurnOpening ||
       query.after !== undefined || query.before !== undefined || query.direction !== undefined || query.align !== undefined)) {
-    return reply.code(400).send({ error: "opening must be current-turn with limit and no paging cursors",
+    return reply.code(400).send({ error: "opening must be current-turn with no paging cursors",
       code: "invalid_history_page" });
   }
-  if (query.limit === undefined) {
-    await svc.hydrateHistory(id);
-    return { events: db.listEvents(id, after) };
-  }
-  const limit = Number(query.limit);
-  const requestedEpoch = Number(query.eventEpoch);
+  // Omission is a cache-first page, just like explicit paging. Never await whole-log hydration
+  // or serialize all history because an API consumer forgot the page size.
+  const limit = Number(query.limit ?? 200);
+  const requestedEpoch = query.eventEpoch === undefined ? undefined : Number(query.eventEpoch);
   // A backward read serves the bounded opening window: the newest `limit` rows, then older pages
   // below an explicit cursor. Combining it with the forward gap-fill cursor is always a client bug,
   // so it fails closed rather than silently ignoring one of the two.
@@ -4467,7 +4465,7 @@ app.get("/api/sessions/:id/events", async (req, reply) => {
     });
   }
   if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 200 ||
-      !Number.isSafeInteger(requestedEpoch) || requestedEpoch < 0) {
+      (requestedEpoch !== undefined && (!Number.isSafeInteger(requestedEpoch) || requestedEpoch < 0))) {
     return reply.code(400).send({
       error: "after, eventEpoch, and limit must be bounded non-negative integers",
       code: "invalid_history_page",
@@ -4476,7 +4474,7 @@ app.get("/api/sessions/:id/events", async (req, reply) => {
   const session = db.getSession(id);
   const state = db.getRunnerHistoryState(id);
   if (!session || !state) return reply.code(404).send({ error: "session not found" });
-  if (requestedEpoch !== state.eventEpoch) {
+  if (requestedEpoch !== undefined && requestedEpoch !== state.eventEpoch) {
     return reply.code(409).send({
       error: "session event history was replaced",
       code: "stale_event_epoch",
@@ -4488,9 +4486,9 @@ app.get("/api/sessions/:id/events", async (req, reply) => {
   if (currentTurnOpening) {
     const opening = db.listCachedCurrentTurnOpening(id, limit);
     void svc.hydrateHistory(id);
-    const preview = cacheComplete ? null : await historyPreviews.read(id, requestedEpoch, { limit });
+    const preview = cacheComplete ? null : await historyPreviews.read(id, state.eventEpoch, { limit });
     const current = db.getRunnerHistoryState(id);
-    if (!current || current.eventEpoch !== requestedEpoch) return reply.code(409).send({
+    if (!current || current.eventEpoch !== state.eventEpoch) return reply.code(409).send({
       error: "session event history was replaced", code: "stale_event_epoch", eventEpoch: current?.eventEpoch,
     });
     return { ...opening, eventEpoch: state.eventEpoch, cacheComplete, ...(preview ? { preview } : {}) };

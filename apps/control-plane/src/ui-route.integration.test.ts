@@ -22,6 +22,74 @@ import { MAX_UI_CLIENT_MESSAGE_BYTES } from "./ui-channel.js";
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const CONTROL_PLANE_TOKEN = "ui-route-integration-token";
 
+test("missing-limit event reads page 50,000 cached events with exact continuation and validation", { timeout: 45_000 }, async (t) => {
+  const port = await reservePort();
+  const temp = mkdtempSync(join(tmpdir(), "wollipog-default-events-"));
+  const databasePath = join(temp, "control-plane.db");
+  const ownerToken = loadOrCreateLocalDeviceToken(defaultLocalDeviceTokenPath(databasePath));
+  const seed = ControlPlaneDb.open(databasePath);
+  seed.registerRunner({
+    runnerId: "offline-default-events", hostname: "fixture", os: "linux", version: "fixture",
+    workspaces: [{ id: "fixture", name: "Fixture", path: temp }], agents: [],
+  }, Date.now(), 0);
+  seed.createSession({
+    id: "default-events", runnerId: "offline-default-events", workspaceId: "fixture",
+    agentId: "fixture", title: "Fixture", useWorktree: false, driver: "claude-code", config: {}, now: 1,
+  });
+  const raw = seed.raw();
+  const insert = raw.prepare("INSERT INTO session_events(session_id,seq,ts,kind,payload) VALUES(?,?,?,?,?)");
+  raw.exec("BEGIN");
+  for (let seq = 1; seq <= 50_000; seq++) {
+    insert.run("default-events", seq, seq, "agent_message", JSON.stringify({ kind: "agent_message", text: `event ${seq}` }));
+  }
+  raw.exec("COMMIT");
+  seed.close();
+  let output = "";
+  const child = spawn(process.execPath, ["--import", "tsx", "apps/control-plane/src/index.ts"], {
+    cwd: REPO_ROOT,
+    env: { ...process.env, CONTROL_PLANE_HOST: "127.0.0.1", CONTROL_PLANE_PORT: String(port),
+      CONTROL_PLANE_DB: databasePath, CONTROL_PLANE_TOKEN, CONTROL_PLANE_USAGE_PRICING_URL: "off" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  child.stdout?.on("data", chunk => { output += chunk; });
+  child.stderr?.on("data", chunk => { output += chunk; });
+  t.after(async () => { await stopChild(child); rmSync(temp, { recursive: true, force: true }); });
+  const base = `http://127.0.0.1:${port}`;
+  await waitForHealth(base, child, () => output);
+  const read = (query = "") => fetchWithBearer(`${base}/api/sessions/default-events/events${query}`, ownerToken);
+  type Page = { events: Array<{ seq: number }>; nextAfter: number; eventEpoch: number; hasMoreCached: boolean; cacheComplete: boolean };
+  let page = await (await read()).json() as Page;
+  assert.equal(page.events.length, 200, "omission returns the established 200-event page, not the entire log");
+  assert.equal(page.nextAfter, 200);
+  assert.equal(page.eventEpoch, 0);
+  assert.equal(page.hasMoreCached, true);
+  let seen = 0;
+  let pages = 0;
+  for (;;) {
+    pages++;
+    assert.ok(pages <= 250);
+    assert.ok(page.events.length <= 200);
+    for (const event of page.events) assert.equal(event.seq, ++seen, "all rows are returned once, oldest first");
+    if (!page.hasMoreCached) break;
+    page = await (await read(`?after=${page.nextAfter}&eventEpoch=${page.eventEpoch}`)).json() as Page;
+  }
+  assert.equal(seen, 50_000);
+  assert.equal(pages, 250);
+  const empty = await (await read("?after=50000&eventEpoch=0")).json() as Page;
+  assert.deepEqual(empty.events, []);
+  assert.equal(empty.nextAfter, 50_000);
+  assert.equal(empty.hasMoreCached, false);
+  const tail = await (await read("?direction=backward")).json() as Page & { nextBefore: number };
+  assert.equal(tail.events.length, 200);
+  assert.equal(tail.events.at(-1)?.seq, 50_000);
+  assert.equal(tail.nextBefore, 49_801);
+  for (const query of ["?after=-1", "?after=nope", "?eventEpoch=-1", "?eventEpoch=nope", "?limit=0", "?limit=201", "?direction=backward&after=0"]) {
+    assert.equal((await read(query)).status, 400, query);
+  }
+  assert.equal((await read("?eventEpoch=1")).status, 409);
+  assert.equal((await fetchWithBearer(`${base}/api/sessions/missing/events`, ownerToken)).status, 404);
+});
+
 type JsonObject = Record<string, unknown>;
 interface StrictSocket {
   readyState: number;
@@ -1406,9 +1474,9 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   assert.deepEqual([afterInvalid.session.title, afterInvalid.session.titleSource], ["Renamed target", "user"]);
 
   const coldPage = await (await ownerFetch(
-    "/api/sessions/session-history/events?after=0&limit=2&eventEpoch=0",
+    "/api/sessions/session-history/events",
   )).json() as { events: unknown[]; cacheComplete: boolean };
-  assert.deepEqual(coldPage.events, [], "the bounded route returns the cache before runner I/O completes");
+  assert.deepEqual(coldPage.events, [], "the default page returns the cache before runner I/O completes");
   assert.equal(coldPage.cacheComplete, false);
   const historyRequest1 = await runnerInbox.take((message) => message.type === "session_history_page");
   assert.equal(historyRequest1.afterSeq, 0);

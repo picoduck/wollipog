@@ -45,6 +45,12 @@ call fails because the event history was replaced, restart from `--after 0` with
 Each event is one summary line capped at 400 characters, so a long message is truncated. The MCP
 `get_session_events` tool takes the same `after`, `limit`, and `eventEpoch`.
 
+Every event read stays paged while history hydrates; a short or empty incomplete page is not the
+end of the log. Without `--after`, an incomplete result is the newest cached window, so retry
+without `--after` for the true newest window once hydration catches up. Direct HTTP reads of
+`GET /api/sessions/:id/events` default to 200 events when `limit` is omitted; use `nextAfter` and
+`eventEpoch` to continue rather than treating one response as the whole log.
+
 `session stop-job` (MCP `stop_background_job`) ends one unfinished background job of a child
 session by its id, which `session get` lists as `unfinishedBackgroundJobs`. Use it when a job that
 never ends, such as a monitor whose condition never fires, keeps a finished sibling's result or a
