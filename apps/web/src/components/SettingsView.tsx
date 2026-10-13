@@ -1,5 +1,5 @@
 import { setHideAccountEmails, useAccountEmailPrivacy } from "../account-email-privacy.js";
-import React, { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { ArtifactUploadSettings } from "./ArtifactUploadSettings.js";
 import { Notice } from "./Notice.js";
 import { State } from "./State.js";
@@ -42,7 +42,7 @@ import { useIsCompact, useIsMobile, useIsTouchOnly } from "./useIsMobile.js";
 import { EXPERIMENT_COPY, experimentForViewName } from "../experiments.js";
 import { useExperiments } from "../use-experiments.js";
 import { destination } from "../navigation.js";
-import { ActionRow, LinkRow, SegmentedRow, SelectRow, SettingRow, SettingsGroup, StaticRow, SwitchRow, ValueRow } from "./ui/SettingsRows.js";
+import { ActionRow, LinkRow, SAVED_MS, SegmentedRow, SelectRow, SettingRow, SettingsGroup, StaticRow, SwitchRow, ValueRow } from "./ui/SettingsRows.js";
 import { SCHEME_SWATCHES, type ColorScheme, type ResolvedTheme } from "../theme.js";
 import type { SessionsPreviewLayout } from "../sessions-preview-layout.js";
 import { useSessionsPreviewLayout } from "../use-sessions-preview-layout.js";
@@ -365,38 +365,50 @@ export function AppearancePanel({
   density: string;
   onDensityChange: (value: string) => void;
 }) {
+  // A phone never shows the Sessions preview beside or below its list, so the layout does nothing there.
+  const phone = useIsMobile();
+  const [saved, flashSaved] = useSavedRow();
+  // Every row here saves the moment it changes (§8.6), so each says so. Choosing the value it
+  // already has changes nothing and says nothing.
+  const instant = (row: string, current: string, apply: (next: string) => void) => (next: string) => {
+    apply(next);
+    if (next !== current) flashSaved(row);
+  };
   /* ONE group, where there were three.
      A heading per setting made the panel read as three sections that happened to contain one
      control each, and repeated every title immediately below itself — "Theme" over a row called
      "Theme". These are three axes of one thing, which is what the group now says once. It is named
      Display rather than Appearance because the panel is already called Appearance, and a group
-     heading that restates its panel's is the same duplication one level up. */
+     heading that restates its panel's is the same duplication one level up. The panel head carries
+     the scope, This Device, for every group on it. */
   return (
-    <SettingsGroup title="Display">
+    <SettingsGroup title="Display" foot="Motion follows your system's reduce-motion setting.">
       <SegmentedRow
         title="Theme"
         options={options}
         value={value}
         disabled={disabled}
         disabledReason={disabledReason}
-        onChange={onChange}
+        onChange={instant("theme", value, onChange)}
+        saved={saved === "theme"}
       />
       {/* A SEPARATE axis from light/dark: every scheme has both, so choosing Dracula does not
           choose dark. A listbox rather than pills because five names need their descriptions and
-          their swatches to choose between, which a pill cannot carry. */}
+          their swatches to choose between, which a pill cannot carry. Its width is the described
+          list's default (§8.3). Browsing previews without changing anything, so only a commit saves. */}
       <SelectRow
         title="Color Scheme"
-        description="Applies to both the light and the dark theme."
+        description="Applies to both light and dark themes."
         options={schemes.map((option) => ({
           ...option,
           swatch: <SchemeSwatch scheme={option.value} theme={resolvedTheme} />,
         }))}
         value={scheme}
         disabled={disabled}
-        onChange={onSchemeChange}
+        onChange={instant("scheme", scheme, onSchemeChange)}
         onPreview={onSchemePreview}
-        menuWidth={400}
         estimatedOptionHeight={58}
+        saved={saved === "scheme"}
       />
       {/* A THIRD axis, and about spacing rather than colour: every scheme and theme has both
           densities. Compact is the default because it is what the app already renders. */}
@@ -406,54 +418,102 @@ export function AppearancePanel({
         value={density}
         disabled={disabled}
         disabledReason={disabledReason}
-        onChange={onDensityChange}
+        onChange={instant("density", density, onDensityChange)}
+        saved={saved === "density"}
       />
       {/* Where the Sessions preview sits (§6.3, #2219). The Sessions header's Preview Layout control
           writes the same per-device key, and each follows the other live. */}
-      <SessionsLayoutRow disabled={disabled} disabledReason={disabledReason} />
+      {!phone && (
+        <SessionsLayoutRow
+          disabled={disabled}
+          disabledReason={disabledReason}
+          saved={saved === "sessions-layout"}
+          onSaved={() => flashSaved("sessions-layout")}
+        />
+      )}
       {/* Where terminal tabs open (§4.6, #2869). The dock's and the side panel tool's More Terminal
-          Actions write the same per-device key, and each follows the others live. */}
-      <TerminalPlacementRow disabled={disabled} disabledReason={disabledReason} />
+          Actions write the same per-device key, and each follows the others live. Kept on phones,
+          which have both placements. */}
+      <TerminalPlacementRow
+        disabled={disabled}
+        disabledReason={disabledReason}
+        saved={saved === "terminal-placement"}
+        onSaved={() => flashSaved("terminal-placement")}
+      />
     </SettingsGroup>
   );
 }
 
-const SESSIONS_LAYOUT_OPTIONS: ReadonlyArray<{ value: SessionsPreviewLayout; label: string }> = [
-  { value: "below", label: "Preview Below" },
-  { value: "right", label: "Preview Right" },
+/** Which Display row shows its Saved check (§8.6): the one changed last, for `SAVED_MS`. */
+function useSavedRow(): [string | null, (row: string) => void] {
+  const [saved, setSaved] = useState<string | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  const flash = useCallback((row: string) => {
+    clearTimeout(timer.current);
+    setSaved(row);
+    timer.current = setTimeout(() => setSaved(null), SAVED_MS);
+  }, []);
+  return [saved, flash];
+}
+
+/** A Display row that reads and writes its own per-device store. */
+interface DeviceRowProps {
+  disabled: boolean;
+  disabledReason?: string;
+  saved: boolean;
+  /** The row's value changed and is stored. */
+  onSaved: () => void;
+}
+
+const SESSIONS_LAYOUT_OPTIONS: ReadonlyArray<{ value: SessionsPreviewLayout; label: string; description: string }> = [
+  { value: "below", label: "Preview Below", description: "The session list across the top, with the preview under it." },
+  {
+    value: "right",
+    label: "Preview Right",
+    description: "The session list on the left, with the preview beside it, in windows 1100px and wider.",
+  },
 ];
 
-function SessionsLayoutRow({ disabled, disabledReason }: { disabled: boolean; disabledReason?: string }) {
+function SessionsLayoutRow({ disabled, disabledReason, saved, onSaved }: DeviceRowProps) {
   const [layout, setLayout] = useSessionsPreviewLayout();
   return (
     <SegmentedRow
       title="Sessions Layout"
-      description="Preview Right applies in windows 1100px and wider."
       options={SESSIONS_LAYOUT_OPTIONS}
       value={layout}
       disabled={disabled}
       disabledReason={disabledReason}
-      onChange={(value) => setLayout(value === "right" ? "right" : "below")}
+      onChange={(value) => {
+        const next = value === "right" ? "right" : "below";
+        setLayout(next);
+        if (next !== layout) onSaved();
+      }}
+      saved={saved}
     />
   );
 }
 
-const TERMINAL_PLACEMENT_OPTIONS: ReadonlyArray<{ value: TerminalPlacement; label: string }> = [
-  { value: "dock", label: "Bottom Dock" },
-  { value: "panel", label: "Right Panel" },
+const TERMINAL_PLACEMENT_OPTIONS: ReadonlyArray<{ value: TerminalPlacement; label: string; description: string }> = [
+  { value: "dock", label: "Bottom Dock", description: "Terminal tabs open in a dock under the composer." },
+  { value: "panel", label: "Right Panel", description: "Terminal tabs open as the Terminal tool in the right panel." },
 ];
 
-function TerminalPlacementRow({ disabled, disabledReason }: { disabled: boolean; disabledReason?: string }) {
+function TerminalPlacementRow({ disabled, disabledReason, saved, onSaved }: DeviceRowProps) {
   const placement = useTerminalPlacement();
   return (
     <SegmentedRow
       title="Terminal Placement"
-      description="Where terminal tabs open on this device. Running shells keep running when you switch."
       options={TERMINAL_PLACEMENT_OPTIONS}
       value={placement}
       disabled={disabled}
       disabledReason={disabledReason}
-      onChange={(value) => setTerminalPlacement(value === "panel" ? "panel" : "dock")}
+      onChange={(value) => {
+        const next = value === "panel" ? "panel" : "dock";
+        setTerminalPlacement(next);
+        if (next !== placement) onSaved();
+      }}
+      saved={saved}
     />
   );
 }

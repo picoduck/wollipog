@@ -2803,6 +2803,17 @@ button.status { cursor: pointer; }
   box-shadow: var(--elev-2);
   animation: none;
 }
+/* The highlighted option's fill is where focus is in an open list (§9.1), so the list draws no ring
+   around every option as well (#3020). Only while an option is highlighted: a list with nothing to
+   highlight has no active descendant and keeps its ring, the one sign that focus is there. */
+.menu.listbox[aria-activedescendant]:focus-visible { outline: none; }
+/* Forced colors paints every fill as Canvas, so there the highlighted option carries the ring. */
+@media (forced-colors: active) {
+  .menu.listbox[aria-activedescendant]:focus-visible .ui-select-option.is-active {
+    outline: var(--focus-width) solid Highlight;
+    outline-offset: calc(-1 * var(--focus-width));
+  }
+}
 @keyframes menu-open { from { opacity: 0; transform: translateY(-4px); } }
 
 /* --------------------------------- Toolbar ---------------------------------

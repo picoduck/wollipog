@@ -48,11 +48,19 @@ async function openSection(page: Page, theme: string, section: SettingsSection) 
   await expect(SETTLED[section](page)).toBeVisible();
 }
 
+/** Segmented rows a phone does not show: it has no Sessions preview to lay out (#3020). */
+const DESKTOP_ONLY_SEGMENTED: ReadonlySet<string> = new Set(["Sessions Layout"]);
+
 /** Every option of every segmented control inside a setting row, each against its own pill. */
 async function expectEveryPillFits(page: Page, section: SettingsSection, where: string) {
   const groups = page.locator(".settings-panel .setting-row [role='radiogroup']");
   const names = await groups.evaluateAll((elements) => elements.map((element) => element.getAttribute("aria-label") ?? ""));
+  const phone = await page.evaluate(() => matchMedia("(max-width: 760px)").matches);
   for (const expected of SEGMENTED[section] ?? []) {
+    if (phone && DESKTOP_ONLY_SEGMENTED.has(expected)) {
+      expect(names, `${section}: "${expected}" is not on a phone`).not.toContain(expected);
+      continue;
+    }
     expect(names, `${section}: "${expected}" is a segmented row`).toContain(expected);
   }
   for (const [index, name] of names.entries()) {

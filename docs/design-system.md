@@ -875,9 +875,10 @@ Both places render the one `TerminalMoreActions` (`TerminalHead.tsx`), each with
 session bar's Terminal toggle and Ctrl+` call `toggleTerminalTool()` in Right Panel placement, and the
 toggle's `aria-pressed` is then `terminalToolShowing()`; in Bottom Dock placement they show and hide
 the dock as before. Settings › Appearance › Display has **Terminal Placement**, a segmented row with
-**Bottom Dock** and **Right Panel**, described "Where terminal tabs open on this device. Running shells
-keep running when you switch." It reads and writes the same key as both menus and follows them and
-other windows live, as Sessions Layout does (§6.3).
+**Bottom Dock** and **Right Panel**, its description following the value: "Terminal tabs open in a
+dock under the composer." or "Terminal tabs open as the Terminal tool in the right panel." It is the
+group's last row and stays on phones. It reads and writes the same key as both menus and follows them
+and other windows live, as Sessions Layout does (§6.3).
 
 **One terminal state, any host (#2867).** The open session's terminals live above the places that
 show them: `useSessionTerminals(sessionId)` (`session-terminals.tsx`, provided above the app's main
@@ -1516,7 +1517,8 @@ master-detail pages stay side by side.
   row in Settings › Appearance › Display. Both write one key and update each other live.
 - **Widths.** Preview Right applies at 1100px and wider only; at compact widths (761–1099px) Sessions
   is always stacked and the control is hidden, which also keeps the compact header to its budget
-  (§15.2). Phones have no preview (§6.2), whatever the preference.
+  (§15.2). Phones have no preview (§6.2), whatever the preference, so the Sessions Layout row is
+  hidden at 760px and below as well (#3020); the stored choice is kept.
 - **Empty.** An empty list replaces both panes with one state (§6.1); no divider is drawn.
   **Built (#2220).** `.inbox-state.master-detail-state` takes the list pane's place on the page grid,
   and the preview and divider are not rendered. The state follows the §12 order: Reconnecting… while
@@ -2026,7 +2028,9 @@ workflow step list is a different component and keeps a local name.
   appears in place, without the menu's entrance motion. It is not portalled: it stays beside its
   field and takes the field's font. Its placement is measured against its real containing block
   (§2.10), so an ancestor container cannot move it.
-  It replaced `.ui-select-list`.
+  It replaced `.ui-select-list`. Focused, it draws no ring of its own while an option is highlighted:
+  the highlighted option's fill shows where focus is, and in forced colors that option carries the
+  ring instead. A list with no option to highlight keeps its ring (#3020).
 
 ### 9.2 Popover
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { after, before, test } from "node:test";
+import { after, before, mock, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
@@ -10,6 +10,7 @@ import {
   ActionRow,
   LinkRow,
   NumberRow,
+  SAVED_MS,
   SegmentedRow,
   SelectRow,
   SettingRow,
@@ -252,16 +253,20 @@ test("Sessions Layout writes the Sessions preview layout and follows it live (#2
   try {
     const group = container.querySelector('[role="radiogroup"][aria-label="Sessions Layout"]')!;
     const row = group.closest(".setting-row")!;
-    assert.equal(row.querySelector(".setting-row-desc")?.textContent, "Preview Right applies in windows 1100px and wider.");
+    const description = () => row.querySelector(".setting-row-desc")?.textContent;
+    assert.equal(description(), "The session list across the top, with the preview under it.");
     const radios = () => [...group.querySelectorAll<HTMLButtonElement>('[role="radio"]')];
     assert.deepEqual(radios().map((radio) => [radio.textContent, radio.getAttribute("aria-checked")]),
       [["Preview Below", "true"], ["Preview Right", "false"]], "Preview Below is the default");
 
     await act(async () => { radios()[1]!.click(); });
     assert.equal(getSessionsPreviewLayout(), "right", "the row writes the one key the Sessions header reads");
+    assert.equal(description(), "The session list on the left, with the preview beside it, in windows 1100px and wider.",
+      "the description says what the chosen layout does");
     // The Sessions header writes it too, and the row follows without a reload.
     await act(async () => { setSessionsPreviewLayout("below"); });
     assert.deepEqual(radios().map((radio) => radio.getAttribute("aria-checked")), ["true", "false"]);
+    assert.equal(description(), "The session list across the top, with the preview under it.");
   } finally {
     setSessionsPreviewLayout("below");
     await cleanup();
@@ -289,8 +294,8 @@ test("Terminal Placement writes the per-device placement and follows both menus 
     const group = container.querySelector('[role="radiogroup"][aria-label="Terminal Placement"]')!;
     assert.ok(group, "the row's group is named Terminal Placement");
     const row = group.closest(".setting-row")!;
-    assert.equal(row.querySelector(".setting-row-desc")?.textContent,
-      "Where terminal tabs open on this device. Running shells keep running when you switch.");
+    const description = () => row.querySelector(".setting-row-desc")?.textContent;
+    assert.equal(description(), "Terminal tabs open in a dock under the composer.");
     const radios = () => [...group.querySelectorAll<HTMLButtonElement>('[role="radio"]')];
     const checked = () => radios().map((radio) => radio.getAttribute("aria-checked"));
     assert.deepEqual(radios().map((radio) => [radio.textContent, radio.getAttribute("aria-checked")]),
@@ -300,6 +305,7 @@ test("Terminal Placement writes the per-device placement and follows both menus 
     assert.equal(domWindow.localStorage.getItem(TERMINAL_PLACEMENT_STORAGE_KEY), "panel",
       "the row writes the key both More Terminal Actions menus read");
     assert.deepEqual(checked(), ["false", "true"]);
+    assert.equal(description(), "Terminal tabs open as the Terminal tool in the right panel.");
 
     // Move to Bottom Dock and Move to Right Panel write it in this window; the row follows.
     await act(async () => { setTerminalPlacement("dock"); });
@@ -358,7 +364,8 @@ test("the scheme list requests readable content dimensions while preserving trig
     assert.ok(list);
     assert.equal(list.querySelectorAll('[role="option"]').length, 5);
     assert.equal(list.style.left, "600px", "the open list keeps the trigger's start edge");
-    assert.equal(list.style.width, "400px", "described schemes get a content-aware width");
+    assert.equal(list.style.width, "360px",
+      "described schemes get the described list's default width (§8.3), wider than the 280px floor");
     // Five rows budgeted at 58px each, plus the list's own box. Derived rather than spelled "298px":
     // that literal silently encoded a chrome budget of 8px, which counted the list's 4px
     // padding on each edge but not its 1px border — and `box-sizing: border-box` is global, so
@@ -715,6 +722,60 @@ test("a preview repaints the document, never reaches storage, and the commit is 
     assert.deepEqual(schemeWrites(), ["wollipog", "one-dark"], "no browsed palette may ever be persisted");
   } finally {
     await cleanup();
+  }
+});
+
+test("Display's descriptions follow the value as sentences, and each change shows Saved for 2s (#3020)", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  const { container, cleanup } = await renderThemed([]);
+  try {
+    const row = (title: string) => [...container.querySelectorAll(".setting-row")]
+      .find((candidate) => candidate.querySelector(".setting-row-title")?.textContent === title)!;
+    const description = (title: string) => row(title).querySelector(".setting-row-desc")?.textContent;
+    const savedRows = () => [...container.querySelectorAll(".setting-row-saved")]
+      .map((check) => check.closest(".setting-row")!.querySelector(".setting-row-title")?.textContent);
+    const pill = (group: string, label: string) => [...container.querySelectorAll<HTMLButtonElement>(
+      `[role="radiogroup"][aria-label="${group}"] [role="radio"]`,
+    )].find((radio) => radio.textContent === label)!;
+
+    assert.equal(description("Theme"), "Follows your system's light or dark setting.");
+    assert.equal(description("Color Scheme"), "Applies to both light and dark themes.");
+    assert.equal(description("Density"), "Fits more on screen.");
+    assert.equal(container.querySelector(".settings-group-foot")?.textContent,
+      "Motion follows your system's reduce-motion setting.");
+    assert.deepEqual(savedRows(), [], "nothing has changed yet");
+
+    await act(async () => { pill("Theme", "Dark").click(); });
+    assert.equal(description("Theme"), "Always dark.");
+    assert.deepEqual(savedRows(), ["Theme"]);
+    assert.equal(row("Theme").querySelector('[role="status"]')?.textContent, "Theme saved");
+
+    await act(async () => { pill("Density", "Comfortable").click(); });
+    assert.equal(description("Density"), "Adds space between rows.");
+    assert.deepEqual(savedRows(), ["Density"], "the latest change is the one that says Saved");
+
+    await act(async () => { mock.timers.tick(SAVED_MS - 1); });
+    assert.deepEqual(savedRows(), ["Density"]);
+    await act(async () => { mock.timers.tick(1); });
+    assert.deepEqual(savedRows(), [], "and only for SAVED_MS");
+
+    // Choosing what is already chosen changes nothing, so nothing says it saved.
+    await act(async () => { pill("Density", "Comfortable").click(); });
+    assert.deepEqual(savedRows(), []);
+
+    // Browsing previews without saving; Escape saves nothing; a commit saves.
+    const list = await openList(container);
+    await key(list, "ArrowDown");
+    assert.deepEqual(savedRows(), [], "a preview is not a change");
+    await key(list, "Escape");
+    assert.deepEqual(savedRows(), []);
+    const second = await openList(container);
+    await key(second, "ArrowDown");
+    await key(second, "Enter");
+    assert.deepEqual(savedRows(), ["Color Scheme"]);
+  } finally {
+    await cleanup();
+    mock.timers.reset();
   }
 });
 
@@ -1098,7 +1159,7 @@ test("each option's sentence is attached to the control it describes", async () 
     }
 
     const trigger = container.querySelector(".ui-select-trigger")!;
-    assert.equal(describedBy(trigger), "Applies to both the light and the dark theme.",
+    assert.equal(describedBy(trigger), "Applies to both light and dark themes.",
       "the picker's helper text has to reach someone who tabbed straight to the trigger");
 
     // The visible sentence for a segmented row is the SELECTED option's, and the pill already
