@@ -939,6 +939,26 @@ CREATE TABLE IF NOT EXISTS orchestrator_campaign_events (
 CREATE INDEX IF NOT EXISTS idx_orchestrator_campaign_events_pending
   ON orchestrator_campaign_events(campaign_session_id, seq);
 
+-- Who resolved a campaign request, keyed by the same hashed identity the projection publishes
+-- (#3083). Written with the resolution's governance audit, read when the request's removal is
+-- published: a removal the campaign Orchestrator caused itself wakes nobody, and any other carries
+-- its outcome and resolver into the continuation. Rows are bounded by age, not by consumption, so
+-- a deferred attention batch replaying the same removal still finds them.
+CREATE TABLE IF NOT EXISTS orchestrator_campaign_request_resolutions (
+  campaign_session_id TEXT NOT NULL,
+  request_token       TEXT NOT NULL,
+  subject_session_id  TEXT NOT NULL,
+  occurrence_id       TEXT NOT NULL,
+  category            TEXT NOT NULL,
+  title               TEXT,
+  resource_key        TEXT,
+  outcome             TEXT NOT NULL,
+  resolved_by         TEXT NOT NULL,
+  resolved_at         INTEGER NOT NULL,
+  PRIMARY KEY (campaign_session_id, request_token),
+  FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
 -- Write-ahead attention checkpoints contain only hashed request identities, never request text.
 -- Commit before accepting a deferred runner mutation; remove only after publication succeeds.
 CREATE TABLE IF NOT EXISTS orchestrator_campaign_attention_checkpoints (
@@ -2970,6 +2990,12 @@ function campaignAuthorityFromRows(
   }, requester, protocol, request, undefined, controllerProtocol);
 }
 
+/** The content-free identity under which a campaign publishes one pending request. A typed workflow
+ * decision is keyed by its occurrence; any other request by its occurrence, or its request id. */
+export function campaignRequestToken(type: "typed" | "generic", sessionId: string, requestKey: string): string {
+  return createHash("sha256").update(`${type}:${sessionId}:${requestKey}`).digest("hex");
+}
+
 function addCampaignRequestSummary(
   counts: NonNullable<SessionView["campaignRequests"]>,
   request: CampaignRequestSummaryRow,
@@ -2983,8 +3009,8 @@ function addCampaignRequestSummary(
   if (request.type === "typed") {
     if (request.authority !== "human" && request.authority !== "orchestrator") return;
     counts[request.authority]++;
-    if (request.authority === "human") counts.humanRequestTokens!.push(createHash("sha256")
-      .update(`typed:${request.session_id}:${request.occurrence_id}`).digest("hex"));
+    if (request.authority === "human") counts.humanRequestTokens!.push(
+      campaignRequestToken("typed", request.session_id, String(request.occurrence_id)));
     return;
   }
   const mode = parentControl === "questions" || parentControl === "questions_and_approvals" ? parentControl : "off";
@@ -2995,8 +3021,8 @@ function addCampaignRequestSummary(
       : evaluateCampaignAuthority({ id: "controller", driver: request.driver, parentControl: mode },
         { id: request.session_id, driver: request.driver }, runnerProtocol, pending).owner;
     counts[authority]++;
-    if (authority === "human") counts.humanRequestTokens!.push(createHash("sha256")
-      .update(`generic:${request.session_id}:${pending.occurrenceId ?? pending.requestId}`).digest("hex"));
+    if (authority === "human") counts.humanRequestTokens!.push(
+      campaignRequestToken("generic", request.session_id, pending.occurrenceId ?? pending.requestId));
   }
 }
 
@@ -3234,6 +3260,29 @@ export interface CampaignContinuationEventRecord {
   occurrenceId?: string;
   subjectStatus?: string;
   createdAt: number;
+}
+
+/** Who settled a campaign request: the campaign's own Orchestrator, an authenticated human, or
+ * another actor (a policy, the system, or an agent that is not the campaign Orchestrator). */
+export type CampaignRequestResolver = "orchestrator" | "human" | "agent" | "policy" | "system";
+
+/** Long enough to outlive any deferred attention batch, which settles within one runner
+ * registration; short enough that a busy campaign's rows stay few. */
+export const CAMPAIGN_REQUEST_RESOLUTION_RETENTION_MS = 7 * 24 * 60 * 60_000;
+
+export interface CampaignRequestResolutionRecord {
+  requestToken: string;
+  subjectSessionId: string;
+  occurrenceId: string;
+  /** The typed workflow decision category, or the generic request kind. */
+  category: string;
+  title?: string;
+  /** A typed workflow decision's resource key, such as the pull request it would merge. */
+  resourceKey?: string;
+  /** The governance outcome that settled it: allowed, denied, answered, dismissed, revoked... */
+  outcome: string;
+  resolvedBy: CampaignRequestResolver;
+  resolvedAt: number;
 }
 
 export interface CampaignContinuationRecord {
@@ -16779,6 +16828,65 @@ export class ControlPlaneDb {
     }));
   }
 
+  /** Record who resolved one campaign request (#3083). A later resolution of the same identity
+   * replaces an earlier one, and rows older than the retention window are pruned on the way in. */
+  recordCampaignRequestResolution(input: CampaignRequestResolutionRecord & { campaignSessionId: string }): void {
+    this.stmt(`DELETE FROM orchestrator_campaign_request_resolutions WHERE campaign_session_id=? AND resolved_at<?`)
+      .run(input.campaignSessionId, input.resolvedAt - CAMPAIGN_REQUEST_RESOLUTION_RETENTION_MS);
+    this.stmt(`INSERT INTO orchestrator_campaign_request_resolutions
+      (campaign_session_id,request_token,subject_session_id,occurrence_id,category,title,resource_key,outcome,resolved_by,resolved_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(campaign_session_id,request_token) DO UPDATE SET
+        subject_session_id=excluded.subject_session_id,occurrence_id=excluded.occurrence_id,
+        category=excluded.category,title=excluded.title,resource_key=excluded.resource_key,outcome=excluded.outcome,
+        resolved_by=excluded.resolved_by,resolved_at=excluded.resolved_at`)
+      .run(input.campaignSessionId, input.requestToken, input.subjectSessionId, input.occurrenceId,
+        input.category, input.title ?? null, input.resourceKey ?? null, input.outcome, input.resolvedBy, input.resolvedAt);
+  }
+
+  /** A resolution whose delivery failed left its request pending; forget the recorded resolver. */
+  forgetCampaignRequestResolution(campaignSessionId: string, requestToken: string): void {
+    this.stmt(`DELETE FROM orchestrator_campaign_request_resolutions WHERE campaign_session_id=? AND request_token=?`)
+      .run(campaignSessionId, requestToken);
+  }
+
+  campaignRequestResolution(campaignSessionId: string, requestToken: string): CampaignRequestResolutionRecord | null {
+    const row = this.stmt(`SELECT * FROM orchestrator_campaign_request_resolutions
+      WHERE campaign_session_id=? AND request_token=?`).get(campaignSessionId, requestToken) as {
+      request_token: string; subject_session_id: string; occurrence_id: string; category: string;
+      title: string | null; resource_key: string | null; outcome: string; resolved_by: string; resolved_at: number;
+    } | undefined;
+    return row ? {
+      requestToken: row.request_token,
+      subjectSessionId: row.subject_session_id,
+      occurrenceId: row.occurrence_id,
+      category: row.category,
+      ...(row.title ? { title: row.title } : {}),
+      ...(row.resource_key ? { resourceKey: row.resource_key } : {}),
+      outcome: row.outcome,
+      resolvedBy: row.resolved_by as CampaignRequestResolver,
+      resolvedAt: row.resolved_at,
+    } : null;
+  }
+
+  /** When the earliest undelivered event that must wake the Orchestrator promptly was recorded,
+   * across the whole pending queue rather than one bounded delivery slice (#3083). Prompt events are
+   * a child becoming ready or held, the last human blocker clearing, and a request removal not
+   * attributed to a non-human resolver that caused it: an unknown resolver may be a human. */
+  campaignContinuationPromptEventAt(campaignSessionId: string): number | null {
+    const row = this.stmt(
+      `SELECT MIN(event.created_at) AS at FROM orchestrator_campaign_events event
+       WHERE event.campaign_session_id=? AND event.seq>? AND (
+         event.kind IN ('child_ready','child_blocked','human_blockers_cleared') OR
+         (event.kind='request_resolved' AND NOT EXISTS (
+           SELECT 1 FROM orchestrator_campaign_request_resolutions resolution
+           WHERE resolution.campaign_session_id=event.campaign_session_id
+             AND resolution.request_token=event.occurrence_id
+             AND resolution.resolved_by!='human' AND resolution.resolved_at<=event.created_at)))`,
+    ).get(campaignSessionId, this.campaignContinuationCursor(campaignSessionId)) as { at: number | null };
+    return row.at ?? null;
+  }
+
   hasPendingCampaignContinuationEvents(campaignSessionId: string): boolean {
     return Boolean(this.stmt(
       "SELECT 1 FROM orchestrator_campaign_events WHERE campaign_session_id=? AND seq>? LIMIT 1",
@@ -16849,6 +16957,14 @@ export class ControlPlaneDb {
       hasPendingApproval: pendingRequests(parseJson<PendingApproval>(row.pending_approval))
         .some((request) => !request.async),
     } : null;
+  }
+
+  /** The status and pending requests of a session a continuation event names, without building
+   * its full view. */
+  campaignContinuationSubject(sessionId: string): { status: SessionStatus; pendingApproval: PendingApproval | null } | null {
+    const row = this.stmt("SELECT status,pending_approval FROM sessions WHERE id=?").get(sessionId) as
+      { status: SessionStatus; pending_approval: string | null } | undefined;
+    return row ? { status: row.status, pendingApproval: parseJson<PendingApproval>(row.pending_approval) } : null;
   }
 
   activeCampaignContinuation(campaignSessionId: string): CampaignContinuationRecord | null {
@@ -17294,10 +17410,10 @@ export class ControlPlaneDb {
     const pendingOrchestrator = pending.filter((decision) => decision.authority === "orchestrator");
     let pendingGenericHuman = 0;
     let pendingGenericOrchestrator = 0;
-    const humanRequestKeys = pendingHuman.map((decision) =>
-      `typed:${decision.session_id}:${decision.occurrence_id}`);
-    const orchestratorRequestKeys = pendingOrchestrator.map((decision) =>
-      `typed:${decision.session_id}:${decision.occurrence_id}`);
+    const humanRequestTokens = pendingHuman.map((decision) =>
+      campaignRequestToken("typed", decision.session_id, decision.occurrence_id));
+    const orchestratorRequestTokens = pendingOrchestrator.map((decision) =>
+      campaignRequestToken("typed", decision.session_id, decision.occurrence_id));
     let waitingHuman = 0;
     let active = 0;
     let blocked = 0;
@@ -17312,10 +17428,10 @@ export class ControlPlaneDb {
         this.getRunner(campaign.runner_id)?.protocolVersion, this.campaignPolicyRequest(campaign.id, policy.control, request));
         if (evaluation.owner === "orchestrator") {
           pendingGenericOrchestrator += 1;
-          orchestratorRequestKeys.push(`generic:${campaign.id}:${request.occurrenceId ?? request.requestId}`);
+          orchestratorRequestTokens.push(campaignRequestToken("generic", campaign.id, request.occurrenceId ?? request.requestId));
         } else {
           pendingGenericHuman += 1;
-          humanRequestKeys.push(`generic:${campaign.id}:${request.occurrenceId ?? request.requestId}`);
+          humanRequestTokens.push(campaignRequestToken("generic", campaign.id, request.occurrenceId ?? request.requestId));
         }
       }
     }
@@ -17327,10 +17443,10 @@ export class ControlPlaneDb {
       for (const request of generic) {
         if (campaignAuthorityFromRows(campaign, { id: child.id, driver: child.driver, runnerId: child.runner_id, workspaceId: child.workspace_id, repositoryRoot: policy.control?.mode === "full_control" ? this.sessionRepositoryRoot(child.id) : undefined }, this.getRunner(child.runner_id)?.protocolVersion, this.campaignPolicyRequest(child.id, policy.control, request), policy.control?.mode === "full_control" ? this.getRunner(campaign.runner_id)?.protocolVersion : undefined).owner === "orchestrator") {
           pendingGenericOrchestrator += 1;
-          orchestratorRequestKeys.push(`generic:${child.id}:${request.occurrenceId ?? request.requestId}`);
+          orchestratorRequestTokens.push(campaignRequestToken("generic", child.id, request.occurrenceId ?? request.requestId));
         } else {
           pendingGenericHuman += 1;
-          humanRequestKeys.push(`generic:${child.id}:${request.occurrenceId ?? request.requestId}`);
+          humanRequestTokens.push(campaignRequestToken("generic", child.id, request.occurrenceId ?? request.requestId));
           childHasHumanRequest = true;
         }
       }
@@ -17431,10 +17547,8 @@ export class ControlPlaneDb {
       ...(resolvedCampaignId === campaignSessionId ? { pendingRequests: {
         human: pendingHuman.length + pendingGenericHuman,
         orchestrator: pendingOrchestrator.length + pendingGenericOrchestrator,
-        humanRequestTokens: humanRequestKeys.map((key) =>
-          createHash("sha256").update(key).digest("hex")).sort(),
-        orchestratorRequestTokens: orchestratorRequestKeys.map((key) =>
-          createHash("sha256").update(key).digest("hex")).sort(),
+        humanRequestTokens: humanRequestTokens.sort(),
+        orchestratorRequestTokens: orchestratorRequestTokens.sort(),
       } } : {}),
       followUps: {
         unique: Number(followUps.unique_count ?? 0),

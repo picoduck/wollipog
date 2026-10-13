@@ -43,6 +43,51 @@ ambiguous-result state. It does not answer a question, grant an approval or repl
 provider turn. Recovery runs on runner registration/runtime reconciliation; a disconnected runner
 cannot execute a continuation.
 
+## Waking the Orchestrator
+
+Each continuation is a full-context model turn, so events wake the root Orchestrator only when it
+has something to learn or do (#3083):
+
+- **Its own resolutions wake nobody.** Every request resolution records who settled it, keyed by
+  the same hashed identity the projection publishes, in
+  `orchestrator_campaign_request_resolutions`. When the campaign Orchestrator settled a request
+  itself, through `resolve_descendant_workflow_decision` or another descendant resolution, its
+  removal records no `request_resolved` event. Any other removal of an Orchestrator-owned request
+  still does. A human settling a human-owned gate records one too, besides `human_blockers_cleared`,
+  which fires only once the last human gate goes.
+- **Bursts share one turn.** These events are delivered after a one-second fan-in:
+  - `child_ready`, `child_blocked` and `human_blockers_cleared`;
+  - a `request_resolved` whose removal was caused by a human, or by no recorded resolver at all
+    (an unknown resolver may have been a human).
+
+  Any other event waits 30 seconds from the oldest undelivered event. Urgency is judged across
+  the whole pending queue, not just one 64-event delivery slice. A prompt event carries everything
+  pending with it, so the window never delays a human gate. The control plane checks every five
+  seconds.
+- **The payload says whether to act.** Each event names:
+  - its request's category and title;
+  - the child's current status;
+  - for a settled request, its outcome and the resolver that caused the removal.
+
+  The prompt also carries compact campaign counts and an `Action needed` line.
+  - **Titles** add nothing the Orchestrator cannot already read: it may read every descendant's
+    event history. They appear only where it can act on the request, which keeps the summary
+    aligned with `list_descendant_requests`: while the request is still pending and
+    Orchestrator-owned, or when an Orchestrator-owned request was settled. They are written by
+    child sessions, so they are flattened to one line, stripped of brackets, and labeled as data.
+  - **`Action needed: no`** requires nothing pending for the Orchestrator, no held child, no report
+    to verify, no required cleanup, no human or unattributed resolution, and no undelivered events
+    beyond the bounded 64-event slice. It lets the turn end without the `get_campaign` and
+    `list_descendant_requests` sweep.
+  - **Cost.** The delivery deadline comes from one query over the queue. Event details are built
+    only when a continuation is actually staged, and session views are read once per pass.
+
+  The prompt is control-plane text that the runner forwards verbatim, so no protocol change is
+  involved.
+
+Resolution rows are kept for seven days, so a deferred batch that replays a removal still finds
+its resolver. A missing row only costs an extra wake-up.
+
 ## Notification Boundary
 
 Own-session status/approval/delivery progress and reported child occurrences are separate from the
