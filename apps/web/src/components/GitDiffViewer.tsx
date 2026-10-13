@@ -238,6 +238,39 @@ export function useInitiallyCollapsedDiffPaths(files: readonly GitDiffFile[], id
   return next.collapsed;
 }
 
+/**
+ * Per-path intent overrides the evolving defaults; only Expand All gives future paths global
+ * expansion intent. Choices can outlive a pane change, while automatic defaults have their own
+ * identity. Review resets choices on a session change; the standalone viewer owns them for its mount.
+ */
+export function useDiffFileExpansion(files: readonly GitDiffFile[], identity: string, choiceIdentity: string) {
+  const initialCollapsed = useInitiallyCollapsedDiffPaths(files, identity);
+  const [choices, setChoices] = useState(() => ({
+    identity: choiceIdentity, expandAll: false, paths: new Map<string, boolean>(),
+  }));
+  const current = choices.identity === choiceIdentity ? choices : {
+    identity: choiceIdentity, expandAll: false, paths: new Map<string, boolean>(),
+  };
+  if (current !== choices) setChoices(current);
+  const collapsedPaths = useMemo(() => {
+    const paths = new Set(current.expandAll ? [] : initialCollapsed);
+    for (const [path, expanded] of current.paths) {
+      if (expanded) paths.delete(path); else paths.add(path);
+    }
+    return paths;
+  }, [initialCollapsed, current]);
+  const setFileExpanded = (path: string, expanded: boolean) => setChoices((prior) => ({
+    ...prior,
+    paths: new Map(prior.paths).set(path, expanded),
+  }));
+  const setAllFilesExpanded = (expanded: boolean) => setChoices({
+    identity: choiceIdentity,
+    expandAll: expanded,
+    paths: expanded ? new Map() : new Map(files.map((file) => [file.path, false])),
+  });
+  return { collapsedPaths, setFileExpanded, setAllFilesExpanded };
+}
+
 /** Added and removed line counts for one file's diffstat. */
 function fileStat(file: GitDiffFile): { added: number; removed: number } {
   let added = 0;
@@ -263,6 +296,7 @@ export function GitDiffViewer({
   wrap = false,
   collapsedPaths,
   onCollapsedPathsChange,
+  onFileExpandedChange,
   fileNotice = null,
   focus,
   focusSettled = true,
@@ -287,6 +321,8 @@ export function GitDiffViewer({
    */
   collapsedPaths?: ReadonlySet<string>;
   onCollapsedPathsChange?: (next: ReadonlySet<string>) => void;
+  /** A host tracking intent receives only the path the person chose, not a snapshot of defaults. */
+  onFileExpandedChange?: (path: string, expanded: boolean) => void;
   fileNotice?: DiffFileNotice | null;
   focus?: DiffFileFocus | null;
   /** This diff was read after the focus request, so a file missing from it is really absent. */
@@ -307,19 +343,19 @@ export function GitDiffViewer({
   useEffect(() => {
     if (focus && !focusedPath && focusSettled) onFocusHandled?.();
   }, [focus, focusedPath, focusSettled, onFocusHandled]);
-  const initialCollapsed = useInitiallyCollapsedDiffPaths(diff.files, `${diff.scope}:${review?.lineage ?? ""}`);
-  const [ownCollapsed, setOwnCollapsed] = useState<ReadonlySet<string> | null>(null);
-  const collapsed = collapsedPaths ?? ownCollapsed ?? initialCollapsed;
+  const ownExpansion = useDiffFileExpansion(diff.files, `${diff.scope}:${review?.lineage ?? ""}`, "");
+  const collapsed = collapsedPaths ?? ownExpansion.collapsedPaths;
   const collapsedRef = useRef(collapsed);
   collapsedRef.current = collapsed;
-  const setCollapsed = onCollapsedPathsChange ?? setOwnCollapsed;
   const setFileExpanded = (path: string, expanded: boolean) => {
     const prior = collapsedRef.current;
     if (prior.has(path) !== expanded) return;
     const next = new Set(prior);
     if (expanded) next.delete(path); else next.add(path);
     collapsedRef.current = next;
-    setCollapsed(next);
+    if (onFileExpandedChange) onFileExpandedChange(path, expanded);
+    else if (onCollapsedPathsChange) onCollapsedPathsChange(next);
+    else ownExpansion.setFileExpanded(path, expanded);
   };
 
   const lineage = review?.lineage ?? "";

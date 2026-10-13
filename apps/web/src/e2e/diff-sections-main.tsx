@@ -41,6 +41,8 @@ declare global {
       /** Files the panel attached to the prompt, and files it opened in Files. */
       attached(): CreateWorkspaceReferenceRequest[];
       opened(): string[];
+      /** Install a larger synthetic diff; the real Refresh Review action reads it. */
+      setFileCount(count: number): void;
     };
   }
 }
@@ -50,19 +52,20 @@ if (params.get("theme") === "light") document.documentElement.dataset.theme = "l
 const panelWidth = Number(params.get("width") ?? 400);
 const stale = params.get("stale") === "1";
 const NOW = Date.now();
+let syntheticFileCount = params.has("files") ? Number(params.get("files")) : null;
 
 const status: GitStatusInfo = {
   branch: "agent/speed-up-checkout-totals",
-  files: params.get("files") === "200"
-    ? Array.from({ length: 200 }, (_, index) => ({ status: "M", path: `src/file-${index}.ts` }))
+  files: syntheticFileCount !== null
+    ? Array.from({ length: syntheticFileCount }, (_, index) => ({ status: "M", path: `src/file-${index}.ts` }))
     : DIFF_SECTIONS_STATUS_FILES,
   hasChanges: true,
   ahead: 1,
   remoteUrl: "https://github.com/acme/shop.git",
   baseRef: "origin/main",
-  stagedCount: params.get("files") === "200" ? 0 : 1,
-  addedLines: params.get("files") === "200" ? 400 : 14,
-  deletedLines: params.get("files") === "200" ? 200 : 5,
+  stagedCount: syntheticFileCount !== null ? 0 : 1,
+  addedLines: syntheticFileCount !== null ? syntheticFileCount * 2 : 14,
+  deletedLines: syntheticFileCount !== null ? syntheticFileCount : 5,
 };
 
 const session: SessionView = {
@@ -89,10 +92,11 @@ let rewritten = false;
 /** The fixture diff, with line 21 rewritten once a `rewrite=1` stage has run. */
 function currentDiff() {
   const diff = diffSectionsDiff();
-  if (params.get("files") === "200") {
-    const files = Array.from({ length: 200 }, (_, index) => ({ ...diff.files[1]!, path: `src/file-${index}.ts` }));
-    const stats = { filesChanged: 200, insertions: 400, deletions: 200 };
-    return { ...diff, files, stats, unstagedFiles: files, unstagedStats: stats, stagedFiles: [], stagedStats: { filesChanged: 0, insertions: 0, deletions: 0 } };
+  if (syntheticFileCount !== null) {
+    const files = Array.from({ length: syntheticFileCount }, (_, index) => ({ ...diff.files[1]!, path: `src/file-${index}.ts` }));
+    const stats = { filesChanged: files.length, insertions: files.length * 2, deletions: files.length };
+    return { ...diff, diffHash: String(files.length).padStart(64, "0"), files, stats,
+      unstagedFiles: files, unstagedStats: stats, stagedFiles: [], stagedStats: { filesChanged: 0, insertions: 0, deletions: 0 } };
   }
   if (!rewritten) return diff;
   const file = diff.files[0]!;
@@ -230,6 +234,12 @@ window.__DIFF_SECTIONS_E2E__ = {
   calls: () => [...calls],
   attached: () => [...attached],
   opened: () => [...opened],
+  setFileCount: (count) => {
+    syntheticFileCount = count;
+    status.files = Array.from({ length: count }, (_, index) => ({ status: "M", path: `src/file-${index}.ts` }));
+    status.addedLines = count * 2;
+    status.deletedLines = count;
+  },
 };
 
 createRoot(document.getElementById("root")!).render(
