@@ -608,9 +608,9 @@ function SessionCard({
           ? <CardFamilyChip family={threadChildren} besideKey={[status.badge?.ariaLabel ?? "", ...status.others].join("\n")} />
           : strip && <ActivityStrip activity={activity} now={activityNow} compact />}
       </div>
-      {request
-        ? <CardRequest session={session} request={request} runnerOnline={runnerOnline} onOpen={onOpen} />
-        : <div className="card-preview">{plainTextPreview(session.preview)}</div>}
+      {/* No transcript excerpt (#3175): a card ends on its status line unless a request needs a
+          decision here. */}
+      {request && <CardRequest session={session} request={request} runnerOnline={runnerOnline} onOpen={onOpen} />}
     </article>
   );
 }

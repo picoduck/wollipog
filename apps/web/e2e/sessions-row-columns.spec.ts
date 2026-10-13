@@ -4,9 +4,10 @@ import { expectGeometry } from "./geometry-margins.js";
 
 /**
  * #2218 (docs/design-system.md §6.3 "Rows use the width"): in the stacked layout, a list 880px or
- * wider gives each two-line row a snippet after its title and fixed trailing columns on its status
- * line (status, activity, flags, time), with the row actions in a column of their own. Narrower
- * lists keep #2209's two lines. Rows stay exactly `--row-h-2` either way.
+ * wider gives each two-line row fixed trailing columns on its status line (status, activity, flags,
+ * time), with the row actions in a column of their own. The title line carries no transcript
+ * excerpt (#3175), so the title takes the whole line. Narrower lists keep #2209's two lines. Rows
+ * stay exactly `--row-h-2` either way.
  *
  * The browser is in Chicago and the snoozed row's reminder was saved from Tokyo, so its time cell
  * proves the row reads the same zone as the Snooze dialog.
@@ -32,7 +33,8 @@ type RowGeometry = {
   time: { left: number; right: number };
   titleBox: { width: number; clipped: boolean };
   copyWidth: number;
-  snippet: { text: string; visible: boolean; left: number; right: number } | null;
+  copyText: string;
+  hasSnippet: boolean;
   trailDisplay: string;
   rowRight: number;
   paddingRight: number;
@@ -50,8 +52,6 @@ async function visibleRows(page: Page): Promise<RowGeometry[]> {
         const strip = box(row.querySelector(".inbox-row-activity"));
         const time = box(row.querySelector(".inbox-row-time"))!;
         const title = row.querySelector<HTMLElement>(".inbox-row-title")!;
-        const snippet = row.querySelector<HTMLElement>(".inbox-row-snippet");
-        const snippetBox = box(snippet);
         const style = getComputedStyle(row);
         return {
           title: title.textContent ?? "",
@@ -61,11 +61,8 @@ async function visibleRows(page: Page): Promise<RowGeometry[]> {
           time: pick(time),
           titleBox: { width: title.getBoundingClientRect().width, clipped: title.scrollWidth > title.clientWidth + 1 },
           copyWidth: row.querySelector(".inbox-row-copy")!.getBoundingClientRect().width,
-          snippet: snippet && snippetBox ? {
-            text: snippet.textContent ?? "",
-            visible: getComputedStyle(snippet).display !== "none" && snippetBox.width > 0,
-            ...pick(snippetBox),
-          } : null,
+          copyText: row.querySelector(".inbox-row-copy")!.textContent ?? "",
+          hasSnippet: row.querySelector(".inbox-row-snippet") !== null,
           trailDisplay: getComputedStyle(row.querySelector(".inbox-row-trail")!).display,
           rowRight: row.getBoundingClientRect().right,
           paddingRight: Number.parseFloat(style.paddingRight),
@@ -99,26 +96,22 @@ test("at 1440×900 six rows of different statuses line up their badges' left edg
   for (const row of rows) expect(row.height, row.title).toBe(token);
 });
 
-test("a blocked row's snippet is its request; an idle row's is its last message as plain text; the title keeps at most 60%", async ({ page }) => {
+test("no row repeats its request or last message after the title, and a long title takes the whole line (#3175)", async ({ page }) => {
   await open(page, 1440);
   const rows = await visibleRows(page);
   const byTitle = (prefix: string) => rows.find((row) => row.title.startsWith(prefix))!;
 
-  expect(byTitle("Migrate the Billing Tables").snippet).toMatchObject({ text: "Run the Migration Script", visible: true });
-  expect(byTitle("Restructure the Sessions Rows").snippet)
-    .toMatchObject({ text: "Which Database Should the Migration Target?", visible: true });
-  const idle = byTitle("Draft the Quarterly Report").snippet!;
-  expect(idle).toMatchObject({ text: "Done All 42 tests pass. I updated the changelog and README.md.", visible: true });
-  expect(idle.text).not.toMatch(/[*#`[\]()]/);
-
-  for (const row of rows.filter((candidate) => candidate.snippet?.visible)) {
-    expectGeometry(row.titleBox.width - 0.6 * row.copyWidth, `"${row.title}" keeps at most 60% of its title line`)
-      .toBeLessThanOrEqual(0.5);
+  for (const row of rows) {
+    expect(row.hasSnippet, row.title).toBe(false);
+    expect(row.copyText, `${row.title}: the title line holds only the title`).toBe(row.title);
   }
-  // The long title is the one the cap stops, at the cap, and it ends in an ellipsis.
+  for (const text of ["Run the Migration Script", "Which Database Should the Migration Target?", "All 42 tests pass"]) {
+    expect(rows.some((row) => row.copyText.includes(text)), text).toBe(false);
+  }
+  // The long title the old 60% cap clipped here now reads whole, inside its line.
   const long = byTitle(LONG_TITLE);
-  expect(long.titleBox.clipped).toBe(true);
-  expect(Math.abs(long.titleBox.width - 0.6 * long.copyWidth)).toBeLessThan(1);
+  expect(long.titleBox.clipped, "the long title is no longer clipped at 1440px").toBe(false);
+  expectGeometry(long.titleBox.width - long.copyWidth, "the title stays inside its line").toBeLessThanOrEqual(0.5);
 });
 
 test("the activity column sits directly after the status column: a Running row's strip is in it, an idle row's is empty", async ({ page }) => {
@@ -175,7 +168,7 @@ test("hovering a row shows its actions in their own column and leaves the status
   expectGeometry(geometry.actionsRight - geometry.rowRight, "the actions stay inside the row").toBeLessThanOrEqual(0);
 });
 
-test("at 940px the list is under 880px, and rows keep the two-line anatomy with no snippet or columns", async ({ page }) => {
+test("at 940px the list is under 880px, and rows keep the two-line anatomy with no columns", async ({ page }) => {
   await open(page, 940);
   const listWidth = await page.locator(".inbox-list-pane").evaluate((pane) => pane.getBoundingClientRect().width);
   // 940px is the issue's own example of a list just under the threshold (876px beside the 64px rail),
@@ -187,14 +180,13 @@ test("at 940px the list is under 880px, and rows keep the two-line anatomy with 
   for (const row of rows) {
     expect(row.height, row.title).toBe(token);
     expect(row.trailDisplay, row.title).toBe("flex");
-    expect(row.snippet?.visible ?? false, row.title).toBe(false);
+    expect(row.hasSnippet, row.title).toBe(false);
   }
-  await expect(page.locator(".inbox-row-snippet:visible")).toHaveCount(0);
 });
 
 // 944px is the narrowest window whose list is 880px (beside the 64px rail); 1100px is the issue's.
 for (const width of [944, 1100] as const) {
-  test(`at ${width}px the columns fit beside the sender, and a long title still gets its 60% share`, async ({ page }) => {
+  test(`at ${width}px the columns fit beside the sender, and a long title takes its whole line`, async ({ page }) => {
     await open(page, width);
     const listWidth = await page.locator(".inbox-list-pane").evaluate((pane) => pane.getBoundingClientRect().width);
     expect(listWidth, "the list reaches the wide-row threshold").toBeGreaterThanOrEqual(880);
@@ -206,7 +198,6 @@ for (const width of [944, 1100] as const) {
     }
     expect(same(rows.map((row) => row.time.right)), "every time ends at one x").toBe(1);
     expect(same(rows.filter((row) => row.badge).map((row) => row.badge!.left)), "every badge starts at one x").toBe(1);
-    expect(rows.some((row) => row.snippet?.visible)).toBe(true);
 
     const fit = await page.locator(".inbox-row").evaluateAll((nodes) => nodes.map((row) => {
       const sender = row.querySelector(".inbox-row-sender")!.getBoundingClientRect();
@@ -220,7 +211,7 @@ for (const width of [944, 1100] as const) {
     }
     const long = rows.find((row) => row.title.startsWith(LONG_TITLE))!;
     expect(long.titleBox.clipped).toBe(true);
-    expect(Math.abs(long.titleBox.width - 0.6 * long.copyWidth), "the long title keeps its whole 60% share").toBeLessThan(1);
+    expect(Math.abs(long.titleBox.width - long.copyWidth), "the long title takes its whole line").toBeLessThan(1);
   });
 }
 

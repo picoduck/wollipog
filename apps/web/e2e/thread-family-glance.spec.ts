@@ -4,6 +4,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
  * Thread families at a glance (#2215, docs/design-system.md §5.2, §5.5, §11.1, §18): the chevron is
  * the §5.5 icon in a small icon button, the family chip follows its parent's title directly and keeps
  * its dots and working count below a 600px list, and Stalled is said once, by the row's one badge, with no rail.
+ * A list 880px or wider sets the chip on the title line under the parent's status badge (#3175).
  *
  * `session-rows-e2e.html?family=1` leads the list with a running parent and a waiting, a stalled, a
  * running and a completed child, threaded by `threadInboxRows()` as the Sessions page threads them.
@@ -20,23 +21,26 @@ const chipGap = (row: Locator) => row.evaluate((shell) => {
   const title = shell.querySelector(".inbox-row-title")!.getBoundingClientRect();
   const family = shell.querySelector(".inbox-thread-family")!.getBoundingClientRect();
   const line = shell.querySelector(".inbox-row-copy")!.getBoundingClientRect();
-  return { gap: family.left - title.right, chipRight: family.right, lineRight: line.right, top: family.top - title.top };
+  const badge = shell.querySelector(".row-status")!.getBoundingClientRect();
+  return { gap: family.left - title.right, chipRight: family.right, lineRight: line.right, top: family.top - title.top,
+    chipLeft: family.left, chipTop: family.top, badgeLeft: badge.left, badgeBottom: badge.bottom };
 });
 
 for (const length of ["short", "long"] as const) {
-  test(`at 1440×900 the family chip starts within 16px of a ${length} parent title`, async ({ page }) => {
+  test(`at 1440×900 the family chip of a ${length} parent title starts directly under the status badge`, async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(`${FAMILY}${length === "long" ? "&familyTitle=long" : ""}`);
     await expect(chip(page)).toBeVisible();
     await expect(chip(page).locator(".inbox-thread-family-text")).toHaveText("4 Children · Needs Your Input");
     await expect(chip(page).locator(".inbox-thread-working")).toHaveText("1 Working");
-    const { gap, chipRight, lineRight } = await chipGap(parent(page));
-    expect(gap, "the chip follows the title, never before it").toBeGreaterThanOrEqual(0);
-    expect(gap, "the chip sits beside the title it describes").toBeLessThanOrEqual(16);
+    const { gap, chipLeft, chipRight, chipTop, lineRight, badgeLeft, badgeBottom } = await chipGap(parent(page));
+    // A wide list sets the chip in the status column on the title line (#3175).
+    expect(Math.abs(chipLeft - badgeLeft), "the chip starts where the status badge starts").toBeLessThan(0.5);
+    expect(chipTop, "the chip is on the line under the badge").toBeGreaterThanOrEqual(badgeBottom - 0.5);
+    expect(gap, "the title ends before the chip").toBeGreaterThanOrEqual(0);
     expect(chipRight, "the chip stays inside its line").toBeLessThanOrEqual(lineRight + 0.5);
-    // A wide list adds the snippet after them (#2218): title, chip, then the snippet, in that order.
-    const snippetLeft = await parent(page).locator(".inbox-row-snippet").evaluate((node) => node.getBoundingClientRect().left);
-    expect(snippetLeft, "the snippet follows the chip").toBeGreaterThanOrEqual(chipRight);
+    // No transcript excerpt follows the title or the chip (#3175).
+    await expect(parent(page).locator(".inbox-row-snippet")).toHaveCount(0);
     if (length === "long") {
       // The long title gives way, not the chip: it is clipped with an ellipsis and the chip stays whole.
       const clipped = await parent(page).locator(".inbox-row-title").evaluate((node) => node.scrollWidth > node.clientWidth);

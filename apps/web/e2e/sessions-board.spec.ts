@@ -616,11 +616,7 @@ function cardGeometry(page: Page) {
     return {
       id: card.dataset.sessionId!,
       titleLines: lines(".card-title"),
-      previewLines: lines(".card-preview"),
-      previewClipped: (() => {
-        const preview = card.querySelector<HTMLElement>(".card-preview");
-        return preview ? getComputedStyle(preview).textOverflow === "ellipsis" && getComputedStyle(preview).whiteSpace === "nowrap" : null;
-      })(),
+      hasPreview: card.querySelector(".card-preview") !== null,
       wrappedButtons: [...card.querySelectorAll<HTMLElement>(".card-request .btn")]
         .filter((button) => button.scrollWidth > button.clientWidth + 0.5 || button.getBoundingClientRect().height > parseFloat(getComputedStyle(button).height) + 0.5)
         .map((button) => button.textContent),
@@ -678,15 +674,12 @@ async function expectWholeStatusLines(page: Page) {
 test.describe("Board cards at 1440×900 (#2222)", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
-  test("every card has one anatomy: a two-line title, a one-line preview, and no lift on hover", async ({ page }) => {
+  test("every card has one anatomy: a two-line title, no transcript preview, and no lift on hover", async ({ page }) => {
     await openCards(page);
     const before = await cardGeometry(page);
     for (const card of before) {
       expect(card.titleLines, `${card.id}'s title`).toBeLessThanOrEqual(2);
-      if (card.previewLines !== null) {
-        expect(card.previewLines, `${card.id}'s preview`).toBe(1);
-        expect(card.previewClipped, `${card.id}'s preview ends in an ellipsis`).toBe(true);
-      }
+      expect(card.hasPreview, `${card.id} shows no transcript preview (#3175)`).toBe(false);
       expect(card.transform).toBe("none");
       expect(card.badgeClipped, `${card.id}'s badge reads whole beside the strip and the family chip`).toBe(false);
     }
