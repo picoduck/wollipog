@@ -41,7 +41,7 @@ function haveGit(): boolean {
   }
 }
 
-function fakeProvider(options: { reportsDelivery?: boolean } = {}) {
+function fakeProvider(options: { reportsDelivery?: boolean; deferFirstPrompt?: Promise<void> } = {}) {
   const reportsDelivery = options.reportsDelivery ?? true;
   const prompts: Array<{ provider: number; text: string }> = [];
   const callbacks: DriverCallbacks[] = [];
@@ -59,6 +59,13 @@ function fakeProvider(options: { reportsDelivery?: boolean } = {}) {
       close: async () => {},
       prompt: async (text: string) => {
         prompts.push({ provider, text });
+        if (provider === 0 && prompts.length === 1 && options.deferFirstPrompt) {
+          // A turn whose result settles late, as a Codex turn awaiting image cleanup does.
+          await options.deferFirstPrompt;
+          turnError = PROVIDER_ERROR;
+          undelivered = true;
+          return "refusal" as const;
+        }
         turnError = next === "accept" ? null : PROVIDER_ERROR;
         undelivered = next === "reject";
         if (next !== "accept") return "refusal" as const;
@@ -464,6 +471,32 @@ test("an idle provider under a rejection hold can still be parked for capacity (
     h.continuation("third");
     await settle();
     assert.equal(canPark(), false, "a held turn in the FIFO keeps the process, as any queued work does");
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("a rejection that settles after Restart replaced its provider does not count toward the new hold (#3100)", { skip: !haveGit() }, async () => {
+  let releaseRetired!: () => void;
+  const retired = new Promise<void>((resolve) => { releaseRetired = resolve; });
+  const provider = fakeProvider({ deferFirstPrompt: retired });
+  const h = setup("retired", provider, "codex-app-server");
+  try {
+    await h.manager.start(h.spec);
+    h.continuation("first");
+    await waitFor(() => provider.prompts.length === 1, "the first continuation did not start");
+
+    assert.equal(await h.manager.start(h.spec), true);
+    h.continuation("second");
+    await waitFor(() => h.settled("second"), "the replacement's first continuation did not settle");
+    assert.equal(provider.prompts.at(-1)?.provider, 1);
+
+    // The retired provider's turn now settles with the same rejection.
+    releaseRetired();
+    await settle();
+    h.continuation("third");
+    await waitFor(() => provider.prompts.length === 3, "a retired rejection reinstated the hold after Restart");
+    assert.deepEqual(provider.prompts.at(-1), { provider: 1, text: "continue third" });
   } finally {
     h.cleanup();
   }

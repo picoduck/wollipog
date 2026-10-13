@@ -13266,8 +13266,9 @@ export class SessionManager {
       }
       entry.currentBackgroundJobIds = undefined;
     } catch (err) {
-      // A thrown prompt proves nothing about delivery, so it never extends a rejection streak.
-      this.lastProviderRejections.delete(sessionId);
+      // A thrown prompt proves nothing about delivery, so it never extends a rejection streak. A
+      // retired generation's late settle must not touch the replacement's streak.
+      if (this.active.get(sessionId) === entry) this.lastProviderRejections.delete(sessionId);
       this.settleModelStoppedJobs(sessionId, queued.id, false);
       if (backgroundJobIds?.length && !entry.backgroundPromptAccepted) {
         this.resetBackgroundContinuationSubmission(sessionId, backgroundJobIds);
@@ -15717,6 +15718,9 @@ export class SessionManager {
     stop: StopReason,
     inputMayHaveBeenDelivered: boolean,
   ): string | undefined {
+    // The streak and hold are session-scoped, so a turn that settles after Restart replaced its
+    // provider must not count toward, or reinstate, the replacement's hold.
+    if (this.active.get(sessionId) !== entry) return undefined;
     const rejection = stop === "refusal" && !inputMayHaveBeenDelivered && !entry.providerCapacityFailure &&
       !entry.authenticationBlocked && entry.client.lastPromptUndelivered?.() === true
       ? entry.client.lastTurnError?.()?.trim() || undefined
