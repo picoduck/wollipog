@@ -60,8 +60,12 @@ test("at 1440×900 a large family's chip stays under the badge and its dots give
   expect(Math.abs(chipLeft - badgeLeft), "the chip starts where the status badge starts").toBeLessThan(0.5);
   expect(chipRight, "the chip stays inside its line").toBeLessThanOrEqual(lineRight + 0.5);
   const text = chip(page).locator(".inbox-thread-family-text");
-  await expect(text).toContainText("13 Working");
+  await expect(text).toHaveText("16 Children · Needs Your Input");
   expect(await text.evaluate((node) => node.scrollWidth <= node.clientWidth + 0.5), "the rollup is not clipped").toBe(true);
+  const working = chip(page).locator(".inbox-thread-working");
+  await expect(working).toHaveText("13 Working");
+  await expect(working).toBeVisible();
+  expect(await working.evaluate((node) => node.scrollWidth <= node.clientWidth + 0.5), "the working count is not clipped").toBe(true);
 });
 
 for (const shape of [
