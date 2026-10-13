@@ -1,6 +1,8 @@
 import {
   MAX_UI_POD_SUBSCRIPTIONS,
   MAX_UI_SESSION_SUBSCRIPTIONS,
+  MAX_UI_SUBSCRIPTION_UPDATES_PER_WINDOW,
+  UI_SUBSCRIPTION_RATE_WINDOW_MS,
   type PodView,
   type RunView,
   type SessionEvent,
@@ -100,7 +102,25 @@ export class UiSubscriptionSynchronizer {
     this.revision = 0;
   }
 
+  /** Whether `nextMessage` would send a replacement for this state, without spending a revision. */
+  pending(state: UiSubscriptionSource, enabled: boolean): boolean {
+    return enabled && this.desiredFor(state).key !== this.sentKey;
+  }
+
   nextMessage(state: UiSubscriptionSource, enabled: boolean): UiToControlPlane | null {
+    const desired = this.desiredFor(state);
+    if (!enabled || desired.key === this.sentKey) return null;
+    const revision = ++this.revision;
+    this.sentKey = desired.key;
+    return {
+      type: "session_subscriptions",
+      revision,
+      sessionIds: desired.sessionIds,
+      podIds: desired.podIds,
+    };
+  }
+
+  private desiredFor(state: UiSubscriptionSource): { sessionIds: string[]; podIds: string[]; key: string } {
     const inboxSessionId = state.view.name === "inbox" ? state.inbox?.selectedSessionId ?? null : null;
     if (state.view !== this.view || inboxSessionId !== this.inboxSessionId ||
         state.sessions !== this.sessions || state.runs !== this.runs || state.pods !== this.pods || !this.desired) {
@@ -115,15 +135,52 @@ export class UiSubscriptionSynchronizer {
         key: `${subscriptions.sessionIds.join("\u0000")}\u0001${subscriptions.podIds.join("\u0000")}`,
       };
     }
-    if (!enabled || this.desired.key === this.sentKey) return null;
-    const revision = ++this.revision;
-    this.sentKey = this.desired.key;
-    return {
-      type: "session_subscriptions",
-      revision,
-      sessionIds: this.desired.sessionIds,
-      podIds: this.desired.podIds,
-    };
+    return this.desired;
+  }
+}
+
+/** Arrival jitter can bunch replacements the client spaced apart, so the bucket is sized for a
+ * window this much longer than the server's. */
+export const UI_SUBSCRIPTION_PACE_MARGIN_MS = 1_000;
+/** A small burst keeps most of the budget for steady refill, so a held-down key waits under half a
+ * second per replacement instead of stalling for a whole window after one large burst. */
+export const UI_SUBSCRIPTION_PACE_BURST = MAX_UI_SUBSCRIPTION_UPDATES_PER_WINDOW / 4;
+
+/** Token bucket that keeps subscription replacements under the server's per-window admission
+ * (#3122). Exceeding it closes the socket with 1013, and because the server's window survives
+ * reconnects, the dashboard used to flap offline until the window expired. Any interval of length T
+ * admits at most burst + refill × T, so the burst plus the rest of the budget refilled over the
+ * padded window can never exceed the server's count. The caller coalesces: a deferred send reads the
+ * latest selection when it fires, so pacing never drops or reorders the final subscription. */
+export class UiSubscriptionPacer {
+  private tokens: number;
+  private updatedAt: number | null = null;
+
+  constructor(
+    private readonly burst = UI_SUBSCRIPTION_PACE_BURST,
+    private readonly refillPerMs = (MAX_UI_SUBSCRIPTION_UPDATES_PER_WINDOW - UI_SUBSCRIPTION_PACE_BURST) /
+      (UI_SUBSCRIPTION_RATE_WINDOW_MS + UI_SUBSCRIPTION_PACE_MARGIN_MS),
+  ) {
+    this.tokens = burst;
+  }
+
+  /** Milliseconds until one replacement may be sent; 0 when it may be sent now. */
+  delay(now: number): number {
+    this.refill(now);
+    return this.tokens >= 1 ? 0 : Math.ceil((1 - this.tokens) / this.refillPerMs);
+  }
+
+  take(now: number): void {
+    this.refill(now);
+    this.tokens -= 1;
+  }
+
+  private refill(now: number): void {
+    // A clock stepping backwards earns nothing, rather than a negative refill that would stall sends.
+    if (this.updatedAt !== null && now > this.updatedAt) {
+      this.tokens = Math.min(this.burst, this.tokens + (now - this.updatedAt) * this.refillPerMs);
+    }
+    this.updatedAt = now;
   }
 }
 

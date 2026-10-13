@@ -10788,6 +10788,11 @@ export type ControlPlaneToUi =
  * Leave headroom for future run sizes without admitting multi-thousand-query subscription frames. */
 export const MAX_UI_SESSION_SUBSCRIPTIONS = 256;
 export const MAX_UI_POD_SUBSCRIPTIONS = 1;
+/** Subscription replacements one admission key (a paired device, else the user) may send per
+ * window. The window survives reconnects, and the control plane closes a socket that exceeds it with
+ * 1013, so dashboards pace their replacements under it instead of discovering it by disconnect. */
+export const MAX_UI_SUBSCRIPTION_UPDATES_PER_WINDOW = 32;
+export const UI_SUBSCRIPTION_RATE_WINDOW_MS = 10_000;
 
 /** Browser dashboards replace their live high-volume session subscription whenever navigation
  * changes. Metadata upserts remain global within the caller's authorization scope; only event,

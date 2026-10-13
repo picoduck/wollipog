@@ -7,9 +7,15 @@ import {
   BACKGROUND_OBSERVATION_RETRY_MS,
   BackgroundDeliveryObservationTracker,
   StoreProvider,
+  useStore,
   useStoreSelector,
 } from "./store.js";
-import type { SessionView } from "@wollipog/protocol";
+import {
+  MAX_UI_SUBSCRIPTION_UPDATES_PER_WINDOW,
+  UI_SUBSCRIPTION_RATE_WINDOW_MS,
+  type SessionView,
+} from "@wollipog/protocol";
+import { UI_SUBSCRIPTION_PACE_BURST } from "./ui-subscriptions.js";
 import type { UiConnectionRuntime, UiSocket } from "./ui-transport.js";
 import { installDomTestCleanup } from "./dom-test-cleanup.js";
 import { withScopedClockOverrides } from "./components/test-clock-overrides.js";
@@ -323,6 +329,74 @@ test("a legacy full snapshot sends its targeted stream selection immediately", a
       type: "session_subscriptions", revision: 1, sessionIds: ["busy-1"], podIds: [],
     }]);
   } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+test("rapid switching is paced under the server budget and still ends on the final selection", async () => {
+  const timers = new Map<number, { run: () => void; delay: number }>();
+  let nextId = 1;
+  let now = 1_000_000;
+  const originalNow = Date.now;
+  Date.now = () => now;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const sockets: FakeSocket[] = [];
+  let navigate!: ReturnType<typeof useStore>["navigate"];
+  function Navigator() {
+    navigate = useStore().navigate;
+    return null;
+  }
+  try {
+    await withScopedClockOverrides(domWindow, {
+      setTimeout: (run: () => void, delay: number) => { const id = nextId++; timers.set(id, { run, delay }); return id; },
+      clearTimeout: (id: number) => { timers.delete(id); },
+    }, async () => {
+      await act(async () => {
+        root.render(<StoreProvider connection={runtime("paced-subscriptions", "paced-subscriptions:1", sockets)}
+          navigation={{ current: () => ({ name: "board" }), push() {}, listen: () => () => {} }}><Navigator /></StoreProvider>);
+      });
+      const socket = sockets[0]!;
+      Object.defineProperty(socket, "readyState", { value: 1 });
+      const selections = () => socket.sent.map((data) => JSON.parse(data))
+        .filter((msg) => msg.type === "session_subscriptions").map((msg) => msg.sessionIds);
+      const frame = JSON.parse(snapshot("s0", "Session 0"));
+      const ids = Array.from({ length: 2 * MAX_UI_SUBSCRIPTION_UPDATES_PER_WINDOW }, (_, index) => `s${index}`);
+      await act(async () => {
+        socket.onmessage?.({ data: JSON.stringify({ ...frame, capabilities: { sessionSubscriptions: true },
+          sessions: ids.map((id) => ({ ...frame.sessions[0], id, title: id })) }) });
+      });
+      assert.deepEqual(selections(), [[]], "the board's empty selection spends the first replacement");
+      const firstPacedTimer = nextId;
+      for (const id of ids) {
+        now += 10;
+        await act(async () => { navigate({ name: "session", id }); });
+      }
+      const sent = selections();
+      assert.equal(sent.length, UI_SUBSCRIPTION_PACE_BURST, "only the burst is sent while switching outpaces the budget");
+      assert.deepEqual(sent.at(-1), [`s${UI_SUBSCRIPTION_PACE_BURST - 2}`]);
+      const paced = [...timers].filter(([id]) => id >= firstPacedTimer);
+      assert.equal(paced.length, 1, "one trailing send is scheduled however many selections are skipped");
+      const [timerId, timer] = paced[0]!;
+      assert.ok(timer.delay > 0 && timer.delay < UI_SUBSCRIPTION_RATE_WINDOW_MS);
+      now += timer.delay;
+      timers.delete(timerId);
+      await act(async () => { timer.run(); });
+      assert.deepEqual(selections().at(-1), [ids.at(-1)], "the trailing send carries the final selection");
+      assert.equal(selections().length, UI_SUBSCRIPTION_PACE_BURST + 1, "skipped selections are never sent");
+
+      await act(async () => { socket.onclose?.({ code: 1013 }); });
+      const reconnect = timers.get(nextId - 1)!;
+      assert.ok(reconnect.delay >= UI_SUBSCRIPTION_RATE_WINDOW_MS,
+        "a rate-limited close waits out the server window instead of being refused again");
+      assert.ok(reconnect.delay <= 30_000, "the wait stays within the ordinary backoff ceiling");
+      await act(async () => { root.unmount(); });
+      assert.equal(timers.size, 0, "unmount cancels paced and retry timers");
+    });
+  } finally {
+    Date.now = originalNow;
     await act(async () => { root.unmount(); });
     container.remove();
   }

@@ -9,7 +9,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { defaultLocalDeviceTokenPath, loadOrCreateLocalDeviceToken } from "../../control-plane/src/local-device-credential.js";
 import { previewRetainers } from "./fixtures/heap-retainers.js";
-import { RETENTION_SESSION_COUNT, retentionPrompt, retentionSessionTitle, seedSessionRetention } from "./fixtures/session-retention-seed.js";
+import { RETENTION_SESSION_COUNT, retentionPrompt, retentionSessionId, retentionSessionTitle, seedSessionRetention } from "./fixtures/session-retention-seed.js";
 
 // Reproduce against any clean source tree, including historical 67165338e:
 // SESSION_RETENTION_REFERENCE_ROOT=/path/to/source SESSION_RETENTION_EVIDENCE_DIR=/private/path \
@@ -122,6 +122,28 @@ test("ten nine-session production cycles release detached previews and keep DOM/
   info.setTimeout(120_000 + cycles * 5_000);
   // All nine virtualized rows fit, on both the historical and current Sessions layouts.
   await page.setViewportSize({ width: 1280, height: 1600 });
+  // Observed through CDP, not page script, so the probe adds no listeners of its own. A socket
+  // closed mid-run is a reconnect: its offline and resync transients are what the counters caught
+  // in #3122 (-5 offline, +82 mid-resync), and they say nothing about a leak.
+  const ui = { opened: 0, closed: 0, requested: 0, applied: 0, appliedSessionIds: "" };
+  page.on("websocket", socket => {
+    if (new URL(socket.url()).pathname !== "/ui") return;
+    // Subscription revisions restart on every socket.
+    Object.assign(ui, { opened: ui.opened + 1, requested: 0, applied: 0, appliedSessionIds: "" });
+    socket.on("framesent", ({ payload }) => {
+      if (typeof payload !== "string" || !payload.includes('"session_subscriptions"')) return;
+      const message = JSON.parse(payload) as { type: string; revision: number };
+      if (message.type === "session_subscriptions") ui.requested = message.revision;
+    });
+    socket.on("framereceived", ({ payload }) => {
+      if (typeof payload !== "string" || !payload.includes('"session_subscriptions_applied"')) return;
+      const message = JSON.parse(payload) as { type: string; revision: number; sessionIds: string[] };
+      if (message.type !== "session_subscriptions_applied") return;
+      ui.applied = message.revision;
+      ui.appliedSessionIds = message.sessionIds.join(",");
+    });
+    socket.on("close", () => { ui.closed++; });
+  });
   await page.goto(`${base}/#pair=${token}`);
   await expect(page.locator(".session-detail.preview")).toBeVisible({ timeout: 30_000 });
   await page.getByRole("radio", { name: "List", exact: true }).click();
@@ -131,6 +153,11 @@ test("ten nine-session production cycles release detached previews and keep DOM/
   const navigateCycle = async () => {
     for (let index = 0; index < RETENTION_SESSION_COUNT; index++) await select(page, index);
     await select(page, 0);
+    // Deterministic settle point: one open socket whose latest subscription, the final selection,
+    // the server has applied. Paced subscription sends can trail the click, and their acknowledgement
+    // starts the preview's recovery reads, so sampling before it measures work still in flight.
+    await expect.poll(() => ui.opened - ui.closed === 1 && ui.requested > 0 && ui.applied === ui.requested &&
+      ui.appliedSessionIds === retentionSessionId(0), { timeout: 15_000 }).toBe(true);
     // Let pending scroll/frame and seen-dwell work settle, then collect real browser objects.
     await page.waitForTimeout(2_100);
     await cdp.send("HeapProfiler.collectGarbage");
@@ -162,7 +189,7 @@ test("ten nine-session production cycles release detached previews and keep DOM/
     browserVersion: page.context().browser()?.version() ?? "unknown",
     engineMode: info.project.use.launchOptions?.args?.includes("--js-flags=--jitless") ? "jitless" : "default",
     sessions: RETENTION_SESSION_COUNT, warmupCycles: 2, measuredCycles: cycles,
-    samples, ...retainers, heapTrendBytesPerCycle: (samples.at(-1)!.heapBytes - samples[0]!.heapBytes) / cycles };
+    uiSocket: { opened: ui.opened, closed: ui.closed }, samples, ...retainers, heapTrendBytesPerCycle: (samples.at(-1)!.heapBytes - samples[0]!.heapBytes) / cycles };
   // CI does not currently upload this test's attachment. Emit only synthetic primitive metadata
   // and counters before assertions so an initial failure stays inspectable after a passing retry.
   console.info("session-retention-measurements", JSON.stringify({ ...report, retainerPath: undefined }));
@@ -176,6 +203,9 @@ test("ten nine-session production cycles release detached previews and keep DOM/
   }
   expect(retainers.detachedPreviewRoots, JSON.stringify(retainers.retainerPath)).toBe(0);
   expect(Math.max(...samples.map(sample => sample.detachedWeakRoots))).toBe(0);
+  // Before the live counters, so a reconnect is reported as itself rather than as DOM/listener growth.
+  expect({ opened: ui.opened, closed: ui.closed }, "the UI socket must stay connected through every cycle")
+    .toEqual({ opened: 1, closed: 0 });
   expect(Math.max(...samples.map(sample => sample.nodes)) - Math.min(...samples.map(sample => sample.nodes))).toBeLessThanOrEqual(20);
   expect(Math.max(...samples.map(sample => sample.listeners)) - Math.min(...samples.map(sample => sample.listeners))).toBeLessThanOrEqual(2);
 });

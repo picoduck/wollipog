@@ -8,7 +8,8 @@
  * The DB is the source of truth; the hub broadcasts deltas built from it.
  */
 
-import { MAX_SKILL_REPORT_REQUESTS, SKILL_REPORT_REQUEST_LIFETIME_MS, runnerSupportsProtocol, PROJECT_MEMORY_MIN_PROTOCOL, SESSION_SUMMARY_UI_PROTOCOL, isTerminal, isTerminalDurableDeliveryState } from "@wollipog/protocol";
+import { MAX_SKILL_REPORT_REQUESTS, SKILL_REPORT_REQUEST_LIFETIME_MS, runnerSupportsProtocol, PROJECT_MEMORY_MIN_PROTOCOL, SESSION_SUMMARY_UI_PROTOCOL, isTerminal, isTerminalDurableDeliveryState,
+  MAX_UI_SUBSCRIPTION_UPDATES_PER_WINDOW, UI_SUBSCRIPTION_RATE_WINDOW_MS } from "@wollipog/protocol";
 import type {
   ControlPlaneToRunner,
   ControlPlaneToUi,
@@ -200,8 +201,7 @@ async function serializeUiSnapshotAsync(snapshot: UiSnapshotMessage): Promise<st
   return result.value ? frames : null;
 }
 export const MAX_UI_QUEUED_MESSAGES = 512;
-export const MAX_UI_SUBSCRIPTION_UPDATES_PER_WINDOW = 32;
-export const UI_SUBSCRIPTION_RATE_WINDOW_MS = 10_000;
+export { MAX_UI_SUBSCRIPTION_UPDATES_PER_WINDOW, UI_SUBSCRIPTION_RATE_WINDOW_MS };
 export const MAX_UI_SUBSCRIPTION_ADMISSION_KEYS = 4_096;
 export const UI_SUBSCRIPTION_ADMISSION_TTL_MS = 60_000;
 export const MAX_UI_CLIENTS = 256;
