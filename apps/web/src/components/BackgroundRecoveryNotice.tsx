@@ -71,7 +71,7 @@ export interface BackgroundRecoveryNoticeProps {
 export function BackgroundRecoveryNotice(props: BackgroundRecoveryNoticeProps) {
   const { state, subject } = props;
   const severity = BACKGROUND_DELIVERY_STATUS[state].severity;
-  if (severity === "missing") return <ResultMissingNotice {...props} />;
+  if (severity === "missing" || state === "capacity_retry_exhausted") return <ResultMissingNotice {...props} />;
   if (severity === "blocked") return <ResultBlockedNotice {...props} />;
   return (
     <Notice tone="info" compact role="status" className="background-recovery-notice" dataState={state}>
@@ -89,7 +89,7 @@ function ResultMissingNotice({ state, subject, finishedAt, now, missingSince, ac
       dataState={state}
       actions={acknowledgement && (
         <>
-          <BusyButton className="btn sm" busy={acknowledgement.busy} progress="Acknowledging the missing result…"
+          <BusyButton className="btn sm" busy={acknowledgement.busy} progress={state === "capacity_retry_exhausted" ? "Acknowledging retry exhaustion…" : "Acknowledging the missing result…"}
             onClick={acknowledgement.onAcknowledge}>
             Acknowledge
           </BusyButton>
@@ -99,7 +99,7 @@ function ResultMissingNotice({ state, subject, finishedAt, now, missingSince, ac
       details={(
         <dl className="facts">
           <div><dt>Finished</dt><dd><RecordedTime at={finishedAt} now={now} /></dd></div>
-          <div><dt>Missing Since</dt><dd><RecordedTime at={missingSince} now={now} /></dd></div>
+          <div><dt>{state === "capacity_retry_exhausted" ? "Exhausted Since" : "Missing Since"}</dt><dd><RecordedTime at={missingSince} now={now} /></dd></div>
           {acknowledgement && <div><dt>Acknowledge</dt><dd>{ACKNOWLEDGE_MISSING_RESULT_EFFECT}</dd></div>}
           <Diagnostic state={state} />
         </dl>

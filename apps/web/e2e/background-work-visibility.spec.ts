@@ -560,3 +560,49 @@ test.describe("on touch", () => {
     for (const height of await hitHeights(page.locator("#right-panel button:visible"))) expect(height).toBeGreaterThanOrEqual(44);
   });
 });
+
+for (const width of [390, 1440]) {
+  test(`pre-acceptance retry exhaustion is visible and acknowledged safely at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/command-inbox-projects-e2e.html?scenario=git-visibility&sessionShell=1");
+    await page.getByRole("button", { name: /Alpha Session/ }).click();
+    await waitForSessionPreview(page);
+    const expand = page.getByRole("button", { name: "Open Session", exact: true });
+    if (await expand.isVisible()) await expand.click();
+    await page.evaluate((version) => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(version), PROTOCOL_VERSION);
+    await page.evaluate(() => {
+      const now = Date.now();
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+        status: "idle", pendingApproval: null, driver: "claude-code", backgroundWorkState: undefined,
+        backgroundWorkTracking: "managed",
+        backgroundJobs: [{ id: "capacity-job", parentTurnId: "capacity-turn", launchType: "agent",
+          registeredAt: now - 20_000, terminalStatus: "completed", terminalObservedAt: now - 10_000,
+          lastObservedAt: now, sourcePresent: true, continuationRequired: true, continuationId: "capacity-continuation" }],
+        backgroundDeliveries: [{ continuationId: "capacity-continuation", parentTurnId: "capacity-turn",
+          jobCount: 1, terminalCount: 1, queuedAt: now - 9_000, submittedAt: now - 8_000,
+          retryExhaustedAt: now - 1_000, watchdogState: "capacity_retry_exhausted" }],
+      });
+    });
+    const status = page.locator(".session-bar .session-status-button");
+    await expect(status).toHaveAccessibleName("Session Status: Retry Exhausted");
+    await expectButtonUnclipped(status);
+    await status.click();
+    const popover = page.getByRole("dialog", { name: "Session Status" });
+    await expect(popover.getByRole("button", { name: "Acknowledge Retry Exhaustion", exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await openBackgroundWorkFromPinnedSummary(page);
+    const panel = page.locator('#right-panel[data-mode="background"]');
+    const notice = panel.locator('.notice[data-state="capacity_retry_exhausted"]');
+    await expect(notice).toBeVisible();
+    await expect(notice.locator(".notice-title")).toHaveText("Retry Exhausted");
+    await expect(notice).toContainText("The return step was not confirmed.");
+    await expect(notice.getByRole("button", { name: "Acknowledge", exact: true })).toBeVisible();
+    await expect(notice.getByRole("button", { name: /retry|rerun/i })).toHaveCount(0);
+    await notice.getByRole("button", { name: "Show Details", exact: true }).click();
+    await expect(notice).toContainText("Exhausted Since");
+    await notice.getByRole("button", { name: "Acknowledge", exact: true }).click();
+    await expect(notice).toHaveCount(0);
+    await expect(panel).toContainText("Retry Exhaustion Acknowledged");
+    await expect(status).not.toHaveAccessibleName("Session Status: Retry Exhausted");
+  });
+}

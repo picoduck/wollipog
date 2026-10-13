@@ -1,3 +1,4 @@
+import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
 import { registerCampaignIssueScopeRoutes } from "./campaign-issue-scope-routes.js";
 /**
  * Control plane: routes UI commands to runners, ingests runner events, persists
@@ -1116,6 +1117,14 @@ const orchestrator = new BoxOrchestrator({
 // has no top-level await — required to bundle the control plane into a CJS single
 // executable (the Tauri sidecar) without an ESM wrapper.
 app.register(cors, { origin: isLocalOrigin, methods: [...CORS_METHODS] });
+app.addHook("preSerialization", (req, _reply, payload, done) => {
+  // Agent tools understand data rather than the UI enum; only human clients need this downgrade.
+  if (requestPrincipal(req)?.kind === "agent") { done(null, payload); return; }
+  const protocol = parseUiProtocolVersion(req.query) ?? parseUiProtocolVersion({
+    protocolVersion: req.headers["x-wollipog-ui-protocol"],
+  });
+  done(null, projectBackgroundRetryExhaustionForUi(payload, protocol));
+});
 // @fastify/websocket installs one `upgrade` listener on the underlying HTTP server. Register it
 // exactly once: sibling registrations make both listeners claim every socket and eventually turn
 // an ordinary disconnect into ERR_HTTP_SOCKET_ASSIGNED / ERR_STREAM_WRITE_AFTER_END. The server
@@ -5897,6 +5906,20 @@ app.post("/api/sessions/:id/background-deliveries/:continuationId/acknowledge-mi
   if (!resolution) return reply.code(404).send({ error: "background delivery not found" });
   if (!changed && resolution === "not_terminal") {
     return reply.code(409).send({ error: "background delivery is not terminally missing" });
+  }
+  if (changed) hub.sessionChangedById(id);
+  return session;
+});
+
+app.post("/api/sessions/:id/background-deliveries/:continuationId/acknowledge-retry-exhaustion", async (req, reply) => {
+  const { id, continuationId } = req.params as { id: string; continuationId: string };
+  const changed = db.acknowledgeBackgroundRetryExhaustion(id, continuationId, Date.now());
+  const session = db.getSession(id);
+  if (!session) return reply.code(404).send({ error: "session not found" });
+  const resolution = db.backgroundRetryExhaustionResolution(id, continuationId);
+  if (!resolution) return reply.code(404).send({ error: "background delivery not found" });
+  if (!changed && resolution === "not_terminal") {
+    return reply.code(409).send({ error: "background delivery has not exhausted its retries" });
   }
   if (changed) hub.sessionChangedById(id);
   return session;

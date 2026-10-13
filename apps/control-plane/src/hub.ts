@@ -1,3 +1,4 @@
+import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
 /**
  * Connection hub. Two responsibilities:
  *  1. Track live runner websockets so the control plane can ROUTE commands
@@ -898,7 +899,8 @@ export class Hub {
     info.hiddenIndefiniteReminderSessionIds = new Set(supportsIndefiniteReminders ? [] : allReminders
       .filter((reminder) => reminder.scheduleKind === "someday" && reminder.state === "pending")
       .map((reminder) => reminder.sessionId));
-    const sessions = allSessions.filter((session) => !info.hiddenIndefiniteReminderSessionIds!.has(session.id));
+    const sessions = allSessions.filter((session) => !info.hiddenIndefiniteReminderSessionIds!.has(session.id))
+      .map((session) => projectBackgroundRetryExhaustionForUi(session, info.uiProtocolVersion));
     const reminders = supportsIndefiniteReminders
       ? allReminders
       : allReminders.filter((reminder) => reminder.scheduleKind !== "someday");
@@ -1809,7 +1811,8 @@ export class Hub {
   }
 
   private safeSend(client: Socket, msg: ControlPlaneToUi): void {
-    this.sendRaw(client, JSON.stringify(msg), this.coalesceKey(msg));
+    const projected = projectBackgroundRetryExhaustionForUi(msg, this.uiClients.get(client)?.uiProtocolVersion);
+    this.sendRaw(client, JSON.stringify(projected), this.coalesceKey(projected));
   }
 
   private coalesceKey(msg: ControlPlaneToUi): string | undefined {

@@ -1451,3 +1451,30 @@ Native MCP enum/boolean forms and Pi boolean confirmations cannot represent arbi
 provider schema. Their questions expose `customAnswerError`: entering custom text shows that limitation
 and retains the question, instead of converting it into an enum, a boolean, or a cancellation.
 These form responses grant no tool or governance authorization.
+
+
+## Provider Failure Categories and Background Retry Exhaustion
+
+`Driver.lastTurnFailureCategory()` is optional and belongs to the exact runner turn. Supported
+drivers reset it before submission and bind terminal evidence to that turn. Codex App Server uses
+its `CodexErrorInfo` and standard request-rejection codes; Claude Code uses terminal API status
+evidence, including [529 overload](https://platform.claude.com/docs/en/api/errors). A known category
+overrides display wording. Unknown codes and drivers without structured evidence keep conservative
+text classification. Authentication-looking diagnostics remain redacted even when the reliable
+category chooses another recovery lane.
+
+The existing capacity retry policy remains three attempts after 1, 2, and 4 seconds. The
+`provider_capacity_retry` log's `classification` is a category or `text_fallback`; it contains no
+prompt, credential, or raw provider error. Background exhaustion additionally records
+`background_capacity_retry_exhausted`, with session correlation, entry point, and attempt count.
+
+Before acceptance, exhausted background delivery has its own `continuationRetryExhaustedAt` runner
+fact and `capacity_retry_exhausted` public watchdog. It never manufactures accepted missing-result
+evidence. **Acknowledge** clears attention while retaining audit history and never resubmits work;
+later acceptance or a valid result supersedes the exhaustion condition. Exhaustion acknowledgment
+cannot acknowledge an accepted missing result that appears later.
+
+The new runner fact requires protocol v221. Current HTTP clients advertise their UI version with
+`x-wollipog-ui-protocol`; WebSockets use the existing `protocolVersion` negotiation. Older UI clients
+receive the legacy view without the new enum or fields, retaining history/log diagnostics. This
+display downgrade does not mutate canonical evidence or create retry authority.

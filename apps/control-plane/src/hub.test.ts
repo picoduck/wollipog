@@ -1620,3 +1620,21 @@ test("a stale socket detach does not reject in-flight requests riding the replac
   hub.resolveRunnerRequest({ type: "git_result", requestId: "req-live", ok: true, data: {} });
   assert.equal((await p).ok, true);
 });
+
+test("every live UI send downgrades exhaustion for legacy clients, including targeted detail updates", () => {
+  const hub = new Hub(fakeDb);
+  const client = {} as Socket;
+  const internal = hub as any;
+  const frames: string[] = [];
+  internal.sendRaw = (_client: Socket, data: string) => frames.push(data);
+  const message = { type: "session_upsert", session: { id: "session", runnerId: "runner", backgroundDeliveries: [{
+    parentTurnId: "turn", jobCount: 1, terminalCount: 1, retryExhaustedAt: 5, watchdogState: "capacity_retry_exhausted",
+  }] } };
+  internal.uiClients.set(client, { uiProtocolVersion: 218, close: () => {} });
+  internal.safeSend(client, message);
+  assert.doesNotMatch(frames[0]!, /capacity_retry_exhausted|retryExhaustedAt/);
+  internal.uiClients.set(client, { uiProtocolVersion: 220, close: () => {} });
+  internal.safeSend(client, message);
+  assert.match(frames[1]!, /capacity_retry_exhausted/);
+  assert.equal(message.session.backgroundDeliveries[0]!.watchdogState, "capacity_retry_exhausted");
+});

@@ -676,7 +676,8 @@
 //      records the child's ledger attempt before its launch is sent. An older control plane would
 //      ignore the field and leave the child unattributed, so the runner's tool and CLI refuse it
 //      against a pre-v220 control plane instead of sending it.
-export const PROTOCOL_VERSION = 220;
+// 221: pre-acceptance background capacity retry exhaustion, separate from accepted missing results.
+export const PROTOCOL_VERSION = 221;
 
 export * from "./campaign-authority.js";
 export * from "./campaign-issue-publication.js";
@@ -931,6 +932,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   managedBackgroundDelivery: 82,
   managedBackgroundInventory: 82,
   backgroundMissingResultRecovery: 134,
+  backgroundRetryExhaustion: 221,
   delegatedParentControl: 136,
   typedWorkflowDecisionDelegation: 139,
   fullControlAuthority: 215,
@@ -6152,6 +6154,8 @@ export interface ManagedBackgroundJobSnapshot {
   continuationQueuedAt?: number;
   continuationSubmittedAt?: number;
   continuationAcceptedAt?: number;
+  /** v220: bounded capacity retries ended without recorded provider acceptance. Not retry authority. */
+  continuationRetryExhaustedAt?: number;
   /** The accepted provider turn ended without a complete durable top-level assistant result. */
   continuationMissingResultAt?: number;
   assistantResultPersistedAt?: number;
@@ -6232,6 +6236,7 @@ export interface ManagedBackgroundResult {
 }
 
 export type BackgroundDeliveryWatchdogState =
+  | "capacity_retry_exhausted"
   | "terminal_without_continuation"
   /** A finished job's result cannot be returned: another job started by the same turn has no
    * terminal status, and the runner records a continuation only once every one of them does
@@ -6276,6 +6281,10 @@ export interface BackgroundDeliveryView {
   queuedAt?: number;
   submittedAt?: number;
   acceptedAt?: number;
+  /** v220: capacity retries ended before provider acceptance was recorded. */
+  retryExhaustedAt?: number;
+  /** Clears attention without acceptance or replay authority; audit evidence is retained. */
+  retryExhaustionAcknowledgedAt?: number;
   /** Runner proof that the accepted provider turn is terminal without a complete durable result. */
   missingResultAt?: number;
   /** Durable user resolution of a terminal missing result; audit evidence remains intact. */

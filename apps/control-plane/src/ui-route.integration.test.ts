@@ -929,8 +929,11 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   });
   assert.equal(invalidScopedReveal.status, 400, "member scope does not bypass the exact workspace-root gate");
 
-  const ownerFetch = (path: string, init?: RequestInit) =>
-    fetchWithBearer(`${httpBase}${path}`, ownerToken, init);
+  const ownerFetch = (path: string, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+    headers.set("x-wollipog-ui-protocol", String(PROTOCOL_VERSION));
+    return fetchWithBearer(`${httpBase}${path}`, ownerToken, { ...init, headers });
+  };
 
   for (const body of [
     { action: "commit", message: "must stay isolated" },
@@ -1260,6 +1263,62 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     "/api/sessions/session-target/background-deliveries/bgcont-route-absent/acknowledge-missing-result",
     { method: "POST" },
   )).status, 404, "an unknown continuation remains indistinguishable from inaccessible history");
+
+  const exhaustionJob = {
+    ...terminalMissingJobs[0]!, id: "route-exhaustion-job", parentTurnId: "route-exhaustion-turn",
+    continuationId: "bgcont-route-exhaustion", continuationAcceptedAt: undefined,
+    continuationMissingResultAt: undefined, continuationRetryExhaustedAt: 7_000,
+  };
+  runner.send(JSON.stringify({ type: "session_runtime_updated", snapshot: {
+    ...sessionSnapshot("session-target"), backgroundWorkTracking: "managed",
+    backgroundJobs: [exhaustionJob],
+  } }));
+  for (const inbox of [uiInbox, operatorUiInbox]) {
+    await inbox.take((message) => message.type === "session_upsert" &&
+      (message.session as { id?: string; backgroundDeliveries?: Array<{ continuationId?: string; watchdogState?: string }> } | undefined)
+        ?.backgroundDeliveries?.some((delivery) => delivery.continuationId === "bgcont-route-exhaustion" &&
+          delivery.watchdogState === "capacity_retry_exhausted") === true);
+  }
+  assert.equal((await ownerFetch(
+    "/api/sessions/session-target/background-deliveries/bgcont-route-exhaustion/acknowledge-missing-result",
+    { method: "POST" },
+  )).status, 409, "exhaustion does not grant accepted missing-result authority");
+  const legacyExhaustionView = await fetchWithBearer(`${httpBase}/api/sessions/session-target`, ownerToken, {
+    headers: { "x-wollipog-ui-protocol": "218" },
+  });
+  assert.equal(legacyExhaustionView.status, 200);
+  const legacyExhaustionBody = await legacyExhaustionView.text();
+  assert.doesNotMatch(legacyExhaustionBody, /capacity_retry_exhausted|retryExhaustedAt/,
+    "legacy HTTP clients never receive an unknown watchdog or its new fields");
+  const exhaustionAcknowledgement = await ownerFetch(
+    "/api/sessions/session-target/background-deliveries/bgcont-route-exhaustion/acknowledge-retry-exhaustion",
+    { method: "POST" },
+  );
+  assert.equal(exhaustionAcknowledgement.status, 200, await exhaustionAcknowledgement.clone().text());
+  const exhaustionSession = await exhaustionAcknowledgement.json() as {
+    backgroundDeliveries?: Array<{ continuationId?: string; acceptedAt?: number; missingResultAt?: number;
+      retryExhaustedAt?: number; retryExhaustionAcknowledgedAt?: number; watchdogState?: string }>;
+  };
+  const acknowledgedExhaustion = exhaustionSession.backgroundDeliveries?.find((delivery) =>
+    delivery.continuationId === "bgcont-route-exhaustion");
+  assert.ok(acknowledgedExhaustion?.retryExhaustionAcknowledgedAt);
+  assert.equal(acknowledgedExhaustion.retryExhaustedAt, 7_000);
+  assert.equal(acknowledgedExhaustion.acceptedAt, undefined);
+  assert.equal(acknowledgedExhaustion.missingResultAt, undefined);
+  assert.equal(acknowledgedExhaustion.watchdogState, undefined);
+  assert.equal((await ownerFetch(
+    "/api/sessions/session-target/background-deliveries/bgcont-route-exhaustion/acknowledge-retry-exhaustion",
+    { method: "POST" },
+  )).status, 200, "repeat exhaustion acknowledgement is idempotent");
+  assert.equal((await ownerFetch(
+    "/api/sessions/session-target/background-deliveries/bgcont-route-absent/acknowledge-retry-exhaustion",
+    { method: "POST" },
+  )).status, 404);
+
+  for (const inbox of [uiInbox, operatorUiInbox]) {
+    await inbox.take((message) => message.type === "session_upsert" &&
+      (message.session as { id?: string } | undefined)?.id === "session-target");
+  }
 
   const plainStopResponse = await ownerFetch("/api/sessions/session-other/stop", { method: "POST" });
   assert.equal(plainStopResponse.status, 200);
@@ -2402,8 +2461,11 @@ test("legacy workspace rename cannot bypass durable Project management authority
   });
 
   const httpBase = `http://127.0.0.1:${port}`;
-  const ownerFetch = (path: string, init?: RequestInit) =>
-    fetchWithBearer(`${httpBase}${path}`, ownerToken, init);
+  const ownerFetch = (path: string, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+    headers.set("x-wollipog-ui-protocol", String(PROTOCOL_VERSION));
+    return fetchWithBearer(`${httpBase}${path}`, ownerToken, { ...init, headers });
+  };
   const operatorHeaders = {
     authorization: `Bearer ${operatorToken}`,
     "content-type": "application/json",

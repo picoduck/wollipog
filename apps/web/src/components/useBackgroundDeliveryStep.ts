@@ -1,7 +1,7 @@
 import { useLayoutEffect, useSyncExternalStore, type RefObject } from "react";
 import type { SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
-import { missingResultContinuationId, requestMissingResultAcknowledgement } from "../background-delivery-status.js";
+import { backgroundDeliveryAcknowledgement, requestBackgroundDeliveryAcknowledgement, type BackgroundDeliveryAcknowledgement } from "../background-delivery-status.js";
 import {
   STOP_JOB_ALREADY_ENDED,
   STOP_JOB_OUTCOME,
@@ -89,7 +89,7 @@ export function resetBackgroundDeliverySteps() {
 }
 
 type Offer =
-  | { kind: "acknowledge"; key: string; continuationId: string }
+  | { kind: "acknowledge"; key: string; acknowledgement: BackgroundDeliveryAcknowledgement }
   | { kind: "stop"; key: string; target: BlockedDeliveryStopTarget };
 
 /** The step this session's row offers, whatever its state. */
@@ -97,9 +97,9 @@ function offeredStep(instanceScope: string, inputs: StepInputs): Offer | null {
   const { session, condition, runnerOnline, runnerProtocolVersion } = inputs;
   const delivery = condition?.needsYou ? condition.delivery : undefined;
   if (!delivery) return null;
-  const continuationId = missingResultContinuationId(delivery);
-  if (continuationId) {
-    return { kind: "acknowledge", key: JSON.stringify([instanceScope, session.id, "acknowledge", continuationId]), continuationId };
+  const acknowledgement = backgroundDeliveryAcknowledgement(delivery);
+  if (acknowledgement) {
+    return { kind: "acknowledge", key: JSON.stringify([instanceScope, session.id, "acknowledge", acknowledgement.kind, acknowledgement.continuationId]), acknowledgement };
   }
   const target = blockedDeliveryStopTarget(session, delivery, runnerProtocolVersion, runnerOnline);
   return target ? { kind: "stop", key: JSON.stringify([instanceScope, session.id, "stop", target.jobId]), target } : null;
@@ -161,17 +161,18 @@ export function useBackgroundDeliveryStep({
   if (state === "done") return undefined;
 
   if (offer.kind === "acknowledge") {
-    const { continuationId } = offer;
+    const { acknowledgement } = offer;
+    const exhausted = acknowledgement.kind === "retry_exhaustion";
     return {
-      label: "Acknowledge Missing Result",
-      progress: "Acknowledging the missing result…",
+      label: exhausted ? "Acknowledge Retry Exhaustion" : "Acknowledge Missing Result",
+      progress: exhausted ? "Acknowledging retry exhaustion…" : "Acknowledging the missing result…",
       busy: state === "pending",
       run: () => {
         if (steps.has(key)) return;
         setStep(key, sessionKey, "pending");
-        void requestMissingResultAcknowledgement(api, sessionId, continuationId).then((failure) => {
+        void requestBackgroundDeliveryAcknowledgement(api, sessionId, acknowledgement).then((failure) => {
           setStep(key, sessionKey, failure === null ? "done" : null);
-          if (failure === null) showToast("Missing result acknowledged.", { tone: "success" });
+          if (failure === null) showToast(exhausted ? "Retry exhaustion acknowledged." : "Missing result acknowledged.", { tone: "success" });
           else showToast(failure, { tone: "error" });
         });
       },

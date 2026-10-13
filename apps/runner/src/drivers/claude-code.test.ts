@@ -5483,3 +5483,34 @@ test("fixed-rule one-shot native command keeps plain stdin and exact text despit
   assert.equal(await pending, "end_turn");
   driver.dispose();
 });
+
+test("Claude terminal categories reset at turn ownership and preserve settled runner evidence", () => {
+  const h = makeHarness();
+  const driver = h.driver as any;
+  h.feed({ type: "result", is_error: true, api_error_status: 529, result: "new provider wording" });
+  assert.equal(h.driver.lastTurnFailureCategory(), "capacity");
+  driver.resetTurnEventState();
+  assert.equal(h.driver.lastTurnFailureCategory(), null);
+  h.feed({ type: "result", is_error: true, api_error_status: 429, result: "overloaded_error" });
+  assert.equal(h.driver.lastTurnFailureCategory(), "rate_limit");
+  driver.settledRunnerTurnFailureCategory = "rate_limit";
+  driver.resetTurnEventState();
+  h.feed({ type: "result", is_error: true, api_error_status: 529, result: "provider-owned turn" });
+  assert.equal(h.driver.lastTurnFailureCategory(), "rate_limit", "later provider-owned work cannot alter the settled runner turn");
+});
+
+test("Claude structured authentication errors sanitize prose before recovery", () => {
+  const h = makeHarness();
+  h.feed({ type: "result", is_error: true, api_error_status: 401, result: "synthetic-secret" });
+  assert.equal(h.driver.lastTurnFailureCategory(), "authentication");
+  assert.equal(h.authenticationFailures, 1);
+  assert.doesNotMatch(JSON.stringify([h.events, h.stderr]), /synthetic-secret/);
+});
+
+test("Claude structured capacity evidence outranks conflicting authentication prose without leaking it", () => {
+  const h = makeHarness();
+  h.feed({ type: "result", is_error: true, api_error_status: 529, result: "invalid API key supplied: synthetic-secret" });
+  assert.equal(h.driver.lastTurnFailureCategory(), "capacity");
+  assert.equal(h.authenticationFailures, 0);
+  assert.doesNotMatch(JSON.stringify([h.events, h.stderr, h.driver.lastTurnError()]), /synthetic-secret/);
+});

@@ -1416,3 +1416,44 @@ test("a turn whose unfinished jobs were all lost doesn't say it is waiting for t
     await panel.dispose();
   }
 });
+
+test("retry exhaustion is actionable without replay and cannot acknowledge a later missing result", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const calls: string[] = [];
+  const client = {
+    acknowledgeBackgroundRetryExhaustion: async () => { calls.push("exhaustion"); return {} as SessionView; },
+    acknowledgeBackgroundMissingResult: async () => { calls.push("missing"); return {} as SessionView; },
+  } as unknown as ApiClient;
+  const delivery = {
+    continuationId: "bgcont-exhausted", parentTurnId: "turn-1", jobCount: 1, terminalCount: 1,
+    retryExhaustedAt: 5, watchdogState: "capacity_retry_exhausted" as const,
+  };
+  const render = async (value: import("@wollipog/protocol").BackgroundDeliveryView) => {
+    await act(async () => root.render(<ApiProvider client={client}><BackgroundWorkPanel
+      session={{ id: "session", runnerId: "runner", backgroundWorkTracking: "managed", backgroundJobs: [],
+        backgroundDeliveries: [value] } as unknown as SessionView}
+      runnerOnline runnerProtocolVersion={PROTOCOL_VERSION} parentTurns={new Map()} /></ApiProvider>));
+  };
+  try {
+    await render(delivery);
+    assert.equal(container.querySelector(".notice-title")?.textContent, "Retry Exhausted");
+    assert.equal((container.textContent ?? "").split("Retry Exhausted").length - 1, 1);
+    assert.equal(acknowledgeButtons(container).length, 1);
+    assert.equal([...container.querySelectorAll("button")].some((button) => /retry|rerun/i.test(button.textContent ?? "")), false);
+    await act(async () => { acknowledgeButtons(container)[0]!.click(); await Promise.resolve(); await Promise.resolve(); });
+    assert.deepEqual(calls, ["exhaustion"]);
+    assertNoDomNode(container.querySelector(".notice-title"));
+    assert.match(container.textContent ?? "", /Retry Exhaustion Acknowledged/);
+    await render({ ...delivery, acceptedAt: 6, retryExhaustionAcknowledgedAt: 7, watchdogState: undefined });
+    assert.doesNotMatch(container.textContent ?? "", /Retry Exhaustion Acknowledged/);
+    await render({ ...delivery, acceptedAt: 6, missingResultAt: 8, retryExhaustionAcknowledgedAt: 7,
+      watchdogState: "accepted_without_result" });
+    assert.equal(container.querySelector(".notice-title")?.textContent, "Result Missing");
+    assert.equal(acknowledgeButtons(container).length, 1, "earlier exhaustion acknowledgement cannot hide later accepted missing-result recovery");
+    await act(async () => { acknowledgeButtons(container)[0]!.click(); await Promise.resolve(); await Promise.resolve(); });
+    assert.deepEqual(calls, ["exhaustion", "missing"]);
+    assert.match(container.textContent ?? "", /Missing Result Acknowledged/);
+  } finally { await act(async () => root.unmount()); container.remove(); }
+});

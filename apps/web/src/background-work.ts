@@ -104,7 +104,7 @@ export function groupBackgroundHistory(
 export type BackgroundJobGroupStatus =
   | { key: "waiting"; unfinished: number }
   | { key: "finished"; finished: number; total: number }
-  | { key: "returning" | "returned" | "result_missing" | "missing_acknowledged" | "unverified" };
+  | { key: "returning" | "returned" | "result_missing" | "missing_acknowledged" | "retry_exhausted" | "retry_exhaustion_acknowledged" | "unverified" };
 
 /** The group status's badge, with its count in the label where it has one. */
 export function backgroundJobGroupBadge(status: BackgroundJobGroupStatus): StatusMeta {
@@ -116,6 +116,15 @@ export function backgroundJobGroupBadge(status: BackgroundJobGroupStatus): Statu
   return meta;
 }
 
+function retryReceiptStatus(deliveries: readonly BackgroundDeliveryView[], acknowledged: (delivery: BackgroundDeliveryView) => boolean): BackgroundJobGroupStatus | null {
+  const exhausted = deliveries.filter((delivery) => delivery.retryExhaustedAt != null &&
+    delivery.acceptedAt == null && delivery.runnerResultPersistedAt == null);
+  if (exhausted.some((delivery) => delivery.retryExhaustionAcknowledgedAt == null && !acknowledged(delivery))) {
+    return { key: "retry_exhausted" };
+  }
+  return exhausted.length ? { key: "retry_exhaustion_acknowledged" } : null;
+}
+
 /** Where one or more delivery receipts stand, for a group or a receipt with no listed jobs. */
 export function deliveryReceiptStatus(
   deliveries: readonly BackgroundDeliveryView[],
@@ -124,6 +133,8 @@ export function deliveryReceiptStatus(
   if (deliveries.some((delivery) => delivery.runnerResultPersistedAt != null)) return { key: "returned" };
   if (deliveries.some((delivery) => delivery.missingResultAt != null &&
       delivery.missingResultAcknowledgedAt == null && !acknowledged(delivery))) return { key: "result_missing" };
+  const retry = retryReceiptStatus(deliveries, acknowledged);
+  if (retry) return retry;
   if (deliveries.some((delivery) => delivery.missingResultAcknowledgedAt != null || acknowledged(delivery))) {
     return { key: "missing_acknowledged" };
   }
@@ -176,6 +187,8 @@ export function backgroundJobGroupStatus(
   const pending = group.deliveries.filter((delivery) => delivery.runnerResultPersistedAt == null);
   if (pending.some((delivery) => delivery.missingResultAt != null &&
       delivery.missingResultAcknowledgedAt == null && !acknowledged(delivery))) return { key: "result_missing" };
+  const retry = retryReceiptStatus(pending, acknowledged);
+  if (retry) return retry;
   if (pending.some((delivery) => delivery.missingResultAcknowledgedAt != null || acknowledged(delivery))) {
     return { key: "missing_acknowledged" };
   }

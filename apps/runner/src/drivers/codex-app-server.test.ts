@@ -4918,3 +4918,62 @@ for (const resumeId of [undefined, "thread-held"] as const) {
     }
   });
 }
+
+test("structured Codex turn categories reset before submission and ignore completed terminals", async () => {
+  const h = makeHarness();
+  const driver = h.driver as any;
+  driver.threadId = "thread-ready";
+  let turn = 0;
+  driver.peer = {
+    request: async (method: string) => {
+      if (method !== "turn/start") return {};
+      if (++turn === 1) throw { code: -32000, message: "changed provider wording", data: { codexErrorInfo: "serverOverloaded" } };
+      return { turn: { id: "turn-current" } };
+    },
+    requestWithDeadline: async () => ({}),
+  };
+  assert.equal(await h.driver.prompt("first"), "refusal");
+  assert.equal(h.driver.lastTurnFailureCategory(), "capacity");
+  const next = h.driver.prompt("second");
+  assert.equal(h.driver.lastTurnFailureCategory(), null, "no stale capacity while the next submission is pending");
+  await waitForCondition(() => driver.turnId === "turn-current");
+  driver.completeRootTurn({ turn: { id: "old-turn", status: "failed", error: { codexErrorInfo: "serverOverloaded" } } }, driver.promptGeneration, "old-turn");
+  assert.equal(h.driver.lastTurnFailureCategory(), null);
+  driver.completeRootTurn({ turn: { id: "turn-current", status: "failed", error: { message: "overloaded_error", codexErrorInfo: "usageLimitExceeded" } } }, driver.promptGeneration, "turn-current");
+  assert.equal(await next, "refusal");
+  assert.equal(h.driver.lastTurnFailureCategory(), "quota");
+  driver.completeRootTurn({ turn: { id: "turn-current", status: "failed", error: { codexErrorInfo: "serverOverloaded" } } }, driver.promptGeneration, "turn-current");
+  assert.equal(h.driver.lastTurnFailureCategory(), "quota", "a duplicate terminal cannot replace settled evidence");
+});
+
+test("structured Codex authentication rejection never publishes provider secret text", async () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "thread-ready";
+  (h.driver as any).peer = {
+    request: async (method: string) => {
+      if (method === "turn/start") throw { code: -32000, message: "synthetic-secret", data: { codexErrorInfo: "unauthorized" } };
+      return {};
+    },
+    requestWithDeadline: async () => ({}),
+  };
+  assert.equal(await h.driver.prompt("task"), "refusal");
+  assert.equal(h.driver.lastTurnFailureCategory(), "authentication");
+  assert.equal(h.authenticationFailures(), 1);
+  assert.doesNotMatch(JSON.stringify([h.events, h.stderr, h.driver.lastTurnError()]), /synthetic-secret/);
+});
+
+test("Codex structured capacity evidence outranks conflicting authentication prose without leaking it", async () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "thread-ready";
+  (h.driver as any).peer = {
+    request: async (method: string) => {
+      if (method === "turn/start") throw { code: -32000, message: "invalid API key supplied: synthetic-secret", data: { codexErrorInfo: "serverOverloaded" } };
+      return {};
+    },
+    requestWithDeadline: async () => ({}),
+  };
+  assert.equal(await h.driver.prompt("task"), "refusal");
+  assert.equal(h.driver.lastTurnFailureCategory(), "capacity");
+  assert.equal(h.authenticationFailures(), 0);
+  assert.doesNotMatch(JSON.stringify([h.events, h.stderr, h.driver.lastTurnError()]), /synthetic-secret/);
+});

@@ -16,6 +16,14 @@ export interface BackgroundDeliveryStatusCopy {
 
 /** User-facing copy for a delivery watchdog, shared by every surface that presents one. */
 export const BACKGROUND_DELIVERY_STATUS: Record<BackgroundDeliveryWatchdogState, BackgroundDeliveryStatusCopy> = {
+  capacity_retry_exhausted: {
+    label: "Retry Exhausted",
+    description: "Automatic attempts to return a background result ended because model capacity remained unavailable.",
+    recovery: "The return step was not confirmed. Wollipog will not start another automatic retry burst.",
+    action: "Review the conversation before attempting recovery, or acknowledge this alert without resubmitting work.",
+    diagnostic: "Three capacity retries ended without recorded provider acceptance.",
+    severity: "blocked",
+  },
   terminal_without_continuation: {
     label: "Result Pending",
     description: "A background job finished, but its result has not yet been returned to this conversation.",
@@ -109,6 +117,9 @@ export function backgroundRecoverySentence(
 ): string {
   const its = singular(subject) ? "its" : "their";
   switch (state) {
+    case "capacity_retry_exhausted":
+      return `Automatic attempts to return ${subjectResult(subject)} ended because model capacity remained unavailable. ` +
+        "The return step was not confirmed. Review the conversation before attempting recovery.";
     case "accepted_without_result":
       return `${capitalize(subjectName(subject))} finished, but ${its} result never reached this conversation. ` +
         "Wollipog won't retry on its own, so the step can't run twice.";
@@ -178,6 +189,40 @@ export function requestMissingResultAcknowledgement(
   return api.acknowledgeBackgroundMissingResult(sessionId, continuationId)
     .then(() => null)
     .catch((error: unknown) => error instanceof Error ? error.message : "Missing-result acknowledgement failed.");
+}
+
+export interface BackgroundDeliveryAcknowledgement {
+  kind: "missing_result" | "retry_exhaustion";
+  continuationId: string;
+}
+
+/** Different recovery phases cannot share a local acknowledgement or a server mutation. */
+export function backgroundDeliveryRecoveryKind(delivery: Pick<BackgroundDeliveryView, "watchdogState" | "missingResultAt" | "retryExhaustedAt">): BackgroundDeliveryAcknowledgement["kind"] {
+  return delivery.watchdogState === "capacity_retry_exhausted" ||
+    (delivery.retryExhaustedAt != null && delivery.missingResultAt == null) ? "retry_exhaustion" : "missing_result";
+}
+
+export function backgroundDeliveryAcknowledgement(delivery: BackgroundDeliveryView): BackgroundDeliveryAcknowledgement | null {
+  if (delivery.watchdogState === "capacity_retry_exhausted") {
+    return delivery.continuationId && delivery.retryExhaustedAt != null && delivery.acceptedAt == null &&
+      delivery.runnerResultPersistedAt == null && delivery.retryExhaustionAcknowledgedAt == null
+      ? { kind: "retry_exhaustion", continuationId: delivery.continuationId } : null;
+  }
+  const continuationId = missingResultContinuationId(delivery);
+  return continuationId ? { kind: "missing_result", continuationId } : null;
+}
+
+export function requestBackgroundDeliveryAcknowledgement(
+  api: Pick<ApiClient, "acknowledgeBackgroundMissingResult" | "acknowledgeBackgroundRetryExhaustion">,
+  sessionId: string,
+  acknowledgement: BackgroundDeliveryAcknowledgement,
+): Promise<string | null> {
+  if (acknowledgement.kind === "missing_result") {
+    return requestMissingResultAcknowledgement(api, sessionId, acknowledgement.continuationId);
+  }
+  return api.acknowledgeBackgroundRetryExhaustion(sessionId, acknowledgement.continuationId)
+    .then(() => null)
+    .catch((error: unknown) => error instanceof Error ? error.message : "Retry-exhaustion acknowledgement failed.");
 }
 
 export function backgroundDeliveryAccessibleName(state: BackgroundDeliveryWatchdogState): string {

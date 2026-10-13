@@ -3355,3 +3355,19 @@ test("upgrade anchor absence never forces an existing healthy index to rebuild o
     assert.equal(page.page.turnStartSeq, 402);
   } finally { store.flush("s_abc"); rmSync(root, { recursive: true, force: true }); }
 });
+
+test("pre-acceptance retry exhaustion is protocol gated and never becomes a missing-result marker", () => {
+  const m = meta({ backgroundJobs: [{
+    id: "job", parentTurnId: "turn", runnerId: "runner", workspaceId: null,
+    context: { kind: "native" }, launchType: "agent", registeredAt: 1,
+    terminalStatus: "completed", terminalObservedAt: 2, continuationRequired: true,
+    continuationId: "continuation", continuationQueuedAt: 3, continuationSubmittedAt: 4,
+    continuationRetryExhaustedAt: 5,
+  }] });
+  assert.equal(metaToSnapshot(m, 218).backgroundJobs![0]!.continuationRetryExhaustedAt, undefined);
+  assert.equal(metaToSnapshot(m, 219).backgroundJobs![0]!.continuationRetryExhaustedAt, undefined);
+  const current = metaToSnapshot(m, 220).backgroundJobs![0]!;
+  assert.equal(current.continuationRetryExhaustedAt, 5);
+  assert.equal(current.continuationAcceptedAt, undefined);
+  assert.equal(current.continuationMissingResultAt, undefined);
+});
