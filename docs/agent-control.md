@@ -87,8 +87,8 @@ wollipog help [doctor|update|pair|service|admin|session|worktree|artifact|decisi
 ```
 
 `wollipog pr wait` (MCP `wait_pull_request`, #3081) blocks until a GitHub pull request's required
-checks pass or fail, its merge-queue entry fails (`UNMERGEABLE`, or a required merge-group check
-fails) or leaves the queue unmerged, it
+checks pass or fail, GitHub marks its merge-queue entry `UNMERGEABLE` (`queue_failed`) or the entry
+leaves the queue unmerged (`queue_ejected`), it
 merges or closes, its head moves away from `--head`, or the timeout expires, then returns one bounded
 summary. It runs in the runner-side process, not the model: no model request happens while it
 waits. It reads GitHub through the local `gh` login and never writes, so it needs no control plane,
@@ -105,8 +105,12 @@ GitHub's `mergeStateStatus` to confirm it, because an unseen context could still
 `no_required_checks` at once. An unreadable base is an error, never an empty requirement, and a
 GraphQL answer carrying any error is retried rather than trusted. A queue
 entry that disappears without a merge is reported as `queue_ejected` only once it has stayed missing
-for 10 seconds. Timeouts are clamped to 1 ms–3 hours (default 4 minutes); reads share that budget, so no read
-starts more than 20 seconds past it and one still in flight then is abandoned. Polling is clamped to
+for 10 seconds. A failed merge-group check alone never ends the wait (#3121): when an entry ahead
+caused it, GitHub drops that entry and rebuilds this one's group on a new commit, so the wait keeps
+reading until GitHub itself gives up on the entry or it merges; `--any-failure` applies to the head's
+checks only. Timeouts are clamped to 1 ms–3 hours (default 4 minutes); reads share that budget, so no read
+starts more than 20 seconds past it and one still in flight then is abandoned. Resolving a bare
+number's repository is one of those reads, so `--timeout 1` still returns one snapshot. Polling is clamped to
 10 seconds–10 minutes (default 30 seconds); lists are capped at 30 required checks and 20 failed jobs.
 
 `wollipog session steering` (MCP `list_steering_attempts`) returns at most 50 receipts, prioritizing

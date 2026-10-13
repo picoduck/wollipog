@@ -17,7 +17,7 @@ import {
 } from "./session-management-mcp.js";
 import { VERSION } from "./version.js";
 import { contextGhRunner, type GhRunner } from "./campaign-forge-status.js";
-import { PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS, PULL_REQUEST_WAIT_MAX_TIMEOUT_MS } from "./pull-request-wait.js";
+import { PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS, PULL_REQUEST_WAIT_MAX_TIMEOUT_MS, PULL_REQUEST_WAIT_READ_GRACE_MS } from "./pull-request-wait.js";
 import { defaultHostAdminIo, hostAdminUsage, runHostAdminCli, type HostAdminIo } from "./host-admin-cli.js";
 import { defaultServiceHost, defaultServiceIo, runServiceCli, serviceUsage } from "./service-cli.js";
 import {
@@ -166,6 +166,8 @@ export async function runPullRequestCli(
   io: { stdout: Write; stderr: Write },
   gh: GhRunner = contextGhRunner({ kind: "native" }, process.cwd()),
   signal?: AbortSignal,
+  /** Test hook for PULL_REQUEST_WAIT_READ_GRACE_MS. */
+  graceMs = PULL_REQUEST_WAIT_READ_GRACE_MS,
 ): Promise<number> {
   const fail = (message: string, code: number): number => {
     (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: message })}\n` : `${message}\n`);
@@ -180,18 +182,23 @@ export async function runPullRequestCli(
   }
   let repository = option(args, "--repo");
   let remainingMs = timeoutMs;
+  let readGraceMs: number | undefined;
   if (!repository && /^#?\d+$/u.test(words[2]!)) {
-    // Discovery comes out of the same budget as the wait, so the command still ends in time.
+    // Discovery is one more read, so it shares the wait's budget of the timeout plus one read's
+    // grace: `--timeout 1` still returns a snapshot, and the command still ends within that budget.
     // Clamped and floored exactly as the wait itself treats --timeout.
     const budgetMs = Math.min(PULL_REQUEST_WAIT_MAX_TIMEOUT_MS, Math.max(1, Math.floor(timeoutMs ?? PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS)));
     const startedAt = Date.now();
-    const discovery = AbortSignal.timeout(budgetMs);
+    const discovery = AbortSignal.timeout(budgetMs + graceMs);
     const resolved = await gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
       signal ? AbortSignal.any([discovery, signal]) : discovery);
     repository = resolved.code === null ? resolved.stdout.trim() : "";
     if (!repository) return fail("could not resolve this directory's GitHub repository; pass --repo <owner/name>", 1);
-    remainingMs = budgetMs - (Date.now() - startedAt);
-    if (remainingMs < 1) return fail("resolving the repository used the whole timeout; pass --repo <owner/name>", 1);
+    // The wait gets what remains of the timeout (at least one poll), and of the grace after it.
+    const elapsedMs = Date.now() - startedAt;
+    remainingMs = Math.max(1, budgetMs - elapsedMs);
+    readGraceMs = budgetMs + graceMs - elapsedMs - remainingMs;
+    if (readGraceMs < 1) return fail("resolving the repository used the whole timeout; pass --repo <owner/name>", 1);
   }
   const result = await executeManagerTool("wait_pull_request", {
     pullRequest: words[2],
@@ -200,7 +207,11 @@ export async function runPullRequestCli(
     ...(remainingMs !== undefined ? { timeoutMs: remainingMs } : {}),
     ...(intervalMs !== undefined ? { intervalMs } : {}),
     ...(flag(args, "--any-failure") ? { returnOnAnyFailure: true } : {}),
-  }, { fetch: () => Promise.reject(new Error("no control plane")), cpUrl: "", selfSessionId: "", token: "", gh, ...(signal ? { signal } : {}) });
+  }, {
+    fetch: () => Promise.reject(new Error("no control plane")), cpUrl: "", selfSessionId: "", token: "", gh,
+    ...(signal ? { signal } : {}),
+    ...(readGraceMs !== undefined ? { pullRequestReadGraceMs: readGraceMs } : {}),
+  });
   const data = payload(result);
   io.stdout(json ? `${JSON.stringify(data)}\n` : `${JSON.stringify(data, null, 2)}\n`);
   if (result.isError) return 1;

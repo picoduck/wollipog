@@ -92,6 +92,8 @@ export interface McpDeps {
   controlPlaneProtocolVersion?: number;
   /** Read-only `gh` for `wait_pull_request`; defaults to this process's own `gh` login. */
   gh?: GhRunner;
+  /** `wait_pull_request`'s read grace when a caller already spent part of it (CLI repository discovery). */
+  pullRequestReadGraceMs?: number;
 }
 
 export type ToolContent =
@@ -2012,7 +2014,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "wait_pull_request",
-    description: "Wait, without model turns, until a GitHub pull request's required checks pass or fail, its merge-queue entry fails or leaves the queue, it merges or closes, its head moves, or the timeout expires; then return one bounded summary (head SHA, each required check, merge-queue position and state, failed jobs with run links, merged). Required checks come from the base branch's rules; one not reported yet is pending, never passing. Reads only, through this runner's gh login. Keep timeoutMs plus 20 seconds inside your harness's tool-call limit and call again on outcome \"timeout\".",
+    description: "Wait, without model turns, until a GitHub pull request's required checks pass or fail, GitHub marks its merge-queue entry UNMERGEABLE or it leaves the queue, it merges or closes, its head moves, or the timeout expires; then return one bounded summary (head SHA, each required check, merge-queue position and state, failed jobs with run links, merged). Required checks come from the base branch's rules; one not reported yet is pending, never passing. Reads only, through this runner's gh login. Keep timeoutMs plus 20 seconds inside your harness's tool-call limit and call again on outcome \"timeout\".",
     inputSchema: {
       type: "object",
       properties: {
@@ -2034,7 +2036,7 @@ export const TOOLS: McpTool[] = [
           maximum: PULL_REQUEST_WAIT_MAX_INTERVAL_MS,
           description: `GitHub polling interval; defaults to ${PULL_REQUEST_WAIT_DEFAULT_INTERVAL_MS}.`,
         },
-        returnOnAnyFailure: { type: "boolean", description: "Also return when a check outside the required set fails." },
+        returnOnAnyFailure: { type: "boolean", description: "Also return when a check outside the required set fails on the head; a queued pull request still waits for GitHub's verdict on its entry." },
       },
       required: ["pullRequest"],
       additionalProperties: false,
@@ -2054,6 +2056,7 @@ export const TOOLS: McpTool[] = [
         ...(deps.now ? { now: deps.now } : {}),
         ...(deps.sleep ? { sleep: deps.sleep } : {}),
         ...(deps.signal ? { signal: deps.signal } : {}),
+        ...(deps.pullRequestReadGraceMs !== undefined ? { readGraceMs: deps.pullRequestReadGraceMs } : {}),
       });
       return result.ok ? textResult(result.summary) : errorResult(result.error);
     },

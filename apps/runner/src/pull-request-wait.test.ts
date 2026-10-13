@@ -20,6 +20,7 @@ import {
 const HEAD = "44579c6c25235598f1a28f8ccb0449cb8dbbc810";
 const OTHER_HEAD = "55579c6c25235598f1a28f8ccb0449cb8dbbc811";
 const GROUP = "66679c6c25235598f1a28f8ccb0449cb8dbbc812";
+const REBUILT = "77779c6c25235598f1a28f8ccb0449cb8dbbc813";
 const MERGE = "dd08b41b0000000000000000000000000000beef";
 const AGGREGATOR = "Typecheck, Test & Sidecar Bundle";
 
@@ -315,7 +316,7 @@ test("a merge-queue entry waits until the pull request merges", async () => {
   assert.equal(fake.graphqlCalls(), 3, "passing PR checks do not end a wait while the pull request is queued");
 });
 
-test("the queue summary carries the merge group's checks and a failed group returns queue_failed", async () => {
+test("the queue summary carries the merge group's checks and an UNMERGEABLE entry returns queue_failed", async () => {
   const fake = fakeGh([ok(pr({
     mergeQueueEntry: {
       position: 0, state: "UNMERGEABLE", enqueuedAt: "2026-10-12T10:00:00Z",
@@ -480,24 +481,56 @@ test("the full base branch name reaches GitHub even when the summary clips it", 
   ]);
 });
 
-test("while queued, a failing merge-group check returns queue_failed without waiting for the ejection", async () => {
-  const entry = (nodes: unknown[]) => ok(pr({
-    mergeQueueEntry: { position: 0, state: "AWAITING_CHECKS", enqueuedAt: null, headCommit: { oid: GROUP, statusCheckRollup: rollup(nodes) } },
+test("a failed merge group whose entry GitHub rebuilds keeps waiting until it merges", async () => {
+  // #3121: an entry ahead fails, so this entry's group fails too; GitHub drops the entry ahead and
+  // rebuilds this one's group on a new commit, and it merges from there.
+  const entry = (oid: string, nodes: unknown[], position = 1) => ok(pr({
+    mergeQueueEntry: { position, state: "AWAITING_CHECKS", enqueuedAt: null, headCommit: { oid, statusCheckRollup: rollup(nodes) } },
   }, [run(AGGREGATOR, "SUCCESS")]));
-  const required = await waitForPullRequest({ repository: "o/r", number: 7 },
-    { gh: fakeGh([entry([run(AGGREGATOR, "FAILURE")])]).gh, ...clock() });
-  assert.ok(required.ok);
-  assert.equal(required.summary.outcome, "queue_failed");
+  const fake = fakeGh([
+    entry(GROUP, [run(AGGREGATOR, "FAILURE")]),
+    entry(REBUILT, [run(AGGREGATOR, null)], 0),
+    entry(REBUILT, [run(AGGREGATOR, "SUCCESS")], 0),
+    ok(pr({ state: "MERGED", mergeCommit: { oid: MERGE } }, [run(AGGREGATOR, "SUCCESS")])),
+  ]);
+  const result = await waitForPullRequest({ repository: "o/r", number: 7, headSha: HEAD, timeoutMs: 600_000 }, { gh: fake.gh, ...clock() });
+  assert.ok(result.ok);
+  assert.equal(result.summary.outcome, "merged");
+  assert.equal(result.summary.mergeCommitSha, MERGE);
+  assert.equal(fake.graphqlCalls(), 4);
 
-  const optional = [run(AGGREGATOR, null), run("Platform Isolation", "FAILURE")];
-  const flagged = await waitForPullRequest({ repository: "o/r", number: 7, returnOnAnyFailure: true },
-    { gh: fakeGh([entry(optional)]).gh, ...clock() });
+  // Until GitHub acts, a failed group is only reported: the summary carries it on a timeout.
+  const stalled = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 60_000 },
+    { gh: fakeGh([entry(GROUP, [run(AGGREGATOR, "FAILURE")])]).gh, ...clock() });
+  assert.ok(stalled.ok);
+  assert.equal(stalled.summary.outcome, "timeout");
+  assert.equal(stalled.summary.mergeQueue?.checks?.sha, GROUP);
+  assert.deepEqual(stalled.summary.mergeQueue?.checks?.failedJobs.map(({ name, required }) => ({ name, required })),
+    [{ name: AGGREGATOR, required: true }]);
+
+  // returnOnAnyFailure covers the head's checks only; it never pre-empts GitHub's verdict on the entry.
+  const flagged = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 60_000, returnOnAnyFailure: true },
+    { gh: fakeGh([entry(GROUP, [run(AGGREGATOR, null), run("Platform Isolation", "FAILURE")])]).gh, ...clock() });
   assert.ok(flagged.ok);
-  assert.equal(flagged.summary.outcome, "queue_failed");
-  const unflagged = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 60_000 },
-    { gh: fakeGh([entry(optional)]).gh, ...clock() });
-  assert.ok(unflagged.ok);
-  assert.equal(unflagged.summary.outcome, "timeout");
+  assert.equal(flagged.summary.outcome, "timeout");
+});
+
+test("a failed merge group ends the wait only once GitHub gives up on the entry", async () => {
+  const entry = (state: string) => ok(pr({
+    mergeQueueEntry: { position: 0, state, enqueuedAt: null, headCommit: { oid: GROUP, statusCheckRollup: rollup([run(AGGREGATOR, "FAILURE")]) } },
+  }, [run(AGGREGATOR, "SUCCESS")]));
+  const unmergeable = fakeGh([entry("AWAITING_CHECKS"), entry("UNMERGEABLE")]);
+  const failedGroup = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 600_000 }, { gh: unmergeable.gh, ...clock() });
+  assert.ok(failedGroup.ok);
+  assert.equal(failedGroup.summary.outcome, "queue_failed");
+  assert.equal(unmergeable.graphqlCalls(), 2);
+
+  const removed = fakeGh([entry("AWAITING_CHECKS"), ok(pr()), ok(pr())]);
+  const time = clock();
+  const ejected = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 600_000 }, { gh: removed.gh, ...time });
+  assert.ok(ejected.ok);
+  assert.equal(ejected.summary.outcome, "queue_ejected");
+  assert.deepEqual(time.sleeps, [30_000, 10_000], "the ejection is confirmed over the whole interval");
 });
 
 test("HTTP 403 rate limits and 5xx answers retry; an ordinary 403 does not", async () => {
