@@ -30,7 +30,17 @@ export class WorkflowVideoEvidenceApprovals {
   constructor(readonly database: ControlPlaneDb, runtime: VideoEvidenceRuntime,
     private readonly access: WorkflowVideoEvidenceAccess, private readonly clock = Date.now) {
     database.raw().exec("CREATE TABLE IF NOT EXISTS workflow_video_approvals (" +
-      "occurrence_id TEXT PRIMARY KEY REFERENCES workflow_decisions(occurrence_id), record TEXT NOT NULL, sha256 TEXT NOT NULL)");
+      "occurrence_id TEXT PRIMARY KEY REFERENCES workflow_decisions(occurrence_id) ON DELETE CASCADE, record TEXT NOT NULL, sha256 TEXT NOT NULL)");
+    const references = database.raw().prepare("PRAGMA foreign_key_list(workflow_video_approvals)").all() as
+      Array<{ table: string; from: string; on_delete: string }>;
+    if (!references.some((r) => r.table === "workflow_decisions" && r.from === "occurrence_id" && r.on_delete === "CASCADE")) {
+      this.atomic(() => {
+        database.raw().exec("CREATE TABLE workflow_video_approvals_cascade (occurrence_id TEXT PRIMARY KEY " +
+          "REFERENCES workflow_decisions(occurrence_id) ON DELETE CASCADE, record TEXT NOT NULL, sha256 TEXT NOT NULL);" +
+          "INSERT INTO workflow_video_approvals_cascade SELECT occurrence_id,record,sha256 FROM workflow_video_approvals;" +
+          "DROP TABLE workflow_video_approvals; ALTER TABLE workflow_video_approvals_cascade RENAME TO workflow_video_approvals;");
+      });
+    }
     this.bridge = new VideoEvidenceDecisionBridge(runtime, {
       decisionCurrent: (decision, phase) => access.decisionCurrent(decision, phase),
       linkedReview: (decision, evidenceId) => access.linkedReview(decision, evidenceId),

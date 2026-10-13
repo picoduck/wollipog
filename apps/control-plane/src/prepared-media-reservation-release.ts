@@ -3,7 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { mediaDispatchFenceBody, validMediaNeverDispatchedFence, type MediaNeverDispatchedFence } from "@wollipog/protocol";
 import type { CampaignBudgetLedger } from "./campaign-budget.js";
 import { MediaSessionPurposes } from "./media-session-purposes.js";
-import type { PreparedMediaRecord } from "./prepared-media-sessions.js";
+import { PreparedMediaSessions, type PreparedMediaRecord } from "./prepared-media-sessions.js";
 const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 /** Server-only adapter. No agent route and no budget usage/settlement mutation. Authenticated
@@ -58,5 +58,30 @@ export class PreparedMediaReservationRelease {
     // so it does not occupy child/native/media slots forever. No provider stop or usage settlement.
     if (Number(this.db.prepare("UPDATE sessions SET status='stopped' WHERE id=? AND status='queued'")
       .run(record.sessionId).changes) !== 1) throw new Error("Never-dispatched Session lifecycle changed.");
+  }
+  /** Server lifecycle Stop only. Reuse the coordinator's exact atomic never-enqueued claim;
+   * unknown/possibly dispatched states and missing tables cannot acquire an unsent proof. */
+  cancelLocallyUnsent(sessionId: string): boolean {
+    const row = this.db.prepare("SELECT payload FROM prepared_media_sessions WHERE json_extract(payload,'$.sessionId')=?")
+      .get(sessionId) as { payload: string } | undefined;
+    if (!row) return false;
+    const saved = JSON.parse(row.payload) as PreparedMediaRecord;
+    const coordinator = new PreparedMediaSessions(this.db, {
+      database: this.db,
+      materialize: () => { throw new Error("Stop cannot materialize or dispatch media work."); },
+      currentAdmission: () => null,
+      currentIdentity: (id) => {
+        const session = this.db.prepare("SELECT runner_id FROM sessions WHERE id=?").get(id) as { runner_id: string } | undefined;
+        const dispatch = this.ledger.dispatch(id);
+        return session && dispatch ? { rootSessionId: dispatch.rootSessionId, runnerId: session.runner_id, generation: dispatch.generation } : null;
+      },
+      authorize: async () => false,
+      send: async () => { throw new Error("Stop cannot dispatch media work."); },
+      reconcile: async () => null,
+      cancelNeverDispatched: (record) => this.release(record),
+    });
+    coordinator.cancelPrepared({ rootSessionId: saved.rootSessionId, childSessionId: saved.childSessionId,
+      admissionId: saved.admissionId, requestSha256: saved.requestSha256 });
+    return true;
   }
 }

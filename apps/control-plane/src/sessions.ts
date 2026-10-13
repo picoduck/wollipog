@@ -4,7 +4,7 @@ import type { WorkflowVideoEvidenceApprovals } from "./workflow-video-evidence-a
 import { MediaSessionPurposes } from "./media-session-purposes.js";
 import { PreparedMediaReservationRelease } from "./prepared-media-reservation-release.js";
 import { MEDIA_SESSION_PURPOSE_ERROR, type PreparedMediaSessionRuntime, type PreparedMediaSubject } from "./prepared-media-session-runtime.js";
-import type { PreparedMediaIdentity, MaterializedMediaSession } from "./prepared-media-sessions.js";
+import type { PreparedMediaIdentity, MaterializedMediaSession, PreparedMediaRecord } from "./prepared-media-sessions.js";
 import { reviewerAdmissionReadiness } from "./evidence-review-worker.js";
 import type { OperatorVideoValidationPermits } from "./operator-video-validation.js";
 import type { OperatorVideoValidationPurpose } from "@wollipog/protocol";
@@ -3768,6 +3768,20 @@ export class SessionsService {
     return ok(materialized);
   }
 
+  /** Private preparedCommitted port: announce only an exact actually committed stored Session. */
+  publishPreparedMediaSession(record: PreparedMediaRecord): void {
+    if (this.db.raw().isTransaction) throw new Error("Prepared media metadata must follow its owning commit.");
+    const saved = this.db.raw().prepare("SELECT payload_sha256 FROM prepared_media_sessions WHERE root_id=? AND admission_id=?")
+      .get(record.rootSessionId, record.admissionId) as { payload_sha256: string } | undefined;
+    const session = this.db.getSession(record.sessionId);
+    if (!saved || saved.payload_sha256 !== createHash("sha256").update(JSON.stringify(record)).digest("hex") ||
+      !session || session.parentSessionId !== record.rootSessionId || !this.mediaSessionPurposes.owns(session.id)) {
+      throw new Error("An exact committed media Session is required for notification.");
+    }
+    this.hub.sessionChanged(session);
+    this.log.info(`session created ${session.id} on ${session.runnerId} (${session.agentId} @ ${session.workspaceId})`);
+  }
+
   createSession(
     req: CreateSessionRequest,
     delivery?: PreStagedDeliveryOptions,
@@ -4659,7 +4673,7 @@ export class SessionsService {
       }
       if (command.type === "start_session") command.initialImages = nonEmpty(externalized.data);
     }
-    this.hub.sessionChanged(this.db.getSession(id) ?? session);
+    if (!capture) this.hub.sessionChanged(this.db.getSession(id) ?? session);
     // The runner emits the user_message into the box store (source of truth) when it runs the
     // initial prompt — the control plane no longer appends it locally.
 
@@ -4726,7 +4740,7 @@ export class SessionsService {
         return fail("runner disconnected while launching the session", 409);
       }
     }
-    this.log.info(`session created ${id} on ${req.runnerId} (${req.agentId} @ ${req.workspaceId})`);
+    if (!capture) this.log.info(`session created ${id} on ${req.runnerId} (${req.agentId} @ ${req.workspaceId})`);
     return ok(this.db.getSession(id)!, 201);
   }
 
@@ -4820,6 +4834,7 @@ export class SessionsService {
     slashCommand: string | undefined,
     config: SessionConfig | undefined,
   ): Promise<ServiceResult<PromptAdmissionView> | null> {
+    if (this.mediaSessionPurposes.owns(sessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
     // The steering lane carries plain conversational text only. A slash command, an attachment, or
     // a per-turn config change is turn-scoped work that must start a turn of its own.
     if (slashCommand || images.length > 0 || config) return null;
@@ -6109,6 +6124,7 @@ export class SessionsService {
   }
 
   async steer(sessionId: string, request: SteerRequest): Promise<ServiceResult<SteeringAttemptView>> {
+    if (this.mediaSessionPurposes.owns(sessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
     this.db.compactSteeringAttempts(Date.now());
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
@@ -6558,6 +6574,25 @@ export class SessionsService {
   }
 
   private requestStop(session: SessionView, now: number, archiveAfterStop = false, refreshProject = true): SessionView {
+    if (session.status === "stopped" && this.mediaSessionPurposes.owns(session.id) &&
+      this.db.raw().prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='prepared_media_sessions'").get() &&
+      this.db.raw().prepare("SELECT 1 FROM prepared_media_sessions WHERE state='cancelled' AND json_extract(payload,'$.sessionId')=?").get(session.id)) {
+      return session; // duplicate locally proven cancellation never dispatches a generic Stop
+    }
+    if (session.status === "queued" && this.mediaSessionPurposes.owns(session.id)) {
+      // Never turn an unknown queued dispatch into a generic stopped row: that would destroy
+      // the exact queued proof required by later authenticated cancellation/reconciliation.
+      try {
+        if (["prepared_media_sessions", "media_session_purposes", "media_never_dispatched_fences"].some((name) =>
+          !this.db.raw().prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name)) ||
+          !new PreparedMediaReservationRelease(this.db.raw(), this.db.campaignBudgets).cancelLocallyUnsent(session.id)) return session;
+      } catch { return session; }
+      this.revokeUnconsumedWorkflowDecisionsForSession(session.id, "session-stopped");
+      if (archiveAfterStop) this.db.setSessionArchived(session.id, true, now);
+      const stopped = this.db.getSession(session.id)!;
+      this.hub.sessionChanged(stopped, refreshProject);
+      return stopped;
+    }
     const campaignBefore = this.campaignAttentionController(session);
     // Persist before touching the socket: ws.send acceptance is not delivery proof on a half-open
     // connection. Reconnect inventory/status reconciliation owns retry and final clearance.
@@ -6612,7 +6647,11 @@ export class SessionsService {
   stop(sessionId: string): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
-    return ok(this.requestStop(session, Date.now()));
+    const stopped = this.requestStop(session, Date.now());
+    if (stopped.status === "queued" && this.mediaSessionPurposes.owns(session.id)) {
+      return fail("Prepared media Stop requires exact never-enqueued proof or authenticated reconciliation; capacity is retained.", 409);
+    }
+    return ok(stopped);
   }
 
   /** Explicit recovery keeps the same operation identity. A duplicate request that races the
@@ -11545,6 +11584,9 @@ export class SessionsService {
     }
     if (archiveRequiresStop(session.status) || this.db.hasSessionStopIntent(sessionId)) {
       const pending = this.requestStop(session, now, true, refreshProject);
+      if (pending.status === "queued" && this.mediaSessionPurposes.owns(session.id)) {
+        return fail("Prepared media archive requires exact never-enqueued proof or authenticated reconciliation; capacity is retained.", 409);
+      }
       return ok(pending, 202);
     }
     if (session.archived) return ok(session);

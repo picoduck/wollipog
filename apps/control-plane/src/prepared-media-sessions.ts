@@ -48,6 +48,8 @@ export interface PreparedMediaSessionPorts {
    * Real Session-service adapter supplies this; no Session/member/provider is created here. */
   preflightMaterialization?(identity: PreparedMediaIdentity): void;
   materialize(identity: PreparedMediaIdentity): MaterializedMediaSession;
+  /** Metadata notification only after this coordinator's actual commit, never during admission. */
+  preparedCommitted?(record: PreparedMediaRecord): void;
   currentAdmission(sessionId: string): EvidenceReviewerBudgetAdmission | null;
   /** Actual durable Session/member generation even when current admission is revoked.
    * Cancellation must never release capacity belonging to a replacement generation. */
@@ -152,12 +154,14 @@ export class PreparedMediaSessions {
     return record;
   }
   prepare(identity: PreparedMediaIdentity): PreparedMediaRecord {
+    if (this.db.isTransaction) throw new Error("Media preparation must own its commit boundary.");
     if (![identity.rootSessionId, identity.childSessionId, identity.admissionId].every(id) ||
       identity.rootSessionId === identity.childSessionId || !digest(identity.requestSha256)) {
       throw new Error("Exact campaign and child media identity is required.");
     }
     if (!this.get(identity)) this.ports.preflightMaterialization?.(identity);
-    return this.transaction(() => {
+    let created = false;
+    const prepared = this.transaction(() => {
       const existing = this.get(identity);
       if (existing) return existing;
       const materialized = this.ports.materialize(identity);
@@ -165,8 +169,11 @@ export class PreparedMediaSessions {
       const record: PreparedMediaRecord = { ...identity, ...materialized,
         commandSha256: sha(materialized.command), dispatchSha256: null, state: "prepared", binding: null };
       this.save(record);
+      created = true;
       return this.get(identity)!;
     });
+    if (created) this.ports.preparedCommitted?.(structuredClone(prepared));
+    return prepared;
   }
   private sameGeneration(record: PreparedMediaRecord): boolean {
     const actual = this.ports.currentIdentity(record.sessionId);

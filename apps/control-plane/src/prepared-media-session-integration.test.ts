@@ -13,7 +13,7 @@ import { SessionsService, normalizeWorkflowDecisionSnapshot } from "./sessions.j
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { mintCampaignEvidenceAuthority } from "./evidence-authority.js";
 import type { HumanPrincipal } from "./identity.js";
-import type { PreparedMediaSessionRuntime } from "./prepared-media-session-runtime.js";
+import { MEDIA_SESSION_PURPOSE_ERROR, type PreparedMediaSessionRuntime } from "./prepared-media-session-runtime.js";
 import { PreparedMediaSessions, type PreparedMediaSessionPorts } from "./prepared-media-sessions.js";
 import type { ReviewerAdmissionContext, EvidenceReviewerTarget, VideoProfileLiveProof } from "./evidence-review-worker.js";
 import { isAgentControlApiRouteAllowed } from "./auth.js";
@@ -138,6 +138,7 @@ function harness(sourceBytes?: Buffer, validation = false) {
       if (!value.ok) throw new Error(value.error); },
     materialize: (id) => { const value = service.materializePreparedMediaSession(id, subject);
       if (!value.ok || !value.data) throw new Error(value.error); return value.data; },
+    preparedCommitted: (record) => service.publishPreparedMediaSession(record),
     currentAdmission: (sessionId) => service.campaignBudgetWorkerPreflight("root", { kind: "managed", sessionId }).data ?? null,
     currentIdentity: (sessionId) => { const session = db.getSession(sessionId), dispatch = db.campaignBudgets.dispatch(sessionId);
       return session && dispatch ? { rootSessionId: dispatch.rootSessionId, runnerId: session.runnerId, generation: dispatch.generation } : null; },
@@ -219,6 +220,34 @@ test("validation materialization rollback restores one-shot permit with real Ses
   assert.deepEqual(h.messages, []);
   h.ports.materialize = original;
   assert.ok(h.prepared.prepare(h.identity).sessionId);
+});
+test("rolled-back media preparation emits no phantom Session or creation audit", (t) => {
+  const h = harness(undefined, true); t.after(() => h.db.close());
+  let broadcasts = 0, createdLogs = 0;
+  h.hub.sessionChanged = () => { broadcasts++; };
+  h.log.info = () => { createdLogs++; };
+  const materialize = h.ports.materialize;
+  h.ports.materialize = (identity) => { materialize(identity); throw new Error("Synthetic storage failure after materialization"); };
+  assert.throws(() => h.prepared.prepare(h.identity), /storage failure/);
+  assert.equal(h.db.raw().prepare("SELECT COUNT(*) AS n FROM sessions").get()!.n, 2);
+  assert.equal(broadcasts, 0, "a rolled-back actual Session must never be announced");
+  assert.equal(createdLogs, 0, "creation audit must wait for the owning commit");
+});
+test("media preparation announces its actual committed record once and refuses an external commit boundary", (t) => {
+  const h = harness(); t.after(() => h.db.close());
+  let broadcasts = 0, createdLogs = 0;
+  h.hub.sessionChanged = (session) => {
+    assert.equal(h.db.raw().isTransaction, false);
+    assert.equal(h.prepared.get(h.identity)?.sessionId, session.id);
+    broadcasts++;
+  };
+  h.log.info = () => { assert.equal(h.db.raw().isTransaction, false); createdLogs++; };
+  const actual = h.prepared.prepare(h.identity);
+  assert.equal(h.prepared.prepare(h.identity).sessionId, actual.sessionId);
+  assert.equal(broadcasts, 1); assert.equal(createdLogs, 1);
+  h.db.raw().exec("BEGIN");
+  try { assert.throws(() => h.prepared.prepare(h.identity), /own its commit boundary/); }
+  finally { h.db.raw().exec("ROLLBACK"); }
 });
 
 function syntheticValidationFrames() {
@@ -584,6 +613,71 @@ test("original UI gate persists actual media actor separately and consumes compl
   assert.ok(consumed.ok, consumed.error ?? "Consumption refused"); assert.equal(consumed.data?.status, "consumed");
   assert.equal((await h.service.consumeWorkflowDecision("child", h.original.occurrenceId,
     { resourceSnapshot: h.original.resourceSnapshot })).ok, false, "consumption cannot replay");
+});
+test("Session deletion cascades exact delegated approval provenance", async (t) => {
+  for (const target of ["child", "root"]) {
+    const h = await gateHarness(t); if (!h) return; h.complete();
+    assert.ok(h.resolve().ok);
+    assert.equal(h.db.raw().prepare("PRAGMA foreign_keys").get()!.foreign_keys, 1);
+    assert.doesNotThrow(() => h.db.deleteSession(target));
+    assert.equal(h.db.raw().prepare("SELECT COUNT(*) AS n FROM workflow_video_approvals").get()!.n, 0);
+  }
+});
+test("prior prepared approval schema migrates transactionally without changing its exact provenance", async (t) => {
+  const h = await gateHarness(t); if (!h) return; h.complete(); assert.ok(h.resolve().ok);
+  const before = h.db.raw().prepare("SELECT * FROM workflow_video_approvals").get();
+  h.db.raw().exec("ALTER TABLE workflow_video_approvals RENAME TO previous_approval;" +
+    "CREATE TABLE workflow_video_approvals (occurrence_id TEXT PRIMARY KEY REFERENCES workflow_decisions(occurrence_id),record TEXT NOT NULL,sha256 TEXT NOT NULL);" +
+    "INSERT INTO workflow_video_approvals SELECT * FROM previous_approval; DROP TABLE previous_approval;");
+  new WorkflowVideoEvidenceApprovals(h.db, h.runtime, h.approvalAccess);
+  assert.deepEqual(h.db.raw().prepare("SELECT * FROM workflow_video_approvals").get(), before);
+  assert.doesNotThrow(() => h.db.deleteSession("child"));
+  assert.equal(h.db.raw().prepare("SELECT COUNT(*) AS n FROM workflow_video_approvals").get()!.n, 0);
+});
+test("Stop atomically cancels only an exact locally never-enqueued media reservation", (t) => {
+  const h = releaseHarness(t); h.messages.length = 0;
+  const stopped = h.service.stop(h.actual.sessionId); assert.ok(stopped.ok);
+  assert.equal(h.db.getSession(h.actual.sessionId)?.status, "stopped");
+  assert.equal(h.prepared.get(h.identity)?.state, "cancelled");
+  assert.equal(h.db.campaignBudgets.active(h.actual.sessionId), false);
+  assert.equal(h.db.campaignBudgets.completedAttestation(h.actual.sessionId), null, "cancellation is never fabricated final usage");
+  assert.ok(h.service.stop(h.actual.sessionId).ok, "duplicate Stop of the cancelled command is a local no-op");
+  assert.deepEqual(h.messages, [], "a locally unqueued command needs no provider Stop");
+});
+test("Stop and archive retain queued unknown, replaced or missing-table media capacity without generic dispatch", async (t) => {
+  for (const mode of ["unknown", "replacement", "missing-table"]) {
+    const h = releaseHarness(t); h.messages.length = 0;
+    if (mode === "unknown") {
+      h.ports.authorize = async () => true; h.ports.send = async () => "unknown";
+      await h.prepared.bind(h.identity, h.binding); await h.prepared.dispatch(h.identity);
+    } else if (mode === "replacement") h.db.campaignBudgets.replaceDispatch(h.actual.sessionId);
+    else h.db.raw().exec("DROP TABLE media_never_dispatched_fences");
+    assert.equal(h.service.stop(h.actual.sessionId).ok, false);
+    assert.equal(h.service.setArchived(h.actual.sessionId, true).ok, false);
+    assert.equal(h.db.getSession(h.actual.sessionId)?.status, "queued");
+    assert.equal(h.db.campaignBudgets.active(h.actual.sessionId), true);
+    assert.equal(h.db.campaignBudgets.completedAttestation(h.actual.sessionId), null);
+    assert.deepEqual(h.messages, []);
+  }
+});
+test("all steering entry points refuse permanent media purpose before persistence or RPC", async (t) => {
+  const h = releaseHarness(t); h.messages.length = 0;
+  h.db.updateSessionStatus(h.actual.sessionId, "running", 9);
+  h.db.raw().prepare("UPDATE sessions SET agent_capabilities=? WHERE id=?")
+    .run(JSON.stringify({ supportsSteering: true }), h.actual.sessionId);
+  h.hub.activeTurnIdForSession = () => "synthetic-active-turn";
+  let requests = 0;
+  h.hub.requestFromRunner = async () => { requests++; throw new Error("Synthetic RPC only, no actual provider"); };
+  for (const invoke of [
+    () => h.service.steer(h.actual.sessionId, { submissionId: "synthetic-steer", turnId: "synthetic-active-turn", text: "Untrusted fixture text" }),
+    () => h.service.promptOrSteer(h.actual.sessionId, "Untrusted fixture text"),
+  ]) {
+    const result = await invoke(); assert.equal(result.ok, false);
+    assert.equal(result.error, MEDIA_SESSION_PURPOSE_ERROR);
+  }
+  assert.equal(requests, 0);
+  assert.equal(h.db.findSteeringAttemptBySubmission(h.actual.sessionId, "synthetic-steer"), null);
+  assert.deepEqual(h.messages, []);
 });
 
 test("original media approval fails closed after durable provenance corruption, revocation and missing runtime", async (t) => {
