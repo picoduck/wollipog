@@ -4492,9 +4492,9 @@ app.get("/api/sessions/:id/events", async (req, reply) => {
       "boundedSessionEventReads")) {
       return reply.code(426).send({
         error: "This runner uses an older unpaged session events reader. Update the Wollipog runner " +
-          "to protocol v219 or newer, or request an explicit limit and eventEpoch.",
+          "to protocol v220 or newer, or request an explicit limit and eventEpoch.",
         code: "session_event_reader_upgrade_required",
-        requiredProtocolVersion: 219,
+        requiredProtocolVersion: 220,
       });
     }
   }

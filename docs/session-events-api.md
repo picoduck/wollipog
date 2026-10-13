@@ -49,12 +49,12 @@ include additional rows within their separate alignment caps; they are not whole
 ## Migrating Consumers
 
 Upgrade installed CLI/MCP readers **before rolling out this control-plane change**. Runner
-protocol 219 introduces the reader that never requests the old whole-history fallback.
+protocol 220 introduces the reader that never requests the old whole-history fallback.
 Older readers can otherwise slice events 171–200 from a bounded first page and wrongly present
 them as the newest window of a much longer log if a later completeness probe succeeds.
 
 The server rejects that identifiable legacy fallback (`after` present, no `limit`, and no
-`eventEpoch`) from an authenticated agent session whose credential's runner is below protocol 219,
+`eventEpoch`) from an authenticated agent session whose credential's runner is below protocol 220,
 with HTTP 426, `code: "session_event_reader_upgrade_required"`, and runner-upgrade guidance.
 The capability comes from the authenticated actor's registered runner, never a request header
 or the runner hosting the target session. Ordinary default requests, epoch-pinned continuation,
@@ -65,6 +65,10 @@ identified as an old installed reader from their event request alone. Upgrade th
 and migrate scripts before upgrading the control plane; the server still returns the normal
 bounded default to human-principal HTTP consumers. A reader that expects one response to be the
 whole log is incompatible regardless of its credentials. Deployment remains an operator action.
+Restart any externally managed or surviving MCP/provider processes launched before the reader
+upgrade before rolling out the control plane; replacing an installed binary does not replace an
+already-running reader process. Normal managed runner shutdown disposes its providers and MCP
+descendants, but the runner's newly registered protocol alone cannot certify an external survivor.
 
 Scripts that used one missing-limit response as the complete transcript must implement the forward
 traversal above. Merely adding `limit=200` and retaining only the first response truncates history.

@@ -299,7 +299,7 @@ export const BUILT_IN_SKILL_SOURCES: readonly BuiltInSkillSource[] = [
           "without `--after` for the true newest window once hydration catches up. Direct HTTP reads of",
           "`GET /api/sessions/:id/events` default to 200 events when `limit` is omitted; use `nextAfter` and",
           "`eventEpoch` to continue rather than treating one response as the whole log.",
-          "Protocol-219 runners use the bounded reader throughout hydration. Update older CLI/MCP",
+          "Protocol-220 runners use the bounded reader throughout hydration. Update older CLI/MCP",
           "installations before upgrading a control plane that serves default pages: an old reader's",
           "whole-log fallback can mistake a bounded first page for the newest window. Identifiable old",
           "agent-session fallbacks fail with runner-upgrade guidance; paired-device CLI calls need the",
