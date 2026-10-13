@@ -492,6 +492,8 @@ interface QueuedPrompt {
   sessionId?: string;
   /** Runner-owned continuation used only to consume orphaned Claude task notifications. */
   syntheticRecovery?: boolean;
+  /** Runner-owned authentication continuation; never attribute it to a user message. */
+  providerRecovery?: boolean;
   /** Control-plane-authenticated automatic campaign turn, distinct from a human prompt. */
   campaignContinuation?: boolean;
   /** Durable managed jobs whose barrier terminal observation caused this continuation. */
@@ -671,6 +673,10 @@ interface ActiveSession {
   authenticationBlocked?: boolean;
   /** Only a terminal refusal paired with a capacity diagnostic can trigger a continuation. */
   providerCapacityFailure?: boolean;
+  /** A runner prompt has crossed its provider boundary in this logical turn. */
+  providerPromptSubmitted?: boolean;
+  /** Only an interrupted runner prompt, rather than an idle process or manual command, resumes. */
+  authenticationInterruptedPrompt?: boolean;
   /** The provider rejected its own stored conversation history. Unlike an authentication block
    * this never clears in place: the FIFO stops draining permanently and the session can only be
    * continued by recovering it into a new conversation. */
@@ -8689,6 +8695,7 @@ export class SessionManager {
     campaignContinuation = false,
     /** The launch's own initial prompt, which precedes whatever queued up while it was admitted. */
     launchInitialPrompt = false,
+    providerRecovery = false,
   ): boolean {
     if (this.roleConversionPending(sessionId)) {
       durable?.failed("wait for the session role change to finish before sending a message", "COMMAND_CANCELLED");
@@ -8764,7 +8771,7 @@ export class SessionManager {
     // adoption authorization, no user event. Retain the attempt so its text is not lost.
     const quarantined = this.store.readMeta(sessionId);
     if (quarantined?.providerHistoryBlock) {
-      if (!syntheticRecovery && !recoveredQuestion && !quarantined.providerHistoryBlock.retry) {
+      if (!(syntheticRecovery || providerRecovery) && !recoveredQuestion && !quarantined.providerHistoryBlock.retry) {
         this.store.patchMeta(sessionId, {
           providerHistoryBlock: {
             ...quarantined.providerHistoryBlock,
@@ -8784,7 +8791,7 @@ export class SessionManager {
       durable?.failed(PROVIDER_HISTORY_QUARANTINE_GUIDANCE, "COMMAND_CANCELLED");
       return false;
     }
-    if (!syntheticRecovery) {
+    if (!(syntheticRecovery || providerRecovery)) {
       const meta = this.store.readMeta(sessionId);
       if (meta && isAdoptedSession(meta) && meta.adoptedBackgroundRecoveryAuthorized !== true) {
         this.store.patchMeta(sessionId, { adoptedBackgroundRecoveryAuthorized: true });
@@ -8793,7 +8800,7 @@ export class SessionManager {
     // The first real message names an untitled session (Codex-style). meta.title is the source of
     // truth (snapshots carry it to the control plane), so set it here; the CP also derives the same
     // title live from the user_message event for immediacy.
-    if (!syntheticRecovery && !recoveredQuestion && !slashCommand && text.trim()) {
+    if (!(syntheticRecovery || providerRecovery) && !recoveredQuestion && !slashCommand && text.trim()) {
       const meta = this.store.readMeta(sessionId);
       if (
         meta &&
@@ -8808,8 +8815,8 @@ export class SessionManager {
     const persistedMeta = this.store.readMeta(sessionId);
     const durableAuthenticationBlock = !!persistedMeta?.providerAuthBlock;
     const projectedAuthenticationBlock = isProviderAuthenticationBlock(persistedMeta?.pendingApproval);
-    if ((durableAuthenticationBlock || projectedAuthenticationBlock) && syntheticRecovery) return false;
-    if (durableAuthenticationBlock && this.providerAuthRecovery && !syntheticRecovery) {
+    if ((durableAuthenticationBlock || projectedAuthenticationBlock) && (syntheticRecovery || providerRecovery)) return false;
+    if (durableAuthenticationBlock && this.providerAuthRecovery && !(syntheticRecovery || providerRecovery)) {
       const guidance = this.blockedPromptAuthenticationGuidance(persistedMeta!);
       if (durable) {
         return this.retainDurableProviderAuthenticationPrompt(
@@ -8853,7 +8860,7 @@ export class SessionManager {
         text,
         images,
         slashCommand,
-        config: effectiveConfig, durable, syntheticRecovery, backgroundJobIds, recoveredQuestion,
+        config: effectiveConfig, durable, syntheticRecovery, providerRecovery, backgroundJobIds, recoveredQuestion,
         campaignContinuation,
       });
       if (!this.recoveryLaunching.has(sessionId)) {
@@ -8880,7 +8887,7 @@ export class SessionManager {
       this.insertQueuedPrompt(sessionId, queue, {
         id: queuedPromptId ?? durable?.commandId ?? randomUUID(),
         ordinal: reservedOrdinal ?? this.nextQueueOrdinal(sessionId), text, images, slashCommand,
-        config: effectiveConfig, durable, syntheticRecovery, backgroundJobIds, recoveredQuestion,
+        config: effectiveConfig, durable, syntheticRecovery, providerRecovery, backgroundJobIds, recoveredQuestion,
         campaignContinuation,
       });
       this.preLaunchQueues.set(sessionId, queue);
@@ -8904,6 +8911,7 @@ export class SessionManager {
         recoveredQuestion,
         queuedPromptId,
         campaignContinuation,
+        providerRecovery,
       ).catch((error) => {
         // resumeAndPrompt handles EXPECTED failures internally (durable.failed / error events). An
         // UNEXPECTED throw (e.g. a JSON.stringify RangeError writing a pathological config) escapes
@@ -8935,7 +8943,7 @@ export class SessionManager {
       durable?.failed("prompt queue is full", "QUEUE_FULL");
       return false;
     }
-    if (entry.authenticationBlocked && !syntheticRecovery) entry.authenticationBlocked = false;
+    if (entry.authenticationBlocked && !(syntheticRecovery || providerRecovery)) entry.authenticationBlocked = false;
     if (projectedAuthenticationBlock) this.store.patchMeta(sessionId, { pendingApproval: null });
     // Config rides the queue ENTRY (applied when it dequeues in drain()) rather than being
     // applied now: with prompts B(config X) and C(config Y) queued, B must run under X, not Y.
@@ -8946,7 +8954,7 @@ export class SessionManager {
       text,
       images,
       slashCommand,
-      config: effectiveConfig, durable, syntheticRecovery, backgroundJobIds, recoveredQuestion,
+      config: effectiveConfig, durable, syntheticRecovery, providerRecovery, backgroundJobIds, recoveredQuestion,
       campaignContinuation,
     });
     this.emitQueue(sessionId);
@@ -9409,7 +9417,7 @@ export class SessionManager {
     if (!prompt) return { eligible: true };
     if ((prompt.durable && (!prompt.recoveredQuestion?.pendingQuestion.async ||
         !prompt.durable.beginSteering || !prompt.durable.steeringRejected)) ||
-        prompt.sessionCommand || prompt.syntheticRecovery) {
+        prompt.sessionCommand || (prompt.syntheticRecovery || prompt.providerRecovery)) {
       return {
         eligible: false,
         reason: "configuration_mismatch",
@@ -9979,7 +9987,7 @@ export class SessionManager {
     if (prompt.sessionCommand) {
       return { eligible: false, message: "Provider commands cannot be edited after admission." };
     }
-    if (prompt.syntheticRecovery || prompt.backgroundJobIds?.length) {
+    if ((prompt.syntheticRecovery || prompt.providerRecovery) || prompt.backgroundJobIds?.length) {
       return { eligible: false, message: "Runner-managed recovery messages cannot be edited." };
     }
     if (prompt.slashCommand) {
@@ -10233,7 +10241,7 @@ export class SessionManager {
    */
   private queueHoldFor(sessionId: string, entry: ActiveSession): SessionQueueHoldView | null {
     if (entry.running || entry.providerInitiatedTurnActive) return null;
-    const waiting = entry.queue.filter((prompt) => !prompt.syntheticRecovery);
+    const waiting = entry.queue.filter((prompt) => !(prompt.syntheticRecovery || prompt.providerRecovery));
     if (waiting.length === 0) return null;
     const kind: SessionQueueHoldKind | null = entry.pendingProviderAccountSwitch
       ? "provider_account_switch"
@@ -10288,7 +10296,7 @@ export class SessionManager {
       ? "provider_account_switch"
       : entry?.pendingWorktreeRebind ? "worktree_rebind" : null;
     const meta = this.store.readMeta(sessionId);
-    const stillWaiting = kind === start.kind && entry!.queue.some((prompt) => !prompt.syntheticRecovery) &&
+    const stillWaiting = kind === start.kind && entry!.queue.some((prompt) => !(prompt.syntheticRecovery || prompt.providerRecovery)) &&
       (!!meta?.backgroundWorkState || !!meta?.pendingBackgroundTaskIds?.length) &&
       !meta?.orphanedWork?.recoveryAttemptedAt;
     if (!stillWaiting) this.handoffWaitStarts.delete(sessionId);
@@ -10565,8 +10573,8 @@ export class SessionManager {
     this.recoveryQueues.delete(sessionId);
     this.preLaunchQueues.delete(sessionId);
     if (replaced.length === 0) return;
-    this.cancelQueued(replaced.filter((prompt) => prompt.syntheticRecovery), "session restart replaced the conversation");
-    const carried = replaced.filter((prompt) => !prompt.syntheticRecovery);
+    this.cancelQueued(replaced.filter((prompt) => (prompt.syntheticRecovery || prompt.providerRecovery)), "session restart replaced the conversation");
+    const carried = replaced.filter((prompt) => !(prompt.syntheticRecovery || prompt.providerRecovery));
     if (carried.length === 0) return;
     // Inserting re-seeds the ordinal counter Restart cleared, so later prompts queue behind these.
     const queue: QueuedPrompt[] = [];
@@ -10627,7 +10635,7 @@ export class SessionManager {
    * containment) dropped the message with no receipt, no error and nothing on the child's
    * timeline. Record it where both sides can see it, quoting enough to resend. */
   private reportDiscardedQueuedPrompt(prompt: QueuedPrompt, reason: string): void {
-    if (prompt.durable || prompt.sessionCommand || prompt.syntheticRecovery ||
+    if (prompt.durable || prompt.sessionCommand || (prompt.syntheticRecovery || prompt.providerRecovery) ||
         prompt.recoveredQuestion || !prompt.sessionId) return;
     const text = (prompt.slashCommand ? `/${prompt.slashCommand} ${prompt.text}` : prompt.text).trim();
     // An attachment-only prompt is valid and just as lost, so it is named by its attachments
@@ -10691,8 +10699,10 @@ export class SessionManager {
     recoveredQuestion?: QueuedPrompt["recoveredQuestion"],
     queuedPromptId?: string,
     campaignContinuation = false,
+    providerRecovery = false,
   ): Promise<void> {
     const meta = this.store.readMeta(sessionId);
+    if (providerRecovery && (!meta || meta.status === "stopped" || !meta.agentSessionId || !canResumeSession(meta))) return;
     if (!meta) {
       this.emitEvent(sessionId, { kind: "error", message: "session is not active on this runner" });
       this.emitStatus(sessionId, "failed");
@@ -10846,6 +10856,7 @@ export class SessionManager {
         config: fresh.config,
         durable,
         syntheticRecovery,
+        providerRecovery,
         backgroundJobIds,
         recoveredQuestion,
         campaignContinuation,
@@ -11007,6 +11018,8 @@ export class SessionManager {
         recoveredQuestion,
         queuedPromptId,
         campaignContinuation,
+        false,
+        providerRecovery,
       );
     }
   }
@@ -11216,6 +11229,7 @@ export class SessionManager {
           entry.currentDurable = undefined;
           entry.currentSessionCommand = undefined;
           entry.sessionCommandProviderStarted = false;
+          entry.providerPromptSubmitted = false;
           entry.currentBackgroundJobIds = undefined;
           entry.backgroundPromptAccepted = undefined;
           entry.backgroundAssistantMessagePersisted = undefined;
@@ -12248,7 +12262,7 @@ export class SessionManager {
     if (this.hasPendingApproval(sessionId)) {
       return this.queuedPromptResolvesPendingQuestion(sessionId, queue[0]);
     }
-    const index = queue.findIndex((prompt) => prompt.syntheticRecovery);
+    const index = queue.findIndex((prompt) => (prompt.syntheticRecovery || prompt.providerRecovery));
     if (index < 0) return false;
     if (index > 0) queue.unshift(queue.splice(index, 1)[0]!);
     return true;
@@ -12655,6 +12669,7 @@ export class SessionManager {
       slashCommand,
       durable,
       syntheticRecovery,
+      providerRecovery,
       backgroundJobIds,
       recoveredQuestion,
       campaignContinuation,
@@ -12776,6 +12791,11 @@ export class SessionManager {
           ...(recoveredQuestion.answerSummary ? { answers: recoveredQuestion.answerSummary } : {}),
           ...(recoveredQuestion.answeredByUserId ? { answeredByUserId: recoveredQuestion.answeredByUserId } : {}),
         }, durable)
+      : providerRecovery
+      ? this.emitEvent(sessionId, {
+          kind: "stderr",
+          text: "Runner continued the interrupted task after authentication was verified.",
+        })
       : syntheticRecovery
       ? this.emitEvent(sessionId, {
           kind: "stderr",
@@ -12995,9 +13015,13 @@ export class SessionManager {
       let stop: Awaited<ReturnType<Driver["prompt"]>>;
       entry.usageWindowRejection = undefined;
       let retryOriginalInput = true;
+      let inputMayHaveBeenDelivered = false;
+      let capacityRetriesExhausted = false;
       for (let attempt = 0; ; attempt++) {
         entry.providerCapacityFailure = false;
+        let caughtCapacityError = false;
         try {
+          entry.providerPromptSubmitted = true;
           stop = await entry.client.prompt(
             retryOriginalInput ? `${text}${workspaceReferenceText}` : PROVIDER_RETRY_CONTINUATION,
             retryOriginalInput ? images : undefined,
@@ -13006,10 +13030,13 @@ export class SessionManager {
         } catch (error) {
           if (!isProviderCapacityFailure(errText(error))) throw error;
           entry.providerCapacityFailure = true;
+          caughtCapacityError = true;
+          this.emitEvent(sessionId, { kind: "stderr", text: "The provider reported that model capacity is temporarily unavailable." });
           stop = "refusal";
         }
         const terminalError = entry.client.lastTurnError?.();
-        if (terminalError) entry.providerCapacityFailure = isProviderCapacityFailure(terminalError);
+        if (!caughtCapacityError && terminalError) entry.providerCapacityFailure = isProviderCapacityFailure(terminalError);
+        if (retryOriginalInput && entry.client.lastPromptUndelivered?.() !== true) inputMayHaveBeenDelivered = true;
         if (stop !== "refusal" || !entry.providerCapacityFailure) {
           if (attempt > 0) this.log(JSON.stringify({ event: "provider_capacity_retry_settled", sessionId,
             entryPoint: "prompt", attempts: attempt, stopReason: stop }));
@@ -13018,9 +13045,17 @@ export class SessionManager {
         const canRetry = () => this.active.get(sessionId) === entry && !this.shuttingDown &&
           !entry.cancelRequested && !entry.interruptRequested && !entry.governanceTripped &&
           !this.queueHeld(entry) && !this.recoveryHolds.has(sessionId) && !this.hasPendingApproval(sessionId) &&
-          !entry.authenticationBlocked && !entry.historyIntegrityFailure && !entry.historyQuarantined;
-        if (!canRetry()) break;
+          !entry.authenticationBlocked && !entry.historyIntegrityFailure && !entry.historyQuarantined &&
+          !entry.pendingProviderAccountSwitch && !entry.pendingWorktreeRebind &&
+          !this.loggingOut.has(sessionId) && !this.closing.has(sessionId) && !this.deleting.has(sessionId) &&
+          !this.rewinding.has(sessionId) && !this.forking.has(sessionId);
+        const holdRetry = () => {
+          if (entry.cancelRequested || entry.interruptRequested || this.active.get(sessionId) !== entry) stop = "cancelled";
+          this.log(JSON.stringify({ event: "provider_capacity_retry_held", sessionId, entryPoint: "prompt", attempt: attempt + 1 }));
+        };
+        if (!canRetry()) { holdRetry(); break; }
         if (attempt >= 3) {
+          capacityRetriesExhausted = true;
           this.emitEvent(sessionId, { kind: "stderr", text: "Model capacity retries exhausted after 3 retries. Retry the turn when capacity is available." });
           this.log(JSON.stringify({ event: "provider_capacity_retry_exhausted", sessionId, entryPoint: "prompt", attempts: 3 }));
           break;
@@ -13035,18 +13070,35 @@ export class SessionManager {
         while (canRetry() && Date.now() < deadline) {
           await new Promise((resolve) => setTimeout(resolve, Math.min(100, deadline - Date.now())));
         }
-        if (!canRetry()) {
-          if (entry.cancelRequested || entry.interruptRequested || this.active.get(sessionId) !== entry) stop = "cancelled";
-          this.log(JSON.stringify({ event: "provider_capacity_retry_held", sessionId, entryPoint: "prompt", attempt: attempt + 1 }));
-          break;
+        if (!canRetry()) { holdRetry(); break; }
+        // Backoff is another awaited boundary. Re-prove the selected tree before spending again.
+        if (entry.worktree) {
+          const path = entry.worktree.path;
+          const branch = entry.worktree.branch;
+          const selected = this.store.readMeta(sessionId);
+          const failure = selected ? await this.persistedWorktreeFailure(selected, path, branch) : "session disappeared";
+          if (!canRetry()) { holdRetry(); break; }
+          if (!entry.worktree || entry.worktree.branch !== branch ||
+              !sameWorktreePath(entry.context, entry.worktree.path, path)) { holdRetry(); break; }
+          if (failure) {
+            if (selected) this.recordWorktreeRecovery(selected, path, failure, "before provider retry");
+            this.emitEvent(sessionId, { kind: "stderr", text: "Model capacity retry paused because the selected worktree needs recovery." });
+            holdRetry();
+            break;
+          }
         }
       }
       if (entry.historyIntegrityFailure) return;
       this.captureAgentSessionId(sessionId, entry.client); // codex threadId becomes known after turn 1
-      if (backgroundJobIds?.length && stop === "refusal" && !entry.backgroundPromptAccepted &&
-          !entry.providerCapacityFailure) {
-        this.resetBackgroundContinuationSubmission(sessionId, backgroundJobIds);
-        this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
+      if (backgroundJobIds?.length && stop === "refusal" && !entry.backgroundPromptAccepted) {
+        if (capacityRetriesExhausted) {
+          // Keep the terminal result for inspection, with an explicit missing-result audit fact.
+          // Exhaustion must not strand a pending submission or create another automatic retry burst.
+          this.markBackgroundContinuationMissingResult(sessionId, backgroundJobIds, true);
+        } else {
+          this.resetBackgroundContinuationSubmission(sessionId, backgroundJobIds);
+          this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
+        }
       }
       if (syntheticRecovery) {
         if (backgroundJobIds?.length) {
@@ -13078,7 +13130,7 @@ export class SessionManager {
           answered: false, resolutionReason: "replaced",
         });
         // Authentication recovery owns its own blocker and replay; do not race it with a re-ask.
-        if (!entry.authenticationBlocked && entry.client.lastPromptUndelivered?.()) {
+        if (!entry.authenticationBlocked && !inputMayHaveBeenDelivered && entry.client.lastPromptUndelivered?.()) {
           rejectedAnswerBlocker = this.reaskAsyncQuestionAfterRejectedTurn(
             sessionId, recoveredQuestion, entry.client.lastTurnError?.() ?? null,
           );
@@ -14575,6 +14627,9 @@ export class SessionManager {
           prompt.backgroundJobIds,
           prompt.recoveredQuestion,
           prompt.id,
+          prompt.campaignContinuation,
+          false,
+          prompt.providerRecovery,
         );
       }
     });
@@ -17323,14 +17378,14 @@ export class SessionManager {
   /** Provider acceptance is the at-most-once fence. Once that exact turn has ended without a
    * complete durable result, retain a terminal audit fact instead of replaying or claiming the
    * continuation is still in flight. */
-  private markBackgroundContinuationMissingResult(sessionId: string, jobIds: string[]): void {
+  private markBackgroundContinuationMissingResult(sessionId: string, jobIds: string[], exhaustedBeforeAcceptance = false): void {
     const current = this.store.readMeta(sessionId);
     if (!current?.backgroundJobs) return;
     const selected = new Set(jobIds);
     const missingResultAt = Date.now();
     let changed = false;
     const backgroundJobs = current.backgroundJobs.map((job) => {
-      if (!selected.has(job.id) || !job.continuationAcceptedAt || job.assistantResultPersistedAt ||
+      if (!selected.has(job.id) || (!job.continuationAcceptedAt && !exhaustedBeforeAcceptance) || job.assistantResultPersistedAt ||
           job.continuationMissingResultAt) return job;
       changed = true;
       return { ...job, continuationMissingResultAt: missingResultAt };
@@ -17652,7 +17707,7 @@ export class SessionManager {
       return;
     }
     if ((entry && this.queueHeld(entry)) || entry?.running ||
-        entry?.queue.some((prompt) => prompt.syntheticRecovery)) {
+        entry?.queue.some((prompt) => (prompt.syntheticRecovery || prompt.providerRecovery))) {
       this.scheduleOrphanRecovery(sessionId, ORPHAN_RECOVERY_RETRY_MS);
       return;
     }
@@ -18562,6 +18617,8 @@ export class SessionManager {
     const entry = this.active.get(sessionId);
     const meta = this.store.readMeta(sessionId);
     if (!entry || !meta || entry.authenticationBlocked || entry.historyIntegrityFailure) return;
+    entry.authenticationInterruptedPrompt = entry.providerPromptSubmitted === true &&
+      !entry.currentSessionCommand && !entry.providerInitiatedTurnActive;
     entry.authenticationBlocked = true;
     const scope = this.executionIsolation.mode === "bwrap" && launchMeta.context.kind === "wsl" &&
       this.authorizeSafeWslLaunch?.(launchMeta) === true
@@ -18654,7 +18711,10 @@ export class SessionManager {
       });
       this.store.flush(sessionId);
       const entry = this.active.get(sessionId);
-      if (entry) entry.authenticationBlocked = false;
+      if (entry) {
+        entry.authenticationBlocked = false;
+        entry.authenticationInterruptedPrompt = false;
+      }
       this.emitEvent(sessionId, {
         kind: "permission_resolved",
         requestId,
@@ -18931,7 +18991,11 @@ export class SessionManager {
       // Persist the one-shot tombstone before the recovered prompt can reach a provider.
       if (retry || durableRetries.length) this.store.flush(meta.sessionId);
       const entry = this.active.get(meta.sessionId);
-      if (entry) entry.authenticationBlocked = false;
+      const continueInterruptedPrompt = entry?.authenticationInterruptedPrompt === true;
+      if (entry) {
+        entry.authenticationBlocked = false;
+        entry.authenticationInterruptedPrompt = false;
+      }
       if (meta.agentId) this.onAgentAuthUpdate?.(meta.agentId, { status: "authenticated" });
       if (meta.pendingApproval?.requestId === providerAuthenticationRequestId(block)) {
         this.emitEvent(meta.sessionId, {
@@ -18966,7 +19030,7 @@ export class SessionManager {
           retry.ordinal,
           true,
         );
-      } else if (entry && !targetOnly && block.delivery === "uncertain" && block.phase === "turn" &&
+      } else if (entry && continueInterruptedPrompt && !targetOnly && block.delivery === "uncertain" && block.phase === "turn" &&
           !entry.queue.length && !this.recoveryQueues.has(meta.sessionId) &&
           !this.shuttingDown && !entry.cancelRequested && !entry.interruptRequested &&
           !this.queueHeld(entry) && !this.backgroundRecoveryHeld(meta) && !this.hasPendingApproval(meta.sessionId) &&
@@ -18974,7 +19038,15 @@ export class SessionManager {
         this.log(JSON.stringify({ event: "provider_authentication_continue", sessionId: meta.sessionId,
           entryPoint: targetResolutionOptionId }));
         this.emitEvent(meta.sessionId, { kind: "stderr", text: "Authentication was verified. Continuing the interrupted task in the existing conversation." });
-        this.prompt(meta.sessionId, PROVIDER_RETRY_CONTINUATION);
+        this.insertQueuedPrompt(meta.sessionId, entry.queue, {
+          id: `authcont_${randomUUID()}`,
+          text: PROVIDER_RETRY_CONTINUATION,
+          images: [],
+          providerRecovery: true,
+          config: this.snapshotQueuedConfig(meta.sessionId),
+        });
+        this.emitQueue(meta.sessionId);
+        this.scheduleDrain(meta.sessionId);
       } else {
         this.emitStatus(meta.sessionId, "idle");
         if (this.recoveryQueues.has(meta.sessionId)) {

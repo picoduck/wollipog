@@ -106,7 +106,9 @@ function harness(
   const logs: string[] = [];
   const prompts: Array<{ home: string; text: string; resumeId?: string }> = [];
   const disposedHomes: string[] = [];
+  let latestCallbacks!: DriverCallbacks;
   const factory = (_kind: AgentDriverKind, options: DriverOptions, callbacks: DriverCallbacks): Driver => {
+    latestCallbacks = callbacks;
     const home = options.env.CLAUDE_CONFIG_DIR ?? "<none>";
     return {
       get pid() { return undefined; },
@@ -168,6 +170,7 @@ function harness(
     logs,
     prompts,
     disposedHomes,
+    callbacks: () => latestCallbacks,
     probes,
     manager,
     cleanup: () => {
@@ -496,6 +499,7 @@ test("mid-turn authentication recovery continues automatically after the same ac
     h.manager.prompt(SESSION, "original task");
     await waitFor(() => h.prompts.length === 2, "authentication recovery left the interrupted session idle");
     assert.match(h.prompts[1]!.text, /Continue/);
+    assert.equal(h.store.readEvents(SESSION).filter((event) => event.payload.kind === "user_message").length, 1);
     assert.equal(h.prompts.filter((prompt) => prompt.text === "original task").length, 1);
   } finally { h.cleanup(); }
 });
@@ -516,6 +520,7 @@ test("manual Retry continues a mid-turn authentication failure once credentials 
     h.manager.resolvePermission(SESSION, card.requestId, "auth:revalidate");
     await waitFor(() => h.prompts.length === 2, "manual Retry did not continue");
     assert.match(h.prompts[1]!.text, /Continue/);
+    assert.equal(h.store.readEvents(SESSION).filter((event) => event.payload.kind === "user_message").length, 1);
   } finally { h.cleanup(); }
 });
 
@@ -526,5 +531,22 @@ test("repeated mid-turn authentication failure stops automatic retries and offer
     h.manager.prompt(SESSION, "original task");
     await waitFor(() => h.store.readMeta(SESSION)?.pendingApproval?.kind === "authentication", "repeated failure did not surface recovery");
     assert.equal(h.prompts.length, 2, "only one automatic continuation is allowed without a healthy turn");
+  } finally { h.cleanup(); }
+});
+
+for (const lane of ["idle", "provider", "command"]) test(`authentication recovery never invents a prompt for the ${lane} lane`, async () => {
+  const h = harness({ "/claude/work": { observations: [{ status: "authenticated", identityId: "identity-work" }] } });
+  try {
+    h.manager.prompt(SESSION, "finished task");
+    await waitFor(() => h.prompts.length === 1 && !(h.manager as any).active.get(SESSION)?.running, "initial task did not finish");
+    const entry = (h.manager as any).active.get(SESSION);
+    if (lane === "provider") entry.providerInitiatedTurnActive = true;
+    if (lane === "command") entry.currentSessionCommand = { commandId: "manual-command" };
+    h.callbacks().onAuthenticationFailure?.();
+    if (lane === "provider") entry.providerInitiatedTurnActive = false;
+    if (lane === "command") entry.currentSessionCommand = undefined;
+    await waitFor(() => !h.store.readMeta(SESSION)?.providerAuthBlock, "authentication did not recover");
+    assert.equal(h.prompts.length, 1, "no runner prompt was interrupted");
+    assert.equal(h.store.readEvents(SESSION).filter((event) => event.payload.kind === "user_message").length, 1);
   } finally { h.cleanup(); }
 });
