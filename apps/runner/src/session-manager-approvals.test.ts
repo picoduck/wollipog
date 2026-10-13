@@ -694,8 +694,8 @@ test("a late async dismissal cannot clear a reused provider request id", () => {
   }
 });
 
-for (const outcome of ["accepted", "rejected", "uncertain", "cancelled", "restored", "discarded"] as const) {
-  test(`a durable async answer uses steering and handles ${outcome} delivery without reopening`, async () => {
+for (const automated of [false, true]) for (const outcome of ["accepted", "rejected", "uncertain", "cancelled", "restored", "discarded"] as const) {
+  test(`a durable async answer uses steering and handles ${outcome} delivery without reopening${automated ? " during an automation-owned turn" : ""}`, async () => {
     const { sm, sent, store, cleanup } = makeHarness(true);
     try {
       const entry = (sm as any).active.get("s_perm");
@@ -719,6 +719,13 @@ for (const outcome of ["accepted", "rejected", "uncertain", "cancelled", "restor
       });
       const recoveryId = store.readMeta("s_perm")!.pendingApproval!.recoveryId!;
       const transitions: string[] = [];
+      const automationTransitions: string[] = [];
+      const automation = { commandId: "active_automation",
+        started: () => { automationTransitions.push("started"); },
+        completed: () => { automationTransitions.push("completed"); },
+        failed: () => { automationTransitions.push("failed"); },
+        uncertain: () => { automationTransitions.push("uncertain"); } };
+      if (automated) entry.currentDurable = automation;
       // Hold the lane before provider submission, as when an earlier steering attempt owns it.
       const beforeProvider = outcome === "restored" || outcome === "discarded";
       if (beforeProvider) (sm as any).steeringLaneRunning.add("s_perm");
@@ -732,6 +739,8 @@ for (const outcome of ["accepted", "rejected", "uncertain", "cancelled", "restor
         failed: () => { transitions.push("failed"); },
         uncertain: () => { transitions.push("uncertain"); },
       });
+      assert.equal(entry.currentDurable, automated ? automation : undefined);
+      assert.deepEqual(automationTransitions, [], "answer delivery must preserve automation receipt ownership");
       if (beforeProvider) {
         assert.equal(steers.length, 0);
         assert.equal(entry.reservedPromotions.size, 1);
@@ -764,6 +773,8 @@ for (const outcome of ["accepted", "rejected", "uncertain", "cancelled", "restor
         await new Promise<void>((resolve) => setImmediate(resolve));
       }
       assert.equal(steers.length, 1);
+      assert.equal(entry.currentDurable, automated ? automation : undefined);
+      assert.deepEqual(automationTransitions, [], "answer delivery must preserve automation receipt ownership");
       assert.match(steers[0]!.text, /Question: Which path\?\nAnswer: Patch/u);
       assert.equal(steers[0]!.submissionId, "async_steer_command");
       assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
