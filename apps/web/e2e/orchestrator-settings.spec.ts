@@ -116,14 +116,37 @@ test.describe("on a phone", () => {
 });
 
 test("an invalid number blocks Save with a count, and a failed save keeps the draft with Try Again", async ({ page }) => {
-  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/settings-rows-e2e.html?theme=dark&section=orchestrator&orchestrator=save-fails");
   const limit = page.getByRole("spinbutton", { name: "Maximum Concurrent Children" });
+  const save = page.locator(".save-bar").getByRole("button", { name: "Save Defaults" });
+  const fill = (locator: typeof save) => locator.evaluate((element) => getComputedStyle(element).backgroundColor);
+  // The primary's own fill while Save can save, and the unavailable fill it must take instead.
+  await limit.fill("7");
+  await expect(save).not.toHaveAttribute("aria-disabled", "true");
+  const saveable = await fill(save);
+  const unavailable = await page.evaluate(() => {
+    const probe = document.createElement("div");
+    probe.style.background = "var(--bg-elev-2)";
+    document.body.append(probe);
+    const value = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    return value;
+  });
+  expect(unavailable).not.toBe(saveable);
+
   await limit.fill("65");
   await expect(limit).toHaveAttribute("aria-invalid", "true");
   await expect(page.getByText("Enter a whole number from 0 to 64.")).toBeVisible();
   await expect(page.locator(".save-bar-message")).toHaveText("Fix 1 setting to save");
-  await expect(page.getByRole("button", { name: "Save Defaults" })).toHaveAttribute("aria-disabled", "true");
+  // With focus still in the invalid field, at desktop width, Save is refused and drawn as refused.
+  await expect(limit).toBeFocused();
+  await expect(save).toHaveAttribute("aria-disabled", "true");
+  await expect.poll(() => fill(save), { message: "Save is painted unavailable, not as the primary" }).toBe(unavailable);
+  // Playwright will not click an aria-disabled button, so the press is dispatched: it must not save.
+  await save.dispatchEvent("click");
+  await expect(page.locator(".save-bar-message")).toHaveText("Fix 1 setting to save");
+  await expect(page.locator(".save-bar.is-error")).toHaveCount(0);
 
   await limit.fill("12");
   await page.getByRole("button", { name: "Save Defaults" }).click();
