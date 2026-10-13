@@ -27,7 +27,7 @@ import type {
   ShellStatus,
   UiToControlPlane,
 } from "@wollipog/protocol";
-import { pendingRequests } from "@wollipog/protocol";
+import { pendingRequests, UI_SUBSCRIPTION_RATE_WINDOW_MS } from "@wollipog/protocol";
 import { reconcileQuestionDrafts } from "./question-drafts.js";
 import { CONTROL_PLANE_WS } from "./config.js";
 import { expireFollowTailAnchor } from "./useFollowTail.js";
@@ -73,6 +73,7 @@ import {
 import {
   EMPTY_UI_SUBSCRIPTION_DELIVERY,
   eventHighWater,
+  UiSubscriptionPacer,
   UiSubscriptionSynchronizer,
   isSessionActivityObservable,
   type UiSubscriptionDeliveryState,
@@ -2889,17 +2890,30 @@ export function StoreProvider({
     let reconnectDelay = 1_500;
     let cancelBackgroundObservations = () => {};
     const subscriptionSync = new UiSubscriptionSynchronizer();
+    // Lives as long as the store, not the socket: the server's admission window survives reconnects.
+    const subscriptionPacer = new UiSubscriptionPacer();
+    let subscriptionPaceTimer: number | null = null;
     const syncSubscriptions = () => {
       const ws = wsRef.current;
-      if (!ws || ws.readyState !== UI_SOCKET_OPEN) return;
+      // A scheduled trailing send reads the store when it fires, so it carries the latest selection.
+      if (!ws || ws.readyState !== UI_SOCKET_OPEN || subscriptionPaceTimer !== null) return;
       const state = store.getState();
-      const msg: UiToControlPlane | null = subscriptionSync.nextMessage(
-        state,
-        // A paged header and partial rows are not an authoritative selection. Sending each
-        // growing inventory wastes the principal's shared admission window on every connect.
-        state.streamSubscriptions.mode === "targeted" && state.snapshotLoaded,
-      );
+      // A paged header and partial rows are not an authoritative selection. Sending each
+      // growing inventory wastes the principal's shared admission window on every connect.
+      const enabled = state.streamSubscriptions.mode === "targeted" && state.snapshotLoaded;
+      if (!subscriptionSync.pending(state, enabled)) return;
+      // Monotonic: a wall-clock step forward must not grant refill the server's window never granted.
+      const wait = subscriptionPacer.delay(performance.now());
+      if (wait > 0) {
+        subscriptionPaceTimer = window.setTimeout(() => {
+          subscriptionPaceTimer = null;
+          if (!closed) syncSubscriptions();
+        }, wait);
+        return;
+      }
+      const msg: UiToControlPlane | null = subscriptionSync.nextMessage(state, enabled);
       if (!msg || msg.type !== "session_subscriptions") return;
+      subscriptionPacer.take(performance.now());
       // Freeze the durable recovery cursor before the server can apply this replacement. A live
       // event delivered immediately after its acknowledgement must not advance us past older gaps.
       store.prepareSubscriptionRecovery(msg.revision, msg.sessionIds);
@@ -2993,7 +3007,12 @@ export function StoreProvider({
         const unauthorized = ev.code === 1008;
         dispatch({ type: "conn", conn: unauthorized ? "unauthorized" : "offline", authRequired: unauthorized || undefined });
         // Equal jitter avoids synchronized retry waves, while the exponential window is capped.
-        const delay = unauthorized ? 10_000 : reconnectDelay * (0.5 + Math.random() * 0.5);
+        const jittered = reconnectDelay * (0.5 + Math.random() * 0.5);
+        // 1013 is the CP's per-window admission refusing this caller (#3122). Its window survives
+        // reconnects, so retrying inside it is refused again; wait it out once instead of flapping.
+        // The wait stays bounded by the same 30-second ceiling as ordinary backoff.
+        const delay = unauthorized ? 10_000
+          : ev.code === 1013 ? Math.max(jittered, UI_SUBSCRIPTION_RATE_WINDOW_MS) : jittered;
         if (!unauthorized) reconnectDelay = Math.min(30_000, reconnectDelay * 2);
         reconnectRef.current = window.setTimeout(() => {
           reconnectRef.current = null;
@@ -3039,6 +3058,8 @@ export function StoreProvider({
       cancelBackgroundObservations();
       if (reconnectRef.current) window.clearTimeout(reconnectRef.current);
       reconnectRef.current = null;
+      if (subscriptionPaceTimer !== null) window.clearTimeout(subscriptionPaceTimer);
+      subscriptionPaceTimer = null;
       const ws = wsRef.current;
       if (ws) {
         ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
