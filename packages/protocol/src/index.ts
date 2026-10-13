@@ -670,7 +670,8 @@
 //      closed by a `settled` record. Runners send them only to a v216+ control plane.
 // 217: bounded Full Control issue lineage, publication admission and verified closure.
 // 218: durable campaign allowance, final managed usage and controlled native review admission.
-export const PROTOCOL_VERSION = 218;
+// 219: CLI/MCP event readers never use the legacy unpaged hydration fallback.
+export const PROTOCOL_VERSION = 219;
 
 export * from "./campaign-authority.js";
 export * from "./campaign-issue-publication.js";
@@ -885,6 +886,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   automationCommandReceipts: 53,
   runnerLocalAgentEnv: 54,
   indexedHistory: 55,
+  /** CLI/MCP event reader keeps incomplete-cache reads paged. Older readers assume the unpaged
+   * hydration fallback returns the whole log and can mislabel a bounded prefix as its newest tail. */
+  boundedSessionEventReads: 219,
   authoritativeHistoryWindow: 213,
   promptImageReferences: 56,
   durableSessionShells: 57,

@@ -10,6 +10,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import {
   PROTOCOL_VERSION,
+  RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
   type ResourceScope,
   type RunnerMetadata,
@@ -31,11 +32,23 @@ test("missing-limit event reads page 50,000 cached events with exact continuatio
   seed.registerRunner({
     runnerId: "offline-default-events", hostname: "fixture", os: "linux", version: "fixture",
     workspaces: [{ id: "fixture", name: "Fixture", path: temp }], agents: [],
-  }, Date.now(), 0);
+  }, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads - 1);
   seed.createSession({
     id: "default-events", runnerId: "offline-default-events", workspaceId: "fixture",
     agentId: "fixture", title: "Fixture", useWorktree: false, driver: "claude-code", config: {}, now: 1,
   });
+  seed.registerRunner({
+    runnerId: "current-default-events", hostname: "fixture-current", os: "linux", version: "fixture",
+    workspaces: [{ id: "fixture", name: "Fixture", path: temp }], agents: [],
+  }, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads);
+  seed.createSession({
+    id: "current-event-reader", runnerId: "current-default-events", workspaceId: "fixture",
+    agentId: "fixture", title: "Current Reader", useWorktree: false, driver: "claude-code", config: {}, now: 1,
+  });
+  const oldReaderToken = "fixture-old-event-reader";
+  const currentReaderToken = "fixture-current-event-reader";
+  assert.equal(seed.setAgentControlCredential("default-events", "offline-default-events", hashToken(oldReaderToken), Date.now()), true);
+  assert.equal(seed.setAgentControlCredential("current-event-reader", "current-default-events", hashToken(currentReaderToken), Date.now()), true);
   const raw = seed.raw();
   const insert = raw.prepare("INSERT INTO session_events(session_id,seq,ts,kind,payload) VALUES(?,?,?,?,?)");
   raw.exec("BEGIN");
@@ -56,7 +69,38 @@ test("missing-limit event reads page 50,000 cached events with exact continuatio
   t.after(async () => { await stopChild(child); rmSync(temp, { recursive: true, force: true }); });
   const base = `http://127.0.0.1:${port}`;
   await waitForHealth(base, child, () => output);
+  // Startup settles orphaned sessions. Restore only these disposable credential actors as live,
+  // so the production auth path, rather than a forged header, determines the reader's runner.
+  const actors = ControlPlaneDb.open(databasePath);
+  actors.updateSessionStatus("default-events", "running", Date.now());
+  actors.updateSessionStatus("current-event-reader", "running", Date.now());
+  actors.close();
   const read = (query = "") => fetchWithBearer(`${base}/api/sessions/default-events/events${query}`, ownerToken);
+  const agentRead = (actor: string, token: string, target: string, query: string) =>
+    fetchWithBearer(`${base}/api/sessions/${target}/events${query}`, token, {
+      headers: { [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: actor, "x-wollipog-protocol-version": String(PROTOCOL_VERSION) },
+    });
+  const legacyFallback = await agentRead("default-events", oldReaderToken, "default-events", "?after=0");
+  assert.equal(legacyFallback.status, 426, "an old installed reader's exact unpaged fallback cannot return a misleading prefix");
+  const upgrade = await legacyFallback.json() as { error: string; code: string; requiredProtocolVersion: number };
+  assert.equal(upgrade.code, "session_event_reader_upgrade_required");
+  assert.equal(upgrade.requiredProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads);
+  assert.match(upgrade.error, /Update the Wollipog runner/);
+  assert.equal((await agentRead("default-events", oldReaderToken, "current-event-reader", "?after=0")).status, 426,
+    "the guard uses the credential actor's old runner even when the target is on a new runner");
+  assert.equal((await agentRead("current-event-reader", currentReaderToken, "default-events", "?after=0")).status, 200,
+    "a current reader can inspect a legacy runner's cached history");
+  for (const query of ["", "?after=0&eventEpoch=0", "?direction=backward&limit=30&eventEpoch=0", "?after=0&limit=30&eventEpoch=0"]) {
+    assert.equal((await agentRead("default-events", oldReaderToken, "default-events", query)).status, 200,
+      `ordinary/default and explicit paged agent reads remain valid: ${query}`);
+  }
+  assert.equal((await agentRead("current-event-reader", oldReaderToken, "default-events", "?after=0")).status, 401,
+    "a token cannot claim a different actor to bypass the compatibility guard");
+  assert.equal((await fetch(`${base}/api/sessions/default-events/events?after=0`, {
+    headers: { [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: "default-events" },
+  })).status, 401);
+  assert.equal((await agentRead("default-events", ownerToken, "default-events", "?after=0")).status, 200,
+    "a human principal's raw HTTP request stays paged even with an untrusted actor header");
   type Page = { events: Array<{ seq: number }>; nextAfter: number; eventEpoch: number; hasMoreCached: boolean; cacheComplete: boolean };
   let page = await (await read()).json() as Page;
   assert.equal(page.events.length, 200, "omission returns the established 200-event page, not the entire log");
@@ -1478,6 +1522,11 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   )).json() as { events: unknown[]; cacheComplete: boolean };
   assert.deepEqual(coldPage.events, [], "the default page returns the cache before runner I/O completes");
   assert.equal(coldPage.cacheComplete, false);
+  const explicitColdPage = await (await ownerFetch(
+    "/api/sessions/session-history/events?after=0&limit=2&eventEpoch=0",
+  )).json() as { events: unknown[]; cacheComplete: boolean };
+  assert.deepEqual(explicitColdPage.events, [], "explicit pages also return before runner I/O completes");
+  assert.equal(explicitColdPage.cacheComplete, false);
   const historyRequest1 = await runnerInbox.take((message) => message.type === "session_history_page");
   assert.equal(historyRequest1.afterSeq, 0);
   runner.send(JSON.stringify({

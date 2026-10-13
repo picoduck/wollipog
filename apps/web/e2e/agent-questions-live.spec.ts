@@ -376,13 +376,13 @@ async function startLiveStack(
       )) return stack;
       if (session.status === "failed") {
         throw new Error(`session failed before asking a question: ${JSON.stringify(session)}\n` +
-          `events: ${JSON.stringify(await fetchEvents(stack))}\n${logs()}`);
+          `events: ${JSON.stringify(await fetchEvents(stack).catch(String))}\n${logs()}`);
       }
       await delay(100);
     }
     throw new Error(`${provider === "codex" ? "Codex" : "Claude"} question never reached the control plane` +
       `${awaitIdle ? " with the session idle" : ""}\n` +
-      `session: ${JSON.stringify(lastSession)}\nevents: ${JSON.stringify(await fetchEvents(stack))}\n${logs()}`);
+      `session: ${JSON.stringify(lastSession)}\nevents: ${JSON.stringify(await fetchEvents(stack).catch(String))}\n${logs()}`);
   } catch (error) {
     await stop();
     throw error;
@@ -591,7 +591,7 @@ for (const viewport of [
   } catch (error) {
     throw new Error(`${error instanceof Error ? error.stack : String(error)}\n` +
       `session: ${JSON.stringify(await fetchSession(stack))}\n` +
-      `events: ${JSON.stringify((await fetchEvents(stack)).events.map((event) => event.payload))}\n${stack.logs()}`);
+      `events: ${JSON.stringify(await fetchEvents(stack).then(result => result.events.map(event => event.payload)).catch(String))}\n${stack.logs()}`);
   } finally {
     await stack.stop();
   }

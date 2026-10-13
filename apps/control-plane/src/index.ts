@@ -4481,6 +4481,23 @@ app.get("/api/sessions/:id/events", async (req, reply) => {
       eventEpoch: state.eventEpoch,
     });
   }
+  // Installed old CLI/MCP readers use exactly this fallback shape, then slice the response as if
+  // it contained the whole log. Their later tail probe can mark a first page as the true newest
+  // window. Fence that identifiable agent call instead of silently supplying misleading rows.
+  const principal = requestPrincipal(req);
+  if (query.limit === undefined && query.after !== undefined && query.eventEpoch === undefined &&
+      principal?.kind === "agent" && principal.credentialSessionId) {
+    const actor = db.getSession(principal.credentialSessionId);
+    if (!runnerSupportsProtocol(actor ? db.getRunner(actor.runnerId)?.protocolVersion : undefined,
+      "boundedSessionEventReads")) {
+      return reply.code(426).send({
+        error: "This runner uses an older unpaged session events reader. Update the Wollipog runner " +
+          "to protocol v219 or newer, or request an explicit limit and eventEpoch.",
+        code: "session_event_reader_upgrade_required",
+        requiredProtocolVersion: 219,
+      });
+    }
+  }
   const indexed = runnerSupportsProtocol(db.getRunner(session.runnerId)?.protocolVersion, "indexedHistory");
   const cacheComplete = indexed ? state.complete : state.hydratedSeq >= state.tailSeq;
   if (currentTurnOpening) {

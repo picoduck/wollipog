@@ -143,6 +143,9 @@ cursor to the new log.
 Direct HTTP consumers use a default page of 200 events when `limit` is omitted. A missing limit
 never requests the whole log. See [the session events API migration guide](./session-events-api.md)
 for continuation cursors, incomplete-cache retries, and history replacement handling.
+Upgrade CLI/MCP installations to the protocol-219 reader before rolling out this server change.
+Identifiable older agent-session unpaged fallbacks receive upgrade guidance; human-principal
+paired-device CLI calls must follow the documented upgrade-first migration.
 
 `wollipog admin` is host administration for an SSH operator on the control-plane machine. It
 authenticates with the control plane's protected local credential over loopback instead of a
