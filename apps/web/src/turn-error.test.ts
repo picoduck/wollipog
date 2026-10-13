@@ -14,6 +14,11 @@ test("describeTurnError says known failures in plain words", () => {
     ["prompt failed: read ECONNRESET", "The connection to the provider was lost."],
     ["fetch failed", "The connection to the provider was lost."],
     ["Your request was flagged as potentially violating our usage policy", "The provider rejected the content of this turn."],
+    // The hold quotes the provider's error; a quoted usage-limit error must not decide the sentence.
+    ["Codex rejected two turns in a row with the same error: turn/start failed: 429 Too Many Requests. " +
+      "Automatic turns are held until you send a message or restart the session.",
+    "The provider rejected two turns in a row with the same error, so automatic turns are held. " +
+      "Send a message or restart the session to continue."],
   ];
   for (const [message, sentence] of cases) assert.equal(describeTurnError(message), sentence, message);
 });

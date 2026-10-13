@@ -31,6 +31,12 @@ test("Retry Turn prompts an idle session of any driver", () => {
   }
 });
 
+test("Retry Turn prompts a session held between turns, since a person's message is what continues it (#3100)", () => {
+  assert.deepEqual(turnRetryPlan({ ...ready, status: "input_required", heldBetweenTurns: true }), { kind: "prompt" });
+  assert.deepEqual(turnRetryPlan({ ...ready, status: "input_required" }),
+    { kind: "unavailable", reason: TURN_RETRY_BUSY_REASON }, "a turn paused for a request is still busy");
+});
+
 test("Retry Turn restarts a failed or stopped session first only where the restart resumes", () => {
   for (const status of ["failed", "stopped", "completed"] as const) {
     for (const driver of ["codex-app-server", "pi"] as const) {
@@ -61,6 +67,7 @@ test("Retry Turn names why the session cannot take a new turn", () => {
   for (const status of ["running", "starting", "queued", "input_required"] as const) {
     assert.equal(reason({ status }), TURN_RETRY_BUSY_REASON, status);
   }
+  assert.equal(reason({ status: "running", heldBetweenTurns: true }), TURN_RETRY_BUSY_REASON);
   assert.equal(reason({ promptRefusal: "Viewers can't send messages.", runnerOnline: false }), "Viewers can't send messages.",
     "the composer's order: a refusal before the runner");
 });

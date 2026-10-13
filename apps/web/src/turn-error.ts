@@ -10,6 +10,13 @@ export const TURN_ERROR_FALLBACK = "The agent stopped because of an error.";
  */
 const TURN_ERROR_SHAPES: ReadonlyArray<{ pattern: RegExp; sentence: string }> = [
   {
+    // The runner's own hold notice (#3100). It quotes the provider's error, which may match a later
+    // shape, so it is tested first.
+    pattern: /\bAutomatic turns are held until you send a message or restart the session\.$/,
+    sentence: "The provider rejected two turns in a row with the same error, so automatic turns are held. " +
+      "Send a message or restart the session to continue.",
+  },
+  {
     pattern: /\b(?:rate[ -]?limit|usage limit|quota|too many requests|429|credit balance (?:is )?too low|hit your limit)\b/i,
     sentence: "The provider's usage limit was reached. Wait for it to reset, then retry.",
   },
