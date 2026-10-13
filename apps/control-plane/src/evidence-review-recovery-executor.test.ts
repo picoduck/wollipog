@@ -232,3 +232,15 @@ test("wrong operation/gate/criteria and extra stage payload are uncertain, never
     assert.equal(h.calls.length, 3);
   }
 });
+
+test("CR2 Reproduction F3 refreshed expiry never reports an uncertain durable mutation as rejected", async (t) => {
+  const h = harness(t); h.lose("capture");
+  assert.equal((await h.executor.execute(subject, split())).state, "uncertain");
+  const before = h.calls.length, reads = h.reconciles.length;
+  h.authority().capture.expiresAt++;
+  const resumed = await h.executor.execute(subject, split());
+  assert.equal(h.db.prepare("SELECT state FROM evidence_recovery_attempts").get()?.state, "uncertain");
+  assert.equal(h.calls.length, before, "renewal cannot authorize replay/another capture or refund");
+  assert.equal(h.reconciles.length, reads, "renewed authority cannot read back the old effect");
+  assert.equal(resumed.state, "uncertain", "truthful uncertainty must retain the exact original outcome fence");
+});

@@ -17,6 +17,11 @@ import { prepareVideoEvidence, videoPreparationDecoderAvailable } from "./video-
 
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 const source = readFileSync(new URL("../test-fixtures/video-preparation-paced.webm", import.meta.url));
+/** Minimal actual referenced rows for this metadata-store fixture; no managed Session or grant. */
+function fixtureSessions(db: DatabaseSync): void {
+  db.exec("CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY);" +
+    "INSERT OR IGNORE INTO sessions VALUES ('root'),('child'),('reviewer');");
+}
 const admission = { rootSessionId: "root", authorityRevision: 4,
   dispatch: { rootSessionId: "root", generation: "synthetic-dispatch-generation" },
   allocation: { sessionId: "reviewer", costUsd: 1, toolCalls: 1000 },
@@ -49,6 +54,7 @@ before(async () => {
 function fixture(t: { skip(reason: string): void; after(fn: () => void): void }) {
   if (!template) { t.skip("isolated decoder unavailable"); return null; }
   const db = new DatabaseSync(":memory:");
+  fixtureSessions(db);
   t.after(() => db.close());
   const frameBytes = new Map<number, Buffer>();
   const frames: VideoReviewFrameStorage = {
@@ -251,6 +257,7 @@ test("SQLite receipts and verdict absence survive process restart", async (t) =>
     deleteFrame: (_r, i) => { bytes.delete(i); },
   };
   let db = new DatabaseSync(path);
+  fixtureSessions(db);
   let store = new SqliteVideoReviewStore(db, frames);
   store.saveDerived(template, images);
   const access = { currentBinding: () => binding, readSource: () => source, workerAdmission: () => workerAdmission, normalCompletion: () => false };
@@ -269,6 +276,7 @@ test("SQLite receipts and verdict absence survive process restart", async (t) =>
 test("failed frame storage rolls back metadata and removes only its own new partial frames", (t) => {
   if (!template) { t.skip("isolated decoder unavailable"); return; }
   const db = new DatabaseSync(":memory:"); t.after(() => db.close());
+  fixtureSessions(db);
   const bytes = new Map<number, Buffer>();
   const store = new SqliteVideoReviewStore(db, {
     writeFrame: (_r, i, b) => { bytes.set(i, b); if (i === 1) throw new Error("storage refused"); },

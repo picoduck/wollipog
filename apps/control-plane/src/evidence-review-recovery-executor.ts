@@ -203,7 +203,11 @@ export class EvidenceRecoveryExecutor {
       row = this.db.prepare("SELECT * FROM evidence_recovery_attempts WHERE lineage_key=? AND attempt=?").get(lineageKey, attempt) as AttemptRow;
       this.db.exec("COMMIT");
     } catch (error) { if (this.db.isTransaction) this.db.exec("ROLLBACK"); throw error; }
-    if (row.intent !== JSON.stringify(intent) || row.operation_id !== operationId) return { state: "rejected" };
+    // Changed current authority cannot authorize readback or replay of an old mutation. Its
+    // unknown outcome remains unknown, rather than implying a durable rejection or safe retry.
+    if (row.intent !== JSON.stringify(intent) || row.operation_id !== operationId) {
+      return { state: row.state === "uncertain" ? "uncertain" : "rejected" };
+    }
     if (row.state === "rejected") return { state: "rejected" };
     if (this.active.has(operationId)) return { state: "uncertain" };
     this.active.add(operationId);

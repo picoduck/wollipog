@@ -355,3 +355,24 @@ Current private destination and provider disclosure revisions, retention text an
 reviewer identities are re-read at preparation, resolution and consumption. A privacy or retention
 change invalidates admission/provenance even if the Human previously approved the old disclosure.
 No disclosure authority, candidate runtime profile or live registry record is activated by this slice.
+
+Private quality review metadata, receipts and verdicts now reference the actual root, source child
+and reviewer Sessions with delete cascades. The checked prior-schema migration preserves exact live
+provenance and drops only orphan quality metadata. This is partial privacy cleanup: derived frame
+artifacts remain attached to their private source child and use the existing artifact retention and
+content-addressed byte garbage collection. Deleting a reviewer or root does not claim those bytes
+were removed. Permanent purpose and prepared command payloads remain intentionally durable while
+unknown/live effects or reservations require exact command, generation and history reconciliation.
+No budget/effect history is deleted or refunded. A trusted terminal/no-uncertainty command cleanup
+and derived-frame retention policy must be independently established before live registration;
+the preparation supplies neither a terminal proof nor automatic worker termination.
+
+Resolution and consumption own their transaction boundary and reject enclosing transactions.
+Current proof checks remain inside each gate transaction. If they actually record an exact linked
+review's irreversible negative, rollback discards partial positive approval/provenance mutations
+but commits that observed negative afterward. Restored source, frames, binding or expiry cannot
+revive it; absent final genuine usage remains pending rather than becoming a quality rejection.
+Changed authority cannot authorize an old uncertain recovery effect: reporting stays uncertain
+without any readback, replay, replacement or refund under renewed authority. Full expiry/owner/
+allowance/lineage/cap bindings are retained. Session access denial precedes permanent-purpose route
+restriction, preserving indistinguishable inaccessible and absent Session responses.

@@ -89,11 +89,27 @@ export class WorkflowVideoEvidenceApprovals {
     const bytes = this.database.readWorkflowArtifactBytes(item.artifactId);
     return Boolean(bytes && digest(bytes) === item.sha256);
   }
-  private atomic<T>(operation: () => T): T {
+  private atomic<T>(operation: () => T, reviewIds?: readonly string[]): T {
     const sql = this.database.raw(), savepoint = "media_gate_" + randomUUID().replaceAll("-", "");
+    // Gate calls must own the final commit of an observed irreversible negative. An enclosing
+    // caller transaction could otherwise roll it back after this method returns or throws.
+    if (reviewIds && sql.isTransaction) throw new Error("Original media gate requires its own transaction boundary.");
     sql.exec("SAVEPOINT " + savepoint);
     try { const value = operation(); sql.exec("RELEASE " + savepoint); return value; }
-    catch (error) { sql.exec("ROLLBACK TO " + savepoint); sql.exec("RELEASE " + savepoint); throw error; }
+    catch (error) {
+      // Capture only exact linked review IDs whose runtime actually recorded a negative. This
+      // never manufactures quality, changes pending settlement, or preserves partial approval.
+      let revoked: string[] = [];
+      try {
+        revoked = [...new Set(reviewIds ?? [])].filter((id) =>
+          sql.prepare("SELECT status FROM temporal_video_reviews WHERE review_id=?").get(id)?.status === "revoked");
+      } finally { sql.exec("ROLLBACK TO " + savepoint); sql.exec("RELEASE " + savepoint); }
+      if (revoked.length) {
+        const placeholders = revoked.map(() => "?").join(",");
+        sql.prepare("UPDATE temporal_video_reviews SET status='revoked' WHERE status='pending' AND review_id IN (" + placeholders + ")").run(...revoked);
+      }
+      throw error;
+    }
   }
   resolve(decision: WorkflowDecisionView, resolution: ResolveWorkflowDecisionRequest, now: number,
     mutation: () => WorkflowDecisionView | null): WorkflowDecisionView {
@@ -113,7 +129,7 @@ export class WorkflowVideoEvidenceApprovals {
         .run(decision.occurrenceId, record, digest(record));
       this.database.consumeUiEvidenceReviewReceipts(decision.occurrenceId, now);
       return resolved;
-    });
+    }, (resolution.delegatedVideoEvidence ?? []).map((reference) => reference.reviewId));
   }
   consume(decision: WorkflowDecisionView, mutation: () => WorkflowDecisionView | null): WorkflowDecisionView {
     return this.atomic(() => {
@@ -122,6 +138,6 @@ export class WorkflowVideoEvidenceApprovals {
       const consumed = mutation();
       if (!consumed || consumed.status !== "consumed") throw new Error("Original UI gate changed before consumption.");
       return consumed;
-    });
+    }, (decision.delegatedVideoEvidence ?? []).map((reference) => reference.reviewId));
   }
 }

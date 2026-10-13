@@ -1,4 +1,10 @@
 import { readFileSync } from "node:fs";
+import ts from "typescript";
+import Fastify from "fastify";
+import { runInNewContext } from "node:vm";
+import { registerAuthGate } from "./http-auth.js";
+import { mutationAuthorizationError, PERSONAL_ORGANIZATION_ID, agentCredentialSessionTargetError,
+  agentDelegationAuthorizationError } from "./identity.js";
 import { WorkflowVideoEvidenceApprovals } from "./workflow-video-evidence-approvals.js";
 import { createControlPlaneVideoReviewStore } from "./video-evidence-artifacts.js";
 import { VideoEvidenceRuntime, type VideoReviewBinding, type VideoReviewRuntimeAccess } from "./video-evidence-runtime.js";
@@ -590,7 +596,7 @@ async function gateHarness(t: { skip(reason: string): void; after(fn: () => void
       observation: "Disclosed deterministic fixture observation; not a blind model claim." }], rationale: "Synthetic contract test only." });
     reference.verdictId = verdict.verdictId; settled = true; return verdict;
   };
-  return { ...h, preparedRuntime: h.runtime, service, approvals, approvalAccess, runtime, store, original, record, reference, resolve, complete,
+  return { ...h, preparedRuntime: h.runtime, service, approvals, approvalAccess, runtimeAccess, runtime, store, original, record, reference, resolve, complete,
     revoke: () => { allowed = false; } };
 }
 
@@ -772,4 +778,185 @@ test("human campaign CAS derives evidence disclosure without replacing budget/sc
   assert.equal(h.db.workflowDecisionByOccurrence("original-gate")?.status, "revoked", "old occurrence loses the superseded envelope");
   assert.equal(service.setCampaignControl("root", proposal, revision, h.human).ok, false, "stale CAS cannot replace new human authorization");
   assert.deepEqual(h.messages.filter((message) => (message as { type?: string }).type === "start_session"), []);
+});
+
+// Disclosed SYNTHETIC fixtures only. No live principal/capture/provider/media/usage proof.
+test("Session deletion removes private quality metadata while retaining exact unknown command and budget proof", async (t) => {
+  const h = await gateHarness(t); if (!h) return;
+  h.complete(); assert.ok(h.resolve().ok);
+  const reviewerId = h.record.binding.reviewerSessionId;
+  const budgetBefore = JSON.stringify(h.db.raw().prepare("SELECT * FROM campaign_budget_members WHERE session_id=?").get(reviewerId));
+  assert.ok(h.db.raw().prepare("SELECT record FROM media_session_purposes WHERE session_id=?").get(reviewerId));
+  assert.ok(h.db.raw().prepare("SELECT verdict FROM temporal_video_verdicts WHERE review_id=?").get(h.record.reviewId));
+  h.db.deleteSession("child");
+  const purposeRow = h.db.raw().prepare("SELECT record FROM media_session_purposes WHERE session_id=?").get(reviewerId);
+  const preparedRow = h.db.raw().prepare("SELECT payload FROM prepared_media_sessions").get();
+  const p = purposeRow ? JSON.parse(String(purposeRow.record)) : null;
+  const preparedPayload = preparedRow ? JSON.parse(String(preparedRow.payload)) : null;
+  t.diagnostic(JSON.stringify({ sourceDeleted: h.db.getSession("child") === null,
+    actualReviewerRetained: h.db.getSession(reviewerId) !== null,
+    reviewRetained: h.store.getReview(h.record.reviewId) !== null,
+    receiptCount: h.store.latestReceipts(h.record.reviewId).length,
+    privateVerdictRetained: h.store.getVerdict(h.record.reviewId) !== null,
+    purposeCommandRetained: !!p?.command, preparedCommandRetained: !!preparedPayload?.command,
+    purposePromptPresent: typeof p?.command?.initialPrompt === "string",
+    launchEnvironmentFieldCount: Object.keys(p?.command?.spec?.env ?? {}).length,
+    budgetMemberUnchanged: budgetBefore === JSON.stringify(h.db.raw().prepare("SELECT * FROM campaign_budget_members WHERE session_id=?").get(reviewerId)) }));
+  assert.equal(h.db.workflowArtifactExportPreflight("source"), null);
+  assert.equal(h.store.getReview(h.record.reviewId) === null, true, "deleted private source cannot leave rationale/frame/criteria records");
+  assert.deepEqual(h.db.raw().prepare("SELECT record FROM media_session_purposes WHERE session_id=?").get(reviewerId), purposeRow);
+  assert.equal(budgetBefore, JSON.stringify(h.db.raw().prepare("SELECT * FROM campaign_budget_members WHERE session_id=?").get(reviewerId)));
+  assert.equal(h.store.latestReceipts(h.record.reviewId).length, 0);
+  assert.equal(h.store.getVerdict(h.record.reviewId), null);
+  assert.deepEqual(h.db.raw().prepare("SELECT payload FROM prepared_media_sessions").get(), preparedRow);
+});
+test("CR2 Reproduction F2 actual resolve SAVEPOINT cannot undo irreversible frame revocation", async (t) => {
+  const h = await gateHarness(t); if (!h) return; h.complete();
+  const read = h.store.readFrame.bind(h.store);
+  h.store.readFrame = () => null;
+  assert.equal(h.resolve().ok, false);
+  const status = h.store.getReview(h.record.reviewId)?.status;
+  h.store.readFrame = read;
+  const revived = h.resolve();
+  t.diagnostic(JSON.stringify({ savedStatusAfterFailedResolve: status, restoredFrameApproval: revived.ok }));
+  assert.equal(status, "revoked", "actual resolve rollback must preserve negative frame proof");
+  assert.equal(revived.ok, false, "restored bytes cannot revive observed irreversible revocation");
+});
+test("CR2 Reproduction F2 consume refusal and restored frames must preserve runtime revocation too", async (t) => {
+  const h = await gateHarness(t); if (!h) return; h.complete(); assert.ok(h.resolve().ok);
+  const read = h.store.readFrame.bind(h.store); h.store.readFrame = () => null;
+  const result = await h.service.consumeWorkflowDecision("child", h.original.occurrenceId, { resourceSnapshot: h.original.resourceSnapshot });
+  assert.equal(result.ok, false);
+  assert.equal(h.db.workflowDecisionByOccurrence(h.original.occurrenceId)?.status, "revoked");
+  const runtimeStatus = h.store.getReview(h.record.reviewId)?.status;
+  h.store.readFrame = read;
+  assert.equal((await h.service.consumeWorkflowDecision("child", h.original.occurrenceId, { resourceSnapshot: h.original.resourceSnapshot })).ok, false);
+  t.diagnostic(JSON.stringify({ originalGateIrreversiblyRevoked: true, runtimeStatusAfterConsumeRefusal: runtimeStatus }));
+  assert.equal(runtimeStatus, "revoked", "consume SAVEPOINT must retain observed irreversible runtime revocation");
+});
+test("CR2 Reproduction F4 real Fastify gate denies unauthorized media and missing IDs identically", async (t) => {
+  const h = harness(); t.after(() => h.db.close());
+  const actual = h.prepared.prepare(h.identity);
+  const outsider = { ...h.human, userId: "synthetic-other-member", actorId: "synthetic-member", role: "operator" as const };
+  assert.equal(h.db.canAccessSession(outsider, actual.sessionId), false);
+  const index = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+  const ast = ts.createSourceFile("index.ts", index, ts.ScriptTarget.Latest, true);
+  const fn = ast.statements.find((s) => ts.isFunctionDeclaration(s) && s.name?.text === "authorizeApiRequest");
+  assert.ok(fn, "extract the actual frozen handler without importing hosting bootstrap");
+  const js = ts.transpileModule(fn.getText(ast), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const authorize = runInNewContext(js + "\nauthorizeApiRequest;", { db: h.db, svc: h.service,
+    requestPrincipals: new WeakMap(), mutationAuthorizationError, mediaSessionMutationAllowed,
+    MEDIA_SESSION_PURPOSE_ERROR, PERSONAL_ORGANIZATION_ID, agentCredentialSessionTargetError, agentDelegationAuthorizationError });
+  const app = Fastify(); t.after(() => app.close());
+  registerAuthGate(app, { authenticate: () => ({ id: "synthetic-device", name: "Code Fixture", principal: outsider }),
+    isAllowedOrigin: () => true, authorize });
+  app.post("/api/sessions/:id/restart", async () => ({ invoked: true }));
+  await app.ready();
+  const missing = await app.inject({ method: "POST", url: "/api/sessions/not-a-session/restart" });
+  const media = await app.inject({ method: "POST", url: "/api/sessions/" + actual.sessionId + "/restart" });
+  assert.equal(missing.statusCode, 404);
+  assert.equal(media.statusCode, missing.statusCode, "actual purpose guard must run AFTER member access denial");
+  assert.deepEqual(media.json(), missing.json());
+  const authorized = Fastify(); t.after(() => authorized.close());
+  registerAuthGate(authorized, { authenticate: () => ({ id: "synthetic-owner-device", name: "Code Fixture", principal: h.human }),
+    isAllowedOrigin: () => true, authorize });
+  authorized.post("/api/sessions/:id/restart", async () => ({ invoked: true }));
+  await authorized.ready();
+  const denied = await authorized.inject({ method: "POST", url: "/api/sessions/" + actual.sessionId + "/restart" });
+  assert.equal(denied.statusCode, 403);
+  assert.equal(denied.json().error, MEDIA_SESSION_PURPOSE_ERROR);
+});
+
+test("observed source, binding and expiry negatives survive real resolve and consume rollback and restoration", async (t) => {
+  for (const phase of ["resolve", "consume"] as const) for (const change of ["source", "binding", "expiry"] as const) {
+    const h = await gateHarness(t); if (!h) return; h.complete();
+    if (phase === "consume") assert.ok(h.resolve().ok);
+    const source = h.runtimeAccess.readSource, current = h.runtimeAccess.currentBinding;
+    const savedRecord = h.db.raw().prepare("SELECT record FROM temporal_video_reviews WHERE review_id=?").get(h.record.reviewId)!.record;
+    if (change === "source") h.runtimeAccess.readSource = () => null;
+    if (change === "binding") h.runtimeAccess.currentBinding = () => null;
+    if (change === "expiry") h.db.raw().prepare("UPDATE temporal_video_reviews SET record=? WHERE review_id=?")
+      .run(JSON.stringify({ ...JSON.parse(String(savedRecord)), expiresAt: 1 }), h.record.reviewId);
+    const invoke = () => phase === "resolve" ? h.resolve() : h.service.consumeWorkflowDecision("child", h.original.occurrenceId,
+      { resourceSnapshot: h.original.resourceSnapshot });
+    assert.equal((await invoke()).ok, false, phase + "/" + change);
+    assert.equal(h.store.getReview(h.record.reviewId)?.status, "revoked", phase + "/" + change);
+    h.runtimeAccess.readSource = source; h.runtimeAccess.currentBinding = current;
+    h.db.raw().prepare("UPDATE temporal_video_reviews SET record=? WHERE review_id=?").run(savedRecord!, h.record.reviewId);
+    assert.equal((await invoke()).ok, false, "restoration cannot revive " + phase + "/" + change);
+    assert.equal(h.store.getReview(h.record.reviewId)?.status, "revoked");
+  }
+});
+
+test("media gates refuse enclosing transactions before proof, and late mutation failure preserves pending quality", async (t) => {
+  const h = await gateHarness(t); if (!h) return; h.complete();
+  h.db.raw().exec("BEGIN");
+  assert.equal(h.resolve().ok, false);
+  h.db.raw().exec("ROLLBACK");
+  assert.equal(h.store.getReview(h.record.reviewId)?.status, "pending");
+  assert.ok(h.resolve().ok);
+  const approved = h.db.workflowDecisionByOccurrence(h.original.occurrenceId)!;
+  h.db.raw().exec("BEGIN");
+  assert.throws(() => h.approvals.consume(approved, () => { throw new Error("must not invoke mutation"); }), /own transaction boundary/);
+  h.db.raw().exec("ROLLBACK");
+  assert.throws(() => h.approvals.consume(approved, () => null), /before consumption/);
+  assert.equal(h.store.getReview(h.record.reviewId)?.status, "pending", "failed approval mutation is not observed negative evidence");
+  assert.equal(h.db.workflowDecisionByOccurrence(h.original.occurrenceId)?.status, "approved");
+});
+
+test("root or reviewer deletion cascades private quality records but retained source artifacts remain a live prerequisite", async (t) => {
+  for (const target of ["root", "reviewer"] as const) {
+    const h = await gateHarness(t); if (!h) return; h.complete();
+    const frameId = h.record.reviewId + ":frame:0";
+    assert.ok(h.db.workflowArtifactExportPreflight(frameId));
+    h.db.deleteSession(target === "reviewer" ? h.record.binding.reviewerSessionId : target);
+    assert.equal(h.store.getReview(h.record.reviewId), null);
+    assert.equal(h.store.latestReceipts(h.record.reviewId).length, 0);
+    assert.equal(h.store.getVerdict(h.record.reviewId), null);
+    assert.ok(h.db.workflowArtifactExportPreflight(frameId), "source-owned frame bytes use existing retention; no full privacy cleanup claim");
+  }
+});
+
+test("exact prior quality schema migrates atomically, preserves live provenance and removes only orphan quality metadata", async (t) => {
+  for (const orphan of [false, true]) {
+    const h = await gateHarness(t); if (!h) return; h.complete();
+    const sql = h.db.raw();
+    const review = sql.prepare("SELECT review_id,binding_sha256,record,status FROM temporal_video_reviews").get()!;
+    const receipts = sql.prepare("SELECT * FROM temporal_video_receipts ORDER BY frame_index").all();
+    const verdict = sql.prepare("SELECT * FROM temporal_video_verdicts").get()!;
+    const intents = sql.prepare("SELECT * FROM prepared_media_sessions").all();
+    sql.exec("BEGIN; DROP TABLE temporal_video_verdicts; DROP TABLE temporal_video_receipts; DROP TABLE temporal_video_reviews;" +
+      "CREATE TABLE temporal_video_reviews(review_id TEXT PRIMARY KEY,binding_sha256 TEXT NOT NULL,record TEXT NOT NULL,status TEXT NOT NULL);" +
+      "CREATE TABLE temporal_video_receipts(review_id TEXT NOT NULL REFERENCES temporal_video_reviews(review_id),frame_index INTEGER NOT NULL,receipt_id TEXT NOT NULL UNIQUE,receipt TEXT NOT NULL,acknowledged INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(review_id,frame_index));" +
+      "CREATE TABLE temporal_video_verdicts(review_id TEXT PRIMARY KEY REFERENCES temporal_video_reviews(review_id),verdict TEXT NOT NULL,sha256 TEXT NOT NULL);");
+    sql.prepare("INSERT INTO temporal_video_reviews VALUES (?,?,?,?)").run(review.review_id!, review.binding_sha256!, review.record!, review.status!);
+    for (const r of receipts) sql.prepare("INSERT INTO temporal_video_receipts VALUES (?,?,?,?,?)")
+      .run(r.review_id!, r.frame_index!, r.receipt_id!, r.receipt!, r.acknowledged!);
+    sql.prepare("INSERT INTO temporal_video_verdicts VALUES (?,?,?)").run(verdict.review_id!, verdict.verdict!, verdict.sha256!);
+    sql.exec("COMMIT");
+    if (orphan) h.db.deleteSession("child");
+    else {
+      sql.prepare("UPDATE temporal_video_reviews SET binding_sha256=?").run("corrupt-fixture-binding");
+      assert.throws(() => createControlPlaneVideoReviewStore(h.db), /invalid binding provenance/);
+      assert.equal(sql.isTransaction, false);
+      assert.equal(sql.prepare("SELECT COUNT(*) AS n FROM temporal_video_receipts").get()!.n, receipts.length);
+      assert.equal(sql.prepare("SELECT name FROM sqlite_master WHERE name='temporal_video_reviews_next'").get(), undefined);
+      sql.prepare("UPDATE temporal_video_reviews SET binding_sha256=?").run(review.binding_sha256!);
+    }
+    const migrated = createControlPlaneVideoReviewStore(h.db);
+    assert.deepEqual(sql.prepare("SELECT * FROM prepared_media_sessions").all(), intents, "unknown intent history is unchanged");
+    if (orphan) {
+      assert.equal(migrated.getReview(h.record.reviewId), null);
+      assert.equal(migrated.latestReceipts(h.record.reviewId).length, 0);
+      assert.equal(migrated.getVerdict(h.record.reviewId), null);
+    } else {
+      assert.deepEqual(sql.prepare("SELECT review_id,binding_sha256,record,status FROM temporal_video_reviews").get(), review);
+      assert.deepEqual(sql.prepare("SELECT * FROM temporal_video_receipts ORDER BY frame_index").all(), receipts);
+      assert.deepEqual(sql.prepare("SELECT * FROM temporal_video_verdicts").get(), verdict);
+      h.db.deleteSession(h.record.binding.reviewerSessionId);
+      assert.equal(migrated.getReview(h.record.reviewId), null);
+      assert.equal(migrated.latestReceipts(h.record.reviewId).length, 0);
+      assert.equal(migrated.getVerdict(h.record.reviewId), null);
+    }
+  }
 });

@@ -672,8 +672,6 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   const mutationError = mutationAuthorizationError(req.method, routePath, principal);
   if (mutationError) return mutationError;
   if (!principal) return null;
-  const mediaTarget = routePath.startsWith("/api/sessions/:id/") ? (req.params as { id?: unknown }).id : null;
-  if (typeof mediaTarget === "string" && svc.mediaSessionPurposes.owns(mediaTarget) && !mediaSessionMutationAllowed(req.method, routePath)) return MEDIA_SESSION_PURPOSE_ERROR;
 
   const memberScopedRoute = routePath === "/api/instance" || routePath === "/api/compatibility" ||
     routePath === "/api/identity" || routePath === "/api/runners" ||
@@ -741,6 +739,8 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   if (sessionId && !db.canAccessSession(principal, sessionId)) {
     return { statusCode: 404, error: "session not found" };
   }
+  const mediaTarget = routePath.startsWith("/api/sessions/:id/") ? params.id : null;
+  if (typeof mediaTarget === "string" && svc.mediaSessionPurposes.owns(mediaTarget) && !mediaSessionMutationAllowed(req.method, routePath)) return MEDIA_SESSION_PURPOSE_ERROR;
   const runnerId = typeof params.runnerId === "string" ? params.runnerId
     : typeof params.id === "string" && routePath.startsWith("/api/runners/") ? params.id : null;
   if (runnerId) {

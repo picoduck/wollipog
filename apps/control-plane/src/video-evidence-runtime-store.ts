@@ -16,16 +16,63 @@ export interface VideoReviewFrameStorage {
 export class SqliteVideoReviewStore implements VideoReviewStore {
   constructor(private readonly db: DatabaseSync, private readonly frames: VideoReviewFrameStorage) {
     db.exec("CREATE TABLE IF NOT EXISTS temporal_video_reviews (" +
-      "review_id TEXT PRIMARY KEY, binding_sha256 TEXT NOT NULL, record TEXT NOT NULL, status TEXT NOT NULL " +
+      "review_id TEXT PRIMARY KEY, binding_sha256 TEXT NOT NULL, record TEXT NOT NULL, " +
+      "root_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, " +
+      "child_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, " +
+      "reviewer_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, status TEXT NOT NULL " +
       "CHECK(status IN ('pending','revoked','consumed')));" +
       "CREATE UNIQUE INDEX IF NOT EXISTS temporal_video_binding ON temporal_video_reviews(binding_sha256) WHERE status='pending';" +
       "CREATE TABLE IF NOT EXISTS temporal_video_receipts (" +
-      "review_id TEXT NOT NULL REFERENCES temporal_video_reviews(review_id)," +
+      "review_id TEXT NOT NULL REFERENCES temporal_video_reviews(review_id) ON DELETE CASCADE," +
       "frame_index INTEGER NOT NULL, receipt_id TEXT NOT NULL UNIQUE," +
       "receipt TEXT NOT NULL, acknowledged INTEGER NOT NULL DEFAULT 0," +
       "PRIMARY KEY(review_id, frame_index));" +
       "CREATE TABLE IF NOT EXISTS temporal_video_verdicts (" +
-      "review_id TEXT PRIMARY KEY REFERENCES temporal_video_reviews(review_id),verdict TEXT NOT NULL,sha256 TEXT NOT NULL);");
+      "review_id TEXT PRIMARY KEY REFERENCES temporal_video_reviews(review_id) ON DELETE CASCADE,verdict TEXT NOT NULL,sha256 TEXT NOT NULL);");
+    this.migrateSessionReferences();
+  }
+  private migrateSessionReferences(): void {
+    const references = this.db.prepare("PRAGMA foreign_key_list(temporal_video_reviews)").all();
+    if (["root_session_id", "child_session_id", "reviewer_session_id"].every((column) =>
+      references.some((r) => r.from === column && r.table === "sessions" && r.to === "id" && r.on_delete === "CASCADE")) &&
+      ["temporal_video_receipts", "temporal_video_verdicts"].every((table) =>
+        this.db.prepare("PRAGMA foreign_key_list(" + table + ")").all().some((r) =>
+          r.from === "review_id" && r.table === "temporal_video_reviews" && r.to === "review_id" && r.on_delete === "CASCADE"))) return;
+    const columns = this.db.prepare("PRAGMA table_info(temporal_video_reviews)").all().map((r) => String(r.name)).sort();
+    if (JSON.stringify(columns) !== JSON.stringify(["binding_sha256", "record", "review_id", "status"]) || this.db.isTransaction) {
+      throw new Error("Temporal review schema migration requires its exact prior schema and an owning transaction.");
+    }
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.exec("CREATE TABLE temporal_video_reviews_next (review_id TEXT PRIMARY KEY,binding_sha256 TEXT NOT NULL," +
+        "record TEXT NOT NULL,root_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE," +
+        "child_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE," +
+        "reviewer_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE," +
+        "status TEXT NOT NULL CHECK(status IN ('pending','revoked','consumed')));" +
+        "CREATE TABLE temporal_video_receipts_next (review_id TEXT NOT NULL REFERENCES temporal_video_reviews_next(review_id) ON DELETE CASCADE," +
+        "frame_index INTEGER NOT NULL,receipt_id TEXT NOT NULL UNIQUE,receipt TEXT NOT NULL,acknowledged INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(review_id,frame_index));" +
+        "CREATE TABLE temporal_video_verdicts_next (review_id TEXT PRIMARY KEY REFERENCES temporal_video_reviews_next(review_id) ON DELETE CASCADE,verdict TEXT NOT NULL,sha256 TEXT NOT NULL);");
+      for (const row of this.db.prepare("SELECT * FROM temporal_video_reviews").all()) {
+        const record = JSON.parse(String(row.record)) as VideoReviewRecord, binding = record.binding;
+        if (record.reviewId !== row.review_id || videoReviewBindingDigest(binding) !== row.binding_sha256 ||
+          ![binding.rootSessionId, binding.childSessionId, binding.reviewerSessionId].every((id) => typeof id === "string" && id.length > 0)) {
+          throw new Error("Temporal review migration encountered invalid binding provenance.");
+        }
+        // Previously deleted owners leave private quality metadata, not live capacity. Remove
+        // only those orphan quality rows; purpose/command/budget/effect history is untouched.
+        if (![binding.rootSessionId, binding.childSessionId, binding.reviewerSessionId].every((id) =>
+          this.db.prepare("SELECT 1 FROM sessions WHERE id=?").get(id))) continue;
+        this.db.prepare("INSERT INTO temporal_video_reviews_next VALUES (?,?,?,?,?,?,?)")
+          .run(row.review_id!, row.binding_sha256!, row.record!, binding.rootSessionId, binding.childSessionId, binding.reviewerSessionId, row.status!);
+      }
+      this.db.exec("INSERT INTO temporal_video_receipts_next SELECT r.* FROM temporal_video_receipts r JOIN temporal_video_reviews_next v USING(review_id);" +
+        "INSERT INTO temporal_video_verdicts_next SELECT r.* FROM temporal_video_verdicts r JOIN temporal_video_reviews_next v USING(review_id);" +
+        "DROP TABLE temporal_video_verdicts; DROP TABLE temporal_video_receipts; DROP TABLE temporal_video_reviews;" +
+        "ALTER TABLE temporal_video_reviews_next RENAME TO temporal_video_reviews;" +
+        "ALTER TABLE temporal_video_receipts_next RENAME TO temporal_video_receipts;" +
+        "ALTER TABLE temporal_video_verdicts_next RENAME TO temporal_video_verdicts;" +
+        "CREATE UNIQUE INDEX temporal_video_binding ON temporal_video_reviews(binding_sha256) WHERE status='pending';COMMIT");
+    } catch (error) { if (this.db.isTransaction) this.db.exec("ROLLBACK"); throw error; }
   }
   saveDerived(record: VideoReviewRecord, images: readonly Buffer[]): void {
     if (images.length !== record.manifest.frames.length) throw new Error("Incomplete temporal frame storage");
@@ -38,8 +85,9 @@ export class SqliteVideoReviewStore implements VideoReviewStore {
         created.push(index);
         this.frames.writeFrame(record, index, bytes);
       }
-      this.db.prepare("INSERT INTO temporal_video_reviews(review_id, binding_sha256, record, status) VALUES (?,?,?,?)")
-        .run(record.reviewId, videoReviewBindingDigest(record.binding), JSON.stringify(record), record.status);
+      this.db.prepare("INSERT INTO temporal_video_reviews(review_id,binding_sha256,record,root_session_id,child_session_id,reviewer_session_id,status) VALUES (?,?,?,?,?,?,?)")
+        .run(record.reviewId, videoReviewBindingDigest(record.binding), JSON.stringify(record), record.binding.rootSessionId,
+          record.binding.childSessionId, record.binding.reviewerSessionId, record.status);
     } catch (error) {
       // Artifact bytes may be outside SQLite: remove only this failed derivation's new files.
       for (const index of created) {
