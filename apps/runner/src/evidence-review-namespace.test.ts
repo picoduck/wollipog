@@ -56,17 +56,21 @@ test("existing network grant gets only bounded DNS/TLS runtime files while forbi
   writeFileSync(join(forbidden, "expected.json"), "synthetic private test truth", { mode: 0o600 });
   const ns = prepareEvidenceReviewNamespace({ stateDirectory: state, providerExecutable: realpathSync("/usr/bin/python3"),
     forbiddenRoots: [forbidden], network: "inherit" });
-  const script = "import os,ssl; assert len(ssl.create_default_context().get_ca_certs())>0; " +
-    "assert os.path.isfile('/etc/resolv.conf'); assert not os.path.exists('/etc/shadow'); " +
-    "assert not os.path.exists('/etc/passwd'); print('bounded DNS/TLS runtime only')";
+  const script = "import os,ssl; assert os.environ['SSL_CERT_FILE']=='/etc/ssl/certs/ca-certificates.crt'; " +
+    "assert len(ssl.create_default_context().get_ca_certs())>0, 'mounted CA bundle must be usable'; " +
+    "assert os.path.isfile('/etc/resolv.conf'), 'bounded resolver file must exist'; " +
+    "assert not os.path.exists('/etc/shadow'), 'shadow must remain inaccessible'; " +
+    "assert not os.path.exists('/etc/passwd'), 'passwd must remain inaccessible'; print('bounded DNS/TLS runtime only')";
   assert.equal(execFileSync(ns.command, [...ns.args, "--", "/usr/bin/python3", "-I", "-c", script], {
-    env: {}, encoding: "utf8", timeout: 5_000,
+    env: { SSL_CERT_FILE: join(forbidden, "expected.json") }, encoding: "utf8", timeout: 5_000,
   }).trim(), "bounded DNS/TLS runtime only");
   assert.equal(ns.args.some((arg, i) => arg === "--ro-bind" && ns.args[i + 1] === "/etc"), false);
   const deny = prepareEvidenceReviewNamespace({ stateDirectory: state, providerExecutable: realpathSync("/usr/bin/python3"),
     forbiddenRoots: [forbidden], network: "deny" });
   assert.ok(deny.args.includes("--unshare-net"));
   assert.equal(deny.args.includes("/etc/resolv.conf"), false);
+  assert.equal(deny.env.SSL_CERT_FILE, undefined);
+  assert.equal(ns.env.SSL_CERT_FILE, "/etc/ssl/certs/ca-certificates.crt");
   assert.notEqual(deny.namespaceSha256, ns.namespaceSha256);
 });
 

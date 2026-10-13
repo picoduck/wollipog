@@ -21,7 +21,8 @@ export interface EvidenceReviewNamespace {
   providerCommand: string;
   args: string[];
   cwd: "/review";
-  env: { HOME: "/reviewer-state"; TMPDIR: "/tmp"; PATH: "/usr/bin:/bin" };
+  env: { HOME: "/reviewer-state"; TMPDIR: "/tmp"; PATH: "/usr/bin:/bin";
+    SSL_CERT_FILE?: "/etc/ssl/certs/ca-certificates.crt" };
   /** Stable audited policy/capability digest; Session identity remains in the exact grant. */
   namespaceSha256: string;
   /** Private runner record binding this particular mount mapping; never a transferable grant. */
@@ -78,6 +79,9 @@ export function prepareEvidenceReviewNamespace(input: EvidenceReviewNamespaceInp
   if (networkFiles.length) {
     args.push("--dir", "/etc", "--dir", "/etc/ssl", "--dir", "/etc/ssl/certs");
     for (const file of networkFiles) args.push("--ro-bind", file.source, file.target);
+    // Installed TLS runtimes may default to a distro-specific symlink outside this exact
+    // mount set. Pin the already verified bundle rather than exposing more /etc state.
+    args.push("--setenv", "SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt");
   }
   args.push("--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--dir", "/review",
     "--bind", state, "/reviewer-state", "--setenv", "HOME", "/reviewer-state",
@@ -86,7 +90,8 @@ export function prepareEvidenceReviewNamespace(input: EvidenceReviewNamespaceInp
   args.push("--chdir", "/review");
   return {
     command: "/usr/bin/bwrap", providerCommand: mountedRoots.some((root) => contains(root, executable)) ? executable : "/provider", args, cwd: "/review",
-    env: { HOME: "/reviewer-state", TMPDIR: "/tmp", PATH: "/usr/bin:/bin" },
+    env: { HOME: "/reviewer-state", TMPDIR: "/tmp", PATH: "/usr/bin:/bin",
+      ...(networkFiles.length ? { SSL_CERT_FILE: "/etc/ssl/certs/ca-certificates.crt" as const } : {}) },
     namespaceSha256: sha(JSON.stringify({ version: 1, executableSha256: createHash("sha256").update(readFileSync(executable)).digest("hex"),
       runtimeRoots: mountedRoots, networkFiles: networkFiles.map(({ target, sha256 }) => ({ target, sha256 })), stateTarget: "/reviewer-state", network: input.network,
       tools: MEDIA_REVIEWER_TOOLS, hostRootMounted: false, projectMounted: false })),
