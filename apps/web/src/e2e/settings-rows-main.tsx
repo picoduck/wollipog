@@ -276,6 +276,8 @@ function Harness() {
   const section: SettingsSection | undefined = routed?.name === "settings"
     ? routed.section
     : SETTINGS_SECTIONS.some((entry) => entry.id === requestedSection) ? requestedSection! : "appearance";
+  // Notifications where the browser refuses alerts, or where neither kind can work (#3022).
+  const alerts = params.get("alerts");
   // A failed Tailnet change: the error takes the row description's place (Settings › Network).
   const tailnetError = params.get("tailnet-error") === "1"
     ? "Tailscale refused the change. Check that the Tailscale app is running, then try again."
@@ -358,8 +360,14 @@ function Harness() {
               // the exact drift this file was rebuilt to remove, one level down.
               notifications: (
                 <NotificationsPanel
-                  notify={{ supported: true, on: false, toggle: () => undefined }}
-                  push={topology === "full"
+                  notify={{
+                    supported: alerts !== "unavailable",
+                    on: false,
+                    permission: alerts === "blocked" ? "denied" : "default",
+                    toggle: () => undefined,
+                    recheck: () => undefined,
+                  }}
+                  push={topology === "full" && alerts !== "unavailable"
                     ? { state: busy ? "busy" : "on", confirmed: pushChecked, toggle: async () => undefined }
                     : { state: "unavailable", confirmed: false, toggle: async () => undefined }}
                   disabled={disabled}

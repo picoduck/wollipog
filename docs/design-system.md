@@ -1415,7 +1415,9 @@ variant by default and offers side by side as a user preference (§6.3).
   `DetailBar` with "Back to Settings". `/settings` keeps no section, so wider layouts open the first
   one (§6.1 rule 2). The panel's head is the section title, its description and, when every setting
   in it is kept in one place, "This Device" or "Your Account" as §11.3 meta; the title is hidden
-  where the current tab or the detail bar already names the section.
+  where the current tab or the detail bar already names the section. A section with more to say in
+  its head than an index row holds gives the head its own sentence (`panelDescription`, #3022); the
+  head hides its description on phones, so the index line stays the one a phone reads.
 
 ### 6.1 The Default Detail State (No Selection)
 
@@ -1829,7 +1831,11 @@ child of the surface (`.setting-row-frame`), its status region inside the frame,
 row with something to say under it about its last change. Every child of a surface is a row or such a
 frame: a sentence about the whole group is its description or its foot, never a paragraph between
 rows. A Settings section with one group leaves out the group's title, because the section's own
-heading already names it; a section with several heads each one.
+heading already names it; a section with several heads each one. A section none of whose settings
+can work in this window shows a compact §12.1 state in a padded surface (`.settings-state-surface`)
+in place of its group, never an empty surface; a setting the browser refuses is a disabled row
+saying so, with a compact warning `Notice` above the surface saying how to allow it (Settings ›
+Notifications, #3022).
 
 ### 8.3 Field Widths
 

@@ -38,6 +38,8 @@ interface HarnessOptions {
   section?: SettingsSection;
   copy?: "default" | "long";
   defaults?: "pending" | "agent" | "agent-missing" | "agent-repair";
+  /** Notifications where the browser blocks alerts, or where neither kind can work (#3022). */
+  alerts?: "available" | "blocked" | "unavailable";
 }
 
 
@@ -50,10 +52,10 @@ interface HarnessOptions {
 async function useHarness(
   page: Page,
   theme: Theme,
-  { state = "rest", topology = "full", section = "appearance", copy = "default", defaults = "pending" }: HarnessOptions = {},
+  { state = "rest", topology = "full", section = "appearance", copy = "default", defaults = "pending", alerts = "available" }: HarnessOptions = {},
 ) {
   await page.goto(
-    `/settings-rows-e2e.html?theme=${theme}&state=${state}&topology=${topology}&section=${section}&copy=${copy}&defaults=${defaults}`,
+    `/settings-rows-e2e.html?theme=${theme}&state=${state}&topology=${topology}&section=${section}&copy=${copy}&defaults=${defaults}&alerts=${alerts}`,
   );
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
   // The SECTION's own heading, not a fixed control: asserting a radio here would silently pass on
@@ -719,6 +721,51 @@ test("the reduced topology production can render is covered too @production", as
     "and the setting must still be visible").toBeVisible();
   await expect(page.getByText(/Tailscale is not installed/),
     "an unavailable setting has to say why it is unavailable").toBeVisible();
+});
+
+test("Notifications says where alerts come from when none can work, and how to allow blocked ones", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await useHarness(page, "dark", { section: "notifications", alerts: "unavailable" });
+  await expect(page.locator(".settings-panel .settings-group"), "no empty group under the panel head").toHaveCount(0);
+  const surface = page.locator(".settings-panel > .settings-state-surface");
+  await expect(surface.getByRole("heading", { level: 3, name: "Alerts Aren't Available Here" })).toBeVisible();
+  // The surface's padding is the state's whole inset, on every side.
+  const inset = await surface.evaluate((element) => {
+    const outer = element.getBoundingClientRect();
+    const title = element.querySelector(".state-title")!.getBoundingClientRect();
+    return { top: title.top - outer.top, left: title.left - outer.left };
+  });
+  expect(inset, "the title sits at the surface's 16px padding plus its 1px border").toEqual({ top: 17, left: 17 });
+
+  await useHarness(page, "dark", { section: "notifications", alerts: "blocked" });
+  const desktop = page.getByRole("switch", { name: /^Desktop Alerts/ });
+  await expect(desktop).toBeDisabled();
+  await expect(desktop).toContainText("Your browser blocks alerts from Wollipog.");
+  const notice = page.locator(".settings-panel > .notice.t-warning");
+  await expect(notice.getByRole("button", { name: "Try Again" })).toBeVisible();
+  const [noticeBox, surfaceBox] = await Promise.all([
+    notice.boundingBox(),
+    page.locator(".settings-group-surface").boundingBox(),
+  ]);
+  expect(noticeBox!.y + noticeBox!.height, "the notice sits above the surface").toBeLessThanOrEqual(surfaceBox!.y);
+});
+
+test("both Experimental rows are one line at 1440px", async ({ page }) => {
+  // The section description says once what turning a feature off does, so each row's own
+  // description is short enough for one line (#3022): one line of title and one of description,
+  // the shortest a described row on the shared grid can be (§8.2).
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await useHarness(page, "dark", { section: "experimental" });
+  const rows = page.locator(".settings-panel .setting-row");
+  await expect(rows).toHaveCount(2);
+  const measured = await rows.evaluateAll((elements) => elements.map((row) => {
+    const lines = (selector: string) => {
+      const element = row.querySelector(selector)!;
+      return element.getBoundingClientRect().height / Number.parseFloat(getComputedStyle(element).lineHeight);
+    };
+    return { title: lines(".setting-row-title"), description: lines(".setting-row-desc") };
+  }));
+  for (const row of measured) expect(row).toEqual({ title: 1, description: 1 });
 });
 
 /** Every section renders, and each one names itself. A route that 404s inside the app is worse
