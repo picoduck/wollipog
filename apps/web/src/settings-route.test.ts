@@ -76,6 +76,10 @@ test("every section has an icon-free one-line description and at most one scope 
     assert.ok(section.description.length > 0 && section.description.length <= 38,
       `${section.title}: one untruncated line on a 390px phone row`);
     assert.match(section.description, /^[A-Z][^.]*\.$/, `${section.title}: one sentence, in sentence case`);
+    // The panel head's longer form is shown only where the index is not, and still ends a sentence.
+    if (section.panelDescription !== undefined) {
+      assert.match(section.panelDescription, /^[A-Z].*\.$/, `${section.title}: the panel head's sentences end with a period`);
+    }
     assert.ok(section.scope === undefined || section.scope === "This Device" || section.scope === "Your Account");
   }
   // Sections whose groups are kept in different places say so per group, never as a whole.

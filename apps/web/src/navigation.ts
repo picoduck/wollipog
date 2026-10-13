@@ -43,6 +43,11 @@ export interface SettingsSectionEntry {
   /** One line in user terms: under the section's title, and as its row's second line on a phone. */
   description: string;
   /**
+   * The panel head's own sentence, where the section has more to say there than a phone's index row
+   * holds. The panel head hides its description on phones, so this is never truncated.
+   */
+  panelDescription?: string;
+  /**
    * Named once in the section's head (§11.3 meta). Absent where the section's groups are kept in
    * different places, or where it keeps nothing.
    */
@@ -51,13 +56,25 @@ export interface SettingsSectionEntry {
 
 export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSectionEntry> = [
   { id: "appearance", title: "Appearance", description: "Theme, colors, density and navigation.", scope: "This Device" },
-  { id: "notifications", title: "Notifications", description: "Alerts when a session needs you.", scope: "This Device" },
+  {
+    id: "notifications",
+    title: "Notifications",
+    description: "Alerts when a session needs you.",
+    panelDescription: "Alerts for approvals and finished turns.",
+    scope: "This Device",
+  },
   { id: "keyboard", title: "Keyboard", description: "Shortcuts for getting around faster." },
   { id: "behavior", title: "Behavior", description: "Typing, privacy and agent defaults." },
   { id: "approvals", title: "Approvals", description: "Question answers and tool policies." },
   { id: "orchestrator", title: "Orchestrator", description: "Defaults for sessions that run others.", scope: "Your Account" },
   { id: "network", title: "Network", description: "Reach this machine from other devices." },
-  { id: "experimental", title: "Experimental", description: "Features that are still being tested.", scope: "This Device" },
+  {
+    id: "experimental",
+    title: "Experimental",
+    description: "Features that are still being tested.",
+    panelDescription: "Early features. Turning one off hides it from navigation and search.",
+    scope: "This Device",
+  },
   { id: "about", title: "About", description: "Versions and updates." },
 ];
 

@@ -2,6 +2,7 @@ import { setHideAccountEmails, useAccountEmailPrivacy } from "../account-email-p
 import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { ArtifactUploadSettings } from "./ArtifactUploadSettings.js";
 import { Notice } from "./Notice.js";
+import { State } from "./State.js";
 import {
   PROTOCOL_VERSION,
   type AgentDriverKind,
@@ -283,7 +284,7 @@ export function SettingsView({ section, onNavigate, panels }: SettingsViewProps)
           <div className="settings-panel-head">
             <div className="settings-panel-heading">
               <h2 id="settings-panel-heading" ref={headingRef} tabIndex={-1}>{current.title}</h2>
-              <p className="settings-panel-desc">{current.description}</p>
+              <p className="settings-panel-desc">{current.panelDescription ?? current.description}</p>
             </div>
             {current.scope && <span className="settings-panel-scope">{current.scope}</span>}
           </div>
@@ -1716,12 +1717,13 @@ export function SessionNamingPanel() {
 }
 
 /**
- * Untested features, each behind its own switch.
+ * Early features, each behind its own switch.
  *
  * These gate UI EXPOSURE on this device and this instance, never capability: the control
  * plane keeps serving the underlying APIs, and turning a feature back on restores every
  * surface without a reload. The exception to "never hide a setting that could exist" is
- * deliberate here — hiding is the setting.
+ * deliberate here — hiding is the setting. The section's description says once what turning one
+ * off does, so each row says only what its feature is.
  */
 export function ExperimentalPanel({
   flags,
@@ -1734,13 +1736,13 @@ export function ExperimentalPanel({
     <SettingsGroup>
       <SwitchRow
         title={EXPERIMENT_COPY.multiAgent.name}
-        description={`Runs and workflow graphs that coordinate several agents. Off hides ${EXPERIMENT_COPY.multiAgent.name} from navigation and search on this device.`}
+        description="Runs that coordinate several agents in a workflow graph."
         checked={flags.multiAgent}
         onClick={() => onToggle("multiAgent", !flags.multiAgent)}
       />
       <SwitchRow
         title={EXPERIMENT_COPY.pods.name}
-        description={`Shared-context groups of sessions. Off hides ${EXPERIMENT_COPY.pods.name} from navigation and search on this device.`}
+        description="Shared-context groups of sessions."
         checked={flags.pods}
         onClick={() => onToggle("pods", !flags.pods)}
       />
@@ -1951,7 +1953,6 @@ function DesktopUpdateRows({ update }: { update: DesktopUpdateSetting }) {
   );
 }
 
-/** Desktop alerts (Notification API while a tab is open) as a settings switch. */
 /**
  * Desktop alerts (the Notification API, while a tab is open) as injected state.
  *
@@ -1962,24 +1963,31 @@ function DesktopUpdateRows({ update }: { update: DesktopUpdateSetting }) {
 export { useNotifySetting, type NotifySetting } from "../use-notify-setting.js";
 import type { NotifySetting } from "../use-notify-setting.js";
 
+/** The browser refuses alerts from this site, which only its own settings can change. */
+function alertsBlocked(notify: NotifySetting): boolean {
+  return notify.supported && notify.permission === "denied";
+}
+
 export function NotifyRow({ notify }: { notify: NotifySetting }) {
   if (!notify.supported) return null;
+  const blocked = alertsBlocked(notify);
   return (
     <SwitchRow
       title="Desktop Alerts"
-      description="Approvals and finished turns, while Wollipog is open"
+      description={blocked ? "Your browser blocks alerts from Wollipog." : "Approvals and finished turns, while Wollipog is open."}
       checked={notify.on}
-      disabled={notify.disabled}
+      disabled={notify.disabled || blocked}
       onClick={notify.toggle}
     />
   );
 }
 
 /**
- * Web Push (push-to-wake, outlives the tab) as a settings switch — a pure view of the
- * shell-mounted usePushSetting state, so reconciliation runs whether or not the dialog ever
- * opens. Hidden where push can't work (insecure origin, no SW registration, Tauri).
- */export function PushRow({ push, disabled }: { push: PushSetting; disabled?: boolean }) {
+ * Web Push (outlives the tab) as a settings switch — a pure view of the shell-mounted
+ * usePushSetting state, so reconciliation runs whether or not the dialog ever opens. Hidden where
+ * push can't work (insecure origin, no SW registration, Tauri).
+ */
+export function PushRow({ push, disabled }: { push: PushSetting; disabled?: boolean }) {
   const { state, confirmed, toggle } = push;
   // Rendering checked={state === "on"} moved the switch to off — and announced
   // aria-checked="false" — while disablePush() had not yet unregistered the subscription, so
@@ -1989,16 +1997,24 @@ export function NotifyRow({ notify }: { notify: NotifySetting }) {
   return (
     <SwitchRow
       title="Push Notifications"
-      description="Push-to-wake — works with the app closed"
+      description="Get alerts even when Wollipog is closed."
       checked={confirmed}
       busy={state === "busy"}
+      // Turning on subscribes this browser with the server, which can take a moment; turning off
+      // keeps the spinner before the description.
+      busyLabel={confirmed ? undefined : "Turning on push for this browser…"}
       disabled={disabled}
       onClick={() => void toggle()}
     />
   );
 }
 
-/** Alerts, in the order production renders them: desktop first, push last. */
+/**
+ * Alerts, in the order production renders them: desktop first, push last.
+ *
+ * Each row hides where it cannot work, so a window with neither says so rather than showing an empty
+ * surface, and a browser that refuses alerts says how to allow them.
+ */
 export function NotificationsPanel({
   notify,
   push,
@@ -2009,10 +2025,32 @@ export function NotificationsPanel({
   /** Production never disables these; the Playwright harness renders the state to measure it. */
   disabled?: boolean;
 }) {
+  if (!notify.supported && push.state === "unavailable") {
+    return (
+      <div className="surface settings-state-surface">
+        <State compact headingLevel={3} title="Alerts Aren't Available Here">
+          This window can't show system notifications. Anything that needs you still shows a count on Sessions.
+        </State>
+      </div>
+    );
+  }
   return (
-    <SettingsGroup>
-      <NotifyRow notify={{ ...notify, disabled }} />
-      <PushRow push={push} disabled={disabled} />
-    </SettingsGroup>
+    <>
+      {alertsBlocked(notify) && (
+        <Notice
+          tone="warning"
+          compact
+          // A refusal in the browser's own prompt brings this in while the person is on the page.
+          role="status"
+          actions={<button type="button" className="btn sm" onClick={notify.recheck}>Try Again</button>}
+        >
+          Allow notifications for this site in your browser's settings, then turn Desktop Alerts on.
+        </Notice>
+      )}
+      <SettingsGroup>
+        <NotifyRow notify={{ ...notify, disabled }} />
+        <PushRow push={push} disabled={disabled} />
+      </SettingsGroup>
+    </>
   );
 }

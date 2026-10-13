@@ -17347,6 +17347,10 @@ button.setting-row { cursor: pointer; }
   border-bottom-left-radius: var(--radius-md);
   border-bottom-right-radius: var(--radius-md);
 }
+/* A section with no setting that can work here: its compact §12.1 state in a padded surface, in
+   the group's place. The surface's padding is the state's whole inset. */
+.settings-state-surface { padding: var(--space-4); }
+.settings-state-surface > .state { padding-top: 0; }
 
 /* The palette shown AS the palette: a scheme's ground, its accent and its secondary accent. See
    SCHEME_SWATCHES in theme.ts for why these three arrive as literal values and what pins them to

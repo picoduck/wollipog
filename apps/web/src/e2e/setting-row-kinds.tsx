@@ -49,7 +49,7 @@ export function RowKinds() {
         intro="One of each row kind, on one grid."
         foot="Every title shares one left edge, and every control ends at one right edge."
       >
-        <SwitchRow title="Desktop Alerts" description="Approvals and finished turns, while Wollipog is open" checked={false} onClick={noop} />
+        <SwitchRow title="Desktop Alerts" description="Approvals and finished turns, while Wollipog is open." checked={false} onClick={noop} />
         <SegmentedRow title="Theme" options={THEME_OPTIONS} value="system" onChange={noop} />
         <SelectRow title="Color Scheme" description="Applies to both the light and the dark theme." options={COLOR_SCHEMES} value="wollipog" onChange={noop} />
         <NumberRow title="Idle Timeout" description="How long an idle session waits before it sleeps." value="30" unit="min" min={0} onChange={noop} />
@@ -82,7 +82,7 @@ export function RowKinds() {
         <ActionRow title="Codex" description="No installation is online." actionLabel="Edit…" disabled onAction={noop} />
       </SettingsGroup>
       <SettingsGroup title="Busy" intro="A busy row keeps its confirmed value and says it is saving.">
-        <SwitchRow title="Push Notifications" description="Push-to-wake — works with the app closed" checked busy onClick={noop} />
+        <SwitchRow title="Push Notifications" description="Get alerts even when Wollipog is closed." checked busy onClick={noop} />
         <SelectRow title="Child Harness" description="Automatic or a fixed stable Agent Harness identity." options={HARNESS_OPTIONS} value="codex" busy onChange={noop} />
         <SegmentedRow title="Answer Questions In" options={ANSWER_IN} value="interactive" busy busyLabel="Saving on this device…" onChange={noop} />
         <NumberRow title="Retention" value="7" unit="d" busy onChange={noop} />
