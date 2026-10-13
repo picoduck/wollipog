@@ -15,7 +15,7 @@ import {
 } from "react";
 import { defaultRangeExtractor, type Range, useVirtualizer } from "@tanstack/react-virtual";
 import { flushSync } from "react-dom";
-import { dispatchVirtualRowResize, VIRTUAL_VIEWPORT_INTENT_EVENT } from "../viewport-intent.js";
+import { dispatchVirtualRowResize, dispatchVirtualViewportCorrection, VIRTUAL_VIEWPORT_INTENT_EVENT } from "../viewport-intent.js";
 
 type CancelVirtualMeasurementCommit = () => void;
 type VirtualMeasurementCommit = (commit: () => void) => CancelVirtualMeasurementCommit | void;
@@ -784,7 +784,10 @@ function VirtualList<T>({
           viewportStart: viewport.top,
           viewportEnd: viewport.bottom,
         });
-        if (Math.abs(adjustment) >= 0.5) currentScroll.scrollTop += adjustment;
+        if (Math.abs(adjustment) >= 0.5) {
+          currentScroll.scrollTop += adjustment;
+          dispatchVirtualViewportCorrection(currentScroll);
+        }
         if (!focusApplied && revealFocus) {
           row.focus({ preventScroll: true });
           focusApplied = true;
@@ -856,7 +859,10 @@ function VirtualList<T>({
         anchor.offset,
         row.getBoundingClientRect().top - scroll.getBoundingClientRect().top,
       );
-      if (Math.abs(adjustment) >= 0.5) scroll.scrollTop += adjustment;
+      if (Math.abs(adjustment) >= 0.5) {
+        scroll.scrollTop += adjustment;
+        dispatchVirtualViewportCorrection(scroll);
+      }
       // The generic bounded anchor window treats any scrollTop change after its last correction
       // as reader intent. Record this companion correction so our own width settle does not make
       // that owner relinquish the same logical anchor early.
@@ -1167,7 +1173,10 @@ function VirtualList<T>({
         correctionAnchor.offset,
         correctionRow.getBoundingClientRect().top - viewport.top,
       );
-      if (Math.abs(adjustment) >= 0.5) scroll.scrollTop += adjustment;
+      if (Math.abs(adjustment) >= 0.5) {
+        scroll.scrollTop += adjustment;
+        dispatchVirtualViewportCorrection(scroll);
+      }
       // Width ownership is independent of the generic bounded pending window. Update the
       // generic owner's intent bookkeeping only when it owns this logical correction.
       if (pending && correctionAnchor.key === pending.key) {
@@ -1271,7 +1280,10 @@ function VirtualList<T>({
               current.offset,
               currentRow.getBoundingClientRect().top - currentScroll.getBoundingClientRect().top,
             );
-            if (Math.abs(adjustment) >= 0.5) currentScroll.scrollTop += adjustment;
+            if (Math.abs(adjustment) >= 0.5) {
+              currentScroll.scrollTop += adjustment;
+              dispatchVirtualViewportCorrection(currentScroll);
+            }
           }
           anchorCorrectionScrollTopRef.current = currentScroll.scrollTop;
           anchorCorrectionIntentVersionRef.current = viewportIntentVersionRef.current;
