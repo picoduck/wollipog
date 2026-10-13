@@ -535,6 +535,32 @@ test("revoking or expiring an opted-in link erases its stored title with the pro
   );
 });
 
+// Revoking nulls the projection in the same statement, so on that path the missing-projection check
+// would refuse even without the revocation check. Keep the bytes so only `revoked_at` refuses (#3115).
+test("the capability lookup refuses a revoked link whose projection is still stored and erases it", () => {
+  const { db, principal } = fixture();
+  db.appendEvent("session-share", { kind: "user_message", text: "shared" }, 2);
+  const created = createAuthorizedTranscriptShare(
+    db, principal, "session-share", { expiresInSeconds: 3600, includeTitle: true }, 10_000,
+  );
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const shareId = created.value.share.shareId;
+  const stored = () => ({
+    ...rawDb(db).prepare(
+      "SELECT title, projection_json IS NULL AS erased, revoked_at FROM transcript_shares WHERE share_id=?",
+    ).get(shareId),
+  });
+
+  rawDb(db).prepare("UPDATE transcript_shares SET revoked_at=? WHERE share_id=?").run(10_001, shareId);
+  assert.deepEqual(stored(), { title: "Private title", erased: 0, revoked_at: 10_001 },
+    "the revoked row still holds its projection and title, well before it expires");
+
+  assert.equal(lookupPublicTranscriptShareCapability(db, `Wollipog-Share ${created.value.token}`, 10_002), null);
+  assert.deepEqual(stored(), { title: null, erased: 1, revoked_at: 10_001 },
+    "the refused lookup erases the stored projection and title");
+});
+
 /** transcript_shares as it was before #2189 added the title column. */
 const LEGACY_TRANSCRIPT_SHARES_SCHEMA = `CREATE TABLE legacy_transcript_shares (
   share_id           TEXT PRIMARY KEY,
