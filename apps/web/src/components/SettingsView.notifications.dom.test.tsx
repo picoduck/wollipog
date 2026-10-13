@@ -9,6 +9,7 @@ import { SETTINGS_SECTIONS, type SettingsSection } from "../navigation.js";
 import { DEFAULT_EXPERIMENT_FLAGS } from "../experiments.js";
 import { ExperimentalPanel, NotificationsPanel, SettingsView, useNotifySetting } from "./SettingsView.js";
 import { notifier } from "../notify.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/settings/notifications" });
 const previous = new Map<string, unknown>();
@@ -89,8 +90,8 @@ test("a window with neither kind of alert says so instead of showing an empty gr
   try {
     const { container } = view;
     assert.equal(container.querySelectorAll('[role="switch"]').length, 0);
-    assert.equal(container.querySelector(".settings-group"), null, "no group surrounds no rows");
-    assert.equal(container.querySelector(".settings-group-title"), null, "and no heading sits over nothing");
+    assertNoDomNode(container.querySelector(".settings-group"), "no group surrounds no rows");
+    assertNoDomNode(container.querySelector(".settings-group-title"), "and no heading sits over nothing");
     const state = container.querySelector(".settings-state-surface > .state.compact");
     assert.ok(state, "a compact state in a padded surface takes the group's place");
     assert.equal(state.querySelector("h3.state-title")?.textContent, "Alerts Aren't Available Here");
@@ -104,7 +105,7 @@ test("a window with neither kind of alert says so instead of showing an empty gr
 test("either kind alone is enough to show the group", async () => {
   const pushOnly = await render(<LiveNotifications setting={push()} />);
   try {
-    assert.equal(pushOnly.container.querySelector(".settings-state-surface"), null);
+    assertNoDomNode(pushOnly.container.querySelector(".settings-state-surface"));
     assert.ok(pushOnly.switchNamed("Push Notifications"));
   } finally {
     await pushOnly.unmount();
@@ -112,7 +113,7 @@ test("either kind alone is enough to show the group", async () => {
   stubNotification("default");
   const desktopOnly = await render(<LiveNotifications setting={push({ state: "unavailable" })} />);
   try {
-    assert.equal(desktopOnly.container.querySelector(".settings-state-surface"), null);
+    assertNoDomNode(desktopOnly.container.querySelector(".settings-state-surface"));
     assert.ok(desktopOnly.switchNamed("Desktop Alerts"));
   } finally {
     await desktopOnly.unmount();
@@ -146,7 +147,7 @@ test("a browser that blocks alerts disables Desktop Alerts and says how to allow
     // Allowed in the browser's settings, then Try Again: the notice clears and the row works again.
     browser.permission = "granted";
     await act(async () => tryAgain!.click());
-    assert.equal(container.querySelector(".notice"), null, "the notice clears once the browser allows alerts");
+    assertNoDomNode(container.querySelector(".notice"), "the notice clears once the browser allows alerts");
     const allowed = view.switchNamed("Desktop Alerts");
     assert.equal(allowed.disabled, false);
     assert.equal(allowed.getAttribute("aria-checked"), "true", "the saved choice applies again");
@@ -162,7 +163,7 @@ test("Try Again clears the notice when the browser will ask again", async () => 
   try {
     browser.permission = "default";
     await act(async () => view.container.querySelector<HTMLButtonElement>(".notice button")!.click());
-    assert.equal(view.container.querySelector(".notice"), null);
+    assertNoDomNode(view.container.querySelector(".notice"));
     assert.equal(view.switchNamed("Desktop Alerts").disabled, false, "turning it on will show the prompt");
   } finally {
     await view.unmount();
@@ -173,7 +174,7 @@ test("refusing the browser's prompt shows the blocked state rather than a switch
   stubNotification("default", "denied");
   const view = await render(<LiveNotifications setting={push()} />);
   try {
-    assert.equal(view.container.querySelector(".notice"), null);
+    assertNoDomNode(view.container.querySelector(".notice"));
     await act(async () => view.switchNamed("Desktop Alerts").click());
     assert.ok(view.container.querySelector(".notice.t-warning"), "the refusal is explained at once");
     assert.equal(view.switchNamed("Desktop Alerts").disabled, true);
@@ -225,7 +226,7 @@ test("every Notifications and Experimental sentence ends with a period, and the 
     for (const sentence of sentences) assert.match(sentence, /\.$/, `"${sentence}" ends with a period`);
     for (const view of [notifications, experimental]) {
       assert.doesNotMatch(view.container.textContent ?? "", /Push-to-wake|Untested Features/i);
-      assert.equal(view.container.querySelector(".settings-group-title"), null, "one ungrouped surface");
+      assertNoDomNode(view.container.querySelector(".settings-group-title"), "one ungrouped surface");
     }
     assert.deepEqual(sections.map((entry) => [entry.panelDescription, entry.scope]), [
       ["Alerts for approvals and finished turns.", "This Device"],
