@@ -15,7 +15,7 @@ import {
   useFollowTail,
   type FollowTailApi,
 } from "./useFollowTail.js";
-import { VIRTUAL_ROW_RESIZE_EVENT, VIRTUAL_VIEWPORT_INTENT_EVENT } from "./viewport-intent.js";
+import { dispatchVirtualViewportCorrection, VIRTUAL_ROW_RESIZE_EVENT, VIRTUAL_VIEWPORT_INTENT_EVENT } from "./viewport-intent.js";
 
 test("new rows are the ones after the detach point, never prepended history", () => {
   const rows = [{ id: 4 }, { id: 5 }, { id: 9 }, { id: 10 }];
@@ -23,6 +23,41 @@ test("new rows are the ones after the detach point, never prepended history", ()
   assert.equal(countRowsAfter(rows, 5), 2);
   assert.equal(countRowsAfter([{ id: 1 }, { id: 2 }, ...rows], 5), 2, "earlier pages add older rows only");
   assert.equal(countRowsAfter(rows, Number.NEGATIVE_INFINITY), 4, "an empty detach point counts every row");
+});
+
+test("a virtual anchor correction at the tail preserves paused reading, then downward navigation resumes (#3156)", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  let followTail!: FollowTailApi;
+  try {
+    await act(async () => root.render(<Harness sessionId="prepend-correction-3156" revision={0}
+      mode="expanded" onApi={(api) => { followTail = api; }} />));
+    const reader = container.firstElementChild as HTMLElement;
+    setScrollMetrics(reader, { scrollTop: 0, scrollHeight: 500, clientHeight: 500 });
+    await act(async () => followTail.pause());
+    // Prepending and preserving the original row can clamp at the physical tail, because the
+    // original turn still has less than a viewport of content below the anchor.
+    setScrollMetrics(reader, { scrollTop: 700, scrollHeight: 1_200, clientHeight: 500 });
+    await act(async () => {
+      dispatchVirtualViewportCorrection(reader);
+      reader.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never);
+    });
+    assert.equal(reader.dataset.state, "paused", "anchor restoration is not a request to follow");
+    await act(async () => {
+      reader.scrollTop = 660;
+      reader.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never);
+    });
+    assert.equal(reader.dataset.state, "paused");
+    await act(async () => {
+      reader.scrollTop = 700;
+      reader.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never);
+    });
+    assert.equal(reader.dataset.state, "following", "a fresh downward landing still resumes");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
 });
 
 test("resume-key matching excludes Inbox navigation and modified global shortcuts", () => {

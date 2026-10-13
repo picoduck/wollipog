@@ -2564,6 +2564,71 @@ test("a downward wheel tick never arms earlier pagination", async () => {
   }
 });
 
+for (const input of ["wheel", "ArrowUp", "k", "touch"] as const) {
+  for (const scrollHeight of [500, 501]) {
+    test(`one-screen history: ${input} starts paging with a ${scrollHeight - 500}px scroll range (#3156)`, async () => {
+      const pages = pageController();
+      const fixture = await mountFixture(pages);
+      try {
+        const openingWindow = await openBoundedWindow(pages, fixture);
+        setScrollerMetrics(fixture.scroller, { clientHeight: 500, scrollHeight, scrollTop: 0 });
+        await act(async () => {
+          fixture.scroller.focus();
+          fixture.scroller.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never);
+          fireDomEvent.wheel(fixture.scroller, { deltaY: 40 });
+          fixture.scroller.dispatchEvent(new domWindow.CustomEvent(VIRTUAL_VIEWPORT_INTENT_EVENT,
+            { detail: { direction: "down" } }) as never);
+        });
+        await flushAsyncWork();
+        assert.equal(pages.tailCalls.length, 1, "layout and downward input cannot start paging");
+        const navigateUp = () => {
+          if (input === "wheel") fireDomEvent.wheel(fixture.scroller, { deltaY: -40 });
+          else if (input === "ArrowUp") fireDomEvent.keyDown(fixture.scroller, { key: "ArrowUp" });
+          else if (input === "k") fireDomEvent.keyDown(fixture.scroller, { key: "k" });
+          else {
+            fixture.scroller.dispatchEvent(touchInputEvent("touchstart", 100) as never);
+            fixture.scroller.dispatchEvent(touchInputEvent("touchmove", 140) as never);
+            fixture.scroller.dispatchEvent(touchInputEvent("touchend") as never);
+          }
+        };
+        await act(async () => navigateUp());
+        await flushAsyncWork();
+        assert.equal(pages.tailCalls.length, 2, "explicit upward input loads history without a button or scroll event");
+        assert.equal(pages.tailCalls[1]!.before, openingWindow[0]!.seq);
+        await act(async () => { navigateUp(); navigateUp(); });
+        await flushAsyncWork();
+        assert.equal(pages.tailCalls.length, 2, "repeated input cannot duplicate the in-flight page");
+        setScrollerMetrics(fixture.scroller, { clientHeight: 500, scrollHeight: 1_200, scrollTop: 700 });
+        const earlier = fixture.events.slice(-16, -8);
+        await act(async () => pages.releaseTail({ events: earlier, eventEpoch: 0,
+          nextBefore: earlier[0]!.seq, hasMoreOlder: true, cacheComplete: true }));
+        await flushAsyncWork(10);
+        assert.equal(pages.tailCalls.length, 2, "a scrollable prepend waits for fresh navigation");
+        // This synthetic touch produces no native pan: lifting it can resume as a tap. The wheel
+        // and actual reading keys must retain their pause through the prepend.
+        if (input !== "touch") assert.equal(followState(fixture), "paused");
+        assert.equal(domWindow.document.activeElement, fixture.scroller, "focus stays in the reader");
+      } finally { await unmountFixture(fixture); }
+    });
+  }
+}
+
+test("one-screen history: explicit upward input cannot page zero-sized geometry (#3156)", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    await openBoundedWindow(pages, fixture);
+    setScrollerMetrics(fixture.scroller, { clientHeight: 0, scrollHeight: 0, scrollTop: 0 });
+    await act(async () => {
+      fireDomEvent.wheel(fixture.scroller, { deltaY: -40 });
+      fixture.scroller.dispatchEvent(new domWindow.CustomEvent(VIRTUAL_VIEWPORT_INTENT_EVENT,
+        { detail: { direction: "up" } }) as never);
+    });
+    await flushAsyncWork();
+    assert.equal(pages.tailCalls.length, 1, "hidden geometry cannot initiate history filling");
+  } finally { await unmountFixture(fixture); }
+});
+
 test("upward wheel input at the head loads the next page without a scroll event", async () => {
   const pages = pageController();
   const fixture = await mountFixture(pages);

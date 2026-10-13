@@ -30,6 +30,7 @@ import "../styles.css";
  * - `earlier`: a bounded opening window with older activity above it. `?older=hold` keeps the
  *   earlier-page request in flight, `?older=fail` rejects it, `?older=unsupported` answers it as a
  *   server without backward reads does, and the default resolves it.
+ *   `?opening=one-turn` opens just the complete latest turn, which fits without scrolling (#3156).
  * - `unpaired`: the server refuses this device before anything is cached (#2579).
  * - `incomplete`: every read answers with a cache still filling from the machine, holding only a
  *   hidden Agent Log (#2773). `?runner=offline` shows that machine as offline.
@@ -46,6 +47,7 @@ document.documentElement.setAttribute("data-theme", params.get("theme") === "lig
 const state = params.get("state") ?? "awaiting";
 const emptyOpeningRace = state === "empty-opening-race";
 const older = params.get("older") ?? "resolve";
+const oneTurnOpening = state === "earlier" && params.get("opening") === "one-turn";
 const mode = params.get("mode") === "preview" ? ("preview" as const) : ("expanded" as const);
 const count = Number(params.get("count") ?? "0");
 const failedPrompt = params.get("failed") === "1";
@@ -163,7 +165,7 @@ const session = {
 const snapshotMessage: ControlPlaneToUi = {
   type: "snapshot",
   capabilities: { sessionSubscriptions: emptyOpeningRace, boundedDelivery: emptyOpeningRace, paginatedSessionHistory: emptyOpeningRace, projects: true,
-    currentTurnOpening: emptyOpeningRace },
+    currentTurnOpening: emptyOpeningRace || oneTurnOpening },
   runners: [runner],
   boxes: [],
   projects: [project],
@@ -234,6 +236,12 @@ const client = {
     ? async () => ({ events: racingEvents.slice(0, 3), eventEpoch: 0, nextAfter: 3, hasMoreCached: false, cacheComplete: true })
     : never,
   getSessionTurnStartPage: async (): Promise<SessionEventsResponse> => {
+    if (oneTurnOpening) {
+      const turn = events.slice(-3);
+      return { events: turn, eventEpoch: 0, turnStartSeq: turn[0]!.seq,
+        nextAfter: turn.at(-1)!.seq, tailSeq: turn.at(-1)!.seq,
+        hasMoreLater: false, hasMoreOlder: true, turnAligned: true, cacheComplete: true };
+    }
     if (!emptyOpeningRace) return never();
     // Capture the complete empty log before live delivery, then hold only its response.
     const page = { events: [], eventEpoch: 0, turnStartSeq: 0, nextAfter: 0, tailSeq: 0,

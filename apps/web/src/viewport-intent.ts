@@ -31,6 +31,15 @@ export function virtualViewportIntentDirection(event: Event): VirtualViewportInt
 
 export const VIRTUAL_ROW_RESIZE_EVENT = "wollipog:virtual-row-resize";
 
+export const VIRTUAL_VIEWPORT_CORRECTION_EVENT = "wollipog:virtual-viewport-correction";
+
+/** An anchor restoration is layout movement, even when it lands at the transcript tail. Report
+ * the corrected position before its asynchronous scroll event can be mistaken for navigation. */
+export function dispatchVirtualViewportCorrection(target: HTMLElement): void {
+  const EventConstructor = target.ownerDocument.defaultView?.Event ?? Event;
+  target.dispatchEvent(new EventConstructor(VIRTUAL_VIEWPORT_CORRECTION_EVENT));
+}
+
 /** Report that a virtual row's measured height changed. It is dispatched where the row is measured:
  * in the ResizeObserver delivery that follows layout, or in the commit that mounts the row, right
  * after reading it. Either way layout is current, so a listener can read scroll geometry without
