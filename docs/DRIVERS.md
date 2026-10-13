@@ -1027,6 +1027,15 @@ all existing app-server capabilities. Other startup failures are not retried or 
    error; resume never falls back to `thread/start`. Provider turns returned by validation/resume
    are deliberately ignored because the runner event log already owns displayed history. Note
    app-server enums are **camelCase**: `readOnly` / `workspaceWrite` / `dangerFullAccess`.
+
+   Each of these handshake requests (`initialize`, `thread/read`, `thread/resume`, `thread/start`)
+   must settle within `CODEX_INITIALIZATION_REQUEST_TIMEOUT_MS` (120 seconds per request). If the
+   transport discards an oversized stdout record while one is pending, that request fails at once
+   instead of waiting for the bound, because the discarded record may have been its response.
+   Either case fails the launch with an error that names only the stalled method (for example
+   `Codex app-server did not answer thread/resume within 120 seconds`), never provider payload. A
+   stalled resume is not retryable. Prompts admitted while the launch was starting were never sent,
+   and their durable receipts fail without a correlated user event, so they can be sent again.
 3. `turn/start` `{threadId, input:[{type:"text",text:"…"},{type:"localImage",path:"…"}]}`
    (+ a `{type:"skill",name,path}` item when a skill command is invoked) → streams notifications
    until `turn/completed`. Session commands come from two sources. Custom prompts are the top-level
