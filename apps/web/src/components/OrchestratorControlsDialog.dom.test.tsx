@@ -384,7 +384,7 @@ test("a revision conflict shows the danger notice in the dialog, reloads, and pu
   await harness.rerender(stored);
   assert.equal(option(gate(dialog, "PR Merge Approval"), "Human").getAttribute("aria-checked"), "true",
     "the choice shown returns to the stored value");
-  assertNoDomNode(dialog.querySelector(".ui-row-saved"), "nothing reads as saved");
+  assertNoDomNode(dialog.querySelector(".setting-row-saved"), "nothing reads as saved");
 });
 
 test("under StrictMode a conflict still shows its notice and puts the stored choice back", async () => {
@@ -418,7 +418,7 @@ test("a gate changed three times before the first save settles shows the newest 
   const dialog = harness.dialog();
   const shown = () => [...gate(dialog, "PR Merge Approval").querySelectorAll('[role="radio"]')]
     .find((radio) => radio.getAttribute("aria-checked") === "true")?.textContent;
-  const savedOnRow = () => gate(dialog, "PR Merge Approval").closest(".orchestrator-gate")?.querySelector(".ui-row-saved") ?? null;
+  const savedOnRow = () => gate(dialog, "PR Merge Approval").closest(".orchestrator-gate")?.querySelector(".setting-row-saved") ?? null;
   await act(async () => fireDomEvent.click(option(gate(dialog, "PR Merge Approval"), "Orchestrator")));
   await act(async () => fireDomEvent.click(option(gate(dialog, "PR Merge Approval"), "Human")));
   await act(async () => fireDomEvent.click(option(gate(dialog, "PR Merge Approval"), "Orchestrator")));
@@ -485,7 +485,7 @@ test("changing a gate again clears its Saved check until the new change saves", 
       new Promise<SessionView>((resolve) => replies.push(() => resolve(orchestrator({ parentControlPolicy: { revision: revision + 1, decisions } })))),
   });
   const dialog = harness.dialog();
-  const savedOnRow = () => gate(dialog, "PR Merge Approval").closest(".orchestrator-gate")?.querySelector(".ui-row-saved") ?? null;
+  const savedOnRow = () => gate(dialog, "PR Merge Approval").closest(".orchestrator-gate")?.querySelector(".setting-row-saved") ?? null;
   await act(async () => fireDomEvent.click(option(gate(dialog, "PR Merge Approval"), "Orchestrator")));
   await flush();
   await act(async () => replies[0]!());
@@ -520,7 +520,7 @@ test("a gate that failed and then saves retires its failure notice", async () =>
   })));
   await flush();
   assertNoDomNode(dialog.querySelector(".notice.t-danger"), "the newest change saved, so the failure is gone");
-  assert.ok(gate(dialog, "PR Merge Approval").closest(".orchestrator-gate")?.querySelector(".ui-row-saved"));
+  assert.ok(gate(dialog, "PR Merge Approval").closest(".orchestrator-gate")?.querySelector(".setting-row-saved"));
 });
 
 test("a reply older than a revision the dialog has already seen does not send the next change on it", async () => {

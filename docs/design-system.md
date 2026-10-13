@@ -1801,7 +1801,7 @@ Only a disabled row dims, and only its title (`--text-faint`, never opacity, §3
 | `SelectRow` | `Select` filling the column. | Its `.menu.listbox` is at least as wide as the trigger and 280px, and 360px when options carry descriptions, by default. `disabledReason` is visible under the trigger and part of its description. |
 | `NumberRow` | A `.w-xs` (96px) field with its unit inside (§8.3). | Named by the title and unit; a long unit goes in the title or description. An invalid value is `aria-invalid` with a `FieldError` under the field (§8.5). |
 | `ValueRow` | A read-only value, right-aligned. | `mono` for addresses, versions and ids; `copy` adds Copy, an `.icon-btn.sm` named "Copy <Title>". |
-| `LinkRow` | Trailing `ChevronRight`, after an optional trailing word. | Navigation only; the whole row is the button. `NavRow` is its alias until its callers move. |
+| `LinkRow` | Trailing `ChevronRight`, after an optional trailing word. | Navigation only; the whole row is the button. |
 | `ActionRow` | One `.btn` (`--control-h`), such as Edit…. | Named by its label and the row's title ("Edit… Claude Code"). |
 | `StaticRow` | None. | States something; its title is full contrast and it has no role. |
 
@@ -1825,7 +1825,11 @@ rows, and an optional foot line. The surface is the size container for the 560px
 instant save that is not a switch shows a compact danger `Notice` above the surface with Retry. Rows
 inside a surface never turn into cards: hover is a `--bg-elev-2` fill without a border, only on rows
 that are one link or button, on fine pointers. A switch row with `saved` or `failure` is one framed
-child of the surface (`.setting-row-frame`), its status region inside the frame.
+child of the surface (`.setting-row-frame`), its status region inside the frame, and so is any other
+row with something to say under it about its last change. Every child of a surface is a row or such a
+frame: a sentence about the whole group is its description or its foot, never a paragraph between
+rows. A Settings section with one group leaves out the group's title, because the section's own
+heading already names it; a section with several heads each one.
 
 ### 8.3 Field Widths
 
@@ -3385,7 +3389,7 @@ Never use CSS `text-transform` to achieve either. Enum values pass through `stat
 | `ui/ChoiceControls` `Checkbox` (native 13px) | `.checkbox` + `.switch` |
 | `ChoiceCards` (`.ui-choice-cards`, `.ui-choice-card*`, trailing `.ui-choice-mark`), `.workflow-preset`, `.agent-pick`, `.pod-member-pick`, `.access-choice`, the People member checklist | `ChoiceRows` (`.choice-row`, leading `.radio-mark` / `.checkbox-mark`) or `ChoiceList` (`.choice-list`) (#1952) |
 | `.field` / `.access-form` (two systems) | `.field` (label, control, helper/error) |
-| `.ui-row`, `.ui-row-choice`, `.orchestrator-number-row`, `.orchestrator-policy-control`, `.rail-order-row`, `.agent-defaults-editor` grids | `.setting-row` (the row components moved with #2947; the remaining hand-built rows move with #3019) |
+| `.ui-row`, `.ui-row-choice`, `.orchestrator-number-row`, `.orchestrator-policy-control`, `.rail-order-row`, `.agent-defaults-editor` grids | `.setting-row` (the row components moved with #2947 and Settings' hand-built rows with #3019; `.rail-order-row` moves with #3021, `.agent-defaults-editor` with #3024, and New Session's `.orchestrator-policy-control` with its own unit) |
 | `.archive-table`, `.usage-table`, `.skills-table`, assignment matrix | `.table` (fixed layout) with phone row fallback |
 | `.shortcut-row kbd`, `.shortcut-hint kbd` (9px) | `kbd` (one recipe) |
 | `code` global chip | `:not(pre) > code` chip only |

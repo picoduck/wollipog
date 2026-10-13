@@ -19,7 +19,7 @@ import {
 } from "../session-preset-defaults.js";
 import { DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE } from "../ui-evidence-disclosure.js";
 import type { SelectOption } from "./ui/ChoiceControls.js";
-import { SegmentedRow, SelectRow, SettingsGroup, StaticRow } from "./ui/SettingsRows.js";
+import { NumberRow, SegmentedRow, SelectRow, SettingsGroup, StaticRow } from "./ui/SettingsRows.js";
 
 const AUTO = "__automatic__";
 const DECISION_LABELS: Record<DelegatableWorkflowDecisionCategory, string> = {
@@ -39,6 +39,17 @@ const PARENT_CONTROL_OPTIONS: SelectOption<OrchestratorDefaults["delegation"]["p
   { value: "off", label: "Human", description: "Keep descendant questions and ordinary approvals human-owned." },
   { value: "questions", label: "Questions", description: "Delegate non-secret descendant implementation questions." },
   { value: "questions_and_approvals", label: "Questions and Approvals", description: "Also delegate eligible one-time approvals." },
+];
+
+/**
+ * Follow-Ups, as a Select for the same reason: in the 240px control column two equal pills are
+ * 116px each, and "Execute Approved" measured 118.5px in the widest verified face, so it drew past
+ * its pill at 900px and wider (#3019's check). Session Role Settings offers the same choice as a
+ * Select.
+ */
+const FOLLOW_UP_OPTIONS: SelectOption<OrchestratorDefaults["behavior"]["followUps"]>[] = [
+  { value: "recommend_only", label: "Recommend Only", description: "Report justified follow-ups and wait for approval." },
+  { value: "execute_approved", label: "Execute Approved", description: "Continue with follow-ups after their required approval." },
 ];
 
 function unavailableError(caught: unknown): string {
@@ -323,30 +334,21 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
         value={draft.behavior.childEffort ?? AUTO}
         onChange={(value) => updateBehavior("childEffort", value === AUTO ? null : value)}
       />
-      <label className="orchestrator-number-row" htmlFor="orchestrator-max-children">
-        <span className="ui-row-body">
-          <span className="ui-row-title">Maximum Concurrent Children</span>
-          <span className="ui-row-desc">Uses the existing live-child admission limit. Choose 0 to pause child admission.</span>
-        </span>
-        <input
-          id="orchestrator-max-children"
-          type="number"
-          inputMode="numeric"
-          min="0"
-          max={String(MAX_LIVE_CHILD_LIMIT)}
-          value={draft.behavior.maximumConcurrentChildren}
-          aria-invalid={!limitValid}
-          aria-describedby={!limitValid ? "orchestrator-max-children-error" : undefined}
-          onChange={(event) => updateBehavior("maximumConcurrentChildren", Number(event.currentTarget.value))}
-        />
-      </label>
-      {!limitValid && <p id="orchestrator-max-children-error" className="form-error" role="alert">Enter a whole number from 0 to {MAX_LIVE_CHILD_LIMIT}.</p>}
-      <SegmentedRow
+      <NumberRow
+        title="Maximum Concurrent Children"
+        description="Uses the existing live-child admission limit. Choose 0 to pause child admission."
+        inputId="orchestrator-max-children"
+        min={0}
+        max={MAX_LIVE_CHILD_LIMIT}
+        value={draft.behavior.maximumConcurrentChildren}
+        error={limitValid ? null : `Enter a whole number from 0 to ${MAX_LIVE_CHILD_LIMIT}.`}
+        onChange={(value) => updateBehavior("maximumConcurrentChildren", Number(value))}
+      />
+      <SelectRow
         title="Follow-Ups"
-        options={[
-          { value: "recommend_only", label: "Recommend Only", description: "Report justified follow-ups and wait for approval." },
-          { value: "execute_approved", label: "Execute Approved", description: "Continue with follow-ups after their required approval." },
-        ]}
+        // The selected option's sentence, as the pills showed it.
+        description={FOLLOW_UP_OPTIONS.find((option) => option.value === draft.behavior.followUps)?.description}
+        options={FOLLOW_UP_OPTIONS}
         value={draft.behavior.followUps}
         onChange={(value) => updateBehavior("followUps", value as OrchestratorDefaults["behavior"]["followUps"])}
       />
@@ -430,6 +432,8 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
     <SettingsGroup
       title="Decision Delegation"
       intro="Human ownership is the default. Delegation changes apply only to new campaigns and never grant authority to existing sessions."
+      // Under the surface rather than between its rows: every child of a group's surface is a row.
+      foot={DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE}
     >
       <SelectRow
         title="Descendant Requests"
@@ -457,7 +461,6 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
         value={draft.delegation.decisions[category]}
         onChange={(value) => updateDelegation(category, value as "human" | "orchestrator")}
       />)}
-      <p className="settings-group-intro">{DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE}</p>
       <StaticRow
         title="Human-Only Decisions"
         description="Secrets, authentication, persistent permission grants, governance changes, cost budgets, and tool guardrails cannot be delegated. Change those controls as an authenticated human."

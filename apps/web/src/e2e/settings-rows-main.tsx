@@ -7,6 +7,7 @@ import {
   BehaviorPanel,
   ExperimentalPanel,
   KeyboardPanel,
+  NavigationRailPanel,
   NetworkPanel,
   NotificationsPanel,
   PendingSetting,
@@ -329,6 +330,7 @@ function Harness() {
               ? <div className="settings-panel" style={{ width: groupWidth }}><RowKinds /></div>
               : <RowKinds />])) as Record<SettingsSection, React.ReactNode> : {
               appearance: (
+                <>
                 <AppearancePanel
                   options={THEME_OPTIONS}
                   value="system"
@@ -347,6 +349,9 @@ function Harness() {
                   density="compact"
                   onDensityChange={() => undefined}
                 />
+                {/* With the rail editor after it, as the shell composes the section. */}
+                <NavigationRailPanel />
+                </>
               ),
               // The PRODUCTION panel, given injected state. The fixture used to copy two SwitchRows
               // that looked like its rows, and a copy is a second description of the topology —

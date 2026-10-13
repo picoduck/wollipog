@@ -290,7 +290,6 @@
    sentinel and the iOS marker is replaced on every regeneration, so the first version of this block
    lived there and was silently deleted the next time the generator ran. The idempotency test caught
    it, which is what that test is for. */
-:root[data-density="comfortable"] .ui-row { min-height: 42px; }
 :root[data-density="comfortable"] .inbox-row { min-height: 46px; }
 :root[data-density="comfortable"] {
   /* Rows grow by their height tokens (§19.1: density changes row height, not per-family padding).
@@ -300,7 +299,6 @@
   --row-h-dense: 36px;
   --row-pad-y: 14px;
   --row-pad-x: 14px;
-  --row-gap: var(--space-3);
   --inbox-row-pad-y: 12px;
   --inbox-row-pad-x: 13px;
   --inbox-title-fade: 30px;
@@ -376,17 +374,13 @@
      The scale is on the ROW rhythm rather than on --space-*: those are a 4pt grid used for layout
      gutters, and stretching them moves page structure. What a density setting should change is how
      much air a line of content sits in. --- */
-  /* Compact's values are the merge-base LITERALS, not the nearest token. `--row-gap` was
-     `var(--space-2)` — 8px against the 6px `.settings-options` actually had — so every option list
-     rendered 2px looser by default, and both minimum heights moved from their initial value to a
-     number. "The default renders byte for byte as before" was this PR's whole premise and it was
-     false. `auto` is the initial value; Comfortable supplies the numbers.
+  /* Compact's values are the merge-base LITERALS, not the nearest token: "the default renders byte
+     for byte as before" is the premise, and the nearest token is not what shipped.
 
-     `--stack-gap` is gone: it was declared for both densities and read by nothing, which is a
-     token asserting that something consumes it. */
+     `--stack-gap` and `--row-gap` are gone: each was declared for both densities and, once its
+     last reader went, read by nothing, which is a token asserting that something consumes it. */
   --row-pad-y: 11px;
   --row-pad-x: 12px;
-  --row-gap: 6px;
   --inbox-row-pad-y: 9px;
   --inbox-row-pad-x: 11px;
   /* A wide Sessions list's fixed trailing columns (#2218, §6.3), the same in either density. The
@@ -17306,9 +17300,8 @@ button.setting-row { cursor: pointer; }
   .setting-row-value > .setting-row-control { justify-content: flex-start; }
 }
 
-/* An instant setting's quiet "Saved" check (§8.6). `.ui-row-saved` is the same check on rows that
-   are not yet setting rows (Orchestrator Controls' gates, Skill Assignments). */
-.ui-row-saved,
+/* An instant setting's quiet "Saved" check (§8.6), also on Orchestrator Controls' gates and Skill
+   Assignments, which are not setting rows. */
 .setting-row-saved {
   display: inline-flex;
   flex: none;
@@ -17317,10 +17310,10 @@ button.setting-row { cursor: pointer; }
   color: var(--text-dim);
   font: var(--type-small);
 }
-:is(.ui-row-saved, .setting-row-saved) > svg { color: var(--positive-text); }
+.setting-row-saved > svg { color: var(--positive-text); }
 /* In forced colors the icon follows its words: an svg keeps an author colour it sets itself. */
 @media (forced-colors: active) {
-  :is(.ui-row-saved, .setting-row-saved) > svg { color: inherit; }
+  .setting-row-saved > svg { color: inherit; }
 }
 
 /* A group of settings (§5.1): a head, one sentence, one surface of rows, one foot line. */
@@ -17354,36 +17347,6 @@ button.setting-row { cursor: pointer; }
   border-bottom-left-radius: var(--radius-md);
   border-bottom-right-radius: var(--radius-md);
 }
-
-/* ---------- Rows not yet on the setting-row grid (#3019 moves them) ----------
-   Approvals' skeleton rows and the Orchestrator number row keep the earlier row recipe. */
-.ui-row {
-  display: grid;
-  grid-template-columns: auto 1fr auto;
-  align-items: center;
-  gap: var(--space-3);
-  width: 100%;
-  /* A settings row is itself the control (the switch, the navigation), so it is at least one
-     control height: 44px on a touch screen through the coarse-pointer block. Its padding and
-     content already make it taller on a mouse, so the compact default does not move. The density
-     axis — a row is where a density setting should be felt — still raises the minimum only under
-     the comfortable selector below. */
-  min-height: var(--control-h);
-  padding: var(--row-pad-y) var(--row-pad-x);
-  border: 1px solid transparent;
-  border-radius: var(--radius-md);
-  background: transparent;
-  color: var(--text);
-  text-align: left;
-  cursor: pointer;
-  font: inherit;
-  transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
-}
-.ui-row:hover:not(.is-disabled) { background: var(--bg-elev-2); border-color: var(--border); }
-.ui-row:active:not(.is-disabled) { transform: scale(0.995); }
-.ui-row-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.ui-row-title { font-size: var(--text-base); font-weight: var(--weight-medium); }
-.ui-row-desc { font-size: var(--text-xs); color: var(--text-faint); line-height: var(--leading-tight); }
 
 /* The palette shown AS the palette: a scheme's ground, its accent and its secondary accent. See
    SCHEME_SWATCHES in theme.ts for why these three arrive as literal values and what pins them to
@@ -17471,10 +17434,9 @@ button.setting-row { cursor: pointer; }
 .approvals-info { gap: var(--space-2); }
 .approvals-info > p { margin: 0; }
 .approvals-empty { margin: 0; padding: var(--row-pad-y) var(--row-pad-x); color: var(--text-dim); font: var(--type-small); }
-.approvals-skeleton { display: grid; gap: var(--row-gap); }
-.approvals-skeleton-row { cursor: default; }
-.approvals-skeleton-row:hover:not(.is-disabled) { background: transparent; border-color: transparent; }
-.approvals-skeleton-row > .ui-row-body { gap: var(--space-2); }
+/* Skeleton rows are setting rows of the group's surface, with the same hairline between them. */
+.approvals-skeleton > .setting-row + .setting-row { border-top: 1px solid var(--border); }
+.approvals-skeleton-row .setting-row-label { gap: var(--space-2); }
 /* Label-prefixed meta items 12px apart, one line, never separated by dots (§5.2, §11.3). */
 .policy-meta { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .policy-meta-item + .policy-meta-item { margin-inline-start: var(--space-3); }
@@ -17483,15 +17445,6 @@ button.setting-row { cursor: pointer; }
 /* Orchestrator defaults keep Behavior and Decision Delegation visibly separate while reusing the
    settings row controls and their keyboard contracts. */
 .orchestrator-settings { display: grid; gap: var(--space-5); color: var(--text); }
-.settings-group-intro { margin: 0; padding: 0 var(--row-pad-x) var(--space-2); color: var(--text-dim); font-size: var(--text-sm); line-height: var(--leading-normal); }
-.orchestrator-number-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 220px;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--row-pad-y) var(--row-pad-x);
-}
-.orchestrator-number-row input,
 .orchestrator-policy-control input {
   width: 100%;
   color: var(--text);
@@ -17541,7 +17494,7 @@ button.setting-row { cursor: pointer; }
   min-width: 0;
 }
 .orchestrator-gate > .seg { grid-column: 3; grid-row: 1; }
-.orchestrator-gate > .ui-row-saved { grid-column: 2; grid-row: 1; }
+.orchestrator-gate > .setting-row-saved { grid-column: 2; grid-row: 1; }
 .orchestrator-gate-label {
   grid-column: 1;
   grid-row: 1;
@@ -17581,12 +17534,12 @@ button.setting-row { cursor: pointer; }
 }
 
 @media (max-width: 760px) {
-  .orchestrator-number-row, .orchestrator-policy-control { grid-template-columns: minmax(0, 1fr); }
+  .orchestrator-policy-control { grid-template-columns: minmax(0, 1fr); }
   .orchestrator-settings-actions, .orchestrator-policy-unavailable { align-items: stretch; flex-direction: column; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ui-row, .setting-row, .ui-switch, .ui-switch::after { transition: none; }
+  .setting-row, .ui-switch, .ui-switch::after { transition: none; }
 }
 
 /* ---------------------------- Reduced motion ---------------------------- */
@@ -18436,35 +18389,45 @@ a.tab { text-decoration: none; }
 }
 .settings-group { display: flex; flex-direction: column; gap: var(--space-2); }
 
-/* Settings -> Appearance -> Navigation: the rail's visibility and order editor (#385). */
+/* Settings -> Appearance -> Navigation: the rail's visibility and order editor (#385). The list is a
+   child of the group's surface, so it draws no box of its own and its rows start on the group's text
+   edge, as setting rows do. #3021 rebuilds these rows on the setting-row grid. */
 .rail-order-list {
   margin: 0;
   padding: 0;
   list-style: none;
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elev);
 }
 .rail-order-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  min-height: 44px;
-  padding: 4px 10px;
+  gap: var(--space-3);
+  min-height: var(--row-h);
+  padding: var(--space-1) var(--space-4);
 }
 .rail-order-row + .rail-order-row { border-top: 1px solid var(--border); }
 .rail-order-row.is-inactive .rail-order-icon,
 .rail-order-row.is-inactive .rail-order-title { color: var(--text-dim); }
 .rail-order-icon { display: inline-flex; color: var(--text-dim); }
-.rail-order-title { flex: 1; min-width: 0; font-size: var(--text-sm); }
+/* A name that cannot fit wraps rather than drawing into the status beside it. */
+.rail-order-title { flex: 1; min-width: 0; font-size: var(--text-sm); overflow-wrap: anywhere; }
 .rail-order-state { display: inline-flex; align-items: center; gap: 8px; }
 .rail-order-note { font-size: var(--text-xs); color: var(--text-faint); }
 .rail-order-controls { display: inline-flex; align-items: center; gap: 4px; }
-.rail-order-required { font-size: var(--text-xs); color: var(--text-faint); padding: 0 6px; }
-.rail-order-hint { margin: 0; font-size: var(--text-xs); color: var(--text-faint); }
-.rail-order-actions { display: flex; justify-content: flex-start; }
+/* Required and Show/Hide share one last column, so every row's controls end on one edge. */
+.rail-order-controls > :last-child { display: inline-flex; justify-content: center; min-width: 64px; }
+.rail-order-required { font-size: var(--text-xs); color: var(--text-faint); }
+/* In a narrow group the name needs the room more than the controls need one column: on a phone with
+   44px buttons a hidden destination's name otherwise ran into its status. */
+@container (max-width: 559px) {
+  .rail-order-row { gap: var(--space-2); }
+  .rail-order-controls > :last-child { min-width: 0; }
+}
+
+/* Settings › Behavior › Artifact Uploads: what its last change did, under the row's text. */
+.artifact-upload-status { display: grid; gap: var(--space-2); padding: 0 var(--space-4) var(--space-3); }
+.artifact-upload-status > p { margin: 0; color: var(--text-dim); font: var(--type-small); }
 
 .agent-defaults-list {
   display: flex;

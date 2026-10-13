@@ -80,10 +80,10 @@ for (const viewport of [
       await merge.scrollIntoViewIfNeeded();
       await merge.getByRole("radio", { name: "Orchestrator" }).click();
       const row = merge.locator("xpath=..");
-      await expect(row.locator(".ui-row-saved")).toHaveText("Saved");
+      await expect(row.locator(".setting-row-saved")).toHaveText("Saved");
       await expect(merge.getByRole("radio", { name: "Orchestrator" })).toHaveAttribute("aria-checked", "true");
       await page.screenshot({ path: `${SHOT}/${viewport.name}-${theme}-gate-saved.png` });
-      await expect(row.locator(".ui-row-saved")).toHaveCount(0, { timeout: 4_000 });
+      await expect(row.locator(".setting-row-saved")).toHaveCount(0, { timeout: 4_000 });
 
       await page.keyboard.press("Escape");
       await expect(dialog).toHaveCount(0);

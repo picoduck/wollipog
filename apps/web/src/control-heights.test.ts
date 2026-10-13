@@ -145,8 +145,7 @@ test("every core control is one control height, never sized by its padding", () 
 const REMAINING_MIN_HEIGHT_44 = [
   // The phone Session header row; its geometry is asserted in styles.test.ts (#1801 detail bar).
   "@media (max-width: 760px)|.session-bar",
-  // The Settings rail-order row (#1803 rows).
-  "|.rail-order-row",
+  // The Settings rail-order row left this list with #3019: it is --row-h tall, 48px on touch.
 ];
 
 const CORE_CONTROL = /\.btn\b|\.icon-btn\b|(^|[\s>+~(])(input|select|textarea)\b|\.ui-select-trigger|\.ui-searchable-combobox-input|\.seg-option|\.ui-switch|\.menu-item|\.plus-item|\.ui-select-option/;

@@ -128,7 +128,10 @@ test("Orchestrator settings separate policy areas, validate accessibly, and pers
     const limit = container.querySelector<HTMLInputElement>("#orchestrator-max-children")!;
     await act(async () => { fireDomEvent.change(limit, { target: { value: "65" } }); });
     assert.equal(limit.getAttribute("aria-invalid"), "true");
-    assert.equal(container.querySelector('[role="alert"]')?.textContent, "Enter a whole number from 0 to 64.");
+    // The field's own error under it (§8.5), which the field points at while it shows.
+    const limitError = document.getElementById(limit.getAttribute("aria-describedby")!.split(" ")[0]!);
+    assert.equal(limitError?.className, "field-error");
+    assert.equal(limitError?.textContent, "Enter a whole number from 0 to 64.");
     assert.equal((container.querySelector("button.btn.primary") as HTMLButtonElement).disabled, true);
 
     await act(async () => { fireDomEvent.change(limit, { target: { value: "8" } }); });

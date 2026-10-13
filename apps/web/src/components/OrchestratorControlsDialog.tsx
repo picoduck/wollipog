@@ -359,7 +359,7 @@ export function OrchestratorControlsDialog({
 
 /** The quiet "Saved" check (§8.6), announced by the dialog's polite region. */
 function SavedCheck() {
-  return <span className="ui-row-saved" aria-hidden="true"><CheckIcon size={14} />Saved</span>;
+  return <span className="setting-row-saved" aria-hidden="true"><CheckIcon size={14} />Saved</span>;
 }
 
 function Fact({ label, value, source, title }: { label: string; value: ReactNode; source?: ReactNode; title?: string }) {

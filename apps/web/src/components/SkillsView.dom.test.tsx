@@ -2928,7 +2928,7 @@ test("Assignments lists direct rules as rows with an invocation menu, a real Ena
     await act(async () => fixture.release());
     await act(settle);
     assert.equal(toggle(0).getAttribute("aria-checked"), "false");
-    assert.equal(rows()[0]!.querySelector(".ui-row-saved")?.textContent, "Saved");
+    assert.equal(rows()[0]!.querySelector(".setting-row-saved")?.textContent, "Saved");
     assert.equal(rows()[0]!.querySelector(':scope > [role="status"]')?.textContent, "All Agents on All Machines saved");
     assert.equal(rows()[0]!.querySelector(".skill-assignment-desc")?.textContent, "Direct assignment, turned off");
 
@@ -2946,8 +2946,8 @@ test("Assignments lists direct rules as rows with an invocation menu, a real Ena
     assert.deepEqual(fixture.calls.at(-1), ["update", "a-codex", { invocation: "manual" }]);
     assert.equal(fixture.calls.length, 2, "one request");
     assert.equal(rows()[1]!.querySelector<HTMLButtonElement>('[data-rule-control="invocation"]')!.textContent, "Manual Only");
-    assert.equal(rows()[1]!.querySelector(".ui-row-saved")?.textContent, "Saved");
-    assertNoDomNode(rows()[0]!.querySelector(".ui-row-saved"), "only the latest change shows Saved");
+    assert.equal(rows()[1]!.querySelector(".setting-row-saved")?.textContent, "Saved");
+    assertNoDomNode(rows()[0]!.querySelector(".setting-row-saved"), "only the latest change shows Saved");
 
     // Choosing the current invocation changes nothing.
     await act(async () => rows()[1]!.querySelector<HTMLButtonElement>('[data-rule-control="invocation"]')!.click());
@@ -3024,7 +3024,7 @@ test("a declined Remove Assignment… changes nothing, and a failed change shows
     await act(async () => row().querySelector<HTMLButtonElement>('button[role="switch"]')!.click());
     await act(settle);
     assert.equal(row().querySelector('button[role="switch"]')!.getAttribute("aria-checked"), "true");
-    assertNoDomNode(row().querySelector(".ui-row-saved"));
+    assertNoDomNode(row().querySelector(".setting-row-saved"));
     assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /Assignment could not be saved\./);
   } finally {
     await view.unmount();
