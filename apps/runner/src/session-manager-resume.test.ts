@@ -1,3 +1,4 @@
+import { PROVIDER_RETRY_CONTINUATION } from "./provider-turn-retry.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import { EventEmitter } from "node:events";
@@ -208,7 +209,7 @@ function harness(
   ) => void | SessionLaunchPreparation | Promise<void | SessionLaunchPreparation>,
   steer?: Driver["steer"],
   maxConcurrentSessions = 4,
-  promptTurn?: (text: string) => void | Promise<void>,
+  promptTurn?: (text: string) => void | "refusal" | Promise<void | "refusal">,
   providerAuthRecovery?: ProviderAuthRecoveryController,
   acceptPrompt = true,
 ) {
@@ -245,11 +246,11 @@ function harness(
       prompt: async (text) => {
         prompts.push(text);
         if (acceptPrompt) callbacks.onPromptAccepted?.();
-        await promptTurn?.(text);
+        const stop = await promptTurn?.(text);
         if (options.initialBackgroundTaskIds?.length || /consume queued background-task/i.test(text)) {
           callbacks.onBackgroundWork?.({ state: null, pendingTaskIds: [] });
         }
-        return "end_turn";
+        return stop ?? "end_turn";
       },
       prepareCommand: (input) => {
         const prepared = {
@@ -415,13 +416,13 @@ test("runtime authentication recovery stays silent until the shared probe settle
     probe.resolve({ status: "authenticated", identityId: "account-a" });
     for (let i = 0; i < 10; i += 1) await shortDelay();
     assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
-    assert.deepEqual(h.prompts, ["possibly delivered"], "uncertain delivery is not replayed");
+    assert.deepEqual(h.prompts, ["possibly delivered", PROVIDER_RETRY_CONTINUATION], "recovery continues history without replaying uncertain input");
     assert.equal(h.store.readEvents("resume-session").some((event) =>
       event.payload.kind === "permission_request" || event.payload.kind === "permission_resolved"), false);
     assert.equal(h.sent.some((message) => message.type === "session_status" && message.status === "input_required"), false);
     assert.equal(h.manager.prompt("resume-session", "retry after recovery"), true);
     for (let i = 0; i < 5; i += 1) await tick();
-    assert.deepEqual(h.prompts, ["possibly delivered", "retry after recovery"]);
+    assert.deepEqual(h.prompts, ["possibly delivered", PROVIDER_RETRY_CONTINUATION, "retry after recovery"]);
   } finally {
     h.manager.shutdownAll();
     h.cleanup();
@@ -479,13 +480,13 @@ for (const state of ["automatic", "manual", "local-card", "shared-card"] as cons
       assert.match(stderr.text, /retry this prompt/i);
       if (state === "automatic") {
         assert.match(stderr.text, /checked automatically/);
-        assert.doesNotMatch(stderr.text, /Recheck Authentication|Inbox/);
+        assert.doesNotMatch(stderr.text, /Retry|Inbox/);
       } else if (state === "manual") {
         assert.match(stderr.text, /recovery is in progress/);
-        assert.doesNotMatch(stderr.text, /Recheck Authentication|Inbox/);
+        assert.doesNotMatch(stderr.text, /Retry|Inbox/);
       } else if (state === "local-card") {
         assert.match(stderr.text, /this session's Authentication Required card/);
-        assert.match(stderr.text, /Recheck Authentication/);
+        assert.match(stderr.text, /Retry/);
       } else {
         assert.match(stderr.text, /In Inbox/);
         assert.match(stderr.text, /ask the runner owner/);
@@ -1095,7 +1096,7 @@ test("startup reconciliation restores a durable authentication card and suppress
     assert.equal(restored.pendingApproval?.title, "Authentication Required — Claude Code");
     assert.deepEqual(
       restored.pendingApproval?.options.map((option) => option.name),
-      ["Start Sign-In", "Recheck Authentication", "Dismiss Recovery"],
+      ["Start Sign-In", "Retry", "Dismiss Recovery"],
     );
     assert.equal(h.manager.sessionSnapshots()[0]?.status, "input_required");
     assert.equal(h.manager.sessionSnapshots()[0]?.pendingApproval?.kind, "authentication");
@@ -1137,7 +1138,7 @@ test("provider-native revalidation retries a proven-not-delivered prompt once ac
     assert.equal(blocked.providerAuthBlock?.retry?.text, "retained before provider submission");
     assert.deepEqual(blocked.pendingApproval?.options.map((option) => option.name), [
       "Start Sign-In",
-      "Recheck Authentication",
+      "Retry",
       "Dismiss Recovery",
     ]);
     const requestId = blocked.pendingApproval!.requestId;
@@ -2073,7 +2074,7 @@ test("fresh-start authentication failure preserves its worktree and ordinary ini
     assert.equal(statSync(blocked.worktreePath!).isDirectory(), true, "recoverable auth must not reap the worktree");
     assert.deepEqual(
       blocked.pendingApproval?.options.map((option) => option.name),
-      ["Recheck Authentication", "Dismiss Recovery"],
+      ["Retry", "Dismiss Recovery"],
     );
   } finally {
     h.manager.shutdownAll();
@@ -2157,7 +2158,7 @@ test("wrong-account revalidation fails closed and uncertain delivery is never re
       "the uncertain prompt is not replayed and blocked known-undelivered work is replayed once");
     assert.deepEqual(retainedReceipts, ["queued", "queued", "started", "completed"]);
     assert.equal(h.store.readEvents("resume-session").filter((event) =>
-      event.payload.kind === "stderr" && /interrupted prompt was not retried/iu.test(event.payload.text)).length, 1,
+      event.payload.kind === "stderr" && /original input was not replayed/iu.test(event.payload.text)).length, 1,
     "uncertain interrupted work stays visible even while newer retained work replays");
     assert.equal(
       h.store.readEvents("resume-session").findLast((event) => event.payload.kind === "permission_resolved")?.payload.optionId,
@@ -2456,14 +2457,14 @@ test("evidence-free identity mismatch offers accurate redacted recovery guidance
     assert.match(guidance, /cannot match the current authenticated state to the state recorded for this session/i);
     assert.match(guidance, /cannot determine whether the account changed/i);
     assert.match(guidance, /Choose Use Current Account/);
-    assert.match(guidance, /choose Recheck Authentication/);
+    assert.match(guidance, /choose Retry/);
     assert.doesNotMatch(guidance, /current-secret|opaque-current|opaque-recorded/);
     assert.ok(h.logs.some((line) => /provider authentication identity could not be confirmed/i.test(line)));
     assert.ok(h.logs.every((line) =>
       !/account identity mismatch|current-secret|opaque-current|opaque-recorded/i.test(line)));
     assert.deepEqual(options.slice(0, 2).map((option) => option.name), [
       "Use Current Account",
-      "Recheck Authentication",
+      "Retry",
     ]);
     assert.equal(
       options[0]?.description,
@@ -2569,7 +2570,7 @@ test("authentication recovery fans out only to matching credential scopes", asyn
     cancel: () => false,
   };
   h = harness({ providerCredentialIdentityId: "account-a" }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, async () => {
-    h.callbacks().onAuthenticationFailure?.();
+    if (h.prompts.length === 1) h.callbacks().onAuthenticationFailure?.();
   }, controller);
   try {
     h.manager.prompt("resume-session", "uncertain target");
@@ -7170,4 +7171,258 @@ test("an async answer admitted during a launch that fails is settled as never se
     h.manager.shutdownAll();
     h.cleanup();
   }
+});
+
+test("model capacity failures automatically continue the existing conversation", async () => {
+  let h!: ReturnType<typeof harness>;
+  let attempts = 0;
+  h = harness({}, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, () => {
+    if (++attempts === 1) {
+      h.callbacks().onEvent({ kind: "error", message: "Model is at capacity. Please try again later." });
+      return "refusal";
+    }
+  });
+  try {
+    h.manager.prompt("resume-session", "original task");
+    for (let i = 0; i < 200 && h.prompts.length < 2; i++) await shortDelay();
+    assert.equal(h.prompts.length, 2, "capacity rejection left the session stalled");
+    assert.match(h.prompts[1]!, /Continue/);
+  } finally { h.manager.shutdownAll(); h.cleanup(); }
+});
+
+
+for (const stopDuringBackoff of [false, true]) test(`capacity recovery ${stopDuringBackoff ? "honors Stop" : "exhausts its bounded retries"}`, async () => {
+  let h!: ReturnType<typeof harness>;
+  h = harness({}, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, () => {
+    h.callbacks().onEvent({ kind: "error", message: "overloaded_error" });
+    return "refusal";
+  });
+  try {
+    h.manager.prompt("resume-session", "original task");
+    const retryEvents = () => h.store.readEvents("resume-session").filter((event) =>
+      event.payload.kind === "stderr" && /Retrying in/.test(event.payload.text));
+    for (let i = 0; i < 100 && retryEvents().length === 0; i++) await shortDelay();
+    assert.equal(retryEvents().length, 1);
+    if (stopDuringBackoff) await h.manager.stop("resume-session");
+    for (let i = 0; i < 850 && h.store.readMeta("resume-session")?.status === "running"; i++) await shortDelay();
+    assert.equal(h.prompts.length, stopDuringBackoff ? 1 : 4);
+    assert.equal(h.store.readMeta("resume-session")?.status, stopDuringBackoff ? "stopped" : "idle");
+    if (!stopDuringBackoff) assert.ok(h.logs.some((line) => line.includes('"event":"provider_capacity_retry_exhausted"')));
+  } finally { h.manager.shutdownAll(); h.cleanup(); }
+});
+
+for (const boundary of ["interrupt", "control-plane", "governance", "history", "account", "worktree", "sign-out"]) {
+  test(`capacity backoff respects the ${boundary} boundary`, async () => {
+    let h!: ReturnType<typeof harness>;
+    h = harness({}, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, () => {
+      h.callbacks().onEvent({ kind: "error", message: "overloaded_error" });
+      return "refusal";
+    });
+    try {
+      h.manager.prompt("resume-session", "original task");
+      for (let i = 0; i < 100 && !h.logs.some((line) => line.includes('"event":"provider_capacity_retry"')); i++) await shortDelay();
+      assert.ok(h.logs.some((line) => line.includes('"event":"provider_capacity_retry"')));
+      const entry = (h.manager as any).active.get("resume-session");
+      if (boundary === "interrupt") assert.equal(h.manager.interruptTurn("resume-session"), "applied");
+      if (boundary === "control-plane") h.manager.rearmGovernance("resume-session", {}, "control_plane");
+      if (boundary === "governance") entry.governanceTripped = "cost_budget";
+      if (boundary === "history") entry.historyQuarantined = true;
+      if (boundary === "account") entry.pendingProviderAccountSwitch = "next-account";
+      if (boundary === "worktree") entry.pendingWorktreeRebind = h.root;
+      if (boundary === "sign-out") (h.manager as any).loggingOut.add("resume-session");
+      for (let i = 0; i < 100 && entry.running; i++) await shortDelay();
+      assert.equal(entry.running, false);
+      assert.deepEqual(h.prompts, ["original task"]);
+      assert.equal(h.store.readMeta("resume-session")!.status, "idle");
+    } finally { h.manager.shutdownAll(); h.cleanup(); }
+  });
+}
+
+test("a proven-undelivered capacity refusal retries the input rather than losing the task", async () => {
+  let h!: ReturnType<typeof harness>;
+  h = harness({}, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, () => {
+    if (h.prompts.length > 1) return;
+    const client = (h.manager as any).active.get("resume-session").client;
+    client.lastPromptUndelivered = () => true;
+    client.lastTurnError = () => h.prompts.length === 1 ? "model_capacity_exceeded" : null;
+    return "refusal";
+  });
+  try {
+    h.manager.prompt("resume-session", "original task");
+    for (let i = 0; i < 200 && h.prompts.length < 2; i++) await shortDelay();
+    assert.deepEqual(h.prompts, ["original task", "original task"]);
+    assert.equal(h.store.readEvents("resume-session").filter((event) => event.payload.kind === "user_message").length, 1);
+  } finally { h.manager.shutdownAll(); h.cleanup(); }
+});
+
+test("a thrown capacity error continues history and emits a structured settlement log", async () => {
+  let attempts = 0;
+  const h = harness({}, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, () => {
+    if (++attempts === 1) throw new Error("overloaded_error");
+  });
+  try {
+    h.manager.prompt("resume-session", "original task");
+    for (let i = 0; i < 200 && !h.logs.some((line) => line.includes('"event":"provider_capacity_retry_settled"')); i++) await shortDelay();
+    assert.deepEqual(h.prompts, ["original task", PROVIDER_RETRY_CONTINUATION]);
+    const log = h.logs.find((line) => line.includes('"event":"provider_capacity_retry_settled"'))!;
+    assert.deepEqual(JSON.parse(log), { event: "provider_capacity_retry_settled", sessionId: "resume-session", entryPoint: "prompt", attempts: 1, stopReason: "end_turn" });
+    assert.ok(h.logs.every((line) => !line.includes("original task")));
+  } finally { h.manager.shutdownAll(); h.cleanup(); }
+});
+
+for (const diagnostic of ["invalid API key", "billing limit reached", "context window exceeded", "connection reset", "Tool server overloaded",
+  "insufficient_quota: model is at capacity", "rate_limit_error: model overloaded",
+  "authentication_error: provider overloaded"]) {
+  test(`a terminal ${diagnostic} does not trigger capacity recovery`, async () => {
+    let h!: ReturnType<typeof harness>;
+    h = harness({}, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, () => {
+      h.callbacks().onEvent({ kind: "error", message: diagnostic });
+      return "refusal";
+    });
+    try {
+      h.manager.prompt("resume-session", "original task");
+      for (let i = 0; i < 100 && (!h.prompts.length || h.store.readMeta("resume-session")?.status !== "idle"); i++) await shortDelay();
+      assert.deepEqual(h.prompts, ["original task"]);
+      assert.ok(h.logs.every((line) => !line.includes('"event":"provider_capacity_retry"')));
+    } finally { h.manager.shutdownAll(); h.cleanup(); }
+  });
+}
+
+for (const hold of [false, true]) test(`unaccepted capacity continuation ${hold ? "remains retryable after a hold" : "records exhaustion without staying pending"}`, async () => {
+  let h!: ReturnType<typeof harness>;
+  h = harness({
+    driver: "claude-code", agentId: "claude-code", command: "claude", agentSessionId: "claude-session",
+    backgroundWorkState: "continuation_pending",
+    backgroundJobs: [{
+      id: "capacity-job", parentTurnId: "turn-a", runnerId: "runner", workspaceId: "workspace",
+      context: { kind: "native" }, launchType: "agent", registeredAt: 1,
+      terminalStatus: "completed", terminalObservedAt: 2, continuationRequired: true,
+      continuationQueuedAt: 3, continuationId: "bgcont-capacity",
+    }],
+  }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, () => {
+    if (!hold || h.prompts.length === 1) {
+      h.callbacks().onEvent({ kind: "error", message: "overloaded_error" });
+      return "refusal";
+    }
+    h.callbacks().onPromptAccepted?.();
+    h.callbacks().onEvent({ kind: "agent_message", text: "Background result consumed." });
+  }, undefined, false);
+  try {
+    h.manager.reconcileStore();
+    for (let i = 0; i < 100 && !h.logs.some((line) => line.includes('"event":"provider_capacity_retry"')); i++) await shortDelay();
+    assert.equal(h.prompts.length, 1);
+    if (hold) h.manager.rearmGovernance("resume-session", {}, "control_plane");
+    for (let i = 0; i < 1000 && (h.manager as any).active.get("resume-session")?.running; i++) await shortDelay();
+    const meta = h.store.readMeta("resume-session")!;
+    if (hold) {
+      assert.equal(meta.backgroundJobs![0]!.continuationSubmittedAt, undefined);
+      assert.equal(meta.backgroundJobs![0]!.continuationMissingResultAt, undefined);
+      h.manager.rearmGovernance("resume-session", {});
+      await (h.manager as any).runBackgroundContinuation("resume-session");
+      for (let i = 0; i < 100 && !h.store.readMeta("resume-session")?.backgroundJobs![0]!.assistantResultPersistedAt; i++) await shortDelay();
+      assert.equal(h.prompts.length, 2);
+      assert.ok(h.store.readMeta("resume-session")!.backgroundJobs![0]!.assistantResultPersistedAt);
+    } else {
+      assert.equal(h.prompts.length, 4);
+      assert.ok(meta.backgroundJobs![0]!.continuationMissingResultAt);
+      assert.equal(meta.backgroundWorkState, undefined);
+      await (h.manager as any).runBackgroundContinuation("resume-session");
+      await shortDelay();
+      assert.equal(h.prompts.length, 4, "exhaustion cannot start a second automatic burst");
+    }
+  } finally { h.manager.shutdownAll(); h.cleanup(); }
+});
+
+test("capacity backoff re-proves worktree validity before another provider turn", async () => {
+  let h!: ReturnType<typeof harness>;
+  let checks = 0;
+  h = harness({}, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, () => {
+    const entry = (h.manager as any).active.get("resume-session");
+    entry.worktree = { path: h.root, branch: "selected-branch" };
+    h.store.patchMeta("resume-session", { worktreePath: h.root });
+    (h.manager as any).persistedWorktreeFailure = async () => { checks++; return "selected worktree was removed"; };
+    (h.manager as any).captureDiff = async () => null;
+    h.callbacks().onEvent({ kind: "error", message: "overloaded_error" });
+    return "refusal";
+  });
+  try {
+    h.manager.prompt("resume-session", "original task");
+    for (let i = 0; i < 200 && !checks; i++) await shortDelay();
+    assert.equal(checks, 1);
+    assert.deepEqual(h.prompts, ["original task"]);
+    assert.ok(h.store.readEvents("resume-session").some((event) => event.payload.kind === "stderr" && /selected worktree needs recovery/.test(event.payload.text)));
+  } finally { h.manager.shutdownAll(); h.cleanup(); }
+});
+
+test("a delivered async answer is never re-asked after an undelivered capacity continuation", async () => {
+  let h!: ReturnType<typeof harness>;
+  h = harness({}, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, () => {
+    const client = (h.manager as any).active.get("resume-session").client;
+    client.lastPromptUndelivered = () => h.prompts.length !== 2;
+    client.lastTurnError = () => h.prompts.length <= 2 ? "overloaded_error" : "invalid request";
+    h.callbacks().onEvent({ kind: "error", message: client.lastTurnError() });
+    return "refusal";
+  });
+  try {
+    (h.manager as any).emitEvent("resume-session", {
+      kind: "question_request", async: true, requestId: "capacity-answer",
+      questions: [{ id: "0", question: "Which path?", options: [{ label: "Patch" }] }],
+    });
+    const occurrence = h.store.readMeta("resume-session")!.pendingApproval!.recoveryId!;
+    h.manager.answerRecoveredQuestion("resume-session", "capacity-answer", occurrence, { "0": "Patch" }, {
+      commandId: "capacity-answer-command", queued: () => {}, started: () => {}, completed: () => {},
+      failed: () => {}, uncertain: () => {},
+    });
+    for (let i = 0; i < 500 && h.prompts.length < 3; i++) await shortDelay();
+    assert.equal(h.prompts.length, 3);
+    assert.equal(h.prompts[0], h.prompts[1], "only the first known-undelivered answer is replayed");
+    assert.equal(h.prompts[2], PROVIDER_RETRY_CONTINUATION);
+    assert.equal(h.store.readEvents("resume-session").filter((event) => event.payload.kind === "question_request").length, 1);
+    assert.equal(h.store.readMeta("resume-session")!.pendingApproval, null);
+  } finally { h.manager.shutdownAll(); h.cleanup(); }
+});
+
+test("a thrown capacity error remains visible when an interrupt prevents retry", async () => {
+  let h!: ReturnType<typeof harness>;
+  h = harness({}, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, () => {
+    assert.equal(h.manager.interruptTurn("resume-session"), "applied");
+    throw new Error("overloaded_error");
+  });
+  try {
+    h.manager.prompt("resume-session", "original task");
+    for (let i = 0; i < 100 && !h.store.readEvents("resume-session").some((event) => event.payload.kind === "turn_interrupted"); i++) await shortDelay();
+    assert.deepEqual(h.prompts, ["original task"]);
+    assert.ok(h.store.readEvents("resume-session").some((event) => event.payload.kind === "turn_interrupted"));
+    assert.ok(h.store.readEvents("resume-session").some((event) => event.payload.kind === "stderr" && /model capacity is temporarily unavailable/.test(event.payload.text)));
+  } finally { h.manager.shutdownAll(); h.cleanup(); }
+});
+
+test("an unaccepted background capacity retry carries its complete results before delivery is recorded", async () => {
+  let h!: ReturnType<typeof harness>;
+  h = harness({
+    driver: "claude-code", agentId: "claude-code", command: "claude", agentSessionId: "claude-session",
+    backgroundWorkState: "continuation_pending",
+    backgroundJobs: [{
+      id: "capacity-results-job", parentTurnId: "turn-a", runnerId: "runner", workspaceId: "workspace",
+      context: { kind: "native" }, launchType: "agent", registeredAt: 1,
+      terminalStatus: "completed", terminalObservedAt: 2, continuationRequired: true,
+      continuationQueuedAt: 3, continuationId: "bgcont-capacity-results",
+    }],
+  }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, () => {
+    if (h.prompts.length === 1) {
+      h.callbacks().onEvent({ kind: "error", message: "overloaded_error" });
+      return "refusal";
+    }
+    h.callbacks().onPromptAccepted?.();
+    h.callbacks().onEvent({ kind: "agent_message", text: "The complete job results were consumed." });
+  }, undefined, false);
+  try {
+    h.manager.reconcileStore();
+    for (let i = 0; i < 200 && !h.store.readMeta("resume-session")?.backgroundJobs![0]!.assistantResultPersistedAt; i++) await shortDelay();
+    assert.equal(h.prompts.length, 2);
+    assert.equal(h.prompts[0], h.prompts[1], "the provider never accepted the result-bearing first prompt");
+    assert.match(h.prompts[1]!, /capacity-results-job/);
+    assert.ok(h.store.readMeta("resume-session")!.backgroundJobs![0]!.assistantResultPersistedAt);
+    assert.equal(h.store.readEvents("resume-session").filter((event) => event.payload.kind === "background_continuation_delivered").length, 1);
+  } finally { h.manager.shutdownAll(); h.cleanup(); }
 });

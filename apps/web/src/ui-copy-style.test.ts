@@ -837,7 +837,7 @@ test("the sign-in card's labels are Title Case and its help lines are sentences 
     }
   }
   // The labels the issue names, exactly.
-  for (const label of ["This Session Uses", "Signed In Now", "Last Checked", "Check Again", "Start Sign-In",
+  for (const label of ["This Session Uses", "Signed In Now", "Last Checked", "Retry", "Start Sign-In",
     "Choose Another Account…"]) {
     assert.ok(Object.values(SIGN_IN_COPY).includes(label as never), label);
   }

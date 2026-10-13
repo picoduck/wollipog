@@ -360,7 +360,7 @@ test("evidence-free mismatch guidance explains uncertainty and names available r
   assert.match(guidance, /cannot match the current authenticated state to the state recorded for this session/i);
   assert.match(guidance, /cannot determine whether the account changed/i);
   assert.match(guidance, /Choose Use Current Account/);
-  assert.match(guidance, /choose Recheck Authentication/);
+  assert.match(guidance, /choose Retry/);
   assert.match(guidance, /Credential and account values are redacted/);
   assert.doesNotMatch(guidance, /Provider account identity mismatch/);
 });

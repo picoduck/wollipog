@@ -24,7 +24,7 @@ import "../styles.css";
  * - `no-email`: the same, but the provider reports no email;
  * - `signed-out`: nobody is signed in and the runner can start a sign-in (Start Sign-In);
  * - `not-manager`: signed out, for a viewer who cannot manage the Machine;
- * - `readonly`: signed out, and the runner cannot start a sign-in here (Recheck Authentication);
+ * - `readonly`: signed out, and the runner cannot start a sign-in here (Retry);
  * - `methods`: an ACP agent (OpenCode) that offers several sign-in methods;
  * - `signing-in`: a sign-in the runner is running for this session, waiting for a pasted code;
  * - `older`: a pre-v180 runner that cannot report the signed-in account;
@@ -153,7 +153,7 @@ const OPTION = {
   },
   revalidate: {
     optionId: "auth:revalidate",
-    name: "Recheck Authentication",
+    name: "Retry",
     description: "Ask the provider in this exact context whether authentication is now valid.",
     kind: "allow_once",
   },
