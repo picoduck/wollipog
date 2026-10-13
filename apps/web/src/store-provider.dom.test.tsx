@@ -337,9 +337,13 @@ test("a legacy full snapshot sends its targeted stream selection immediately", a
 test("rapid switching is paced under the server budget and still ends on the final selection", async () => {
   const timers = new Map<number, { run: () => void; delay: number }>();
   let nextId = 1;
+  // The pacer runs on the monotonic clock; the wall clock is stepped separately below.
   let now = 1_000_000;
+  let wallStep = 0;
   const originalNow = Date.now;
-  Date.now = () => now;
+  const originalPerformanceNow = performance.now;
+  Date.now = () => now + wallStep;
+  performance.now = () => now;
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
@@ -382,10 +386,22 @@ test("rapid switching is paced under the server budget and still ends on the fin
       const [timerId, timer] = paced[0]!;
       assert.ok(timer.delay > 0 && timer.delay < UI_SUBSCRIPTION_RATE_WINDOW_MS);
       now += timer.delay;
+      // An NTP correction or manual change steps only the wall clock; the server window has not moved.
+      wallStep = UI_SUBSCRIPTION_RATE_WINDOW_MS * 6;
       timers.delete(timerId);
       await act(async () => { timer.run(); });
       assert.deepEqual(selections().at(-1), [ids.at(-1)], "the trailing send carries the final selection");
       assert.equal(selections().length, UI_SUBSCRIPTION_PACE_BURST + 1, "skipped selections are never sent");
+      const afterStep = nextId;
+      for (const id of ids.slice(0, UI_SUBSCRIPTION_PACE_BURST)) {
+        now += 10;
+        await act(async () => { navigate({ name: "session", id }); });
+      }
+      // Only the ~1.4 tokens the monotonic clock earned while the trailing send waited remain; a
+      // wall-clock pacer would treat the step as six idle windows and release a whole burst.
+      assert.ok(selections().length - (UI_SUBSCRIPTION_PACE_BURST + 1) <= 2,
+        "a wall-clock step grants no refill, so switching after it is still paced");
+      assert.equal([...timers.keys()].filter((id) => id >= afterStep).length, 1);
 
       await act(async () => { socket.onclose?.({ code: 1013 }); });
       const reconnect = timers.get(nextId - 1)!;
@@ -397,6 +413,7 @@ test("rapid switching is paced under the server budget and still ends on the fin
     });
   } finally {
     Date.now = originalNow;
+    performance.now = originalPerformanceNow;
     await act(async () => { root.unmount(); });
     container.remove();
   }

@@ -2896,7 +2896,8 @@ export function StoreProvider({
       // growing inventory wastes the principal's shared admission window on every connect.
       const enabled = state.streamSubscriptions.mode === "targeted" && state.snapshotLoaded;
       if (!subscriptionSync.pending(state, enabled)) return;
-      const wait = subscriptionPacer.delay(Date.now());
+      // Monotonic: a wall-clock step forward must not grant refill the server's window never granted.
+      const wait = subscriptionPacer.delay(performance.now());
       if (wait > 0) {
         subscriptionPaceTimer = window.setTimeout(() => {
           subscriptionPaceTimer = null;
@@ -2906,7 +2907,7 @@ export function StoreProvider({
       }
       const msg: UiToControlPlane | null = subscriptionSync.nextMessage(state, enabled);
       if (!msg || msg.type !== "session_subscriptions") return;
-      subscriptionPacer.take(Date.now());
+      subscriptionPacer.take(performance.now());
       // Freeze the durable recovery cursor before the server can apply this replacement. A live
       // event delivered immediately after its acknowledgement must not advance us past older gaps.
       store.prepareSubscriptionRecovery(msg.revision, msg.sessionIds);
