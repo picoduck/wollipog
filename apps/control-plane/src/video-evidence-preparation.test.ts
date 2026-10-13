@@ -8,13 +8,37 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { test } from "node:test";
 import fc from "fast-check";
-import { PACED_VIDEO_PREPARATION_PROFILE as profile, prepareVideoEvidence,
+import { PACED_VIDEO_PREPARATION_PROFILE as profile, prepareVideoEvidence, prepareCandidateVideoEvidence,
   videoPreparationDecoderAvailable, videoPresentationTimeUs } from "./video-evidence-preparation.js";
 
 const fixture = (name: string) => readFileSync(new URL(`../test-fixtures/${name}`, import.meta.url));
 const paced = () => fixture("video-preparation-paced.webm");
 const hash = (bytes: Buffer | string) => createHash("sha256").update(bytes).digest("hex");
 const run = promisify(execFile);
+
+test("candidate derives all 16 explicit native frames and cannot borrow the paced envelope", async (t) => {
+  if (!await requireDecoder(t)) return;
+  const source = fixture("video-review-max-profile.webm");
+  const result = await prepareCandidateVideoEvidence(source, "video/webm");
+  assert.ok(result.ok, result.ok ? "complete candidate" : result.reason);
+  if (!result.ok) return;
+  assert.equal(result.manifest.profile, "candidate-silent-video-preparation-v1");
+  assert.equal(result.manifest.frames.length, 16);
+  assert.equal(result.manifest.durationUs, 4_000_000);
+  assert.equal(result.manifest.width, 640);
+  assert.equal(result.manifest.height, 360);
+  assert.deepEqual(result.manifest.frames.map((frame) => frame.ptsUs), Array.from({ length: 16 }, (_, i) => i * 250_000));
+  for (const frame of result.manifest.frames) {
+    assert.equal(frame.durationUs, 250_000);
+    assert.equal(frame.sha256, hash(result.images[frame.index]!));
+  }
+  const pacedRefusal = await prepareVideoEvidence(source, "video/webm");
+  assert.equal(pacedRefusal.ok, false);
+  if (!pacedRefusal.ok) assert.equal(pacedRefusal.code, "recapture_resolution");
+  const candidateRefusal = await prepareCandidateVideoEvidence(paced(), "video/webm");
+  assert.equal(candidateRefusal.ok, false);
+  if (!candidateRefusal.ok) assert.equal(candidateRefusal.code, "recapture_resolution");
+});
 
 test("explicit PTS preserves every generated microsecond identically across FFmpeg field versions", () => {
   const encode = (us: number) => `${Math.floor(us / 1_000_000)}.${String(us % 1_000_000).padStart(6, "0")}`;

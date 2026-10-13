@@ -1,5 +1,5 @@
 /** Offline preparation only. Neither this manifest nor local output is a delivery receipt,
- * a quality verdict, or authority to enable delegated video review. No runtime imports this file. */
+ * a quality verdict, or authority to enable delegated video review. */
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -25,6 +25,14 @@ export const PACED_VIDEO_PREPARATION_PROFILE = Object.freeze({
   cpuSeconds: 15,
 });
 const PROFILE = PACED_VIDEO_PREPARATION_PROFILE;
+export const CANDIDATE_VIDEO_PREPARATION_PROFILE = Object.freeze({ ...PROFILE,
+  id: "candidate-silent-video-preparation-v1", sourceBytes: 8 * 1024 * 1024,
+  durationUs: 4_000_000, frames: 16, minimumWidth: 640, minimumHeight: 360,
+  width: 640, height: 360, minimumFrameIntervalUs: 250_000,
+  frameBytes: 1024 * 1024, totalFrameBytes: 8 * 1024 * 1024,
+  segmentFrames: 16, wallTimeMs: 5_000, cpuSeconds: 3,
+});
+type PreparationProfile = typeof PROFILE | typeof CANDIDATE_VIDEO_PREPARATION_PROFILE;
 const sha256 = (bytes: Buffer | string) => createHash("sha256").update(bytes).digest("hex");
 
 export interface PreparedVideoFrame {
@@ -37,7 +45,7 @@ export interface PreparedVideoFrame {
 export interface VideoPreparationManifest {
   schemaVersion: 1;
   purpose: "offline_preparation_only";
-  profile: typeof PROFILE.id;
+  profile: PreparationProfile["id"];
   sourceSha256: string;
   sourceSizeBytes: number;
   sourceMediaType: "video/webm" | "video/mp4";
@@ -50,7 +58,7 @@ export interface VideoPreparationManifest {
 }
 export type VideoPreparationFailureCode = "source_limit" | "unsupported_media" | "decoder_busy" |
   "decoder_unavailable" | "decode_limit" | "unsupported_streams" | "recapture_resolution" |
-  "recapture_timing" | "split_capture" | "integrity";
+  "recapture_timing" | "split_capture" | "recapture_frame_size" | "integrity";
 export type VideoPreparationResult =
   | { ok: true; manifest: VideoPreparationManifest; manifestSha256: string; images: Buffer[] }
   | { ok: false; code: VideoPreparationFailureCode; reason: string; retryable: boolean };
@@ -81,11 +89,12 @@ function release(): void {
 
 /** Fixed tools and arguments, no shell, no network, no host session directories or secrets.
  * Both tools receive only a read-only source. No decoder output is written to the host. */
-async function isolated(input: string, tool: "ffmpeg" | "ffprobe", args: string[], limit: number)
+async function isolated(input: string, tool: "ffmpeg" | "ffprobe", args: string[], limit: number,
+  profile: PreparationProfile = PROFILE)
   : Promise<Buffer | null> {
   return new Promise((resolve) => {
     const child = spawn("/usr/bin/prlimit", [
-      `--cpu=${PROFILE.cpuSeconds}`, "--as=1073741824", `--fsize=${PROFILE.frameBytes}`,
+      `--cpu=${profile.cpuSeconds}`, "--as=1073741824", `--fsize=${profile.frameBytes}`,
       "--", "/usr/bin/bwrap", "--ro-bind", "/usr", "/usr", "--ro-bind", "/bin", "/bin",
       "--ro-bind", "/lib", "/lib", "--ro-bind", "/lib64", "/lib64",
       "--ro-bind", "/etc/alternatives", "/etc/alternatives",
@@ -100,7 +109,7 @@ async function isolated(input: string, tool: "ffmpeg" | "ffprobe", args: string[
     let invalid = false;
     let settled = false;
     const abort = () => { invalid = true; child.kill("SIGKILL"); };
-    const timer = setTimeout(abort, PROFILE.wallTimeMs);
+    const timer = setTimeout(abort, profile.wallTimeMs);
     child.stdout.on("data", (chunk: Buffer) => {
       size += chunk.length;
       if (size > limit) abort(); else if (!invalid) chunks.push(chunk);
@@ -146,38 +155,52 @@ export function videoPresentationTimeUs(frame: { pts_time?: unknown; pkt_pts_tim
 }
 
 const PNG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
-function imagesFromPipe(bytes: Buffer, width: number, height: number): Buffer[] | null {
+export function videoPreparationImagesFromPipe(bytes: Buffer, width: number, height: number) {
+  return imagesFromPipe(bytes, width, height, PROFILE);
+}
+function imagesFromPipe(bytes: Buffer, width: number, height: number, profile: PreparationProfile)
+  : { ok: true; images: Buffer[] } | { ok: false; code: "integrity" | "recapture_frame_size" } {
   const images: Buffer[] = [];
   let start = 0;
   while (start < bytes.length) {
-    if (images.length >= PROFILE.frames || !bytes.subarray(start, start + 8).equals(PNG) ||
+    if (images.length >= profile.frames || !bytes.subarray(start, start + 8).equals(PNG) ||
         bytes.length - start < 33 || bytes.readUInt32BE(start + 8) !== 13 ||
         bytes.toString("ascii", start + 12, start + 16) !== "IHDR" ||
-        bytes.readUInt32BE(start + 16) !== width || bytes.readUInt32BE(start + 20) !== height) return null;
+        bytes.readUInt32BE(start + 16) !== width || bytes.readUInt32BE(start + 20) !== height) return { ok: false, code: "integrity" };
     let offset = start + 8;
     let complete = false;
     while (offset + 12 <= bytes.length) {
       const length = bytes.readUInt32BE(offset);
       const type = bytes.toString("ascii", offset + 4, offset + 8);
-      if (length > PROFILE.frameBytes || offset + length + 12 > bytes.length ||
-          offset + length + 12 - start > PROFILE.frameBytes) return null;
+      if (offset + length + 12 > bytes.length) return { ok: false, code: "integrity" };
+      if (length > profile.frameBytes || offset + length + 12 - start > profile.frameBytes) {
+        return { ok: false, code: "recapture_frame_size" };
+      }
       offset += length + 12;
-      if (type === "IEND") { if (length !== 0) return null; complete = true; break; }
+      if (type === "IEND") { if (length !== 0) return { ok: false, code: "integrity" }; complete = true; break; }
     }
-    if (!complete) return null;
+    if (!complete) return { ok: false, code: "integrity" };
     images.push(bytes.subarray(start, offset));
     start = offset;
   }
-  return images;
+  return { ok: true, images };
 }
 
 /** Derive a complete sequence from the source, preserving every source frame at its native
  * dimensions. FFmpeg converts decoded colour planes to RGB for lossless PNG encoding. It never rescales,
  * samples, strips audio, changes playback speed, or claims to repair an unreadable capture. */
-export async function prepareVideoEvidence(source: Buffer, mediaType: "video/webm" | "video/mp4")
+export function prepareVideoEvidence(source: Buffer, mediaType: "video/webm" | "video/mp4") {
+  return prepareWithProfile(source, mediaType, PROFILE);
+}
+/** Distinct candidate envelope, never a relaxed paced-profile admission. Every native source
+ * timestamp/duration is derived explicitly by the same bounded isolated worker. */
+export function prepareCandidateVideoEvidence(source: Buffer, mediaType: "video/webm" | "video/mp4") {
+  return prepareWithProfile(source, mediaType, CANDIDATE_VIDEO_PREPARATION_PROFILE);
+}
+async function prepareWithProfile(source: Buffer, mediaType: "video/webm" | "video/mp4", profile: PreparationProfile)
   : Promise<VideoPreparationResult> {
-  if (!source.length || source.length > PROFILE.sourceBytes) {
-    return failure("source_limit", "Split or recapture the original recording below 32 MiB.");
+  if (!source.length || source.length > profile.sourceBytes) {
+    return failure("source_limit", "Split or recapture the original recording within its disclosed source-byte limit.");
   }
   if (!(mediaType === "video/webm" || mediaType === "video/mp4") || !videoBytesMatchMime(mediaType, source)) {
     return failure("unsupported_media", "Use a verified WebM or MP4 recording.");
@@ -199,7 +222,7 @@ export async function prepareVideoEvidence(source: Buffer, mediaType: "video/web
       "-v", "error", "-show_streams", "-show_frames", "-show_entries",
       "stream=codec_type,codec_name,width,height:frame=media_type,pts_time,pkt_pts_time,duration_time,pkt_duration_time,width,height",
       "-of", "json", "/input",
-    ], 512 * 1024);
+    ], 512 * 1024, profile);
     if (!metadata) return failure("decode_limit", "Complete inspection exceeded the isolated decoder limits.");
     let probe: Probe;
     try { probe = JSON.parse(metadata.toString("utf8")) as Probe; } catch {
@@ -212,51 +235,55 @@ export async function prepareVideoEvidence(source: Buffer, mediaType: "video/web
     }
     const { width, height } = probe.streams[0]!;
     if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) ||
-        Number(width) < PROFILE.minimumWidth || Number(height) < PROFILE.minimumHeight ||
-        Number(width) > PROFILE.width || Number(height) > PROFILE.height) {
-      return failure("recapture_resolution", "Recapture at readable native dimensions between 960×540 and 1280×720.");
+        Number(width) < profile.minimumWidth || Number(height) < profile.minimumHeight ||
+        Number(width) > profile.width || Number(height) > profile.height) {
+      return failure("recapture_resolution", "Recapture at the exact disclosed native dimensions for this profile.");
     }
-    if (!Array.isArray(probe.frames) || probe.frames.length < 2 || probe.frames.length > PROFILE.frames) {
-      return failure("split_capture", "Split the original scenario into clips of at most 900 source frames.");
+    if (!Array.isArray(probe.frames) || probe.frames.length < 2 || probe.frames.length > profile.frames) {
+      return failure("split_capture", "Split the original scenario into clips of at most the disclosed source-frame count.");
     }
     const pts = probe.frames.map(videoPresentationTimeUs);
     const lastDuration = timestamp(probe.frames.at(-1)!.duration_time ?? probe.frames.at(-1)!.pkt_duration_time);
     if (lastDuration === null || lastDuration <= 0 || pts.some((time, index) => time === null ||
-        (index === 0 ? time !== 0 : time - pts[index - 1]! < PROFILE.minimumFrameIntervalUs)) ||
+        (index === 0 ? time !== 0 : time - pts[index - 1]! < profile.minimumFrameIntervalUs)) ||
         probe.frames.some((frame) => frame.media_type !== "video" || frame.width !== width || frame.height !== height)) {
-      return failure("recapture_timing", "Recapture with explicit ordered timestamps starting at zero, at no more than 30 fps.");
+      return failure("recapture_timing", "Recapture with explicit ordered timestamps starting at zero, within the disclosed frame interval.");
     }
     const durationUs = pts.at(-1)! + lastDuration;
-    if (durationUs > PROFILE.durationUs) return failure("split_capture", "Split the original scenario into clips of at most 30 seconds.");
+    if (durationUs > profile.durationUs) return failure("split_capture", "Split the original scenario into clips of within the disclosed duration.");
     const durations = pts.map((time, index) => index + 1 < pts.length ? pts[index + 1]! - time! : lastDuration);
-    if (durations.some((duration) => duration > PROFILE.segmentDurationUs)) {
+    if (durations.some((duration) => duration > profile.segmentDurationUs)) {
       return failure("recapture_timing", "A source frame hold exceeds the four-second preparation segment bound.");
     }
     const pipe = await isolated(input, "ffmpeg", [
       "-nostdin", "-hide_banner", "-loglevel", "error", "-xerror", "-err_detect", "explode",
       "-threads", "1", "-i", "/input", "-map", "0:v:0", "-vsync", "0",
-      "-frames:v", String(PROFILE.frames + 1), "-threads", "1",
+      "-frames:v", String(profile.frames + 1), "-threads", "1",
       "-f", "image2pipe", "-vcodec", "png", "pipe:1",
-    ], PROFILE.totalFrameBytes);
+    ], profile.totalFrameBytes, profile);
     if (!pipe) return failure("decode_limit", "Complete PNG conversion exceeded the decoder time or byte limits; split or recapture.");
-    const images = imagesFromPipe(pipe, Number(width), Number(height));
-    if (!images || images.length !== probe.frames.length) {
+    const parsed = imagesFromPipe(pipe, Number(width), Number(height), profile);
+    if (!parsed.ok && parsed.code === "recapture_frame_size") {
+      return failure("recapture_frame_size", "A complete native PNG frame exceeds this profile’s per-frame byte bound; recapture simpler content within the readable profile. Splitting duration cannot reduce a single frame, and sampling or downscaling is not permitted.");
+    }
+    if (!parsed.ok || parsed.images.length !== probe.frames.length) {
       return failure("integrity", "Decoded images do not match every source frame and its native dimensions.");
     }
+    const images = parsed.images;
     const frames = images.map((bytes, index) => ({
       index, ptsUs: pts[index]!, durationUs: durations[index]!, sha256: sha256(bytes), sizeBytes: bytes.length,
     }));
     const segments: VideoPreparationManifest["segments"] = [];
     for (let first = 0; first < frames.length;) {
       let end = first;
-      while (end < frames.length && end - first < PROFILE.segmentFrames &&
-          frames[end]!.ptsUs + frames[end]!.durationUs - frames[first]!.ptsUs <= PROFILE.segmentDurationUs) end++;
+      while (end < frames.length && end - first < profile.segmentFrames &&
+          frames[end]!.ptsUs + frames[end]!.durationUs - frames[first]!.ptsUs <= profile.segmentDurationUs) end++;
       segments.push({ index: segments.length, firstFrame: first, frameCount: end - first,
         startUs: frames[first]!.ptsUs, endUs: frames[end - 1]!.ptsUs + frames[end - 1]!.durationUs });
       first = end;
     }
     const manifest: VideoPreparationManifest = {
-      schemaVersion: 1, purpose: "offline_preparation_only", profile: PROFILE.id,
+      schemaVersion: 1, purpose: "offline_preparation_only", profile: profile.id,
       sourceSha256: sha256(snapshot), sourceSizeBytes: snapshot.length, sourceMediaType: mediaType,
       width: Number(width), height: Number(height), durationUs, frames, segments,
     };

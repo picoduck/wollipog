@@ -6,6 +6,7 @@ import type { Readable, Writable } from "node:stream";
 import {
   isOrchestratorOnlyCapabilities,
   POLICY_HOOK_ABANDONMENT_MS,
+  PACED_VIDEO_REVIEW_MIN_PROTOCOL,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
@@ -1673,7 +1674,12 @@ export const TOOLS: McpTool[] = [
         occurrenceId: { type: "string" },
         outcome: { type: "string", enum: ["approve", "deny"] },
         selectedOptionId: { type: "string", description: "Required approved option for implementation questions only" },
-        evidenceReviewed: { type: "array", items: { type: "string" }, description: "Every evidence id actually inspected; required to approve a UI evidence decision, and must be omitted when denying one or resolving any other category" },
+        evidenceReviewed: { type: "array", items: { type: "string" }, description: "Every evidence id directly inspected by this owner; excludes original videos covered by admitted managed-media proof. Omit when denying or for another category" },
+        delegatedVideoEvidence: { type: "array", minItems: 1, maxItems: 32, items: {
+          type: "object", properties: { evidenceId: { type: "string", maxLength: 256 }, reviewId: { type: "string", maxLength: 256 },
+            verdictId: { type: "string", maxLength: 256 }, reviewerSessionId: { type: "string", maxLength: 256 } },
+          required: ["evidenceId", "reviewId", "verdictId", "reviewerSessionId"], additionalProperties: false,
+        }, description: "Exact original video IDs and actual non-self managed media Session verdict references; requires protected production readiness, not an ordinary worker message" },
         rationale: { type: "string", description: "Audit-only: never retained or shown to the child; only its digest is recorded" },
         childMessage: {
           type: "string",
@@ -1692,6 +1698,16 @@ export const TOOLS: McpTool[] = [
           (args?.outcome !== "approve" && args?.outcome !== "deny")) {
         return errorResult("sessionId, occurrenceId, and an approve or deny outcome are required");
       }
+      if (args?.delegatedVideoEvidence !== undefined) {
+        if (!Array.isArray(args.delegatedVideoEvidence) || !args.delegatedVideoEvidence.length || args.outcome !== "approve") {
+          return errorResult("Delegated video provenance is valid only for approval and must be a non-empty array");
+        }
+        const compatibility = deps.controlPlaneProtocolVersion === undefined ? await cpFetch(deps, "GET", "/api/compatibility") : null;
+        const version = deps.controlPlaneProtocolVersion ?? (compatibility?.ok ? compatibility.data?.protocolVersion : null);
+        if (!Number.isInteger(version) || version < PACED_VIDEO_REVIEW_MIN_PROTOCOL) {
+          return errorResult(`Delegated video provenance requires production control plane protocol v${PACED_VIDEO_REVIEW_MIN_PROTOCOL}; no approval was sent`);
+        }
+      }
       if (args?.childMessage !== undefined) {
         if (typeof args.childMessage !== "string") return errorResult("childMessage must be a string");
         const compatibilityError = await workflowDecisionChildMessageCompatibilityError(deps);
@@ -1709,6 +1725,7 @@ export const TOOLS: McpTool[] = [
             outcome: args.outcome,
             ...(typeof args.selectedOptionId === "string" ? { selectedOptionId: args.selectedOptionId } : {}),
             ...(Array.isArray(args.evidenceReviewed) ? { evidenceReviewed: args.evidenceReviewed } : {}),
+            ...(Array.isArray(args.delegatedVideoEvidence) ? { delegatedVideoEvidence: args.delegatedVideoEvidence } : {}),
             ...(typeof args.rationale === "string" ? { rationale: args.rationale } : {}),
             ...(typeof args.childMessage === "string" ? { childMessage: args.childMessage } : {}),
           },
