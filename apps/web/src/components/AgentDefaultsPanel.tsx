@@ -14,6 +14,14 @@ import { agentDefaultsDescription, harnessIdentityKey, isConfigurable } from "./
 /** §12.3: a load that settles sooner shows nothing new. */
 const SKELETON_DELAY_MS = 300;
 
+/** A save or reset that failed for an agent the list then dropped, so its dialog had to close. */
+interface LostChange {
+  key: string;
+  name: string;
+  kind: "save" | "reset";
+  detail: string;
+}
+
 interface LoadFailure {
   /** The server predates agent defaults (404): an update, not a retry, is what fixes it. */
   endpointMissing: boolean;
@@ -74,6 +82,10 @@ export function AgentDefaultsPanel({
   const [loading, setLoading] = useState(false);
   const [showSkeleton, setShowSkeleton] = useState(false);
   const [failure, setFailure] = useState<LoadFailure | null>(null);
+  // The last failed save or reset, while its dialog shows it; and one whose dialog closed because the
+  // agent left the list, which the group then says, rather than closing on it in silence.
+  const failedChange = useRef<LostChange | null>(null);
+  const [lostChange, setLostChange] = useState<LostChange | null>(null);
 
   useEffect(() => {
     mounted.current = true;
@@ -98,7 +110,11 @@ export function AgentDefaultsPanel({
       setFailure(null);
       // The agent being edited is gone: its dialog closes, and focus falls back to Refresh.
       const editingKey = editingRef.current;
-      if (editingKey && !next.defaults.some((option) => harnessIdentityKey(option) === editingKey)) setEditing(null);
+      if (editingKey && !next.defaults.some((option) => harnessIdentityKey(option) === editingKey)) {
+        if (failedChange.current?.key === editingKey) setLostChange(failedChange.current);
+        failedChange.current = null;
+        setEditing(null);
+      }
       return true;
     } catch (caught) {
       if (!requestIsCurrent(requestApi, generation)) return false;
@@ -113,6 +129,8 @@ export function AgentDefaultsPanel({
     setView(null);
     setEditing(null);
     setFailure(null);
+    failedChange.current = null;
+    setLostChange(null);
     mutating.current = false;
     void load(true);
     return () => { loadGeneration.current += 1; };
@@ -150,8 +168,14 @@ export function AgentDefaultsPanel({
    * A save or reset. A read already in flight is dropped, since the answer here is newer; a failure
    * reads the list again, so the dialog repairs its draft against what the agent offers now.
    */
-  const mutate = async (request: () => Promise<AgentHarnessDefaultsView>): Promise<void> => {
+  const mutate = async (
+    option: AgentHarnessDefaultOption,
+    kind: LostChange["kind"],
+    request: () => Promise<AgentHarnessDefaultsView>,
+  ): Promise<void> => {
     const requestApi = api;
+    failedChange.current = null;
+    setLostChange(null);
     const invalidateLoads = () => {
       loadGeneration.current += 1;
       setLoading(false);
@@ -170,15 +194,21 @@ export function AgentDefaultsPanel({
     } catch (caught) {
       if (requestIsCurrent(requestApi)) {
         mutating.current = false;
+        failedChange.current = {
+          key: harnessIdentityKey(option),
+          name: option.name,
+          kind,
+          detail: caught instanceof Error ? caught.message : String(caught),
+        };
         void load(false);
       }
       throw caught;
     }
   };
 
-  const save = (option: AgentHarnessDefaultOption, config: AgentHarnessDefaultConfig) => mutate(() =>
+  const save = (option: AgentHarnessDefaultOption, config: AgentHarnessDefaultConfig) => mutate(option, "save", () =>
     api.updateAgentHarnessDefault({ agentId: option.agentId, driver: option.driver, context: option.context, config }));
-  const reset = (option: AgentHarnessDefaultOption) => mutate(() =>
+  const reset = (option: AgentHarnessDefaultOption) => mutate(option, "reset", () =>
     api.deleteAgentHarnessDefault({ agentId: option.agentId, driver: option.driver, context: option.context }));
 
   const retry = (
@@ -256,7 +286,10 @@ export function AgentDefaultsPanel({
             if (node) editButtons.current.set(key, node);
             else editButtons.current.delete(key);
           }}
-          onAction={() => setEditing(key)}
+          onAction={() => {
+            setLostChange(null);
+            setEditing(key);
+          }}
         />
       );
     });
@@ -284,7 +317,24 @@ export function AgentDefaultsPanel({
             {loading ? <Spinner decorative /> : <RefreshIcon size={14} />}
           </button>
         )}
-        notice={notice}
+        notice={(notice || lostChange) && (
+          <>
+            {notice}
+            {lostChange && (
+              <Notice
+                tone="danger"
+                role="alert"
+                title={lostChange.kind === "save" ? "Defaults Not Saved" : "Defaults Not Reset"}
+                details={<code>{lostChange.detail}</code>}
+                onDismiss={() => setLostChange(null)}
+              >
+                {lostChange.kind === "save"
+                  ? `${lostChange.name} is no longer available, so its defaults weren't saved.`
+                  : `${lostChange.name} is no longer available, so its defaults weren't reset.`}
+              </Notice>
+            )}
+          </>
+        )}
       >
         {rows}
       </SettingsGroup>
@@ -294,7 +344,10 @@ export function AgentDefaultsPanel({
           option={editingOption}
           onSave={(config) => save(editingOption, config)}
           onReset={() => reset(editingOption)}
-          onClose={() => setEditing(null)}
+          onClose={() => {
+            failedChange.current = null;
+            setEditing(null);
+          }}
           returnFocusRef={returnFocusRef}
         />
       )}

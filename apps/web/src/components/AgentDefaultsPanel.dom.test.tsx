@@ -640,6 +640,36 @@ test("Save Defaults with every field on Wollipog Default resets, and stays the b
   }
 });
 
+test("a rejected save whose agent then leaves the list is said in the group, not dropped with the dialog", async () => {
+  let gets = 0;
+  const removed = view();
+  removed.defaults = removed.defaults.filter((option) => option.agentId !== "codex");
+  const fixture = await renderPanel(transport(async (_path, init) => {
+    if (init?.method === "PUT") return json({ error: "agent harness is no longer discovered" }, 409);
+    gets += 1;
+    return json(gets === 1 ? view() : removed);
+  }));
+  try {
+    await openEditor(fixture.container, "Codex App Server");
+    await choose("Model", "Luna");
+    await choose("Reasoning Effort", "Low");
+    await act(async () => buttonNamed("Save Defaults").click());
+    await nextFrame();
+    assertNoDomNode(body().querySelector('[role="dialog"]'));
+    const notice = fixture.container.querySelector<HTMLElement>('.notice[role="alert"]');
+    assert.ok(notice, "the group says the save failed");
+    assert.match(notice.textContent ?? "", /Defaults Not Saved/);
+    assert.match(notice.textContent ?? "", /Codex App Server is no longer available, so its defaults weren't saved\./);
+    await act(async () => buttonNamed("Show Details", notice).click());
+    assert.match(notice.textContent ?? "", /no longer discovered/);
+    assert.ok(focused() === buttonNamed("Refresh Agents"), "focus is on Refresh Agents");
+    await act(async () => buttonNamed("Dismiss", notice).click());
+    assertNoDomNode(fixture.container.querySelector(".notice"));
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("a repair that removes the chosen model clears the missing-effort error", async () => {
   let gets = 0;
   const withoutSol = view();
