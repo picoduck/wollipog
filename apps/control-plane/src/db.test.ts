@@ -9000,6 +9000,24 @@ test("cost the runner already acknowledged is not charged again for its rate-pri
     costIsEstimate: true, ratePricedUsage: [...accrueRatePricedUsage([], record)!] }), "runner-1", 1_000);
   assert.ok(Math.abs(mixed.getSession("mixed")!.costUsd - (acknowledged + 0.25)) < 1e-12);
   assert.equal(mixed.sessionUsageByModel("mixed").totals.costSource, "unpriced");
+
+  // The residual keeps its cost under the model that produced it, even when the session moved on.
+  const moved = withRunner();
+  moved.setUsageRateTable(parseRateTable(ratePricedRateDocument));
+  moved.createSessionFromSnapshot(snapshot({ id: "moved", driver: "claude-code", config: { model: "claude-small-model" },
+    historyEpoch: 1, seq: 1, tokensIn: 10, tokensOut: 5, costUsd: acknowledged, acknowledgedCostUsd: acknowledged,
+    ratePricedUsage: [...accrueRatePricedUsage([], record)!] }), "runner-1", 1_000);
+  assert.deepEqual(moved.sessionUsageByModel("moved").byModel, eventFirst.usage.byModel);
+
+  // Sub-micro acknowledged cost is absorbed exactly, not once per remainder.
+  const cheap = [{ kind: "token_usage" as const, model: "cheap-model", inputTokens: 1 }];
+  const cheapTable = parseRateTable({ "cheap-model": { input_cost_per_token: 0.00000015, output_cost_per_token: 0 } });
+  const fraction = withRunner();
+  fraction.setUsageRateTable(cheapTable);
+  fraction.createSessionFromSnapshot(snapshot({ id: "fraction", driver: "codex-app-server", config: { model: "cheap-model" },
+    historyEpoch: 1, seq: 1, tokensIn: 1, costUsd: 0.00000015, acknowledgedCostUsd: 0.00000015,
+    ratePricedUsage: [...accrueRatePricedUsage([], cheap[0]!)!] }), "runner-1", 1_000);
+  assert.ok(Math.abs(fraction.getSession("fraction")!.costUsd - 0.00000015) < 1e-15);
 });
 
 test("flat catch-up without entries leaves the per-key counts incomplete", () => {

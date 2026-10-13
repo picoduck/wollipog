@@ -13394,45 +13394,9 @@ export class ControlPlaneDb {
             return { costSource: priced.costSource, costMicrousd: parts.microusd + carryMicrousd };
           })()
         : null;
-    const delta: UsageLedgerDelta = {
-      inputTokens: residual.inputTokens,
-      outputTokens: residual.outputTokens,
-      costMicrousd: residualPriced?.costMicrousd ?? 0,
-      uncachedInputTokens: residual.inputTokens,
-      cachedInputTokens: 0,
-      cacheCreationTokens: 0,
-      reasoningTokens: 0,
-      cacheSavingsMicrousd: 0,
-      providerReportedRecords: residualPriced?.costSource === "providerReported" ? 1 : 0,
-      modelPricedRecords: residualPriced?.costSource === "modelPriced" ? 1 : 0,
-      unpricedRecords: residualPriced?.costSource === "unpriced" ? 1 : 0,
-    };
-    if (!row) {
-      this.stmt(
-        `INSERT INTO usage_session_state
-           (session_id, input_tokens, output_tokens, cost_microusd, runner_history_epoch,
-            covered_through_seq, revision, rate_priced_status, updated_at)
-         VALUES (?, 0, 0, 0, ?, 0, 0, ?, ?)`,
-      ).run(sessionId, snapshot.historyEpoch ?? null, invalidatesCounts ? 1 : 0, now);
-    }
-    // A cumulative snapshot tells us the amount, not when its unseen prefix accrued. Attribute the
-    // positive catch-up at observation time instead of fabricating historical precision.
-    this.recordUsageDeltaInTransaction(sessionId, delta, now, false, dimensions);
-    // Preserve the authoritative fractional baseline around the rounded micro-USD watermark so
-    // later sub-micro events can cross the next rounding boundary exactly once.
-    let remainderPicousd = pricedRemainderPicousd ?? (adoptsSnapshotCost ? snapshotRemainder : null);
-    // The runner's cost is the last priced cost it acknowledged plus provider costs since. Only a
-    // ledger that fell below that acknowledgement (restored, or new to the runner) sees growth that
-    // may already price a rate-priced residual. Book rate-priced cost only above that deficit, never
-    // twice. When provider-costed tokens are missing too, the split is unknowable, so the absorbed
-    // part is recorded unpriced: a lower bound.
-    const acknowledgedMicrousd = typeof snapshot.acknowledgedCostUsd === "number"
-      ? ControlPlaneDb.usageMicroUsd(snapshot.acknowledgedCostUsd) : 0;
-    let unabsorbedGrowthMicrousd = providerCostGrew
-      ? Math.min(residual.costMicrousd, Math.max(0, acknowledgedMicrousd - current.cost_microusd)) : 0;
-    for (const { entry, missing } of ratePricedResiduals) {
-      // Priced exactly as event-first ingestion prices each record under this key. A request-size
-      // tier that the recorded range cannot pin down leaves the residual unpriced: a lower bound.
+    // Priced exactly as event-first ingestion prices each record under its key. A request-size tier
+    // that the recorded range cannot pin down leaves the residual unpriced: a lower bound.
+    const pricedResiduals = ratePricedResiduals.map(({ entry, missing }) => {
       const model = entry.model ?? dimensions?.model;
       const context = entry.requestInputTokens
         ? sameRequestInputTier(this.usageRateTable, model, entry.requestInputTokens.min, entry.requestInputTokens.max)
@@ -13448,22 +13412,72 @@ export class ControlPlaneDb {
       const priced = context === null
         ? { costUsd: 0, costSource: "unpriced" as const, cacheSavingsUsd: 0 }
         : priceUsage(this.usageRateTable, model, buckets, null, context);
-      const cost = ControlPlaneDb.usageCostParts(priced.costUsd);
+      return { entry, missing, buckets, priced, cost: ControlPlaneDb.usageCostParts(priced.costUsd) };
+    });
+    // The runner's cost is the last priced cost it acknowledged plus provider costs since. Only a
+    // ledger that fell below that acknowledgement (restored, or new to the runner) sees cost growth
+    // that may already price a rate-priced residual. That part of the growth is not booked again:
+    // the residual keeps its cost under its own model, and the flat growth shrinks by it. When
+    // provider-costed tokens are missing too, the split is unknowable, so the shrunken flat part is
+    // recorded unpriced: a lower bound.
+    const pico = (parts: { microusd: number; remainderPicousd: number }) =>
+      BigInt(parts.microusd) * 1_000_000n + BigInt(parts.remainderPicousd);
+    const ledgerPico = pico({ microusd: current.cost_microusd, remainderPicousd: current.cost_remainder_picousd });
+    const residualPico = pricedResiduals.reduce((sum, { cost }) => sum + pico(cost), 0n);
+    const absorbable = [pico(parts) - ledgerPico, pico(ControlPlaneDb.usageCostParts(snapshot.acknowledgedCostUsd)) - ledgerPico, residualPico]
+      .reduce((least, value) => value < least ? value : least);
+    const absorbedPico = providerCostGrew && absorbable > 0n ? absorbable : 0n;
+    let flatCostMicrousd = residualPriced?.costMicrousd ?? 0;
+    if (absorbedPico > 0n) {
+      const absorbedMicrousd = Number((absorbedPico + 500_000n) / 1_000_000n);
+      const fraction = snapshotRemainder - Number(absorbedPico - BigInt(absorbedMicrousd) * 1_000_000n);
+      const carryMicrousd = Math.round(fraction / 1_000_000);
+      flatCostMicrousd += carryMicrousd - absorbedMicrousd;
+      pricedRemainderPicousd = fraction - carryMicrousd * 1_000_000;
+    }
+    // Growth wholly absorbed by the residual leaves nothing to record under the session's model.
+    const flatCostSource = absorbedPico > 0n && !residualTokens && flatCostMicrousd === 0 ? undefined
+      : absorbedPico > 0n && residualTokens ? "unpriced" as const : residualPriced?.costSource;
+    const delta: UsageLedgerDelta = {
+      inputTokens: residual.inputTokens,
+      outputTokens: residual.outputTokens,
+      costMicrousd: flatCostMicrousd,
+      uncachedInputTokens: residual.inputTokens,
+      cachedInputTokens: 0,
+      cacheCreationTokens: 0,
+      reasoningTokens: 0,
+      cacheSavingsMicrousd: 0,
+      providerReportedRecords: flatCostSource === "providerReported" ? 1 : 0,
+      modelPricedRecords: flatCostSource === "modelPriced" ? 1 : 0,
+      unpricedRecords: flatCostSource === "unpriced" ? 1 : 0,
+    };
+    if (!row) {
+      this.stmt(
+        `INSERT INTO usage_session_state
+           (session_id, input_tokens, output_tokens, cost_microusd, runner_history_epoch,
+            covered_through_seq, revision, rate_priced_status, updated_at)
+         VALUES (?, 0, 0, 0, ?, 0, 0, ?, ?)`,
+      ).run(sessionId, snapshot.historyEpoch ?? null, invalidatesCounts ? 1 : 0, now);
+    }
+    // A cumulative snapshot tells us the amount, not when its unseen prefix accrued. Attribute the
+    // positive catch-up at observation time instead of fabricating historical precision.
+    this.recordUsageDeltaInTransaction(sessionId, delta, now, false, dimensions);
+    // Preserve the authoritative fractional baseline around the rounded micro-USD watermark so
+    // later sub-micro events can cross the next rounding boundary exactly once.
+    let remainderPicousd = pricedRemainderPicousd ?? (adoptsSnapshotCost ? snapshotRemainder : null);
+    for (const { entry, missing, buckets, priced, cost } of pricedResiduals) {
       const combinedRemainder = (remainderPicousd ?? current.cost_remainder_picousd) + cost.remainderPicousd;
       const carryMicrousd = Math.round(combinedRemainder / 1_000_000);
       remainderPicousd = combinedRemainder - carryMicrousd * 1_000_000;
-      const absorbedMicrousd = Math.min(unabsorbedGrowthMicrousd, cost.microusd + carryMicrousd);
-      unabsorbedGrowthMicrousd -= absorbedMicrousd;
-      const costSource = absorbedMicrousd > 0 && residualTokens ? "unpriced" : priced.costSource;
       this.recordUsageDeltaInTransaction(sessionId, {
         inputTokens: missing.inputTokens,
-        costMicrousd: cost.microusd + carryMicrousd - absorbedMicrousd,
+        costMicrousd: cost.microusd + carryMicrousd,
         ...buckets,
         reasoningTokens: Math.min(missing.outputTokens, missing.reasoningOutputTokens),
         cacheSavingsMicrousd: ControlPlaneDb.usageMicroUsd(priced.cacheSavingsUsd),
         providerReportedRecords: 0,
-        modelPricedRecords: costSource === "modelPriced" ? 1 : 0,
-        unpricedRecords: costSource === "unpriced" ? 1 : 0,
+        modelPricedRecords: priced.costSource === "modelPriced" ? 1 : 0,
+        unpricedRecords: priced.costSource === "unpriced" ? 1 : 0,
       }, now, false, dimensions && entry.model ? { ...dimensions, model: entry.model } : dimensions);
     }
     if (remainderPicousd !== null) {

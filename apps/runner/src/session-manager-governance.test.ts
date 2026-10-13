@@ -991,6 +991,8 @@ test("a correction preserves usage accrued before acknowledgement and applies sk
     h.store.patchMeta("s_governance", { costUsd: 4 });
     syncCorrection(h, 2, 1, -1);
     assert.equal(h.store.readMeta("s_governance")!.costUsd, 3);
+    assert.equal(h.store.readMeta("s_governance")!.acknowledgedCostUsd, 2,
+      "usage preserved past the correction was never priced by the control plane (#3111)");
     syncCorrection(h, 2, 1, -1);
     assert.equal(h.store.readMeta("s_governance")!.costUsd, 3);
     h.store.patchMeta("s_governance", { costUsd: 4 });

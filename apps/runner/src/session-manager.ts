@@ -14284,6 +14284,8 @@ export class SessionManager {
    * authoritative cost the runner can enforce. */
   syncPricedSessionCost(sessionId: string, costUsd: number, revision?: number, correctionDeltaUsd?: number, coordinate?: import("@wollipog/protocol").PricedSessionCostMessage): void {
     if (!Number.isFinite(costUsd) || costUsd < 0) return;
+    // The control plane's own price, before provider usage preserved below is added (#3111).
+    const acknowledgedCostUsd = costUsd;
     const current = this.store.readMeta(sessionId);
     if (!current || !Number.isSafeInteger(revision ?? 0) || (revision ?? 0) < 0) return;
     const priorRevision = current.costReconciliationRevision ?? 0;
@@ -14319,7 +14321,7 @@ export class SessionManager {
       const adjusted = current.costUsd + correctionDeltaUsd! - (current.costReconciliationDeltaUsd ?? 0);
       costUsd = Math.max(costUsd, adjusted);
     }
-    const updated = this.store.patchMeta(sessionId, { costUsd, acknowledgedCostUsd: costUsd,
+    const updated = this.store.patchMeta(sessionId, { costUsd, acknowledgedCostUsd,
       ...(revision !== undefined ? { costReconciliationRevision: revision } : {}),
       ...(correctionDeltaUsd !== undefined ? { costReconciliationDeltaUsd: correctionDeltaUsd } : {}),
       ...(identity !== undefined ? { costReconciliationIdentity: identity } : {}),
