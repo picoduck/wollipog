@@ -1720,15 +1720,20 @@ export function Select<T extends string>({
    * The highlighted option is where focus is, and the only place it shows (§9.1): the list draws no
    * ring of its own while one is highlighted (#3020). So opening the list and every keyboard move keep
    * that option in view; End in a long list highlighted an option below the scroll fold, and nothing
-   * on screen said where focus was. Not for the pointer, which is already over what it highlights, and
-   * scrolling under it would move a different option beneath it. Again when the placement changes,
-   * since the list only becomes a scroller once it is placed.
+   * on screen said where focus was. Not when the pointer moves the highlight: it is already over what
+   * it highlights, and scrolling under it would move a different option beneath it. But always when the
+   * placement changes, whoever moved the highlight last: the list only becomes a scroller once it is
+   * placed, and a shorter window can push a hovered option below the fold. `listStyle` is the placement
+   * itself; `panelStyle` is a fresh object on every render of a searchable list that opened above.
    */
   const revealActive = useRef(false);
+  const reveal = () => {
+    if (open && activeDescendant) document.getElementById(activeDescendant)?.scrollIntoView?.({ block: "nearest" });
+  };
   useLayoutEffect(() => {
-    if (!open || !revealActive.current || !activeDescendant) return;
-    document.getElementById(activeDescendant)?.scrollIntoView?.({ block: "nearest" });
-  }, [open, activeDescendant, panelStyle]);
+    if (revealActive.current) reveal();
+  }, [open, activeDescendant]);
+  useLayoutEffect(reveal, [listStyle]);
 
   /**
    * The list's keyboard contract, owned by whatever holds focus while it is open: the list itself,

@@ -1757,6 +1757,19 @@ test.describe("the appearance controls", () => {
     await page.keyboard.press("Home");
     await expect.poll(inView).toEqual({ scrolls: true, label: "Wollipog", visible: true });
     await page.keyboard.press("Escape");
+
+    // A highlight the POINTER chose is not scrolled to while the pointer moves, but a shorter window
+    // that turns the list into a scroller still brings it into view.
+    await page.setViewportSize({ width: 360, height: 640 });
+    await trigger(page).focus();
+    await page.keyboard.press("Enter");
+    await expect(list).toBeFocused();
+    await list.getByRole("option", { name: "Monokai" }).hover();
+    await expect.poll(async () => (await inView()).label).toBe("Monokai");
+    await page.setViewportSize({ width: 360, height: 240 });
+    await expect.poll(inView, { message: "the hovered highlight is brought back into view when the list starts to scroll" })
+      .toEqual({ scrolls: true, label: "Monokai", visible: true });
+    await page.keyboard.press("Escape");
   });
 
   for (const theme of THEMES) {
