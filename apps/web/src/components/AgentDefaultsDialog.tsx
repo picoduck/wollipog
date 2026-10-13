@@ -22,6 +22,7 @@ const EFFORT_ERROR_ID = "agent-defaults-effort-error";
 const EFFORT_HELPER_ID = "agent-defaults-effort-helper";
 const HELPER_ID = "agent-defaults-helper";
 
+/** Which footer button is running: it shows the busy state and keeps focus, whatever it requested. */
 type Pending = "save" | "reset" | null;
 
 /** Validation (unchanged from the inline editor): a chosen model that has efforts needs one. */
@@ -99,10 +100,14 @@ export function AgentDefaultsDialog({
     setDraft(next);
   };
 
-  const run = async (kind: Exclude<Pending, null>, action: () => Promise<void>) => {
+  /**
+   * `button` is the one pressed; `kind` is what it asked for. Save Defaults with every field on
+   * Wollipog Default is a reset, but stays the busy button, so focus stays where it was pressed.
+   */
+  const run = async (button: Exclude<Pending, null>, kind: "save" | "reset", action: () => Promise<void>) => {
     if (pendingRef.current) return;
-    pendingRef.current = kind;
-    setPending(kind);
+    pendingRef.current = button;
+    setPending(button);
     setFailure(null);
     try {
       await action();
@@ -130,11 +135,11 @@ export function AgentDefaultsDialog({
     const chosen = !!(draft.model || draft.effort || draft.permissionMode);
     // Every field on Wollipog Default is the same as having no defaults saved.
     if (!chosen) {
-      if (option.preference) void run("reset", onReset);
+      if (option.preference) void run("save", "reset", onReset);
       else onClose();
       return;
     }
-    void run("save", () => onSave(draft));
+    void run("save", "save", () => onSave(draft));
   };
 
   const close = () => {
@@ -153,7 +158,7 @@ export function AgentDefaultsDialog({
           busy={pending === "reset"}
           progress="Going back to Wollipog defaults…"
           disabled={pending === "save"}
-          onClick={() => void run("reset", onReset)}
+          onClick={() => void run("reset", "reset", onReset)}
         >
           Use Wollipog Defaults
         </BusyButton>

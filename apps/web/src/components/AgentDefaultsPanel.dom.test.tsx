@@ -606,6 +606,40 @@ test("Retry keeps focus while it fails again, and hands it to Refresh Agents onc
   }
 });
 
+test("Save Defaults with every field on Wollipog Default resets, and stays the busy, focused button", async () => {
+  const methods: string[] = [];
+  let reject!: (response: Response) => void;
+  const pendingDelete = new Promise<Response>((resolve) => { reject = resolve; });
+  const fixture = await renderPanel(transport(async (_path, init) => {
+    const method = init?.method ?? "GET";
+    methods.push(method);
+    return method === "DELETE" ? pendingDelete : json(view(true));
+  }));
+  try {
+    await openEditor(fixture.container, "Codex App Server");
+    await choose("Model", "Wollipog Default");
+    await choose("Permission Mode", "Wollipog Default");
+    const save = buttonNamed("Save Defaults");
+    save.focus();
+    await act(async () => save.click());
+    await settle();
+    assert.deepEqual(methods, ["GET", "DELETE"]);
+    // Busy without `disabled`, which would drop the focus it was pressed with.
+    assert.equal(save.getAttribute("aria-busy"), "true");
+    assert.equal(save.disabled, false);
+    assert.equal(buttonNamed("Use Wollipog Defaults").getAttribute("aria-busy"), null);
+    await act(async () => {
+      reject(json({ error: "database is locked" }, 503));
+      await pendingDelete;
+    });
+    await nextFrame();
+    assert.match(dialog().querySelector('.notice[role="alert"]')?.textContent ?? "", /Defaults Not Reset/);
+    assert.ok(focused() === save, "focus stays on Save Defaults");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("a repair that removes the chosen model clears the missing-effort error", async () => {
   let gets = 0;
   const withoutSol = view();
