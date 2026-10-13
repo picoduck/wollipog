@@ -670,6 +670,32 @@ test("a rejected save whose agent then leaves the list is said in the group, not
   }
 });
 
+test("a refresh that removes the focused field keeps focus inside the open dialog", async () => {
+  let gets = 0;
+  const gone = view(true);
+  gone.defaults[0]!.installations = [];
+  gone.defaults[0]!.compatibleInstallations = 0;
+  const fixture = await renderPanel(transport(async () => {
+    gets += 1;
+    return json(gets === 1 ? view(true) : gone);
+  }));
+  try {
+    await openEditor(fixture.container, "Codex App Server");
+    const model = buttonNamed(/^Model:/, dialog());
+    model.focus();
+    await fixture.render({ revision: 1 });
+    await nextFrame();
+    // The agent left every machine: its fields are gone and the warning says so.
+    assertNoDomNode(dialog().querySelector('[aria-label^="Model:"]'));
+    assert.match(dialog().textContent ?? "", /no longer discovered on any machine/);
+    const active = focused();
+    assert.ok(active !== null && active !== (body() as Element) && dialog().contains(active as Node),
+      "focus stays inside the dialog");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("a repair that removes the chosen model clears the missing-effort error", async () => {
   let gets = 0;
   const withoutSol = view();

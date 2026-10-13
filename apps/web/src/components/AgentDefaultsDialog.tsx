@@ -72,6 +72,7 @@ export function AgentDefaultsDialog({
   const pendingRef = useRef<Pending>(null);
   const effortFieldRef = useRef<HTMLDivElement>(null);
   const openedWith = useRef(option);
+  const formRef = useRef<HTMLFormElement>(null);
 
   useEffect(() => {
     if (openedWith.current === option) return;
@@ -82,6 +83,17 @@ export function AgentDefaultsDialog({
     if (notice) setRepairNotice(notice);
     // The missing-effort error is about a model the repair may have removed, or whose efforts it did.
     if (!needsEffort(option, repaired)) setEffortError(null);
+    // The repair can remove the field that had focus (the agent left every machine). Focus must not
+    // fall to the page behind an open dialog, where Tab escapes its trap: the first control left in
+    // the body takes it, or the dialog itself.
+    const frame = requestAnimationFrame(() => {
+      const active = document.activeElement;
+      if (active && active !== document.body && active.isConnected) return;
+      const form = formRef.current;
+      const control = form?.querySelector<HTMLElement>('button:not([disabled]):not([aria-disabled="true"])');
+      (control ?? form?.closest<HTMLElement>('[role="dialog"]'))?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
   }, [option]);
 
   const models = uniqueModels(option);
@@ -180,6 +192,7 @@ export function AgentDefaultsDialog({
       )}
     >
       <form
+        ref={formRef}
         id="agent-defaults-form"
         className="form"
         noValidate
