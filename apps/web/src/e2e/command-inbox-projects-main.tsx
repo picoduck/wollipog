@@ -310,7 +310,8 @@ function initialModel(): FixtureModel {
     input.pendingApproval = { requestId: "environment", title: "Which environment?", kind: "question", options: [],
       questions: [{ id: "environment", question: "Which environment?", options: [{ label: "Staging" }, { label: "Production" }] }] };
     input.attention.humanActions = [{ requestId: "environment", rank: 3, requestedAt: base + 500 }];
-    const review = make("session-review", "Findings Ready for Assessment", "running", 10);
+    // A result is ready for review only once its session has stopped working (#3074).
+    const review = make("session-review", "Findings Ready for Assessment", "idle", 10);
     review.attention.result = { revision: "result-1", at: base + 10, owner: "human" };
     const work = make("session-working", "Investigating in the Background", "running", 2000);
     const quiet = make("session-quiet", "Previously Reviewed Explanation", "idle", 1000);

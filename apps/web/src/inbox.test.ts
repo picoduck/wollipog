@@ -4,6 +4,7 @@ import type { ProjectView, SessionStatus, SessionView } from "@wollipog/protocol
 import { workspaceLocationKey } from "./projects.js";
 import { outstandingSessionResult, sessionFollowUp } from "./session-follow-up.js";
 import { sortSessionsForReminders } from "./session-reminders.js";
+import { sessionRowStatus } from "./session-row-status.js";
 import {
   INBOX_ALL_SPLIT_KEY,
   INBOX_NO_PROJECT_SPLIT_KEY,
@@ -110,7 +111,7 @@ test("sortInboxSessions pins within a priority group and ignores noisy event rec
   assert.deepEqual(sorted.map(({ id }) => id), ["pinned", "new", "none", "old"]);
 });
 
-test("pins lead while input, results, work, and quiet remain independent of lifecycle", () => {
+test("pins lead while input, results at rest, work, and quiet keep their order; a working result waits (#3074)", () => {
   const attention = (at: number, revision: string | null, acknowledgedRevision: string | null = null) => ({
     version: 1 as const, meaningfulAt: at, humanActions: [], acknowledgedRevision,
     result: revision ? { revision, at, owner: "human" as const } : null,
@@ -124,8 +125,13 @@ test("pins lead while input, results, work, and quiet remain independent of life
   const working = session("working", { status: "running", attention: attention(50, null) });
   assert.deepEqual(sortInboxSessions([quiet, reviewed, readyIdle, working, input, readyRunning],
     new Set(["quiet", "working"])).map(({ id }) => id),
-  ["working", "quiet", "input", "ready-running", "ready-idle", "reviewed"]);
+  ["working", "quiet", "input", "ready-idle", "ready-running", "reviewed"]);
   assert.equal(sessionFollowUp(input).group, "needs_input");
+  assert.equal(sessionFollowUp(readyRunning).group, "working");
+  assert.equal(sessionFollowUp({ ...readyRunning, status: "idle" }).group, "ready_for_review", "the turn ended");
+  for (const status of ["starting", "queued"] as const) assert.equal(sessionFollowUp({ ...readyRunning, status }).group, "working");
+  assert.equal(sessionFollowUp({ ...readyIdle, stopOperation: { operationId: "stop", status: "stop_pending", requestedAt: 1,
+    lastAttemptAt: 1, attemptCount: 1, capacityReleased: false } }).group, "working", "a pending stop is still working");
   assert.equal(outstandingSessionResult(reviewed), null);
   assert.equal(sessionFollowUp(session("legacy", { status: "idle", preview: "Old text", messageCount: 99 })).group, "quiet");
 });
@@ -145,13 +151,41 @@ test("agent-owned child results and requests stay unattended; handed-off results
     pendingRequestOwners: { human: 0, orchestrator: 1 },
     attention: { version: 1, humanActions: [], meaningfulAt: 2,
       result: { revision: "r1", at: 2, owner: "orchestrator" }, acknowledgedRevision: null } });
-  const human = session("human", { status: "running", attention: { version: 1, humanActions: [], meaningfulAt: 3,
+  const human = session("human", { status: "idle", attention: { version: 1, humanActions: [], meaningfulAt: 3,
     result: { revision: "r2", at: 3, owner: "human" }, acknowledgedRevision: null } });
   assert.deepEqual(sortInboxSessions([parent, child, human]).map(({ id }) => id), ["human", "parent", "child"]);
   const handedOff = { ...child, attention: { ...child.attention!, result: { ...child.attention!.result!, at: 4, owner: "human" as const } } };
   const rows = threadInboxRows(sortInboxSessions([parent, handedOff, human]).map((session) => ({ session })), new Set());
   assert.deepEqual(rows.map(({ session }) => session.id), ["parent", "child", "human"]);
   assert.match(inboxThreadChildrenLabel(rows[0]!.thread.children!), /Ready for Review/);
+});
+
+test("a family's Ready for Review counts only descendants at rest, and a working parent keeps its status (#3074)", () => {
+  const result = (revision: string, at: number) => ({ version: 1 as const, humanActions: [], meaningfulAt: at,
+    result: { revision, at, owner: "human" as const }, acknowledgedRevision: null });
+  const family = (parentStatus: SessionStatus, childStatus: SessionStatus) => threadInboxRows([
+    { session: session("parent", { status: parentStatus }) },
+    { session: session("child", { status: childStatus, parentSessionId: "parent", attention: result("old", 2) }) },
+  ], new Set())[0]!;
+  // At-rest parent, running child with an old unacknowledged result: no family Ready for Review.
+  const runningChild = family("idle", "running");
+  assert.equal(runningChild.thread.children?.followUpLabel, undefined);
+  assert.equal(sessionRowStatus(runningChild.session, { familyFollowUpLabel: runningChild.thread.children?.followUpLabel }).badge, null);
+  assert.doesNotMatch(inboxThreadChildrenLabel(runningChild.thread.children!), /Ready for Review/);
+  // Once the child's turn ends, the family's Ready for Review appears on the at-rest parent.
+  const restingChild = family("idle", "idle");
+  assert.equal(restingChild.thread.children?.followUpLabel, "Ready for Review");
+  assert.equal(sessionRowStatus(restingChild.session, { familyFollowUpLabel: "Ready for Review" }).badge?.meta.label, "Ready for Review");
+  // Running parent, at-rest child with a result: the parent shows its working status.
+  const runningParent = family("running", "idle");
+  assert.equal(runningParent.thread.children?.followUpLabel, "Ready for Review");
+  assert.equal(sessionRowStatus(runningParent.session, { familyFollowUpLabel: "Ready for Review" }).badge?.meta.label, "Running");
+  // A family request that needs the person still shows on a working parent.
+  const asking = threadInboxRows([{ session: session("parent", { status: "running" }) },
+    { session: session("child", { status: "input_required", parentSessionId: "parent",
+      pendingApproval: { requestId: "q", title: "Choose", kind: "question", options: [] } }) }], new Set())[0]!;
+  assert.equal(asking.thread.children?.followUpLabel, "Needs Your Input");
+  assert.equal(sessionRowStatus(asking.session, { familyFollowUpLabel: "Needs Your Input" }).badge?.meta.label, "Needs Your Input");
 });
 
 test("a due reminder surfaces follow-up but cannot outrank human input or split a family", () => {
@@ -165,6 +199,14 @@ test("a due reminder surfaces follow-up but cannot outrank human input or split 
     .map(({ id }) => id), ["input", "parent", "child"]);
   assert.deepEqual(sortSessionsForReminders([parent, child, input], new Map([["child", due]]), "ordinary",
     new Set(["child"])).map(({ id }) => id), ["parent", "child", "input"]);
+  // A due reminder ranks with results only once the session has stopped working (#3074).
+  const result = session("result", { status: "idle", attention: { version: 1, humanActions: [], meaningfulAt: 1,
+    result: { revision: "r1", at: 1, owner: "human" }, acknowledgedRevision: null } });
+  const lone = { ...child, parentSessionId: null };
+  assert.deepEqual(sortSessionsForReminders([lone, result], new Map([["child", due]]), "ordinary").map(({ id }) => id),
+    ["result", "child"]);
+  assert.deepEqual(sortSessionsForReminders([result, { ...lone, status: "idle" }], new Map([["child", due]]), "ordinary")
+    .map(({ id }) => id), ["child", "result"]);
 });
 
 test("sortInboxSessions ignores updated time and uses stable creation time and id for old peers", () => {

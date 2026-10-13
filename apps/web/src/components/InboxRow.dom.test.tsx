@@ -62,14 +62,16 @@ const badges = (container: Element) => [...container.querySelectorAll<HTMLElemen
 const minutesAgo = (minutes: number): SessionActivity => recordSessionActivity(undefined, NOW - minutes * ACTIVITY_BUCKET_MS);
 
 test("a parent keeps its human family reason in the single badge across phone and desktop shapes", async () => {
-  for (const reason of ["Needs Your Input", "Ready for Review"] as const) {
-    await withRow(baseSession({ status: "running" }), async (container, rerender) => {
-      assert.deepEqual(badges(container).map((badge) => badge.textContent), [reason]);
+  // A working parent keeps its own Running over the family's Ready for Review (#3074).
+  for (const [reason, status, shown] of [["Needs Your Input", "running", "Needs Your Input"],
+    ["Ready for Review", "idle", "Ready for Review"], ["Ready for Review", "running", "Running"]] as const) {
+    await withRow(baseSession({ status }), async (container, rerender) => {
+      assert.deepEqual(badges(container).map((badge) => badge.textContent), [shown]);
       await rerender({ threeRow: false });
-      assert.deepEqual(badges(container).map((badge) => badge.textContent), [reason]);
+      assert.deepEqual(badges(container).map((badge) => badge.textContent), [shown]);
       assert.match(container.querySelector(".inbox-thread-family-text")?.textContent ?? "", new RegExp(reason));
     }, { threeRow: true, threadChildren: JSON.stringify({ count: 1, waiting: reason === "Needs Your Input" ? 1 : 0,
-      followUpLabel: reason, children: [{ id: "child", title: "Child", state: "running" }] }) });
+      followUpLabel: reason, children: [{ id: "child", title: "Child", state: reason === "Needs Your Input" ? "blocked" : "idle" }] }) });
   }
 });
 

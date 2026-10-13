@@ -288,14 +288,15 @@ test("no card renders markdown, a tag, an emoji or more than one status badge", 
 
 test("a returned result keeps one review badge and meaningful time despite newer chatter", async () => {
   const meaningfulAt = Date.now() - 15 * 60_000;
-  const board = await mount({ sessions: [session("result", {
-    lastEventAt: Date.now(),
-    attention: { version: 1, meaningfulAt, humanActions: [],
-      result: { revision: "returned-result", at: meaningfulAt, owner: "human" }, acknowledgedRevision: null },
-  })] });
+  const attention = { version: 1 as const, meaningfulAt, humanActions: [],
+    result: { revision: "returned-result", at: meaningfulAt, owner: "human" as const }, acknowledgedRevision: null };
+  const board = await mount({ sessions: [session("result", { lastEventAt: Date.now(), attention }),
+    session("working", { status: "running", lastEventAt: Date.now(), attention })] });
   try {
     const card = board.card("result");
     assert.deepEqual([...card.querySelectorAll(".status")].map((badge) => badge.textContent), ["Ready for Review"]);
+    // A session still working shows its working status, not its earlier result (#3074).
+    assert.deepEqual([...board.card("working").querySelectorAll(".status")].map((badge) => badge.textContent), ["Running"]);
     assert.equal(card.querySelector("time.card-time")?.getAttribute("datetime"), new Date(meaningfulAt).toISOString());
     assert.equal(card.querySelector("time.card-time")?.textContent, "15m ago");
     assert.equal(card.querySelector(".card-sender-text")?.textContent, "Codex App Server · Wollipog");

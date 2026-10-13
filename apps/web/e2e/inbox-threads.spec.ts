@@ -273,6 +273,10 @@ test("phone parents visibly identify review work and suppress controller-owned r
   }));
   expect(box.contentWidth).toBeLessThanOrEqual(box.width);
   expect(box.right).toBeLessThanOrEqual(390);
+  // A working parent shows its working status; its family chip still says Ready for Review (#3074).
+  await page.goto(`${PAGE}&family-follow-up=review-working`);
+  await expect(parent.locator(".status")).toHaveText("Running");
+  await expect(parent.locator(".inbox-thread-family")).toContainText("Ready for Review");
   await page.goto(`${PAGE}&family-follow-up=controlled`);
   await expect(parent.locator(".status")).toHaveText("Running");
   await expect(parent.locator(".status")).toHaveCount(1);

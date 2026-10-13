@@ -49,7 +49,7 @@ for (const width of [1440, 390]) {
     expect(await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.model().sessions
       .find((s) => s.id === "session-review")!.attention!.acknowledgedRevision)).toBe("result-2");
     await page.reload();
-    await expect.poll(() => titles(page)).toEqual([input, work, result, quiet]);
+    await expect.poll(() => titles(page)).toEqual([input, work, quiet, result]);
   });
 }
 
@@ -64,6 +64,11 @@ test("All and Project lists share priorities; new results defer reordering while
     fixture.replaceSessionSnapshot("session-working", { attention: { ...facts,
       result: { revision: "work-result", at: Date.now(), owner: "human" } } });
   });
+  // Still working, so its result is not ready for review and it keeps its place (#3074).
+  await expect(row(page, work).locator(".status")).toHaveText("Running");
+  await expect.poll(() => titles(page)).toEqual([input, result, work, quiet]);
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-working", { status: "idle" }));
+  await expect(row(page, work).locator(".status")).toHaveText("Ready for Review");
   await expect(row(page, work)).toHaveAttribute("aria-selected", "true");
   await expect.poll(() => titles(page)).toEqual([input, result, work, quiet]);
   const orderLine = page.locator(".inbox-order-line");
@@ -121,7 +126,7 @@ test("mobile touch menu keeps its target while a result changes priority", async
   await page.evaluate(() => {
     const fixture = window.__WOLLIPOG_PROJECT_INBOX_E2E__;
     const facts = fixture.model().sessions.find((s) => s.id === "session-working")!.attention!;
-    fixture.replaceSessionSnapshot("session-working", { attention: { ...facts,
+    fixture.replaceSessionSnapshot("session-working", { status: "idle", attention: { ...facts,
       result: { revision: "work-result", at: Date.now(), owner: "human" } } });
   });
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
