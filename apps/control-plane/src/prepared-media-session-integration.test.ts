@@ -960,3 +960,147 @@ test("exact prior quality schema migrates atomically, preserves live provenance 
     }
   }
 });
+
+// Synthetic in-memory CODE fixtures; no actual provider, grant, budget, host or media action.
+for (const entry of ["reconnect", "enforcement"] as const) for (const unknown of [false, true]) {
+  test("CR3 Reproduction guardrail " + entry + " preserves exact media " + (unknown ? "unknown fence" : "never-enqueued release"), async (t) => {
+    const h = releaseHarness(t);
+    if (unknown) {
+      h.ports.authorize = async () => true; h.ports.send = async () => "unknown";
+      await h.prepared.bind(h.identity, h.binding); await h.prepared.dispatch(h.identity);
+    }
+    h.messages.length = 0;
+    h.db.campaignBudgets.stop("root", "accounting_unavailable", "Synthetic allowance refusal");
+    if (entry === "reconnect") h.service.recoverCampaignBudgetAllocations("r");
+    else (h.service as unknown as { enforceCampaignBudget(id: string, now: number): boolean }).enforceCampaignBudget("root", Date.now());
+    const status = h.db.getSession(h.actual.sessionId)!.status;
+    const state = h.prepared.get(h.identity)!.state;
+    const messages = h.messages.filter((m) => (m as { sessionId?: string }).sessionId === h.actual.sessionId);
+    t.diagnostic(JSON.stringify({ entry, unknown, status, state, active: h.db.campaignBudgets.active(h.actual.sessionId), targetMessages: messages }));
+    assert.equal(h.db.campaignBudgets.completedAttestation(h.actual.sessionId), null);
+    if (unknown) {
+      assert.equal(status, "queued");
+      const r = h.prepared.get(h.identity)!;
+      const runnerDb = new DatabaseSync(":memory:"); t.after(() => runnerDb.close());
+      const receipt = new RunnerMediaDispatchFences(runnerDb).cancelBeforeLaunch(h.fenceIdentity(r))!;
+      assert.ok(h.service.onMediaReviewNeverDispatched("r", receipt));
+      h.ports.reconcile = async () => ({ ...h.fenceIdentity(r), outcome: "never_dispatched" });
+      assert.equal((await h.prepared.reconcile(h.identity)).state, "cancelled");
+    } else assert.equal(state, "cancelled");
+    assert.equal(h.db.campaignBudgets.active(h.actual.sessionId), false);
+    assert.deepEqual(messages, [], "no generic media Stop RPC or new dispatch");
+  });
+}
+for (const entry of ["reconcile_absent", "hydrate_absent", "hydrate_terminal", "live_terminal", "reported_terminal", "disconnect", "delete"] as const) {
+  test("CR3 Reproduction generic " + entry + " cannot destroy uncertain media cancellation identity", async (t) => {
+    const h = releaseHarness(t); h.ports.authorize = async () => true; h.ports.send = async () => "unknown";
+    await h.prepared.bind(h.identity, h.binding); await h.prepared.dispatch(h.identity);
+    h.messages.length = 0;
+    if (entry === "reconcile_absent") h.service.reconcileRunnerSessions("r", []);
+    if (entry === "hydrate_absent") await h.service.hydrateRunnerSessionsCooperatively("r", [], { isCurrent: () => true });
+    if (entry === "reported_terminal") h.service.onSessionStatus(h.actual.sessionId, "stopped", undefined, undefined, "r");
+    if (entry === "disconnect") h.service.failRunnerSessions("r");
+    if (entry === "live_terminal" || entry === "hydrate_terminal") {
+      const snapshot: import("@wollipog/protocol").SessionSnapshot = { id: h.actual.sessionId, workspaceId: "w", agentId: "claude", status: "stopped" as const,
+        title: "Synthetic Generic Snapshot", config: {}, costUsd: 0, tokensIn: 0, tokensOut: 0,
+        useWorktree: false, worktreePath: null, preview: null, pendingApproval: null,
+        seq: 0, createdAt: 1, updatedAt: 2, driver: "claude-code" as const };
+      if (entry === "live_terminal") h.service.applySessionRuntimeUpdate("r", snapshot);
+      else await h.service.hydrateRunnerSessionsCooperatively("r", [snapshot], { isCurrent: () => true });
+    }
+    if (entry === "delete") {
+      const result = h.service.delete(h.actual.sessionId);
+      t.diagnostic(JSON.stringify({ deleted: result.ok, memberRetained: h.db.campaignBudgets.active(h.actual.sessionId),
+        commandRetained: h.prepared.get(h.identity)?.state, purposeRetained: h.service.mediaSessionPurposes.owns(h.actual.sessionId) }));
+      assert.equal(result.ok, false, "unknown media cannot acquire generic delete/kill authority");
+    }
+    assert.equal(h.db.getSession(h.actual.sessionId)?.status, "queued", "generic absence/status is not same-command permanent fence");
+    assert.equal(h.prepared.get(h.identity)?.state, "uncertain");
+    assert.equal(h.db.campaignBudgets.active(h.actual.sessionId), true);
+    assert.deepEqual(h.messages.filter((m) => (m as { sessionId?: string }).sessionId === h.actual.sessionId), []);
+  });
+}
+
+function lifecycleSnapshot(sessionId: string, costUsd = 0): import("@wollipog/protocol").SessionSnapshot {
+  return { id: sessionId, workspaceId: "w", agentId: "claude", status: "stopped",
+    title: "Synthetic Lifecycle Snapshot", driver: "claude-code", config: {}, costUsd,
+    tokensIn: 10, tokensOut: 2, useWorktree: false, worktreePath: null, preview: null,
+    pendingApproval: null, seq: 0, historyEpoch: 0, createdAt: 1, updatedAt: 2 };
+}
+test("quarantined snapshots retain possible charges and same-generation checkpoints without releasing capacity", async (t) => {
+  for (const entry of ["live", "inventory", "status"] as const) {
+    const h = releaseHarness(t); h.ports.authorize = async () => true; h.ports.send = async () => "unknown";
+    await h.prepared.bind(h.identity, h.binding); await h.prepared.dispatch(h.identity);
+    const checkpoint = { generation: h.actual.admission.dispatch.generation, historyEpoch: 0, throughSeq: 0, costUsd: 0.5 };
+    const snapshot = { ...lifecycleSnapshot(h.actual.sessionId, 0.5), campaignBudgetCheckpoint: checkpoint };
+    if (entry === "live") h.service.applySessionRuntimeUpdate("r", snapshot);
+    if (entry === "inventory") await h.service.hydrateRunnerSessionsCooperatively("r", [snapshot], { isCurrent: () => true });
+    if (entry === "status") h.service.onSessionStatus(h.actual.sessionId, "stopped", undefined, undefined, "r", undefined, undefined, checkpoint);
+    assert.equal(h.db.getSession(h.actual.sessionId)?.status, "queued");
+    assert.equal(h.db.campaignBudgets.active(h.actual.sessionId), true);
+    const budget = h.db.campaignBudgets.view("root")!;
+    if (entry !== "status") assert.ok(budget.actual.costUsd >= 0.5, entry + " preserves observed monotonic cost");
+    // A checkpoint without hydrated priced history is not final usage or zero charge. Preserve
+    // its exact amount and the full outstanding reservation, rather than manufacturing settlement.
+    assert.ok(budget.actual.costUsd + budget.outstanding.costUsd >= checkpoint.costUsd);
+    assert.equal(h.db.campaignBudgets.completedAttestation(h.actual.sessionId), null);
+    assert.equal(h.db.raw().prepare("SELECT COUNT(*) AS n FROM campaign_budget_checkpoints WHERE session_id=?").get(h.actual.sessionId)!.n, 1);
+    assert.deepEqual(JSON.parse(String(h.db.raw().prepare("SELECT checkpoint FROM campaign_budget_checkpoints WHERE session_id=?")
+      .get(h.actual.sessionId)!.checkpoint)), checkpoint);
+    assert.equal(h.db.raw().prepare("SELECT COUNT(*) AS n FROM campaign_budget_settlements WHERE session_id=?").get(h.actual.sessionId)!.n, 0);
+    assert.throws(() => h.prepared.cancelPrepared(h.identity), /possibly dispatched/);
+  }
+});
+test("missing, corrupt or replaced lifecycle proof cannot admit generic status, delete or guardrail stop", async (t) => {
+  for (const mode of ["missing", "corrupt-purpose", "corrupt-prepared", "replacement", "history"] as const) {
+    const h = releaseHarness(t); h.messages.length = 0;
+    if (mode === "missing") h.db.raw().exec("DROP TABLE prepared_media_sessions");
+    if (mode === "corrupt-purpose") h.db.raw().prepare("UPDATE media_session_purposes SET sha256='bad'").run();
+    if (mode === "corrupt-prepared") h.db.raw().prepare("UPDATE prepared_media_sessions SET payload_sha256='bad'").run();
+    if (mode === "replacement") h.db.campaignBudgets.replaceDispatch(h.actual.sessionId);
+    if (mode === "history") h.db.campaignBudgets.recordCheckpoint(h.actual.sessionId,
+      { generation: h.actual.admission.dispatch.generation, historyEpoch: 0, throughSeq: 0, costUsd: 0 });
+    h.service.onSessionStatus(h.actual.sessionId, "stopped", undefined, undefined, "r");
+    h.service.reconcileRunnerSessions("r", []);
+    assert.equal(h.service.delete(h.actual.sessionId).ok, false);
+    h.db.campaignBudgets.stop("root", "accounting_unavailable", "Synthetic unavailable accounting");
+    h.service.recoverCampaignBudgetAllocations("r");
+    assert.equal(h.db.getSession(h.actual.sessionId)?.status, "queued", mode);
+    assert.equal(h.db.campaignBudgets.active(h.actual.sessionId), true, mode);
+    assert.deepEqual(h.messages.filter((m) => (m as { sessionId?: string }).sessionId === h.actual.sessionId), []);
+  }
+});
+test("verified current active command permits authenticated status, but generic Stop and Delete do not invent terminal cleanup proof", async (t) => {
+  const h = releaseHarness(t); h.ports.authorize = async () => true; h.ports.send = async () => "accepted";
+  await h.prepared.bind(h.identity, h.binding); await h.prepared.dispatch(h.identity);
+  assert.equal(h.service.mediaSessionPurposes.lifecycleState(h.actual.sessionId), "active");
+  h.messages.length = 0;
+  h.db.campaignBudgets.stop("root", "accounting_unavailable", "Synthetic stopped allowance");
+  h.service.recoverCampaignBudgetAllocations("r");
+  assert.equal(h.db.getSession(h.actual.sessionId)?.status, "queued");
+  assert.deepEqual(h.messages.filter((m) => (m as { sessionId?: string }).sessionId === h.actual.sessionId), []);
+  h.service.onSessionStatus(h.actual.sessionId, "running", undefined, undefined, "r");
+  assert.equal(h.db.getSession(h.actual.sessionId)?.status, "running", "only synthetic trusted active same-generation command unquarantines lifecycle");
+  assert.equal(h.service.delete(h.actual.sessionId).ok, false, "active is not terminal privacy/kill proof");
+  h.db.campaignBudgets.replaceDispatch(h.actual.sessionId);
+  assert.equal(h.service.mediaSessionPurposes.lifecycleState(h.actual.sessionId), null);
+  h.service.onSessionStatus(h.actual.sessionId, "stopped", undefined, undefined, "r");
+  assert.equal(h.db.getSession(h.actual.sessionId)?.status, "running", "replaced generation stays quarantined without resurrecting status");
+});
+
+test("unresolved media event ingestion retains usage/history while generic questions cannot acquire lifecycle authority", async (t) => {
+  const h = releaseHarness(t); h.ports.authorize = async () => true; h.ports.send = async () => "unknown";
+  await h.prepared.bind(h.identity, h.binding); await h.prepared.dispatch(h.identity);
+  h.messages.length = 0;
+  h.service.onSessionEvent(h.actual.sessionId, { kind: "token_usage", model: "claude-opus-5-5", costUsd: 0.2 }, 1, Date.now(), "r");
+  h.service.onSessionEvent(h.actual.sessionId, { kind: "question_request", requestId: "synthetic-media-question",
+    questions: [{ id: "q", header: "Synthetic", question: "Synthetic generic request", options: [{ label: "Proceed" }] }] },
+    2, Date.now(), "r");
+  assert.equal(h.db.getSession(h.actual.sessionId)?.status, "queued");
+  assert.equal(h.db.getSession(h.actual.sessionId)?.pendingApproval, null);
+  assert.ok(h.db.campaignBudgets.view("root")!.actual.costUsd >= 0.2);
+  assert.ok(h.db.listEvents(h.actual.sessionId).some((e) => e.payload.kind === "token_usage"));
+  assert.equal(h.db.campaignBudgets.active(h.actual.sessionId), true);
+  assert.equal(h.db.campaignBudgets.completedAttestation(h.actual.sessionId), null);
+  assert.deepEqual(h.messages.filter((m) => (m as { sessionId?: string }).sessionId === h.actual.sessionId), []);
+});

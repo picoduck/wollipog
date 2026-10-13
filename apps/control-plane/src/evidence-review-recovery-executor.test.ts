@@ -244,3 +244,13 @@ test("CR2 Reproduction F3 refreshed expiry never reports an uncertain durable mu
   assert.equal(h.reconciles.length, reads, "renewed authority cannot read back the old effect");
   assert.equal(resumed.state, "uncertain", "truthful uncertainty must retain the exact original outcome fence");
 });
+
+test("CR3 Reproduction completed outcome is not relabeled rejection by renewed authority", async (t) => {
+  const h = harness(t); assert.equal((await h.executor.execute(subject, split())).state, "completed");
+  const calls = h.calls.length, reads = h.reconciles.length;
+  h.authority().capture.expiresAt++;
+  const result = await h.executor.execute(subject, split());
+  assert.equal(h.db.prepare("SELECT state FROM evidence_recovery_attempts").get()?.state, "completed");
+  assert.equal(h.calls.length, calls); assert.equal(h.reconciles.length, reads);
+  assert.equal(result.state, "unsupported", "renewal gives no reauthorization and does not change completed history");
+});

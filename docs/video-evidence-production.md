@@ -376,3 +376,20 @@ Changed authority cannot authorize an old uncertain recovery effect: reporting s
 without any readback, replay, replacement or refund under renewed authority. Full expiry/owner/
 allowance/lineage/cap bindings are retained. Session access denial precedes permanent-purpose route
 restriction, preserving indistinguishable inaccessible and absent Session responses.
+
+Pending permanent media commands also quarantine generic lifecycle inputs. Budget/guardrail Stop
+reuses only the exact existing same-database locally never-enqueued cancellation; unknown,
+possibly dispatched, missing/corrupt/replaced/history/checkpoint proof retains its Session and
+reservation without generic Stop/Delete RPC or tombstone. Generic disconnect, absence, direct
+status and inventory/live snapshots cannot manufacture a permanent same-command fence or terminal
+state. Authenticated possible usage, monotonic costs, checkpoints and history are still retained
+independently of status quarantine. Only a validated stored active same-command/purpose/current
+generation can resume authenticated lifecycle projection. This is historical dispatch identity,
+not spending/quality authority; real sender/driver registration is still absent.
+
+Generic deletion permits only independently proven exact cancelled media identity. Cleanup of an
+active or settled media command remains held for a separate trusted terminal privacy/retention
+contract before live registration. Durable purpose/command/budget/history is never silently purged.
+After completed recovery, a changed current authority for the same original subject/plan reports
+unsupported without readback, revalidation, replay or new authority. Durable completion, true
+rejection, changed-subject refusal and uncertainty stay distinct; full authority/expiry/caps remain.

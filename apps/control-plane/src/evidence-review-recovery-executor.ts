@@ -206,6 +206,15 @@ export class EvidenceRecoveryExecutor {
     // Changed current authority cannot authorize readback or replay of an old mutation. Its
     // unknown outcome remains unknown, rather than implying a durable rejection or safe retry.
     if (row.intent !== JSON.stringify(intent) || row.operation_id !== operationId) {
+      // An authority renewal gives no permission to reverify or replay completed work. Keep
+      // completed history distinct from a true rejection and from a different subject/attempt.
+      if (row.state === "completed") {
+        try {
+          const saved = JSON.parse(row.intent) as RecoveryIntent;
+          if (saved.operationId === operationId && saved.attempt === attempt && saved.action === intent.action &&
+            JSON.stringify(saved.subject) === JSON.stringify(intent.subject)) return { state: "unsupported" };
+        } catch { return { state: "unsupported" }; }
+      }
       return { state: row.state === "uncertain" ? "uncertain" : "rejected" };
     }
     if (row.state === "rejected") return { state: "rejected" };

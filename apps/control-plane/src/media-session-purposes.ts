@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { DurableSessionCommand, OperatorVideoValidationPurpose } from "@wollipog/protocol";
 import type { DatabaseSync } from "node:sqlite";
+import type { PreparedMediaRecord } from "./prepared-media-sessions.js";
 
 export interface MediaSessionPurpose {
   operatorValidation?: OperatorVideoValidationPurpose;
@@ -32,6 +33,33 @@ export class MediaSessionPurposes {
       return Boolean(purpose && this.db.prepare("SELECT 1 FROM campaign_budget_members WHERE session_id=? AND root_id=? AND generation=?")
         .get(sessionId, purpose.rootSessionId, purpose.generation));
     } catch { return false; }
+  }
+  /** Read-only lifecycle provenance, not current admission, spending or quality authority.
+   * An active state must come from the private authenticated same-command dispatch/reconcile
+   * port. Generic inventory/status/absence cannot mint it. Corruption/missing/replaced proof
+   * retains quarantine; this lookup never creates tables, rewrites history or releases capacity. */
+  lifecycleState(sessionId: string): "active" | "cancelled" | null {
+    try {
+      const purpose = this.get(sessionId);
+      if (!purpose) return null;
+      const row = this.db.prepare("SELECT payload,payload_sha256,state FROM prepared_media_sessions WHERE json_extract(payload,'$.sessionId')=?")
+        .get(sessionId) as { payload: string; payload_sha256: string; state: string } | undefined;
+      if (!row || !["active", "cancelled"].includes(row.state)) return null;
+      const r = JSON.parse(row.payload) as PreparedMediaRecord;
+      const member = this.db.prepare("SELECT m.root_id,m.generation,m.active,s.runner_id,s.parent_session_id FROM campaign_budget_members m " +
+        "JOIN sessions s ON s.id=m.session_id WHERE m.session_id=?").get(sessionId);
+      if (!member || sha(r) !== row.payload_sha256 || r.state !== row.state || r.sessionId !== sessionId ||
+        r.rootSessionId !== purpose.rootSessionId || r.childSessionId !== purpose.childSessionId || r.admissionId !== purpose.admissionId ||
+        member.root_id !== r.rootSessionId || member.parent_session_id !== r.rootSessionId || member.runner_id !== r.runnerId ||
+        member.generation !== purpose.generation || member.generation !== r.admission.dispatch.generation ||
+        r.command.type !== "start_session" || r.command.spec.sessionId !== sessionId ||
+        r.command.spec.campaignBudgetDispatch?.rootSessionId !== r.rootSessionId || r.command.spec.campaignBudgetDispatch.generation !== member.generation ||
+        sha(r.command) !== r.commandSha256 || sha(purpose.command) !== r.commandSha256) return null;
+      if (r.state === "cancelled") return member.active === 0 &&
+        ["never_enqueued", "terminal_fenced"].includes(r.cancellation?.kind ?? "") ? "cancelled" : null;
+      if (!r.binding || !r.dispatchSha256 || r.dispatchSha256 !== sha({ command: r.command, admission: r.admission, binding: r.binding })) return null;
+      return "active";
+    } catch { return null; }
   }
   add(purpose: MediaSessionPurpose): void {
     if (!this.db.isTransaction || purpose.sessionId === purpose.rootSessionId || purpose.sessionId === purpose.childSessionId ||

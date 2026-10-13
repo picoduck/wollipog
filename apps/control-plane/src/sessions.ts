@@ -6616,10 +6616,24 @@ export class SessionsService {
     return stopped;
   }
 
+  /** An unresolved permanent media purpose retains its actual lifecycle identity. This is
+   * independent of usage/history ingestion and grants no new dispatch or quality authority. */
+  private pendingMediaLifecycle(session: SessionView | null): boolean {
+    if (!session || !this.mediaSessionPurposes.owns(session.id)) return false;
+    const state = this.mediaSessionPurposes.lifecycleState(session.id);
+    return state !== "active" && state !== "cancelled";
+  }
+
   /** Declining a guardrail card is a Stop, so it is as durable as one: persist the intent before
    * touching the socket, or a lost frame leaves nothing to resend and the runner's next live
    * snapshot restores the session the user stopped. */
   private stopAtGuardrail(session: SessionView, now: number): void {
+    if ((session.status === "queued" && this.mediaSessionPurposes.owns(session.id)) || this.pendingMediaLifecycle(session)) {
+      // Reuse only the exact same-DB locally unsent cancellation. Unknown delivery is not a
+      // generic Stop authorization or terminal proof, even when the root budget is stopped.
+      if (session.status === "queued") this.requestStop(session, now);
+      return;
+    }
     this.abortPolicyHookApprovals(session, now, "guardrail-stopped");
     this.revokeUnconsumedWorkflowDecisionsForSession(session.id, "guardrail-stopped");
     this.db.setPendingApproval(session.id, null);
@@ -11845,6 +11859,11 @@ export class SessionsService {
   delete(sessionId: string): ServiceResult<{ deleted: true }> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    if (this.mediaSessionPurposes.owns(sessionId) && this.mediaSessionPurposes.lifecycleState(sessionId) !== "cancelled") {
+      // Live/unknown command cleanup needs independent terminal proof and a dedicated retention
+      // contract before registration. Generic Delete cannot remove reconciliation identity/kill.
+      return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
+    }
     const reconciliationBlock = this.podReconciliationMutationError(sessionId);
     if (reconciliationBlock) return fail(reconciliationBlock, 409);
     const sideChat = this.db.getSideChat(sessionId);
@@ -13361,6 +13380,7 @@ export class SessionsService {
       // History can arrive after terminal status. Its durable hydration completes settlement.
       void this.hydrateHistory(sessionId).then(() => this.settleCampaignUsage(sessionId)).catch(() => {});
     }
+    if (this.pendingMediaLifecycle(session)) return;
     const campaignBefore = this.campaignAttentionController(session);
     let admittedReplacement = false;
     if (this.db.hasSessionStopIntent(sessionId)) {
@@ -14036,6 +14056,13 @@ export class SessionsService {
         payload.kind === "background_continuation_delivered") {
       this.hub.sessionChangedById(sessionId);
     }
+    // Keep authoritative usage/tool/history ingestion above. An unresolved media command has
+    // no generic prompt/question/permission lifecycle; such events cannot overwrite its queue
+    // identity, mint a generic continuation, or launch auxiliary title-generation work.
+    if (this.pendingMediaLifecycle(session())) {
+      this.hub.sessionChangedById(sessionId);
+      return;
+    }
     // A durable Stop fences lifecycle side effects as well as status/snapshot resurrection.
     // Preserve the authoritative history event, but never let a late permission/question/policy
     // event recreate an approval card or move the control-plane session out of stopped.
@@ -14471,6 +14498,7 @@ export class SessionsService {
   failRunnerSessions(runnerId: string): void {
     const now = Date.now();
     for (const s of this.db.listSessions({ includeArchived: true })) {
+      if (this.pendingMediaLifecycle(s)) continue;
       if (s.runnerId === runnerId && !isTerminal(s.status)) {
         const campaignBefore = this.campaignAttentionController(s);
         this.automaticQuestions.delete(s.id);
@@ -14501,6 +14529,7 @@ export class SessionsService {
     this.endAbsentWorkflowDecisionWork(runnerId, (sessionId) => !liveSet.has(sessionId));
     for (const s of this.db.listSessions({ includeArchived: true })) {
       if (s.runnerId !== runnerId) continue;
+      if (this.pendingMediaLifecycle(s)) continue;
       if (this.db.hasSessionStopIntent(s.id)) {
         if (liveSet.has(s.id)) {
           this.sendStopCommand(runnerId, s.id);
@@ -14551,6 +14580,7 @@ export class SessionsService {
    * absent session is stopped by the caller, which revokes on that path. */
   private endAbsentWorkflowDecisionWork(runnerId: string, absent: (sessionId: string) => boolean): void {
     for (const sessionId of this.db.sessionsOwingWorkflowDecisionWork(runnerId)) {
+      if (this.pendingMediaLifecycle(this.db.getSession(sessionId))) continue;
       const status = this.db.getSession(sessionId)?.status;
       if (absent(sessionId) && status && isTerminal(status)) {
         this.revokeUnconsumedWorkflowDecisionsForSession(sessionId, "provider-session-absent");
@@ -14743,7 +14773,7 @@ export class SessionsService {
         if (unsupportedCostSessions.has(snap.id) || !isTerminal(snap.status) || duplicateSnapshotIds.has(snap.id) ||
             stopIntentIds.has(snap.id) || this.db.isTombstoned(snap.id) || changedSinceInventory(snap.id)) return [];
         const existing = this.db.getSession(snap.id);
-        if (!existing || existing.runnerId !== runnerId || !isTerminal(existing.status) ||
+        if (!existing || existing.runnerId !== runnerId || !isTerminal(existing.status) || this.pendingMediaLifecycle(existing) ||
             this.db.unconsumedWorkflowDecisionsForSession(snap.id).length > 0 ||
             this.db.heldWorkflowDecisionResumes(snap.id).length > 0 ||
             this.db.hasOpenRestartNotices(snap.id) ||
@@ -14766,7 +14796,12 @@ export class SessionsService {
         this.hub.sessionChangedById(snap.id);
         recordAppliedVersion(snap.id);
       }
-      for (const [snapshotIndex, snap] of chunk.entries()) {
+      for (const [snapshotIndex, incoming] of chunk.entries()) {
+        // Preserve possible costs/history/checkpoints through normal accounting while generic
+        // snapshot status cannot overwrite an unresolved media dispatch/cancellation identity.
+        const mediaSession = this.db.getSession(incoming.id);
+        const mediaPending = this.pendingMediaLifecycle(mediaSession);
+        const snap = mediaPending ? { ...incoming, status: mediaSession!.status } : incoming;
         if (terminalBatchIndexes.has(snapshotIndex)) continue;
         // A session the user deleted must not be recreated — re-issue the delete to the (now online)
         // runner and skip it. The tombstone is pruned below once the box stops reporting the id.
@@ -14857,6 +14892,7 @@ export class SessionsService {
       const s = this.db.getSession(id);
       if (!s || changedSinceInventory(id)) continue;
       if (s.runnerId === runnerId && !byId.has(s.id)) {
+        if (this.pendingMediaLifecycle(s)) continue;
         campaignBefore(s);
         if (this.db.hasSessionStopIntent(s.id)) this.settleStopIntent(s.id, now, "runner_absent");
         if (isTerminal(s.status)) this.revokeUnconsumedWorkflowDecisionsForSession(s.id, "provider-session-absent");
@@ -14920,6 +14956,7 @@ export class SessionsService {
     const existing = this.db.getSession(snapshot.id);
     if (!existing || existing.runnerId !== runnerId || this.db.isTombstoned(snapshot.id)) return;
     if(isTerminal(snapshot.status) && snapshot.campaignBudgetCheckpoint) this.db.campaignBudgets.recordCheckpoint(snapshot.id,snapshot.campaignBudgetCheckpoint);
+    if (this.pendingMediaLifecycle(existing)) snapshot = { ...snapshot, status: existing.status };
     const unsupportedCost = this.unsupportedCostReconciliation(runnerId, snapshot);
     const unacknowledgedRevision = snapshot.costReconciliationRevision ?? 0;
     snapshot = unsupportedCost ? { ...snapshot, costUsd: existing.costUsd } : normalizeReconciledSnapshot(this.db, snapshot);
