@@ -10241,7 +10241,7 @@ export class SessionManager {
    */
   private queueHoldFor(sessionId: string, entry: ActiveSession): SessionQueueHoldView | null {
     if (entry.running || entry.providerInitiatedTurnActive) return null;
-    const waiting = entry.queue.filter((prompt) => !(prompt.syntheticRecovery || prompt.providerRecovery));
+    const waiting = entry.queue.filter((prompt) => !prompt.syntheticRecovery);
     if (waiting.length === 0) return null;
     const kind: SessionQueueHoldKind | null = entry.pendingProviderAccountSwitch
       ? "provider_account_switch"
@@ -10296,7 +10296,7 @@ export class SessionManager {
       ? "provider_account_switch"
       : entry?.pendingWorktreeRebind ? "worktree_rebind" : null;
     const meta = this.store.readMeta(sessionId);
-    const stillWaiting = kind === start.kind && entry!.queue.some((prompt) => !(prompt.syntheticRecovery || prompt.providerRecovery)) &&
+    const stillWaiting = kind === start.kind && entry!.queue.some((prompt) => !prompt.syntheticRecovery) &&
       (!!meta?.backgroundWorkState || !!meta?.pendingBackgroundTaskIds?.length) &&
       !meta?.orphanedWork?.recoveryAttemptedAt;
     if (!stillWaiting) this.handoffWaitStarts.delete(sessionId);
@@ -12262,7 +12262,7 @@ export class SessionManager {
     if (this.hasPendingApproval(sessionId)) {
       return this.queuedPromptResolvesPendingQuestion(sessionId, queue[0]);
     }
-    const index = queue.findIndex((prompt) => (prompt.syntheticRecovery || prompt.providerRecovery));
+    const index = queue.findIndex((prompt) => prompt.syntheticRecovery);
     if (index < 0) return false;
     if (index > 0) queue.unshift(queue.splice(index, 1)[0]!);
     return true;
@@ -13026,7 +13026,11 @@ export class SessionManager {
             retryOriginalInput ? `${text}${workspaceReferenceText}` : PROVIDER_RETRY_CONTINUATION,
             retryOriginalInput ? images : undefined,
             retryOriginalInput ? slashCommand : undefined,
-          ).finally(() => this.flushTextDeltas(sessionId));
+          ).finally(() => {
+            // A later stderr diagnostic during diff capture is not an interrupted provider task.
+            entry.providerPromptSubmitted = false;
+            this.flushTextDeltas(sessionId);
+          });
         } catch (error) {
           if (!isProviderCapacityFailure(errText(error))) throw error;
           entry.providerCapacityFailure = true;
@@ -13037,6 +13041,8 @@ export class SessionManager {
         const terminalError = entry.client.lastTurnError?.();
         if (!caughtCapacityError && terminalError) entry.providerCapacityFailure = isProviderCapacityFailure(terminalError);
         if (retryOriginalInput && entry.client.lastPromptUndelivered?.() !== true) inputMayHaveBeenDelivered = true;
+        // Capacity backoff still owns unfinished runner work, even though the failed call settled.
+        if (stop === "refusal" && entry.providerCapacityFailure) entry.providerPromptSubmitted = true;
         if (stop !== "refusal" || !entry.providerCapacityFailure) {
           if (attempt > 0) this.log(JSON.stringify({ event: "provider_capacity_retry_settled", sessionId,
             entryPoint: "prompt", attempts: attempt, stopReason: stop }));
@@ -13062,7 +13068,10 @@ export class SessionManager {
         }
         // Replay input only when the provider proves the previous submission never arrived.
         // Once delivery is uncertain, every later attempt stays a history continuation.
-        retryOriginalInput = retryOriginalInput && entry.client.lastPromptUndelivered?.() === true;
+        retryOriginalInput = retryOriginalInput && (
+          (Boolean(backgroundJobIds?.length) && !entry.backgroundPromptAccepted) ||
+          entry.client.lastPromptUndelivered?.() === true
+        );
         const delayMs = 1000 * 2 ** attempt;
         this.emitEvent(sessionId, { kind: "stderr", text: `Model capacity is temporarily unavailable. Retrying in ${delayMs / 1000} seconds (attempt ${attempt + 1}/3).` });
         this.log(JSON.stringify({ event: "provider_capacity_retry", sessionId, entryPoint: "prompt", attempt: attempt + 1, delayMs }));
@@ -13088,6 +13097,7 @@ export class SessionManager {
           }
         }
       }
+      entry.providerPromptSubmitted = false;
       if (entry.historyIntegrityFailure) return;
       this.captureAgentSessionId(sessionId, entry.client); // codex threadId becomes known after turn 1
       if (backgroundJobIds?.length && stop === "refusal" && !entry.backgroundPromptAccepted) {
@@ -19034,6 +19044,7 @@ export class SessionManager {
           !entry.queue.length && !this.recoveryQueues.has(meta.sessionId) &&
           !this.shuttingDown && !entry.cancelRequested && !entry.interruptRequested &&
           !this.queueHeld(entry) && !this.backgroundRecoveryHeld(meta) && !this.hasPendingApproval(meta.sessionId) &&
+          !entry.pendingWorktreeRebind && !entry.pendingProviderAccountSwitch && !this.projectMemoryChanged(meta.sessionId, entry) &&
           meta.agentSessionId && canResumeSession(meta)) {
         this.log(JSON.stringify({ event: "provider_authentication_continue", sessionId: meta.sessionId,
           entryPoint: targetResolutionOptionId }));

@@ -7396,3 +7396,33 @@ test("a thrown capacity error remains visible when an interrupt prevents retry",
     assert.ok(h.store.readEvents("resume-session").some((event) => event.payload.kind === "stderr" && /model capacity is temporarily unavailable/.test(event.payload.text)));
   } finally { h.manager.shutdownAll(); h.cleanup(); }
 });
+
+test("an unaccepted background capacity retry carries its complete results before delivery is recorded", async () => {
+  let h!: ReturnType<typeof harness>;
+  h = harness({
+    driver: "claude-code", agentId: "claude-code", command: "claude", agentSessionId: "claude-session",
+    backgroundWorkState: "continuation_pending",
+    backgroundJobs: [{
+      id: "capacity-results-job", parentTurnId: "turn-a", runnerId: "runner", workspaceId: "workspace",
+      context: { kind: "native" }, launchType: "agent", registeredAt: 1,
+      terminalStatus: "completed", terminalObservedAt: 2, continuationRequired: true,
+      continuationQueuedAt: 3, continuationId: "bgcont-capacity-results",
+    }],
+  }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, () => {
+    if (h.prompts.length === 1) {
+      h.callbacks().onEvent({ kind: "error", message: "overloaded_error" });
+      return "refusal";
+    }
+    h.callbacks().onPromptAccepted?.();
+    h.callbacks().onEvent({ kind: "agent_message", text: "The complete job results were consumed." });
+  }, undefined, false);
+  try {
+    h.manager.reconcileStore();
+    for (let i = 0; i < 200 && !h.store.readMeta("resume-session")?.backgroundJobs![0]!.assistantResultPersistedAt; i++) await shortDelay();
+    assert.equal(h.prompts.length, 2);
+    assert.equal(h.prompts[0], h.prompts[1], "the provider never accepted the result-bearing first prompt");
+    assert.match(h.prompts[1]!, /capacity-results-job/);
+    assert.ok(h.store.readMeta("resume-session")!.backgroundJobs![0]!.assistantResultPersistedAt);
+    assert.equal(h.store.readEvents("resume-session").filter((event) => event.payload.kind === "background_continuation_delivered").length, 1);
+  } finally { h.manager.shutdownAll(); h.cleanup(); }
+});

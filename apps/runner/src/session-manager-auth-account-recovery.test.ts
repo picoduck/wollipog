@@ -550,3 +550,52 @@ for (const lane of ["idle", "provider", "command"]) test(`authentication recover
     assert.equal(h.store.readEvents(SESSION).filter((event) => event.payload.kind === "user_message").length, 1);
   } finally { h.cleanup(); }
 });
+
+test(" a post-completion auth diagnostic never starts another task", async () => {
+  const h = harness({ "/claude/work": { observations: [{ status: "authenticated", identityId: "identity-work" }] } });
+  let first = true;
+  (h.manager as any).captureDiff = async () => {
+    if (first) { first = false; h.callbacks().onAuthenticationFailure?.(); }
+    return null;
+  };
+  try {
+    h.manager.prompt(SESSION, "task that already completed");
+    await waitFor(() => h.prompts.length > 1 || (!first && !h.store.readMeta(SESSION)?.providerAuthBlock), "recovery did not settle");
+    assert.equal(h.prompts.length, 1, "a healthy provider turn had already completed before auth failed");
+  } finally { h.cleanup(); }
+});
+
+for (const race of [false, true]) test(`authentication continuation respects a background-blocked worktree change ${race ? "queued concurrently" : "already pending"}`, async () => {
+  const state: HomeState = { observations: [
+    { status: "authenticated", identityId: "identity-work" }, { status: "unauthenticated" },
+  ] };
+  const h = harness({ "/claude/work": state }, "original task");
+  try {
+    h.manager.prompt(SESSION, "original task");
+    await waitFor(() => h.store.readMeta(SESSION)?.pendingApproval?.kind === "authentication", "no recovery card");
+    const card = h.store.readMeta(SESSION)!.pendingApproval!;
+    const hold = () => {
+      const entry = (h.manager as any).active.get(SESSION);
+      entry.pendingWorktreeRebind = "/workspace/selected";
+      h.store.patchMeta(SESSION, { backgroundWorkState: "running", pendingBackgroundTaskIds: ["running-job"] });
+    };
+    if (race) {
+      const schedule = (h.manager as any).scheduleDrain.bind(h.manager);
+      (h.manager as any).scheduleDrain = (id: string) => {
+        if ((h.manager as any).active.get(id)?.queue.some((prompt: any) => prompt.providerRecovery)) hold();
+        schedule(id);
+      };
+    } else hold();
+    state.observations = [{ status: "authenticated", identityId: "identity-work" }];
+    h.manager.resolvePermission(SESSION, card.requestId, "auth:revalidate");
+    await waitFor(() => !h.store.readMeta(SESSION)?.providerAuthBlock, "authentication did not recover");
+    for (let i = 0; i < 10; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(h.prompts.length, 1, "no continuation may run in the old worktree before the selected handoff");
+    const entry = (h.manager as any).active.get(SESSION);
+    assert.equal(entry.pendingWorktreeRebind, "/workspace/selected");
+    if (race) {
+      assert.equal(entry.queue.length, 1, "the raced continuation stays queued behind the handoff");
+      assert.equal(h.manager.sessionSnapshots()[0]!.queueHold?.kind, "worktree_rebind");
+    }
+  } finally { h.cleanup(); }
+});
