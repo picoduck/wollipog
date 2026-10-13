@@ -525,11 +525,13 @@ async function gateHarness(t: { skip(reason: string): void; after(fn: () => void
     audienceSha256: h.context.audienceSha256, capabilitiesSha256: h.target.capabilitiesSha256,
     sourceEvidenceId: "original-video", sourceArtifactId: "source", sourceSha256: sha(source),
     workerAdmissionSha256: reviewer.admission.allocationDigest, criteriaSha256: sha(JSON.stringify(criteria)) };
-  let allowed = true;
+  let allowed = true, settled = false;
   const store = createControlPlaneVideoReviewStore(h.db);
   const runtimeAccess: VideoReviewRuntimeAccess = { currentBinding: () => allowed ? binding : null,
-    normalCompletion: () => false, workerAdmission: () => h.service.campaignBudgetWorkerPreflight("root",
-      { kind: "managed", sessionId: reviewer.sessionId }).data ?? null,
+    // Synthetic trusted-port settlement; this unsent Session is never real media usage proof.
+    normalCompletion: () => settled, workerAdmission: (_binding, phase) => phase === "historical"
+      ? settled ? reviewer.admission : null : h.service.campaignBudgetWorkerPreflight("root",
+        { kind: "managed", sessionId: reviewer.sessionId }).data ?? null,
     readSource: (id) => h.db.readWorkflowArtifactBytes(id) };
   const runtime = new VideoEvidenceRuntime(store, runtimeAccess);
   const derived = await runtime.derive(binding, "video/webm", criteria); assert.ok(derived.ok);
@@ -557,7 +559,7 @@ async function gateHarness(t: { skip(reason: string): void; after(fn: () => void
     const verdict = runtime.recordVerdict(record.reviewId, reviewer.sessionId, { outcome: "accept", criteria: [{
       criterionId: "transients", outcome: "pass", observedFrameIndices: [157],
       observation: "Disclosed deterministic fixture observation; not a blind model claim." }], rationale: "Synthetic contract test only." });
-    reference.verdictId = verdict.verdictId; return verdict;
+    reference.verdictId = verdict.verdictId; settled = true; return verdict;
   };
   return { ...h, preparedRuntime: h.runtime, service, approvals, approvalAccess, runtime, store, original, record, reference, resolve, complete,
     revoke: () => { allowed = false; } };

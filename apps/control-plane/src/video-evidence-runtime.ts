@@ -400,6 +400,13 @@ export class VideoEvidenceRuntime {
   }
 
   private verifiedObservation(reviewId: string, authenticatedReviewerSessionId: string): VideoReviewVerdict {
+    const pending = this.store.getReview(reviewId);
+    if (pending && pending.binding.reviewerSessionId === authenticatedReviewerSessionId &&
+      !this.access.normalCompletion(pending.binding)) {
+      // A verdict/active allocation cannot predict final priced usage. Withhold historical
+      // quality without destroying the pending record while genuine settlement is outstanding.
+      throw new VideoReviewRefused("stale");
+    }
     const review = this.current(reviewId, authenticatedReviewerSessionId, "resolve");
     const receipts = this.completeReceipts(review);
     for (const frame of review.manifest.frames) {

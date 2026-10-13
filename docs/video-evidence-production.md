@@ -262,6 +262,9 @@ The historical-attestation lifecycle separates completed quality proof from fres
 Current managed budget admission is required
 for dispatch, media access and verdict submission. The quality verdict durably stores the exact
 server worker/allocation/authority snapshot before normal terminal usage settlement.
+Historical observation is withheld until trusted final priced settlement and normal completion
+match that exact generation. An active allocation never substitutes for final usage; an early
+quality check preserves the original pending record while settlement remains outstanding.
 
 Normal completion removes fresh media/attestation access; it does not manufacture a new authority
 or automatically revoke an otherwise exact completed quality proof. Owner resolution rechecks the

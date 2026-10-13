@@ -41,7 +41,7 @@ function fixture() {
 test("normal final settlement supports only the original historical verdict, never fresh active access", () => {
   const f = fixture();
   assert.deepEqual(f.provenance.active(f.binding), f.admission);
-  assert.deepEqual(f.provenance.historical(f.binding), f.admission);
+  assert.equal(f.provenance.historical(f.binding), null, "active allocation is not final historical quality");
   assert.equal(f.provenance.normalCompletion(f.binding), false);
   f.complete();
   assert.equal(f.provenance.active(f.binding), null);
@@ -49,6 +49,17 @@ test("normal final settlement supports only the original historical verdict, nev
   assert.deepEqual(f.provenance.historical(f.binding), f.admission);
   for (const field of ["occurrenceId", "sourceEvidenceId", "sourceArtifactId"] as const) {
     assert.equal(f.provenance.historical({ ...f.binding, [field]: "replacement" }), null);
+  }
+});
+test("an active allocation cannot substitute for missing, unpriced or pending final settlement", () => {
+  for (const mutation of [
+    (f: ReturnType<typeof fixture>) => { f.ports.completedAttestation = () => null; },
+    (f: ReturnType<typeof fixture>) => { f.receipt.settlementDigest = digest; },
+    (f: ReturnType<typeof fixture>) => { f.worker.normalCompletion = false; },
+  ]) {
+    const f = fixture(); mutation(f);
+    assert.deepEqual(f.provenance.active(f.binding), f.admission);
+    assert.equal(f.provenance.historical(f.binding), null);
   }
 });
 test("replacement generations, model/effort or campaign identities invalidate completed proof without resetting allowance", () => {

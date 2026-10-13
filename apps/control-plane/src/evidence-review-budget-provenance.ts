@@ -69,8 +69,6 @@ export class EvidenceReviewBudgetProvenance {
     if (!this.ports.currentOwnerActionAllowed(binding)) return null;
     const admission = this.pinned(binding);
     if (!admission) return null;
-    const active = this.active(binding);
-    if (active && sha(active) === sha(admission)) return structuredClone(admission);
     return this.completed(binding, admission) ? structuredClone(admission) : null;
   }
   normalCompletion(binding: VideoReviewBinding): boolean {

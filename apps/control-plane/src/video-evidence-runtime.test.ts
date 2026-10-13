@@ -70,6 +70,8 @@ function fixture(t: { skip(reason: string): void; after(fn: () => void): void })
   };
   const runtime = new VideoEvidenceRuntime(store, access, () => now);
   return { db, frames, store, runtime, frameBytes, access,
+    // Disclosed trusted-port completion fixture only; never actual usage/settlement evidence.
+    complete: () => { access.normalCompletion = () => true; },
     setCurrent: (b: VideoReviewBinding | null) => { current = b; },
     setSource: (s: Buffer | null) => { retained = s; }, setTime: (value: number) => { now = value; } };
 }
@@ -100,6 +102,7 @@ test("distinct candidate permit derives and hands off every native frame, while 
   f.runtime.acknowledgeBatch(derived.review.reviewId, "reviewer", batch.deliveries.map((d) => d.receipt));
   f.runtime.recordVerdict(derived.review.reviewId, "reviewer", { ...report,
     criteria: [{ ...report.criteria[0]!, observedFrameIndices: [0, 15] }] });
+  f.complete();
   assert.equal(f.runtime.validationObservation(derived.review.reviewId, "reviewer").receiptIds.length, 16);
   assert.throws(() => f.runtime.approvalProvenance(derived.review.reviewId, "reviewer"), refused("verdict"));
   f.access.validationProfile = () => "paced";
@@ -120,6 +123,7 @@ test("Human validation observations retain their purpose on every frame and verd
     index = batch.nextIndex;
   }
   const verdict = f.runtime.recordVerdict(record.reviewId, "reviewer", report);
+  f.complete();
   assert.deepEqual(verdict.operatorValidation, record.binding.operatorValidation);
   assert.deepEqual(f.runtime.validationObservation(record.reviewId, "reviewer"), verdict);
   assert.throws(() => f.runtime.approvalProvenance(record.reviewId, "reviewer"), refused("verdict"));
@@ -180,14 +184,17 @@ test("durable ordered all-frame acknowledgement is necessary but insufficient fo
     assert.throws(() => f.runtime.acknowledge("video_test", "reviewer", delivery.receipt.receiptId, hash("wrong")), refused("receipt"));
     f.runtime.acknowledge("video_test", "reviewer", delivery.receipt.receiptId, delivery.receipt.sha256);
   }
-  assert.throws(() => f.runtime.approvalProvenance("video_test", "reviewer"), refused("verdict"));
+  assert.throws(() => f.runtime.approvalProvenance("video_test", "reviewer"), refused("stale"));
   assert.throws(() => f.runtime.recordVerdict("video_test", "reviewer", { ...report, oracle: "unexpected truth" } as typeof report), refused("criteria"));
   assert.throws(() => f.runtime.recordVerdict("video_test", "reviewer", { ...report, criteria: [{ ...report.criteria[0]!, secret: "extra input" } as typeof report.criteria[number]] }), refused("criteria"));
   const verdict = f.runtime.recordVerdict("video_test", "reviewer", report);
   assert.equal(verdict.receiptIds.length, 360);
-  assert.equal(f.runtime.approvalProvenance("video_test", "reviewer").verdictId, verdict.verdictId);
+  assert.throws(() => f.runtime.approvalProvenance("video_test", "reviewer"), refused("stale"));
+  assert.equal(f.store.getReview("video_test")?.status, "pending", "awaiting final settlement preserves the original quality record");
   assert.throws(() => f.runtime.deliver("video_test", "reviewer", 359), refused("order"));
   assert.throws(() => f.runtime.recordVerdict("video_test", "reviewer", report), refused("verdict"));
+  f.complete();
+  assert.equal(f.runtime.approvalProvenance("video_test", "reviewer").verdictId, verdict.verdictId);
   assert.throws(() => f.runtime.approvalProvenance("video_test", "child"), refused("stale"));
   f.db.prepare("UPDATE temporal_video_verdicts SET verdict=json_set(verdict, '$.rationale', 'substituted') WHERE review_id=?").run("video_test");
   assert.equal(f.store.getVerdict("video_test"), null);
@@ -256,7 +263,7 @@ test("SQLite receipts and verdict absence survive process restart", async (t) =>
   runtime.acknowledge("video_test", "reviewer", delivery.receipt.receiptId, delivery.receipt.sha256);
   assert.equal(store.latestReceipts("video_test")[0]?.acknowledged, true);
   assert.equal(store.getVerdict("video_test"), null);
-  assert.throws(() => runtime.approvalProvenance("video_test", "reviewer"), refused("receipt"));
+  assert.throws(() => runtime.approvalProvenance("video_test", "reviewer"), refused("stale"));
 });
 
 test("failed frame storage rolls back metadata and removes only its own new partial frames", (t) => {
@@ -316,6 +323,7 @@ test("current source removal and completed quality proof frame substitution fail
     f.runtime.acknowledge("video_test", "reviewer", delivery.receipt.receiptId, delivery.receipt.sha256);
   }
   f.runtime.recordVerdict("video_test", "reviewer", report);
+  f.complete();
   f.frameBytes.set(157, Buffer.from("transient substituted after model delivery"));
   assert.throws(() => f.runtime.approvalProvenance("video_test", "reviewer"), refused("frame_mismatch"));
   assert.equal(f.store.getReview("video_test")?.status, "revoked");
@@ -355,6 +363,7 @@ test("bounded consecutive batches preserve all 360 native frames and acknowledge
   assert.throws(() => f.runtime.deliverBatch("video_test", "reviewer", 0), refused("order"));
   const verdict = f.runtime.recordVerdict("video_test", "reviewer", report);
   assert.equal(verdict.receiptIds.length, 360);
+  f.complete();
   assert.equal(f.runtime.approvalProvenance("video_test", "reviewer").verdictId, verdict.verdictId);
 });
 
@@ -386,6 +395,7 @@ test("original gate distinguishes parent-inspected images from exact worker vide
   const reference = { evidenceId: binding.sourceEvidenceId, reviewId: "video_test",
     verdictId: verdict.verdictId, reviewerSessionId: "reviewer" };
   const original = JSON.stringify(snapshot);
+  f.complete();
   assert.equal(bridge.approvalProvenance(decision, [], [reference], "resolve")[0]?.reviewerSessionId, "reviewer");
   assert.throws(() => bridge.approvalProvenance(decision, [binding.sourceEvidenceId], [reference], "resolve"), /truthfully cover/u);
   assert.throws(() => bridge.approvalProvenance(decision, [], [{ ...reference, reviewerSessionId: "root" }], "resolve"), /original evidence/u);
@@ -407,6 +417,7 @@ test("attempted fresh reads after typed resolution do not destroy otherwise curr
     }))); cursor = batch.nextIndex;
   }
   const verdict = f.runtime.recordVerdict("video_test", "reviewer", report);
+  f.complete();
   // Exact gate is approved: its owner can consume current provenance, worker has no new access.
   f.access.currentBinding = (_binding, phase) => phase === "resolve" ? binding : null;
   assert.throws(() => f.runtime.deliverBatch("video_test", "reviewer", 0), refused("stale"));
