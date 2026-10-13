@@ -13,6 +13,7 @@ import { ClaudeCodeDriver } from "./drivers/claude-code.js";
 import { CodexAppServerResumeError } from "./drivers/codex-app-server.js";
 import { setGitRunnerForTests } from "./git-ops.js";
 import type { ProviderAuthRecoveryController } from "./provider-auth-recovery.js";
+import { accrueRatePricedUsage } from "@wollipog/protocol";
 import {
   SessionManager,
   type DurableCommandLifecycle,
@@ -7062,9 +7063,13 @@ test("Claude resume hands the driver the live requests still open after its chec
     // Recovery no longer rebuilds a republished request, so a crash right after it must not lose its
     // counters to the lazy metadata flush: a fresh store reads them from disk.
     assert.equal(new SessionStore(h.root).readMeta("resume-session")!.tokensIn, before.tokensIn + 9);
+    // It has no provider cost, so its cache buckets are kept for snapshot catch-up pricing (#3111).
+    const ratePriced = accrueRatePricedUsage(before.ratePricedUsage ?? [], { ...live(9), liveUsage: "republished" });
+    assert.deepEqual(new SessionStore(h.root).readMeta("resume-session")!.ratePricedUsage, ratePriced);
     (h.manager as any).accrueMeta("resume-session", { ...live(9), liveUsage: "settled", costUsd: 0.01 });
     assert.deepEqual([h.store.readMeta("resume-session")!.tokensIn, h.store.readMeta("resume-session")!.costUsd], [before.tokensIn + 18, before.costUsd + 0.01]);
     assert.equal(new SessionStore(h.root).readMeta("resume-session")!.tokensIn, before.tokensIn + 18);
+    assert.deepEqual(h.store.readMeta("resume-session")!.ratePricedUsage, ratePriced, "a provider-costed record keeps flat accounting");
   } finally {
     h.manager.shutdownAll();
     h.cleanup();

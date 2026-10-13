@@ -7,13 +7,13 @@
 import { DatabaseSync } from "node:sqlite";
 import { CampaignBudgetLedger } from "./campaign-budget.js";
 import { CampaignReviewJobs } from "./campaign-review-jobs.js";
-import { attentionRequestRank } from "@wollipog/protocol";
+import { attentionRequestRank, parseRatePricedUsage, ratePricedUsageKey, ratePricedUsageRecord, RATE_PRICED_USAGE_MAX_ENTRIES, type RatePricedUsageTotal } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent } from "./campaign-authority.js";
 import { evaluateApprovalPolicies, sessionSpawnSafetyPolicy } from "./policy-engine.js";
 import { validCampaignControl, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
-import { lookupRate, priceUsage, resolveCostSource, type RateTable } from "./usage-pricing.js";
+import { lookupRate, priceUsage, resolveCostSource, sameRequestInputTier, type RateTable } from "./usage-pricing.js";
 import { collapseAgentSpawnObservations, type StructuredAgentSpawnObservation } from "./child-session-registry.js";
 import { WalCheckpointer, type WalCheckpointerOptions } from "./wal-checkpointer.js";
 import { mkdirSync, readFileSync } from "node:fs";
@@ -2423,7 +2423,24 @@ CREATE TABLE IF NOT EXISTS usage_session_state (
   runner_history_epoch INTEGER,
   covered_through_seq INTEGER NOT NULL DEFAULT 0,
   revision            INTEGER NOT NULL DEFAULT 0,
+  -- usage_session_rate_priced completeness: 0 counted since the first usage, 1 adopts the next
+  -- snapshot's entries as its baseline, 2 abandoned (snapshots fall back to flat totals).
+  rate_priced_status  INTEGER NOT NULL DEFAULT 0,
   updated_at          INTEGER NOT NULL,
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
+-- Rate-priced usage ingested per snapshot pricing key (#3111). A runner snapshot's cumulative
+-- entry minus this row is usage the control plane never ingested.
+CREATE TABLE IF NOT EXISTS usage_session_rate_priced (
+  session_id                  TEXT NOT NULL,
+  entry_key                   TEXT NOT NULL,
+  input_tokens                INTEGER NOT NULL DEFAULT 0,
+  output_tokens               INTEGER NOT NULL DEFAULT 0,
+  cached_input_tokens         INTEGER NOT NULL DEFAULT 0,
+  cache_creation_tokens       INTEGER NOT NULL DEFAULT 0,
+  reasoning_tokens            INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (session_id, entry_key),
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 
@@ -5791,6 +5808,16 @@ export class ControlPlaneDb {
     } catch {
       /* column already present */
     }
+    let addedRatePricedStatus = false;
+    try {
+      db.exec("ALTER TABLE usage_session_state ADD COLUMN rate_priced_status INTEGER NOT NULL DEFAULT 0");
+      addedRatePricedStatus = true;
+    } catch {
+      /* column already present */
+    }
+    // Existing sessions ingested usage before per-key counting began, so their first snapshot
+    // entries become the baseline instead of a residual (#3111).
+    if (addedRatePricedStatus) db.exec("UPDATE usage_session_state SET rate_priced_status=1");
     // v103 usage ledger: the five token buckets, cache savings, and cost provenance counters.
     // Additive with zero defaults so pre-existing buckets keep aggregating unchanged.
     for (const table of ["usage_session_state", "usage_hourly", "usage_daily"]) {
@@ -12814,12 +12841,12 @@ export class ControlPlaneDb {
         this.stmt(
           `INSERT INTO usage_session_state
              (session_id, input_tokens, output_tokens, cost_microusd, runner_history_epoch,
-              covered_through_seq, revision, updated_at)
+              covered_through_seq, revision, rate_priced_status, updated_at)
            SELECT id,
                   CASE WHEN input_tokens >= 0 THEN input_tokens ELSE 0 END,
                   CASE WHEN output_tokens >= 0 THEN output_tokens ELSE 0 END,
                   CAST(ROUND(CASE WHEN cost_usd >= 0 THEN cost_usd ELSE 0 END * 1000000.0) AS INTEGER),
-                  runner_history_epoch, runner_history_tail_seq, 0, ?
+                  runner_history_epoch, runner_history_tail_seq, 0, 1, ?
              FROM sessions`,
         ).run(now);
         this.stmt("INSERT INTO usage_aggregation_meta (id, baseline_seeded_at) VALUES (1, ?)").run(now);
@@ -13206,6 +13233,8 @@ export class ControlPlaneDb {
         modelPricedRecords: counted && priced.costSource === "modelPriced" ? 1 : 0,
         unpricedRecords: counted && priced.costSource === "unpriced" ? 1 : 0,
       }, occurredAt, true, dimensions);
+      const ratePriced = ratePricedUsageRecord(payload);
+      if (ratePriced) this.countRatePricedUsageInTransaction(sessionId, ratePriced, occurredAt);
       if (eventId !== undefined && dimensions?.driver === "claude-code" && counted && priced.costSource === "providerReported") {
         const owner = dimensions.scope.owner;
         this.stmt("INSERT OR IGNORE INTO usage_cost_receipts VALUES (?, ?, ?, ?, ?)").run(
@@ -13244,16 +13273,42 @@ export class ControlPlaneDb {
     }
   }
 
+  /** Count one ingested rate-priced record under its snapshot pricing key (#3111). A session
+   * with implausibly many keys abandons per-key reconciliation rather than growing without bound. */
+  private countRatePricedUsageInTransaction(sessionId: string, record: RatePricedUsageTotal, now: number): void {
+    const key = ratePricedUsageKey(record);
+    const known = this.stmt("SELECT 1 FROM usage_session_rate_priced WHERE session_id=? AND entry_key=?").get(sessionId, key);
+    if (!known) {
+      const count = (this.stmt("SELECT COUNT(*) AS n FROM usage_session_rate_priced WHERE session_id=?")
+        .get(sessionId) as { n: number }).n;
+      if (count >= RATE_PRICED_USAGE_MAX_ENTRIES * 2) {
+        this.stmt("UPDATE usage_session_state SET rate_priced_status=2, updated_at=? WHERE session_id=?").run(now, sessionId);
+        return;
+      }
+    }
+    this.stmt(
+      `INSERT INTO usage_session_rate_priced
+         (session_id, entry_key, input_tokens, output_tokens, cached_input_tokens, cache_creation_tokens, reasoning_tokens)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(session_id, entry_key) DO UPDATE SET
+         input_tokens=input_tokens+excluded.input_tokens, output_tokens=output_tokens+excluded.output_tokens,
+         cached_input_tokens=cached_input_tokens+excluded.cached_input_tokens,
+         cache_creation_tokens=cache_creation_tokens+excluded.cache_creation_tokens,
+         reasoning_tokens=reasoning_tokens+excluded.reasoning_tokens`,
+    ).run(sessionId, key, record.inputTokens, record.outputTokens, record.cachedInputTokens,
+      record.cacheCreationInputTokens, record.reasoningOutputTokens);
+  }
+
   /** Reconcile a runner-authoritative cumulative snapshot. Identical, reordered, or stale lower
    * snapshots add nothing; only positive per-metric deltas enter the current observation bucket. */
   private reconcileUsageSnapshotInTransaction(sessionId: string, snapshot: SessionSnapshot, now: number): void {
     const row = this.stmt(
       `SELECT input_tokens, output_tokens, cost_microusd, cost_remainder_picousd,
-              runner_history_epoch, covered_through_seq
+              runner_history_epoch, covered_through_seq, rate_priced_status
          FROM usage_session_state WHERE session_id=?`,
     ).get(sessionId) as {
       input_tokens: number; output_tokens: number; cost_microusd: number; cost_remainder_picousd: number;
-      runner_history_epoch: number | null; covered_through_seq: number;
+      runner_history_epoch: number | null; covered_through_seq: number; rate_priced_status: number;
     } | undefined;
     const current = row ?? { input_tokens: 0, output_tokens: 0, cost_microusd: 0, cost_remainder_picousd: 0 };
     const target = {
@@ -13261,13 +13316,51 @@ export class ControlPlaneDb {
       outputTokens: ControlPlaneDb.usageToken(snapshot.tokensOut),
       costMicrousd: ControlPlaneDb.usageMicroUsd(snapshot.costUsd),
     };
+    // v219 runners also carry cumulative usage without a provider cost, per pricing key (#3111).
+    // Each entry's excess over what this ledger ingested under the same key is usage it never saw,
+    // with its cache buckets intact. A ledger row that predates per-key counting adopts the first
+    // entries as its baseline, and the flat totals below price that one catch-up as before.
+    const ratePricedStatus = row?.rate_priced_status ?? 0;
+    const entries = snapshot.ratePricedUsage === undefined || ratePricedStatus === 2
+      ? null : parseRatePricedUsage(snapshot.ratePricedUsage);
+    type Ingested = Omit<RatePricedUsageTotal, "model" | "serviceTier" | "requestInputTokens">;
+    const ingested = new Map<string, Ingested>();
+    if (entries) {
+      for (const counted of this.stmt(
+        `SELECT entry_key, input_tokens, output_tokens, cached_input_tokens, cache_creation_tokens, reasoning_tokens
+           FROM usage_session_rate_priced WHERE session_id=?`,
+      ).all(sessionId) as Array<{ entry_key: string; input_tokens: number; output_tokens: number;
+        cached_input_tokens: number; cache_creation_tokens: number; reasoning_tokens: number }>) {
+        ingested.set(counted.entry_key, {
+          inputTokens: Number(counted.input_tokens), outputTokens: Number(counted.output_tokens),
+          cachedInputTokens: Number(counted.cached_input_tokens), cacheCreationInputTokens: Number(counted.cache_creation_tokens),
+          reasoningOutputTokens: Number(counted.reasoning_tokens),
+        });
+      }
+    }
+    const ratePricedResiduals = entries && ratePricedStatus === 0
+      ? entries.map((entry) => {
+          const seen = ingested.get(ratePricedUsageKey(entry));
+          const missing = (field: keyof Ingested) => Math.max(0, entry[field] - (seen?.[field] ?? 0));
+          return { entry, residual: {
+            inputTokens: missing("inputTokens"), outputTokens: missing("outputTokens"),
+            cachedInputTokens: missing("cachedInputTokens"), cacheCreationInputTokens: missing("cacheCreationInputTokens"),
+            reasoningOutputTokens: missing("reasoningOutputTokens"),
+          } };
+        }).filter(({ residual }) => residual.inputTokens > 0 || residual.outputTokens > 0 ||
+          residual.cachedInputTokens > 0 || residual.cacheCreationInputTokens > 0)
+      : [];
     const parts = ControlPlaneDb.usageCostParts(snapshot.costUsd);
     const snapshotRemainder = (parts.microusd - target.costMicrousd) * 1_000_000 + parts.remainderPicousd;
     const adoptsSnapshotCost = target.costMicrousd > current.cost_microusd ||
       (target.costMicrousd === current.cost_microusd && snapshotRemainder >= current.cost_remainder_picousd);
+    // Flat totals include the rate-priced residuals above; only what they leave unexplained is
+    // usage with a provider-reported cost, or usage a pre-v219 runner reported, priced as before.
     const residual = {
-      inputTokens: Math.max(0, target.inputTokens - current.input_tokens),
-      outputTokens: Math.max(0, target.outputTokens - current.output_tokens),
+      inputTokens: Math.max(0, target.inputTokens - current.input_tokens -
+        ratePricedResiduals.reduce((sum, { residual }) => sum + residual.inputTokens, 0)),
+      outputTokens: Math.max(0, target.outputTokens - current.output_tokens -
+        ratePricedResiduals.reduce((sum, { residual }) => sum + residual.outputTokens, 0)),
       costMicrousd: Math.max(0, target.costMicrousd - current.cost_microusd),
     };
     // A runner snapshot carries flat totals: no cache breakdown and, for opaque-billing providers,
@@ -13318,14 +13411,70 @@ export class ControlPlaneDb {
     // A cumulative snapshot tells us the amount, not when its unseen prefix accrued. Attribute the
     // positive catch-up at observation time instead of fabricating historical precision.
     this.recordUsageDeltaInTransaction(sessionId, delta, now, false, dimensions);
-    if (pricedRemainderPicousd !== null) {
+    // Preserve the authoritative fractional baseline around the rounded micro-USD watermark so
+    // later sub-micro events can cross the next rounding boundary exactly once.
+    let remainderPicousd = pricedRemainderPicousd ?? (adoptsSnapshotCost ? snapshotRemainder : null);
+    for (const { entry, residual: missing } of ratePricedResiduals) {
+      // Priced exactly as event-first ingestion prices each record under this key. A request-size
+      // tier that the recorded range cannot pin down leaves the residual unpriced: a lower bound.
+      const model = entry.model ?? dimensions?.model;
+      const context = entry.requestInputTokens
+        ? sameRequestInputTier(this.usageRateTable, model, entry.requestInputTokens.min, entry.requestInputTokens.max)
+          ? { requestInputTokens: entry.requestInputTokens.max, ...(entry.serviceTier === undefined ? {} : { serviceTier: entry.serviceTier }) }
+          : null
+        : entry.serviceTier === undefined ? undefined : { serviceTier: entry.serviceTier };
+      const buckets = {
+        uncachedInputTokens: dimensions && CODEX_DRIVERS.has(dimensions.driver)
+          ? Math.max(0, missing.inputTokens - missing.cachedInputTokens)
+          : missing.inputTokens,
+        cachedInputTokens: missing.cachedInputTokens,
+        cacheCreationTokens: missing.cacheCreationInputTokens,
+        outputTokens: missing.outputTokens,
+      };
+      const priced = context === null
+        ? { costUsd: 0, costSource: "unpriced" as const, cacheSavingsUsd: 0 }
+        : priceUsage(this.usageRateTable, model, buckets, null, context);
+      const cost = ControlPlaneDb.usageCostParts(priced.costUsd);
+      const combinedRemainder = (remainderPicousd ?? current.cost_remainder_picousd) + cost.remainderPicousd;
+      const carryMicrousd = Math.round(combinedRemainder / 1_000_000);
+      remainderPicousd = combinedRemainder - carryMicrousd * 1_000_000;
+      this.recordUsageDeltaInTransaction(sessionId, {
+        inputTokens: missing.inputTokens,
+        costMicrousd: cost.microusd + carryMicrousd,
+        ...buckets,
+        reasoningTokens: Math.min(missing.outputTokens, missing.reasoningOutputTokens),
+        cacheSavingsMicrousd: ControlPlaneDb.usageMicroUsd(priced.cacheSavingsUsd),
+        providerReportedRecords: 0,
+        modelPricedRecords: priced.costSource === "modelPriced" ? 1 : 0,
+        unpricedRecords: priced.costSource === "unpriced" ? 1 : 0,
+      }, now, false, dimensions && entry.model ? { ...dimensions, model: entry.model } : dimensions);
+    }
+    if (remainderPicousd !== null) {
       this.stmt("UPDATE usage_session_state SET cost_remainder_picousd=? WHERE session_id=?")
-        .run(pricedRemainderPicousd, sessionId);
-    } else if (adoptsSnapshotCost) {
-      // Preserve the authoritative fractional baseline around the rounded micro-USD watermark so
-      // later sub-micro events can cross the next rounding boundary exactly once.
-      this.stmt("UPDATE usage_session_state SET cost_remainder_picousd=? WHERE session_id=?")
-        .run(snapshotRemainder, sessionId);
+        .run(remainderPicousd, sessionId);
+    }
+    if (entries) {
+      // Every entry is now accounted through this snapshot, whether priced above or adopted.
+      for (const entry of entries) {
+        const seen = ingested.get(ratePricedUsageKey(entry));
+        if (seen && entry.inputTokens <= seen.inputTokens && entry.outputTokens <= seen.outputTokens &&
+            entry.cachedInputTokens <= seen.cachedInputTokens && entry.cacheCreationInputTokens <= seen.cacheCreationInputTokens &&
+            entry.reasoningOutputTokens <= seen.reasoningOutputTokens) continue;
+        this.stmt(
+          `INSERT INTO usage_session_rate_priced
+             (session_id, entry_key, input_tokens, output_tokens, cached_input_tokens, cache_creation_tokens, reasoning_tokens)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(session_id, entry_key) DO UPDATE SET
+             input_tokens=MAX(input_tokens, excluded.input_tokens), output_tokens=MAX(output_tokens, excluded.output_tokens),
+             cached_input_tokens=MAX(cached_input_tokens, excluded.cached_input_tokens),
+             cache_creation_tokens=MAX(cache_creation_tokens, excluded.cache_creation_tokens),
+             reasoning_tokens=MAX(reasoning_tokens, excluded.reasoning_tokens)`,
+        ).run(sessionId, ratePricedUsageKey(entry), entry.inputTokens, entry.outputTokens, entry.cachedInputTokens,
+          entry.cacheCreationInputTokens, entry.reasoningOutputTokens);
+      }
+      if (ratePricedStatus === 1) {
+        this.stmt("UPDATE usage_session_state SET rate_priced_status=0 WHERE session_id=?").run(sessionId);
+      }
     }
     const nextCovered = row?.runner_history_epoch === (snapshot.historyEpoch ?? null)
       ? Math.max(row.covered_through_seq, snapshot.seq)
@@ -22795,7 +22944,8 @@ export class ControlPlaneDb {
    * until the next FULL commit or checkpoint flushes the WAL; the runner's retained log refills it
    * (docs/control-plane-database-durability.md). Outside WAL, NORMAL could corrupt the file.
    * Usage stays FULL: after a rollback, the reconnect snapshot would book a lost token_usage as flat
-   * totals before its replay (reconcileUsageSnapshotInTransaction), dropping its cache breakdown. */
+   * totals before its replay (reconcileUsageSnapshotInTransaction), dropping the cache breakdown of
+   * a provider-costed record (rate-priced records keep theirs, #3111). */
   private replayableCommit<T>(payloads: readonly SessionEventPayload[], work: () => T): T {
     if (payloads.some((payload) => payload.kind === "token_usage")) return work();
     return this.relaxedCommit(work);

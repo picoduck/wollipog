@@ -104,6 +104,7 @@ import {
   PROTOCOL_VERSION,
   providerSupportsConversationFork,
   queueHoldReason,
+  accrueRatePricedUsage,
   runnerSupportsProtocol,
   validatePromptImageInputs,
   validateQuestionAnswers,
@@ -5806,6 +5807,7 @@ export class SessionManager {
       acpSessionOverrides,
       tokensIn: retainAccounting ? (prior?.tokensIn ?? 0) : 0,
       tokensOut: retainAccounting ? (prior?.tokensOut ?? 0) : 0,
+      ratePricedUsage: retainAccounting ? prior?.ratePricedUsage : undefined,
       contextTokensUsed: priorResumeId ? prior?.contextTokensUsed : undefined,
       contextWindow: priorResumeId ? prior?.contextWindow : undefined,
       costUsd: retainAccounting ? (prior?.costUsd ?? 0) : 0,
@@ -5871,6 +5873,7 @@ export class SessionManager {
           meta.costUsd = latest.costUsd;
           meta.tokensIn = latest.tokensIn;
           meta.tokensOut = latest.tokensOut;
+          meta.ratePricedUsage = latest.ratePricedUsage;
           meta.costReconciliationRevision = latest.costReconciliationRevision;
           meta.costReconciliationDeltaUsd = latest.costReconciliationDeltaUsd;
           meta.costReconciliationIdentity = latest.costReconciliationIdentity;
@@ -19287,10 +19290,14 @@ export class SessionManager {
       // live record is display-only: a later record accounts the same request (#3086).
       const m = this.store.readMeta(sessionId);
       if (!m) return;
+      // Rate-priced usage keeps its cache buckets, so a snapshot covering it is priced exactly (#3111).
+      const priorRatePriced = m.ratePricedUsage ?? [];
+      const ratePricedUsage = m.ratePricedUsage === null ? null : accrueRatePricedUsage(priorRatePriced, payload);
       this.store.patchMeta(sessionId, {
         tokensIn: m.tokensIn + (payload.inputTokens ?? 0),
         tokensOut: m.tokensOut + (payload.outputTokens ?? 0),
         costUsd: m.costUsd + (payload.costUsd ?? 0),
+        ...(m.ratePricedUsage === null || ratePricedUsage === priorRatePriced ? {} : { ratePricedUsage: ratePricedUsage && [...ratePricedUsage] }),
         ...(payload.claudeUsageCheckpoint ? { claudeUsageCheckpoint: payload.claudeUsageCheckpoint, claudeUsageCheckpointSeq: m.seq } : {}),
       });
       // Usage counters normally flush lazily. A republished request has already left the open live

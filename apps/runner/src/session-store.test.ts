@@ -800,6 +800,17 @@ test("deleted-session markers reap by age while crash-window rows and recent fen
   }
 });
 
+test("rate-priced usage rides registration and v219 snapshots but never an older negotiated peer", () => {
+  const ratePricedUsage = [{ model: "claude-opus-5", requestInputTokens: { min: 1_210, max: 1_210 }, inputTokens: 10,
+    outputTokens: 5, cachedInputTokens: 1_000, cacheCreationInputTokens: 200, reasoningOutputTokens: 0 }];
+  assert.deepEqual(metaToSnapshot(meta({ ratePricedUsage }), null).ratePricedUsage, ratePricedUsage,
+    "registration is pre-negotiation and is where a reconnect prices unseen usage");
+  assert.deepEqual(metaToSnapshot(meta({ ratePricedUsage }), 219).ratePricedUsage, ratePricedUsage);
+  assert.equal("ratePricedUsage" in metaToSnapshot(meta({ ratePricedUsage }), 218), false);
+  assert.equal("ratePricedUsage" in metaToSnapshot(meta({ ratePricedUsage: null }), null), false, "an overflowed session reports none");
+  assert.equal("ratePricedUsage" in metaToSnapshot(meta(), 219), false);
+});
+
 test("metaToSnapshot omits runner-only fields (agentSessionId, repoPath, command provenance)", () => {
   const snap = metaToSnapshot(meta({
     controlPlaneLaunchId: "launch-proof-1",
