@@ -1,3 +1,4 @@
+import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
 /**
  * Control-plane persistence, backed by `node:sqlite` (built into Node >=22.5).
  * Using the built-in driver means there is no native module to compile — the
@@ -10816,12 +10817,27 @@ export class ControlPlaneDb {
     return counts;
   }
 
-  private readonly sessionSummaryReads = new Map<string,{ revision: string; sessions: SessionView[]; json: string; bytes: number }>();
+  private readonly sessionSummaryReads = new Map<string,{ revision: string; sessions: SessionView[]; json: string; legacyJson?: string; bytes: number }>();
   private sessionSummaryReadBytes = 0;
 
   /** REST and dashboard connects share the exact authorized serialized list until a DB write. */
-  sessionListJsonForPrincipal(principal: AuthPrincipal, includeArchived = false): string {
-    return this.sessionSummaryRead(principal,includeArchived).json;
+  sessionListJsonForPrincipal(principal: AuthPrincipal, includeArchived = false, supportsRetryExhaustion = true): string {
+    const cached = this.sessionSummaryRead(principal,includeArchived);
+    if (supportsRetryExhaustion) return cached.json;
+    if (cached.legacyJson !== undefined) return cached.legacyJson;
+    // This REST route sends serialized text, bypassing Fastify preSerialization. Keep canonical
+    // data shared and cache the legacy projection lazily, only within the same memory budget.
+    const payload={ sessions: cached.sessions };
+    const legacy=projectBackgroundRetryExhaustionForUi(payload,null);
+    const legacyJson=legacy===payload ? cached.json : JSON.stringify(legacy);
+    const extraBytes=legacyJson===cached.json ? 0 : Buffer.byteLength(legacyJson);
+    if (this.sessionSummaryReads.get(JSON.stringify([principal,includeArchived]))===cached &&
+        this.sessionSummaryReadBytes+extraBytes<=32*1024*1024) {
+      cached.legacyJson=legacyJson;
+      cached.bytes+=extraBytes;
+      this.sessionSummaryReadBytes+=extraBytes;
+    }
+    return legacyJson;
   }
 
   cachedSessionSummariesForPrincipal(principal: AuthPrincipal): SessionView[] | undefined {
@@ -10842,7 +10858,7 @@ export class ControlPlaneDb {
     const sessions=this.listSessionSummaries(principal,includeArchived);
     const json=JSON.stringify({ sessions });
     const bytes=Buffer.byteLength(json);
-    const entry={ revision,sessions,json,bytes };
+    const entry: { revision: string; sessions: SessionView[]; json: string; legacyJson?: string; bytes: number }={ revision,sessions,json,bytes };
     const limit=32*1024*1024;
     if (bytes<=limit) {
       while (this.sessionSummaryReads.size>=4 || this.sessionSummaryReadBytes+bytes>limit) {

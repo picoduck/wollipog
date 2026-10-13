@@ -1290,6 +1290,18 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   const legacyExhaustionBody = await legacyExhaustionView.text();
   assert.doesNotMatch(legacyExhaustionBody, /capacity_retry_exhausted|retryExhaustedAt/,
     "legacy HTTP clients never receive an unknown watchdog or its new fields");
+  for (const path of ["/api/sessions", "/api/sessions?archived=true"]) {
+    for (const version of [undefined, "218", "219", String(PROTOCOL_VERSION)]) {
+      const response = await fetchWithBearer(`${httpBase}${path}`, ownerToken, {
+        headers: version === undefined ? {} : { "x-wollipog-ui-protocol": version },
+      });
+      assert.equal(response.status, 200);
+      const body = await response.text();
+      if (version === String(PROTOCOL_VERSION)) assert.match(body, /capacity_retry_exhausted/);
+      else assert.doesNotMatch(body, /capacity_retry_exhausted|retryExhaustedAt|retryExhaustionAcknowledgedAt/,
+        `${path} must project legacy ${version ?? "unnegotiated"} clients even when its JSON is cached`);
+    }
+  }
   const exhaustionAcknowledgement = await ownerFetch(
     "/api/sessions/session-target/background-deliveries/bgcont-route-exhaustion/acknowledge-retry-exhaustion",
     { method: "POST" },

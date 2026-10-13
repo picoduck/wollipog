@@ -3842,8 +3842,12 @@ app.delete("/api/boxes/:id", async (req, reply) => {
 app.get("/api/sessions", async (req,reply) => {
   const includeArchived = (req.query as { archived?: string })?.archived === "true";
   const principal = requestPrincipal(req);
+  const uiProtocol = parseUiProtocolVersion(req.query) ?? parseUiProtocolVersion({
+    protocolVersion: req.headers["x-wollipog-ui-protocol"],
+  });
+  const supportsRetryExhaustion = principal?.kind === "agent" || runnerSupportsProtocol(uiProtocol, "backgroundRetryExhaustion");
   return reply.type("application/json").send(principal
-    ? db.sessionListJsonForPrincipal(principal,includeArchived)
+    ? db.sessionListJsonForPrincipal(principal,includeArchived,supportsRetryExhaustion)
     : '{"sessions":[]}');
 });
 
