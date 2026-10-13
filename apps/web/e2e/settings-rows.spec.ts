@@ -1733,6 +1733,32 @@ test.describe("the appearance controls", () => {
     expect(geometry.scrollHeight).toBeGreaterThan(geometry.clientHeight);
   });
 
+  test("in a list that scrolls, the keyboard keeps the highlighted option in view, since its fill is the only focus cue (#3020)", async ({ page }) => {
+    await page.setViewportSize({ width: 360, height: 240 });
+    await useHarness(page, "dark", { section: "appearance", copy: "long" });
+    await trigger(page).focus();
+    await page.keyboard.press("Enter");
+    const list = page.getByRole("listbox", { name: "Color Scheme" });
+    await expect(list).toBeFocused();
+    const inView = () => list.evaluate((element) => {
+      const active = element.querySelector<HTMLElement>(".ui-select-option.is-active")!;
+      const box = element.getBoundingClientRect();
+      const option = active.getBoundingClientRect();
+      return {
+        scrolls: element.scrollHeight > element.clientHeight,
+        label: active.querySelector(".ui-select-option-body > span")?.textContent,
+        visible: option.top >= box.top - 0.5 && option.bottom <= box.bottom + 0.5,
+      };
+    });
+    expect(await inView()).toEqual({ scrolls: true, label: "Wollipog", visible: true });
+    await page.keyboard.press("End");
+    await expect.poll(inView, { message: "End highlights the last palette below the fold and scrolls to it" })
+      .toEqual({ scrolls: true, label: "Monokai", visible: true });
+    await page.keyboard.press("Home");
+    await expect.poll(inView).toEqual({ scrolls: true, label: "Wollipog", visible: true });
+    await page.keyboard.press("Escape");
+  });
+
   for (const theme of THEMES) {
     test(`the aligned Appearance rows and colour menu match their ${theme} baselines`, async ({ page }) => {
       skipWithoutBaselines();

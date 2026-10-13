@@ -1680,6 +1680,7 @@ export function Select<T extends string>({
     : listStyle;
 
   const openAt = (index: number) => {
+    revealActive.current = true;
     setActive(Math.max(0, index));
     setQuery("");
     if (!searchable) {
@@ -1705,6 +1706,7 @@ export function Select<T extends string>({
     createOption.onSelect(searched);
   };
   const filter = (next: string) => {
+    revealActive.current = true;
     setQuery(next);
     // The first result a keypress can commit, as Home would choose.
     setActive(Math.max(0, filterSearchableComboboxOptions(options, next).findIndex((option) => !option.disabled)));
@@ -1714,6 +1716,19 @@ export function Select<T extends string>({
   const listId = searchable ? `${popover.panelId}-list` : popover.panelId;
   const createId = `${popover.panelId}-create`;
   const activeDescendant = showCreate ? createId : visible[activeIndex] ? optionId(activeIndex) : undefined;
+  /*
+   * The highlighted option is where focus is, and the only place it shows (§9.1): the list draws no
+   * ring of its own while one is highlighted (#3020). So opening the list and every keyboard move keep
+   * that option in view; End in a long list highlighted an option below the scroll fold, and nothing
+   * on screen said where focus was. Not for the pointer, which is already over what it highlights, and
+   * scrolling under it would move a different option beneath it. Again when the placement changes,
+   * since the list only becomes a scroller once it is placed.
+   */
+  const revealActive = useRef(false);
+  useLayoutEffect(() => {
+    if (!open || !revealActive.current || !activeDescendant) return;
+    document.getElementById(activeDescendant)?.scrollIntoView?.({ block: "nearest" });
+  }, [open, activeDescendant, panelStyle]);
 
   /**
    * The list's keyboard contract, owned by whatever holds focus while it is open: the list itself,
@@ -1721,6 +1736,7 @@ export function Select<T extends string>({
    * commits with it; Escape and Tab are the root's in both forms.
    */
   const navigate = (event: React.KeyboardEvent<HTMLElement>, spaceCommits: boolean) => {
+    revealActive.current = true;
     const step = (delta: number) => {
       event.preventDefault();
       if (visible.length === 0) return;
@@ -1769,7 +1785,7 @@ export function Select<T extends string>({
         tabIndex={-1}
         className={`ui-select-option${option.value === value ? " is-selected" : ""}`
           + `${index === activeIndex ? " is-active" : ""}${option.disabled ? " is-disabled" : ""}`}
-        onMouseEnter={() => setActive(index)}
+        onMouseEnter={() => { revealActive.current = false; setActive(index); }}
         onClick={() => commit(option)}
       >
         {option.swatch}
