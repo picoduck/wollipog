@@ -8,6 +8,7 @@ import { SessionsService } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { campaignBoundaryCurrent } from "./campaign-authority.js";
 import { closureEvidence, issueEvidenceDigest } from "./campaign-issue-authority.js";
+import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import type { HumanPrincipal } from "./identity.js";
 
 function harness(full = true, maximum = 5) {
@@ -81,6 +82,33 @@ test("bounded epic scope records lineage, preserves the authorizing human and re
     assert.equal(h.db.workflowDecisionByOccurrence(other.data!.occurrenceId)!.status,"revoked");
     assert.equal(h.approve(proposed.data!).ok,false);
     assert.equal((await h.proposal("stale")).ok,false);
+  } finally { h.db.close(); }
+});
+
+test("consumed scope changes fence a previously queued recovery turn under its original scope", async () => {
+  const h = harness();
+  try {
+    const sent: unknown[] = [];
+    h.hub.sendToRunner = (_id, message) => { sent.push(message); return true; };
+    h.db.updateSessionStatus("root", "idle", 4);
+    h.db.recordCampaignContinuationEvent({ campaignSessionId: "root", eventId: "old-scope-ready", kind: "child_ready", now: 5 });
+    h.hub.isRunnerOnline = () => false;
+    h.svc.retryDuePrompts(10000);
+    const staged = h.db.latestCampaignContinuation("root")!;
+    assert.ok(staged);
+    const before = h.db.getSessionPromptCommand(staged.commandId)!.payloadJson;
+    h.hub.isRunnerOnline = () => true;
+    const proposed = await h.proposal("new-members");
+    assert.ok(proposed.ok, proposed.error ?? "scope proposal refused");
+    assert.ok(h.approve(proposed.data!).ok);
+    assert.equal(h.db.workflowDecisionByOccurrence(proposed.data!.occurrenceId)!.status, "consumed");
+    assert.equal(campaignBoundaryCurrent(h.db.getSession("root")!), true, "new scope is valid for future exact admissions");
+    h.db.updateSessionStatus("root", "idle", 20000);
+    h.svc.retryDuePrompts(30000);
+    assert.equal(sent.some(m => (m as {commandId?:string}).commandId === staged.commandId), false,
+      "scope consumption does not rebind an old staged turn");
+    assert.equal(h.db.getSessionPromptCommand(staged.commandId)!.payloadJson, before);
+    assert.equal(h.db.campaignProjection("root")!.recovery!.automation!.state, "authority_unavailable");
   } finally { h.db.close(); }
 });
 
@@ -274,6 +302,21 @@ test("bounded not-planned closure needs a recorded supported disposition and kee
     assert.equal(executed.data!.issueClosureResult!.outcome,"uncertain");
     assert.equal((await h.svc.executeGithubIssueClosure("root",d.occurrenceId,d.resourceDigest)).ok,false);
     assert.equal(h.state.executes,1);
+    const recovery = new CampaignRecoveryService(h.db, () => {}, { info() {} });
+    recovery.maintain(Date.now());
+    const later = h.svc.createWorkflowDecision("root", { requestId: "later-choice", resourceKey: d.resourceKey,
+      resourceSnapshot: { category: "implementation_question", question: "Which separate repair should run?",
+        options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] } });
+    assert.ok(later.ok, later.error ?? "later exact question refused");
+    assert.ok(h.db.campaignRecoverySettledDecisions("root").some(item => item.occurrenceId === d.occurrenceId),
+      "a newer same-key occurrence cannot supersede an uncertain consumed mutation");
+    recovery.maintain(Date.now());
+    const original = h.db.campaignProjection("root")!.recovery!.records.find(record =>
+      record.resource.occurrenceId === recoveryCoordinate(d.occurrenceId))!;
+    assert.equal(original.reason, "uncertain_outcome");
+    assert.equal(original.effectiveOwner, "human");
+    assert.equal(original.requiredInput, "reconcile_original_outcome");
+    assert.equal(h.state.executes, 1, "recovery never replays the uncertain closure");
   } finally { h.db.close(); }
 });
 

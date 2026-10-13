@@ -58,7 +58,7 @@ const human = new Set<CampaignRecoveryReason>(["missing_human_information", "mis
 function identity(campaignId: string, resource: CampaignRecoveryResource, action: CampaignRecoveryAction): string {
   const coordinate = resource.kind === "worker" && resource.workItemId
     ? { kind: "worker", workItemId: resource.workItemId }
-    : resource.kind === "pull_request" && ["repair_checks", "rereview"].includes(action)
+    : (resource.kind === "pull_request" || resource.kind === "review_job") && ["repair_checks", "rereview"].includes(action)
       ? { kind: "pull_request", repository: resource.repository?.toLowerCase(), pullRequest: resource.pullRequest }
       : resource;
   return `recovery_${createHash("sha256").update(JSON.stringify([campaignId, coordinate, action])).digest("hex")}`;
@@ -132,11 +132,12 @@ export class CampaignRecoveryStore {
         let reason = attempts >= CAMPAIGN_RECOVERY_LIMITS.maxAttempts && !observation.resolved
           ? "attempts_exhausted" : old && hard.has(old.reason) && !terminal.has(old.state) && !observation.resolved
             ? old.reason : observation.reason;
-        const state = !authorized && observation.owner !== "human" ? "cancelled" : observation.resolved ? "resolved" : hard.has(reason) ? "blocked"
+        const state = observation.resolved ? "resolved" : !authorized && observation.owner !== "human"
+          ? reason === "uncertain_outcome" ? "blocked" : "cancelled" : hard.has(reason) ? "blocked"
           : observation.owner === "human" || human.has(reason) ? "waiting_human"
           : dispatchFenced ? "blocked"
           : reason === "transient_failure" ? "backoff" : "ready";
-        if (state === "blocked" && dispatchFenced && !hard.has(reason)) reason = "authority_changed";
+        if (state === "blocked" && dispatchFenced && !hard.has(reason) && reason !== "uncertain_outcome") reason = "authority_changed";
         if (old && row!.signal === observation.signal && !changedResource && old.policyRevision === policyRevision &&
             old.effectiveOwner === observation.owner && old.reason === reason && Boolean(old.dispatchFenced) === dispatchFenced &&
             (observation.resolved ? old.state === "resolved" : !terminal.has(old.state) || state === old.state)) continue;

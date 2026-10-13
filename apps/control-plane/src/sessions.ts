@@ -5121,6 +5121,7 @@ export class SessionsService {
       if (active) continue;
       const campaign = this.db.campaignContinuationLifecycle(campaignSessionId);
       if (!campaign || campaign.archived || campaign.status !== "idle" || campaign.hasPendingApproval) continue;
+      if (this.db.campaignContinuationAdmission(campaignSessionId).state !== "available") continue;
       if (!this.db.hasPendingCampaignContinuationEvents(campaignSessionId)) continue;
       const projection = this.db.campaignProjection(campaignSessionId);
       if (!projection || (projection.status === "waiting_human" &&
@@ -5196,6 +5197,7 @@ export class SessionsService {
             continuationId,
             eventFromSeq,
             eventThroughSeq,
+            authorityDigest: this.db.campaignContinuationAuthorityDigest(campaignSessionId),
           },
         },
         now,

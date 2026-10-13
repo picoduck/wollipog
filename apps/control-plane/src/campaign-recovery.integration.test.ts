@@ -1,27 +1,37 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
-  type PendingApproval, type RunnerMetadata } from "@wollipog/protocol";
+  type CampaignBudgetAuthority, type PendingApproval, type RunnerMetadata } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
+import { automationCommandDigest, canonicalAutomationCommandJson } from "./automation-command-outbox.js";
 
-function fixture() {
+function fixture(budgetAuthority?: CampaignBudgetAuthority) {
   const db = ControlPlaneDb.open(":memory:");
   const identity = db.localIdentityContext();
   const metadata: RunnerMetadata = { runnerId: "r", hostname: "test", os: "linux", version: "test",
     workspaces: [{ id: "w", name: "Repo", path: "/repos/test" }], agents: [{ id: "agent", name: "Agent",
       command: "codex", args: [], env: {}, driver: "codex-app-server", available: true }] };
   db.registerRunner(metadata, 1, PROTOCOL_VERSION);
+  // Synthetic prices are test-only; no provider request or live pricing assertion is made.
+  db.setUsageRateTable(new Map([["gpt-6.1-sol", { inputCostPerToken: 0.000001, outputCostPerToken: 0.000001,
+    cacheReadCostPerToken: 0.000001, cacheCreationCostPerToken: 0.000001 }]]));
+  if (budgetAuthority?.controlledReview) {
+    metadata.runtime = { dataDir: "/fixture", worktreeRoot: "/fixture/worktrees", maxConcurrentSessions: 4,
+      campaignReview: budgetAuthority.controlledReview };
+    db.registerRunner(metadata, 1, PROTOCOL_VERSION);
+  }
   const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
   policy.issueScope = { repository: "picoduck/wollipog", issueNumbers: [2938], revision: 1,
     authorizedByUserId: identity.userId, authorizedAt: 1 };
   policy.issueNumbers = [2938];
   for (const id of ["root", "child", "unaffected"]) {
     db.createSession({ id, runnerId: "r", workspaceId: "w", agentId: "agent", title: id,
-      useWorktree: false, driver: "codex-app-server", config: {}, now: 1,
+      useWorktree: false, driver: "codex-app-server", config: { model: "gpt-6.1-sol" }, now: 1,
+      scope: { organizationId: identity.organizationId, owner: { kind: "user", userId: identity.userId } },
       ...(id !== "root" ? { parentSessionId: "root" } : { role: "orchestrator", orchestratorPolicy: policy,
         parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } } }) });
     db.updateSessionStatus(id, "running", 2);
@@ -35,12 +45,221 @@ function fixture() {
   const log = { info(message: string) { logs.push(message); }, warn() {}, error() {} };
   const svc = new SessionsService(db, hub, log);
   const enabled = svc.setCampaignControl("root", { mode: "full_control", objective: "Implement #2938",
-    operations: ["implementation_question", "question", "tool_approval"], delegatablePolicyIds: [] }, 1,
+    operations: ["implementation_question", "question", "tool_approval"], delegatablePolicyIds: [],
+    ...(budgetAuthority ? { budgetAuthority } : {}) }, 1,
   { ...identity, kind: "human", actorId: identity.userId });
   assert.ok(enabled.ok, enabled.error ?? "admission failed");
   const recovery = new CampaignRecoveryService(db, () => {}, log);
-  return { db, svc, recovery, sent, logs, metadata };
+  return { db, svc, recovery, sent, logs, metadata, hub, identity };
 }
+
+// Component fixtures use the real CP authority and durable outbox, never live profile grants.
+const recoveryBudget: CampaignBudgetAuthority = { version: 1, accounting: "managed_workers_only",
+  unpriced: "stop", toolCalls: 120, concurrency: 2 };
+
+function nativeRecoveryFixture() {
+  // Stub runner metadata and receipts prove CP composition only, not live profile authenticity.
+  const profile = { profile: "native_opus_5_5_high_read_only", controllerSha256: "a".repeat(64),
+    executableSha256: "b".repeat(64), cliVersion: "2.1.296", accounting: "provider_list_estimate",
+    account: "runner_default_claude", agentId: "reviewer" } as const;
+  const h = fixture({ ...recoveryBudget, costUsd: 100, toolCalls: 3000, concurrency: 4, controlledReview: profile });
+  h.db.setWorktreePath("child", "/fixture/worktrees/child");
+  const planned = h.svc.recordCampaignPlan("root", { planComplete: true,
+    items: [{ key: "original:2938", issue: { repository: "picoduck/wollipog", number: 2938 } }] });
+  assert.ok(planned.ok, planned.error ?? "plan refused");
+  const workItemId = planned.data!.items[0]!.workItemId;
+  assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId, childSessionId: "child" }).ok);
+  assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId, stage: { stage: "in_review",
+    pullRequests: [{ repository: "picoduck/wollipog", number: 3068 }] } }).ok);
+  const request = { requestId: "native_original", workItemId, pullRequest: { repository: "picoduck/wollipog", number: 3068 },
+    baseSha: "a".repeat(40), headSha: "b".repeat(40), costUsd: 5, toolCalls: 20, brief: "Private CODE fixture brief" };
+  const reserve = (requestId: string) => {
+    const result = h.svc.requestCampaignReviewJob("root", { ...request, requestId });
+    assert.ok(result.ok, result.error ?? "native fixture reservation refused");
+    return h.db.campaignReviewJobs.command(result.data!.jobId)!;
+  };
+  return { ...h, reserve };
+}
+
+test("native unknown usage retains the exact job and capacity without review replay or fabricated spend", () => {
+  const h = nativeRecoveryFixture();
+  try {
+    const command = h.reserve("unknown");
+    h.svc.onCampaignReviewJobUpdate("r", { type: "campaign_review_job_update", jobId: command.jobId,
+      nonce: command.nonce, state: "accounting_unavailable", toolCalls: 1 });
+    h.db.updateSessionStatus("root", "idle", 10);
+    h.sent.length = 0;
+    const before = h.db.campaignBudgets.view("root")!;
+    h.recovery.maintain(100); h.svc.retryDuePrompts(10000);
+    const record = h.db.campaignProjection("root")!.recovery!.records.find(r => r.resource.kind === "review_job")!;
+    assert.equal(record.resource.occurrenceId, command.jobId);
+    assert.equal(record.action, "reconcile_outcome");
+    assert.equal(record.requiredInput, "reconcile_original_outcome");
+    assert.equal(record.attempts, 0, "unknown accounting permits no new paid recovery wake");
+    assert.equal(h.sent.length, 0);
+    assert.equal(h.db.campaignBudgets.active(command.jobId), true);
+    assert.deepEqual(h.db.campaignBudgets.view("root")!.outstanding, before.outstanding);
+    assert.equal(h.svc.campaignReviewJob("root", command.jobId).data!.costUsd, null);
+    assert.equal(JSON.stringify(record).includes("Private CODE"), false);
+    assert.equal(JSON.stringify(record).includes(command.nonce), false);
+    h.db.registerRunner(h.metadata, 20000, 217);
+    h.svc.onCampaignReviewJobUpdate("r", { type: "campaign_review_job_update", jobId: command.jobId,
+      nonce: command.nonce, state: "running", costUsd: 1, toolCalls: 2 });
+    assert.equal(h.db.campaignBudgets.view("root")!.state, "accounting_unavailable");
+    assert.equal(h.db.campaignBudgets.active(command.jobId), true);
+    assert.equal(h.svc.campaignReviewJob("root", command.jobId).data!.costUsd, 1, "owned late usage stays charged");
+    assert.equal(h.sent.some(m => (m as {type:string}).type === "cancel_campaign_review_job"), false,
+      "unsupported peers receive no v218 cancellation frame");
+    h.recovery.maintain(20001);
+    assert.equal(h.db.campaignRecovery.projection("root").records.find(r => r.resource.kind === "review_job")!.reason,
+      "uncertain_outcome", "a late running receipt cannot settle an unknown terminal outcome");
+  } finally { h.db.close(); }
+});
+
+test("native invalid attempts and fourth valid objection remain blocked without resetting review ceilings", () => {
+  for (const outcome of ["invalid", "objection"] as const) {
+    const h = nativeRecoveryFixture();
+    try {
+      let command;
+      for (let n = 1; n <= (outcome === "invalid" ? 2 : 4); n++) {
+        command = h.reserve(`attempt_${n}`);
+        h.svc.onCampaignReviewJobUpdate("r", { type: "campaign_review_job_update", jobId: command.jobId,
+          nonce: command.nonce, state: "completed", costUsd: 1, toolCalls: 2,
+          attemptValid: outcome === "objection", attemptConsumed: true,
+          ...(outcome === "objection" ? { vote: "DOWNVOTE" as const } : {}), receiptSha256: "c".repeat(64),
+          report: "Private reviewer report" });
+      }
+      h.sent.length = 0;
+      h.recovery.maintain(100);
+      const record = h.db.campaignProjection("root")!.recovery!.records.find(r => r.resource.kind === "review_job")!;
+      assert.equal(record.resource.occurrenceId, command!.jobId);
+      assert.equal(record.reason, "attempts_exhausted");
+      assert.equal(record.state, "blocked");
+      assert.equal(record.requiredInput, "none");
+      assert.equal(JSON.stringify(record).includes("Private reviewer"), false);
+      h.recovery.maintain(200);
+      assert.equal(h.sent.length, 0);
+      assert.equal(h.db.campaignProjection("root")!.recovery!.unattendedReady, false);
+    } finally { h.db.close(); }
+  }
+});
+
+test("recovery cannot stage or deliver a continuation under stale authority even with no human request", () => {
+  const h = fixture();
+  try {
+    h.db.updateSessionStatus("root", "idle", 4);
+    h.db.updateSessionStatus("child", "failed", 5);
+    h.db.recordCampaignContinuationEvent({ campaignSessionId: "root", subjectSessionId: "unaffected",
+      eventId: "unrelated-ready", kind: "child_ready", now: 6 });
+    h.db.raw().prepare("UPDATE sessions SET parent_control_policy_revision=parent_control_policy_revision+1 WHERE id='root'").run();
+    h.svc.retryDuePrompts(10000);
+    assert.equal(h.db.latestCampaignContinuation("root"), null, "stale authority fences the scheduler itself");
+    assert.equal(h.sent.length, 0, "there is no human-wait status to incidentally hold this turn");
+  } finally { h.db.close(); }
+});
+
+test("recovery preserves budget exhaustion and allocation ceilings before staging a provider effect", () => {
+  for (const failure of ["exhausted", "allocation", "accounting_unavailable"] as const) {
+    const h = fixture(recoveryBudget);
+    try {
+      h.sent.length = 0;
+      h.db.updateSessionStatus("root", "idle", 4);
+      h.db.updateSessionStatus("child", "failed", 5);
+      h.db.recordCampaignContinuationEvent({ campaignSessionId: "root", eventId: "ready", kind: "child_ready", now: 6 });
+      if (failure === "allocation") {
+        const limit = h.db.campaignBudgets.allocation("root")!.toolCalls!;
+        h.db.raw().prepare("UPDATE campaign_budget_members SET tools=? WHERE session_id='root'").run(limit);
+      } else h.db.campaignBudgets.stop("root", failure, "Fixture admission stop");
+      const before = h.db.campaignBudgets.dispatchState("root");
+      h.svc.retryDuePrompts(10000);
+      assert.equal(h.db.latestCampaignContinuation("root"), null, failure);
+      assert.equal(h.sent.some(m => (m as {type:string}).type === "durable_session_command"), false, failure);
+      assert.deepEqual(h.db.campaignBudgets.dispatchState("root"), before, "recovery cannot refund or replace a reservation");
+      assert.equal(h.db.campaignProjection("root")!.recovery!.unattendedReady, false, failure);
+      assert.equal(h.db.campaignRecovery.projection("root").records[0]!.attempts, 0, "blocked admission spends no recovery wake");
+    } finally { h.db.close(); }
+  }
+});
+
+test("a continuation staged before budget loss is fenced again at delivery", () => {
+  const h = fixture(recoveryBudget);
+  try {
+    h.sent.length = 0;
+    h.db.updateSessionStatus("root", "idle", 4);
+    h.db.recordCampaignContinuationEvent({ campaignSessionId: "root", eventId: "ready", kind: "child_ready", now: 5 });
+    h.hub.isRunnerOnline = () => false;
+    h.svc.retryDuePrompts(10000);
+    const staged = h.db.latestCampaignContinuation("root")!;
+    assert.ok(staged);
+    h.db.campaignBudgets.stop("root", "accounting_unavailable", "Unknown final usage fixture");
+    h.hub.isRunnerOnline = () => true;
+    h.svc.retryDuePrompts(20000);
+    assert.equal(h.sent.some(m => (m as {type:string}).type === "durable_session_command"), false);
+    assert.equal(h.db.getSessionPromptCommand(staged.commandId)!.state, "pending", "known non-delivery is retained");
+  } finally { h.db.close(); }
+});
+
+test("automatic recovery respects existing session checkpoints and organization daily limits", () => {
+  for (const guard of ["session", "checkpoint", "daily"] as const) {
+    const h = fixture();
+    try {
+      h.db.updateSessionStatus("root", "idle", 4);
+      h.db.appendEvent("root", { kind: "token_usage", inputTokens: 1, costUsd: 2 }, Date.now(), { accrueUsage: true });
+      if (guard === "session") h.db.updateSessionCostBudget("root", 1, 5);
+      if (guard === "checkpoint") h.db.updateSessionCostCheckpoints("root", [1], 5);
+      if (guard === "daily") h.db.setUsageDailyBudget(h.identity.organizationId, 1, 5);
+      h.db.recordCampaignContinuationEvent({ campaignSessionId: "root", eventId: "ready", kind: "child_ready", now: 6 });
+      h.svc.retryDuePrompts(10000);
+      assert.equal(h.sent.length, 0, guard);
+      assert.equal(h.db.latestCampaignContinuation("root"), null, guard);
+      assert.equal(h.db.getSession("root")!.pendingApproval, null, "recovery cannot create an override prompt");
+      assert.equal(h.db.campaignProjection("root")!.recovery!.automation!.state, "budget_held", guard);
+    } finally { h.db.close(); }
+  }
+});
+
+test("fresh Full Control grants cannot rebind an old queued continuation", () => {
+  const h = fixture();
+  try {
+    h.db.updateSessionStatus("root", "idle", 4);
+    h.db.recordCampaignContinuationEvent({ campaignSessionId: "root", eventId: "ready", kind: "child_ready", now: 5 });
+    h.hub.isRunnerOnline = () => false;
+    h.svc.retryDuePrompts(10000);
+    const staged = h.db.latestCampaignContinuation("root")!;
+    assert.ok(staged);
+    const payload = h.db.getSessionPromptCommand(staged.commandId)!.payloadJson;
+    const principal = { ...h.identity, kind: "human" as const, actorId: h.identity.userId };
+    assert.ok(h.svc.setCampaignControl("root", { mode: "custom" }, 2, principal).ok);
+    assert.ok(h.svc.setCampaignControl("root", { mode: "full_control", objective: "Implement #2938",
+      operations: ["implementation_question", "question", "tool_approval"], delegatablePolicyIds: [] }, 3, principal).ok);
+    h.hub.isRunnerOnline = () => true;
+    h.svc.retryDuePrompts(20000);
+    assert.equal(h.sent.some(m => (m as {type:string}).type === "durable_session_command"), false);
+    assert.equal(h.db.campaignProjection("root")!.recovery!.automation!.state, "authority_unavailable");
+    assert.equal(h.db.getSessionPromptCommand(staged.commandId)!.payloadJson, payload);
+    assert.equal(h.db.latestCampaignContinuation("root")!.continuationId, staged.continuationId);
+  } finally { h.db.close(); }
+});
+
+test("Full Control cannot deliver a legacy queued continuation without its authority binding", () => {
+  const h = fixture();
+  try {
+    h.db.updateSessionStatus("root", "idle", 4);
+    h.db.recordCampaignContinuationEvent({ campaignSessionId: "root", eventId: "ready", kind: "child_ready", now: 5 });
+    h.hub.isRunnerOnline = () => false;
+    h.svc.retryDuePrompts(10000);
+    const staged = h.db.latestCampaignContinuation("root")!;
+    const command = h.db.getSessionPromptCommand(staged.commandId)!;
+    const payload = JSON.parse(command.payloadJson);
+    delete payload.campaignContinuation.authorityDigest;
+    h.db.raw().prepare("UPDATE session_prompt_commands SET payload_json=?,payload_sha256=? WHERE command_id=?")
+      .run(canonicalAutomationCommandJson(payload), automationCommandDigest(payload), staged.commandId);
+    h.hub.isRunnerOnline = () => true;
+    h.svc.retryDuePrompts(20000);
+    assert.equal(h.sent.length, 0);
+    assert.equal(h.db.campaignProjection("root")!.recovery!.unattendedReady, false);
+  } finally { h.db.close(); }
+});
 
 test("human exceptions retain exact resource, owner and smallest input without duplicate requests or content leakage", () => {
   const h = fixture();
@@ -236,6 +455,7 @@ test("routine forge staleness leaves refresh to the background reader without sp
 test("uncertain steering keeps its original occurrence and requests reconciliation, never prompt replay", () => {
   const h = fixture();
   try {
+    h.logs.length = 0; // Exclude the fixture service's initial grant, then observe this recovery sweep.
     h.db.createSteeringAttempt({ requestId: "steer-1", sessionId: "child", submissionId: "original-submission",
       turnId: "original-turn", source: "direct", requestSha256: "a".repeat(64), text: "private prompt", now: 10 });
     h.db.markSteeringAttemptUncertain("steer-1", 20);
@@ -249,6 +469,12 @@ test("uncertain steering keeps its original occurrence and requests reconciliati
     assert.equal(h.sent.length, 0, "recovery event does not resend a prompt");
     h.recovery.maintain(200);
     assert.equal(h.db.campaignProjection("root")!.recovery!.records[0]!.attempts, 1);
+    h.db.setSessionArchived("child", true, 201);
+    h.recovery.maintain(202);
+    assert.equal(h.db.campaignProjection("root")!.recovery!.records.find(item => item.resource.kind === "steering")!.reason,
+      "uncertain_outcome", "archival does not reconcile an external prompt outcome");
+    const admissionLogs = h.logs.filter(message => JSON.parse(message).event === "campaign_recovery_admission");
+    assert.equal(admissionLogs.length, 1, "unchanged admission emits no repeated sweep log");
     assert.ok(h.logs.every(message => !message.includes("private prompt")));
   } finally { h.db.close(); }
 });

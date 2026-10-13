@@ -8,7 +8,7 @@ export type CampaignRecoveryReason = "authorized_action" | "transient_failure" |
 export type CampaignRecoveryState = "ready" | "backoff" | "dispatched" | "waiting_human" |
   "blocked" | "resolved" | "cancelled";
 export interface CampaignRecoveryResource {
-  kind: "request" | "hold" | "worker" | "continuation" | "steering" | "pull_request";
+  kind: "request" | "hold" | "worker" | "continuation" | "steering" | "pull_request" | "review_job";
   sessionId: string;
   /** Exact original occurrence, hold, command, steering attempt, or PR head identity. */
   occurrenceId: string;
@@ -44,7 +44,7 @@ export interface CampaignRecoveryProjection {
   /** False whenever authority/capability or an unresolved exception prevents unattended completion. */
   unattendedReady: boolean;
   /** Live admission fallback. Missing authority/capability never advertises unattended readiness. */
-  automation?: { state: "available" | "authority_unavailable" | "unsupported_capability" | "lifecycle_held"; reason?: string };
+  automation?: { state: "available" | "authority_unavailable" | "unsupported_capability" | "lifecycle_held" | "budget_held"; reason?: string };
   automatic: number;
   waitingHuman: number;
   blocked: number;

@@ -10,7 +10,7 @@ import { CampaignReviewJobs } from "./campaign-review-jobs.js";
 import { attentionRequestRank } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent } from "./campaign-authority.js";
-import { evaluateApprovalPolicies, sessionSpawnSafetyPolicy } from "./policy-engine.js";
+import { evaluateApprovalPolicies, evaluatePolicies, firstAsk, rulesFromSession, sessionSpawnSafetyPolicy } from "./policy-engine.js";
 import { validCampaignControl, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
 import { lookupRate, priceUsage, resolveCostSource, type RateTable } from "./usage-pricing.js";
@@ -5206,10 +5206,71 @@ export class ControlPlaneDb {
     // projection, so read the authority/lifecycle row directly rather than recursively mapping it.
     const row = this.stmt("SELECT * FROM sessions WHERE id=?").get(campaignId) as unknown as SessionRow | undefined;
     const policy = row ? orchestratorCampaignPolicyFromJson(row.orchestrator_policy) : undefined;
-    return Boolean(row && policy?.control?.mode === "full_control" && row.archived !== 1 &&
-      !this.sessionStopIntent(campaignId) && !isTerminal(row.status as SessionStatus) &&
-      campaignBoundaryCurrent({ orchestratorPolicy: policy, parentControlPolicy: this.parentControlPolicy(campaignId) ?? undefined }) &&
-      campaignAuthorityPreflight(policy.control, row.driver, this.getRunner(row.runner_id)?.protocolVersion).supported);
+    return Boolean(row && policy?.control?.mode === "full_control" &&
+      this.campaignContinuationAdmission(campaignId).state === "available");
+  }
+
+  /** Bind a synthetic turn to its staged authority, including repository scope and fixed
+   * execution identity. A fresh human grant cannot make an old queued turn current again. */
+  campaignContinuationAuthorityDigest(campaignId: string): string | undefined {
+    const row = this.stmt("SELECT * FROM sessions WHERE id=?").get(campaignId) as unknown as SessionRow | undefined;
+    const policy = row ? orchestratorCampaignPolicyFromJson(row.orchestrator_policy) : undefined;
+    if (!row || !policy) return undefined;
+    return createHash("sha256").update(JSON.stringify([policy.control ?? { mode: "custom" }, policy.issueScope,
+      row.parent_control_policy_revision, row.runner_id, row.workspace_id, row.driver, row.model, row.effort])).digest("hex");
+  }
+
+  /** Shared live CP preflight for recovery, scheduler, projection and outbox. Read rows rather
+   * than SessionView: a view contains the projection which calls this predicate. */
+  campaignContinuationAdmission(campaignId: string): NonNullable<import("@wollipog/protocol").CampaignRecoveryProjection["automation"]> {
+    const row = this.stmt("SELECT * FROM sessions WHERE id=?").get(campaignId) as unknown as SessionRow | undefined;
+    const policy = row ? orchestratorCampaignPolicyFromJson(row.orchestrator_policy) : undefined;
+    if (!row || !policy || row.archived === 1 || this.sessionStopIntent(campaignId) ||
+        isTerminal(row.status as SessionStatus) || row.status === "input_required" || row.history_quarantine ||
+        row.worktree_recovery || row.queue_hold || pendingRequests(parseJson<PendingApproval>(row.pending_approval)).some(r => !r.async)) {
+      return { state: "lifecycle_held", reason: "Automatic continuation is held by the campaign's current lifecycle or pending recovery." };
+    }
+    const full = policy.control?.mode === "full_control";
+    if (full && !campaignBoundaryCurrent({ orchestratorPolicy: policy, parentControlPolicy: this.parentControlPolicy(campaignId) ?? undefined })) {
+      return { state: "authority_unavailable", reason: "The current authority boundary is unavailable; recovery cannot enlarge it." };
+    }
+    const active = this.activeCampaignContinuation(campaignId);
+    if (active) {
+      const command = this.getSessionPromptCommand(active.commandId);
+      const payload = command ? parseJson<import("@wollipog/protocol").PromptSessionMessage>(command.payloadJson) : null;
+      const binding = payload?.campaignContinuation?.authorityDigest;
+      if ((full || binding !== undefined) && binding !== this.campaignContinuationAuthorityDigest(campaignId)) {
+        return { state: "authority_unavailable", reason: "The queued continuation belongs to an earlier authority or scope. Reconcile its original command before admitting current work." };
+      }
+    }
+    const runner = this.getRunner(row.runner_id);
+    if (!runnerSupportsProtocol(runner?.protocolVersion, "campaignContinuations") ||
+        full && !campaignAuthorityPreflight(policy.control, row.driver, runner?.protocolVersion).supported) {
+      return { state: "unsupported_capability", reason: "The current provider cannot enforce authorized recovery." };
+    }
+    const budget = this.campaignBudgets.view(campaignId);
+    const profile = budget?.authority.controlledReview;
+    if (profile && (!runner?.runtime?.campaignReview ||
+        controlledReviewCapabilityKey(profile) !== controlledReviewCapabilityKey(runner.runtime.campaignReview)) ||
+        budget && this.campaignBudgetAccountingError(row.driver, row.model, budget.authority.costUsd !== undefined)) {
+      return { state: "unsupported_capability", reason: "Required native accounting or reviewer capability is unavailable; recovery cannot bypass it." };
+    }
+    const owner = this.sessionOwnerUser(campaignId);
+    const daily = owner ? this.getUsageDailyBudget(owner.organizationId).perUserUsd : null;
+    const used = this.stmt(`SELECT MAX(cost_usd,usage_peak_cost_usd)+MAX(0,child_cost_reserved_usd) AS cost,
+      MAX(${toolCallCountSql("sessions.id")},usage_peak_tool_calls)+MAX(0,child_tool_calls_reserved) AS tools
+      FROM sessions WHERE id=?`).get(campaignId) as { cost: number; tools: number };
+    const rules = rulesFromSession({ costBudgetUsd: row.cost_budget_usd, maxToolCalls: row.max_tool_calls,
+      costCheckpointsUsd: ControlPlaneDb.parseCheckpoints(row.cost_checkpoints_usd),
+      costCheckpointApprovedUsd: row.cost_checkpoint_approved_usd, costUnpricedAcknowledged: row.cost_unpriced_ack === 1,
+      dailyBudget: owner && daily !== null && daily > 0
+        ? { budgetUsd: daily, spentUsd: this.userCostTodayUsd(owner.organizationId, owner.userId) } : null });
+    if (this.campaignBudgets.admissionError(campaignId) || firstAsk(evaluatePolicies({ status: row.status as SessionStatus,
+      costUsd: used.cost, toolCallCount: used.tools,
+      unpriced: rules.some(rule => rule.kind === "cost_unpriced") && this.sessionUsageUnpriced(campaignId) }, rules))) {
+      return { state: "budget_held", reason: "Automatic continuation is blocked by current accounting or an existing allowance. Recovery cannot reset spend or request an override." };
+    }
+    return { state: "available" };
   }
 
   campaignRecoveryRequest(sessionId: string, request: PendingApproval): PendingApproval {
@@ -5231,7 +5292,7 @@ export class ControlPlaneDb {
             AND settled.occurrence_id=decision.occurrence_id)
         AND NOT EXISTS (SELECT 1 FROM workflow_decisions newer
           WHERE newer.session_id=decision.session_id AND newer.resource_key=decision.resource_key
-          AND newer.rowid>decision.rowid)`).all(campaignId) as unknown[])
+          AND decision.status='denied' AND newer.rowid>decision.rowid)`).all(campaignId) as unknown[])
       .map(workflowDecisionFromRow).filter((decision): decision is WorkflowDecisionView => decision !== null);
   }
 
@@ -17644,16 +17705,7 @@ export class ControlPlaneDb {
     }
     const recovery = policy.control?.mode === "full_control" ? this.campaignRecovery.projection(resolvedCampaignId) : undefined;
     if (recovery) {
-      const boundaryCurrent = campaignBoundaryCurrent({ orchestratorPolicy: policy,
-        parentControlPolicy: { revision: campaign.parent_control_policy_revision, decisions: policy.delegation.decisions } });
-      const supported = campaignAuthorityPreflight(policy.control, campaign.driver,
-        this.getRunner(campaign.runner_id)?.protocolVersion).supported;
-      const lifecycleHeld = campaign.archived === 1 || isTerminal(campaign.status as SessionStatus) ||
-        campaign.status === "input_required" || this.sessionStopIntent(resolvedCampaignId) !== undefined;
-      recovery.automation = !boundaryCurrent ? { state: "authority_unavailable", reason: "The current authority boundary is unavailable; recovery cannot enlarge it." }
-        : !supported ? { state: "unsupported_capability", reason: "The current provider cannot enforce authorized recovery." }
-        : lifecycleHeld ? { state: "lifecycle_held", reason: "Recovery is held by the campaign's current lifecycle or human request." }
-        : { state: "available" };
+      recovery.automation = this.campaignContinuationAdmission(resolvedCampaignId);
       recovery.unattendedReady &&= recovery.automation.state === "available";
     }
     return {
@@ -17753,6 +17805,7 @@ export class ControlPlaneDb {
       "campaignContinuations",
     );
     const held = campaign.archived === 1 || isTerminal(campaign.status as SessionStatus) ||
+      this.campaignContinuationAdmission(campaign.id).state !== "available" ||
       campaign.status === "input_required" || (campaignStatus === "waiting_human" &&
         !this.campaignMayContinueWhileHumanWaiting(campaign.id)) ||
       campaignStatus === "verified_complete" || !runnerCompatible;

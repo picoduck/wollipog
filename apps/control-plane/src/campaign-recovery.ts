@@ -24,6 +24,7 @@ function requestReason(evaluation: CampaignAuthorityEvaluation): CampaignRecover
 /** Server adapters translate authoritative requests, holds, receipt state and forge facts into
  * recovery instructions. They never execute an external effect or weaken a typed decision. */
 export class CampaignRecoveryService {
+  private readonly admissionStates = new Map<string, string>();
   constructor(private readonly db: ControlPlaneDb,
     private readonly changed: (campaignId: string) => void,
     private readonly log: { info(message: string): void }) {}
@@ -43,6 +44,7 @@ export class CampaignRecoveryService {
     const full = root.orchestratorPolicy?.control?.mode === "full_control";
     const revision = root.parentControlPolicy?.revision ?? 0;
     if (!full) {
+      this.admissionStates.delete(root.id);
       if (this.db.campaignRecovery.synchronize(root.id, revision, false, [], now)) this.changed(root.id);
       return;
     }
@@ -56,6 +58,14 @@ export class CampaignRecoveryService {
       const child = this.db.getSession(id); return child ? [child] : [];
     })];
     for (const session of sessions) {
+      // Stop/archive is no receipt. Preserve the original uncertain steering identity even
+      // when the worker is retired; only its reconciled receipt may remove this observation.
+      for (const attempt of session.steeringAttempts ?? []) {
+        if (attempt.state !== "uncertain" || attempt.resolution?.state === "applied") continue;
+        observations.push({ action: "reconcile_outcome", resource: { kind: "steering", sessionId: session.id,
+          occurrenceId: recoveryCoordinate(attempt.submissionId) }, reason: "uncertain_outcome", owner: "orchestrator",
+          signal: attempt.resolution?.state ?? attempt.state });
+      }
       if (session.archived || session.stopOperation) continue;
       for (const request of pendingRequests(session.pendingApproval)) {
         if (!request.occurrenceId) continue;
@@ -91,12 +101,6 @@ export class CampaignRecoveryService {
           reason: session.status === "stopped" ? "hard_denial" : "transient_failure",
           owner: "orchestrator", signal: `${session.id}:${session.eventEpoch ?? 0}:${session.status}` });
       }
-      for (const attempt of session.steeringAttempts ?? []) {
-        if (attempt.state !== "uncertain" || attempt.resolution?.state === "applied") continue;
-        observations.push({ action: "reconcile_outcome", resource: { kind: "steering", sessionId: session.id,
-          occurrenceId: recoveryCoordinate(attempt.submissionId) }, reason: "uncertain_outcome", owner: "orchestrator",
-          signal: attempt.resolution?.state ?? attempt.state });
-      }
     }
     for (const decision of this.db.campaignRecoverySettledDecisions(root.id)) {
       if (decision.status === "denied") {
@@ -110,6 +114,21 @@ export class CampaignRecoveryService {
         resource: { kind: "request", sessionId: decision.sessionId, occurrenceId: recoveryCoordinate(decision.occurrenceId) },
         reason: decision.status === "denied" ? "hard_denial" : "uncertain_outcome",
         owner: decision.status === "denied" ? "orchestrator" : "human", signal: decision.status });
+    }
+    for (const job of this.db.campaignReviewJobs.recoveryJobs(root.id)) {
+      const unknown = job.usageSettlement === "unavailable" || job.usageSettlement === "pending" && previous.some(item =>
+        item.resource.kind === "review_job" && item.resource.occurrenceId === job.jobId && item.reason === "uncertain_outcome");
+      const objection = job.attemptValid === true && job.vote === "DOWNVOTE";
+      const invalid = job.terminalOutcome === "invalid_review" || job.terminalOutcome === "not_launched";
+      if (!unknown && !objection && !invalid) continue;
+      const exhausted = objection ? job.round >= 4 : invalid && job.attemptConsumed === true && job.attempt >= 2;
+      observations.push({ action: unknown ? "reconcile_outcome" : "rereview",
+        resource: { kind: "review_job", sessionId: job.worktreeSessionId, occurrenceId: job.jobId,
+          repository: job.request.pullRequest.repository, pullRequest: job.request.pullRequest.number,
+          workItemId: job.request.workItemId },
+        reason: unknown ? "uncertain_outcome" : exhausted ? "attempts_exhausted"
+          : objection ? "reviewer_objection" : "transient_failure",
+        owner: "orchestrator", signal: `${job.reviewEpoch}:${job.round}:${job.attempt}:${job.terminalOutcome}:${job.receiptSha256 ?? "unsettled"}` });
     }
     const continuation = this.db.latestCampaignContinuation(root.id);
     if (continuation?.state === "failed" || continuation?.state === "missing_result") {
@@ -151,17 +170,26 @@ export class CampaignRecoveryService {
           observations.push({ action: "repair_checks", resource, reason: "failed_checks", owner: "orchestrator",
             signal: `${value.headSha}:checks:${value.checks.state}:${value.requiredChecks.state}` });
         }
-        if (value.reviewDecision === "changes_requested") {
+        if (value.reviewDecision === "changes_requested" && !observations.some(item =>
+          item.action === "rereview" && item.resource.repository === ref.repository && item.resource.pullRequest === ref.number)) {
           observations.push({ action: "rereview", resource, reason: "reviewer_objection", owner: "orchestrator",
             signal: `${value.headSha}:review:${value.reviewDecision}` });
         }
       }
     }
     const changed = this.db.campaignRecovery.synchronize(root.id, revision, current, observations, now);
+    const admission = this.db.campaignContinuationAdmission(root.id);
+    const admissionKey = `${revision}:${admission.state}`;
+    if (this.admissionStates.get(root.id) !== admissionKey) {
+      this.admissionStates.set(root.id, admissionKey);
+      this.log.info(JSON.stringify({ event: "campaign_recovery_admission", entryPoint: "recovery_sweep",
+        campaignId: root.id, policyRevision: revision, state: admission.state }));
+    }
     // A paused/input-required root is never restarted. Child-owned human work does not prevent an
     // otherwise idle parent from repairing unrelated work. One durable continuation remains the
     // execution lane, with its existing receipt and active-turn uniqueness constraints.
-    const mayWake = current && supported && root.status === "idle" && !root.pendingApproval &&
+    const mayWake = current && supported && admission.state === "available" &&
+      root.status === "idle" && !root.pendingApproval &&
       runnerSupportsProtocol(this.db.getRunner(root.runnerId)?.protocolVersion, "campaignContinuations");
     const committedDispatches: Array<{ recoveryId: string; action: string; reason: string; attempt: number }> = [];
     const dispatched = mayWake ? this.db.campaignRecovery.dispatchDue(root.id, revision, now, (record, eventId) => {
