@@ -512,7 +512,7 @@ test("isolation is Off | On, and Strict Project Isolation On includes Integratio
     }
     assertNoDomNode(container.querySelector('[role="switch"]'), "a draft-and-save editor has no switches");
     assert.equal(pill(container, "Strict Project Isolation", "Off").getAttribute("aria-checked"), "true");
-    assert.match(container.textContent ?? "", /Children use their agent's own permissions and governance\./);
+    assert.match(container.textContent ?? "", /The Orchestrator uses its agent's own permissions and governance\./);
     const about = container.querySelector<HTMLDetailsElement>("details.orchestrator-about")!;
     assert.match(about.textContent ?? "", /does not claim operating-system read-only enforcement/);
     assert.match(about.textContent ?? "", /Hooks, plugins, extensions, skills, and configured MCP servers load exactly as they would/);
@@ -530,7 +530,7 @@ test("isolation is Off | On, and Strict Project Isolation On includes Integratio
     assert.equal(writes[0]?.defaults.execution.strictProjectIsolation, false, "the two policies are saved independently");
 
     await act(async () => pill(container, "Strict Project Isolation", "On").click());
-    assert.match(container.textContent ?? "", /Children can't write outside their project\. Needs a supported sandbox\./);
+    assert.match(container.textContent ?? "", /The Orchestrator can't write to the project\. Needs a supported sandbox\./);
     const off = pill(container, "Integration Isolation", "Off");
     assert.equal(off.getAttribute("aria-disabled"), "true");
     assert.equal(pill(container, "Integration Isolation", "On").getAttribute("aria-checked"), "true");

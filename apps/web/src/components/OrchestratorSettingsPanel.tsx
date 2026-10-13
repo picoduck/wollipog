@@ -65,14 +65,18 @@ const FOLLOW_UP_OPTIONS: SelectOption<OrchestratorDefaults["behavior"]["followUp
 /*
  * Off | On rather than a switch: this is a draft that saves from the save bar, and a switch means
  * "applies now" (§8.4, §8.6). The same two pills as New Session's Orchestrator Policy dialog.
+ *
+ * Both policies bound the Orchestrator session itself, not its children: the control plane attaches
+ * them to the Orchestrator's launch only, and children keep their own permissions and integrations.
+ * The sentences say so rather than promising a boundary children do not have.
  */
 const STRICT_ISOLATION_OPTIONS = [
-  { value: "off", label: "Off", description: "Children use their agent's own permissions and governance." },
-  { value: "on", label: "On", description: "Children can't write outside their project. Needs a supported sandbox." },
+  { value: "off", label: "Off", description: "The Orchestrator uses its agent's own permissions and governance." },
+  { value: "on", label: "On", description: "The Orchestrator can't write to the project. Needs a supported sandbox." },
 ];
 const INTEGRATION_ISOLATION_OPTIONS = [
-  { value: "off", label: "Off", description: "Children load the same integrations as any other session." },
-  { value: "on", label: "On", description: "Children get Wollipog's management tools and no other integration." },
+  { value: "off", label: "Off", description: "The Orchestrator loads the same integrations as any other session." },
+  { value: "on", label: "On", description: "The Orchestrator gets Wollipog's management tools and no other integration." },
 ];
 
 const PANEL_DESCRIPTION = "Defaults for new campaigns. Running campaigns keep their own.";
