@@ -87,7 +87,9 @@ export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSectionEntry> = [
   },
   { id: "behavior", title: "Behavior", description: "Typing, privacy and agent defaults." },
   { id: "approvals", title: "Approvals", description: "Question answers and tool policies." },
-  { id: "orchestrator", title: "Orchestrator", description: "Defaults for sessions that run others.", scope: "Your Account" },
+  // No scope: the panel names where its defaults come from instead, "Your Defaults" or "Wollipog
+  // Defaults", once it has loaded them (#3026).
+  { id: "orchestrator", title: "Orchestrator", description: "Defaults for sessions that run others." },
   { id: "network", title: "Network", description: "Reach this machine from other devices." },
   {
     id: "experimental",

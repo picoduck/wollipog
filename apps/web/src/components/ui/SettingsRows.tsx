@@ -258,6 +258,9 @@ const DESCRIBED_MENU_WIDTH_PX = 360;
  * The control is the shared `Select`, so the closed row STATES the current value rather than only
  * naming the setting. Its list is at least as wide as the trigger and 280px, and 360px when options
  * carry descriptions, by default rather than per caller.
+ *
+ * An invalid value, in an editor that saves several rows at once, is `aria-invalid` with a
+ * `FieldError` under the trigger (§8.5), as `NumberRow`'s is.
  */
 export function SelectRow({
   title,
@@ -266,6 +269,7 @@ export function SelectRow({
   value,
   disabled,
   disabledReason,
+  error,
   onChange,
   onPreview,
   label,
@@ -282,6 +286,8 @@ export function SelectRow({
   disabled?: boolean;
   /** Why the row cannot be operated: visible under the control and part of its description. */
   disabledReason?: string;
+  /** One sentence that says what is wrong with the value and how to fix it. */
+  error?: string | null;
   onChange: (value: string) => void;
   /** For a setting whose effect can be shown while the list is browsed. See `Select`. */
   onPreview?: (value: string | null) => void;
@@ -295,8 +301,10 @@ export function SelectRow({
   const id = useId();
   const descriptionId = `${id}-desc`;
   const reasonId = `${id}-reason`;
+  const errorId = `${id}-error`;
   const reason = disabled && disabledReason ? disabledReason : undefined;
-  const describedBy = [description ? descriptionId : null, reason ? reasonId : null].filter(Boolean).join(" ") || undefined;
+  const describedBy = [error ? errorId : null, description ? descriptionId : null, reason ? reasonId : null]
+    .filter(Boolean).join(" ") || undefined;
   return (
     <div className={rowClass("setting-row", { disabled })} aria-busy={busy || undefined}>
       <RowText
@@ -307,7 +315,8 @@ export function SelectRow({
         busyLabel={busyLabel}
         saved={saved}
       />
-      <span className="setting-row-control">
+      {/* A `.field` while invalid, for the field's red edge (§8.5). */}
+      <span className={error ? "setting-row-control field" : "setting-row-control"}>
         <Select
           label={label ?? title}
           options={options}
@@ -316,10 +325,12 @@ export function SelectRow({
           onPreview={onPreview}
           describedBy={describedBy}
           disabled={disabled}
+          invalid={Boolean(error)}
           menuWidth={menuWidth ?? (options.some((option) => option.description) ? DESCRIBED_MENU_WIDTH_PX : undefined)}
           estimatedOptionHeight={estimatedOptionHeight}
         />
-        {reason && <small id={reasonId} className="setting-row-reason">{reason}</small>}
+        {error && <FieldError id={errorId}>{error}</FieldError>}
+        {reason &&<small id={reasonId} className="setting-row-reason">{reason}</small>}
       </span>
       {saved !== undefined && <span className="sr-only" role="status">{rowStatus(title, saved)}</span>}
     </div>
@@ -764,10 +775,11 @@ export function SwitchRow({
  * - An optional one-sentence description (`intro`).
  * - One `.surface` holding the rows, hairlines between them. It is the size container for the 560px
  *   rule, so the rows answer to the group's width rather than the viewport's.
- * - An optional foot line.
+ * - An optional foot line, or a disclosure (§5.5) holding what the rows leave out.
  *
  * `failure` is for an instant save that is not a switch (a switch fails in place): a compact danger
- * notice above the surface, with Retry.
+ * notice above the surface, with Retry. `notice` is any other compact notice about the whole group,
+ * in the same place, such as a capability the group's settings are waiting for.
  */
 export function SettingsGroup({
   title,
@@ -775,6 +787,7 @@ export function SettingsGroup({
   action,
   intro,
   foot,
+  notice,
   failure,
   className,
   headingRef,
@@ -791,6 +804,8 @@ export function SettingsGroup({
   intro?: ReactNode;
   /** One line under the surface, or a disclosure with the rest of what the group needs to say. */
   foot?: ReactNode;
+  /** A compact `Notice` (§13.2) between the description and the surface. */
+  notice?: ReactNode;
   failure?: RowFailure | null;
   className?: string;
   children: ReactNode;
@@ -809,6 +824,7 @@ export function SettingsGroup({
         </div>
       )}
       {intro && <p className="settings-group-desc">{intro}</p>}
+      {notice}
       {failure && (
         <Notice
           tone="danger"

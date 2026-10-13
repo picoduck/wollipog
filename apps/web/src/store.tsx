@@ -49,6 +49,7 @@ import {
 } from "./activity.js";
 import { BrowserNavigation, sameView, viewFromNotificationMessage, type View, type ViewNavigation } from "./navigation.js";
 import { defaultPublishScheduler, type StorePublishScheduler } from "./store-publish-scheduler.js";
+import { interceptLeave } from "./leave-guard.js";
 export { animationFramePublishScheduler, setDefaultPublishScheduler, type StorePublishScheduler } from "./store-publish-scheduler.js";
 import {
   INBOX_SELECTION_STORAGE_KEY,
@@ -2258,12 +2259,21 @@ export class Store {
       if (activation) this.dispatch({ type: "navigate", view: activated });
       return;
     }
+    // An editor with unsaved changes asks first (leave-guard.ts), and navigates here itself if the
+    // person chooses to leave.
+    if (interceptLeave(() => this.navigate(view))) return;
     this.dispatch({ type: "navigate", view: activated });
     this.onNavigate?.(activated);
   };
   navigateFromHistory = (view: View): void => {
     const { view: activated, activation } = this.activate(view);
     if (!sameView(this.state.view, activated) || activation) {
+      // Back and Forward have already moved the address bar, so while an editor asks, the address
+      // goes back to the view still on screen; leaving then navigates as a link would.
+      if (!sameView(this.state.view, activated) && interceptLeave(() => this.navigate(view))) {
+        this.onNavigate?.(this.state.view);
+        return;
+      }
       this.dispatch({ type: "navigate", view: activated });
     }
   };

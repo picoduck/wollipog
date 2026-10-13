@@ -1,5 +1,5 @@
 import { setHideAccountEmails, useAccountEmailPrivacy } from "../account-email-privacy.js";
-import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { ArtifactUploadSettings } from "./ArtifactUploadSettings.js";
 import { Notice } from "./Notice.js";
 import { State } from "./State.js";
@@ -86,6 +86,29 @@ export interface SettingsViewProps {
   panels: Record<SettingsSection, ReactNode>;
 }
 
+/**
+ * What an open section's panel puts in the section's head in place of its entry's: a longer
+ * description than the 38 characters a phone's index row allows, and a meta label (§11.3) that
+ * depends on what the panel loaded, such as Orchestrator's "Your Defaults". `meta` replaces the
+ * entry's scope; `null` shows none, while the panel does not know yet.
+ */
+export interface SettingsPanelHead {
+  description?: string;
+  meta?: string | null;
+}
+
+const SettingsPanelHeadContext = createContext<(head: SettingsPanelHead | null) => void>(() => undefined);
+
+/** Sets the open section's head (see `SettingsPanelHead`) for as long as the calling panel is open. */
+export function useSettingsPanelHead({ description, meta }: SettingsPanelHead): void {
+  const setHead = useContext(SettingsPanelHeadContext);
+  // Before paint, so the head never shows the entry's line for a frame and then changes.
+  useLayoutEffect(() => {
+    setHead({ description, meta });
+    return () => setHead(null);
+  }, [setHead, description, meta]);
+}
+
 /** The page header's one line (§4.2), hidden on phones as every page description is. */
 export const SETTINGS_DESCRIPTION = "Preferences for this device and your account.";
 
@@ -134,6 +157,8 @@ export function SettingsView({ section, onNavigate, panels }: SettingsViewProps)
   const current = SETTINGS_SECTIONS.find((entry) => entry.id === section) ?? SETTINGS_SECTIONS[0]!;
   const headingRef = useRef<HTMLHeadingElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const [panelHead, setPanelHead] = useState<SettingsPanelHead | null>(null);
+  const scope = panelHead && panelHead.meta !== undefined ? panelHead.meta : current.scope;
   // Back/Forward between sections swaps `panels[current.id]`. If the focused control was inside the
   // outgoing panel it is now detached and focus is on <body>. Focusing the heading only in that
   // case keeps link-driven navigation as it is — the link keeps focus, and its `aria-current`
@@ -283,11 +308,11 @@ export function SettingsView({ section, onNavigate, panels }: SettingsViewProps)
           <div className="settings-panel-head">
             <div className="settings-panel-heading">
               <h2 id="settings-panel-heading" ref={headingRef} tabIndex={-1}>{current.title}</h2>
-              <p className="settings-panel-desc">{current.panelDescription ?? current.description}</p>
+              <p className="settings-panel-desc">{panelHead?.description ?? current.panelDescription ?? current.description}</p>
             </div>
-            {current.scope && <span className="settings-panel-scope">{current.scope}</span>}
+            {scope && <span className="settings-panel-scope">{scope}</span>}
           </div>
-          {panels[current.id]}
+          <SettingsPanelHeadContext.Provider value={setPanelHead}>{panels[current.id]}</SettingsPanelHeadContext.Provider>
         </section>
       </div>
     </div>
