@@ -18479,28 +18479,32 @@ a.tab { text-decoration: none; }
   .agent-defaults-fields { grid-template-columns: minmax(0, 1fr); }
 }
 
-.session-naming-editor {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-elev-1);
-}
-.session-naming-custom-fields {
+/* Session Titles' endpoint dialog (#3025): Model takes the row beside the 96px Timeout, which keeps
+   its unit inside it (§8.3); a saved key is one line with its two actions after it. */
+.title-endpoint-pair {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-3);
+}
+.title-endpoint-pair > .field { min-width: 0; }
+.title-endpoint-secret {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: var(--space-2);
 }
-.session-naming-custom-fields .field { margin: 0; }
-.session-naming-key-field { grid-column: 1 / -1; }
-.session-naming-custom-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
-.session-naming-editor > p { margin: 0; }
-.session-naming-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: var(--space-2); }
-@media (max-width: 680px) {
-  .session-naming-custom-fields { grid-template-columns: minmax(0, 1fr); }
-  .session-naming-key-field { grid-column: auto; }
+.title-endpoint-secret-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  color: var(--text-dim);
+}
+.title-endpoint-secret-actions { display: flex; gap: var(--space-2); }
+/* Field text is 16px on phones and coarse pointers (the iOS focus-zoom guard), and a 96px field with
+   "ms" inside it then shows four digits of a five-digit timeout. The field grows just enough to show
+   30,000 whole. */
+@media (max-width: 760px), (pointer: coarse) {
+  .title-endpoint-pair .w-xs { width: 120px; }
 }
 
 /* A phone's Settings index (§6.2): the sections as two-line rows in three surfaces, each opening its
