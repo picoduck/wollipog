@@ -106,7 +106,8 @@ export interface PullRequestWaitInput {
   headSha?: string;
   timeoutMs?: number;
   intervalMs?: number;
-  /** Also return when a check outside the required set fails. */
+  /** Also return when a check outside the required set fails on the head. A queued pull request
+   * still waits for GitHub's own verdict on its entry. */
   returnOnAnyFailure?: boolean;
 }
 
@@ -115,7 +116,7 @@ export interface PullRequestWaitDeps {
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
   signal?: AbortSignal;
-  /** Test hook for PULL_REQUEST_WAIT_READ_GRACE_MS. */
+  /** PULL_REQUEST_WAIT_READ_GRACE_MS, or what remains of it after a caller's own read. */
   readGraceMs?: number;
 }
 
@@ -692,13 +693,10 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
     if (seen.queue) {
       sawQueue = true;
       vanishedAt = null;
-      const group = seen.queue.headSha
-        ? evaluateCommitChecks(seen.queue.headSha, seen.queue.rollup, required.names, required.apps)
-        : null;
-      if (seen.queue.state === "UNMERGEABLE" || group?.requiredState === "failed" ||
-          (input.returnOnAnyFailure && (group?.summary.failedJobs.length ?? 0) > 0)) {
-        return { ok: true, summary: summarize("queue_failed", seen) };
-      }
+      // A failed merge-group check is not GitHub's verdict: when an entry ahead caused it, GitHub
+      // drops that entry and rebuilds this one's group on a new commit. Only GitHub giving up ends
+      // the wait: the entry reads UNMERGEABLE, or it leaves the queue unmerged (confirmed below).
+      if (seen.queue.state === "UNMERGEABLE") return { ok: true, summary: summarize("queue_failed", seen) };
     } else if (sawQueue) {
       // GitHub can drop the entry a moment before the pull request reads MERGED, so an ejection
       // stands only once the entry has stayed missing for the whole confirmation interval.

@@ -194,10 +194,11 @@ test("pr wait runs locally through gh with outcome exit codes and never contacts
     };
     return { gh, calls };
   };
-  const run = async (args: string[], gh: GhRunner) => {
+  const run = async (args: string[], gh: GhRunner, graceMs?: number) => {
     let stdout = "";
     let stderr = "";
-    const code = await runPullRequestCli(args, true, { stdout: (text) => { stdout += text; }, stderr: (text) => { stderr += text; } }, gh);
+    const code = await runPullRequestCli(args, true, { stdout: (text) => { stdout += text; }, stderr: (text) => { stderr += text; } },
+      gh, undefined, graceMs);
     return { code, stdout, stderr };
   };
 
@@ -227,8 +228,20 @@ test("pr wait runs locally through gh with outcome exit codes and never contacts
   assert.equal(unreadable.code, 1);
   assert.match(JSON.parse(unreadable.stdout).error, /forge_unauthenticated/u);
 
-  // Resolving the repository comes out of the wait's own budget.
-  const startedAt = Date.now();
+  // Resolving the repository is one more read in the wait's budget of the timeout plus the grace.
+  // A lookup slower than the timeout but within the grace still yields one snapshot (#3121).
+  const slowLookup = (milliseconds: number, rest: GhRunner): GhRunner => async (args, signal) => {
+    if (args[0] !== "repo") return rest(args, signal);
+    await new Promise((resolve) => setTimeout(resolve, milliseconds));
+    return { stdout: "picoduck/wollipog\n", stderr: "", code: null, timedOut: false };
+  };
+  const snapshot = await run(["pr", "wait", "7", "--timeout", "1", "--json"], slowLookup(150, fakeGh(null).gh));
+  assert.equal(snapshot.code, 124);
+  assert.equal(JSON.parse(snapshot.stdout).outcome, "timeout");
+  assert.equal(JSON.parse(snapshot.stdout).repository, "picoduck/wollipog");
+
+  // A lookup outlasting the timeout and the grace is killed with the existing --repo guidance.
+  let startedAt = Date.now();
   let discoveryKilled = false;
   const hungDiscovery: GhRunner = (_args, signal) => new Promise((resolve) => {
     signal?.addEventListener("abort", () => {
@@ -236,19 +249,24 @@ test("pr wait runs locally through gh with outcome exit codes and never contacts
       resolve({ stdout: "", stderr: "killed", code: "ABORT_ERR", timedOut: true });
     }, { once: true });
   });
-  const slow = await run(["pr", "wait", "7", "--timeout", "100", "--json"], hungDiscovery);
+  const slow = await run(["pr", "wait", "7", "--timeout", "100", "--json"], hungDiscovery, 100);
   assert.equal(slow.code, 1);
   assert.match(JSON.parse(slow.stdout).error, /pass --repo/u);
   assert.equal(discoveryKilled, true);
-  assert.ok(Date.now() - startedAt < 2_000);
-  const late: GhRunner = async (args) => {
-    if (args[0] !== "repo") return passed.gh(args);
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    return { stdout: "picoduck/wollipog\n", stderr: "", code: null, timedOut: false };
-  };
-  const spent = await run(["pr", "wait", "7", "--timeout", "100", "--json"], late);
+  const slowMs = Date.now() - startedAt;
+  assert.ok(slowMs >= 190 && slowMs < 1_500, `discovery ran until the timeout plus the grace: ${slowMs} ms`);
+
+  // The wait gets only what discovery left of both, so a hung read after it still ends in time.
+  startedAt = Date.now();
+  let readKilled = false;
+  const hungRead: GhRunner = (_args, signal) => new Promise(() => {
+    signal?.addEventListener("abort", () => { readKilled = true; }, { once: true });
+  });
+  const spent = await run(["pr", "wait", "7", "--timeout", "100", "--json"], slowLookup(150, hungRead), 200);
   assert.equal(spent.code, 1);
-  assert.match(JSON.parse(spent.stdout).error, /whole timeout/u);
+  assert.equal(readKilled, true);
+  const spentMs = Date.now() - startedAt;
+  assert.ok(spentMs >= 290 && spentMs < 1_500, `the command ended at the timeout plus the grace: ${spentMs} ms`);
   const fractional = await run(["pr", "wait", "7", "--timeout", "100.5", "--json"], passed.gh);
   assert.equal(fractional.code, 0, "a fractional timeout is floored, never a crash");
   assert.equal(JSON.parse(fractional.stdout).outcome, "checks_passed");
