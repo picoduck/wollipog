@@ -35,13 +35,19 @@ test("desktop dashboards read and update the managed sidecar setting", async () 
   ]);
 });
 
-test("tailnet setting descriptions explain enabled and externally managed states", () => {
-  assert.equal(
-    tailnetAccessDescription({ available: true, enabled: true, managed: true }),
-    "Paired browsers can connect through this machine's Tailscale address.",
-  );
-  assert.equal(
-    tailnetAccessDescription({ available: true, enabled: false, managed: false }),
-    "Unavailable while another control plane owns port 4317.",
-  );
+test("each read status has its own sentence, none naming a port or the control plane", () => {
+  const sentences = {
+    on: tailnetAccessDescription({ available: true, enabled: true, managed: true }),
+    off: tailnetAccessDescription({ available: true, enabled: false, managed: true }),
+    unmanaged: tailnetAccessDescription({ available: true, enabled: false, managed: false }),
+    // Tailscale missing outranks every other fact: nothing else about the switch can matter.
+    missing: tailnetAccessDescription({ available: false, enabled: false, managed: false }),
+  };
+  assert.deepEqual(sentences, {
+    on: "Paired browsers can connect through this machine's Tailscale address.",
+    off: "Let paired browsers reach this machine through Tailscale.",
+    unmanaged: "Unavailable because another Wollipog server is using this machine's port.",
+    missing: "Tailscale isn't installed or running on this machine.",
+  });
+  for (const sentence of Object.values(sentences)) assert.doesNotMatch(sentence, /control plane|\d{2,}/i);
 });

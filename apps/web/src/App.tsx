@@ -983,7 +983,7 @@ export function Shell() {
                 ),
                 approvals: <ApprovalsPanel policyId={view.policyId} />,
                 orchestrator: <OrchestratorSettingsPanel discoveryRevision={runners} />,
-                network: <NetworkPanel tailnet={tailnet} />,
+                network: <NetworkPanel tailnet={tailnet} onNavigate={navigate} />,
                 experimental: (
                   <ExperimentalPanel
                     flags={experiments.flags}
@@ -1217,6 +1217,8 @@ function useTailnetAccessSetting(): TailnetAccessSetting {
   // Read once, not per panel visit. Computed rather than stored: it cannot change without a reload.
   const desktop = useMemo(() => isTauriRuntime(), []);
 
+  // Bumped by Try Again after a failed read, which reads again from the start.
+  const [readAttempt, setReadAttempt] = useState(0);
   useEffect(() => {
     let disposed = false;
     readTailnetAccess()
@@ -1232,10 +1234,10 @@ function useTailnetAccessSetting(): TailnetAccessSetting {
     return () => {
       disposed = true;
     };
-  }, []);
+  }, [readAttempt]);
 
   const toggle = useCallback(() => {
-    if (!status || busy || !status.managed) return;
+    if (!status || busy || !status.available || !status.managed) return;
     setBusy(true);
     setError(null);
     writeTailnetAccess(!status.enabled)
@@ -1244,5 +1246,17 @@ function useTailnetAccessSetting(): TailnetAccessSetting {
       .finally(() => setBusy(false));
   }, [busy, status]);
 
-  return { status, loading, desktop, busy, error, toggle };
+  // A failed write leaves the confirmed status in place, so trying again repeats the same change.
+  const retry = useCallback(() => {
+    if (status) {
+      toggle();
+      return;
+    }
+    if (loading) return;
+    setError(null);
+    setLoading(true);
+    setReadAttempt((attempt) => attempt + 1);
+  }, [loading, status, toggle]);
+
+  return { status, loading, desktop, busy, error, toggle, retry };
 }

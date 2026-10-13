@@ -1808,7 +1808,7 @@ Only a disabled row dims, and only its title (`--text-faint`, never opacity, §3
 | `SegmentedRow` | `.seg` filling the column. | For two or three options whose labels fit the column (labels never wrap); a `Select` otherwise. `disabledReason` under the pills. |
 | `SelectRow` | `Select` filling the column. | Its `.menu.listbox` is at least as wide as the trigger and 280px, and 360px when options carry descriptions, by default. `disabledReason` is visible under the trigger and part of its description. |
 | `NumberRow` | A `.w-xs` (96px) field with its unit inside (§8.3). | Named by the title and unit; a long unit goes in the title or description. An invalid value is `aria-invalid` with a `FieldError` under the field (§8.5). |
-| `ValueRow` | A read-only value, right-aligned. | `mono` for addresses, versions and ids; `copy` adds Copy, an `.icon-btn.sm` named "Copy <Title>". |
+| `ValueRow` | A read-only value, right-aligned. | `mono` for addresses, versions and ids; `copy` adds Copy, an `.icon-btn.sm` named "Copy <Title>", or `copyLabel` where the title does not name the value ("Copy Address" beside Connected To). It confirms with its icon. |
 | `LinkRow` | Trailing `ChevronRight`, after an optional trailing word. | Navigation only; the whole row is the button. |
 | `ActionRow` | One `.btn` (`--control-h`), such as Edit…, with an optional 14px icon before its label. | Named by its label and the row's title ("Edit… Claude Code"). |
 | `StaticRow` | None. | States something; its title is full contrast and it has no role. |
@@ -1817,7 +1817,9 @@ Only a disabled row dims, and only its title (`--text-faint`, never opacity, §3
 12px spinner, or replaces it with `busyLabel` (the description stays underneath, hidden, so the row
 keeps its height). `saved` shows the §8.6 check: before the track on a switch row, at the end of the
 text cell otherwise, announced by a polite region beside the control. A failed instant save that is
-not a switch is the group's failure notice (below).
+not a switch is the group's failure notice (below). A `SettingRow` with no value to show until a read
+succeeds (Settings › Network's Tailnet Access before its status is known) takes `failure` too, in
+place of its description with Try Again, so an unknown value is never drawn as a control.
 
 **Narrow.** Under a 560px **container** the control drops below the text at full width; switch, link
 and action rows (`.setting-row-trailing`) keep their control trailing. The container is the group's
@@ -1915,8 +1917,8 @@ to these form choice groups.
   `TriangleAlert` in `--amber` and `--type-small` text in `--text-dim`, never amber text. The field's
   `aria-describedby` points at it. It is the sibling of the field error (`FieldError`), which blocks
   submission and replaces the helper. No screen uses it yet.
-- A failed instant-apply setting (Settings › Network › Tailnet) shows its error in place of the
-  row's description in `--danger-text` (`.danger-text`).
+- A failed instant-apply setting (Settings › Network › Tailnet Access) shows its failure in place of
+  the row's description in `--danger-text` (`.setting-row-failure`), with Try Again after it.
 
 ### 8.6 Save Models
 

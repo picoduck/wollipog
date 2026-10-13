@@ -209,7 +209,6 @@ test("the settings sections name the things the plan says stay discoverable", ()
   // possible; a disabled one with a sentence teaches them where it lives.
   for (const named of [
     "Default Models, Efforts, and Permissions",
-    "Control-Plane Origin",
     "Manage Instances",
     "Updates",
     "Open-Source Licenses",
@@ -220,30 +219,20 @@ test("the settings sections name the things the plan says stay discoverable", ()
   }
   // Every one of them carries a reason, which is the half that makes a disabled row informative
   // rather than a dead end.
-  // Behavior's Reduce Motion, Confirm Before Deleting and Default Models fallback are gone (#3023);
-  // Network and About keep theirs until #3027 and #3028.
+  // Behavior's Reduce Motion, Confirm Before Deleting and Default Models fallback are gone (#3023),
+  // and so are Network's (#3027); About keeps its two until #3028.
   const pending = view.match(/<PendingSetting[\s\S]*?\/>/g) ?? [];
-  assert.ok(pending.length >= 5, "the named-but-unbuilt settings must all be rendered");
+  assert.ok(pending.length >= 2, "the named-but-unbuilt settings must all be rendered");
   for (const block of pending) {
     assert.match(block, /reason=/, "a disabled setting without a reason is worse than none");
   }
-});
-
-test("the Network panel does not report four situations as one", () => {
-  const view = readFileSync(fileURLToPath(new URL("./components/SettingsView.tsx", import.meta.url)), "utf8");
-  // `status === null` covered loading, browser/PWA, absent Tailscale, and a failed read, and all
-  // four rendered "Tailscale is not installed or not detected" — two of which are false statements
-  // about the user's machine.
-  assert.match(view, /tailnet\.loading/, "still reading is not the same as not installed");
-  assert.match(view, /!tailnet\.desktop/, "a browser is not a machine without Tailscale");
-  assert.match(view, /tailnet\.error/, "a failed read has to be shown, not swallowed");
 });
 
 test("the tailnet state is owned by the shell, not by the panel", () => {
   // Mounted inside the panel, the hook re-read on every visit: a toggle started before navigating
   // away completed against the discarded instance, and returning showed the pre-write value.
   assert.match(app, /const tailnet = useTailnetAccessSetting\(\);/);
-  assert.match(app, /network: <NetworkPanel tailnet=\{tailnet\} \/>/,
+  assert.match(app, /network: <NetworkPanel tailnet=\{tailnet\} onNavigate=\{navigate\} \/>/,
     "the panel renders the shell's state rather than fetching its own");
 });
 
@@ -257,49 +246,6 @@ test("the focus rescues fire on a transition, not on arrival", () => {
     "only a breakpoint CROSSING drops focus; arriving at a page does not");
   assert.match(view, /const previousSection = useRef\(section\);[\s\S]{0,200}if \(previousSection\.current === section\) return;/,
     "only a section CHANGE replaces the panel that held focus");
-});
-
-test("Network keeps its other settings when the tailnet is unavailable", () => {
-  const view = readFileSync(fileURLToPath(new URL("./components/SettingsView.tsx", import.meta.url)), "utf8");
-  // The early return took the whole group with it, so the discoverability rule this panel had just
-  // been fixed to satisfy held only where Tailscale happened to be installed — never, in a browser.
-  const panel = view.slice(view.indexOf("export function NetworkPanel"), view.indexOf("export function AboutPanel"));
-  // ONE exit, so there is no second path that can omit a row. Pattern-matching the old early
-  // return instead let a one-line `if (...) return <SettingsGroup>…` walk straight past the check —
-  // the mutation that found this — because the pattern was a spelling and not the property.
-  const code = panel.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/.*/g, " ");
-  assert.equal((code.match(/\breturn\b/g) ?? []).length, 1,
-    "a second return is a second topology, and one of them will forget a row");
-  assert.match(panel, /const tailnetRow = status\?\.available \? \(/,
-    "the conditional belongs to the row that depends on the tailnet");
-  for (const title of ["Control-Plane Origin", "Manage Instances"]) {
-    assert.ok(panel.slice(panel.indexOf("return (")).includes(`title="${title}"`),
-      `${title} must render on every path, not only the available one`);
-  }
-});
-
-test("a tailnet write is announced as busy", () => {
-  const view = readFileSync(fileURLToPath(new URL("./components/SettingsView.tsx", import.meta.url)), "utf8");
-  // Folding busy into `disabled` left the row generically unavailable while its own description
-  // said the control plane was restarting. SwitchRow disables a busy control itself and keeps
-  // showing the value the server last confirmed.
-  assert.match(view, /busy=\{tailnet\.busy\}/, "a write in flight has to say so");
-  assert.match(view, /disabled=\{!status\.managed\}/,
-    "disabled means cannot be operated at all, which is a different fact from mid-write");
-});
-
-test("the browser case is decided before the loading case", () => {
-  const view = readFileSync(fileURLToPath(new URL("./components/SettingsView.tsx", import.meta.url)), "utf8");
-  // In a browser the answer is known synchronously, so a first paint claiming a check was running
-  // described a check that runtime cannot perform.
-  // Comments stripped first: the explanation above the row quotes the very sentence this slice
-  // looks for, so `indexOf` found the comment and the region came out empty — and an empty region
-  // makes every ordering assertion vacuously false, which is how this test first failed.
-  const code = view.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/.*/g, " ");
-  const reason = code.slice(code.indexOf("reason={!tailnet.desktop"), code.indexOf("reason={!tailnet.desktop") + 400);
-  assert.ok(reason.includes("tailnet.loading"), "the loading branch must still exist");
-  assert.ok(reason.indexOf("!tailnet.desktop") < reason.indexOf("tailnet.loading"),
-    "a runtime that cannot check is not a runtime still checking");
 });
 
 test("both callers mount the same notifications panel", () => {

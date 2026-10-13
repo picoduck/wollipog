@@ -110,7 +110,14 @@ function RowText({
           <span className={`setting-row-desc-slot${failure ? " is-failed" : replacement ? " is-busy" : ""}`}>
             {descriptionNode}
             {replacement && (
-              <span className={failure ? "setting-row-desc setting-row-failure" : "setting-row-desc"}>{replacement}</span>
+              // The busy sentence has an id of its own, so a control can be described by what is
+              // happening rather than by the hidden sentence it covers.
+              <span
+                className={failure ? "setting-row-desc setting-row-failure" : "setting-row-desc"}
+                id={!failure && descriptionId ? `${descriptionId}-busy` : undefined}
+              >
+                {replacement}
+              </span>
             )}
           </span>
         ) : descriptionNode}
@@ -120,12 +127,25 @@ function RowText({
   );
 }
 
+/** A failed change in place of the description (§8.5): the sentence, then Try Again. */
+function FailureSentence({ id, failure }: { id: string; failure: RowFailure }) {
+  return (
+    <>
+      <span id={id} title={failure.detail}>{failure.message}</span>{" "}
+      <button type="button" className="link setting-row-retry" onClick={failure.onRetry}>Try Again</button>
+    </>
+  );
+}
+
 /**
  * The §8.2 grid with any control, for a setting none of the row kinds fits. Prefer a row kind: each
  * one carries its control's affordance and accessible names.
  *
  * `trailing` keeps the control beside the text in a narrow container, as switch, link and action rows
  * do; otherwise it drops under the text at full width.
+ *
+ * `failure` shows a failed read or change in place of the description with Try Again (§8.5), as
+ * `SwitchRow` does, for a row that has no value to show until it succeeds. The caller announces it.
  */
 export function SettingRow({
   title,
@@ -140,13 +160,16 @@ export function SettingRow({
   busy,
   busyLabel,
   saved,
+  failure,
   className,
 }: Omit<RowTextProps, "failure" | "descriptionHidden"> & {
   control?: ReactNode;
   trailing?: boolean;
   disabled?: boolean;
+  failure?: RowFailure | null;
   className?: string;
 }) {
+  const id = useId();
   return (
     <div className={rowClass(trailing ? "setting-row setting-row-trailing" : "setting-row", { disabled, extra: className })} aria-busy={busy || undefined}>
       <RowText
@@ -156,9 +179,10 @@ export function SettingRow({
         badge={badge}
         description={description}
         descriptionId={descriptionId}
-        busy={busy}
+        busy={busy && !failure}
         busyLabel={busyLabel}
         saved={saved}
+        failure={failure === undefined ? undefined : failure && <FailureSentence id={`${id}-failure`} failure={failure} />}
       />
       {control && <span className="setting-row-control">{control}</span>}
       {saved !== undefined && <span className="sr-only" role="status">{rowStatus(title, saved)}</span>}
@@ -425,8 +449,9 @@ export function NumberRow({
 
 /**
  * A read-only value in the control column: an address, a version, a count. `mono` for addresses,
- * versions and ids (§11.3). `copy` adds Copy, an `.icon-btn.sm` named for the value ("Copy Server
- * Address"): `true` copies `value` itself, a string copies that text instead.
+ * versions and ids (§11.3). `copy` adds Copy, an `.icon-btn.sm` named "Copy <Title>", or `copyLabel`
+ * where the title does not name the value ("Copy Address" for Connected To): `true` copies `value`
+ * itself, a string copies that text instead. It confirms with its icon.
  */
 export function ValueRow({
   title,
@@ -435,6 +460,7 @@ export function ValueRow({
   value,
   mono,
   copy,
+  copyLabel,
 }: {
   title: string;
   description?: ReactNode;
@@ -442,6 +468,8 @@ export function ValueRow({
   value: ReactNode;
   mono?: boolean;
   copy?: boolean | string;
+  /** The Copy button's name, in Title Case. */
+  copyLabel?: string;
 }) {
   const copyText = typeof copy === "string" ? copy : copy && typeof value === "string" ? value : undefined;
   return (
@@ -455,7 +483,7 @@ export function ValueRow({
           {value}
         </span>
         {copyText !== undefined && (
-          <CopyButton text={copyText} iconOnly className="icon-btn sm" ariaLabel={`Copy ${title}`} />
+          <CopyButton text={copyText} iconOnly className="icon-btn sm" ariaLabel={copyLabel ?? `Copy ${title}`} />
         )}
       </span>
     </div>
@@ -720,18 +748,16 @@ export function SwitchRow({
       descriptionId={`${id}-desc`}
       busy={busy && !failed}
       busyLabel={busyLabel}
-      failure={failure === undefined ? undefined : failure && (
-        <>
-          <span id={`${id}-failure`} title={failure.detail}>{failure.message}</span>{" "}
-          <button type="button" className="link setting-row-retry" onClick={failure.onRetry}>Try Again</button>
-        </>
-      )}
+      failure={failure === undefined ? undefined : failure && <FailureSentence id={`${id}-failure`} failure={failure} />}
     />
   );
   const control = {
     switchRef,
     labelledBy: `${id}-title`,
-    describedBy: failed ? `${id}-failure` : description ? `${id}-desc` : undefined,
+    // While busy the visible sentence is the busy line, and that is what the switch is described by.
+    describedBy: failed ? `${id}-failure`
+      : busy && (busyLabel !== undefined || !description) ? `${id}-desc-busy`
+      : description ? `${id}-desc` : undefined,
     checked,
     disabled,
     busy,
