@@ -204,13 +204,13 @@ export function describeProviderAuthIdentityMismatch(comparison: ProviderAuthIde
     return "The recorded provider identity evidence uses a previous evidence-key generation and cannot be " +
       "compared with the current authenticated state. Wollipog cannot determine whether the account changed. " +
       "Choose Use Current Account to accept the current authenticated state for this session, or restore the " +
-      "recorded authentication and choose Recheck Authentication. Credential and account values are redacted.";
+      "recorded authentication and choose Retry. Credential and account values are redacted.";
   }
   if (!comparison.evidenceAvailable) {
     return "Wollipog cannot match the current authenticated state to the state recorded for this session " +
       "with the available evidence, so it cannot determine whether the account changed. Choose Use Current Account " +
       "to accept the current authenticated state for this session, or restore the recorded authentication and choose " +
-      "Recheck Authentication. Credential and account values are redacted.";
+      "Retry. Credential and account values are redacted.";
   }
   const details: string[] = [];
   if (comparison.differingFields.length) {

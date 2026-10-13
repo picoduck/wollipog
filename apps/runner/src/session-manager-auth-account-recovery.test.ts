@@ -67,7 +67,7 @@ function fakeController(homes: Record<string, HomeState>) {
 
 function harness(
   homes: Record<string, HomeState>,
-  failAuthenticationOn?: string,
+  failAuthenticationOn?: string | ((text: string) => boolean),
   initializeGate: (home: string) => Promise<void> = async () => {},
   onPrompt: (text: string) => void = () => {},
 ) {
@@ -118,7 +118,7 @@ function harness(
         prompts.push({ home, text, ...(options.resumeId ? { resumeId: options.resumeId } : {}) });
         callbacks.onPromptAccepted?.();
         onPrompt(text);
-        if (text === failAuthenticationOn) callbacks.onAuthenticationFailure?.();
+        if (typeof failAuthenticationOn === "function" ? failAuthenticationOn(text) : text === failAuthenticationOn) callbacks.onAuthenticationFailure?.();
         return "end_turn";
       },
       setConfig: () => {},
@@ -486,5 +486,45 @@ test("a policy change during an auth-failed turn preserves the provider and queu
     assert.deepEqual(internals.active.get(SESSION)?.queue.map(item => item.text), ["queued after first"]);
     assert.deepEqual(h.prompts.map(item => item.text), ["first"]);
     assert.ok(h.store.readMeta(SESSION)?.providerAuthBlock);
+  } finally { h.cleanup(); }
+});
+
+
+test("mid-turn authentication recovery continues automatically after the same account is verified", async () => {
+  const h = harness({ "/claude/work": { observations: [{ status: "authenticated", identityId: "identity-work" }] } }, "original task");
+  try {
+    h.manager.prompt(SESSION, "original task");
+    await waitFor(() => h.prompts.length === 2, "authentication recovery left the interrupted session idle");
+    assert.match(h.prompts[1]!.text, /Continue/);
+    assert.equal(h.prompts.filter((prompt) => prompt.text === "original task").length, 1);
+  } finally { h.cleanup(); }
+});
+
+
+test("manual Retry continues a mid-turn authentication failure once credentials recover", async () => {
+  const state: HomeState = { observations: [
+    { status: "authenticated", identityId: "identity-work" },
+    { status: "unauthenticated" },
+  ] };
+  const h = harness({ "/claude/work": state }, "original task");
+  try {
+    h.manager.prompt(SESSION, "original task");
+    await waitFor(() => h.store.readMeta(SESSION)?.pendingApproval?.kind === "authentication", "no recovery card");
+    const card = h.store.readMeta(SESSION)!.pendingApproval!;
+    assert.equal(card.options.find((option) => option.optionId === "auth:revalidate")?.name, "Retry");
+    state.observations = [{ status: "authenticated", identityId: "identity-work" }];
+    h.manager.resolvePermission(SESSION, card.requestId, "auth:revalidate");
+    await waitFor(() => h.prompts.length === 2, "manual Retry did not continue");
+    assert.match(h.prompts[1]!.text, /Continue/);
+  } finally { h.cleanup(); }
+});
+
+test("repeated mid-turn authentication failure stops automatic retries and offers Retry", async () => {
+  const h = harness({ "/claude/work": { observations: [{ status: "authenticated", identityId: "identity-work" }] } },
+    () => true);
+  try {
+    h.manager.prompt(SESSION, "original task");
+    await waitFor(() => h.store.readMeta(SESSION)?.pendingApproval?.kind === "authentication", "repeated failure did not surface recovery");
+    assert.equal(h.prompts.length, 2, "only one automatic continuation is allowed without a healthy turn");
   } finally { h.cleanup(); }
 });

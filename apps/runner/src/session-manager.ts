@@ -1,3 +1,4 @@
+import { isProviderCapacityFailure, PROVIDER_RETRY_CONTINUATION } from "./provider-turn-retry.js";
 import { artifactGuidance } from "./artifact-guidance.js";
 import { campaignOperationEvidenceCurrent } from "./campaign-operation-evidence.js";
 import { effectiveProjectMemoryKey, prepareProjectMemory, prepareProjectMemoryArgs, projectMemoryKey, projectMemoryUnavailable } from "./project-memory.js";
@@ -665,9 +666,11 @@ interface ActiveSession {
   /** The current manual command crossed its durable started boundary and may have reached the
    * provider. History-integrity containment must settle this lane as uncertain, never rejected. */
   sessionCommandProviderStarted?: boolean;
-  /** A provider credential failure cancelled the current turn. Existing FIFO work stays held until
-   * a new user prompt explicitly asks the runner to revalidate the exact installation. */
+  /** A provider credential failure cancelled the current turn. FIFO work stays held until
+   * automatic or manual recovery revalidates the exact installation. */
   authenticationBlocked?: boolean;
+  /** Only a terminal refusal paired with a capacity diagnostic can trigger a continuation. */
+  providerCapacityFailure?: boolean;
   /** The provider rejected its own stored conversation history. Unlike an authentication block
    * this never clears in place: the FIFO stops draining permanently and the session can only be
    * continued by recovering it into a new conversation. */
@@ -7850,8 +7853,8 @@ export class SessionManager {
         onPromptAccepted: () => {
           const live = this.active.get(sessionId);
           if (live?.client !== client) return;
-          const scopeId = this.store.readMeta(sessionId)?.providerCredentialScopeId;
-          if (scopeId) this.providerAuthAutomaticAttempted.delete(scopeId);
+          // Input acceptance does not prove credentials work: only a healthy completed turn
+          // re-arms automatic authentication recovery, or repeated failures could loop forever.
           if (!live.currentBackgroundJobIds?.length) return;
           live.backgroundPromptAccepted = true;
           this.markBackgroundContinuationAccepted(sessionId, live.currentBackgroundJobIds);
@@ -11775,7 +11778,7 @@ export class SessionManager {
       );
     }
     if (providerAccountId === meta.providerAccountId) {
-      return refuse("account_unavailable", "The session already uses that account. Choose Recheck Authentication instead.");
+      return refuse("account_unavailable", "The session already uses that account. Choose Retry instead.");
     }
     let target: BoundProviderAccount;
     try {
@@ -12991,11 +12994,57 @@ export class SessionManager {
     try {
       let stop: Awaited<ReturnType<Driver["prompt"]>>;
       entry.usageWindowRejection = undefined;
-      stop = await entry.client.prompt(`${text}${workspaceReferenceText}`, images, slashCommand)
-        .finally(() => this.flushTextDeltas(sessionId));
+      let retryOriginalInput = true;
+      for (let attempt = 0; ; attempt++) {
+        entry.providerCapacityFailure = false;
+        try {
+          stop = await entry.client.prompt(
+            retryOriginalInput ? `${text}${workspaceReferenceText}` : PROVIDER_RETRY_CONTINUATION,
+            retryOriginalInput ? images : undefined,
+            retryOriginalInput ? slashCommand : undefined,
+          ).finally(() => this.flushTextDeltas(sessionId));
+        } catch (error) {
+          if (!isProviderCapacityFailure(errText(error))) throw error;
+          entry.providerCapacityFailure = true;
+          stop = "refusal";
+        }
+        const terminalError = entry.client.lastTurnError?.();
+        if (terminalError) entry.providerCapacityFailure = isProviderCapacityFailure(terminalError);
+        if (stop !== "refusal" || !entry.providerCapacityFailure) {
+          if (attempt > 0) this.log(JSON.stringify({ event: "provider_capacity_retry_settled", sessionId,
+            entryPoint: "prompt", attempts: attempt, stopReason: stop }));
+          break;
+        }
+        const canRetry = () => this.active.get(sessionId) === entry && !this.shuttingDown &&
+          !entry.cancelRequested && !entry.interruptRequested && !entry.governanceTripped &&
+          !this.queueHeld(entry) && !this.recoveryHolds.has(sessionId) && !this.hasPendingApproval(sessionId) &&
+          !entry.authenticationBlocked && !entry.historyIntegrityFailure && !entry.historyQuarantined;
+        if (!canRetry()) break;
+        if (attempt >= 3) {
+          this.emitEvent(sessionId, { kind: "stderr", text: "Model capacity retries exhausted after 3 retries. Retry the turn when capacity is available." });
+          this.log(JSON.stringify({ event: "provider_capacity_retry_exhausted", sessionId, entryPoint: "prompt", attempts: 3 }));
+          break;
+        }
+        // Replay input only when the provider proves the previous submission never arrived.
+        // Once delivery is uncertain, every later attempt stays a history continuation.
+        retryOriginalInput = retryOriginalInput && entry.client.lastPromptUndelivered?.() === true;
+        const delayMs = 1000 * 2 ** attempt;
+        this.emitEvent(sessionId, { kind: "stderr", text: `Model capacity is temporarily unavailable. Retrying in ${delayMs / 1000} seconds (attempt ${attempt + 1}/3).` });
+        this.log(JSON.stringify({ event: "provider_capacity_retry", sessionId, entryPoint: "prompt", attempt: attempt + 1, delayMs }));
+        const deadline = Date.now() + delayMs;
+        while (canRetry() && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, Math.min(100, deadline - Date.now())));
+        }
+        if (!canRetry()) {
+          if (entry.cancelRequested || entry.interruptRequested || this.active.get(sessionId) !== entry) stop = "cancelled";
+          this.log(JSON.stringify({ event: "provider_capacity_retry_held", sessionId, entryPoint: "prompt", attempt: attempt + 1 }));
+          break;
+        }
+      }
       if (entry.historyIntegrityFailure) return;
       this.captureAgentSessionId(sessionId, entry.client); // codex threadId becomes known after turn 1
-      if (backgroundJobIds?.length && stop === "refusal" && !entry.backgroundPromptAccepted) {
+      if (backgroundJobIds?.length && stop === "refusal" && !entry.backgroundPromptAccepted &&
+          !entry.providerCapacityFailure) {
         this.resetBackgroundContinuationSubmission(sessionId, backgroundJobIds);
         this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
       }
@@ -17702,6 +17751,9 @@ export class SessionManager {
   private onDriverEvent(sessionId: string, payload: SessionEventPayload): void {
     const entry = this.active.get(sessionId);
     if (entry?.historyIntegrityFailure) return;
+    if (entry?.running && payload.kind === "error") {
+      entry.providerCapacityFailure = isProviderCapacityFailure(payload.message);
+    }
     if (entry?.providerInitiatedTurnActive &&
         (payload.kind === "permission_request" || payload.kind === "question_request" && !payload.async)) {
       entry.providerInitiatedRequestIds?.add(payload.requestId);
@@ -17882,7 +17934,7 @@ export class SessionManager {
       // succeeds. Only the correlated recovery action can validate account identity, consume the
       // retry token, and clear matching sessions atomically.
       this.emitProviderAuthenticationCard(current, current.providerAuthBlock,
-        "Authentication now responds, but this blocked generation still requires Recheck Authentication.");
+        "Authentication now responds, but this blocked generation still requires Retry.");
       return false;
     }
     const retainedEvidence = mergeProviderAuthIdentityEvidence(expectedEvidence, observation.identityEvidence);
@@ -18256,11 +18308,11 @@ export class SessionManager {
       return "Authentication recovery is in progress. This prompt was not submitted. Finish the sign-in or authentication check, then retry this prompt.";
     }
     if (isProviderAuthenticationBlock(meta.pendingApproval)) {
-      return "Authentication is still blocked. This prompt was not submitted. Follow this session's Authentication Required card, then choose Recheck Authentication and retry this prompt after recovery completes.";
+      return "Authentication is still blocked. This prompt was not submitted. Follow this session's Authentication Required card, then choose Retry and retry this prompt after recovery completes.";
     }
     // Scope ownership spans sessions, but runner metadata does not establish their visibility to
     // this audience. Point to the Inbox without disclosing a peer's title, ID, or private context.
-    return "Authentication is still blocked. This prompt was not submitted. In Inbox, find the Authentication Required card for this provider and runner. Follow its sign-in instructions, then choose Recheck Authentication. If no matching card is accessible, ask the runner owner to complete authentication recovery. Retry this prompt after recovery completes.";
+    return "Authentication is still blocked. This prompt was not submitted. In Inbox, find the Authentication Required card for this provider and runner. Follow its sign-in instructions, then choose Retry. If no matching card is accessible, ask the runner owner to complete authentication recovery. Retry this prompt after recovery completes.";
   }
 
   private providerAuthenticationOptions(
@@ -18291,8 +18343,8 @@ export class SessionManager {
     }
     options.push({
       optionId: "auth:revalidate",
-      name: "Recheck Authentication",
-      description: "Ask the provider in this exact context whether authentication is now valid.",
+      name: "Retry",
+      description: "Recheck authentication and continue the interrupted session if the account is verified.",
       kind: "allow_once",
     });
     options.push({
@@ -18831,10 +18883,10 @@ export class SessionManager {
             const provider = providerDisplayName(current.driver);
             const detail = credentialContextChanged
               ? replacement.status === "lock_unavailable"
-                ? "Another runner owns this session. Choose Recheck Authentication after that runner releases it."
+                ? "Another runner owns this session. Choose Retry after that runner releases it."
                 : replacement.status === "retirement_failed"
-                ? `The previous ${provider} process could not be stopped. It was not reused; choose Recheck Authentication after it exits.`
-                : `${provider} could not resume the existing conversation with the selected account. Choose Recheck Authentication to retry it.`
+                ? `The previous ${provider} process could not be stopped. It was not reused; choose Retry after it exits.`
+                : `${provider} could not resume the existing conversation with the selected account. Choose Retry to retry it.`
               : replacement.status === "not_resumable"
               ? "The existing Codex conversation has no resumable thread identifier. The stale provider was not reused."
               : replacement.status === "lock_unavailable"
@@ -18894,7 +18946,7 @@ export class SessionManager {
       if (block.delivery === "uncertain") {
         this.emitEvent(meta.sessionId, {
           kind: "stderr",
-          text: "Authentication was restored, but the interrupted prompt was not retried because provider delivery was uncertain.",
+          text: "Authentication was restored. The original input was not replayed because provider delivery was uncertain.",
         });
       }
       if (durableRetries.length) {
@@ -18914,6 +18966,15 @@ export class SessionManager {
           retry.ordinal,
           true,
         );
+      } else if (entry && !targetOnly && block.delivery === "uncertain" && block.phase === "turn" &&
+          !entry.queue.length && !this.recoveryQueues.has(meta.sessionId) &&
+          !this.shuttingDown && !entry.cancelRequested && !entry.interruptRequested &&
+          !this.queueHeld(entry) && !this.backgroundRecoveryHeld(meta) && !this.hasPendingApproval(meta.sessionId) &&
+          meta.agentSessionId && canResumeSession(meta)) {
+        this.log(JSON.stringify({ event: "provider_authentication_continue", sessionId: meta.sessionId,
+          entryPoint: targetResolutionOptionId }));
+        this.emitEvent(meta.sessionId, { kind: "stderr", text: "Authentication was verified. Continuing the interrupted task in the existing conversation." });
+        this.prompt(meta.sessionId, PROVIDER_RETRY_CONTINUATION);
       } else {
         this.emitStatus(meta.sessionId, "idle");
         if (this.recoveryQueues.has(meta.sessionId)) {
