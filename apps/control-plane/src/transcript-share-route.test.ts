@@ -8,7 +8,7 @@ import type { RunnerMetadata } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { registerAuthGate } from "./http-auth.js";
 import { isAllowedOrigin } from "./net.js";
-import { registerPublicTranscriptShareRoute } from "./transcript-share-route.js";
+import { PUBLIC_TRANSCRIPT_SHARE_HEADERS, registerPublicTranscriptShareRoute } from "./transcript-share-route.js";
 import {
   MAX_TRANSCRIPT_SHARE_READS_PER_TOKEN_PER_MINUTE,
   TranscriptShareReadLimiter,
@@ -213,4 +213,55 @@ test("the real public share route enforces capability lifecycle, headers, origin
   assert.equal(limited.statusCode, 429);
   assert.equal(limited.headers["retry-after"], "60");
   assert.equal(limited.headers["cache-control"], "no-store, max-age=0");
+});
+
+// The lookup must refuse a revoked token before the limiter is consulted, so it never spends that
+// token's read budget and never earns a 429. The projection stays stored so only `revoked_at` can
+// refuse the first read; revoking normally nulls it too, which would mask that check (#3115).
+test("a revoked token past the per-token read limit stays 404 at the public route, never 429", async (t) => {
+  const db = ControlPlaneDb.open(":memory:");
+  db.registerRunner(runner, 1, 53);
+  db.createSession({
+    id: "revoked-route-session", runnerId: runner.runnerId, agentId: null, workspaceId: null,
+    title: "Never public", useWorktree: false, driver: "acp", config: {}, now: 1,
+  });
+  db.appendEvent("revoked-route-session", { kind: "user_message", text: "public message" }, 2);
+  const identity = db.localIdentityContext();
+  const principal = { kind: "human" as const, actorId: identity.userId, ...identity };
+  const now = 10_000;
+  const created = createAuthorizedTranscriptShare(
+    db, principal, "revoked-route-session", { expiresInSeconds: 3600 }, now,
+  );
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  rawDb(db).prepare("UPDATE transcript_shares SET revoked_at=? WHERE share_id=?")
+    .run(now - 1, created.value.share.shareId);
+  assert.equal(
+    rawDb(db).prepare("SELECT projection_json IS NOT NULL AS stored FROM transcript_shares WHERE share_id=?")
+      .get(created.value.share.shareId)?.stored,
+    1,
+    "the first read meets a revoked row that still holds its projection",
+  );
+
+  const app = Fastify();
+  registerAuthGate(app, { authenticate: () => null, isAllowedOrigin });
+  registerPublicTranscriptShareRoute(app, { db, limiter: new TranscriptShareReadLimiter(), now: () => now });
+  await app.ready();
+  t.after(async () => { await app.close(); db.close(); });
+
+  const authorization = `Wollipog-Share ${created.value.token}`;
+  for (let attempt = 1; attempt <= MAX_TRANSCRIPT_SHARE_READS_PER_TOKEN_PER_MINUTE + 3; attempt += 1) {
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/public/transcript-share",
+      remoteAddress: "10.0.0.8",
+      headers: { authorization },
+    });
+    assert.equal(response.statusCode, 404, `revoked read ${attempt} must be 404, not rate limited`);
+    assert.deepEqual(response.json(), { error: "shared transcript unavailable" });
+    for (const [name, value] of Object.entries(PUBLIC_TRANSCRIPT_SHARE_HEADERS)) {
+      assert.equal(response.headers[name], value, `revoked read ${attempt} carries ${name}`);
+    }
+    assert.equal(response.headers["retry-after"], undefined);
+  }
 });
