@@ -24,6 +24,12 @@ export function epicChecklistMembers(body: string, repository: string): number[]
 }
 
 export function normalizeCampaignIssueScopeSnapshot(input: Record<string, unknown>): CampaignIssueScopeSnapshot | null {
+  if (!validIssueAdmission(input.issueAdmission) || !validIssueLineage(input.lineage)) return null;
+  if (input.verifiedPublications !== undefined && (!Array.isArray(input.verifiedPublications) || input.verifiedPublications.length > 100 ||
+      input.verifiedPublications.some((p) => !p || typeof p !== "object" || Object.keys(p).length !== 2 || typeof p.publicationOccurrenceId !== "string" ||
+        !p.publicationOccurrenceId || p.publicationOccurrenceId.length > 256 || !Number.isSafeInteger(p.issue) || p.issue < 1 ||
+        !Array.isArray(input.additions) || !input.additions.includes(p.issue)) ||
+      new Set(input.verifiedPublications.map((p) => p.publicationOccurrenceId)).size !== input.verifiedPublications.length)) return null;
   if (typeof input.repository !== "string" || !/^[\w.-]+\/[\w.-]+$/u.test(input.repository) || input.repository.length > 256 ||
       !Number.isSafeInteger(input.expectedRevision) || (input.expectedRevision as number) < 0 ||
       !boundedIssueNumbers(input.before) || !boundedIssueNumbers(input.additions) || !boundedIssueNumbers(input.removals) ||
@@ -51,5 +57,29 @@ export function normalizeCampaignIssueScopeSnapshot(input: Record<string, unknow
   }
   return { category: "campaign_issue_scope", repository: input.repository.toLowerCase(), expectedRevision: input.expectedRevision as number,
     before: [...input.before].sort((a,b) => a-b), additions: [...input.additions].sort((a,b) => a-b), removals: [...input.removals].sort((a,b) => a-b),
-    explanation: input.explanation, affectedAssignments, activeChildren, affectedDecisions: [...input.affectedDecisions] as string[] };
+    explanation: input.explanation, affectedAssignments, activeChildren, affectedDecisions: [...input.affectedDecisions] as string[],
+    ...(input.lineage === undefined ? {} : { lineage: structuredClone(input.lineage) as CampaignIssueScopeSnapshot["lineage"] }),
+    ...(input.issueAdmission === undefined ? {} : { issueAdmission: structuredClone(input.issueAdmission) as CampaignIssueScopeSnapshot["issueAdmission"] }),
+    ...(input.verifiedPublications === undefined ? {} : { verifiedPublications: structuredClone(input.verifiedPublications) as CampaignIssueScopeSnapshot["verifiedPublications"] }) };
+}
+
+export function validIssueAdmission(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!value || typeof value !== "object") return false;
+  const v = value as Record<string, unknown>;
+  const p = v.publicationAuthority as Record<string, unknown> | undefined;
+  return Object.keys(v).every((key) => ["boundaryRevision", "evidenceDigest", "publicationAuthority"].includes(key)) &&
+    (p === undefined || Boolean(p && typeof p === "object" && Object.keys(p).length === 2 &&
+      typeof p.authorizedByUserId === "string" && p.authorizedByUserId.length > 0 && p.authorizedByUserId.length <= 256 &&
+      typeof p.objectiveDigest === "string" && /^[0-9a-f]{64}$/u.test(p.objectiveDigest))) &&
+    Number.isSafeInteger(v.boundaryRevision) && (v.boundaryRevision as number) > 0 &&
+    typeof v.evidenceDigest === "string" && /^[0-9a-f]{64}$/u.test(v.evidenceDigest);
+}
+
+export function validIssueLineage(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!value || typeof value !== "object") return false;
+  const v = value as Record<string, unknown>;
+  return Object.keys(v).length === 2 && (v.kind === "epic" && Number.isSafeInteger(v.epic) && (v.epic as number) > 0 ||
+    v.kind === "follow_up" && typeof v.publicationOccurrenceId === "string" && v.publicationOccurrenceId.length > 0 && v.publicationOccurrenceId.length <= 256);
 }

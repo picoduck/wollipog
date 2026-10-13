@@ -19,6 +19,13 @@ export interface CampaignAuthorityBoundary {
   /** Exact human-selected policy asks eligible for one-time delegation. Built-in rules and
    * escalations requiring a human cannot be named here to override their enforcement. */
   delegatablePolicyIds: string[];
+  /** Human-established issue-write boundary. Omission preserves human-only scope/closure. */
+  issueAuthority?: {
+    epics: number[];
+    relatedFollowUps: boolean;
+    maxIssues: number;
+    closureReasons: Array<"completed" | "not_planned">;
+  };
 }
 
 export type CampaignControl = { mode: "custom" } | { mode: "full_control"; boundary: CampaignAuthorityBoundary };
@@ -39,7 +46,9 @@ const operations: CampaignAuthorityOperation[] = ["implementation_question", "pr
  * sensitive-effect evaluation; this value is never a consumable grant. */
 export function campaignWorkflowOwner(control: CampaignControl | undefined, decisions: ParentControlDecisionPolicy,
   category: WorkflowDecisionCategory, supported: boolean): "human" | "orchestrator" {
-  if (!supported || category === "issue_closure" || category === "campaign_issue_scope") return "human";
+  if (!supported) return "human";
+  if (category === "issue_closure" || category === "campaign_issue_scope") return control?.mode === "full_control" &&
+    validCampaignControl(control) && control.boundary.issueAuthority && control.boundary.operations.includes(category) ? "orchestrator" : "human";
   if (!control || control.mode === "custom") return decisions[category];
   return validCampaignControl(control) && control.boundary.operations.includes(category) ? "orchestrator" : "human";
 }
@@ -52,7 +61,8 @@ export function validCampaignControl(value: unknown): value is CampaignControl {
   const b = control.boundary;
   const bounded = (v: unknown, max: number) => typeof v === "string" && v.trim().length > 0 && v.length <= max && !/[\x00-\x1f\x7f]/u.test(v);
   return Boolean(b && !Array.isArray(b) && b.version === 1 &&
-    Object.keys(b).every((key) => ["version", "revision", "issueScopeRevision", "repository", "objective", "authorizedByUserId", "authorizedAt", "operations", "delegatablePolicyIds"].includes(key)) &&
+    Object.keys(b).every((key) => ["version", "revision", "issueScopeRevision", "repository", "objective", "authorizedByUserId", "authorizedAt", "operations", "delegatablePolicyIds", "issueAuthority"].includes(key)) &&
+    (b.issueAuthority === undefined || validIssueAuthority(b.issueAuthority)) &&
     Number.isSafeInteger(b.revision) && b.revision > 0 && bounded(b.repository, 256) && /^[\w.-]+\/[\w.-]+$/u.test(b.repository) &&
     Number.isSafeInteger(b.issueScopeRevision) && b.issueScopeRevision > 0 &&
     bounded(b.objective, 4000) && bounded(b.authorizedByUserId, 256) && Number.isSafeInteger(b.authorizedAt) && b.authorizedAt > 0 &&
@@ -60,6 +70,15 @@ export function validCampaignControl(value: unknown): value is CampaignControl {
     b.operations.every((operation) => operations.includes(operation)) &&
     Array.isArray(b.delegatablePolicyIds) && b.delegatablePolicyIds.length <= 100 &&
     new Set(b.delegatablePolicyIds).size === b.delegatablePolicyIds.length && b.delegatablePolicyIds.every((id) => bounded(id, 256)));
+}
+
+function validIssueAuthority(value: NonNullable<CampaignAuthorityBoundary["issueAuthority"]>): boolean {
+  return Boolean(value && Object.keys(value).every((key) => ["epics", "relatedFollowUps", "maxIssues", "closureReasons"].includes(key)) &&
+    Array.isArray(value.epics) && value.epics.length <= 100 && new Set(value.epics).size === value.epics.length &&
+    value.epics.every((n) => Number.isSafeInteger(n) && n > 0) && typeof value.relatedFollowUps === "boolean" &&
+    Number.isSafeInteger(value.maxIssues) && value.maxIssues > 0 && value.maxIssues <= 100 &&
+    Array.isArray(value.closureReasons) && new Set(value.closureReasons).size === value.closureReasons.length &&
+    value.closureReasons.every((reason) => ["completed", "not_planned"].includes(reason)));
 }
 
 // Screen actual requests to disclose credentials, authenticate, administer identity or change
@@ -179,8 +198,11 @@ export function resolveCampaignAuthority(input: {
   if (Boolean(request) === Boolean(input.snapshot)) return result("human", "human_required", "unverified_intent");
   if (!input.supported) return result("human", "human_required", "unsupported_provider");
   if (input.humanRequired) return result("human", "human_required", "human_required_rule");
-  // These contracts are intentionally still enforced by their separate human-only routes.
-  if (category === "issue_closure" || category === "campaign_issue_scope") return result("human", "human_required", "protected_request");
+  // These categories need a separate server-derived bounded issue admission. Custom retains
+  // human ownership, and a boundary operation alone cannot make a proposal eligible.
+  if ((category === "issue_closure" || category === "campaign_issue_scope") &&
+      !(input.control?.mode === "full_control" && validCampaignControl(input.control) && input.control.boundary.issueAuthority &&
+        input.snapshot && "issueAdmission" in input.snapshot && input.snapshot.issueAdmission)) return result("human", "human_required", "protected_request");
   if (!input.control || input.control.mode === "custom") {
     const eligible = !input.root && (category ? campaignWorkflowOwner(input.control, input.decisions, category, true) === "orchestrator" : Boolean(request && parentControlRequestEligible(input.parentControl, request)));
     return result(eligible ? "orchestrator" : "human", "custom_policy", "custom_owner");
@@ -188,6 +210,8 @@ export function resolveCampaignAuthority(input: {
   if (!validCampaignControl(input.control)) return result("human", "human_required", "outside_boundary");
   if (request?.standingAdmissionFailure) return result("human", "human_required", "provider_delivery_unavailable");
   const boundary = input.control.boundary;
+  if (category === "follow_up_issue_publication" && boundary.issueAuthority &&
+      !(input.snapshot && "issueAdmission" in input.snapshot && input.snapshot.issueAdmission)) return result("human", "human_required", "unverified_intent");
   if (!boundary.operations.includes(operation) || (input.snapshot && "repository" in input.snapshot &&
       input.snapshot.repository.toLowerCase() !== boundary.repository.toLowerCase())) return result("human", "human_required", "outside_boundary");
   if (!input.trustedSource || input.trustedSource === "provider_elicitation") return result("human", "human_required", "unverified_intent");
@@ -214,7 +238,7 @@ export function resolveCampaignAuthority(input: {
 export function campaignAuthorityPreflight(control: CampaignControl | undefined, driver: string, protocolVersion: number | null | undefined): { supported: boolean; reason?: string; humanRequiredRequests?: string[] } {
   if (!control || control.mode === "custom") return { supported: true };
   if (!validCampaignControl(control)) return { supported: false, reason: "Full Control requires a valid human-authorized boundary." };
-  if ((protocolVersion ?? 0) < 215 || !["codex-app-server", "claude-code"].includes(driver)) return { supported: false, reason: "This provider path cannot enforce the Full Control authority contract; use Custom or update the runner." };
+  if ((protocolVersion ?? 0) < (control.boundary.issueAuthority ? 217 : 215) || !["codex-app-server", "claude-code"].includes(driver)) return { supported: false, reason: "This provider path cannot enforce the Full Control authority contract; use Custom or update the runner." };
   return { supported: true, humanRequiredRequests: ["secrets_and_sign_in", "persistent_permissions", "provider_access_expansion", "external_elicitation", "root_forms_without_suggested_answers", "unverified_tool_effects", "git_execution_without_bounded_effect_proof", "script_execution_without_bounded_effect_proof", "human_required_rules",
     ...(driver === "claude-code" ? ["relative_shell_commands_without_verified_cwd"] : [])] };
 }

@@ -14108,6 +14108,29 @@ export class ControlPlaneDb {
     return [...roots].flatMap((id) => { const root=this.getSession(id); return root?.orchestratorPolicy?.issueScope ? [root] : []; });
   }
 
+  campaignPublicationReservations(rootId: string): WorkflowDecisionView[] {
+    return (this.stmt("SELECT occurrence_id FROM workflow_decisions WHERE controlling_session_id=? AND category='follow_up_issue_publication' AND status IN ('pending','approved','consumed')")
+      .all(rootId) as Array<{ occurrence_id: string }>).flatMap((row) => {
+      const decision = this.workflowDecisionByOccurrence(row.occurrence_id);
+      return decision?.resourceSnapshot.category === "follow_up_issue_publication" && decision.resourceSnapshot.issueAdmission ? [decision] : [];
+    });
+  }
+
+  admittedCampaignPublicationIssue(rootId: string, publicationOccurrenceId: string): number | null {
+    const row = this.stmt(`SELECT json_extract(proof.value, '$.issue') AS issue FROM workflow_decisions decision,
+        json_each(decision.resource_snapshot, '$.verifiedPublications') proof
+      WHERE decision.controlling_session_id=? AND decision.category='campaign_issue_scope' AND decision.status='consumed'
+        AND json_extract(proof.value, '$.publicationOccurrenceId')=?
+      UNION ALL SELECT json_extract(resource_snapshot, '$.additions[0]') AS issue FROM workflow_decisions
+      WHERE controlling_session_id=? AND category='campaign_issue_scope' AND status='consumed'
+        AND json_type(resource_snapshot, '$.issueAdmission')='object'
+        AND json_extract(resource_snapshot, '$.lineage.kind')='follow_up'
+        AND json_extract(resource_snapshot, '$.lineage.publicationOccurrenceId')=?
+        AND json_array_length(resource_snapshot, '$.additions')=1 LIMIT 1`)
+      .get(rootId, publicationOccurrenceId, rootId, publicationOccurrenceId) as { issue: number } | undefined;
+    return row?.issue ?? null;
+  }
+
   campaignSharesRepositoryWorkspace(root: SessionView, member: Pick<SessionView, "id" | "runnerId" | "workspaceId">): boolean {
     const path = (s: Pick<SessionView, "id" | "runnerId" | "workspaceId">) => this.getAdHocWorkspacePath(s.id) ??
       (s.workspaceId ? this.getWorkspacePath(s.runnerId, s.workspaceId) : null);
@@ -14115,21 +14138,30 @@ export class ControlPlaneDb {
   }
 
   /** Approval, authority update, and consumption share a transaction: a replay cannot widen scope. */
-  approveCampaignIssueScope(occurrenceId: string, userId: string, now: number): WorkflowDecisionView | null {
+  approveCampaignIssueScope(occurrenceId: string, userId: string, now: number, agentSessionId?: string): WorkflowDecisionView | null {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const decision = this.workflowDecisionByOccurrence(occurrenceId);
       const snapshot = decision?.resourceSnapshot;
       const root = decision ? this.getSession(decision.sessionId) : null;
       const policy = root?.orchestratorPolicy;
-      if (!decision || decision.status !== "pending" || decision.authority !== "human" || snapshot?.category !== "campaign_issue_scope" ||
+      if (!decision || decision.status !== "pending" || decision.authority !== (agentSessionId ? "orchestrator" : "human") || snapshot?.category !== "campaign_issue_scope" ||
           !root || !policy || (policy.issueScope?.revision ?? 0) !== snapshot.expectedRevision ||
           JSON.stringify([...(policy.issueNumbers ?? [])].sort((a,b) => a-b)) !== JSON.stringify(snapshot.before)) {
         this.db.exec("ROLLBACK"); return null;
       }
+      const boundary = policy.control?.mode === "full_control" ? policy.control.boundary : null;
+      if (agentSessionId && (!boundary?.issueAuthority || !snapshot.issueAdmission || agentSessionId !== root.id ||
+          snapshot.issueAdmission.boundaryRevision !== boundary.revision || decision.policyRevision !== boundary.revision ||
+          boundary.issueScopeRevision !== snapshot.expectedRevision || userId !== boundary.authorizedByUserId ||
+          snapshot.before.length + snapshot.additions.length - snapshot.removals.length > boundary.issueAuthority.maxIssues)) {
+        this.db.exec("ROLLBACK"); return null;
+      }
       const scope: import("@wollipog/protocol").CampaignIssueScope = { repository: snapshot.repository,
         issueNumbers: [...snapshot.before.filter((n) => !snapshot.removals.includes(n)), ...snapshot.additions].sort((a,b) => a-b),
-        revision: snapshot.expectedRevision + 1, authorizedByUserId: userId, authorizedAt: now };
+        revision: snapshot.expectedRevision + 1, authorizedByUserId: userId,
+        authorizedAt: agentSessionId ? policy.issueScope!.authorizedAt : now,
+        ...(agentSessionId ? { disposition: { bySessionId: agentSessionId, at: now, occurrenceId, boundaryRevision: boundary!.revision } } : {}) };
       for (const id of [root.id, ...this.campaignDescendantIds(root.id)]) {
         const memberPolicy = this.sessionOrchestratorPolicy(id);
         if (!memberPolicy) continue;
@@ -14139,10 +14171,16 @@ export class ControlPlaneDb {
         const memberScope = this.campaignSharesRepositoryWorkspace(root, member) ? scope : { ...scope, issueNumbers: [] };
         memberPolicy.issueNumbers = [...memberScope.issueNumbers];
         memberPolicy.issueScope = memberScope;
+        if (agentSessionId && memberPolicy.control?.mode === "full_control") memberPolicy.control.boundary.issueScopeRevision = scope.revision;
         this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(memberPolicy), now, id);
       }
-      if (!this.resolveWorkflowDecision(occurrenceId, "human", "approved", now) || !this.consumeWorkflowDecision(occurrenceId, now)) {
+      if (!this.resolveWorkflowDecision(occurrenceId, decision.authority, "approved", now) || !this.consumeWorkflowDecision(occurrenceId, now)) {
         throw new Error("Scope approval was resolved concurrently");
+      }
+      for (const stale of this.unconsumedWorkflowDecisionsForController(root.id)) {
+        this.stmt("UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?) WHERE occurrence_id=? AND status IN ('pending','approved')").run(now, stale.occurrenceId);
+        this.retireWorkflowDecisionResume(stale.occurrenceId, now);
+        this.revokeUiEvidenceReviewReceipts(stale.occurrenceId, now);
       }
       this.db.exec("COMMIT");
       return this.workflowDecisionByOccurrence(occurrenceId);

@@ -879,6 +879,9 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
         category: { const: "follow_up_issue_publication" }, repository: { type: "string" },
         sanitizedTitle: { type: "string" }, sanitizedBody: { type: "string" },
         labels: { type: "array", maxItems: 32, items: { type: "string" } },
+        recommendationId: { type: "string", description: "Root Full Control related recommendation; the server inspects sanitation, duplicates, lineage and capacity." },
+        issueAdmission: { type: "object", properties: { boundaryRevision: { type: "integer" }, evidenceDigest: { type: "string" },
+          publicationAuthority: { type: "object", properties: { authorizedByUserId: { type: "string" }, objectiveDigest: { type: "string" } }, required: ["authorizedByUserId", "objectiveDigest"], additionalProperties: false } }, required: ["boundaryRevision", "evidenceDigest"], additionalProperties: false, description: "Echo only the server-derived admission from get_workflow_decision when consuming." },
       },
       required: ["category", "repository", "sanitizedTitle", "sanitizedBody", "labels"], additionalProperties: false,
     },
@@ -937,11 +940,13 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "request_campaign_issue_scope_change",
-    description: "Propose exact repository-qualified issue additions and removals against the revision from get_campaign_issue_scope. Always requires an authenticated human, including under Parent Control. Human approval atomically applies and consumes the change; do not consume it yourself. Closure retains its separate human approval. Pending, denied, stale and replayed requests never widen authority.",
+    description: "Propose exact repository-qualified issue additions/removals at the current scope revision. Custom requires a human. A human-established Full Control issue boundary admits verified epic or exact published follow-up lineage within its limits. Resolution atomically applies and consumes scope; do not consume it yourself. Pending, denied, stale and replayed requests never widen authority.",
     inputSchema: { type: "object", properties: {
       requestId: { type: "string" }, expectedRevision: { type: "integer", minimum: 0 }, explanation: { type: "string", minLength: 1, maxLength: 4000 },
       additions: { type: "array", maxItems: 100, items: { type: "object", properties: { repository: { type: "string" }, number: { type: "integer", minimum: 1 } }, required: ["repository", "number"], additionalProperties: false } },
       removals: { type: "array", maxItems: 100, items: { type: "object", properties: { repository: { type: "string" }, number: { type: "integer", minimum: 1 } }, required: ["repository", "number"], additionalProperties: false } },
+      lineage: { oneOf: [ { type: "object", properties: { kind: { const: "epic" }, epic: { type: "integer", minimum: 1 } }, required: ["kind", "epic"], additionalProperties: false },
+        { type: "object", properties: { kind: { const: "follow_up" }, publicationOccurrenceId: { type: "string" } }, required: ["kind", "publicationOccurrenceId"], additionalProperties: false } ] },
     }, required: ["requestId", "expectedRevision", "explanation", "additions", "removals"], additionalProperties: false },
     handler: async (args, deps) => {
       if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
@@ -953,13 +958,14 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "request_github_issue_closure",
-    description: "Propose closing one human-authorized campaign issue. The runner derives the repository, title, issue revision, and related open PRs; the server adds active child assignments. Always asks a human, regardless of Parent Control. An already-closed issue is reported without posting a comment.",
+    description: "Propose closing one authorized campaign issue with fresh forge/conflict evidence. Custom requires a human; bounded Full Control additionally requires verified delivery and actual default-branch merges, or a recorded supported not-planned disposition. An already-closed issue is reported without posting a comment.",
     inputSchema: { type: "object", properties: {
       requestId: { type: "string" }, issue: { type: "integer", minimum: 1 },
       reason: { type: "string", enum: ["completed", "not_planned"] },
       explanation: { type: "string", minLength: 1, maxLength: 4000 },
       evidence: { type: "array", minItems: 1, maxItems: 32, items: { type: "string", minLength: 1, maxLength: 4000 } },
       comment: { type: "string", minLength: 1, maxLength: 65536 },
+      dispositionRecommendationId: { type: "string", maxLength: 256 },
     }, required: ["requestId", "issue", "reason", "explanation", "evidence"], additionalProperties: false },
     handler: async (args, deps) => {
       if (!deps.selfSessionId) return errorResult("this tool requires a session identity");

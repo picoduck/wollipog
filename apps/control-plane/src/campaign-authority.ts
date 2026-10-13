@@ -10,7 +10,7 @@ import type { HumanPrincipal } from "./identity.js";
 export function authorizeFullControl(
   principal: HumanPrincipal,
   scope: NonNullable<NonNullable<SessionView["orchestratorPolicy"]>["issueScope"]>,
-  proposal: Pick<CampaignAuthorityBoundary, "objective" | "operations" | "delegatablePolicyIds">,
+  proposal: Pick<CampaignAuthorityBoundary, "objective" | "operations" | "delegatablePolicyIds" | "issueAuthority">,
   revision: number,
   now: number,
 ): CampaignControl | null {
@@ -19,6 +19,7 @@ export function authorizeFullControl(
     objective: proposal.objective, operations: proposal.operations, delegatablePolicyIds: proposal.delegatablePolicyIds,
     version: 1, revision, issueScopeRevision: scope.revision, repository: scope.repository,
     authorizedByUserId: principal.userId, authorizedAt: now,
+    ...(proposal.issueAuthority === undefined ? {} : { issueAuthority: proposal.issueAuthority }),
   } };
   return validCampaignControl(control) ? structuredClone(control) : null;
 }
@@ -58,7 +59,11 @@ export function evaluateCampaignAuthority(
     humanRequired: pending?.humanRequired, repositoryRoot: requester.repositoryRoot });
   const repositoryBound = !pending || (controller.runnerId !== undefined && requester.runnerId === controller.runnerId &&
     controller.workspaceId !== undefined && controller.workspaceId !== null && requester.workspaceId === controller.workspaceId);
-  return full && (!campaignBoundaryCurrent({ ...controller, parentControlPolicy: policy }) || !repositoryBound)
+  const issueOperation = snapshot?.category === "campaign_issue_scope" || snapshot?.category === "issue_closure" ||
+    snapshot?.category === "follow_up_issue_publication" && full && control.boundary.issueAuthority;
+  const issueBound = !issueOperation || !full || !control.boundary.issueAuthority || Boolean(snapshot && "issueAdmission" in snapshot &&
+    snapshot.issueAdmission?.boundaryRevision === control.boundary.revision && (protocol ?? 0) >= 217 && (controllerProtocol ?? 0) >= 217);
+  return full && (!campaignBoundaryCurrent({ ...controller, parentControlPolicy: policy }) || !repositoryBound || !issueBound)
     ? { ...evaluated, owner: "human", basis: "human_required", reason: "outside_boundary" }
     : evaluated;
 }

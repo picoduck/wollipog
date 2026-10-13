@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { inspectCampaignIssueScope } from "./campaign-issue-scope.js";
+import { inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
 
 test("runner resolves native and checklist members, includes the umbrella, and never expands dependencies", async () => {
   const calls: string[] = [];
@@ -15,6 +15,30 @@ test("runner resolves native and checklist members, includes the umbrella, and n
   const result = await inspectCampaignIssueScope(run, 1);
   assert.deepEqual(result.candidates.map((c) => [c.issue.number, c.source]), [[1,"umbrella"],[2,"sub_issue"],[3,"member_checklist"]]);
   assert.ok(!calls.some((p) => p.endsWith("/99") || p.endsWith("/98")));
+});
+
+test("publication duplicate inspection covers open, closed, newest issues and search overflow", async () => {
+  const publication = {sanitizedTitle:"Related repair",sanitizedBody:"## Problem\nFailure\n## Proposed Behavior\nRepair\n## Acceptance Criteria\n- Works\n## Security and Compatibility\nNone",labels:[]};
+  for (const mode of ["clean","recent","closed","overflow","incomplete","private"]) {
+    const calls: string[] = [];
+    const match={number:123,title:"  RELATED   repair ",html_url:"https://github.com/team/repo/issues/123",state:"closed"};
+    const run=async (command:string,args:string[]) => {
+      if(command==="git") return "https://github.com/team/repo.git";
+      const recent=args.some((arg)=>arg.includes("sort=created")); calls.push(recent?"recent":"search");
+      return JSON.stringify(recent ? mode==="recent"?[match]:[] : {items:mode==="closed"?[match]:[],total_count:mode==="overflow"?101:mode==="closed"?1:0,incomplete_results:mode==="incomplete"});
+    };
+    if(mode==="clean") { assert.ok((await inspectCampaignPublication(run,publication)).publicationDigest); assert.deepEqual(calls,["recent","search"]); }
+    else await assert.rejects(inspectCampaignPublication(run,{...publication,sanitizedBody:publication.sanitizedBody+(mode==="private"?"\n/home/person/private": "")}));
+  }
+});
+
+test("follow-up scope inspects exact title, body and labels rather than trusting its issue number", async () => {
+  const publication={sanitizedTitle:"Exact",sanitizedBody:"Exact body",labels:["feature"]};
+  for(const changed of ["none","title","body","labels"]) {
+    const run=async(command:string)=>command==="git"?"https://github.com/team/repo.git":JSON.stringify({number:10,title:changed==="title"?"Changed":"Exact",body:changed==="body"?"Changed body":"Exact body",labels:[{name:changed==="labels"?"bug":"feature"}],html_url:"https://github.com/team/repo/issues/10"});
+    if(changed!=="none") await assert.rejects(inspectCampaignIssueScope(run,undefined,[10],publication));
+    else assert.equal((await inspectCampaignIssueScope(run,undefined,[10],publication)).candidates[0]!.issue.number,10);
+  }
 });
 
 test("runner fails closed on incomplete, external or excessive membership", async () => {

@@ -46,7 +46,7 @@ export function issueClosureRun(context: AgentContext, cwd: string): Run {
   })).stdout;
 }
 
-export async function inspectGithubIssueClosure(issue: number, run: Run): Promise<GithubIssueClosureInspection> {
+export async function inspectGithubIssueClosure(issue: number, run: Run, deliveryPullRequests?: Array<{number:number;headSha:string}>): Promise<GithubIssueClosureInspection> {
   if (!Number.isSafeInteger(issue) || issue < 1) throw new IssueClosureInspectionError("issue must be a positive integer");
   const repository = githubSlug((await run("git", ["remote", "get-url", "origin"])).trim());
   if (!repository) throw new IssueClosureInspectionError("Issue closure requires an exact github.com origin remote");
@@ -87,12 +87,29 @@ export async function inspectGithubIssueClosure(issue: number, run: Run): Promis
           body, updatedAt: text(pr.updatedAt) }] : [];
   }).sort((a, b) => a.number - b.number);
   const title = text(target.title);
+  const delivery: NonNullable<GithubIssueClosureInspection["delivery"]> = [];
+  if (deliveryPullRequests !== undefined) {
+    if (!deliveryPullRequests.length || deliveryPullRequests.length > 100) throw new IssueClosureInspectionError("Completed closure requires bounded actual merged PR evidence");
+    const defaultBranch = text(object(JSON.parse(await run("gh", ["api", "--hostname", "github.com", `repos/${repository}`]))).default_branch);
+    for (const ref of deliveryPullRequests) {
+      if (!Number.isSafeInteger(ref.number) || ref.number < 1 || !/^[0-9a-f]{40}$/u.test(ref.headSha)) throw new IssueClosureInspectionError("Invalid delivered PR reference");
+      const pr = object(JSON.parse(await run("gh", ["api", "--hostname", "github.com", `repos/${repository}/pulls/${ref.number}`])));
+      const mergeCommitSha = text(pr.merge_commit_sha);
+      if (pr.merged !== true || pr.state !== "closed" || pr.number !== ref.number || object(pr.head).sha !== ref.headSha ||
+          object(pr.base).ref !== defaultBranch || object(object(pr.base).repo).full_name !== canonicalRepository ||
+          !/^[0-9a-f]{40}$/u.test(mergeCommitSha)) throw new IssueClosureInspectionError("Delivery PR has not actually merged at the verified head into the default branch");
+      const comparison = object(JSON.parse(await run("gh", ["api", "--hostname", "github.com", `repos/${repository}/compare/${mergeCommitSha}...${encodeURIComponent(defaultBranch)}`])));
+      if (!["ahead", "identical"].includes(text(comparison.status))) throw new IssueClosureInspectionError("Delivery merge is not contained in the default branch");
+      delivery.push({ number: ref.number, headSha: ref.headSha, mergeCommitSha });
+    }
+  }
   const forgeDigest = createHash("sha256").update(JSON.stringify({
     repository: canonicalRepository, issue, id: text(target.id), title, body: text(target.body),
     state: target.state, updatedAt: text(target.updatedAt), assignees, labels, relevant,
   })).digest("hex");
   return { repository: canonicalRepository, issue, title, url, state: target.state as "OPEN" | "CLOSED", forgeDigest,
-    openPullRequests: relevant.map(({ number, title, url, headSha }) => ({ number, title, url, headSha })) };
+    openPullRequests: relevant.map(({ number, title, url, headSha }) => ({ number, title, url, headSha })),
+    ...(deliveryPullRequests === undefined ? {} : { delivery }) };
 }
 
 /** Called only by the trusted runner command, after CP atomically consumes the human decision.
@@ -103,10 +120,11 @@ export async function executeGithubIssueClosure(
   begin: () => boolean,
 ): Promise<GithubIssueClosureResult> {
   const result = (outcome: GithubIssueClosureResult["outcome"]) => ({ outcome, completedAt: Date.now() });
-  const current = await inspectGithubIssueClosure(snapshot.issue, run);
+  const current = await inspectGithubIssueClosure(snapshot.issue, run, snapshot.delivery?.map(({number,headSha}) => ({number,headSha})));
   if (current.repository !== snapshot.repository) return result("refused");
   if (current.state === "CLOSED") return result("already_closed");
   if (current.forgeDigest !== snapshot.forgeDigest) return result("refused");
+  if (snapshot.issueAdmission && (current.openPullRequests.length || JSON.stringify(current.delivery) !== JSON.stringify(snapshot.delivery))) return result("refused");
   if (!begin()) return result("refused");
   try {
     await run("gh", ["issue", "close", current.url, "--reason", snapshot.reason === "completed" ? "completed" : "not planned",

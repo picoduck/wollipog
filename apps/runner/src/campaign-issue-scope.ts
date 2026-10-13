@@ -1,8 +1,9 @@
-import { epicChecklistMembers, type CampaignIssueScopeView } from "@wollipog/protocol";
+import { epicChecklistMembers, campaignPublicationSafe, campaignPublicationTitle, type CampaignIssueScopeView } from "@wollipog/protocol";
+import { createHash } from "node:crypto";
 import { githubSlug } from "./git-ops.js";
 
 type Run = (command: string, args: string[]) => Promise<string>;
-export async function inspectCampaignIssueScope(run: Run, epic?: number, issues: number[] = []): Promise<{ repository: string; candidates: NonNullable<CampaignIssueScopeView["candidates"]> }> {
+export async function inspectCampaignIssueScope(run: Run, epic?: number, issues: number[] = [], publication?: { sanitizedTitle: string; sanitizedBody: string; labels: string[] }): Promise<{ repository: string; candidates: NonNullable<CampaignIssueScopeView["candidates"]> }> {
   const repository = githubSlug((await run("git", ["remote", "get-url", "origin"])).trim())?.toLowerCase();
   if (!repository) throw new Error("Campaign issue scope requires an exact github.com origin remote");
   const candidates: NonNullable<CampaignIssueScopeView["candidates"]> = [];
@@ -12,6 +13,8 @@ export async function inspectCampaignIssueScope(run: Run, epic?: number, issues:
         typeof raw.html_url !== "string" || raw.html_url.toLowerCase() !== `https://github.com/${repository}/issues/${number}`) {
       throw new Error("GitHub could not verify a repository-qualified issue");
     }
+    if (publication && (raw.title !== publication.sanitizedTitle || raw.body !== publication.sanitizedBody ||
+        !Array.isArray(raw.labels) || JSON.stringify(raw.labels.map((label: {name:string}) => label.name).sort()) !== JSON.stringify([...publication.labels].sort()))) throw new Error("Published issue payload differs from its exact authorization");
     return { title: raw.title as string, body: (raw.body ?? "") as string };
   };
   const readIssues = async (numbers: number[]) => {
@@ -47,4 +50,21 @@ export async function inspectCampaignIssueScope(run: Run, epic?: number, issues:
     candidates.push({ issue: { repository, number: issue.number }, title: issue.title, source: "member_checklist" });
   }
   return { repository, candidates };
+}
+
+/** Search both states and the latest issue page; bounded overflow cannot prove deduplication. */
+export async function inspectCampaignPublication(run: Run, publication: { sanitizedTitle: string; sanitizedBody: string; labels: string[] }): Promise<{ repository: string; publicationDigest: string }> {
+  if (!campaignPublicationSafe(publication.sanitizedTitle, publication.sanitizedBody, publication.labels)) throw new Error("Publication requires sanitized issue-reporting content");
+  const { repository } = await inspectCampaignIssueScope(run);
+  const recent = JSON.parse(await run("gh", ["api", "--hostname", "github.com", `repos/${repository}/issues?state=all&sort=created&direction=desc&per_page=100`]));
+  const search = JSON.parse(await run("gh", ["api", "--hostname", "github.com", "search/issues", "-X", "GET", "-f",
+    `q=repo:${repository} is:issue in:title ${publication.sanitizedTitle}`, "-f", "per_page=100"]));
+  if (!Array.isArray(recent) || !Array.isArray(search.items) || search.incomplete_results !== false || !Number.isSafeInteger(search.total_count) || search.total_count > 100) throw new Error("Duplicate inspection is incomplete");
+  const matches = [...recent, ...search.items].filter((row) => !row.pull_request);
+  if (matches.some((row) => typeof row.title !== "string" || !Number.isSafeInteger(row.number) || typeof row.html_url !== "string" ||
+      !row.html_url.toLowerCase().startsWith(`https://github.com/${repository}/issues/`))) throw new Error("Invalid duplicate evidence");
+  if (matches.some((row) => campaignPublicationTitle(row.title) === campaignPublicationTitle(publication.sanitizedTitle))) throw new Error("An issue already has this normalized title");
+  // Bind the payload, not volatile unrelated tracker rows. Inspection is repeated at consumption.
+  const payload = { sanitizedTitle: publication.sanitizedTitle, sanitizedBody: publication.sanitizedBody, labels: publication.labels };
+  return { repository, publicationDigest: createHash("sha256").update(JSON.stringify(payload)).digest("hex") };
 }
