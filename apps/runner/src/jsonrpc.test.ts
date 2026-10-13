@@ -150,8 +150,9 @@ test("a discarded oversized record fails only the requests that opted in, withou
   const ordinarySent = JSON.parse(String(stdin.read()).trim());
 
   stdout.write(`${JSON.stringify({ id: 1, result: { secret: "x".repeat(256) } })}\n`);
-  await assert.rejects(sensitive, (err: { code?: number; message?: string; discardedRecord?: boolean; transportFailure?: boolean; requestTimeout?: boolean }) => {
+  await assert.rejects(sensitive, (err: { code?: number; message?: string; discardedRecord?: boolean; transportFailure?: boolean; requestTimeout?: boolean; method?: string }) => {
     assert.equal(err.discardedRecord, true);
+    assert.equal(err.method, "thread/resume");
     assert.equal(err.transportFailure, true);
     assert.equal(err.requestTimeout, undefined);
     assert.equal(err.message, "discarded an oversized JSON-RPC record while awaiting thread/resume");

@@ -22,6 +22,8 @@ export interface RpcError {
   /** Local-only marker: an oversized stdout record was discarded while this request was pending,
    * so its response may never arrive. Set only for requests that opted into failOnDiscardedRecord. */
   discardedRecord?: true;
+  /** Local-only: the request a deadline or discarded-record rejection belongs to. */
+  method?: string;
   /** Local-only marker: the request was refused before anything was written to the transport, so
    * the agent provably never saw it. Absent whenever a write may have happened. */
   notSent?: true;
@@ -130,6 +132,7 @@ export class JsonRpcPeer {
         message: `request deadline exceeded (cannot call ${method})`,
         requestTimeout: true,
         notSent: true,
+        method,
       });
     }
     const id = this.nextId++;
@@ -149,6 +152,7 @@ export class JsonRpcPeer {
             code: -32002,
             message: `request deadline exceeded (${method})`,
             requestTimeout: true,
+            method,
           });
         }, Math.min(remainingMs, 2_147_483_647));
       }
@@ -183,6 +187,7 @@ export class JsonRpcPeer {
         message: `discarded an oversized JSON-RPC record while awaiting ${p.method}`,
         transportFailure: true,
         discardedRecord: true,
+        method: p.method,
       });
     }
   }

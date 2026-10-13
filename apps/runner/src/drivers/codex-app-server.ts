@@ -612,17 +612,29 @@ export class CodexAppServerDriver implements Driver {
     this.initializationRequestTimeoutMs = deps.initializationRequestTimeoutMs ?? CODEX_INITIALIZATION_REQUEST_TIMEOUT_MS;
   }
 
-  /** Send one launch handshake request under the initialization bound (#3099). Provider errors pass
-   * through unchanged; a timeout or discarded record becomes an error naming only the method. */
-  private async initializationRequest<T>(peer: JsonRpcPeer, method: string, params: Json): Promise<T> {
-    const timeoutMs = this.initializationRequestTimeoutMs;
-    try {
-      return await peer.request<T>(method, params, { deadlineAt: Date.now() + timeoutMs, failOnDiscardedRecord: true });
-    } catch (error) {
-      if ((error as RpcError)?.requestTimeout) throw new CodexAppServerInitializationStalledError(method, "timeout", timeoutMs);
-      if ((error as RpcError)?.discardedRecord) throw new CodexAppServerInitializationStalledError(method, "oversized_record", timeoutMs);
-      throw error;
+  /** Send one launch handshake request under the initialization bound (#3099). This returns the
+   * peer's own promise, unwrapped: the peer settles a response before it dispatches notifications
+   * that followed it in the same chunk, and any intermediate continuation would let those run before
+   * the caller installs the thread they belong to. Map failures with initializationFailure. */
+  private initializationRequest<T>(peer: JsonRpcPeer, method: string, params: Json): Promise<T> {
+    return peer.request<T>(method, params, {
+      deadlineAt: Date.now() + this.initializationRequestTimeoutMs,
+      failOnDiscardedRecord: true,
+    });
+  }
+
+  /** A timed-out or discarded handshake request becomes an error naming only its method. Provider
+   * errors pass through unchanged. */
+  private initializationFailure(error: unknown): unknown {
+    const rpc = error as RpcError | undefined;
+    if (!rpc?.method) return error;
+    if (rpc.requestTimeout) {
+      return new CodexAppServerInitializationStalledError(rpc.method, "timeout", this.initializationRequestTimeoutMs);
     }
+    if (rpc.discardedRecord) {
+      return new CodexAppServerInitializationStalledError(rpc.method, "oversized_record", this.initializationRequestTimeoutMs);
+    }
+    return error;
   }
 
   get pid(): number | undefined {
@@ -934,7 +946,7 @@ export class CodexAppServerDriver implements Driver {
       if (this.opts.isolation?.backend === "wsl-bwrap") {
         await waitForWslProviderAttemptTeardown(child, this.kill);
       }
-      throw error;
+      throw this.initializationFailure(error);
     }
     this.serverIdentity = diagnosticValue(initialized?.userAgent);
     peer.notify("initialized", {});
@@ -1024,7 +1036,8 @@ export class CodexAppServerDriver implements Driver {
           ...configuredServiceTier(this.config, this.opts.capabilities),
         });
       }
-    } catch (err) {
+    } catch (caught) {
+      const err = this.initializationFailure(caught);
       if (err instanceof CodexAppServerResumeError) throw err;
       if (resumeId) throw resumeError(resumeId, err);
       throw err;

@@ -4843,3 +4843,44 @@ test("a successful launch handshake carries the bound without changing its reque
     driver.dispose();
   }
 });
+
+for (const resumeId of [undefined, "thread-held"] as const) {
+  test(`a ${resumeId ? "thread/resume" : "thread/start"} response still precedes thread settings sent in the same chunk (#3099)`, async () => {
+    const h = makeHarness(resumeId ? { resumeId } : {});
+    const threadId = resumeId ?? "thread-new";
+    const toServer = new PassThrough();
+    const fromServer = new PassThrough();
+    const peer = new JsonRpcPeer(toServer, fromServer);
+    toServer.setEncoding("utf8");
+    let buffered = "";
+    toServer.on("data", (chunk: string) => {
+      buffered += chunk;
+      for (let index = buffered.indexOf("\n"); index >= 0; index = buffered.indexOf("\n")) {
+        const message = JSON.parse(buffered.slice(0, index));
+        buffered = buffered.slice(index + 1);
+        if (message.id === undefined) continue;
+        if (message.method === "thread/read") {
+          fromServer.write(JSON.stringify({ id: message.id, result: { thread: { id: threadId, status: { type: "idle" } } } }) + "\n");
+        } else if (message.method === "thread/start" || message.method === "thread/resume") {
+          // The response and the settings notification that follows it arrive in one later stdout
+          // chunk, as from a real child process (a synchronous reply would settle before the await).
+          setImmediate(() => fromServer.write(
+            JSON.stringify({ id: message.id, result: { thread: { id: threadId } } }) + "\n" +
+            JSON.stringify({ method: "thread/settings/updated", params: { threadId, threadSettings: { serviceTier: "flex" } } }) + "\n",
+          ));
+        } else {
+          fromServer.write(JSON.stringify({ id: message.id, result: {} }) + "\n");
+        }
+      }
+    });
+    (h.driver as any).registerHandlers(peer);
+    (h.driver as any).peer = peer;
+    try {
+      assert.equal(await h.driver.newSession("/tmp/work"), threadId);
+      await waitForCondition(() => h.serviceTiers.length > 0);
+      assert.deepEqual(h.serviceTiers, ["flex"], "the notification is attributed to the thread its response established");
+    } finally {
+      h.driver.dispose();
+    }
+  });
+}
