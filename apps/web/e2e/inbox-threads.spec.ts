@@ -54,7 +54,8 @@ test("a family sorts as one unit with the parent first, children indent under it
   await expect(page.locator(".inbox-row-shell.stacked")).toHaveCount(0);
   const parent = parentRow(page);
   await expect(parent.locator(".inbox-thread-toggle")).toHaveAttribute("aria-label", "Collapse Thread");
-  await expect(parent.locator(".inbox-thread-family-text")).toHaveText("4 Children · Needs Your Input · 1 Working");
+  await expect(parent.locator(".inbox-thread-family-text")).toHaveText("4 Children · Needs Your Input");
+  await expect(parent.locator(".inbox-thread-working")).toHaveText("1 Working");
   await expect(parent.locator(".inbox-thread-family")).toHaveClass(/waiting/);
   await expect(parent.locator(".inbox-thread-dot")).toHaveCount(4);
   await expect(page.locator(".inbox-row-shell.thread-child")).toHaveCount(4);
@@ -88,7 +89,8 @@ test("t, Shift+T, p, and the arrows drive the thread, the chevron is the pointer
   await list.press("t");
   await expect(page.locator(".inbox-row-shell.thread-child")).toHaveCount(0);
   await expect(parentRow(page).locator(".inbox-thread-toggle")).toHaveAttribute("aria-expanded", "false");
-  await expect(parentRow(page).locator(".inbox-thread-family-text")).toHaveText("4 Children · Needs Your Input · 1 Working");
+  await expect(parentRow(page).locator(".inbox-thread-family-text")).toHaveText("4 Children · Needs Your Input");
+  await expect(parentRow(page).locator(".inbox-thread-working")).toHaveText("1 Working");
   await page.screenshot({ path: `${EVIDENCE}/desktop-collapsed.png`, fullPage: true });
   await page.reload();
   await expect(page.locator(".page-tabs .tabs-bar, .sessions-app-bar")).toBeVisible();

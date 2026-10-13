@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import type { SessionReminderView, SessionView } from "@wollipog/protocol";
 import { ACTIVITY_BUCKET_MS, recordSessionActivity, type SessionActivity } from "../activity.js";
 import { InboxList, type InboxListEntry } from "../components/InboxList.js";
-import { threadInboxRows } from "../inbox.js";
+import { sortInboxSessions, threadInboxRows } from "../inbox.js";
 import "../styles.css";
 
 /**
@@ -16,7 +16,8 @@ import "../styles.css";
  * The list's own props stand in for the store: the row clock, each row's activity, the stalled set,
  * selection and unread. `?theme=light|dark`, `?density=comfortable`, `?selected=<id>` (default
  * `session-selected`), `?selectedUnread=1` to make the selected row unread too, `?listWidth=<px>` for a
- * narrow list, and `?focus=1` to put keyboard focus in the list.
+ * narrow list, `?focus=1` to put keyboard focus in the list, and `?sort=1` to apply the Sessions
+ * page's pinned-first ordering instead of the fixed status-layout inventory order.
  *
  * `?family=1` leads with a thread family (#2215): a running parent with a waiting, a stalled, a
  * running and a completed child, threaded by `threadInboxRows()` as InboxView threads them, and its
@@ -147,6 +148,7 @@ const FAMILY_ROWS: readonly InboxListEntry[] = [
       status: "running", lastEventAt: SESSION_ROWS_NOW })) : []),
 ];
 const STALLED = new Set(["session-stalled", "family-stalled"]);
+const PINNED = new Set(["session-running"]);
 
 const ACTIVITY = new Map<string, SessionActivity>([
   ["family-parent", activityAt(1, 2, 4, 9)],
@@ -169,7 +171,13 @@ function SessionRows() {
   const rows = SESSION_ROWS.map((entry) => QUERY.get("selectedUnread") && entry.session.id === selected
     ? { ...entry, unread: true }
     : entry);
-  const entries = FAMILY ? threadInboxRows([...FAMILY_ROWS, ...rows], collapsed, STALLED) : rows;
+  const sourceRows = FAMILY ? [...FAMILY_ROWS, ...rows] : rows;
+  const rowsById = new Map(sourceRows.map((entry) => [entry.session.id, entry]));
+  const orderedRows = QUERY.get("sort") === "1"
+    ? sortInboxSessions(sourceRows.map((entry) => entry.session), PINNED, STALLED)
+      .map((ordered) => rowsById.get(ordered.id)!)
+    : sourceRows;
+  const entries = FAMILY ? threadInboxRows(orderedRows, collapsed, STALLED) : orderedRows;
   const toggleThread = (sessionId: string) => setCollapsed((current) => {
     const next = new Set(current);
     if (!next.delete(sessionId)) next.add(sessionId);
@@ -181,7 +189,7 @@ function SessionRows() {
         <InboxList
           entries={entries}
           selectedSessionId={selected}
-          pinnedSessionIds={new Set(["session-running"])}
+          pinnedSessionIds={PINNED}
           activityBySession={ACTIVITY}
           stalledSessionIds={STALLED}
           activityNow={SESSION_ROWS_NOW}
