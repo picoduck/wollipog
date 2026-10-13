@@ -155,11 +155,11 @@ test("an invalid number blocks Save with a count, and a failed save keeps the dr
   await expect(limit).toHaveValue("12");
 });
 
-test("with no machine advertising capabilities, the warning leads Children", async ({ page }) => {
+test("with no machine reporting models and efforts, the warning leads Children", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto("/settings-rows-e2e.html?theme=light&section=orchestrator&orchestrator=unavailable");
   const notice = page.locator(".settings-group-head + .notice.t-warning");
-  await expect(notice).toContainText("No current Agent Harness installation advertises child model and effort capabilities.");
+  await expect(notice).toContainText("No connected machine reports which models and efforts child agents can use.");
   await expect(notice.getByRole("link", { name: "Open Connections" })).toBeVisible();
   await expect(page.getByRole("button", { name: /^Child Model:/ })).toHaveAttribute("aria-disabled", "true");
   await expect(page.getByRole("button", { name: /^Child Effort:/ })).toHaveAttribute("aria-disabled", "true");

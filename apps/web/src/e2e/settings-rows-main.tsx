@@ -261,7 +261,7 @@ const harnessDefaultsTransport: ApiTransport = {
           capabilities: {
             harnesses: [], models: [], effortLevels: [], supportedPairs: [],
             installations: 0, compatibleInstallations: 0, status: "unavailable",
-            reason: "No current Agent Harness installation advertises child model and effort capabilities. Connect or update a runner, then retry.",
+            reason: "No connected machine reports which models and efforts child agents can use. Connect a machine or update Wollipog on it in Connections, then try again.",
           },
         }), { status: 200, headers: { "content-type": "application/json" } });
       }

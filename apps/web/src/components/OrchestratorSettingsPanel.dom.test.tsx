@@ -311,7 +311,7 @@ test("a rejected save turns the bar into its error state with Try Again and keep
 
 test("with no installation, a warning notice leads Children and the model and effort selects say why they are disabled", async () => {
   const current = settings();
-  const reason = "No current Agent Harness installation advertises child model and effort capabilities. Connect or update a runner, then retry.";
+  const reason = "No connected machine reports which models and efforts child agents can use. Connect a machine or update Wollipog on it in Connections, then try again.";
   current.capabilities = {
     harnesses: [], models: [], effortLevels: [], supportedPairs: [],
     installations: 0, compatibleInstallations: 0, status: "unavailable", reason,
