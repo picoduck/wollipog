@@ -601,6 +601,9 @@ export function BehaviorPanel({
   const inputHeadingRef = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
     if (focus?.target !== "keyboard-shortcuts") return;
+    // A dialog open over the page keeps its focus: Back onto an old Keyboard entry with the
+    // reference open must not move focus behind the dialog, where Tab would wander the page.
+    if (document.activeElement?.closest('[aria-modal="true"]')) return;
     // Where the row is withheld, the group it would be in.
     (shortcutsRef.current ?? inputHeadingRef.current)?.focus();
   }, [focus]);

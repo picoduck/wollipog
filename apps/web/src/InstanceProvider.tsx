@@ -22,6 +22,7 @@ import {
 import { DEVICE_TOKEN_CHANGED_EVENT, deviceToken } from "./device-token.js";
 import {
   DesktopInstanceNavigation,
+  holdRedirectFocus,
   instanceRouteFromPath,
   instanceViewPath,
   isInstanceScopedPath,
@@ -272,6 +273,8 @@ export function InstanceProvider({
       if (!mountedRef.current || generation !== generationRef.current) return;
       const destination = route ?? loadLastInstanceView(profile.id);
       const path = instanceViewPath(profile.id, destination);
+      // The store reads the canonical address, which no longer names a redirect's focus target.
+      holdRedirectFocus(profile.id, destination);
       if (replace) window.history.replaceState(window.history.state, "", path);
       else if (`${window.location.pathname}${window.location.search}` !== path) {
         window.history.pushState(window.history.state, "", path);
@@ -346,6 +349,7 @@ export function InstanceProvider({
         ?? viewFromPath(window.location.pathname, window.location.search)
         ?? loadLastInstanceView(profile.id);
       const canonical = instanceViewPath(profile.id, legacy);
+      holdRedirectFocus(profile.id, legacy);
       if (`${window.location.pathname}${window.location.search}` !== canonical || window.location.hash) {
         window.history.replaceState(window.history.state, "", canonical);
       }

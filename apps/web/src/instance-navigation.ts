@@ -45,6 +45,24 @@ export function instanceRouteFromPath(pathname: string, search = ""): InstanceRo
   return { instanceId, view };
 }
 
+/**
+ * A redirect's focus target (#3023) that `InstanceProvider` canonicalized before the store first read
+ * the address: the canonical route no longer says what to focus. Held for that one read only.
+ */
+let heldRedirect: { path: string; view: View } | null = null;
+
+/** Hold `view`'s focus target for the store's first read of `instanceId`'s canonical route. */
+export function holdRedirectFocus(instanceId: string, view: View): void {
+  heldRedirect = view.name === "settings" && view.focus ? { path: instanceViewPath(instanceId, view), view } : null;
+}
+
+/** The held view, if it is for exactly this address; the hold ends either way. */
+function takeHeldRedirect(path: string): View | null {
+  const held = heldRedirect;
+  heldRedirect = null;
+  return held?.path === path ? held.view : null;
+}
+
 export function isInstanceScopedPath(pathname: string): boolean {
   return pathname.startsWith("/instances/");
 }
@@ -81,10 +99,12 @@ export class DesktopInstanceNavigation implements ViewNavigation {
 
   current(): View {
     const scoped = instanceRouteFromPath(this.target.location.pathname, this.target.location.search);
+    const held = takeHeldRedirect(`${this.target.location.pathname}${this.target.location.search}`);
     if (scoped?.instanceId === this.instanceId) {
-      this.replaceAlias(scoped.view);
-      saveLastInstanceView(this.instanceId, scoped.view);
-      return scoped.view;
+      const view = held ?? scoped.view;
+      this.replaceAlias(view);
+      saveLastInstanceView(this.instanceId, view);
+      return view;
     }
     const legacy = viewFromPath(this.target.location.pathname, this.target.location.search);
     const view = legacy ?? loadLastInstanceView(this.instanceId);

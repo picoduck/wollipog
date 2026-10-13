@@ -260,6 +260,20 @@ test("the /settings/keyboard redirect focuses Show Shortcuts, or the Input group
     assert.equal(domWindow.document.activeElement, domWindow.document.body, "a re-render of the same arrival moves nothing");
     await view.rerender({ target: "keyboard-shortcuts", activationId: 2 });
     assert.equal(domWindow.document.activeElement?.id, SHOW_SHORTCUTS_ID, "the next arrival focuses again");
+    // An arrival while a dialog holds focus (Back with the reference open) leaves focus in it.
+    const dialog = domWindow.document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    const filter = domWindow.document.createElement("input");
+    dialog.append(filter);
+    domWindow.document.body.append(dialog);
+    try {
+      filter.focus();
+      await view.rerender({ target: "keyboard-shortcuts", activationId: 3 });
+      assert.equal(domWindow.document.activeElement, filter, "focus stays in the dialog");
+    } finally {
+      dialog.remove();
+    }
   } finally {
     await view.unmount();
   }
