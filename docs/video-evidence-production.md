@@ -52,8 +52,8 @@ separate gates from live acceptance.
 
 The reviewer modules currently have no hosting entry-point caller. Artifact maintenance is
 prepared in the source tree only; the hosting process has not been changed or restarted. They do not advertise a current runner
-protocol revision or activate production. Protocol 219 is reserved for the media contract; scope uses 217 and native allowance uses 218.
-The advertised protocol remains 218 until an installed supported dispatch contract is available. #2936 owns campaignBudgetWorkerPreflight and
+protocol revision or activate production. Protocol 220 is reserved for the media contract; scope uses 217 and native allowance uses 218.
+This source-base advertises protocol218; current main advertises accounting219. Media220 remains unadvertised until an installed supported dispatch contract is available. #2936 owns campaignBudgetWorkerPreflight and
 allocateCampaignBudget; the final adapter must use durable managed admission before dispatch and
 retain live reservations until cancellation/completion settles. An external process is unsupported.
 
@@ -298,7 +298,7 @@ The controller audience must be contained within the source audience before prep
 
 The namespace preserves the existing network grant and mounts only individually verified public DNS/TLS configuration files when that grant permits networking. It never mounts the whole `/etc` tree. Their digests enter the namespace policy binding; a changed runtime file invalidates empirical proof. An executable outside the allowlisted runtime roots has an explicit `/provider` mapping for dispatch. Synthetic kernel probes verify certificate loading, forbidden-state denial and that executable mapping; no provider is launched by these tests.
 
-The original-gate bridge is now composed with core resolution and consumption behind a private registered runtime. It persists exact delegated media references separately from the controller's directly inspected image IDs, with the original snapshot/digest unchanged. Approval, its provenance and image receipt consumption commit atomically; current source/frame/criterion/verdict and historical actor proof are checked again before consumption. Corrupt proof, expired/replaced image receipt, revoked authority, unsupported peer or an absent runtime refuses the operation. The dedicated tool rejects delegated references on pre-219 peers before sending any approval. Hosting registration remains absent.
+The original-gate bridge is now composed with core resolution and consumption behind a private registered runtime. It persists exact delegated media references separately from the controller's directly inspected image IDs, with the original snapshot/digest unchanged. Approval, its provenance and image receipt consumption commit atomically; current source/frame/criterion/verdict and historical actor proof are checked again before consumption. Corrupt proof, expired/replaced image receipt, revoked authority, unsupported peer or an absent runtime refuses the operation. The dedicated tool rejects delegated references on pre-220 peers before sending any approval. Hosting registration remains absent.
 
 The existing human-only campaign control CAS can compose an evidence proposal only through trusted destination/provider disclosure lookups, deriving the authenticated author, revision and scope. Public, unknown, stale or agent-authored disclosure is refused. Budget and issue scope retain their existing contracts. No disclosure lookup is registered on the hosting service and no authority has been minted there.
 
@@ -321,7 +321,7 @@ provider/base-URL/profile override or new sender registration in this slice.
 Prepared commands now carry a permanent media purpose. The ordinary runner start path refuses
 that marker before workspace/generation/credential/driver work. Actual provider launch still needs
 its dedicated same-generation dispatcher. Terminal never-dispatched fences enter through the
-owning authenticated runner WebSocket identity, with minimum media protocol 219; agent API bodies
+owning authenticated runner WebSocket identity, with minimum media protocol 220; agent API bodies
 and claimed runner identifiers cannot authorize release. The reservation release still requires its
 same-database cancellation claim and exact source command/purpose/generation, with no usage history.
 

@@ -42,7 +42,7 @@ function harness(sourceBytes?: Buffer, validation = false) {
       capabilities: { models: [{ id: "claude-opus-5-5", displayName: "Synthetic Image Model", default: true, inputModalities: ["text", "image"] }],
         effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true, imageToolResults: true,
         permissionModes: ["default"] } }] };
-  db.registerRunner(metadata, 1, 219);
+  db.registerRunner(metadata, 1, 220);
   db.setUsageRateTable(new Map([["claude-opus-5-5", { inputCostPerToken: 0.000001, outputCostPerToken: 0.000001,
     cacheReadCostPerToken: 0.000001, cacheCreationCostPerToken: 0.000001 }]]));
   const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
@@ -95,13 +95,13 @@ function harness(sourceBytes?: Buffer, validation = false) {
     controllingSessionId: "root", category: "ui_evidence_approval", resourceKey: "synthetic", resourceSnapshot: snapshot,
     resourceDigest: sha(JSON.stringify(snapshot)), policyRevision: boundary.revision, authority: validation ? "human" : "orchestrator", createdAt: 7 }));
   const target: EvidenceReviewerTarget = { agentId: "claude", driver: "claude-code", modelId: "claude-opus-5-5",
-    providerId: "synthetic-provider", runnerId: "r", runnerProtocolVersion: 219, capabilitiesSha256: sha("synthetic capability"),
+    providerId: "synthetic-provider", runnerId: "r", runnerProtocolVersion: 220, capabilitiesSha256: sha("synthetic capability"),
     auditedAllFrameDelivery: true, reviewerNamespaceSha256: sha("synthetic namespace"), mediaOnlyNamespaceVerified: true };
   const context: ReviewerAdmissionContext = { mode: "full_control", rootSessionId: "root", childSessionId: "child",
     repository: "picoduck/wollipog", issue: 1321, issueScopeRevision: 1, policyRevision: boundary.revision,
     boundary, evidenceAuthority: evidence, uiEvidenceOwner: validation ? "human" : "orchestrator", taskEvidenceVerified: true,
     destinationConfigurationId: "synthetic-private", organizationId: human.organizationId, audienceSha256: sha("synthetic audience"),
-    controllerProtocolVersion: 219, childProtocolVersion: 219, boundaryCurrent: true, scopeCurrent: true, destinationPrivateVerified: true };
+    controllerProtocolVersion: 220, childProtocolVersion: 220, boundaryCurrent: true, scopeCurrent: true, destinationPrivateVerified: true };
   let proof: VideoProfileLiveProof | null = { proofId: "synthetic-not-live", driver: target.driver, modelId: target.modelId,
     providerId: target.providerId, capabilitiesSha256: target.capabilitiesSha256, reviewerNamespaceSha256: target.reviewerNamespaceSha256,
     oracleIsolationEvidenceSha256: sha("synthetic probe"), profile: "paced-silent-complete-frames-v1",

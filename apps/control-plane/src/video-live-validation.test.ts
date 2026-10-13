@@ -13,7 +13,7 @@ const human: AuthPrincipal = {
 };
 const target: EvidenceReviewerTarget = {
   agentId: "synthetic", driver: "codex-app-server", modelId: "synthetic-model", providerId: "synthetic-provider",
-  runnerId: "isolated", runnerProtocolVersion: 219, capabilitiesSha256: digest("audited capability"),
+  runnerId: "isolated", runnerProtocolVersion: 220, capabilitiesSha256: digest("audited capability"),
   auditedAllFrameDelivery: true, reviewerNamespaceSha256: digest("narrowed namespace"), mediaOnlyNamespaceVerified: true,
 };
 /** Fake inputs in an in-memory test database only; not actual validated runs or live receipts. */
