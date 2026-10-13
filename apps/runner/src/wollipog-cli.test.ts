@@ -687,7 +687,7 @@ test("CLI rejects explicit effort against pre-v138 control planes without creati
   assert.deepEqual(requests, ["http://cp/api/compatibility"]);
 });
 
-test("CLI sends a campaign work item at creation only to a v219 control plane (#3106)", async () => {
+test("CLI sends a campaign work item at creation only to a v220 control plane (#3106)", async () => {
   const create = ["node", "cli.js", "--wollipog-cli", "session", "create", "--runner", "r1", "--agent", "codex",
     "--workspace", "ws", "--effort", "high", "--work-item", "cwi_item", "--json"];
   const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "paired-device" };
@@ -702,7 +702,7 @@ test("CLI sends a campaign work item at creation only to a v219 control plane (#
     const code = await runWollipogCli(create, env, { stdout: (text) => { output += text; }, stderr: () => {} }, fetch);
     if (protocolVersion < RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorkItemAtCreation) {
       assert.equal(code, 1);
-      assert.match(JSON.parse(output).error, /requires v219/u, "an older control plane would ignore the item, so it is refused");
+      assert.match(JSON.parse(output).error, /requires v220/u, "an older control plane would ignore the item, so it is refused");
       assert.deepEqual(requests.map((request) => request.url), ["http://cp/api/compatibility"]);
     } else {
       assert.equal(code, 0);

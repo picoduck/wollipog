@@ -272,7 +272,7 @@ async function issueClosureCompatibilityError(deps: McpDeps): Promise<ToolResult
     ? null : errorResult("Human-approved issue closure requires control plane protocol v194; update Wollipog");
 }
 
-/** A pre-v219 control plane would ignore `campaignWorkItemId` and start the child unattributed,
+/** A pre-v220 control plane would ignore `campaignWorkItemId` and start the child unattributed,
  * so the attempt the caller asked for would silently never be recorded. Refuse by name instead. */
 async function campaignWorkItemAtCreationCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
   const required = RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorkItemAtCreation;

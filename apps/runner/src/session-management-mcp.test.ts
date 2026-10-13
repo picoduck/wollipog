@@ -1628,14 +1628,14 @@ test("create_session fails closed on explicit effort with an older control plane
   assert.deepEqual((omitted.calls[0]!.body as { config: unknown }).config, { model: "opus" });
 });
 
-test("create_session sends a campaign work item only to a v219 control plane and reports the recorded attempt (#3106)", async () => {
+test("create_session sends a campaign work item only to a v220 control plane and reports the recorded attempt (#3106)", async () => {
   const args = { runnerId: "r1", agentId: "claude-code", workspaceId: "ws", prompt: "Deliver it", campaignWorkItemId: "cwi_item" };
   const older = makeDeps(() => ({
     status: 200, body: { protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorkItemAtCreation - 1 },
   }));
   const rejected = await callTool(older.deps, "create_session", args);
   assert.equal(rejected.isError, true);
-  assert.match(resultText(rejected), /requires control plane protocol v219/u);
+  assert.match(resultText(rejected), /requires control plane protocol v220/u);
   assert.match(resultText(rejected), /no child was created/u);
   assert.deepEqual(older.calls.map((call) => call.url), [`${CP_URL}/api/compatibility`],
     "an older control plane would ignore the item, so nothing is sent");

@@ -118,7 +118,7 @@ CLI). Every record lands in the root campaign, including from a nested Orchestra
 
 - `record_campaign_plan` upserts work items by a stable key (issue or planned slice) with dispatch
   state, queue position, and dependencies; set `planComplete` once the original scope is listed.
-- Pass `campaignWorkItemId` to `create_session` (`session create --work-item`, protocol v219+) so the
+- Pass `campaignWorkItemId` to `create_session` (`session create --work-item`, protocol v220+) so the
   child's attempt is recorded before its first prompt; if the attempt cannot be recorded, no child is
   created.
 - `assign_campaign_work_item` records which descendant works on an item. Reusing a child for another
