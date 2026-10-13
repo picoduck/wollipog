@@ -7,6 +7,9 @@ import {
   type AgentDefinition,
 } from "@wollipog/protocol";
 import {
+  CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC,
+  SESSION_CODEX_MCP_MARKER,
+  additiveCodexMcpServerArg,
   additiveOrchestratorLaunchArgs,
   assertClaudeAgentAcpOrchestratorIdentity,
   CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION,
@@ -17,15 +20,19 @@ import {
   orchestratorAcpSessionMeta,
   orchestratorInstructions,
   orchestratorLaunchArgs,
+  parseCodexMcpInventory,
   projectOrchestratorPresetForPeer,
   reservedCodexMcpNameCollision,
+  sessionCodexMcpServerArg,
   stripAdditiveOrchestratorLaunchArgs,
   stripOrchestratorLaunchArgs,
+  stripSessionCodexMcpArgs,
   supportsClaudeAgentAcpOrchestrator,
   withOrchestratorAdditiveRole,
   withOrchestratorPreset,
   type OrchestratorIsolationMode,
 } from "./orchestrator-preset.js";
+import { PULL_REQUEST_WAIT_MAX_TIMEOUT_MS } from "./pull-request-wait.js";
 
 const mcp = {
   command: "/runner",
@@ -1027,4 +1034,73 @@ test("declared Codex MCP names are parsed exactly as codex-cli 0.154.0 parses -c
     isolateCodexMcpServers(JSON.stringify([{ name: "wollipog", enabled: true }, { name: "z", enabled: true }]),
       declaredCodexMcpServerNames(["-c", "mcp_servers.wollipog=\"x\""])),
     ["-c", "mcp_servers.z.enabled=false"]);
+});
+
+test("every runner-built Codex wollipog entry outlasts the longest pull request wait, and nothing else (#3123)", () => {
+  // The wait clamps its timeout to three hours and lets one in-flight GitHub read run at most 20
+  // seconds past it, so the limit must cover both. It is still a bound: under three and a half hours.
+  assert.ok(CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC * 1000 >= PULL_REQUEST_WAIT_MAX_TIMEOUT_MS + 20_000);
+  assert.ok(CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC * 1000 < PULL_REQUEST_WAIT_MAX_TIMEOUT_MS + 30 * 60_000);
+  const timeout = `"tool_timeout_sec" = ${CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC}`;
+  const sessionMcp = { command: "/runner", args: ["--agent-control-mcp"], env: { [SESSION_CODEX_MCP_MARKER]: "1" } };
+  for (const entry of [
+    orchestratorLaunchArgs("codex", mcp).find((arg) => arg.startsWith("mcp_servers=")),
+    additiveCodexMcpServerArg(mcp),
+    sessionCodexMcpServerArg(sessionMcp),
+  ]) {
+    assert.ok(entry?.includes(timeout), entry);
+    assert.equal(entry.match(/tool_timeout_sec/gu)?.length, 1, "set once, inside the wollipog entry only");
+  }
+  // The coupled preset names a whole table, so the setting must sit inside its `wollipog` value.
+  assert.match(orchestratorLaunchArgs("codex-app-server", mcp).find((arg) => arg.startsWith("mcp_servers="))!,
+    /^mcp_servers=\{ "wollipog" = \{[^]*"tool_timeout_sec" = 10860/u);
+});
+
+test("the session Codex entry pre-approves only the read-only wait and carries no Orchestrator role", () => {
+  const entry = sessionCodexMcpServerArg({
+    command: "/runner", args: ["--agent-control-mcp"],
+    env: { WOLLIPOG_SESSION_ID: "s1", [SESSION_CODEX_MCP_MARKER]: "1" }, forwardEnv: true,
+  });
+  assert.match(entry, /^mcp_servers\.wollipog=\{ /u);
+  assert.match(entry, /"tools" = \{ "wait_pull_request" = \{ "approval_mode" = "approve" \} \}/u);
+  assert.equal(entry.includes("default_tools_approval_mode"), false, "no blanket pre-approval");
+  assert.equal(entry.includes("WOLLIPOG_PERMISSION_PRESET"), false, "the Orchestrator-only tools stay hidden");
+  assert.match(entry, /"env_vars" = \["WOLLIPOG_SESSION_ID", "WOLLIPOG_SESSION_MCP"\]/u);
+  // The session entry is not the Orchestrator's: an Orchestrator launch reports it as a collision
+  // unless provisioning first removes it, which it always does.
+  assert.equal(reservedCodexMcpNameCollision(["-c", entry]), true);
+  assert.deepEqual(stripSessionCodexMcpArgs(["-c", entry]), []);
+});
+
+test("only the runner's own session entry is stripped, in every argument form", () => {
+  const entry = sessionCodexMcpServerArg({ command: "/runner", args: [], env: { [SESSION_CODEX_MCP_MARKER]: "1" } });
+  const user = [
+    "-c", "model=\"o3\"",
+    "-c", 'mcp_servers.wollipog={ command = "mine" }',
+    "-c", `mcp_servers.wollipog-helper={ env = { ${SESSION_CODEX_MCP_MARKER} = "1" } }`,
+    "--config", 'mcp_servers.other={ command = "other" }',
+  ];
+  for (const injected of [["-c", entry], ["--config", entry], [`--config=${entry}`]]) {
+    const args = [...user.slice(0, 2), ...injected, ...user.slice(2)];
+    assert.deepEqual(stripSessionCodexMcpArgs(args), user);
+    assert.deepEqual(stripSessionCodexMcpArgs(stripSessionCodexMcpArgs(args)), user, "idempotent");
+  }
+  // An Orchestrator entry is not a session entry.
+  const orchestrator = additiveCodexMcpServerArg(mcp);
+  assert.deepEqual(stripSessionCodexMcpArgs(["-c", orchestrator]), ["-c", orchestrator]);
+});
+
+test("the Codex MCP inventory parser keeps only decision fields and rejects anything else", () => {
+  assert.deepEqual(parseCodexMcpInventory(JSON.stringify([
+    { name: "wollipog", enabled: true, transport: { type: "stdio", command: "/runner", env: { SECRET: "x" } },
+      tool_timeout_sec: 10860.0 },
+    { name: "remote", enabled: false, transport: { type: "streamable_http", url: "https://x" }, tool_timeout_sec: null },
+  ])), [
+    { name: "wollipog", enabled: true, command: "/runner", toolTimeoutSec: 10860 },
+    { name: "remote", enabled: false, command: null, toolTimeoutSec: null },
+  ]);
+  assert.deepEqual(parseCodexMcpInventory("[]"), []);
+  for (const bad of ["", "not json", "{}", "[1]", JSON.stringify([{ enabled: true }])]) {
+    assert.equal(parseCodexMcpInventory(bad), null, bad);
+  }
 });

@@ -47,8 +47,14 @@ import {
 import { installWslBwrapLauncher } from "./wsl-bwrap-launcher.js";
 import {
   ORCHESTRATOR_ENV_KEY,
+  CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC,
+  SESSION_CODEX_MCP_MARKER,
   additiveOrchestratorLaunchArgs,
+  parseCodexMcpInventory,
+  readCodexMcpInventory,
   reservedCodexMcpNameCollision,
+  sessionCodexMcpServerArg,
+  stripSessionCodexMcpArgs,
   orchestratorLaunchArgs,
   stripAdditiveOrchestratorLaunchArgs,
   stripOrchestratorLaunchArgs,
@@ -76,6 +82,7 @@ const TOKEN_PREFIX = "wollipoga_";
 const TOKEN_PATTERN = /^wollipoga_[A-Za-z0-9_-]{43}$/u;
 const AGENT_CONTROL_ENV_KEYS = [
   ORCHESTRATOR_ENV_KEY,
+  SESSION_CODEX_MCP_MARKER,
   "WOLLIPOG_CONTROL_PLANE_URL",
   "WOLLIPOG_SESSION_ID",
   "WOLLIPOG_SESSION_TOKEN_FILE",
@@ -94,11 +101,16 @@ export interface AgentControlHost extends RunnerReentryHost {
   platform?: NodeJS.Platform;
   installWslHelper?: (distro: string) => Promise<void>;
   installWslLauncher?: (distro: string) => Promise<void>;
+  /** Reads `codex mcp list --json` for a launch. Without it, a Codex session without the
+   * Orchestrator role keeps only the CLI, because the runner cannot prove that adding its
+   * `wollipog` MCP entry leaves the user's configuration intact. */
+  readCodexMcpInventory?: typeof readCodexMcpInventory;
 }
 
 export function defaultAgentControlHost(dataDir: string): AgentControlHost {
   return { ...defaultRunnerReentryHost(), configDir: resolve(dataDir, "agent-control"),
-    platform: process.platform, installWslHelper, installWslLauncher: installWslBwrapLauncher };
+    platform: process.platform, installWslHelper, installWslLauncher: installWslBwrapLauncher,
+    readCodexMcpInventory };
 }
 
 function projectPathMatchesContext(path: string, context: AgentContext, platform: NodeJS.Platform): boolean {
@@ -473,6 +485,10 @@ export function provisionAgentControl(
   host: AgentControlHost,
 ): Promise<void> | void {
   const supported = runnerSupportsProtocol(config.controlPlaneProtocolVersion, "sessionAgentControl");
+  const codexDriver = spec.driver === "codex" || spec.driver === "codex-app-server";
+  // A session `wollipog` entry from an earlier launch is re-derived below, never carried over: its
+  // credential coordinates belong to that launch, and the user's inventory may have changed since.
+  if (codexDriver) spec.args = stripSessionCodexMcpArgs(spec.args);
   const context = spec.context ?? { kind: "native" as const };
   const targetIsHost = !spec.executionTarget || spec.executionTarget.adapter === "host";
   const nativeHostExecution = context.kind === "native" && targetIsHost;
@@ -802,7 +818,68 @@ export function provisionAgentControl(
     }
     if (!already) spec.args.push("--mcp-config", file);
   }
+  if (codexDriver && !orchestrator && host.readCodexMcpInventory) {
+    return provisionSessionCodexMcp(spec, {
+      ...runnerReentryCommand(host, "--agent-control-mcp"),
+      env: { ...transportEnv, [SESSION_CODEX_MCP_MARKER]: "1" },
+      ...(memory ? { forwardEnv: true } : {}),
+    }, host.readCodexMcpInventory, log);
+  }
   log(`agent control ${spec.sessionId}: CLI${["claude-code", "pi"].includes(spec.driver ?? "") || (orchestrator && spec.driver === "acp") ? " and MCP" : ""} provisioned`);
+}
+
+/**
+ * Give a Codex session without the Orchestrator role the general `wollipog` MCP server (#3123), so
+ * `wait_pull_request` blocks inside one tool call instead of a shell command Codex keeps checking on
+ * through the model. Claude sessions already receive the same server through `--mcp-config`.
+ *
+ * The entry is added only when Codex itself shows it is safe, from two reads of
+ * `codex mcp list --json` at the launch directory:
+ *
+ *   1. Without the entry, no server named `wollipog` may exist. A user's own server under that name
+ *      is kept: a dotted `-c` override merges into it rather than replacing it, so injecting would
+ *      corrupt it, and for a `url` server Codex refuses to load its configuration at all (measured
+ *      on codex-cli 0.162.1: "url is not supported for stdio").
+ *   2. With the entry, Codex must load it as an enabled server running the runner's command with
+ *      `CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC`. Anything else (an older Codex, a managed policy) leaves
+ *      the launch as it was.
+ *
+ * Every refusal keeps the launch unchanged and the CLI available, and the runner log says why.
+ */
+async function provisionSessionCodexMcp(
+  spec: Pick<SessionLaunchSpec, "sessionId" | "command" | "args" | "env" | "context"> &
+    Partial<Pick<SessionLaunchSpec, "workspacePath">> & { repoPath?: string; worktreePath?: string | null },
+  mcp: Parameters<typeof sessionCodexMcpServerArg>[0],
+  read: typeof readCodexMcpInventory,
+  log: (message: string) => void,
+): Promise<void> {
+  const keepCliOnly = (reason: string): void =>
+    log(`agent control ${spec.sessionId}: CLI provisioned; wollipog MCP server not added (${reason})`);
+  if (reservedCodexMcpNameCollision(spec.args)) {
+    return keepCliOnly("the launch arguments already configure a server named wollipog");
+  }
+  const cwd = spec.worktreePath ?? spec.repoPath ?? spec.workspacePath;
+  if (!cwd) return keepCliOnly("the launch has no working directory to read Codex configuration from");
+  const launch = { command: spec.command, args: spec.args, env: spec.env, context: spec.context };
+  const inventory = async (candidate: typeof launch) => {
+    try { return parseCodexMcpInventory(await read(candidate, cwd)); } catch { return null; }
+  };
+  const existing = await inventory(launch);
+  if (!existing) return keepCliOnly("the Codex MCP inventory could not be read");
+  if (existing.some((server) => server.name === "wollipog")) {
+    return keepCliOnly("the user's own MCP server named wollipog is kept");
+  }
+  const entry = sessionCodexMcpServerArg(mcp);
+  const env = { ...spec.env, [SESSION_CODEX_MCP_MARKER]: "1" };
+  const added = (await inventory({ ...launch, args: [...spec.args, "-c", entry], env }))
+    ?.find((server) => server.name === "wollipog");
+  if (!added?.enabled || added.command !== mcp.command ||
+      added.toolTimeoutSec !== CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC) {
+    return keepCliOnly("this Codex installation did not load the entry as configured");
+  }
+  spec.env = env;
+  spec.args = [...spec.args, "-c", entry];
+  log(`agent control ${spec.sessionId}: CLI and MCP provisioned`);
 }
 
 export function removeAgentControlFiles(sessionId: string, configDir: string): void {

@@ -216,6 +216,59 @@ Claude Code launches also receive an additive `wollipog` stdio MCP configuration
 execute the existing manager tool table, including bounded output projection and `wait_session`, so
 their schemas, self-targeting checks, and REST paths cannot drift.
 
+### Codex Sessions and the `wollipog` MCP Server
+
+Codex has no per-session MCP configuration file, so the runner names the same `wollipog` server
+inline with one `-c mcp_servers.wollipog={...}` argument (#3123). Native host Codex launches
+(`codex` and `codex-app-server`) receive it whether or not the session has the Orchestrator role, so
+`wait_pull_request` can block for a whole CI or merge-queue run inside one tool call. A shell
+`wollipog pr wait` in Codex is different: Codex checks on a long-running command through the model.
+
+**Per-call limit.** Every runner-built Codex `wollipog` entry sets `tool_timeout_sec = 10860`
+(3 hours 1 minute, `CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC`). That covers `wait_pull_request`'s own
+3-hour maximum plus its at most 20-second read overrun, so even a maximal wait returns its own
+`timeout` summary before Codex cuts the call off. Without it, codex-cli 0.162.1 cuts a call off
+at 300 seconds. The setting sits inside the `wollipog` entry alone: no other MCP server's
+configuration changes, and other Wollipog tools keep their own shorter bounds (control-plane
+requests 30 seconds, `wait_session` one hour).
+
+**What a session without the Orchestrator role gains.** The entry starts the same
+`--agent-control-mcp` re-entry Claude sessions already run, with the same session-scoped transport
+the injected CLI already uses: a token-file path, or in `provider` mode the relay coordinates
+forwarded by name through `env_vars`, never the relay key in argv. Its environment carries no
+Orchestrator role marker, so the server hides and refuses every Orchestrator-only (Parent Control)
+tool, and the control plane still enforces the credential's ownership scope and route allowlist.
+The session can therefore reach nothing through MCP that its CLI could not already reach. Only
+`wait_pull_request` is pre-approved (`tools.wait_pull_request.approval_mode = "approve"`), because
+it reads GitHub through the runner's `gh` login and grants nothing. Every other tool keeps the
+approval behavior the session's own Codex configuration gives it. Without that approval,
+codex-cli 0.162.1 under Guardian review sends one reviewer model request before the call starts.
+
+**A user's own server named `wollipog`.** A dotted `-c` override merges into an existing table
+rather than replacing it, so injecting into a user's server would corrupt it. Against a `url`
+server, Codex refuses to load its configuration at all. The runner therefore reads
+`codex mcp list --json` at the launch directory first, bounded at 10 seconds and 1 MiB and never
+logged. It adds the entry only when no server named `wollipog` exists, then reads the inventory
+again with the entry to confirm that Codex loads it, enabled and with the limit above. A server
+named `wollipog` in the user's configuration or launch arguments, an unreadable inventory, or an
+installation that does not load the entry leaves the launch unchanged with the CLI still available.
+The runner log states which reason applied. Orchestrator launches keep their existing behavior: a
+reserved-name collision in the launch arguments is refused with a rename instruction.
+
+**Resume and isolation.** The session entry carries the `WOLLIPOG_SESSION_MCP` marker in its
+environment. Every launch removes a marked entry from the persisted arguments and derives it again,
+so repeated provisioning is idempotent and the user's own arguments are never touched. A role
+conversion to Orchestrator, or a launch whose control plane lacks Agent Control, drops it. So does
+an ordinary Native TUI, which is not provisioned with Agent Control and must not inherit the
+structured launch's credential coordinates.
+Integration Isolation applies only to Orchestrators and is unchanged: it keeps Wollipog's own entry
+and disables the rest.
+
+`pnpm probe:codex-mcp-wait` re-measures this against a real `codex app-server`, a scripted local
+model, and a stub `wait_pull_request` behind the exact entry the runner builds. It counts every
+model request while the call blocks and can show the default cutoff (`--default-limit`) and the
+reviewer request (`--without-approval`).
+
 Agent-created children do not receive invented cost or tool-call limits. Explicit creation values
 take precedence over the parent Project's child defaults, and a finite parent's remaining ceiling
 still bounds every child at creation. If none of those sources supplies a limit, the child remains

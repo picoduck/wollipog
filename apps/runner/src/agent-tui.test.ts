@@ -9,7 +9,7 @@ import { provisionAgentControl } from "./agent-control.js";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import { waitForPendingKills } from "./spawn.js";
 import { openWindowsConpty } from "./windows-conpty.js";
-import { orchestratorLaunchArgs } from "./orchestrator-preset.js";
+import { SESSION_CODEX_MCP_MARKER, orchestratorLaunchArgs, sessionCodexMcpServerArg } from "./orchestrator-preset.js";
 
 function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
   return {
@@ -325,6 +325,27 @@ test("orchestrator TUI preparation fails closed for old peers, unsupported targe
     assertSessionNotDeleted: stillPresent,
     provisionManagedWorktreeGuard: unguarded,
   }), { ...agentTuiLaunch(meta()), managedWorktreeGuard: { active: false } });
+});
+
+test("an ordinary Codex TUI launches without the structured launch's session wollipog entry (#3123)", async () => {
+  const entry = sessionCodexMcpServerArg({
+    command: "/opt/runner", args: ["--agent-control-mcp"],
+    env: { WOLLIPOG_SESSION_TOKEN_FILE: "/state/s.token", [SESSION_CODEX_MCP_MARKER]: "1" },
+  });
+  const user = ["-c", "model=\"o3\"", "-c", 'mcp_servers.wollipog={ command = "mine" }'];
+  for (const driver of ["codex", "codex-app-server"] as const) {
+    const launch = await prepareAgentTuiLaunch(meta({ driver, command: "codex", args: [...user, "-c", entry] }), {
+      controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      provision: () => assert.fail("ordinary TUI must not reprovision"),
+      prepareScratch: async () => assert.fail("ordinary TUI must not prepare scratch"),
+      assertSessionNotDeleted: stillPresent,
+      provisionManagedWorktreeGuard: unguarded,
+    });
+    assert.ok(launch);
+    assert.equal(launch.args.some((arg) => arg.includes(SESSION_CODEX_MCP_MARKER)), false,
+      `${driver}: no credential coordinates reach a TUI that was never provisioned`);
+    for (const arg of user) assert.ok(launch.args.includes(arg), `${driver}: the user's own ${arg} is kept`);
+  }
 });
 
 test("an Orchestrator with independent provider permissions has no Native TUI form", async () => {
