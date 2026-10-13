@@ -4546,10 +4546,13 @@ export class SessionsService {
       }
       if (command.type === "start_session") command.initialImages = nonEmpty(externalized.data);
     }
+    // The precheck above ran in this same synchronous call, so recording succeeds unless the ledger
+    // itself fails; even then the child is removed before any launch is sent.
     if (campaignWorkScope) {
       const recorded = this.recordCampaignAttempt(campaignWorkScope, campaignWorkItemId!, this.db.getSession(id) ?? session);
       if (!recorded.ok) {
         this.db.deleteSession(id);
+        if (budgetRoot) this.db.campaignBudgets.releaseUnlaunched(id);
         if (session.projectId) this.hub.projectChangedById(session.projectId);
         return fail(`cannot record the child's attempt on campaign work item ${campaignWorkItemId}: ${recorded.error}`,
           recorded.status);

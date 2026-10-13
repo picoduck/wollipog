@@ -177,6 +177,12 @@ export class CampaignBudgetLedger {
         { toolCalls: requested.toolCalls ?? prior?.toolCalls ?? Math.floor((view.remaining.toolCalls ?? 0) / slots) }) };
   }
 
+  /** Exact inverse of `admit` for a new session whose launch was never sent, so a refused child
+   * creation leaves the allowance unchanged (#3106). A row that has recorded usage is kept. */
+  releaseUnlaunched(sessionId: string): void {
+    this.sql.prepare("DELETE FROM campaign_budget_members WHERE session_id=? AND cost=0 AND tools=0").run(sessionId);
+  }
+
   members(rootId: string): string[] {
     return (this.sql.prepare("SELECT session_id FROM campaign_budget_members WHERE root_id=?").all(rootId) as unknown as Member[]).map((r) => r.session_id);
   }

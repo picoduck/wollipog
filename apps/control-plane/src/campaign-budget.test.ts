@@ -70,6 +70,31 @@ test("service launches use the exact reservation and agent reallocations preserv
   } finally { h.db.close(); }
 });
 
+test("a child creation refused while recording its work item leaves the campaign allowance unchanged (#3106)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ toolCalls: 120, concurrency: 1 })).ok);
+    const plan = h.svc.recordCampaignPlan("root", { items: [{ key: "item" }], planComplete: true });
+    assert.ok(plan.ok && plan.data, plan.error ?? "plan refused");
+    const request = { runnerId: "r", workspaceId: "w", agentId: "claude", config: { model: "claude-opus-5-5" },
+      prompt: "Implement authorized #2936", campaignWorkItemId: plan.data.items[0]!.workItemId };
+    const create = () => h.svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: "root" });
+    const occupied = () => h.db.campaignBudgets.view("root")!.occupied;
+    const before = occupied();
+    const ledger = h.db.campaignWorkLedger;
+    const assign = ledger.assign;
+    ledger.assign = (() => ({ ok: false, status: 409, error: "ledger refused" })) as typeof assign;
+    const refused = create();
+    ledger.assign = assign;
+    assert.equal(refused.status, 409, refused.error ?? "refused");
+    assert.equal(occupied(), before, "the unlaunched child's reservation is released");
+    assert.deepEqual(h.db.campaignBudgets.members("root").filter((id) => id !== "root"), [], "no reservation survives the refused child");
+    const retried = create();
+    assert.ok(retried.ok && retried.data, retried.error ?? "retry refused");
+    assert.equal(retried.data.campaignMembership?.currentWorkItemId, plan.data.items[0]!.workItemId);
+  } finally { h.db.close(); }
+});
+
 test("budget authority accepts bounded contracts and rejects clearing, unknown accounting, and malformed limits", () => {
   assert.ok(validCampaignBudgetAuthority(allowance({ acceptedFollowUps: 0, costUsd: 10, checkpointsUsd: [2, 10] })));
   for (const value of [null, {}, allowance({ costUsd: 0 }), allowance({ toolCalls: 1.5 }), allowance({ concurrency: 0 }),

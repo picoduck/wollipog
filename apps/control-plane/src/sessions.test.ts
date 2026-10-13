@@ -25333,8 +25333,7 @@ test("child creation records the named campaign work item before the launch is s
     }
     assert.equal(children(), before, "no refused creation leaves a session");
 
-    // An attempt that cannot be recorded after the row exists (the item changed concurrently)
-    // removes the child before its launch is sent.
+    // If the ledger still refuses after the row exists, the child is removed before its launch is sent.
     const ledger = db.campaignWorkLedger;
     const assign = ledger.assign;
     ledger.assign = (() => ({ ok: false, status: 409, error: "a cancelled work item cannot be assigned; recommit it first" })) as typeof assign;
