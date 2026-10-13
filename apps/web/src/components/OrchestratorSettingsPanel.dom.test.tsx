@@ -729,6 +729,41 @@ test("a leave waiting on a save is dropped if the editor goes away first", async
   }
 });
 
+test("a Discard Changes prompt answered after browser Back took the editor away does not navigate", async () => {
+  let setView: (view: View) => void = () => undefined;
+  const store = new Store({ name: "settings", section: "orchestrator" }, (view) => setView(view));
+  const { transport } = server(settings());
+  const view = await mount(<SettingsShell store={store} transport={transport} onView={(set) => { setView = set; }} />);
+  try {
+    const { container } = view;
+    const limit = container.querySelector<HTMLInputElement>("#orchestrator-max-children")!;
+    await act(async () => { fireDomEvent.change(limit, { target: { value: "7" } }); });
+    await act(async () => {
+      container.querySelector('nav.settings-nav a[href="/settings/appearance"]')!
+        .dispatchEvent(new domWindow.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }) as never);
+    });
+    await settle();
+    const dialog = document.querySelector('[role="dialog"]');
+    assert.ok(dialog, "the prompt is open");
+
+    // Browser Back to Behavior: the store follows history and the shell shows that section, which
+    // unmounts the editor while the app-level prompt stays open.
+    const behavior: View = { name: "settings", section: "behavior" };
+    await act(async () => { store.navigateFromHistory(behavior); setView(behavior); });
+    await settle();
+    assertNoDomNode(container.querySelector("#orchestrator-max-children"), "the editor is gone");
+
+    const discard = button(document.querySelector('[role="dialog"]') ?? dialog, "Discard Changes");
+    if (discard) {
+      await act(async () => discard.click());
+      await settle();
+    }
+    assert.deepEqual(store.getState().view, behavior, "the stale destination is not navigated to");
+  } finally {
+    await view.cleanup();
+  }
+});
+
 test("closing the window with a dirty draft asks the browser to confirm", async () => {
   const { transport } = server(settings());
   const view = await mount(panel(transport));
