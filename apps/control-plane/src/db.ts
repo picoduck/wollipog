@@ -13480,9 +13480,15 @@ export class ControlPlaneDb {
         ).run(sessionId, ratePricedUsageKey(entry), entry.inputTokens, entry.outputTokens, entry.cachedInputTokens,
           entry.cacheCreationInputTokens, entry.reasoningOutputTokens);
       }
-      if (ratePricedStatus === 1) {
+      // A baseline is complete only from a snapshot that covers everything this ledger already
+      // booked; a stale one would leave booked usage outside the per-key counts.
+      if (ratePricedStatus === 1 && target.inputTokens >= current.input_tokens && target.outputTokens >= current.output_tokens) {
         this.stmt("UPDATE usage_session_state SET rate_priced_status=0 WHERE session_id=?").run(sessionId);
       }
+    } else if (snapshot.ratePricedUsage !== undefined && ratePricedStatus === 0) {
+      // Malformed entries fell back to flat totals, which booked usage no key counted. The next
+      // valid entries become a baseline rather than a residual.
+      this.stmt("UPDATE usage_session_state SET rate_priced_status=1 WHERE session_id=?").run(sessionId);
     }
     const nextCovered = row?.runner_history_epoch === (snapshot.historyEpoch ?? null)
       ? Math.max(row.covered_through_seq, snapshot.seq)

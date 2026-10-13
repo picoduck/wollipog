@@ -8929,6 +8929,39 @@ test("malformed snapshot entries fall back to flat totals", () => {
     ratePricedUsage: [{ ...accrueRatePricedUsage([], record)![0]!, cachedInputTokens: -1 }] }), "runner-1", 1_000);
   const usage = db.sessionUsageByModel("bad").totals;
   assert.deepEqual([usage.inputTokens, usage.cachedInputTokens], [10, 0]);
+  // The flat fallback booked that record, so the next valid entries are a baseline, not a residual.
+  db.updateSessionFromSnapshot("bad", snapshot({ id: "bad", driver: "claude-code", config: { model: "claude-test-model" },
+    historyEpoch: 1, seq: 1, tokensIn: 10, tokensOut: 5, ratePricedUsage: [...accrueRatePricedUsage([], record)!] }), 2_000);
+  assert.deepEqual(db.sessionUsageByModel("bad").totals, usage);
+});
+
+test("a migrated ledger adopts entries only from a snapshot that covers what it already booked", () => {
+  const first = claudeRepublished("claude-test-model", 10, 5, 1_000, 200);
+  const second = claudeRepublished("claude-test-model", 10, 5, 1_000, 200);
+  // Both records were booked before per-key counting began.
+  const { db, id } = ingestRatePriced("event", "claude-code", "claude-test-model", [first, second], { entries: false });
+  db.raw().prepare("DELETE FROM usage_session_rate_priced WHERE session_id=?").run(id);
+  db.raw().prepare("UPDATE usage_session_state SET rate_priced_status=1 WHERE session_id=?").run(id);
+  const booked = db.sessionUsageByModel(id).totals;
+  const base = snapshot({ id, driver: "claude-code", config: { model: "claude-test-model" }, historyEpoch: 1, seq: 2 });
+  db.updateSessionFromSnapshot(id, { ...base, tokensIn: 10, tokensOut: 5, ratePricedUsage: [...accrueRatePricedUsage([], first)!] }, 4_000);
+  assert.equal(db.raw().prepare("SELECT rate_priced_status AS s FROM usage_session_state WHERE session_id=?").get(id)!.s, 1,
+    "a stale snapshot cannot complete the baseline");
+  const both = accrueRatePricedUsage(accrueRatePricedUsage([], first)!, second)!;
+  db.updateSessionFromSnapshot(id, { ...base, tokensIn: 20, tokensOut: 10, ratePricedUsage: [...both] }, 5_000);
+  assert.equal(db.raw().prepare("SELECT rate_priced_status AS s FROM usage_session_state WHERE session_id=?").get(id)!.s, 0);
+  assert.deepEqual(db.sessionUsageByModel(id).totals, booked, "adoption books nothing that was already booked");
+});
+
+test("service tiers price identically in both orders, including padded and empty tiers", () => {
+  for (const serviceTier of [" standard ", "", "priority", "standard"]) {
+    const records: UsagePayload[] = [{ ...claudeRepublished("claude-small-model", 10, 5, 1_000, 200),
+      pricingContext: { requestInputTokens: 1_210, serviceTier } }];
+    const eventFirst = ingestRatePriced("event", "claude-code", "claude-small-model", records);
+    const snapshotFirst = ingestRatePriced("snapshot", "claude-code", "claude-small-model", records);
+    assert.deepEqual(snapshotFirst.usage.totals, eventFirst.usage.totals, JSON.stringify(serviceTier));
+    assert.equal(snapshotFirst.costUsd, eventFirst.costUsd, JSON.stringify(serviceTier));
+  }
 });
 
 test("a runner rotating pricing keys cannot grow the per-key ledger without bound", () => {

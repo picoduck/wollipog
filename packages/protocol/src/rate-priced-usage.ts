@@ -14,7 +14,7 @@ import type { SessionEventPayload } from "./index.js";
 export interface RatePricedUsageTotal {
   /** The record's model, trimmed and bounded as the control plane reads it; absent when unnamed. */
   model?: string;
-  /** The record's `pricingContext.serviceTier`, bounded; absent when the record named none. */
+  /** The record's `pricingContext.serviceTier` verbatim, bounded; absent when the record named none. */
   serviceTier?: string;
   /** Smallest and largest `pricingContext.requestInputTokens` among the entry's records. Absent
    * for an entry whose records named no request input size. A rate tier chosen by request size can
@@ -31,6 +31,7 @@ export interface RatePricedUsageTotal {
 /** Beyond this many pricing keys a runner stops reporting entries for the session. */
 export const RATE_PRICED_USAGE_MAX_ENTRIES = 32;
 const MAX_TOKENS = 1_000_000_000_000;
+const INVALID_SERVICE_TIER = "<invalid>";
 
 function tokenCount(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.min(Math.floor(value), MAX_TOKENS) : 0;
@@ -61,7 +62,10 @@ export function ratePricedUsageRecord(payload: SessionEventPayload): RatePricedU
   };
   if (!(record.inputTokens || record.outputTokens || record.cachedInputTokens || record.cacheCreationInputTokens)) return null;
   const model = boundedText(payload.model, 128);
-  const serviceTier = boundedText(payload.pricingContext?.serviceTier, 64);
+  // Pricing reads the tier verbatim: a padded, empty, or non-text tier is unknown, not standard.
+  // Bounding keeps an over-long tier unknown, because no published tier name is that long.
+  const tier: unknown = payload.pricingContext?.serviceTier;
+  const serviceTier = tier === undefined ? undefined : typeof tier === "string" ? tier.slice(0, 64) : INVALID_SERVICE_TIER;
   const requestInput = payload.pricingContext?.requestInputTokens;
   return {
     ...(model === undefined ? {} : { model }),
@@ -121,7 +125,7 @@ export function parseRatePricedUsage(value: unknown): RatePricedUsageTotal[] | n
     if (typeof raw !== "object" || raw === null) return null;
     const entry = raw as Record<string, unknown>;
     if (entry.model !== undefined && boundedText(entry.model, 128) !== entry.model) return null;
-    if (entry.serviceTier !== undefined && boundedText(entry.serviceTier, 64) !== entry.serviceTier) return null;
+    if (entry.serviceTier !== undefined && (typeof entry.serviceTier !== "string" || entry.serviceTier.length > 64)) return null;
     const fields = ["inputTokens", "outputTokens", "cachedInputTokens", "cacheCreationInputTokens", "reasoningOutputTokens"] as const;
     if (!fields.every((field) => count(entry[field]))) return null;
     let requestInputTokens: RatePricedUsageTotal["requestInputTokens"];
