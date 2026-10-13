@@ -334,8 +334,11 @@ for (const listWidth of [600, 700, 900, 1440]) {
         if (hovered) {
           const actions = parent(page).locator(".inbox-row-actions");
           await expect(actions).toBeVisible();
-          const actionsBox = (await actions.boundingBox())!;
-          expect(countBox.x + countBox.width).toBeLessThanOrEqual(actionsBox.x);
+          await expect.poll(async () => {
+            const [currentCountBox, actionsBox] = await Promise.all([working.boundingBox(), actions.boundingBox()]);
+            return currentCountBox !== null && actionsBox !== null
+              && currentCountBox.x + currentCountBox.width <= actionsBox.x;
+          }, { message: "the working count stays clear of the visible hover actions" }).toBe(true);
         }
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       }
