@@ -587,6 +587,11 @@ function fail<T>(error: string, status = 400): ServiceResult<T> {
   return { ok: false, status, error };
 }
 
+/** Rolls back a campaign child's creation when its work-item attempt cannot be recorded (#3106). */
+class CampaignAttemptRefusal extends Error {
+  constructor(message: string, readonly status: number) { super(message); }
+}
+
 /** Re-type a failed result, keeping its status, error and any capability-gate versions. */
 function failAs<T>(result: ServiceResult<unknown>, fallback?: string): ServiceResult<T> {
   return {
@@ -3724,6 +3729,8 @@ export class SessionsService {
         fail<SessionView>(`cannot record the child's attempt on campaign work item ${campaignWorkItemId}: ${reason}`, status);
       if (!parentSessionId) return refused("only an Orchestrator creating its own campaign child may name a work item", 400);
       if (delivery) return refused("pre-staged session creation cannot record a work item", 409);
+      // Image externalization commits on its own, so it cannot share the child's creation write.
+      if (req.images?.length) return refused("a child created with prompt images cannot record a work item", 400);
       const scope = this.campaignLedgerScope(parentSessionId, () => true);
       if (!scope.ok || !scope.data) return refused(scope.error ?? "Orchestrator campaign not found", scope.status);
       const assignable = this.db.campaignWorkLedger.assignableItem(scope.data.root.id, campaignWorkItemId);
@@ -4492,7 +4499,7 @@ export class SessionsService {
     }
     if (delivery) delivery.stage(plan!);
     let session: SessionView;
-    try { session = existing ?? this.db.createSession({
+    const insert = () => this.db.createSession({
       campaignBudgetUserLimits,
       id,
       parentSessionId,
@@ -4524,7 +4531,12 @@ export class SessionsService {
       automationOrigin: delivery?.automationOrigin,
       now,
     });
+    try {
+      session = existing ?? (campaignWorkScope
+        ? this.insertCampaignChild(campaignWorkScope, campaignWorkItemId!, insert)
+        : insert());
     } catch (error) {
+      if (error instanceof CampaignAttemptRefusal) return fail(error.message, error.status);
       if (budgetRoot) return fail((error as Error).message, 409);
       throw error;
     }
@@ -4545,18 +4557,6 @@ export class SessionsService {
         return failAs(externalized, "prompt images could not be stored");
       }
       if (command.type === "start_session") command.initialImages = nonEmpty(externalized.data);
-    }
-    // The precheck above ran in this same synchronous call, so recording succeeds unless the ledger
-    // itself fails; even then the child is removed before any launch is sent.
-    if (campaignWorkScope) {
-      const recorded = this.recordCampaignAttempt(campaignWorkScope, campaignWorkItemId!, this.db.getSession(id) ?? session);
-      if (!recorded.ok) {
-        this.db.deleteSession(id);
-        if (budgetRoot) this.db.campaignBudgets.releaseUnlaunched(id);
-        if (session.projectId) this.hub.projectChangedById(session.projectId);
-        return fail(`cannot record the child's attempt on campaign work item ${campaignWorkItemId}: ${recorded.error}`,
-          recorded.status);
-      }
     }
     this.hub.sessionChanged(this.db.getSession(id) ?? session);
     // The runner emits the user_message into the box store (source of truth) when it runs the
@@ -7308,6 +7308,28 @@ export class SessionsService {
       return fail("campaign child not found", 404);
     }
     return this.recordCampaignAttempt(scope.data, request.workItemId, child);
+  }
+
+  /** Inserts a campaign child and opens its work-item attempt as one write, so a refused or failed
+   * recording leaves no session, campaign reservation, or parent charge behind (#3106). */
+  private insertCampaignChild(
+    scope: { caller: SessionView; root: SessionView },
+    workItemId: string,
+    insert: () => SessionView,
+  ): SessionView {
+    const refusal = (reason: string, status: number) =>
+      new CampaignAttemptRefusal(`cannot record the child's attempt on campaign work item ${workItemId}: ${reason}`, status);
+    return this.db.campaignChildCreationTransaction(() => {
+      const child = insert();
+      let recorded: ServiceResult<AssignCampaignWorkItemResponse>;
+      try {
+        recorded = this.recordCampaignAttempt(scope, workItemId, child);
+      } catch (error) {
+        throw refusal((error as Error).message, 500);
+      }
+      if (!recorded.ok) throw refusal(recorded.error ?? "the ledger refused the attempt", recorded.status);
+      return this.db.getSession(child.id) ?? child;
+    });
   }
 
   /** Opens the child's attempt on a work item. Shared by `assign_campaign_work_item` and by child

@@ -25326,6 +25326,9 @@ test("child creation records the named campaign work item before the launch is s
       ["blank item", create("  "), 400, /non-empty work item ID/u],
       ["human creation", create(second, null), 400, /only an Orchestrator/u],
       ["non-Orchestrator parent", create(second, worker), 404, /Orchestrator campaign not found/u],
+      ["prompt images", svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID,
+        prompt: "Deliver", campaignWorkItemId: second, images: [{ mimeType: "image/png", data: "iVBORw0KGgo=" }] as never },
+        undefined, undefined, false, false, false, { parentSessionId: parent.id }), 400, /prompt images cannot record a work item/u],
     ] as const) {
       assert.equal(result.ok, false, label);
       assert.equal(result.status, status, `${label}: ${result.error}`);
