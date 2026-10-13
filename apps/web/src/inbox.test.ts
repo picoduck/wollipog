@@ -531,6 +531,24 @@ test("the family chip label leads with the count and follows with the most press
   assert.equal(inboxThreadChildrenLabel({ count: 2, waiting: 2, children: [child("blocked"), child("stalled")] }), "2 Children · 2 Awaiting Input");
 });
 
+test("list summaries omit a separately rendered working count while full rollups keep it", () => {
+  const running = { id: "running", title: "Running", state: "running" as const };
+  const children = { count: 1, waiting: 0, children: [running] };
+  assert.equal(inboxThreadChildrenLabel(children), "1 Child · 1 Working");
+  assert.equal(inboxThreadChildrenLabel(children, { includeWorking: false }), "1 Child");
+  const waiting = { ...children, count: 2, waiting: 1, working: 1, followUpLabel: "Needs Your Input" as const,
+    children: [running, { id: "blocked", title: "Blocked", state: "blocked" as const }] };
+  assert.equal(inboxThreadChildrenLabel(waiting), "2 Children · Needs Your Input · 1 Working");
+  assert.equal(inboxThreadChildrenLabel(waiting, { includeWorking: false }), "2 Children · Needs Your Input");
+  assert.equal(inboxThreadChildrenLabel({ ...waiting, followUpLabel: undefined }, { includeWorking: false }),
+    "2 Children · 1 Awaiting Input");
+  assert.equal(inboxThreadChildrenLabel({ count: 1, waiting: 0,
+    children: [{ id: "done", title: "Done", state: "done" }] }, { includeWorking: false }), "1 Child · 1 Completed");
+  assert.equal(inboxThreadChildrenLabel({ count: 1, waiting: 0, working: 1,
+    children: [{ id: "done", title: "Done", state: "done" }] }, { includeWorking: false }), "1 Child",
+  "working descendants still outrank completed direct children");
+});
+
 test("split counts keep stalled sessions separate from blocked sessions", () => {
   const sessions = [
     session("both", { status: "input_required", workspaceId: "p1", workspaceName: "Project One" }),

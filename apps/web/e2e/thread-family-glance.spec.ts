@@ -28,7 +28,8 @@ for (const length of ["short", "long"] as const) {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(`${FAMILY}${length === "long" ? "&familyTitle=long" : ""}`);
     await expect(chip(page)).toBeVisible();
-    await expect(chip(page).locator(".inbox-thread-family-text")).toHaveText(LABEL);
+    await expect(chip(page).locator(".inbox-thread-family-text")).toHaveText("4 Children · Needs Your Input");
+    await expect(chip(page).locator(".inbox-thread-working")).toHaveText("1 Working");
     const { gap, chipRight, lineRight } = await chipGap(parent(page));
     expect(gap, "the chip follows the title, never before it").toBeGreaterThanOrEqual(0);
     expect(gap, "the chip sits beside the title it describes").toBeLessThanOrEqual(16);
@@ -309,4 +310,35 @@ for (const shape of [
       await context.close();
     }
   });
+}
+
+
+for (const listWidth of [600, 700, 900, 1440]) {
+  for (const theme of ["light", "dark"] as const) {
+    test(`a large collapsed family protects its working count in a ${listWidth}px ${theme} list`, async ({ page }) => {
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await page.goto(`/session-rows-e2e.html?family=large&collapsed=1&listWidth=${listWidth}&theme=${theme}`);
+      const label = "16 Children · Needs Your Input · 13 Working";
+      await expect(parent(page).locator(".inbox-thread-toggle")).toHaveAttribute("aria-expanded", "false");
+      await expect(chip(page)).toHaveAccessibleName(label);
+      await expect(chip(page)).toHaveAttribute("title", label);
+      const working = chip(page).getByText("13 Working", { exact: true });
+      for (const hovered of [false, true]) {
+        if (hovered) await parent(page).hover();
+        await expect(working).toBeVisible();
+        expect(await working.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+        const countBox = (await working.boundingBox())!;
+        const chipBox = (await chip(page).boundingBox())!;
+        expect(countBox.x).toBeGreaterThanOrEqual(chipBox.x);
+        expect(countBox.x + countBox.width).toBeLessThanOrEqual(chipBox.x + chipBox.width);
+        if (hovered) {
+          const actions = parent(page).locator(".inbox-row-actions");
+          await expect(actions).toBeVisible();
+          const actionsBox = (await actions.boundingBox())!;
+          expect(countBox.x + countBox.width).toBeLessThanOrEqual(actionsBox.x);
+        }
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      }
+    });
+  }
 }

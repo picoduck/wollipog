@@ -283,16 +283,22 @@ export function inboxThreadChildState(
 }
 
 /** The compact rollup on the family chip. The count always leads; what follows is the one fact
- * that matters most about the children right now. */
-export function inboxThreadChildrenLabel(children: InboxThreadChildren): string {
+ * that matters most about the children right now. Lists can render the working count separately;
+ * the default keeps the full rollup for accessible names and Board cards. */
+export function inboxThreadChildrenLabel(
+  children: InboxThreadChildren,
+  { includeWorking = true }: { includeWorking?: boolean } = {},
+): string {
   const parts = [`${children.count} ${children.count === 1 ? "Child" : "Children"}`];
   const running = children.working ?? children.children.filter((child) => child.state === "running").length;
   const done = children.children.filter((child) => child.state === "done").length;
   if (children.followUpLabel) parts.push(children.followUpLabel);
   else if (children.waiting > 0) parts.push(`${children.waiting} Awaiting Input`);
-  else if (running > 0) parts.push(`${running} Working`);
+  else if (running > 0) {
+    if (includeWorking) parts.push(`${running} Working`);
+  }
   else if (done === children.count) parts.push(`${done} Completed`);
-  if (running > 0 && (children.followUpLabel || children.waiting > 0)) parts.push(`${running} Working`);
+  if (includeWorking && running > 0 && (children.followUpLabel || children.waiting > 0)) parts.push(`${running} Working`);
   return parts.join(" · ");
 }
 
