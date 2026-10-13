@@ -7,7 +7,10 @@ import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
-import { automationCommandDigest, canonicalAutomationCommandJson } from "./automation-command-outbox.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DurableCommandStore, isDurableSessionCommandMessage } from "../../runner/src/durable-command-store.js";
 
 function fixture(budgetAuthority?: CampaignBudgetAuthority) {
   const db = ControlPlaneDb.open(":memory:");
@@ -73,13 +76,76 @@ function nativeRecoveryFixture() {
     pullRequests: [{ repository: "picoduck/wollipog", number: 3068 }] } }).ok);
   const request = { requestId: "native_original", workItemId, pullRequest: { repository: "picoduck/wollipog", number: 3068 },
     baseSha: "a".repeat(40), headSha: "b".repeat(40), costUsd: 5, toolCalls: 20, brief: "Private CODE fixture brief" };
-  const reserve = (requestId: string) => {
-    const result = h.svc.requestCampaignReviewJob("root", { ...request, requestId });
+  const reserve = (requestId: string, extra: Partial<typeof request> = {}) => {
+    const result = h.svc.requestCampaignReviewJob("root", { ...request, requestId, ...extra });
     assert.ok(result.ok, result.error ?? "native fixture reservation refused");
     return h.db.campaignReviewJobs.command(result.data!.jobId)!;
   };
   return { ...h, reserve };
 }
+
+test("CP continuations pass the real runner journal admission and deduplicate in both control modes", () => {
+  for (const mode of ["full_control", "custom"] as const) {
+    const h = fixture();
+    const directory = mkdtempSync(join(tmpdir(), "recovery-runner-journal-"));
+    try {
+      if (mode === "custom") assert.ok(h.svc.setCampaignControl("root", { mode }, 2,
+        { ...h.identity, kind: "human", actorId: h.identity.userId }).ok);
+      h.sent.length = 0;
+      h.db.updateSessionStatus("root", "idle", 4);
+      h.db.recordCampaignContinuationEvent({ campaignSessionId: "root", eventId: "ready", kind: "child_ready", now: 5 });
+      h.svc.retryDuePrompts(10000);
+      const message = h.sent.find(m => (m as {type:string}).type === "durable_session_command");
+      assert.ok(isDurableSessionCommandMessage(message), "actual runner allowlist must admit the CP-produced envelope");
+      const journal = new DurableCommandStore(directory, { ownerId: "fixture-runner", now: () => 10000 });
+      assert.equal(journal.claim(message).kind, "new", "wire shape and payload digest pass the real journal");
+      assert.equal(journal.claim({ ...message, requestId: "reconnect" }).kind, "duplicate", "reconnect cannot create another effect");
+    } finally { h.db.close(); rmSync(directory, { recursive: true, force: true }); }
+  }
+});
+
+test("a queued Custom continuation keeps existing liveness after a human execution-preference change", () => {
+  const h = fixture();
+  try {
+    assert.ok(h.svc.setCampaignControl("root", { mode: "custom" }, 2,
+      { ...h.identity, kind: "human", actorId: h.identity.userId }).ok);
+    h.db.updateSessionStatus("root", "idle", 4);
+    h.db.recordCampaignContinuationEvent({ campaignSessionId: "root", eventId: "ready", kind: "child_ready", now: 5 });
+    h.hub.isRunnerOnline = () => false;
+    h.svc.retryDuePrompts(10000);
+    const staged = h.db.latestCampaignContinuation("root")!;
+    assert.ok(staged);
+    h.db.updateSessionConfig("root", { effort: "high" }, 11000); // Fixture equivalent of a permitted human edit.
+    h.hub.isRunnerOnline = () => true;
+    h.svc.retryDuePrompts(20000);
+    assert.ok(h.sent.some(m => (m as {commandId?:string}).commandId === staged.commandId));
+    assert.equal(h.db.getSession("root")!.orchestratorPolicy!.control?.mode, "custom");
+    assert.equal(h.db.campaignProjection("root")!.recovery, undefined);
+  } finally { h.db.close(); }
+});
+
+test("an older unknown native job survives a newer epoch and its late running receipt", () => {
+  const h = nativeRecoveryFixture();
+  try {
+    const original = h.reserve("older");
+    h.reserve("newer_base", { baseSha: "d".repeat(40) }); // Both were admitted before usage became unknown.
+    h.svc.onCampaignReviewJobUpdate("r", { type: "campaign_review_job_update", jobId: original.jobId,
+      nonce: original.nonce, state: "accounting_unavailable", toolCalls: 1 });
+    h.db.updateSessionStatus("root", "idle", 99); // A reconnect status is not an accounting settlement.
+    h.recovery.maintain(100);
+    const before = h.db.campaignRecovery.projection("root").records.find(r => r.resource.occurrenceId === original.jobId)!;
+    assert.equal(before.reason, "uncertain_outcome");
+    h.svc.onCampaignReviewJobUpdate("r", { type: "campaign_review_job_update", jobId: original.jobId,
+      nonce: original.nonce, state: "running", costUsd: 1, toolCalls: 2 });
+    h.recovery.maintain(200);
+    const after = h.db.campaignRecovery.projection("root").records.find(r => r.resource.occurrenceId === original.jobId);
+    assert.ok(after, "a newer base and a progress receipt cannot reconcile the older job's final outcome");
+    assert.equal(after.reason, "uncertain_outcome");
+    assert.equal(h.db.campaignBudgets.active(original.jobId), true);
+    assert.equal(h.db.campaignBudgets.view("root")!.state, "accounting_unavailable");
+    assert.equal(h.svc.campaignReviewJob("root", original.jobId).data!.costUsd, 1);
+  } finally { h.db.close(); }
+});
 
 test("native unknown usage retains the exact job and capacity without review replay or fabricated spend", () => {
   const h = nativeRecoveryFixture();
@@ -249,11 +315,8 @@ test("Full Control cannot deliver a legacy queued continuation without its autho
     h.hub.isRunnerOnline = () => false;
     h.svc.retryDuePrompts(10000);
     const staged = h.db.latestCampaignContinuation("root")!;
-    const command = h.db.getSessionPromptCommand(staged.commandId)!;
-    const payload = JSON.parse(command.payloadJson);
-    delete payload.campaignContinuation.authorityDigest;
-    h.db.raw().prepare("UPDATE session_prompt_commands SET payload_json=?,payload_sha256=? WHERE command_id=?")
-      .run(canonicalAutomationCommandJson(payload), automationCommandDigest(payload), staged.commandId);
+    h.db.raw().prepare("UPDATE orchestrator_campaign_continuations SET authority_digest=NULL WHERE command_id=?")
+      .run(staged.commandId);
     h.hub.isRunnerOnline = () => true;
     h.svc.retryDuePrompts(20000);
     assert.equal(h.sent.length, 0);

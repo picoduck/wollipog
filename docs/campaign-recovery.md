@@ -48,7 +48,9 @@ the child's gate stays unchanged. Custom campaigns retain their existing whole-c
 The scheduler, outbox and readiness projection share a fresh preflight for lifecycle, current
 authority, provider support, campaign allocations, session guardrails and organization daily limits.
 A queued Full Control continuation binds the staged scope, authority and execution identity;
-revocation, a new grant or scope consumption cannot rebind it. Legacy Full Control commands without
+the binding stays in the control-plane continuation row, with no change to the runner envelope.
+Custom continuations retain their existing behavior after permitted execution-preference changes.
+Revocation, a new grant or scope consumption cannot rebind it. Legacy Full Control commands without
 that binding are held for reconciliation through existing management operations. Known non-delivery
 can be cancelled before current work is restaged; a possibly delivered command keeps its original
 receipt identity and cannot be treated as permission to replay.

@@ -8890,9 +8890,6 @@ export interface PromptSessionMessage {
     continuationId: string;
     eventFromSeq: number;
     eventThroughSeq: number;
-    /** CP-owned binding checked again by the durable outbox before Full Control delivery.
-     * Missing legacy bindings fail closed for Full Control; this is never an execution grant. */
-    authorityDigest?: string;
   };
 }
 

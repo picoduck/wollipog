@@ -994,6 +994,7 @@ CREATE TABLE IF NOT EXISTS orchestrator_campaign_continuations (
   event_from_seq      INTEGER NOT NULL,
   event_through_seq   INTEGER NOT NULL,
   observed_through_seq INTEGER NOT NULL,
+  authority_digest    TEXT,
   state               TEXT NOT NULL CHECK (state IN
                        ('pending','running','completed','failed','missing_result','acknowledged')),
   attempt_count       INTEGER NOT NULL DEFAULT 1,
@@ -3296,6 +3297,8 @@ export interface CampaignContinuationRecord {
   eventFromSeq: number;
   eventThroughSeq: number;
   observedThroughSeq: number;
+  /** CP-only Full Control admission binding. Never sent to a runner. */
+  authorityDigest?: string;
   state: "pending" | "running" | "completed" | "failed" | "missing_result" | "acknowledged";
   attemptCount: number;
   nextAttemptAt?: number;
@@ -5215,7 +5218,7 @@ export class ControlPlaneDb {
   campaignContinuationAuthorityDigest(campaignId: string): string | undefined {
     const row = this.stmt("SELECT * FROM sessions WHERE id=?").get(campaignId) as unknown as SessionRow | undefined;
     const policy = row ? orchestratorCampaignPolicyFromJson(row.orchestrator_policy) : undefined;
-    if (!row || !policy) return undefined;
+    if (!row || policy?.control?.mode !== "full_control") return undefined;
     return createHash("sha256").update(JSON.stringify([policy.control ?? { mode: "custom" }, policy.issueScope,
       row.parent_control_policy_revision, row.runner_id, row.workspace_id, row.driver, row.model, row.effort])).digest("hex");
   }
@@ -5236,9 +5239,7 @@ export class ControlPlaneDb {
     }
     const active = this.activeCampaignContinuation(campaignId);
     if (active) {
-      const command = this.getSessionPromptCommand(active.commandId);
-      const payload = command ? parseJson<import("@wollipog/protocol").PromptSessionMessage>(command.payloadJson) : null;
-      const binding = payload?.campaignContinuation?.authorityDigest;
+      const binding = active.authorityDigest;
       if ((full || binding !== undefined) && binding !== this.campaignContinuationAuthorityDigest(campaignId)) {
         return { state: "authority_unavailable", reason: "The queued continuation belongs to an earlier authority or scope. Reconcile its original command before admitting current work." };
       }
@@ -5546,6 +5547,9 @@ export class ControlPlaneDb {
         `UPDATE orchestrator_campaign_continuations SET observed_through_seq=event_through_seq
          WHERE observed_through_seq=0`,
       );
+    }
+    if (!campaignContinuationColumns.some((column) => column.name === "authority_digest")) {
+      db.exec("ALTER TABLE orchestrator_campaign_continuations ADD COLUMN authority_digest TEXT");
     }
     const namingPreferenceSchema = db.prepare(
       "SELECT sql FROM sqlite_master WHERE type='table' AND name='session_naming_preferences'",
@@ -17146,6 +17150,7 @@ export class ControlPlaneDb {
     ).get(campaignSessionId) as undefined | {
       continuation_id: string; campaign_session_id: string; command_id: string;
       event_from_seq: number; event_through_seq: number; observed_through_seq: number;
+      authority_digest: string | null;
       state: CampaignContinuationRecord["state"]; attempt_count: number;
       next_attempt_at: number | null; error: string | null; created_at: number; updated_at: number;
     };
@@ -17199,14 +17204,15 @@ export class ControlPlaneDb {
       this.stmt(
         `INSERT INTO orchestrator_campaign_continuations
          (continuation_id,campaign_session_id,command_id,event_from_seq,event_through_seq,
-          observed_through_seq,state,attempt_count,next_attempt_at,created_at,updated_at)
-         VALUES (?,?,?,?,?,?,'pending',?,?,?,?)`,
+          observed_through_seq,authority_digest,state,attempt_count,next_attempt_at,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,?,'pending',?,?,?,?)`,
       ).run(
         input.continuationId, input.campaignSessionId, input.commandId, input.eventFromSeq,
         input.eventThroughSeq,
         Number((this.stmt(
           "SELECT COALESCE(MAX(seq),0) AS seq FROM orchestrator_campaign_events WHERE campaign_session_id=?",
         ).get(input.campaignSessionId) as { seq: number }).seq),
+        this.campaignContinuationAuthorityDigest(input.campaignSessionId) ?? null,
         input.attemptCount, input.now, input.now, input.now,
       );
       this.db.exec("COMMIT");
@@ -17304,6 +17310,7 @@ export class ControlPlaneDb {
   private campaignContinuationRecord(row: {
     continuation_id: string; campaign_session_id: string; command_id: string;
     event_from_seq: number; event_through_seq: number; observed_through_seq: number;
+    authority_digest: string | null;
     state: CampaignContinuationRecord["state"]; attempt_count: number;
     next_attempt_at: number | null; error: string | null; created_at: number; updated_at: number;
   }): CampaignContinuationRecord {
@@ -17314,6 +17321,7 @@ export class ControlPlaneDb {
       eventFromSeq: row.event_from_seq,
       eventThroughSeq: row.event_through_seq,
       observedThroughSeq: row.observed_through_seq,
+      ...(row.authority_digest ? { authorityDigest: row.authority_digest } : {}),
       state: row.state,
       attemptCount: row.attempt_count,
       ...(row.next_attempt_at != null ? { nextAttemptAt: row.next_attempt_at } : {}),

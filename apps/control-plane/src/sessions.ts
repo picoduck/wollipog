@@ -5197,7 +5197,6 @@ export class SessionsService {
             continuationId,
             eventFromSeq,
             eventThroughSeq,
-            authorityDigest: this.db.campaignContinuationAuthorityDigest(campaignSessionId),
           },
         },
         now,

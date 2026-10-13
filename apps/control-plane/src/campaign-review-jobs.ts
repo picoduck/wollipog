@@ -96,7 +96,7 @@ export class CampaignReviewJobs {
     // Only the latest exact target's settled result can request repair. Every unknown outcome
     // remains retained, including an earlier epoch: a newer review cannot settle its spend.
     const rows = this.sql.prepare(`SELECT job_id FROM campaign_review_jobs job WHERE root_id=? AND
-      (state='accounting_unavailable' OR NOT EXISTS (SELECT 1 FROM campaign_review_jobs newer
+      (state IN ('reserved','running','accounting_unavailable') OR NOT EXISTS (SELECT 1 FROM campaign_review_jobs newer
         WHERE newer.root_id=job.root_id AND newer.target=job.target AND newer.rowid>job.rowid))
       ORDER BY rowid`).all(rootId) as Array<{ job_id: string }>;
     return rows.map(row => this.view(row.job_id)!);
