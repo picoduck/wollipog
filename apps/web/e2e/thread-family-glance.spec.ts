@@ -52,6 +52,18 @@ for (const length of ["short", "long"] as const) {
   });
 }
 
+test("at 1440×900 a large family's chip stays under the badge and its dots give way before its rollup (#3175)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/session-rows-e2e.html?family=large&collapsed=1");
+  await expect(chip(page)).toBeVisible();
+  const { chipLeft, chipRight, lineRight, badgeLeft } = await chipGap(parent(page));
+  expect(Math.abs(chipLeft - badgeLeft), "the chip starts where the status badge starts").toBeLessThan(0.5);
+  expect(chipRight, "the chip stays inside its line").toBeLessThanOrEqual(lineRight + 0.5);
+  const text = chip(page).locator(".inbox-thread-family-text");
+  await expect(text).toContainText("13 Working");
+  expect(await text.evaluate((node) => node.scrollWidth <= node.clientWidth + 0.5), "the rollup is not clipped").toBe(true);
+});
+
 for (const shape of [
   { name: "a 390×844 phone", width: 390, height: 844, query: "" },
   { name: "a 400px list column", width: 1440, height: 900, query: "&listWidth=400" },

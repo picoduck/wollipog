@@ -13337,6 +13337,9 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   .inbox-row-shell:not(.stacked) .inbox-row-copy > .inbox-row-title { grid-column: 1 / -1; }
   .inbox-row-shell:not(.stacked) .inbox-row-copy:has(> .inbox-thread-family) > .inbox-row-title { grid-column: 1; }
   .inbox-row-shell:not(.stacked) .inbox-row-copy > .inbox-thread-family { grid-column: 2 / -1; justify-self: start; max-width: 100%; }
+  /* The chip's cells end at the time column, so a large family's dots give way before its rollup. */
+  .inbox-row-shell:not(.stacked) .inbox-row-copy .inbox-thread-dots { min-width: 0; overflow: hidden; flex-shrink: 100000; }
+  .inbox-row-shell:not(.stacked) .inbox-row-copy .inbox-thread-dot { flex: none; }
   .inbox-row-shell:not(.stacked) .inbox-row-actions {
     top: 50%;
     bottom: auto;
