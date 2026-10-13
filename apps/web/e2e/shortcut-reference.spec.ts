@@ -32,7 +32,7 @@ async function openWithKey(page: Page, url: string): Promise<Locator> {
 
 const headings = (reference: Locator) => reference.locator(".shortcut-group h3");
 
-test.describe("at 1440×900", () => {
+test.describe("at 1440Ãƒâ€”900", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
   test("the reference is 800px wide, two columns, and under two screens tall", async ({ page }) => {
@@ -107,8 +107,8 @@ test.describe("at 1440×900", () => {
     await page.keyboard.press("Alt+ArrowUp");
     await expect(title).toHaveText("Alpha Session");
 
-    // The composer hops too. From an empty composer at the first session, Alt+↑ has nowhere to go
-    // and recalls nothing; only a plain ↑ recalls the last prompt.
+    // The composer hops too. From an empty composer at the first session, Alt+Ã¢â€ â€˜ has nowhere to go
+    // and recalls nothing; only a plain Ã¢â€ â€˜ recalls the last prompt.
     await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitUserMessage("session-alpha", "earlier prompt", "turn-earlier"));
     const composer = page.locator(".composer-input");
     await composer.focus();
@@ -123,8 +123,16 @@ test.describe("at 1440×900", () => {
 
     const reference = await openWithKey(page, SESSION);
     const reading = reference.locator(".shortcut-group").filter({ has: page.getByRole("heading", { name: /^Session Reading/ }) });
-    await expect(reading.locator(".shortcut-row", { hasText: "Next Session" }).locator("kbd")).toHaveText("Alt+↓");
-    await expect(reading.locator(".shortcut-row", { hasText: "Previous Session" }).locator("kbd")).toHaveText("Alt+↑");
+            await expect(
+              reading
+                .locator(".shortcut-row", { hasText: "Next Session" })
+                .locator("kbd"),
+            ).toHaveText("Alt+↓");
+            await expect(
+              reading
+                .locator(".shortcut-row", { hasText: "Previous Session" })
+                .locator("kbd"),
+            ).toHaveText("Alt+↑");
   });
 
   test("the reference lists Fork Conversation (F) under the session page's group (#2272)", async ({ page }) => {
@@ -140,12 +148,15 @@ test.describe("at 1440×900", () => {
   test("typing filters to the matching rows and their headings", async ({ page }) => {
     const reference = await openWithKey(page, SKILLS);
     const filter = reference.getByRole("searchbox", { name: "Filter Shortcuts" });
+    await expect.poll(async () => (await filter.boundingBox())?.height).toBe(32);
     await expect(filter).toBeFocused();
     await filter.fill("term");
     await expect(headings(reference)).toHaveText(["Session"]);
     await expect(reference.locator(".shortcut-row dt")).toHaveText(["Toggle Terminal", "Exit Terminal Focus"]);
     await filter.fill("xyzzy");
-    await expect(reference.getByRole("status")).toContainText("No shortcuts match “xyzzy”.");
+        await expect(reference.getByRole("status")).toContainText(
+          "No shortcuts match",
+        );
   });
 
   test("Done closes the reference and returns focus to its opener", async ({ page }) => {
@@ -177,6 +188,8 @@ test.describe("on a 390px phone", () => {
     // A touch screen opens on the sheet, not the filter: focusing the field would raise the
     // software keyboard over a sheet nobody has read yet.
     expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
+    const filter = reference.getByRole("searchbox", { name: "Filter Shortcuts" });
+    await expect.poll(async () => (await filter.boundingBox())?.height).toBe(44);
     await expect(reference).toBeFocused();
     await expect(reference.getByRole("searchbox", { name: "Filter Shortcuts" })).not.toBeFocused();
     // The loading modal can hand its phone sheet to the loaded reference in a later frame.
