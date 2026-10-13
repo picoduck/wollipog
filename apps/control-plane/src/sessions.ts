@@ -14059,7 +14059,7 @@ export class SessionsService {
     // Keep authoritative usage/tool/history ingestion above. An unresolved media command has
     // no generic prompt/question/permission lifecycle; such events cannot overwrite its queue
     // identity, mint a generic continuation, or launch auxiliary title-generation work.
-    if (this.pendingMediaLifecycle(session())) {
+    if (this.mediaSessionPurposes.owns(sessionId) && this.pendingMediaLifecycle(session())) {
       this.hub.sessionChangedById(sessionId);
       return;
     }
