@@ -191,7 +191,7 @@ test("a stalled session's badge turns danger, stops pulsing, and says how long i
 test("available results use a neutral badge while required answers keep warning priority", () => {
   const attention = { version: 1 as const, humanActions: [], meaningfulAt: 1,
     result: { revision: "r1", at: 1, owner: "human" as const }, acknowledgedRevision: null };
-  const result = sessionRowStatus(session({ status: "running", attention }));
+  const result = sessionRowStatus(session({ status: "idle", attention }));
   assert.equal(result.badge?.meta.label, "Ready for Review");
   assert.equal(result.badge?.meta.tone, "neutral");
   assert.equal(result.badge?.ariaLabel, "Status: Ready for Review");
