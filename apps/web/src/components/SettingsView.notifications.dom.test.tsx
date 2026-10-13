@@ -284,7 +284,7 @@ test("the panel head says what each section's index line has no room for", async
     ["about", "Versions and updates."],
   ] as const) {
     const view = await render(
-      <SettingsView section={section} onNavigate={() => undefined} onOpenShortcuts={() => undefined}
+      <SettingsView section={section} onNavigate={() => undefined}
         panels={Object.fromEntries(SETTINGS_SECTIONS.map((entry) => [entry.id, null])) as Record<SettingsSection, React.ReactNode>} />,
     );
     try {
