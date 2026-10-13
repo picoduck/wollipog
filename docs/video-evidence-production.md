@@ -325,14 +325,31 @@ owning authenticated runner WebSocket identity, with minimum media protocol 219;
 and claimed runner identifiers cannot authorize release. The reservation release still requires its
 same-database cancellation claim and exact source command/purpose/generation, with no usage history.
 
-The durable recovery coordinator claims capture intent before invoking an installed trusted adapter.
-Unknown execution reconciles the same operation; it cannot start a replacement or reset an allowance.
-At most two replacement attempts are admitted for the original resource. New artifact/occurrence
-identities are separately verified through independent trusted derivation. Every original frame's
-content digest, native time and duration must remain represented in order; sampled, omitted, retimed
-or substituted transients fail closed. The original gate snapshot remains unchanged. Actual capture
-capability/action/allowance lookup and capture execution must be registered by the owning service;
-test capture ports are disclosed synthetic doubles and do not prove real recapture or live readiness.
+The unregistered durable recovery coordinator requires an explicit trusted recoverable inadequate-evidence
+disposition by the actual current typed owner. Generic or hard permission denial, Human Required,
+unknown disposition, expiry, scope denial and owner revocation never become recoverable quality failure.
+Human-owned gates remain blocked by this preparation. Independent current finite capture/action
+reservation and fresh gate authority are separate prerequisites, with original aggregate spending,
+tool and work ceilings retained across new IDs, profiles, admissions and restarts.
+
+The coordinator commits separate exact intents for original owner rejection, capture and fresh-occurrence
+creation before invoking each mutation. A lost reply only reconciles that same stage operation;
+unverified original rejection, artifact or gate outcomes block another attempt. Two total replacement
+attempts are pinned to immutable original ancestry; no new ID resets capacity and no unknown charge
+is refunded. Old execution rows without trustworthy ancestry remain conservative. Completed readback
+independently rechecks actual immutable artifacts/occurrences and current authority rather than trusting
+cached capture-worker proof.
+
+Complete trusted original timing/action/transient provenance may cover at most eight adjacent segments,
+each at most 900 native frames and 30 seconds. Aggregate encoded source remains at most 32 MiB and
+derived PNG storage 128 MiB, with the original per-frame 2 MiB and finite work bounds retained.
+Byte-preserving split/conversion must preserve every original PNG hash, frame, native time and duration.
+Specific oversized-frame recapture may produce changed pixels only with independently derived complete
+original timing/action/transient coverage and fresh immutable exact source/criteria/profile/gate
+bindings. It cannot approve the original artifact from those new pixels. Sampled, omitted, retimed,
+unbound or unknown transients refuse. Actual capture/allowance/provenance/typed-owner/gate execution
+ports remain unregistered; disclosed synthetic SQLite fixtures prove code control flow only, not real
+capture, native model inspection, Human allowance, genuine usage or production readiness.
 
 Current private destination and provider disclosure revisions, retention text and exact offered
 reviewer identities are re-read at preparation, resolution and consumption. A privacy or retention
