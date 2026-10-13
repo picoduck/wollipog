@@ -31,6 +31,7 @@ import type { ViewNavigation } from "../navigation.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { MINUTE, campaignProjection, forgeObservation, itemDetail, itemSummary, knownCost, workSummary } from "./campaign-status-fixtures.js";
 import "../styles.css";
+import { campaignRecoveryFixture } from "./campaign-recovery-fixtures.js";
 
 declare global {
   interface Window {
@@ -56,6 +57,10 @@ const scenario = params.get("scenario") ?? "campaign";
 if (params.get("theme") === "light") document.documentElement.dataset.theme = "light";
 
 const NOW = Date.now();
+const recoveryReason = params.get("recovery");
+const recoveryRecord = recoveryReason && ["missing_access", "missing_human_information", "boundary_enlargement",
+  "human_required_rule", "unsupported_capability", "attempts_exhausted", "failed_checks", "reviewer_objection", "uncertain_outcome"].includes(recoveryReason)
+  ? campaignRecoveryFixture(recoveryReason as import("@wollipog/protocol").CampaignRecoveryReason, NOW) : null;
 const HOUR = 60 * MINUTE;
 
 const items: CampaignWorkItemSummary[] = [
@@ -225,7 +230,17 @@ const projectionFor = (rev: number) => campaignProjection(
       enforcement: "admission_and_best_effort_cancellation" as const, externalWorkers: "unsupported" as const,
       sessionLimits: {costBudgetUsd:40,maxToolCalls:null},rootAllocation:{sessionId:"s_parent",costUsd:25,toolCalls:500},costAccounting:"priced" as const,
     } } : {}),
-    heldChildren: [{
+    ...(recoveryRecord ? { recovery: { unattendedReady: false, automatic: recoveryRecord.state === "dispatched" ? 1 : 0,
+      waitingHuman: recoveryRecord.state === "waiting_human" ? 1 : 0, blocked: recoveryRecord.state === "blocked" ? 1 : 0,
+      records: [recoveryRecord], truncated: false } } : {}),
+    ...(params.get("completedChildren") === "1" && recoveryRecord?.reason === "failed_checks" ? {
+      // Static rendering only. Actual fresh authority/forge/completion composition is separately
+      // exercised in the CP-to-runner journal test; these values cannot attest live readiness.
+      status: "active" as const,
+      children: { total: 2, active: 0, waitingHuman: 0, blocked: 0, verified: 2, cleanupPending: 0 },
+      limits: { maximumConcurrentChildren: 4, occupied: 0, remaining: 4, costBudgetUsd: 40, maxToolCalls: null },
+    } : {}),
+    heldChildren: params.get("completedChildren") === "1" ? [] : [{
       sessionId: "s_child_3",
       holds: [{
         kind: "provider_account_switch", holdId: "hold_1", since: NOW - 6 * MINUTE,
@@ -258,9 +273,16 @@ const descendantRequests: DescendantRequestView[] = scenario === "campaign" ? [{
   occurrenceId: "occ_1",
   request: {
     requestId: "req_1",
+    ...(recoveryRecord ? { campaignRecovery: recoveryRecord } : {}),
     occurrenceId: "occ_1",
     title: "Run gh pr merge for the storage pull request",
-    options: [
+    ...(recoveryRecord?.reason === "missing_access" ? {
+      kind: "authentication" as const, title: "Sign in to the required provider account",
+    } : {}),
+    options: recoveryRecord?.reason === "missing_access" ? [
+      { optionId: "auth:login", name: "Sign In", kind: "allow_once" },
+      { optionId: "auth:dismiss", name: "Dismiss", kind: "reject_once" },
+    ] : [
       { optionId: "allow", name: "Allow", kind: "allow_once" },
       { optionId: "reject", name: "Reject", kind: "reject_once" },
     ],
@@ -279,7 +301,11 @@ const client = {
   campaignIssueScope: async (id: string) => ({ campaignSessionId: id, repository: "team/repo", issueNumbers: [], revision: 0,
     supported: true, canPropose: true, outsideScope: [{ workItemId: "scope-fixture", title: "Member work", issue: { repository: "team/repo", number: 124 }, sessionId: "s_child" }],
     candidates: [{ issue: { repository: "team/repo", number: 123 }, title: "Composer Epic", source: "umbrella" as const },
-      { issue: { repository: "team/repo", number: 124 }, title: "Member Work", source: "member_checklist" as const }] }),
+      { issue: { repository: "team/repo", number: 124 }, title: "Member Work", source: "member_checklist" as const }],
+    ...(params.get("completedChildren") === "1" && recoveryRecord?.reason === "failed_checks" ? {
+      // Disclosed static scope data, not a live mint/approval or supported-profile assertion.
+      issueNumbers: [123], revision: 1, canPropose: false, outsideScope: [], candidates: [],
+    } : {}) }),
   proposeCampaignIssueScope: async (_id: string, proposal: import("@wollipog/protocol").CampaignIssueScopeRequest) => {
     (window as unknown as { __SCOPE_PROPOSAL__: unknown }).__SCOPE_PROPOSAL__ = proposal;
     return { status: "pending" } as import("@wollipog/protocol").WorkflowDecisionView;
