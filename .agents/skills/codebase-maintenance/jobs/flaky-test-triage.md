@@ -9,8 +9,10 @@ should surface automatically.
 
 ## Ground Truth
 
-Establish a clean baseline first: confirm the working tree matches `origin/main` before running,
-since a dirty tree makes every result meaningless.
+Establish a clean baseline first: confirm the analysis tree matches the pinned `origin/main`
+commit before running. If the shared checkout is dirty or differs from `origin/main`, use the
+shared skill's detached analysis-worktree exception and install preflight; leave the shared
+checkout untouched.
 
 Run the suite three times: `pnpm test`. Compare the failure sets. Then run the Playwright suite
 three times: `pnpm test:e2e`, from the repository root (the config and baseURL live there). Every
@@ -29,6 +31,14 @@ the batch partway through a later pass (the 2026-10-06 batch was cut off after t
 separate run logs and completion records, and resume from those records if the session yields.
 A killed, interrupted, or partial pass does not count toward the three comparable complete runs;
 report incomplete coverage explicitly if replacements cannot be completed.
+
+A background-work completion notification marks the end of its reported jobs, not necessarily
+the whole sweep. The runner's automatic continuation asks for the parent workflow's final result;
+for this job, that requires completing the remaining passes first. Read the terminal results and
+continue from the completion records until all six passes finish, keeping any pass still running.
+End early only for an explicit human instruction to stop or report, an actual guardrail, or a
+verified execution blocker. Record the exact interruption evidence and completed coverage; do not
+infer an automation wall-clock limit from the automatic continuation's request for a final result.
 
 Pin the baseline across the whole set of runs. Record `git rev-parse HEAD` before the first run
 and re-check it before and after every run, unit and e2e alike. Another session can fast-forward
