@@ -110,6 +110,7 @@ test("orchestrator MCP lists only management tools and leaves self-worktree poli
   const names = (response!.result as { tools: { name: string }[] }).tools.map((tool) => tool.name);
   assert.ok(names.includes("create_session"));
   assert.ok(names.includes("list_governance_policies"));
+  assert.ok(names.includes("wait_pull_request"), "an Orchestrator waits on its own pull requests too");
   for (const name of [
     "get_campaign", "record_campaign_follow_up", "verify_campaign_child",
     "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question",
@@ -463,6 +464,7 @@ test("tools/list returns the curated session and workflow tools with schemas", a
       "reconcile_workflow_decision",
       "get_session_events",
       "wait_session",
+      "wait_pull_request",
       "list_runs",
       "list_governance_policies",
       "get_governance_policy",
@@ -674,6 +676,43 @@ test("MCP cancellation promptly interrupts a long wait_session request", async (
   assert.equal(response.result.isError, true);
   assert.match(response.result.content[0].text, /cancelled/);
   assert.equal(fetches, 1, "cancellation stops the polling loop before another side effect");
+});
+
+test("wait_pull_request reads GitHub through gh, never the control plane, and returns a bounded summary", async () => {
+  const { deps, calls } = makeDeps();
+  const head = "44579c6c25235598f1a28f8ccb0449cb8dbbc810";
+  const ghCalls: string[][] = [];
+  deps.gh = async (args) => {
+    ghCalls.push(args);
+    const json = (value: unknown) => ({ stdout: JSON.stringify(value), stderr: "", code: null, timedOut: false });
+    if (args.includes("graphql")) {
+      return json({ data: { repository: { defaultBranchRef: { name: "main" }, pullRequest: {
+        url: "https://github.com/picoduck/wollipog/pull/7", state: "OPEN", isDraft: false, headRefOid: head, baseRefName: "main",
+        mergeStateStatus: "CLEAN", mergeCommit: null, mergeQueueEntry: null,
+        commits: { nodes: [{ commit: { oid: head, statusCheckRollup: { contexts: { pageInfo: { hasNextPage: false }, nodes: [
+          { __typename: "CheckRun", name: "Typecheck, Test & Sidecar Bundle", status: "COMPLETED", conclusion: "SUCCESS", startedAt: "t", isRequired: true },
+        ] } } } }] },
+      } } } });
+    }
+    if (args.some((arg) => arg.includes("/rules/branches/"))) {
+      return json([{ type: "required_status_checks", parameters: { required_status_checks: [{ context: "Typecheck, Test & Sidecar Bundle" }] } }]);
+    }
+    return json({ protection: { enabled: true } });
+  };
+  const result = await callTool(deps, "wait_pull_request", {
+    pullRequest: "https://github.com/picoduck/wollipog/pull/7", headSha: head.toUpperCase(), timeoutMs: 60_000,
+  });
+  assert.equal(result.isError, undefined);
+  const summary = resultJson(result);
+  assert.equal(summary.outcome, "checks_passed");
+  assert.equal(summary.headSha, head);
+  assert.deepEqual(summary.checks.required, [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed", reported: true }]);
+  assert.equal(calls.length, 0, "no control-plane request");
+  assert.ok(ghCalls.every((args) => args[0] === "api"), "reads only");
+
+  const missingRepo = await callTool(deps, "wait_pull_request", { pullRequest: "7" });
+  assert.equal(missingRepo.isError, true);
+  assert.match(resultText(missingRepo), /repository/);
 });
 
 test("cancelling an in-flight mutation reports its potentially committed outcome", async () => {

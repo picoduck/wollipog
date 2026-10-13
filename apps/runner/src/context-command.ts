@@ -8,6 +8,8 @@ export interface ContextCommandOptions {
   stdin?: string;
   timeoutMs?: number;
   maxBuffer?: number;
+  /** Kills the command when aborted. */
+  signal?: AbortSignal;
 }
 
 export interface ContextCommandResult {
@@ -75,6 +77,7 @@ export function runContextCommand(
         killSignal: "SIGKILL",
         maxBuffer,
         windowsHide: true,
+        ...(options.signal ? { signal: options.signal } : {}),
         ...(spec.windowsVerbatimArguments ? { windowsVerbatimArguments: true, argv0: spec.argv0 } : {}),
       },
       (error, stdout, stderr) => {

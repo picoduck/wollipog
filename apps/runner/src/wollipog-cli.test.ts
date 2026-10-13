@@ -15,7 +15,8 @@ import {
   AGENT_CONTROL_RELAY_ENDPOINT_ENV,
   AGENT_CONTROL_RELAY_KEY_ENV,
 } from "./agent-control-relay.js";
-import { runWollipogCli, runWollipogInit } from "./wollipog-cli.js";
+import type { GhOutcome, GhRunner } from "./campaign-forge-status.js";
+import { runPullRequestCli, runWollipogCli, runWollipogInit } from "./wollipog-cli.js";
 import { expandCommandAlias, resolveHelp } from "./wollipog-help.js";
 
 test("MCP stays connected beyond the credential deadline and recovers typed decisions after acknowledgment", () => {
@@ -153,6 +154,7 @@ test("CLI topic help is complete, successful, and side-effect free", async () =>
     ["campaign", ["plan --input", "update-item <work-item-id>", "assign <work-item-id>", "adjudicate <recommendation-id>", "work-items", "protocol v196+", "grant no authority"]],
     ["decision", ["decision request", "decision get", "decision consume", "decision reconcile", "request_workflow_decision", "--snapshot"]],
     ["init", ["wollipog init", ".wollipog.json", "does not run", "never overwritten"]],
+    ["pr", ["pr wait", "--repo", "--head", "--timeout", "--interval", "--any-failure", "pending, never passing", "124 timeout", "needs no control plane"]],
   ];
   for (const [topic, expected] of topics) {
     const result = await captureCli(["help", topic]);
@@ -165,6 +167,107 @@ test("CLI topic help is complete, successful, and side-effect free", async () =>
   const textWithJsonFlag = await captureCli(["help", "pair", "--json"]);
   assert.equal(textWithJsonFlag.code, 0);
   assert.match(textWithJsonFlag.stdout, /^Usage: wollipog pair/u);
+});
+
+test("pr wait runs locally through gh with outcome exit codes and never contacts the control plane", async () => {
+  const head = "44579c6c25235598f1a28f8ccb0449cb8dbbc810";
+  const json = (value: unknown): GhOutcome => ({ stdout: JSON.stringify(value), stderr: "", code: null, timedOut: false });
+  const fakeGh = (conclusion: string | null, extra: Record<string, unknown> = {}) => {
+    const calls: string[][] = [];
+    const gh: GhRunner = async (args) => {
+      calls.push(args);
+      if (args[0] === "repo") return { stdout: "picoduck/wollipog\n", stderr: "", code: null, timedOut: false };
+      if (args.includes("graphql")) {
+        return json({ data: { repository: { defaultBranchRef: { name: "main" }, pullRequest: {
+          url: "https://github.com/picoduck/wollipog/pull/7", state: "OPEN", isDraft: false, headRefOid: head, baseRefName: "main",
+          mergeStateStatus: "BLOCKED", mergeCommit: null, mergeQueueEntry: null,
+          commits: { nodes: [{ commit: { oid: head, statusCheckRollup: { contexts: { pageInfo: { hasNextPage: false }, nodes: [
+            { __typename: "CheckRun", name: "CI", status: conclusion ? "COMPLETED" : "IN_PROGRESS", conclusion, startedAt: "t" },
+          ] } } } }] },
+          ...extra,
+        } } } });
+      }
+      if (args.some((arg) => arg.includes("/rules/branches/"))) {
+        return json([{ type: "required_status_checks", parameters: { required_status_checks: [{ context: "CI" }] } }]);
+      }
+      return json({});
+    };
+    return { gh, calls };
+  };
+  const run = async (args: string[], gh: GhRunner) => {
+    let stdout = "";
+    let stderr = "";
+    const code = await runPullRequestCli(args, true, { stdout: (text) => { stdout += text; }, stderr: (text) => { stderr += text; } }, gh);
+    return { code, stdout, stderr };
+  };
+
+  const passed = fakeGh("SUCCESS");
+  const ok = await run(["pr", "wait", "7", "--json"], passed.gh);
+  assert.equal(ok.code, 0);
+  assert.equal(JSON.parse(ok.stdout).outcome, "checks_passed");
+  assert.deepEqual(passed.calls[0], ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], "a bare number uses this checkout's repository");
+
+  const explicit = fakeGh("FAILURE");
+  const failedRun = await run(["pr", "wait", "7", "--repo", "picoduck/wollipog", "--head", head, "--json"], explicit.gh);
+  assert.equal(failedRun.code, 3);
+  assert.equal(JSON.parse(failedRun.stdout).outcome, "checks_failed");
+  assert.equal(explicit.calls.some((args) => args[0] === "repo"), false);
+
+  const pending = await run(["pr", "wait", "picoduck/wollipog#7", "--timeout", "1", "--json"], fakeGh(null).gh);
+  assert.equal(pending.code, 124);
+  assert.equal(JSON.parse(pending.stdout).outcome, "timeout");
+
+  const merged = await run(["pr", "wait", "https://github.com/picoduck/wollipog/pull/7", "--json"],
+    fakeGh(null, { state: "MERGED", mergeCommit: { oid: head } }).gh);
+  assert.equal(merged.code, 0);
+  assert.equal(JSON.parse(merged.stdout).merged, true);
+
+  const broken: GhRunner = async () => ({ stdout: "", stderr: "gh: To get started with GitHub CLI, please run:  gh auth login", code: 4, timedOut: false });
+  const unreadable = await run(["pr", "wait", "picoduck/wollipog#7", "--json"], broken);
+  assert.equal(unreadable.code, 1);
+  assert.match(JSON.parse(unreadable.stdout).error, /forge_unauthenticated/u);
+
+  // Resolving the repository comes out of the wait's own budget.
+  const startedAt = Date.now();
+  let discoveryKilled = false;
+  const hungDiscovery: GhRunner = (_args, signal) => new Promise((resolve) => {
+    signal?.addEventListener("abort", () => {
+      discoveryKilled = true;
+      resolve({ stdout: "", stderr: "killed", code: "ABORT_ERR", timedOut: true });
+    }, { once: true });
+  });
+  const slow = await run(["pr", "wait", "7", "--timeout", "100", "--json"], hungDiscovery);
+  assert.equal(slow.code, 1);
+  assert.match(JSON.parse(slow.stdout).error, /pass --repo/u);
+  assert.equal(discoveryKilled, true);
+  assert.ok(Date.now() - startedAt < 2_000);
+  const late: GhRunner = async (args) => {
+    if (args[0] !== "repo") return passed.gh(args);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    return { stdout: "picoduck/wollipog\n", stderr: "", code: null, timedOut: false };
+  };
+  const spent = await run(["pr", "wait", "7", "--timeout", "100", "--json"], late);
+  assert.equal(spent.code, 1);
+  assert.match(JSON.parse(spent.stdout).error, /whole timeout/u);
+  const fractional = await run(["pr", "wait", "7", "--timeout", "100.5", "--json"], passed.gh);
+  assert.equal(fractional.code, 0, "a fractional timeout is floored, never a crash");
+  assert.equal(JSON.parse(fractional.stdout).outcome, "checks_passed");
+
+  for (const args of [["pr"], ["pr", "wait"], ["pr", "watch", "7"], ["pr", "wait", "7", "--timeout", "soon"]]) {
+    const usage = await run(args, passed.gh);
+    assert.equal(usage.code, 2, args.join(" "));
+  }
+
+  // The routed command needs no session credential, token, or control-plane URL (captureCli
+  // fails any request and passes an empty environment).
+  const routed = await captureCli(["pr", "wait", "--json"]);
+  assert.equal(routed.code, 2);
+  assert.match(JSON.parse(routed.stdout).error, /^Usage: wollipog pr wait/u);
+  for (const argv of [["pr", "--help"], ["pr", "wait", "7", "--help"]]) {
+    const help = await captureCli(argv);
+    assert.equal(help.code, 0, argv.join(" "));
+    assert.match(help.stdout, /^Usage: wollipog pr wait/u);
+  }
 });
 
 test("local init succeeds without control-plane credentials and emits stable content-safe JSON", async () => {

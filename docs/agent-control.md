@@ -73,6 +73,7 @@ wollipog worktree attach [--session ID] --path PATH --json
 wollipog worktree select [--session ID] --path PATH --json
 wollipog worktree discard [--session ID] --path PATH --json
 wollipog artifact attach --file PATH [--name NAME] [--session ID] --json
+wollipog pr wait PR [--repo OWNER/NAME] [--head SHA] [--timeout MS] [--interval MS] [--any-failure] --json
 wollipog decision request --request-id ID --resource-key KEY --snapshot JSON --json
 wollipog decision get OCCURRENCE_ID --json
 wollipog decision consume OCCURRENCE_ID --snapshot JSON [--action JSON] --json
@@ -82,8 +83,31 @@ wollipog service <install|status|restart|logs|upgrade|uninstall> [options]
 wollipog doctor
 wollipog update
 wollipog pair <create|list|revoke|url> [options]
-wollipog help [doctor|update|pair|service|admin|session|worktree|artifact|decision]
+wollipog help [doctor|update|pair|service|admin|session|worktree|artifact|decision|pr]
 ```
+
+`wollipog pr wait` (MCP `wait_pull_request`, #3081) blocks until a GitHub pull request's required
+checks pass or fail, its merge-queue entry fails (`UNMERGEABLE`, or a required merge-group check
+fails) or leaves the queue unmerged, it
+merges or closes, its head moves away from `--head`, or the timeout expires, then returns one bounded
+summary. It runs in the runner-side process, not the model: no model request happens while it
+waits. It reads GitHub through the local `gh` login and never writes, so it needs no control plane,
+session credential, or protocol bump; an older runner simply lacks the command. A Direct WSL
+Orchestrator's broker runs it with the distro's own `gh`, never the Windows host's, and its bridged
+CLI form needs `owner/name#number`, a URL, or `--repo`; closing the bridged connection cancels it. Required checks are
+the union of the base branch's active ruleset `required_status_checks`, classic branch protection,
+and any reported check GitHub marks required; a check run and a status context sharing a required
+name must both pass, a name restricted to an app (`integration_id`, `app_id`) counts only that app's
+check runs (every such app must report), and the newest run of a name (by check run id) wins.
+Check contexts are read in pages of 100, up to ten pages per commit; past that, a pass also needs
+GitHub's `mergeStateStatus` to confirm it, because an unseen context could still fail. A required check with no reported run is `pending`
+(`reported: false`), never passing, and a base whose rules require nothing returns
+`no_required_checks` at once. An unreadable base is an error, never an empty requirement, and a
+GraphQL answer carrying any error is retried rather than trusted. A queue
+entry that disappears without a merge is reported as `queue_ejected` only once it has stayed missing
+for 10 seconds. Timeouts are clamped to 1 ms–3 hours (default 4 minutes); reads share that budget, so no read
+starts more than 20 seconds past it and one still in flight then is abandoned. Polling is clamped to
+10 seconds–10 minutes (default 30 seconds); lists are capped at 30 required checks and 20 failed jobs.
 
 `wollipog session steering` (MCP `list_steering_attempts`) returns at most 50 receipts, prioritizing
 pending and unresolved uncertain attempts. `session steering-get` (`get_steering_attempt`) reads an
