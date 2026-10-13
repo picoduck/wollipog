@@ -8,8 +8,9 @@ import type { SessionEventPayload } from "./index.js";
  * tier, and whether the request's input size was known.
  *
  * The runner accrues entries and the control plane counts what it ingested with the same rule
- * (`accrueRatePricedUsage`), so a per-entry difference is exactly the usage the control plane never
- * saw. The control plane prices that difference per bucket, as event-first ingestion would have.
+ * (`accrueRatePricedUsage`), both from the session's first usage, so a per-entry difference is
+ * exactly the usage the control plane never saw. The control plane prices that difference per
+ * bucket, as event-first ingestion would have.
  */
 export interface RatePricedUsageTotal {
   /** The record's model, trimmed and bounded as the control plane reads it; absent when unnamed. */
@@ -22,11 +23,20 @@ export interface RatePricedUsageTotal {
   requestInputTokens?: { min: number; max: number };
   /** Provider-reported input: the uncached part for Anthropic, inclusive of cache reads for Codex. */
   inputTokens: number;
+  /** Sum over records of `inputTokens - cachedInputTokens`, floored at zero per record: the uncached
+   * input of a provider whose input includes cache reads, normalized as each event is. */
+  netInputTokens: number;
   outputTokens: number;
   cachedInputTokens: number;
   cacheCreationInputTokens: number;
   reasoningOutputTokens: number;
 }
+
+/** The cumulative counters of an entry, in wire order. */
+export const RATE_PRICED_USAGE_BUCKETS = [
+  "inputTokens", "netInputTokens", "outputTokens", "cachedInputTokens", "cacheCreationInputTokens", "reasoningOutputTokens",
+] as const;
+export type RatePricedUsageBucket = typeof RATE_PRICED_USAGE_BUCKETS[number];
 
 /** Beyond this many pricing keys a runner stops reporting entries for the session. */
 export const RATE_PRICED_USAGE_MAX_ENTRIES = 32;
@@ -52,15 +62,11 @@ export function ratePricedUsageRecord(payload: SessionEventPayload): RatePricedU
   if (payload.parentToolUseId && payload.independentUsage !== true) return null;
   if (payload.liveUsage === "provisional" || payload.accountingIncomplete) return null;
   if (typeof payload.costUsd === "number" && Number.isFinite(payload.costUsd) && payload.costUsd >= 0) return null;
+  const inputTokens = tokenCount(payload.inputTokens);
   const outputTokens = tokenCount(payload.outputTokens);
-  const record: RatePricedUsageTotal = {
-    inputTokens: tokenCount(payload.inputTokens),
-    outputTokens,
-    cachedInputTokens: tokenCount(payload.cachedInputTokens),
-    cacheCreationInputTokens: tokenCount(payload.cacheCreationInputTokens),
-    reasoningOutputTokens: Math.min(outputTokens, tokenCount(payload.reasoningOutputTokens)),
-  };
-  if (!(record.inputTokens || record.outputTokens || record.cachedInputTokens || record.cacheCreationInputTokens)) return null;
+  const cachedInputTokens = tokenCount(payload.cachedInputTokens);
+  const cacheCreationInputTokens = tokenCount(payload.cacheCreationInputTokens);
+  if (!(inputTokens || outputTokens || cachedInputTokens || cacheCreationInputTokens)) return null;
   const model = boundedText(payload.model, 128);
   // Pricing reads the tier verbatim: a padded, empty, or non-text tier is unknown, not standard.
   // Bounding keeps an over-long tier unknown, because no published tier name is that long.
@@ -72,7 +78,12 @@ export function ratePricedUsageRecord(payload: SessionEventPayload): RatePricedU
     ...(serviceTier === undefined ? {} : { serviceTier }),
     ...(typeof requestInput === "number" && Number.isFinite(requestInput) && requestInput >= 0
       ? { requestInputTokens: { min: requestInput, max: requestInput } } : {}),
-    ...record,
+    inputTokens,
+    netInputTokens: Math.max(0, inputTokens - cachedInputTokens),
+    outputTokens,
+    cachedInputTokens,
+    cacheCreationInputTokens,
+    reasoningOutputTokens: Math.min(outputTokens, tokenCount(payload.reasoningOutputTokens)),
   };
 }
 
@@ -96,8 +107,6 @@ export function accrueRatePricedUsage(
   const index = totals.findIndex((entry) => ratePricedUsageKey(entry) === key);
   if (index < 0) return totals.length >= RATE_PRICED_USAGE_MAX_ENTRIES ? null : [...totals, record];
   const prior = totals[index]!;
-  const sum = (field: "inputTokens" | "outputTokens" | "cachedInputTokens" | "cacheCreationInputTokens" | "reasoningOutputTokens") =>
-    Math.min(prior[field] + record[field], MAX_TOKENS);
   const next: RatePricedUsageTotal = {
     ...(prior.model === undefined ? {} : { model: prior.model }),
     ...(prior.serviceTier === undefined ? {} : { serviceTier: prior.serviceTier }),
@@ -105,11 +114,8 @@ export function accrueRatePricedUsage(
       min: Math.min(prior.requestInputTokens.min, record.requestInputTokens.min),
       max: Math.max(prior.requestInputTokens.max, record.requestInputTokens.max),
     } } : {}),
-    inputTokens: sum("inputTokens"),
-    outputTokens: sum("outputTokens"),
-    cachedInputTokens: sum("cachedInputTokens"),
-    cacheCreationInputTokens: sum("cacheCreationInputTokens"),
-    reasoningOutputTokens: sum("reasoningOutputTokens"),
+    ...Object.fromEntries(RATE_PRICED_USAGE_BUCKETS.map((bucket) =>
+      [bucket, Math.min(prior[bucket] + record[bucket], MAX_TOKENS)])) as Record<RatePricedUsageBucket, number>,
   };
   return totals.map((entry, position) => position === index ? next : entry);
 }
@@ -126,8 +132,7 @@ export function parseRatePricedUsage(value: unknown): RatePricedUsageTotal[] | n
     const entry = raw as Record<string, unknown>;
     if (entry.model !== undefined && boundedText(entry.model, 128) !== entry.model) return null;
     if (entry.serviceTier !== undefined && (typeof entry.serviceTier !== "string" || entry.serviceTier.length > 64)) return null;
-    const fields = ["inputTokens", "outputTokens", "cachedInputTokens", "cacheCreationInputTokens", "reasoningOutputTokens"] as const;
-    if (!fields.every((field) => count(entry[field]))) return null;
+    if (!RATE_PRICED_USAGE_BUCKETS.every((bucket) => count(entry[bucket]))) return null;
     let requestInputTokens: RatePricedUsageTotal["requestInputTokens"];
     if (entry.requestInputTokens !== undefined) {
       const range = entry.requestInputTokens as { min?: unknown; max?: unknown } | null;
@@ -141,11 +146,8 @@ export function parseRatePricedUsage(value: unknown): RatePricedUsageTotal[] | n
       ...(entry.model === undefined ? {} : { model: entry.model as string }),
       ...(entry.serviceTier === undefined ? {} : { serviceTier: entry.serviceTier as string }),
       ...(requestInputTokens ? { requestInputTokens } : {}),
-      inputTokens: entry.inputTokens as number,
-      outputTokens: entry.outputTokens as number,
-      cachedInputTokens: entry.cachedInputTokens as number,
-      cacheCreationInputTokens: entry.cacheCreationInputTokens as number,
-      reasoningOutputTokens: entry.reasoningOutputTokens as number,
+      ...Object.fromEntries(RATE_PRICED_USAGE_BUCKETS.map((bucket) => [bucket, entry[bucket] as number])) as
+        Record<RatePricedUsageBucket, number>,
     };
     const key = ratePricedUsageKey(parsed);
     if (keys.has(key)) return null;

@@ -13,7 +13,7 @@ const republished = { kind: "token_usage" as const, model: " claude-opus-5 ", in
 
 test("only usage the control plane rate-prices into the session total is accrued", () => {
   assert.deepEqual(ratePricedUsageRecord(republished), {
-    model: "claude-opus-5", requestInputTokens: { min: 1_210, max: 1_210 }, inputTokens: 10, outputTokens: 5,
+    model: "claude-opus-5", requestInputTokens: { min: 1_210, max: 1_210 }, inputTokens: 10, netInputTokens: 0, outputTokens: 5,
     cachedInputTokens: 1_000, cacheCreationInputTokens: 200, reasoningOutputTokens: 0,
   });
   for (const excluded of [
@@ -29,6 +29,11 @@ test("only usage the control plane rate-prices into the session total is accrued
   }
   assert.notEqual(ratePricedUsageRecord({ ...republished, parentToolUseId: "child", independentUsage: true }), null);
   assert.notEqual(ratePricedUsageRecord({ ...republished, costUsd: Number.NaN }), null, "an unusable cost is rate-priced");
+  // Pricing reads the tier verbatim, so only an absent tier is absent.
+  assert.deepEqual(["", " standard ", 7].map((serviceTier) =>
+    ratePricedUsageRecord({ ...republished, pricingContext: { serviceTier } as never })!.serviceTier), ["", " standard ", "<invalid>"]);
+  assert.equal(ratePricedUsageRecord({ kind: "token_usage", inputTokens: 100, cachedInputTokens: 600 })!.netInputTokens, 0,
+    "input inclusive of cache reads is normalized per record");
 });
 
 test("records accrue per pricing key and widen the request-size range", () => {

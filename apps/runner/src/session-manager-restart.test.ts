@@ -805,7 +805,7 @@ for (const revision of [0, 1, Number.MAX_SAFE_INTEGER]) test(`Claude Restart ret
     const spec = claudeSpec("s_restart_accounting", f.repo);
     const prior = storedClaudeSession(spec.sessionId, f.repo, {
       costUsd: 0.036, tokensIn: 40, tokensOut: 4, seq: 4, logEpoch: 1,
-      ratePricedUsage: [{ model: "claude-opus-5", inputTokens: 4, outputTokens: 1, cachedInputTokens: 90, cacheCreationInputTokens: 0, reasoningOutputTokens: 0 }],
+      ratePricedUsage: [{ model: "claude-opus-5", inputTokens: 4, netInputTokens: 0, outputTokens: 1, cachedInputTokens: 90, cacheCreationInputTokens: 0, reasoningOutputTokens: 0 }],
       costReconciliationRevision: revision,
       costReconciliationDeltaUsd: revision ? -0.004 : 0,
       costReconciliationIdentity: revision ? "a".repeat(64) : undefined,

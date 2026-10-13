@@ -5342,6 +5342,7 @@ export class SessionManager {
       title: descriptor.title || "(adopted session)",
       titleSource: "provider",
       config: {},
+      ratePricedUsage: [],
       tokensIn: 0,
       tokensOut: 0,
       costUsd: 0,
@@ -5807,7 +5808,7 @@ export class SessionManager {
       acpSessionOverrides,
       tokensIn: retainAccounting ? (prior?.tokensIn ?? 0) : 0,
       tokensOut: retainAccounting ? (prior?.tokensOut ?? 0) : 0,
-      ratePricedUsage: retainAccounting ? prior?.ratePricedUsage : undefined,
+      ratePricedUsage: retainAccounting ? prior?.ratePricedUsage : [],
       contextTokensUsed: priorResumeId ? prior?.contextTokensUsed : undefined,
       contextWindow: priorResumeId ? prior?.contextWindow : undefined,
       costUsd: retainAccounting ? (prior?.costUsd ?? 0) : 0,
@@ -13773,7 +13774,7 @@ export class SessionManager {
           driver: handoff.agent.driver!, command: handoff.agent.command, args: [...handoff.agent.args],
           env: {}, context: source.context, agentSessionId: null, handoffPending: true,
           status: "idle", title, titleSource: "generated", config: { ...handoff.config },
-          tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+          tokensIn: 0, tokensOut: 0, costUsd: 0, ratePricedUsage: [], preview: null, pendingApproval: null,
           turnCount: 0, seq: 0, createdAt: now, updatedAt: now,
           providerStateVersion: source.context.kind === "wsl" ? 3 : 2,
           ...(this.runnerOwnerHash ? { checkpointRefVersion: 2 as const } : {}),
@@ -14053,7 +14054,7 @@ export class SessionManager {
         tokensIn: 0,
         tokensOut: 0,
         costUsd: 0,
-        ratePricedUsage: undefined,
+        ratePricedUsage: [],
         costReconciliationRevision: undefined,
         costReconciliationDeltaUsd: undefined,
         costReconciliationIdentity: undefined,
@@ -19292,13 +19293,12 @@ export class SessionManager {
       const m = this.store.readMeta(sessionId);
       if (!m) return;
       // Rate-priced usage keeps its cache buckets, so a snapshot covering it is priced exactly (#3111).
-      const priorRatePriced = m.ratePricedUsage ?? [];
-      const ratePricedUsage = m.ratePricedUsage === null ? null : accrueRatePricedUsage(priorRatePriced, payload);
+      const ratePricedUsage = Array.isArray(m.ratePricedUsage) ? accrueRatePricedUsage(m.ratePricedUsage, payload) : m.ratePricedUsage;
       this.store.patchMeta(sessionId, {
         tokensIn: m.tokensIn + (payload.inputTokens ?? 0),
         tokensOut: m.tokensOut + (payload.outputTokens ?? 0),
         costUsd: m.costUsd + (payload.costUsd ?? 0),
-        ...(m.ratePricedUsage === null || ratePricedUsage === priorRatePriced ? {} : { ratePricedUsage: ratePricedUsage && [...ratePricedUsage] }),
+        ...(ratePricedUsage === m.ratePricedUsage ? {} : { ratePricedUsage: ratePricedUsage && [...ratePricedUsage] }),
         ...(payload.claudeUsageCheckpoint ? { claudeUsageCheckpoint: payload.claudeUsageCheckpoint, claudeUsageCheckpointSeq: m.seq } : {}),
       });
       // Usage counters normally flush lazily. A republished request has already left the open live

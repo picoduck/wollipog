@@ -7037,7 +7037,7 @@ test("Claude resume recovers the latest raw checkpoint from a paged crash suffix
 
 test("Claude resume hands the driver the live requests still open after its checkpoint", async () => {
   const h = harness({ driver: "claude-code", command: "claude", agentId: "claude-native", agentVersion: "2.1.296",
-    agentSessionId: "claude-conversation", claudeUsageCheckpointSeq: 0 });
+    agentSessionId: "claude-conversation", claudeUsageCheckpointSeq: 0, ratePricedUsage: [] });
   const checkpoint = { sessionId: "claude-conversation", totalCostUsd: 0.03, models: {} };
   const live = (inputTokens: number) => ({ kind: "token_usage" as const, model: "claude-opus-5", inputTokens, outputTokens: 2,
     cachedInputTokens: 30, cacheCreationInputTokens: 4, liveUsage: "provisional" as const });
@@ -7070,6 +7070,10 @@ test("Claude resume hands the driver the live requests still open after its chec
     assert.deepEqual([h.store.readMeta("resume-session")!.tokensIn, h.store.readMeta("resume-session")!.costUsd], [before.tokensIn + 18, before.costUsd + 0.01]);
     assert.equal(new SessionStore(h.root).readMeta("resume-session")!.tokensIn, before.tokensIn + 18);
     assert.deepEqual(h.store.readMeta("resume-session")!.ratePricedUsage, ratePriced, "a provider-costed record keeps flat accounting");
+    // A session whose usage predates counting never starts mid-way: its counts could not be complete.
+    h.store.patchMeta("resume-session", { ratePricedUsage: undefined });
+    (h.manager as any).accrueMeta("resume-session", { ...live(9), liveUsage: "republished" });
+    assert.equal(h.store.readMeta("resume-session")!.ratePricedUsage, undefined);
   } finally {
     h.manager.shutdownAll();
     h.cleanup();

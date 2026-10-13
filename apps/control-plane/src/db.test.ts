@@ -8819,6 +8819,11 @@ test("a snapshot covering unseen rate-priced records books the cost and cache bu
   const codex: UsagePayload[] = [
     { kind: "token_usage", model: "gpt-test-codex", inputTokens: 1_000, cachedInputTokens: 600, outputTokens: 100,
       reasoningOutputTokens: 40, pricingContext: { requestInputTokens: 1_000, serviceTier: "default" } },
+    // A later update that only adds a previously absent cache count is normalized on its own.
+    { kind: "token_usage", model: "gpt-test-codex", inputTokens: 2_000, outputTokens: 10,
+      pricingContext: { requestInputTokens: 2_000, serviceTier: "default" } },
+    { kind: "token_usage", model: "gpt-test-codex", inputTokens: 0, cachedInputTokens: 600,
+      pricingContext: { requestInputTokens: 2_000, serviceTier: "default" } },
     // App Server child threads omit an ambiguous request size; Codex exec omits the context entirely.
     { kind: "token_usage", model: "gpt-test-codex", inputTokens: 500, cachedInputTokens: 400, outputTokens: 50,
       parentToolUseId: "child", independentUsage: true, pricingContext: { requestInputTokens: undefined, serviceTier: "default" } },
@@ -8892,32 +8897,20 @@ test("records with a provider-reported cost keep flat snapshot catch-up beside e
   assert.equal(snapshotFirst.usage.totals.cacheCreationTokens, 200);
 });
 
-test("a ledger that predates per-key counting adopts the first snapshot entries, then reconciles exactly", () => {
+test("a ledger that predates per-key counting keeps flat snapshot catch-up and never double counts", () => {
   const first = claudeRepublished("claude-test-model", 10, 5, 1_000, 200);
-  const adopted = ingestRatePriced("snapshot", "claude-code", "claude-test-model", [first], { ratePricedStatus: 1 });
-  assert.equal(adopted.usage.totals.cachedInputTokens, 0, "the adopting snapshot prices its catch-up from flat totals");
-  assert.equal(adopted.usage.totals.inputTokens, 10, "and books no rate-priced residual on top of it");
-  const { db, id } = adopted;
-  assert.equal(db.raw().prepare("SELECT rate_priced_status AS s FROM usage_session_state WHERE session_id=?").get(id)!.s, 0);
-
+  const flat = ingestRatePriced("snapshot", "claude-code", "claude-test-model", [first], { entries: false });
+  const incomplete = ingestRatePriced("snapshot", "claude-code", "claude-test-model", [first], { ratePricedStatus: 1 });
+  assert.deepEqual(incomplete.usage.totals, flat.usage.totals, "incomplete counts price exactly as a pre-v219 snapshot");
+  const { db, id } = incomplete;
   const second = claudeRepublished("claude-test-model", 7, 3, 500, 50);
   const entries = accrueRatePricedUsage(accrueRatePricedUsage([], first)!, second)!;
-  const before = db.sessionUsageByModel(id).totals;
-  db.updateSessionFromSnapshot(id, snapshot({ id, driver: "claude-code", config: { model: "claude-test-model" }, historyEpoch: 1, seq: 2,
-    tokensIn: 17, tokensOut: 8, costUsd: 0, ratePricedUsage: [...entries] }), 4_000);
-  const after = db.sessionUsageByModel(id).totals;
-  assert.deepEqual(
-    [after.inputTokens - before.inputTokens, after.cachedInputTokens - before.cachedInputTokens, after.cacheCreationTokens - before.cacheCreationTokens],
-    [7, 500, 50],
-  );
-  assert.ok(Math.abs(after.costUsd - before.costUsd - (7 * 0.000003 + 3 * 0.000015 + 500 * 0.0000003 + 50 * 0.00000375)) < 1e-6);
-
-  // Repeating, reordering, or lowering the snapshot adds nothing.
-  db.updateSessionFromSnapshot(id, snapshot({ id, driver: "claude-code", config: { model: "claude-test-model" }, historyEpoch: 1, seq: 2,
-    tokensIn: 10, tokensOut: 5, costUsd: 0, ratePricedUsage: [...accrueRatePricedUsage([], first)!] }), 5_000);
-  db.updateSessionFromSnapshot(id, snapshot({ id, driver: "claude-code", config: { model: "claude-test-model" }, historyEpoch: 1, seq: 2,
-    tokensIn: 17, tokensOut: 8, costUsd: 0, ratePricedUsage: [...entries] }), 5_100);
-  assert.deepEqual(db.sessionUsageByModel(id).totals, after);
+  const base = snapshot({ id, driver: "claude-code", config: { model: "claude-test-model" }, historyEpoch: 1, seq: 2 });
+  db.updateSessionFromSnapshot(id, { ...base, tokensIn: 17, tokensOut: 8, ratePricedUsage: [...entries] }, 4_000);
+  db.updateSessionFromSnapshot(id, { ...base, tokensIn: 17, tokensOut: 8, ratePricedUsage: [...entries] }, 5_000);
+  const totals = db.sessionUsageByModel(id).totals;
+  assert.deepEqual([totals.inputTokens, totals.outputTokens, totals.cachedInputTokens], [17, 8, 0]);
+  assert.equal(db.raw().prepare("SELECT rate_priced_status AS s FROM usage_session_state WHERE session_id=?").get(id)!.s, 1);
 });
 
 test("malformed snapshot entries fall back to flat totals", () => {
@@ -8933,24 +8926,6 @@ test("malformed snapshot entries fall back to flat totals", () => {
   db.updateSessionFromSnapshot("bad", snapshot({ id: "bad", driver: "claude-code", config: { model: "claude-test-model" },
     historyEpoch: 1, seq: 1, tokensIn: 10, tokensOut: 5, ratePricedUsage: [...accrueRatePricedUsage([], record)!] }), 2_000);
   assert.deepEqual(db.sessionUsageByModel("bad").totals, usage);
-});
-
-test("a migrated ledger adopts entries only from a snapshot that covers what it already booked", () => {
-  const first = claudeRepublished("claude-test-model", 10, 5, 1_000, 200);
-  const second = claudeRepublished("claude-test-model", 10, 5, 1_000, 200);
-  // Both records were booked before per-key counting began.
-  const { db, id } = ingestRatePriced("event", "claude-code", "claude-test-model", [first, second], { entries: false });
-  db.raw().prepare("DELETE FROM usage_session_rate_priced WHERE session_id=?").run(id);
-  db.raw().prepare("UPDATE usage_session_state SET rate_priced_status=1 WHERE session_id=?").run(id);
-  const booked = db.sessionUsageByModel(id).totals;
-  const base = snapshot({ id, driver: "claude-code", config: { model: "claude-test-model" }, historyEpoch: 1, seq: 2 });
-  db.updateSessionFromSnapshot(id, { ...base, tokensIn: 10, tokensOut: 5, ratePricedUsage: [...accrueRatePricedUsage([], first)!] }, 4_000);
-  assert.equal(db.raw().prepare("SELECT rate_priced_status AS s FROM usage_session_state WHERE session_id=?").get(id)!.s, 1,
-    "a stale snapshot cannot complete the baseline");
-  const both = accrueRatePricedUsage(accrueRatePricedUsage([], first)!, second)!;
-  db.updateSessionFromSnapshot(id, { ...base, tokensIn: 20, tokensOut: 10, ratePricedUsage: [...both] }, 5_000);
-  assert.equal(db.raw().prepare("SELECT rate_priced_status AS s FROM usage_session_state WHERE session_id=?").get(id)!.s, 0);
-  assert.deepEqual(db.sessionUsageByModel(id).totals, booked, "adoption books nothing that was already booked");
 });
 
 test("service tiers price identically in both orders, including padded and empty tiers", () => {
@@ -8971,14 +8946,14 @@ test("a runner rotating pricing keys cannot grow the per-key ledger without boun
   db.createSessionFromSnapshot(base, "runner-1", 1_000);
   let tokensIn = 0;
   for (let batch = 0; batch < 3; batch++) {
-    const entries = Array.from({ length: 32 }, (_, index) => ({ model: `rotating-${batch}-${index}`, inputTokens: 1, outputTokens: 0,
-      cachedInputTokens: 0, cacheCreationInputTokens: 0, reasoningOutputTokens: 0 }));
+    const entries = Array.from({ length: 32 }, (_, index) => ({ model: `rotating-${batch}-${index}`, inputTokens: 1, netInputTokens: 1,
+      outputTokens: 0, cachedInputTokens: 0, cacheCreationInputTokens: 0, reasoningOutputTokens: 0 }));
     tokensIn += 32;
     db.updateSessionFromSnapshot("rotating", { ...base, seq: batch + 1, tokensIn, ratePricedUsage: entries }, 2_000 + batch);
   }
   const rows = (db.raw().prepare("SELECT COUNT(*) AS n FROM usage_session_rate_priced WHERE session_id='rotating'").get() as { n: number }).n;
   assert.equal(rows, 64);
-  assert.equal(db.raw().prepare("SELECT rate_priced_status AS s FROM usage_session_state WHERE session_id='rotating'").get()!.s, 2);
+  assert.equal(db.raw().prepare("SELECT rate_priced_status AS s FROM usage_session_state WHERE session_id='rotating'").get()!.s, 1);
   assert.equal(db.sessionUsageByModel("rotating").totals.inputTokens, 96, "the abandoned batch still books its flat residual");
 });
 

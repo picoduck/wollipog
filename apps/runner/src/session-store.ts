@@ -207,8 +207,9 @@ export interface SessionMeta {
   contextTokensUsed?: number;
   contextWindow?: number;
   costUsd: number;
-  /** Cumulative usage without a provider-reported cost, per pricing key (#3111). Absent until the
-   * first such record; null once the key bound was exceeded, so it is never reported again. */
+  /** Cumulative usage without a provider-reported cost, per pricing key (#3111), counted from the
+   * session's first usage. Absent for a session whose usage predates counting, and null once the
+   * key bound was exceeded: either way it is never reported. */
   ratePricedUsage?: RatePricedUsageTotal[] | null;
   preview: string | null;
   pendingApproval: PendingApproval | null;
