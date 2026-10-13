@@ -518,6 +518,14 @@ test("native reconnect repeats current admission and never dispatches to an unsu
     assert.equal(h.db.campaignBudgets.view("root")!.state,"accounting_unavailable");
     assert.equal(h.db.campaignBudgets.active(command.jobId),true);
     assert.equal(h.db.campaignReviewJobs.view(command.jobId)!.costUsd,null,"unsupported recovery does not fabricate zero spend");
+    h.sent.length=0;
+    h.svc.onCampaignReviewJobUpdate("r",{type:"campaign_review_job_update",jobId:command.jobId,nonce:command.nonce,
+      state:"running",costUsd:1,toolCalls:1});
+    assert.equal(h.sent.some((m)=>["campaign_review_job","cancel_campaign_review_job"].includes((m as any).type)),false,
+      "late owned usage from a downgraded peer must not emit unnegotiated native cancellation frames");
+    assert.equal(h.db.campaignBudgets.view("root")!.state,"accounting_unavailable");
+    assert.equal(h.db.campaignBudgets.active(command.jobId),true);
+    assert.equal(h.db.campaignReviewJobs.view(command.jobId)!.costUsd,1,"owned late usage remains charged without releasing unknown capacity");
   } finally {h.db.close();}
 });
 

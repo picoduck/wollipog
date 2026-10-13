@@ -7824,16 +7824,19 @@ export class SessionsService {
     if(!this.db.campaignReviewJobs.accept(runnerId,update)) return;
     const command=this.db.campaignReviewJobs.command(update.jobId)!;
     const root=this.db.getSession(command.rootSessionId),control=root?.orchestratorPolicy?.control;
+    const supported=runnerSupportsProtocol(this.db.getRunner(runnerId)?.protocolVersion,"campaignBudgetAdmission");
+    if(!supported) this.db.campaignBudgets.stop(command.rootSessionId,"accounting_unavailable",
+      "Required native review updates need a supported accounting peer; charges are retained and protected admission stopped.");
     const view=this.db.campaignBudgets.view(command.rootSessionId);
     const ownerScope=root?this.db.sessionScope(root.id):null;
     if(ownerScope && this.db.getUsageDailyBudget(ownerScope.organizationId).perUserUsd!==null) {
       this.db.campaignBudgets.stop(command.rootSessionId,"accounting_unavailable","Native review admission cannot continue across a newly enabled organization daily limit.");
-      this.hub.sendToRunner(runnerId,{type:"cancel_campaign_review_job",jobId:command.jobId,nonce:command.nonce});
+      if(supported) this.hub.sendToRunner(runnerId,{type:"cancel_campaign_review_job",jobId:command.jobId,nonce:command.nonce});
       this.enforceCampaignBudget(command.rootSessionId,Date.now());
     }
     if(control?.mode!=="full_control" || !root || !campaignBoundaryCurrent(root) || control.boundary.revision!==command.authorityRevision || view?.state!=="active" ||
         update.toolCalls>=command.request.toolCalls || (update.costUsd??0)>=command.request.costUsd) {
-      this.hub.sendToRunner(runnerId,{type:"cancel_campaign_review_job",jobId:command.jobId,nonce:command.nonce});
+      if(supported) this.hub.sendToRunner(runnerId,{type:"cancel_campaign_review_job",jobId:command.jobId,nonce:command.nonce});
     }
     if(view?.state!=="active") this.enforceCampaignBudget(command.rootSessionId,Date.now());
     this.hub.sessionChangedById(command.rootSessionId);
