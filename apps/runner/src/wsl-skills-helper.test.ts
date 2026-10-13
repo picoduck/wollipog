@@ -244,6 +244,35 @@ finally: os.close(home_fd)
   }
 });
 
+test("helper acquisition tolerates a publication temporary file removed after enumeration (#2414)", (t) => {
+  for (const phase of ["scan", "tally", "completion"] as const) {
+    const home = mkdtempSync(join(tmpdir(), "wollipog-wsl-publication-cleanup-"));
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+    assert.equal(invokeLease(home, acquireAndRelease).status, 0);
+    const root = join(home, ".agent-manager", "provider-home-leases-v1");
+    const temporary = ".provider-home-lease-11111111-1111-4111-8111-111111111111.tmp";
+    if (phase !== "completion") writeFileSync(join(root, temporary), "publication in progress", { mode: 0o600 });
+    const cleanup = `    if ${JSON.stringify(temporary)} in entries and os.path.exists(os.path.join(fd_path(root), ${JSON.stringify(temporary)})): os.unlink(${JSON.stringify(temporary)}, dir_fd=root)\n`;
+    let helper = phase !== "tally"
+      ? instrumentHelper("    entries = bounded_lease_entries(root)\n", "    entries = bounded_lease_entries(root)\n" + cleanup)
+      : instrumentHelper("    return entries\n\ndef checkpoint_history", cleanup + "    return entries\n\ndef checkpoint_history");
+    if (phase === "completion") {
+      const seam = "    published, digest, _, anchor, _, _, _, _ = read_owned_lease_chain(root, lock, True, True)\n";
+      assert.ok(helper.includes(seam), "the post-publication completion seam must match");
+      helper = helper.replace(seam, `    with open(os.path.join(fd_path(root), ${JSON.stringify(temporary)}), "w") as stream: stream.write("publication in progress")\n` + seam);
+    }
+    const result = spawnSync("python3", ["-c", leaseProgram(acquireAndRelease, helper)], {
+      env: { ...process.env, HOME: home }, encoding: "utf8", timeout: 5_000,
+    });
+    assert.equal(result.status, 0, String(result.stderr));
+    assert.match(String(result.stdout), /released/);
+    assert.equal(existsSync(join(root, temporary)), false, "the publication cleanup ran at the scan boundary");
+    const native = new ProviderHomeLeaseRegistry(owner);
+    assert.equal(native.acquireHome(home), true, "the helper leaves a usable canonical journal");
+    native.releaseAll();
+  }
+});
+
 test("real native and helper processes elect one winner while a release mirror finishes publication", async (t) => {
   for (const contenders of ["native", "helper", "both"] as const) await t.test(contenders, async (t) => {
     const home = mkdtempSync(join(tmpdir(), "wollipog-wsl-release-window-"));
