@@ -31,11 +31,11 @@
   "devDependencies": {
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
-    "@vitejs/plugin-react": "^6.1.0",
+    "@vitejs/plugin-react": "^6.1.2",
     "@wollipog/test-support": "workspace:*",
     "happy-dom": "^20.14.5",
     "postcss": "^8.5.28",
     "typescript": "^5.7.3",
-    "vite": "^8.3.0"
+    "vite": "^8.3.4"
   }
 }
