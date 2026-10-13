@@ -58,7 +58,7 @@ human-principal requests and do not send an agent-session claim header.
 wollipog session list [--archived] --json
 wollipog session get ID --json
 wollipog session events ID [--after SEQ [--event-epoch EPOCH]] [--limit COUNT] --json
-wollipog session create --runner ID --agent ID (--workspace ID | --path PATH) [--prompt TEXT] [--model MODEL] [--effort EFFORT] [--cost-budget USD] [--max-tool-calls N] [--max-child-sessions N] --json
+wollipog session create --runner ID --agent ID (--workspace ID | --path PATH) [--prompt TEXT] [--model MODEL] [--effort EFFORT] [--cost-budget USD] [--max-tool-calls N] [--max-child-sessions N] [--work-item CAMPAIGN_WORK_ITEM_ID] --json
 wollipog session prompt ID TEXT --json
 wollipog session steering ID --json
 wollipog session steering-get ID SUBMISSION_ID --json

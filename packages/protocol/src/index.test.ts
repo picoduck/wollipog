@@ -233,10 +233,12 @@ test("older peers never receive display-only live Claude usage, but still accoun
   assert.equal(projectSessionEventPayloadForProtocol(provisional, 216), provisional);
 });
 
-test("PROTOCOL_VERSION is 219", () => {
-  assert.equal(PROTOCOL_VERSION, 219);
+test("PROTOCOL_VERSION is 220", () => {
+  assert.equal(PROTOCOL_VERSION, 220);
   assert.equal(runnerSupportsProtocol(218, "ratePricedSnapshotUsage"), false);
   assert.equal(runnerSupportsProtocol(219, "ratePricedSnapshotUsage"), true);
+  assert.equal(runnerSupportsProtocol(219, "campaignWorkItemAtCreation"), false);
+  assert.equal(runnerSupportsProtocol(220, "campaignWorkItemAtCreation"), true);
   assert.equal(runnerSupportsProtocol(217, "campaignBudgetAdmission"), false);
   assert.equal(runnerSupportsProtocol(218, "campaignBudgetAdmission"), true);
   assert.equal(runnerSupportsProtocol(215, "claudeLiveUsage"), false);

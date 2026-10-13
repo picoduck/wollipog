@@ -1,5 +1,6 @@
 import { acknowledgementRepairFrame } from "./claude-cost-repair.js";
 import type { HumanPrincipal } from "./identity.js";
+import type { CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl } from "./campaign-authority.js";
 import { campaignAuthorityPreflight, controlledReviewCapabilityKey, standingRootQuestionAnswers, type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary } from "@wollipog/protocol";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, campaignNeedsEpicScope } from "./campaign-issue-scope.js";
@@ -585,6 +586,11 @@ function ok<T>(data: T, status = 200): ServiceResult<T> {
 }
 function fail<T>(error: string, status = 400): ServiceResult<T> {
   return { ok: false, status, error };
+}
+
+/** Rolls back a campaign child's creation when its work-item attempt cannot be recorded (#3106). */
+class CampaignAttemptRefusal extends Error {
+  constructor(message: string, readonly status: number) { super(message); }
 }
 
 /** Re-type a failed result, keeping its status, error and any capability-gate versions. */
@@ -3712,6 +3718,26 @@ export class SessionsService {
     const campaignAuthority = this.orchestratorCampaignController(parentSession);
     if (campaignAuthority === "refused") return fail(MALFORMED_ANCESTRY_AUTHORITY_REFUSAL, 409);
     const campaignController = campaignAuthority;
+    // A named work item is checked before anything is written, and the attempt is recorded before
+    // the launch is sent, so the child never runs unattributed (#3106).
+    const campaignWorkItemId = req.campaignWorkItemId;
+    let campaignWorkScope: { caller: SessionView; root: SessionView } | null = null;
+    if (campaignWorkItemId !== undefined) {
+      if (!boundedDecisionString(campaignWorkItemId, 256)) {
+        return fail("campaignWorkItemId must be a non-empty work item ID of at most 256 characters", 400);
+      }
+      const refused = (reason: string, status: number) =>
+        fail<SessionView>(`cannot record the child's attempt on campaign work item ${campaignWorkItemId}: ${reason}`, status);
+      if (!parentSessionId) return refused("only an Orchestrator creating its own campaign child may name a work item", 400);
+      if (delivery) return refused("pre-staged session creation cannot record a work item", 409);
+      // Image externalization commits on its own, so it cannot share the child's creation write.
+      if (req.images?.length) return refused("a child created with prompt images cannot record a work item", 400);
+      const scope = this.campaignLedgerScope(parentSessionId, () => true);
+      if (!scope.ok || !scope.data) return refused(scope.error ?? "Orchestrator campaign not found", scope.status);
+      const assignable = this.db.campaignWorkLedger.assignableItem(scope.data.root.id, campaignWorkItemId);
+      if (!assignable.ok) return refused(assignable.error, assignable.status);
+      campaignWorkScope = scope.data;
+    }
     if (req.config?.maxChildSessions !== undefined &&
         (!Number.isSafeInteger(req.config.maxChildSessions) || req.config.maxChildSessions < 0 ||
           req.config.maxChildSessions > 64)) {
@@ -4474,7 +4500,7 @@ export class SessionsService {
     }
     if (delivery) delivery.stage(plan!);
     let session: SessionView;
-    try { session = existing ?? this.db.createSession({
+    const insert = () => this.db.createSession({
       campaignBudgetUserLimits,
       id,
       parentSessionId,
@@ -4506,7 +4532,12 @@ export class SessionsService {
       automationOrigin: delivery?.automationOrigin,
       now,
     });
+    try {
+      session = existing ?? (campaignWorkScope
+        ? this.insertCampaignChild(campaignWorkScope, campaignWorkItemId!, insert)
+        : insert());
     } catch (error) {
+      if (error instanceof CampaignAttemptRefusal) return fail(error.message, error.status);
       if (budgetRoot) return fail((error as Error).message, 409);
       throw error;
     }
@@ -7277,11 +7308,56 @@ export class SessionsService {
     if (!child || !this.db.isSessionDescendant(callerSessionId, child.id) || !canAccess(child.id)) {
       return fail("campaign child not found", 404);
     }
+    return this.recordCampaignAttempt(scope.data, request.workItemId, child);
+  }
+
+  /** Inserts a campaign child and opens its work-item attempt as one write, so a refused or failed
+   * recording leaves no session, campaign reservation, or parent charge behind (#3106). Views are
+   * broadcast only after the write commits. */
+  private insertCampaignChild(
+    scope: { caller: SessionView; root: SessionView },
+    workItemId: string,
+    insert: () => SessionView,
+  ): SessionView {
+    const refusal = (reason: string, status: number) =>
+      new CampaignAttemptRefusal(`cannot record the child's attempt on campaign work item ${workItemId}: ${reason}`, status);
+    const attemptsBefore = this.db.campaignWorkLedger.openAttemptsBySession(scope.root.id);
+    const child = this.db.campaignChildCreationTransaction(() => {
+      const inserted = insert();
+      let recorded: ReturnType<CampaignWorkLedgerStore["assign"]>;
+      try {
+        recorded = this.assignCampaignAttempt(scope, workItemId, inserted);
+      } catch (error) {
+        throw refusal((error as Error).message, 500);
+      }
+      if (!recorded.ok) throw refusal(recorded.error, recorded.status);
+      return inserted;
+    });
+    this.campaignLedgerChanged(scope.root.id, scope.caller.id);
+    this.campaignMembershipsChanged(scope.root.id, attemptsBefore);
+    return this.db.getSession(child.id) ?? child;
+  }
+
+  /** Opens the child's attempt on a work item. Shared by `assign_campaign_work_item` and by child
+   * creation that names its work item (#3106), so both follow the same assignment rules. */
+  private recordCampaignAttempt(
+    scope: { caller: SessionView; root: SessionView },
+    workItemId: string,
+    child: SessionView,
+  ): ServiceResult<AssignCampaignWorkItemResponse> {
+    return this.ledgerWrite(scope, () => this.assignCampaignAttempt(scope, workItemId, child));
+  }
+
+  private assignCampaignAttempt(
+    scope: { caller: SessionView; root: SessionView },
+    workItemId: string,
+    child: SessionView,
+  ): ReturnType<CampaignWorkLedgerStore["assign"]> {
     const agent = child.agentId
       ? this.db.getRunner(child.runnerId)?.agents.find((candidate) => candidate.id === child.agentId)
       : undefined;
-    return this.ledgerWrite(scope.data, () => this.db.campaignWorkLedger.assign(
-      scope.data!.root.id, callerSessionId, request.workItemId, child.id, {
+    return this.db.campaignWorkLedger.assign(
+      scope.root.id, scope.caller.id, workItemId, child.id, {
         title: child.title || null,
         harness: child.agentId
           ? { agentId: child.agentId, driver: child.driver, context: agent?.context ?? { kind: "native" } }
@@ -7289,7 +7365,7 @@ export class SessionsService {
         agentName: child.agentName,
         model: child.model,
         effort: child.effort,
-      }, Date.now()));
+      }, Date.now());
   }
 
   adjudicateCampaignRecommendation(

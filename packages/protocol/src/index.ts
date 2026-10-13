@@ -672,7 +672,11 @@
 // 218: durable campaign allowance, final managed usage and controlled native review admission.
 // 219: session snapshots carry cumulative rate-priced usage per pricing key, with cache buckets, so
 //      a snapshot covering unseen records prices them as event-first ingestion would (#3111).
-export const PROTOCOL_VERSION = 219;
+// 220: child creation may name its campaign work item (#3106): `CreateSessionRequest.campaignWorkItemId`
+//      records the child's ledger attempt before its launch is sent. An older control plane would
+//      ignore the field and leave the child unattributed, so the runner's tool and CLI refuse it
+//      against a pre-v220 control plane instead of sending it.
+export const PROTOCOL_VERSION = 220;
 
 export * from "./campaign-authority.js";
 export * from "./campaign-issue-publication.js";
@@ -947,6 +951,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v196 control plane records the campaign work ledger. Checked by the runner's ledger MCP tools
    * and CLI commands against the connected control plane, not against a runner. */
   campaignWorkLedger: 196,
+  /** v220 control plane records a child's work-item attempt at creation (#3106). Checked by the
+   * runner's create_session tool and CLI against the connected control plane. */
+  campaignWorkItemAtCreation: 220,
   /** v198 runner reads a campaign's GitHub pull-request status through its `gh` login. */
   campaignForgeStatus: 198,
   orchestratorAdditiveRole: 160,
@@ -10869,6 +10876,9 @@ export interface CreateSessionRequest {
   workspacePath?: string;
   /** ACP-only session overrides. The control plane validates and persists only secret references. */
   acpSessionContext?: AcpSessionContextConfig;
+  /** Protocol v220: the creating Orchestrator's campaign work item. The control plane opens the
+   * child's ledger attempt on it before the launch is sent, or creates nothing (#3106). */
+  campaignWorkItemId?: string;
 }
 
 export interface CreateRunRequest {
