@@ -241,7 +241,7 @@ export function resolveCampaignAuthority(input: {
 export function campaignAuthorityPreflight(control: CampaignControl | undefined, driver: string, protocolVersion: number | null | undefined): { supported: boolean; reason?: string; humanRequiredRequests?: string[] } {
   if (!control || control.mode === "custom") return { supported: true };
   if (!validCampaignControl(control)) return { supported: false, reason: "Full Control requires a valid human-authorized boundary." };
-  if (control.boundary.budgetAuthority && (protocolVersion ?? 0) < 217) return { supported: false, reason: "Campaign limits require a protocol-v217 runner; unsupported peers cannot admit protected work." };
+  if (control.boundary.budgetAuthority && (protocolVersion ?? 0) < 218) return { supported: false, reason: "Campaign limits require a protocol-v218 runner; unsupported peers cannot admit protected work." };
   if ((protocolVersion ?? 0) < (control.boundary.issueAuthority ? 217 : 215) || !["codex-app-server", "claude-code"].includes(driver)) return { supported: false, reason: "This provider path cannot enforce the Full Control authority contract; use Custom or update the runner." };
   return { supported: true, humanRequiredRequests: ["secrets_and_sign_in", "persistent_permissions", "provider_access_expansion", "external_elicitation", "root_forms_without_suggested_answers", "unverified_tool_effects", "git_execution_without_bounded_effect_proof", "script_execution_without_bounded_effect_proof", "human_required_rules",
     ...(driver === "claude-code" ? ["relative_shell_commands_without_verified_cwd"] : [])] };

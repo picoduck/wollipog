@@ -7,7 +7,7 @@ session limits. The foundation's authenticated owner, repository scope, policy r
 revocation checks apply. Only that authenticated human can change the envelope. Agent config,
 ordinary prompts, defaults, replacements and restarts cannot mint it or erase its usage.
 
-Protocol v217 supports optional cost, distinct tool-call, campaign-wide live descendant concurrency,
+Protocol v218 supports optional cost, distinct tool-call, campaign-wide live descendant concurrency,
 and accepted follow-up ceilings. Human Required rules and tighter user/session/organization limits
 remain in force. Checkpoint amounts within a cost envelope are preauthorized notifications in the
 projection; they do not produce repeated permission requests or authorize additional spending.
@@ -72,8 +72,8 @@ parent total is not billed twice; independently reported managed sessions count 
 
 The optional human-minted `budgetAuthority.controlledReview` binds the exact
 `native_opus_5_5_high_read_only` profile, audited installed controller SHA-256, native executable
-SHA-256, Claude CLI 2.1.287, existing runner-default Claude account, and provider admission agent
-identity. It requires finite campaign cost, tool and concurrency ceilings. Numeric protocol217
+SHA-256, Claude CLI 2.1.296, existing runner-default Claude account, and provider admission agent
+identity. It requires finite campaign cost, tool and concurrency ceilings. Numeric protocol218
 alone does not establish this capability; the runner must advertise the matching `campaignReview`
 descriptor. Other versions, execution-isolation contexts and unknown pricing fail closed. No
 installed skill, account, hosting setting or permission is edited by this adapter.

@@ -669,7 +669,8 @@
 // 216: live Claude Code usage (#3086): display-only provisional per-request `token_usage` records
 //      closed by a `settled` record. Runners send them only to a v216+ control plane.
 // 217: bounded Full Control issue lineage, publication admission and verified closure.
-export const PROTOCOL_VERSION = 217;
+// 218: durable campaign allowance, final managed usage and controlled native review admission.
+export const PROTOCOL_VERSION = 218;
 
 export * from "./campaign-authority.js";
 export * from "./campaign-issue-publication.js";
@@ -926,7 +927,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   delegatedParentControl: 136,
   typedWorkflowDecisionDelegation: 139,
   fullControlAuthority: 215,
-  campaignBudgetAdmission: 217,
+  campaignBudgetAdmission: 218,
   workflowDecisionActionAdmission: 151,
   workflowDecisionActionReconciliation: 153,
   /** Control plane retains and delivers a resolver's child-facing workflow-decision message. */
@@ -8139,7 +8140,7 @@ export interface SessionStatusMessage {
   worktreePath?: string | null;
   /** Opaque identity of the accepted start_session command that owns this lifecycle. */
   controlPlaneLaunchId?: string;
-  /** v217; emitted only after the provider has finished producing usage. */
+  /** v218; emitted only after the provider has finished producing usage. */
   campaignBudgetCheckpoint?: import("./campaign-budget.js").CampaignBudgetUsageCheckpoint;
 }
 

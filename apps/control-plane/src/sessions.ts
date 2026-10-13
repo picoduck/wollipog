@@ -7621,7 +7621,7 @@ export class SessionsService {
     if (!root || root === "refused" || root.id !== sessionId || isTerminal(session.status)) return fail("only a live root campaign can change control", 409);
     if (!proposal || typeof proposal !== "object" || Array.isArray(proposal) || !["custom", "full_control"].includes(proposal.mode)) return fail("invalid campaign control mode", 400);
     if (proposal.mode === "custom" && Object.keys(proposal).some((key) => key !== "mode")) return fail("Custom has no authority boundary", 400);
-    if (proposal.mode === "full_control" && Object.keys(proposal).some((key) => !["mode", "objective", "operations", "delegatablePolicyIds", "budgetAuthority"].includes(key))) return fail("invalid campaign authority fields", 400);
+    if (proposal.mode === "full_control" && Object.keys(proposal).some((key) => !["mode", "objective", "operations", "delegatablePolicyIds", "issueAuthority", "budgetAuthority"].includes(key))) return fail("invalid campaign authority fields", 400);
     const scope = session.orchestratorPolicy?.issueScope;
     const now = Date.now();
     const control = proposal.mode === "custom" ? { mode: "custom" as const } : scope &&
@@ -7757,7 +7757,7 @@ export class SessionsService {
         root.archived || isTerminal(root.status) || hasBlockingPendingRequest(root.pendingApproval) ||
         this.db.campaignBudgets.view(root.id)?.state!=="active") return fail("Required native reviewer admission is unsupported without current human-minted budget/profile authority and unblocked owner admission.",409);
     const runner=this.db.getRunner(root.runnerId),profile=runner?.runtime?.campaignReview;
-    if(!this.hub.isRunnerOnline(root.runnerId) || (runner?.protocolVersion??0)<217 || !profile ||
+    if(!this.hub.isRunnerOnline(root.runnerId) || !runnerSupportsProtocol(runner?.protocolVersion,"campaignBudgetAdmission") || !profile ||
         controlledReviewCapabilityKey(profile)!==controlledReviewCapabilityKey(control.boundary.budgetAuthority.controlledReview)) return fail("Required native reviewer capability/profile is unavailable or changed; unattended readiness is refused.",409);
     const item=this.db.campaignWorkLedger.detail(root.id,request.workItemId,Date.now(),canAccess);
     const worker=item?.currentAttempt?.sessionId?this.db.getSession(item.currentAttempt.sessionId):null;
@@ -12979,7 +12979,7 @@ export class SessionsService {
         const parentError=this.campaignBudgetConfigError(this.db.getSession(parentSessionId!)!);
         if(parentError) throw new Error(parentError);
         const peer = this.db.getRunner(req.runnerId)?.protocolVersion ?? 0;
-        if (peer < 217) throw new Error("Campaign run workers require protocol v217");
+        if (!runnerSupportsProtocol(peer, "campaignBudgetAdmission")) throw new Error("Campaign run workers require protocol v218");
         const accountingError = this.db.campaignBudgetAccountingError(launch.driver, config.model, view.authority.costUsd !== undefined);
         if (accountingError) throw new Error(accountingError);
         const allocation = this.db.campaignBudgets.prepare(budgetRoot, id, campaignBudgetUserLimits);

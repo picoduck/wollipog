@@ -18,7 +18,7 @@ export interface ControlledReviewCapability {
   profile: typeof CONTROLLED_REVIEW_PROFILE;
   controllerSha256: string;
   executableSha256: string;
-  cliVersion: "2.1.287";
+  cliVersion: "2.1.296";
   accounting: "provider_list_estimate";
   account: "runner_default_claude";
   agentId: string;

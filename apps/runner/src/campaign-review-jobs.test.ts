@@ -50,7 +50,7 @@ test("native forge binding uses older-gh-compatible scoped REST and rejects stal
 function jobHarness() {
   const root=mkdtempSync(join(tmpdir(),"native-review-lifecycle-"));
   const command:CampaignReviewJobCommand={type:"campaign_review_job",jobId:"review_11111111-1111-1111-1111-111111111111",nonce:"nonce",rootSessionId:"root",authorityRevision:2,
-    worktreeSessionId:"worker",profile:{profile:"native_opus_5_5_high_read_only",controllerSha256:"a".repeat(64),executableSha256:"b".repeat(64),cliVersion:"2.1.287",accounting:"provider_list_estimate",account:"runner_default_claude",agentId:"claude"},
+    worktreeSessionId:"worker",profile:{profile:"native_opus_5_5_high_read_only",controllerSha256:"a".repeat(64),executableSha256:"b".repeat(64),cliVersion:"2.1.296",accounting:"provider_list_estimate",account:"runner_default_claude",agentId:"claude"},
     request:{requestId:"test",workItemId:"item",pullRequest:{repository:"picoduck/wollipog",number:3065},baseSha:"c".repeat(40),headSha:"d".repeat(40),costUsd:5,toolCalls:20,brief:"Review."}};
   const dir=join(root,command.jobId);mkdirSync(dir);
   const updates:CampaignReviewJobUpdate[]=[],released:string[]=[],reserved:string[]=[];

@@ -86,7 +86,7 @@ test("run fanout carries exactly its admitted limits; downgraded peers refuse al
     const start=h.sent.find((m)=>(m as any).type==="start_session") as any;
     assert.equal(start.spec.config.costBudgetUsd,h.db.campaignBudgets.allocation(member.id)!.costUsd);
     assert.equal(start.spec.config.maxToolCalls,h.db.campaignBudgets.allocation(member.id)!.toolCalls);
-    h.db.registerRunner(h.metadata,10,216);
+    h.db.registerRunner(h.metadata,10,217);
     assert.equal(h.svc.prompt("root","continue").ok,false);
     assert.equal(h.svc.campaignBudgetWorkerPreflight("root",{kind:"managed",sessionId:member.id}).ok,false);
     assert.equal(h.svc.allocateCampaignBudget("root",{sessionId:member.id,toolCalls:1}).ok,false);
@@ -102,6 +102,42 @@ test("malformed control proposals refuse without changing the human revision",()
   } finally {h.db.close();}
 });
 
+test("human control updates compose issue and budget authority without bypassing their peer gates", () => {
+  const h = harness();
+  try {
+    const issueAuthority = { epics: [2936], relatedFollowUps: true, maxIssues: 3, closureReasons: ["completed" as const] };
+    const proposal = { mode: "full_control" as const, objective: "Implement #2936", operations: ["implementation_question" as const],
+      delegatablePolicyIds: [], issueAuthority, budgetAuthority: allowance() };
+    const enabled = h.svc.setCampaignControl("root", proposal, 1, h.principal);
+    assert.ok(enabled.ok, enabled.error);
+    const current = h.db.getSession("root")!.orchestratorPolicy!.control!;
+    assert.equal(current.mode, "full_control");
+    if (current.mode !== "full_control") throw new Error("missing Full Control");
+    assert.deepEqual(current.boundary.issueAuthority, issueAuthority);
+    assert.deepEqual(current.boundary.budgetAuthority, proposal.budgetAuthority);
+    h.db.registerRunner(h.metadata, 10, 217);
+    assert.equal(h.svc.setCampaignControl("root", proposal, 2, h.principal).ok, false);
+    assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.control, current);
+  } finally { h.db.close(); }
+});
+
+test("optional media reservation adapter refuses before its owned production tables exist", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable().ok);
+    h.make("child", "root");
+    const before = h.db.campaignBudgets.view("root");
+    const expected = { rootSessionId: "root", runnerId: "r", generation: h.db.campaignBudgets.dispatch("child")!.generation,
+      commandSha256: "a".repeat(64), dispatchSha256: null };
+    assert.equal(h.db.campaignBudgets.deactivateNeverDispatchedMediaReservation("child", expected), false);
+    h.db.campaignBudgets.database.exec("BEGIN");
+    try {
+      assert.equal(h.db.campaignBudgets.deactivateNeverDispatchedMediaReservation("child", expected), false);
+      assert.deepEqual(h.db.campaignBudgets.view("root"), before);
+    } finally { h.db.campaignBudgets.database.exec("ROLLBACK"); }
+  } finally { h.db.close(); }
+});
+
 test("human-only grant, CAS, runner compatibility, and revocation preserve usage", () => {
   const h = harness();
   try {
@@ -115,7 +151,7 @@ test("human-only grant, CAS, runner compatibility, and revocation preserve usage
     assert.equal(h.db.campaignBudgets.view("root")!.actual.toolCalls, 1);
     assert.equal(h.enable(allowance({ toolCalls: 1000 }), 3).ok, false, "a new grant cannot reset an exhausted/revoked ledger");
   } finally { h.db.close(); }
-  const old = harness(":memory:", 216);
+  const old = harness(":memory:", 217);
   try { assert.equal(old.enable().ok, false); } finally { old.db.close(); }
 });
 
@@ -215,7 +251,7 @@ test("reconnect redelivers existing allocations without changing generation or a
     assert.ok(frame);assert.equal(frame.campaignBudgetDispatch.generation,before.generation);
     assert.deepEqual(frame.config,{costBudgetUsd:h.db.campaignBudgets.allocation("worker")!.costUsd,maxToolCalls:h.db.campaignBudgets.allocation("worker")!.toolCalls});
     assert.deepEqual(h.db.campaignBudgets.dispatchState("worker"),before);
-    h.db.registerRunner(h.metadata,10,216);
+    h.db.registerRunner(h.metadata,10,217);
     h.sent.length=0;h.svc.recoverCampaignBudgetAllocations("r");
     assert.equal(h.sent.some((m)=>(m as any).type==="rearm_governance"),false,"unsupported peers receive no budget rearm");
   } finally {h.db.close();}
@@ -339,7 +375,7 @@ test("native review reservations price failed attempts, survive replay and enfor
   const h=harness();
   try {
     assert.ok(h.enable(allowance({costUsd:100,toolCalls:1000})).ok);
-    const profile={profile:"native_opus_5_5_high_read_only",controllerSha256:"a".repeat(64),executableSha256:"b".repeat(64),cliVersion:"2.1.287",accounting:"provider_list_estimate",account:"runner_default_claude",agentId:"claude"} as const;
+    const profile={profile:"native_opus_5_5_high_read_only",controllerSha256:"a".repeat(64),executableSha256:"b".repeat(64),cliVersion:"2.1.296",accounting:"provider_list_estimate",account:"runner_default_claude",agentId:"claude"} as const;
     const request={requestId:"r1",workItemId:"item",pullRequest:{repository:"picoduck/wollipog",number:3065},baseSha:"a".repeat(40),headSha:"b".repeat(40),costUsd:5,toolCalls:20,brief:"Review the exact head."};
     const job=h.db.campaignReviewJobs.reserve("root","r","root",2,profile,request);
     assert.equal(h.db.campaignBudgets.view("root")!.occupied,1);
@@ -370,7 +406,7 @@ test("native review reservations price failed attempts, survive replay and enfor
 test("native service binds authority, assigned scope, canonical PR and server-only usage",()=>{
   const h=harness();
   try {
-    const profile={profile:"native_opus_5_5_high_read_only",controllerSha256:"a".repeat(64),executableSha256:"b".repeat(64),cliVersion:"2.1.287",accounting:"provider_list_estimate",account:"runner_default_claude",agentId:"claude"} as const;
+    const profile={profile:"native_opus_5_5_high_read_only",controllerSha256:"a".repeat(64),executableSha256:"b".repeat(64),cliVersion:"2.1.296",accounting:"provider_list_estimate",account:"runner_default_claude",agentId:"claude"} as const;
     const grant=allowance({costUsd:100,toolCalls:1000,controlledReview:profile});
     assert.equal(h.enable(grant).ok,false,"no supported profile may be advertised before discovery");
     h.metadata.runtime={dataDir:"/runner",worktreeRoot:"/runner/worktrees",maxConcurrentSessions:4,campaignReview:profile};
@@ -436,7 +472,7 @@ test("native missing usage stops admission and retains the full outstanding rese
   const h=harness();
   try {
     assert.ok(h.enable(allowance({costUsd:100,toolCalls:1000})).ok);
-    const p={profile:"native_opus_5_5_high_read_only",controllerSha256:"a".repeat(64),executableSha256:"b".repeat(64),cliVersion:"2.1.287",accounting:"provider_list_estimate",account:"runner_default_claude",agentId:"claude"} as const;
+    const p={profile:"native_opus_5_5_high_read_only",controllerSha256:"a".repeat(64),executableSha256:"b".repeat(64),cliVersion:"2.1.296",accounting:"provider_list_estimate",account:"runner_default_claude",agentId:"claude"} as const;
     const job=h.db.campaignReviewJobs.reserve("root","r","root",2,p,{requestId:"unknown",workItemId:"item",pullRequest:{repository:"picoduck/wollipog",number:3065},baseSha:"a".repeat(40),headSha:"b".repeat(40),costUsd:5,toolCalls:20,brief:"Review."});
     assert.ok(h.db.campaignReviewJobs.accept("r",{type:"campaign_review_job_update",jobId:job.jobId,nonce:job.nonce,state:"accounting_unavailable",toolCalls:1}));
     assert.equal(h.db.campaignBudgets.view("root")!.state,"accounting_unavailable");
@@ -450,7 +486,7 @@ test("native reconnect repeats current admission and never dispatches to an unsu
 
   const h=harness();
   try {
-    const profile={profile:"native_opus_5_5_high_read_only",controllerSha256:"a".repeat(64),executableSha256:"b".repeat(64),cliVersion:"2.1.287",accounting:"provider_list_estimate",account:"runner_default_claude",agentId:"claude"} as const;
+    const profile={profile:"native_opus_5_5_high_read_only",controllerSha256:"a".repeat(64),executableSha256:"b".repeat(64),cliVersion:"2.1.296",accounting:"provider_list_estimate",account:"runner_default_claude",agentId:"claude"} as const;
     const grant=allowance({costUsd:100,toolCalls:1000,controlledReview:profile});
     assert.equal(h.enable(grant).ok,false,"no supported profile may be advertised before discovery");
     h.metadata.runtime={dataDir:"/runner",worktreeRoot:"/runner/worktrees",maxConcurrentSessions:4,campaignReview:profile};
@@ -476,7 +512,7 @@ test("native reconnect repeats current admission and never dispatches to an unsu
     h.sent.length=0;h.svc.recoverCampaignReviewJobs("r");
     assert.equal(h.sent.filter((m)=>(m as any).type==="campaign_review_job").length,1);
     assert.equal(h.db.campaignReviewJobs.view(command.jobId)!.state,"reserved");
-    h.db.registerRunner(h.metadata,11,216);
+    h.db.registerRunner(h.metadata,11,217);
     h.sent.length=0;h.svc.recoverCampaignReviewJobs("r");
     assert.equal(h.sent.some((m)=>["campaign_review_job","cancel_campaign_review_job"].includes((m as any).type)),false);
     assert.equal(h.db.campaignBudgets.view("root")!.state,"accounting_unavailable");
@@ -489,7 +525,7 @@ test("supported native reconnect cancels after human revocation without new admi
 
   const h=harness();
   try {
-    const profile={profile:"native_opus_5_5_high_read_only",controllerSha256:"a".repeat(64),executableSha256:"b".repeat(64),cliVersion:"2.1.287",accounting:"provider_list_estimate",account:"runner_default_claude",agentId:"claude"} as const;
+    const profile={profile:"native_opus_5_5_high_read_only",controllerSha256:"a".repeat(64),executableSha256:"b".repeat(64),cliVersion:"2.1.296",accounting:"provider_list_estimate",account:"runner_default_claude",agentId:"claude"} as const;
     const grant=allowance({costUsd:100,toolCalls:1000,controlledReview:profile});
     assert.equal(h.enable(grant).ok,false,"no supported profile may be advertised before discovery");
     h.metadata.runtime={dataDir:"/runner",worktreeRoot:"/runner/worktrees",maxConcurrentSessions:4,campaignReview:profile};

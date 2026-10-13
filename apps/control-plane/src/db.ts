@@ -17580,7 +17580,7 @@ export class ControlPlaneDb {
       const tighter=this.campaignBudgets.members(resolvedCampaignId).some((id)=>{
         const original=this.campaignBudgets.userLimits(id);return original?.costBudgetUsd!=null || original?.maxToolCalls!=null;
       });
-      const supported=budget.state==="active" && Boolean(profile && capability && (runner?.protocolVersion??0)>=217 &&
+      const supported=budget.state==="active" && Boolean(profile && capability && (runner?.protocolVersion??0)>=218 &&
         controlledReviewCapabilityKey(profile)===controlledReviewCapabilityKey(capability)) && !tighter &&
         scope?.owner.kind==="user" && this.getUsageDailyBudget(scope.organizationId).perUserUsd===null;
       budget.requiredNativeReview={supported,reason:supported?

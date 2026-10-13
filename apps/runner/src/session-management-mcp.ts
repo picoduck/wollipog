@@ -244,7 +244,7 @@ async function campaignBudgetCompatibilityError(deps:McpDeps):Promise<ToolResult
     if(!compatibility.ok) return errorResult("Campaign budget/review compatibility could not be verified");
     actual=compatibility.data?.protocolVersion;
   }
-  return Number.isInteger(actual) && actual!>=217?null:errorResult("Campaign budget/review jobs require control plane protocol v217; update and reconnect.");
+  return Number.isInteger(actual) && actual!>=RUNNER_CAPABILITY_MIN_PROTOCOL.campaignBudgetAdmission?null:errorResult("Campaign budget/review jobs require control plane protocol v218; update and reconnect.");
 }
 
 async function issueClosureCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
@@ -1476,7 +1476,7 @@ export const TOOLS: McpTool[] = [
       if (!deps.selfSessionId || !deps.orchestrator) return errorResult("this tool requires an Orchestrator session identity");
       const compatibility = deps.controlPlaneProtocolVersion === undefined ? await cpFetch(deps, "GET", "/api/compatibility") : null;
       const version = deps.controlPlaneProtocolVersion ?? (compatibility?.ok ? compatibility.data?.protocolVersion : null);
-      if (typeof version !== "number" || version < RUNNER_CAPABILITY_MIN_PROTOCOL.campaignBudgetAdmission) return errorResult("Campaign allocations require control plane protocol v217; update and reconnect.");
+      if (typeof version !== "number" || version < RUNNER_CAPABILITY_MIN_PROTOCOL.campaignBudgetAdmission) return errorResult("Campaign allocations require control plane protocol v218; update and reconnect.");
       const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/orchestrator-campaign/budget-allocations`, args);
       return r.ok ? textResult(r.data) : errorResult(r.message);
     },

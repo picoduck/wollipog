@@ -29,13 +29,13 @@ async function installation(agentId:string) {
   if(hashFile(controller)!==CONTROLLER_SHA) throw new Error("installed review controller differs from the audited version");
   const claude=executable("claude"), python=executable("python3");
   const version=(await run(claude,["--version"],{encoding:"utf8",timeout:10_000})).stdout.trim().split(" ")[0];
-  if(version!=="2.1.287") throw new Error("native reviewer usage provenance is unsupported for this CLI version");
+  if(version!=="2.1.296") throw new Error("native reviewer usage provenance is unsupported for this CLI version");
   const help=(await run(claude,["--help"],{encoding:"utf8",timeout:10_000})).stdout;
   for(const flag of ["--model","--effort","--tools","--allowedTools","--permission-mode","--disable-slash-commands","--strict-mcp-config","--no-session-persistence","--output-format"]) {
     if(!help.includes(flag)) throw new Error(`controlled reviewer lacks ${flag}`);
   }
   const profile:ControlledReviewCapability={profile:CONTROLLED_REVIEW_PROFILE,controllerSha256:CONTROLLER_SHA,
-    executableSha256:hashFile(claude),cliVersion:"2.1.287",accounting:"provider_list_estimate",account:"runner_default_claude",agentId};
+    executableSha256:hashFile(claude),cliVersion:"2.1.296",accounting:"provider_list_estimate",account:"runner_default_claude",agentId};
   return {controller,claude,python,profile};
 }
 export async function discoverControlledReview(agentId:string|undefined):Promise<ControlledReviewCapability|undefined> {
