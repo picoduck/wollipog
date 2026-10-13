@@ -317,7 +317,7 @@ for (const listWidth of [600, 700, 900, 1440]) {
   for (const theme of ["light", "dark"] as const) {
     test(`a large collapsed family protects its working count in a ${listWidth}px ${theme} list`, async ({ page }) => {
       await page.setViewportSize({ width: 1440, height: 900 });
-      await page.goto(`/session-rows-e2e.html?family=large&collapsed=1&listWidth=${listWidth}&theme=${theme}`);
+      await page.goto(`/session-rows-e2e.html?family=large&collapsed=1&sort=1&listWidth=${listWidth}&theme=${theme}`);
       const label = "16 Children · Needs Your Input · 13 Working";
       await expect(parent(page).locator(".inbox-thread-toggle")).toHaveAttribute("aria-expanded", "false");
       await expect(chip(page)).toHaveAccessibleName(label);
@@ -344,4 +344,18 @@ for (const listWidth of [600, 700, 900, 1440]) {
       }
     });
   }
+}
+
+for (const width of [1440, 390]) {
+  test(`the sorted family fixture keeps a pinned session above unpinned input at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/session-rows-e2e.html?family=large&collapsed=1&sort=1");
+    const firstRow = page.locator(".inbox-row-shell").first();
+    await expect(firstRow.locator(".inbox-row-title")).toHaveText("Running: Rebuild the Activity Strip at 48 by 12");
+    await expect(firstRow.getByRole("img", { name: "Pinned Session", exact: true })).toBeVisible();
+    const firstBox = (await firstRow.boundingBox())!;
+    const parentBox = (await parent(page).boundingBox())!;
+    expect(firstBox.y + firstBox.height).toBeLessThanOrEqual(parentBox.y);
+    await expect(parent(page).locator(".status")).toHaveText("Needs Your Input");
+  });
 }
