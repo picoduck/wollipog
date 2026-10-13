@@ -342,9 +342,12 @@ test("an ordinary Codex TUI launches without the structured launch's session wol
       provisionManagedWorktreeGuard: unguarded,
     });
     assert.ok(launch);
-    assert.equal(launch.args.some((arg) => arg.includes(SESSION_CODEX_MCP_MARKER)), false,
+    assert.equal(JSON.stringify(launch).includes(SESSION_CODEX_MCP_MARKER), false,
       `${driver}: no credential coordinates reach a TUI that was never provisioned`);
-    for (const arg of user) assert.ok(launch.args.includes(arg), `${driver}: the user's own ${arg} is kept`);
+    // On Windows the argv is folded into one `cmd.exe /c` tail, so compare on the serialized argv.
+    const argv = JSON.stringify(launch.args);
+    assert.equal(argv.split("mcp_servers.wollipog=").length - 1, 1, `${driver}: the user's own entry is kept`);
+    assert.ok(argv.includes("model="), `${driver}: unrelated user settings are kept`);
   }
 });
 
