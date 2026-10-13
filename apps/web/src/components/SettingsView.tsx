@@ -46,11 +46,12 @@ import {
 } from "../rail-preferences.js";
 import { useRailPreferences } from "../use-rail-preferences.js";
 import { useInstanceScope } from "../instance-scope.js";
+import { instancePublicOrigin, useInstances } from "../instances-context.js";
 import { useIsCompact, useIsMobile, useIsTouchOnly } from "./useIsMobile.js";
 import { EXPERIMENT_COPY, experimentForViewName } from "../experiments.js";
 import { useExperiments } from "../use-experiments.js";
 import { destination } from "../navigation.js";
-import { ActionRow, LinkRow, SegmentedRow, SelectRow, SettingsGroup, StaticRow, SwitchRow } from "./ui/SettingsRows.js";
+import { ActionRow, LinkRow, SegmentedRow, SelectRow, SettingRow, SettingsGroup, StaticRow, SwitchRow, ValueRow } from "./ui/SettingsRows.js";
 import { Select } from "./ui/ChoiceControls.js";
 import { SCHEME_SWATCHES, type ColorScheme, type ResolvedTheme } from "../theme.js";
 import type { SessionsPreviewLayout } from "../sessions-preview-layout.js";
@@ -1747,61 +1748,125 @@ export function ExperimentalPanel({
   );
 }
 
-export function NetworkPanel({ tailnet }: { tailnet: TailnetAccessSetting }) {
-  // ONE row is conditional, not the whole group. An early return here dropped Control-Plane Origin
-  // and Manage Instances in every browser — the exact discoverability rule this panel was fixed to
-  // satisfy a commit earlier, undone by the shape of the fix.
-  const status = tailnet.status;
-  const tailnetRow = status?.available ? (
-    <SwitchRow
-      title="Enable Tailnet Access for This Machine"
-      description={
-        <span className={tailnet.error ? "danger-text" : undefined}>
-          {tailnet.busy ? "Restarting the local control plane…" : tailnet.error ?? tailnetAccessDescription(status)}
-        </span>
-      }
-      checked={status.enabled}
-      // `busy`, not folded into `disabled`. SwitchRow disables a busy control itself and keeps
-      // showing the confirmed value; passing only `disabled` left the row announcing nothing about
-      // the write in flight while its own description said the control plane was restarting.
-      busy={tailnet.busy}
-      disabled={!status.managed}
-      onClick={tailnet.toggle}
-    />
-  ) : (
-    // Four different situations used to render the same sentence — "Tailscale is not installed or
-    // not detected" — including "we have not finished asking yet" and "the read failed". Two of
-    // those are false statements about the user's machine, and the third told them a transient
-    // state was a permanent one.
-    //
-    // `desktop` is tested BEFORE `loading`: in a browser the answer is already known synchronously,
-    // and the first paint claimed a check was running that this runtime cannot perform.
-    <PendingSetting
-      title="Enable Tailnet Access for This Machine"
-      description="Reach this control plane from your other devices."
-      reason={!tailnet.desktop
-        ? "Tailnet access is managed by the Wollipog desktop app; this is a browser."
-        : tailnet.loading
-        ? "Checking whether Tailscale is available on this machine…"
-        : tailnet.error
-        ? `Could not read the Tailscale status: ${tailnet.error}`
-        : "Tailscale is not installed or not detected on this machine."}
-    />
-  );
+/**
+ * Which Wollipog this window talks to, and whether other devices can reach this machine.
+ *
+ * Connection is about this window and shows everywhere. Tailnet is about the machine the desktop
+ * app runs on, so a browser has no Tailnet group, only a foot line saying where it is turned on.
+ */
+export function NetworkPanel({ tailnet, onNavigate }: { tailnet: TailnetAccessSetting; onNavigate: (view: View) => void }) {
+  const instances = useInstances();
+  const phone = useIsMobile();
+  // Null for the packaged desktop app's own server, which has no address another device could use;
+  // the row then names it as the instance menu does, with nothing to copy.
+  const address = instancePublicOrigin(instances);
   return (
-    <SettingsGroup>
-      {tailnetRow}
-      <PendingSetting
-        title="Control-Plane Origin"
-        description="Which control plane this window talks to."
-        reason="Switch it from the instance menu in the sidebar; an editable field here is not built yet."
-      />
-      <PendingSetting
-        title="Manage Instances"
-        description="Add, rename, or remove the control planes you connect to."
-        reason="Managed from the instance menu in the sidebar for now."
-      />
-    </SettingsGroup>
+    <>
+      <SettingsGroup
+        title="Connection"
+        scope="This Window"
+        foot={tailnet.desktop ? undefined : "Tailnet access is turned on in the Wollipog desktop app, on the machine that runs the server."}
+      >
+        <ValueRow
+          title="Connected To"
+          description="The Wollipog server this window uses."
+          value={address ?? instances.activeProfile.label}
+          mono={address !== null}
+          copy={address ?? undefined}
+          copyLabel="Copy Address"
+        />
+        {/* Where Connections › Instances exists: the desktop app with more than one instance
+            allowed, and not on a phone, whose Connections has no Instances tab (#2984). */}
+        {instances.desktopMultiInstance && !phone && (
+          <LinkRow
+            title="Manage Instances"
+            description="Add, rename or switch Wollipog servers."
+            trailing="Connections"
+            onClick={() => onNavigate({ name: "runners", section: "instances" })}
+          />
+        )}
+      </SettingsGroup>
+      {tailnet.desktop && (
+        <SettingsGroup title="Tailnet" scope="This Machine">
+          <TailnetAccessRow tailnet={tailnet} />
+        </SettingsGroup>
+      )}
+    </>
+  );
+}
+
+const TAILNET_ACCESS = "Tailnet Access";
+/** The row's frame in every state, so focus can be found again when the row changes shape. */
+const TAILNET_ACCESS_ROW_ID = "settings-tailnet-access";
+const CHECKING_FOR_TAILSCALE = "Checking for Tailscale…";
+
+/**
+ * The desktop app's Tailnet Access, in one of its states (§8.2, §8.4, §8.5).
+ *
+ * Until a status has been read there is no switch: a disabled switch announces
+ * `aria-checked="false"`, which CLAIMS the setting is off, and for a network-exposure setting that
+ * claim would be made precisely when its value is unknown. Checking and a failed read are a row
+ * with no control; Try Again after a failed read checks again.
+ */
+function TailnetAccessRow({ tailnet }: { tailnet: TailnetAccessSetting }) {
+  const status = tailnet.status;
+  const frameRef = useRef<HTMLDivElement>(null);
+  // Set when Try Again moved focus into the frame: a read that then succeeds replaces the frame with
+  // the switch, and focus goes to the switch unless it has since moved somewhere else. A disabled
+  // switch (Tailscale missing, another server on the port) cannot hold focus, so the row's frame
+  // takes it instead, as the checking frame did.
+  const holdingFocus = useRef(false);
+  useLayoutEffect(() => {
+    if (!status || !holdingFocus.current) return;
+    holdingFocus.current = false;
+    const active = document.activeElement;
+    if (active && active !== document.body && active.isConnected) return;
+    const row = document.getElementById(TAILNET_ACCESS_ROW_ID);
+    const control = row?.querySelector<HTMLButtonElement>('[role="switch"]');
+    if (control && !control.disabled) {
+      control.focus();
+    } else if (row) {
+      row.tabIndex = -1;
+      row.focus();
+    }
+  }, [status]);
+  if (!status) {
+    const failure = tailnet.loading || !tailnet.error ? null : {
+      message: "Couldn't check for Tailscale.",
+      detail: tailnet.error,
+      // Try Again is replaced by the checking line, so focus is kept in the row rather than dropped.
+      onRetry: () => {
+        frameRef.current?.focus();
+        holdingFocus.current = true;
+        tailnet.retry();
+      },
+    };
+    return (
+      <div ref={frameRef} id={TAILNET_ACCESS_ROW_ID} className="setting-row-frame" tabIndex={-1}>
+        <SettingRow
+          title={TAILNET_ACCESS}
+          busy={tailnet.loading}
+          busyLabel={CHECKING_FOR_TAILSCALE}
+          failure={failure}
+        />
+        <span className="sr-only" role="status">{failure ? failure.message : tailnet.loading ? CHECKING_FOR_TAILSCALE : ""}</span>
+      </div>
+    );
+  }
+  return (
+    <SwitchRow
+      title={TAILNET_ACCESS}
+      description={tailnetAccessDescription(status)}
+      // The confirmed value, also while busy: SwitchRow disables a busy control itself and keeps
+      // showing what is live until the write settles.
+      checked={status.enabled}
+      busy={tailnet.busy}
+      busyLabel="Restarting Wollipog on this machine…"
+      disabled={!status.available || !status.managed}
+      failure={tailnet.error ? { message: "Couldn't change Tailnet Access.", detail: tailnet.error, onRetry: tailnet.retry } : null}
+      onClick={tailnet.toggle}
+      anchorId={TAILNET_ACCESS_ROW_ID}
+    />
   );
 }
 

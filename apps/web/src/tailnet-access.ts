@@ -22,6 +22,8 @@ export interface TailnetAccessSetting {
   busy: boolean;
   error: string | null;
   toggle: () => void;
+  /** Try Again for whichever failed: the read when there is no status, otherwise the write. */
+  retry: () => void;
 }
 
 export interface TailnetDesktopRuntime {
@@ -53,9 +55,14 @@ export async function writeTailnetAccess(
   return desktop.invoke<TailnetAccessStatus>("set_tailnet_access", { enabled });
 }
 
+/**
+ * The Tailnet Access row's sentence for a status that was read. Never names a port or "control
+ * plane" (§17.2): the unmanaged case is another Wollipog server already serving on this machine.
+ */
 export function tailnetAccessDescription(status: TailnetAccessStatus): string {
-  if (!status.managed) return "Unavailable while another control plane owns port 4317.";
+  if (!status.available) return "Tailscale isn't installed or running on this machine.";
+  if (!status.managed) return "Unavailable because another Wollipog server is using this machine's port.";
   return status.enabled
     ? "Paired browsers can connect through this machine's Tailscale address."
-    : "Allow paired browsers on this machine's tailnet.";
+    : "Let paired browsers reach this machine through Tailscale.";
 }

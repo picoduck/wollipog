@@ -24,7 +24,7 @@ const SETTLED: Record<SettingsSection, (page: Page) => Locator> = {
   // The tool policies arrive after the routine questions they load with.
   approvals: (page) => page.getByRole("button", { name: /^Review Agent-Created Sessions/ }),
   orchestrator: (page) => page.getByRole("radiogroup", { name: "Completion" }),
-  network: (page) => page.getByRole("switch", { name: "Enable Tailnet Access for This Machine" }),
+  network: (page) => page.getByRole("switch", { name: "Tailnet Access" }),
   experimental: (page) => page.getByRole("switch").first(),
   about: (page) => page.getByText("0.27.0", { exact: true }),
 };

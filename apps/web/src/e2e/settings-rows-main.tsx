@@ -30,6 +30,8 @@ import {
   type ColorScheme,
 } from "../theme.js";
 import { SETTINGS_SECTIONS, viewFromPath, viewPath, type SettingsSection, type View } from "../navigation.js";
+import { browserInstanceManager, InstancesContextProvider, type InstanceManager } from "../instances-context.js";
+import type { TailnetAccessSetting } from "../tailnet-access.js";
 import "../styles.css";
 
 /**
@@ -75,6 +77,56 @@ type State = (typeof STATES)[number];
  */
 const TOPOLOGIES = ["full", "minimal"] as const;
 type Topology = (typeof TOPOLOGIES)[number];
+
+/**
+ * Settings › Network's Tailnet Access in each state the desktop shell can report (#3027), or
+ * `browser`, where there is no desktop shell and so no Tailnet group. Without `tailnet`, the row
+ * follows `state` and `topology` as every other row does.
+ */
+const TAILNET_STATES = [
+  "browser", "off", "on", "restarting", "unavailable", "unmanaged", "checking", "read-failed", "write-failed",
+] as const;
+type TailnetState = (typeof TAILNET_STATES)[number];
+
+function tailnetFixture(state: TailnetState): TailnetAccessSetting {
+  const base: TailnetAccessSetting = {
+    status: { available: true, enabled: false, managed: true },
+    loading: false,
+    desktop: true,
+    busy: false,
+    error: null,
+    toggle: () => undefined,
+    retry: () => undefined,
+  };
+  switch (state) {
+    case "browser": return { ...base, status: null, desktop: false };
+    case "off": return base;
+    case "on": return { ...base, status: { available: true, enabled: true, managed: true } };
+    case "restarting": return { ...base, busy: true };
+    case "unavailable": return { ...base, status: { available: false, enabled: false, managed: true } };
+    case "unmanaged": return { ...base, status: { available: true, enabled: false, managed: false } };
+    case "checking": return { ...base, status: null, loading: true };
+    case "read-failed": return { ...base, status: null, error: "The desktop shell did not answer." };
+    case "write-failed": return {
+      ...base,
+      error: "Tailscale refused the change. Check that the Tailscale app is running, then try again.",
+    };
+  }
+}
+
+/** The desktop app connected to a saved remote server, with Connections › Instances available. */
+const desktopInstances: InstanceManager = {
+  ...browserInstanceManager,
+  desktopMultiInstance: true,
+  activeProfile: {
+    id: "studio",
+    serverInstanceId: "studio",
+    kind: "remote",
+    label: "Home Studio",
+    origin: "https://studio.example.ts.net",
+    createdAt: "",
+  },
+};
 
 const harnessDefaultsView: AgentHarnessDefaultsView = {
   defaults: [
@@ -293,6 +345,10 @@ function Harness() {
   const tailnetError = params.get("tailnet-error") === "1"
     ? "Tailscale refused the change. Check that the Tailscale app is running, then try again."
     : null;
+  const askedTailnet = params.get("tailnet") as TailnetState | null;
+  const tailnetState = askedTailnet && TAILNET_STATES.includes(askedTailnet) ? askedTailnet : null;
+  // `multi` is the desktop app with more than one instance allowed, where Manage Instances shows.
+  const instances = params.get("instances") === "multi" ? desktopInstances : browserInstanceManager;
   const schemes = params.get("copy") === "long"
     ? COLOR_SCHEMES.map((option) => ({
       ...option,
@@ -332,6 +388,7 @@ function Harness() {
   // at #root, which is the class of miss every earlier round of this file was fixing. Settings draws
   // its own page header (#1801), so there is no app-level top bar above it.
   return (
+    <InstancesContextProvider value={instances}>
     <div className="app">
       <main className="main">
         <div className="main-body">
@@ -409,18 +466,21 @@ function Harness() {
               orchestrator: <ApiProvider client={harnessDefaultsApi}><OrchestratorSettingsPanel /></ApiProvider>,
               network: (
                 <NetworkPanel
-                  tailnet={{
+                  tailnet={tailnetState ? tailnetFixture(tailnetState) : {
                     // `managed: false` is how production reaches a DISABLED tailnet switch: another
-                    // control plane owns the port, so the row renders and cannot be operated.
+                    // Wollipog server is using the port, so the row renders and cannot be operated.
+                    // `minimal` is Tailscale missing, the other disabled form.
                     status: topology === "full"
                       ? { available: true, enabled: true, managed: !disabled }
-                      : null,
+                      : { available: false, enabled: false, managed: true },
                     loading: false,
                     desktop: true,
                     busy,
                     error: tailnetError,
                     toggle: () => undefined,
+                    retry: () => undefined,
                   }}
+                  onNavigate={navigate}
                 />
               ),
               // The production panel with injected state, like Notifications above. Storage is
@@ -437,6 +497,7 @@ function Harness() {
         </div>
       </main>
     </div>
+    </InstancesContextProvider>
   );
 }
 
