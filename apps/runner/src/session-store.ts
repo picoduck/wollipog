@@ -52,6 +52,7 @@ import {
   SESSION_EVENT_WIRE_PROJECTION_VARIANTS,
 } from "@wollipog/protocol";
 import type {
+  RatePricedUsageTotal,
   AgentCapabilities,
   AgentSlashCommand,
   UnsupportedSlashCommand,
@@ -206,6 +207,12 @@ export interface SessionMeta {
   contextTokensUsed?: number;
   contextWindow?: number;
   costUsd: number;
+  /** Cumulative usage without a provider-reported cost, per pricing key (#3111), counted from the
+   * session's first usage. Absent for a session whose usage predates counting, and null once the
+   * key bound was exceeded: either way it is never reported. */
+  ratePricedUsage?: RatePricedUsageTotal[] | null;
+  /** The last control-plane priced cost applied to `costUsd` (#3111); travels with ratePricedUsage. */
+  acknowledgedCostUsd?: number;
   preview: string | null;
   pendingApproval: PendingApproval | null;
   /** One-time upgrade scan repaired any question that an older startup path stranded in history. */
@@ -680,7 +687,7 @@ function parseLockGuard(raw: string): LockGuardRecord | null {
  * immediately. A crash can lose at most META_FLUSH_MS of preview/usage churn and a lagging
  * `seq` — which appendEvent self-heals from the ndjson tail (see reconcileSeq). */
 const LAZY_META_KEYS = new Set<string>([
-  "preview", "seq", "tokensIn", "tokensOut", "contextTokensUsed", "contextWindow", "costUsd", "updatedAt",
+  "preview", "seq", "tokensIn", "tokensOut", "contextTokensUsed", "contextWindow", "costUsd", "ratePricedUsage", "updatedAt",
 ]);
 const META_FLUSH_MS = 250;
 /** A warm append layout skips cold-segment checks, so a streaming session still re-validates its
@@ -4005,6 +4012,12 @@ export function metaToSnapshot(
     contextTokensUsed: m.contextTokensUsed,
     contextWindow: m.contextWindow,
     costUsd: m.costUsd,
+    // Registration precedes negotiation and is where a reconnect prices unseen usage, so it always
+    // carries the entries; an older control plane ignores the field.
+    ...(Array.isArray(m.ratePricedUsage) &&
+        (controlPlaneProtocolVersion === null || runnerSupportsProtocol(controlPlaneProtocolVersion, "ratePricedSnapshotUsage"))
+      ? { ratePricedUsage: m.ratePricedUsage,
+          ...(m.acknowledgedCostUsd === undefined ? {} : { acknowledgedCostUsd: m.acknowledgedCostUsd }) } : {}),
     ...(m.costReconciliationRevision ? { costReconciliationRevision: m.costReconciliationRevision } : {}),
     ...(m.costReconciliationIdentity ? { costReconciliationIdentity: m.costReconciliationIdentity } : {}),
     ...(m.costReconciliationDeltaUsd !== undefined ? { costReconciliationDeltaUsd: m.costReconciliationDeltaUsd } : {}),

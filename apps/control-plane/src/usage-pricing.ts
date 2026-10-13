@@ -214,6 +214,14 @@ export function priceUsage(
   return { costUsd, costSource: "modelPriced", cacheSavingsUsd };
 }
 
+/** True when every request input size in `[min, max]` selects the same request-size rate tier as
+ * `priceUsage` does, so records summed across that range can be priced as one. A model with no
+ * size tiers, or no rate, trivially agrees. */
+export function sameRequestInputTier(table: RateTable | null, model: string | null | undefined, min: number, max: number): boolean {
+  const variants = (table ? lookupRate(table, model) : null)?.requestRates ?? [];
+  return !variants.some((variant) => variant.inputThreshold !== undefined && min <= variant.inputThreshold && max > variant.inputThreshold);
+}
+
 /** A bucket that mixes provenance reports the weakest so the UI never overstates confidence: any
  * unpriced record marks the bucket unpriced (the unpriced count says how much), any estimated record
  * marks it model-priced, and only an entirely provider-reported bucket claims exact billing. */

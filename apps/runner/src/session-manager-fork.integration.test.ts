@@ -196,6 +196,7 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
       tokensIn: 1,
       tokensOut: 2,
       costUsd: 0,
+      ratePricedUsage: [{ inputTokens: 1, netInputTokens: 1, outputTokens: 2, cachedInputTokens: 0, cacheCreationInputTokens: 0, reasoningOutputTokens: 0 }],
       preview: null,
       pendingApproval: null,
       worktreeHooks: {
@@ -308,8 +309,10 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
     assert.equal(target.agentSessionId, "thread-forked");
     assert.equal(target.costReconciliationRevision, undefined, "a fork has its own accounting ledger");
     assert.equal(target.costReconciliationDeltaUsd, undefined);
+    assert.deepEqual(target.ratePricedUsage, [], "a fork counts its own rate-priced usage from zero, never its source's");
     manager.syncPricedSessionCost("s_target", 0.01);
     assert.equal(store.readMeta("s_target")!.costUsd, 0.01, "ordinary priced acknowledgements are accepted by the fork");
+    assert.equal(store.readMeta("s_target")!.acknowledgedCostUsd, 0.01, "the acknowledged price travels with rate-priced entries");
     assert.equal(target.preview, null);
     assert.equal(target.pendingProviderAccountId, undefined,
       "a fork never inherits the source's account-switch request");

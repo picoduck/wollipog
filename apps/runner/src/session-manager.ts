@@ -104,6 +104,7 @@ import {
   PROTOCOL_VERSION,
   providerSupportsConversationFork,
   queueHoldReason,
+  accrueRatePricedUsage,
   runnerSupportsProtocol,
   validatePromptImageInputs,
   validateQuestionAnswers,
@@ -5341,6 +5342,7 @@ export class SessionManager {
       title: descriptor.title || "(adopted session)",
       titleSource: "provider",
       config: {},
+      ratePricedUsage: [],
       tokensIn: 0,
       tokensOut: 0,
       costUsd: 0,
@@ -5806,6 +5808,8 @@ export class SessionManager {
       acpSessionOverrides,
       tokensIn: retainAccounting ? (prior?.tokensIn ?? 0) : 0,
       tokensOut: retainAccounting ? (prior?.tokensOut ?? 0) : 0,
+      ratePricedUsage: retainAccounting ? prior?.ratePricedUsage : [],
+      acknowledgedCostUsd: retainAccounting ? prior?.acknowledgedCostUsd : undefined,
       contextTokensUsed: priorResumeId ? prior?.contextTokensUsed : undefined,
       contextWindow: priorResumeId ? prior?.contextWindow : undefined,
       costUsd: retainAccounting ? (prior?.costUsd ?? 0) : 0,
@@ -5871,6 +5875,8 @@ export class SessionManager {
           meta.costUsd = latest.costUsd;
           meta.tokensIn = latest.tokensIn;
           meta.tokensOut = latest.tokensOut;
+          meta.ratePricedUsage = latest.ratePricedUsage;
+          meta.acknowledgedCostUsd = latest.acknowledgedCostUsd;
           meta.costReconciliationRevision = latest.costReconciliationRevision;
           meta.costReconciliationDeltaUsd = latest.costReconciliationDeltaUsd;
           meta.costReconciliationIdentity = latest.costReconciliationIdentity;
@@ -13770,7 +13776,7 @@ export class SessionManager {
           driver: handoff.agent.driver!, command: handoff.agent.command, args: [...handoff.agent.args],
           env: {}, context: source.context, agentSessionId: null, handoffPending: true,
           status: "idle", title, titleSource: "generated", config: { ...handoff.config },
-          tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+          tokensIn: 0, tokensOut: 0, costUsd: 0, ratePricedUsage: [], preview: null, pendingApproval: null,
           turnCount: 0, seq: 0, createdAt: now, updatedAt: now,
           providerStateVersion: source.context.kind === "wsl" ? 3 : 2,
           ...(this.runnerOwnerHash ? { checkpointRefVersion: 2 as const } : {}),
@@ -14050,6 +14056,8 @@ export class SessionManager {
         tokensIn: 0,
         tokensOut: 0,
         costUsd: 0,
+        ratePricedUsage: [],
+        acknowledgedCostUsd: undefined,
         costReconciliationRevision: undefined,
         costReconciliationDeltaUsd: undefined,
         costReconciliationIdentity: undefined,
@@ -14276,6 +14284,8 @@ export class SessionManager {
    * authoritative cost the runner can enforce. */
   syncPricedSessionCost(sessionId: string, costUsd: number, revision?: number, correctionDeltaUsd?: number, coordinate?: import("@wollipog/protocol").PricedSessionCostMessage): void {
     if (!Number.isFinite(costUsd) || costUsd < 0) return;
+    // The control plane's own price, before provider usage preserved below is added (#3111).
+    const acknowledgedCostUsd = costUsd;
     const current = this.store.readMeta(sessionId);
     if (!current || !Number.isSafeInteger(revision ?? 0) || (revision ?? 0) < 0) return;
     const priorRevision = current.costReconciliationRevision ?? 0;
@@ -14311,7 +14321,7 @@ export class SessionManager {
       const adjusted = current.costUsd + correctionDeltaUsd! - (current.costReconciliationDeltaUsd ?? 0);
       costUsd = Math.max(costUsd, adjusted);
     }
-    const updated = this.store.patchMeta(sessionId, { costUsd,
+    const updated = this.store.patchMeta(sessionId, { costUsd, acknowledgedCostUsd,
       ...(revision !== undefined ? { costReconciliationRevision: revision } : {}),
       ...(correctionDeltaUsd !== undefined ? { costReconciliationDeltaUsd: correctionDeltaUsd } : {}),
       ...(identity !== undefined ? { costReconciliationIdentity: identity } : {}),
@@ -19287,10 +19297,13 @@ export class SessionManager {
       // live record is display-only: a later record accounts the same request (#3086).
       const m = this.store.readMeta(sessionId);
       if (!m) return;
+      // Rate-priced usage keeps its cache buckets, so a snapshot covering it is priced exactly (#3111).
+      const ratePricedUsage = Array.isArray(m.ratePricedUsage) ? accrueRatePricedUsage(m.ratePricedUsage, payload) : m.ratePricedUsage;
       this.store.patchMeta(sessionId, {
         tokensIn: m.tokensIn + (payload.inputTokens ?? 0),
         tokensOut: m.tokensOut + (payload.outputTokens ?? 0),
         costUsd: m.costUsd + (payload.costUsd ?? 0),
+        ...(ratePricedUsage === m.ratePricedUsage ? {} : { ratePricedUsage: ratePricedUsage && [...ratePricedUsage] }),
         ...(payload.claudeUsageCheckpoint ? { claudeUsageCheckpoint: payload.claudeUsageCheckpoint, claudeUsageCheckpointSeq: m.seq } : {}),
       });
       // Usage counters normally flush lazily. A republished request has already left the open live

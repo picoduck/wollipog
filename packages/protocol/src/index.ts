@@ -670,12 +670,15 @@
 //      closed by a `settled` record. Runners send them only to a v216+ control plane.
 // 217: bounded Full Control issue lineage, publication admission and verified closure.
 // 218: durable campaign allowance, final managed usage and controlled native review admission.
-export const PROTOCOL_VERSION = 218;
+// 219: session snapshots carry cumulative rate-priced usage per pricing key, with cache buckets, so
+//      a snapshot covering unseen records prices them as event-first ingestion would (#3111).
+export const PROTOCOL_VERSION = 219;
 
 export * from "./campaign-authority.js";
 export * from "./campaign-issue-publication.js";
 export * from "./campaign-budget.js";
 export * from "./campaign-review-job.js";
+export * from "./rate-priced-usage.js";
 import type { CampaignControl, CampaignRequestSource, CampaignAuthorityEvaluation } from "./campaign-authority.js";
 export const SESSION_SUMMARY_UI_PROTOCOL = 212;
 export const SKILL_REPORT_REQUEST_LIFETIME_MS = 30_000;
@@ -1035,6 +1038,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   pricedSessionCost: 106,
   /** v216 control planes show provisional live Claude usage without accruing it. */
   claudeLiveUsage: 216,
+  /** v219 control planes price a snapshot's `ratePricedUsage` residual per cache bucket. */
+  ratePricedSnapshotUsage: 219,
   costReconciliation: 199,
   costReconciliationIdentity: 210,
   /** v129 runners report the exact threshold that cancelled a turn. */
@@ -7130,6 +7135,14 @@ export interface SessionSnapshot {
   contextTokensUsed?: number;
   contextWindow?: number;
   costUsd: number;
+  /** Protocol 219: cumulative usage without a provider-reported cost, per pricing key (#3111).
+   * Absent from older runners, from negotiated snapshots to older control planes, and once a
+   * session exceeds the key bound; the control plane then prices residuals from flat totals. */
+  ratePricedUsage?: import("./rate-priced-usage.js").RatePricedUsageTotal[];
+  /** Protocol 219: the last control-plane priced cost this runner applied to `costUsd`, sent with
+   * `ratePricedUsage`. Cost growth beyond the control plane's ledger is provider cost unless the
+   * ledger fell below this acknowledgement, which already priced some rate-priced usage. */
+  acknowledgedCostUsd?: number;
   /** Protocol 197: SDK-computed cost retains estimate provenance during snapshot catch-up. */
   costIsEstimate?: true;
   /** Protocol 210: acknowledged cumulative adjustment, never inferred from scalar cost. */

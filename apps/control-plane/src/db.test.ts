@@ -23,8 +23,11 @@ import type {
   WorkflowArtifact,
   WorkflowArtifactView,
   type UsageAmount,
+  AgentDriverKind,
+  RatePricedUsageTotal,
 } from "@wollipog/protocol";
 import {
+  accrueRatePricedUsage,
   BACKGROUND_HANDOFF_WAIT_MAX_MS,
   BACKGROUND_JOB_STALL_MS,
   DEFAULT_ORCHESTRATOR_DEFAULTS,
@@ -8745,6 +8748,311 @@ test("snapshot residual pricing carries sub-micro cost and defers to a fractiona
   const fraction = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000, granularity: "hour" });
   assert.equal(fraction.byModel.find((row) => row.key === "claude-fable-5-1")!.costSource, "providerReported");
   assert.ok(Math.abs(db.getSession("fraction")!.costUsd - 0.0000002) < 1e-15, "the estimate ($0.005) must not replace the reported fraction");
+});
+
+// #3111: the same rate-priced records, ingested event-first or covered by a runner snapshot first.
+const ratePricedRateDocument = {
+  "claude-test-model": {
+    input_cost_per_token: 0.000003, output_cost_per_token: 0.000015,
+    cache_read_input_token_cost: 0.0000003, cache_creation_input_token_cost: 0.00000375,
+    input_cost_per_token_above_200k_tokens: 0.000006, output_cost_per_token_above_200k_tokens: 0.0000225,
+    cache_read_input_token_cost_above_200k_tokens: 0.0000006, cache_creation_input_token_cost_above_200k_tokens: 0.0000075,
+  },
+  "claude-small-model": {
+    input_cost_per_token: 0.000001, output_cost_per_token: 0.000005,
+    cache_read_input_token_cost: 0.0000001, cache_creation_input_token_cost: 0.00000125,
+  },
+  "gpt-test-codex": { input_cost_per_token: 0.000002, output_cost_per_token: 0.00001, cache_read_input_token_cost: 0.0000002 },
+};
+type UsagePayload = Extract<SessionEventPayload, { kind: "token_usage" }>;
+const claudeRepublished = (model: string, inputTokens: number, outputTokens: number, cachedInputTokens: number,
+  cacheCreationInputTokens: number): UsagePayload => ({
+  kind: "token_usage", model, inputTokens, outputTokens, cachedInputTokens, cacheCreationInputTokens,
+  pricingContext: { requestInputTokens: inputTokens + cachedInputTokens + cacheCreationInputTokens }, liveUsage: "republished",
+});
+
+/** Ingest `records` into a fresh session, either as events or behind a covering snapshot whose
+ * totals the runner accrued from the same records. `entries: false` models a pre-v219 runner. */
+function ingestRatePriced(
+  order: "event" | "snapshot",
+  driver: AgentDriverKind,
+  model: string,
+  records: UsagePayload[],
+  options: { entries?: boolean; ratePricedStatus?: number } = {},
+) {
+  const db = withRunner();
+  db.setUsageRateTable(parseRateTable(ratePricedRateDocument));
+  const id = `rate-priced-${order}`;
+  const base = snapshot({ id, driver, config: { model }, historyEpoch: 1, seq: 0 });
+  db.createSessionFromSnapshot(base, "runner-1", 1_000);
+  if (options.ratePricedStatus !== undefined) {
+    db.raw().prepare("UPDATE usage_session_state SET rate_priced_status=? WHERE session_id=?").run(options.ratePricedStatus, id);
+  }
+  let ratePricedUsage: readonly RatePricedUsageTotal[] = [];
+  for (const record of records) ratePricedUsage = accrueRatePricedUsage(ratePricedUsage, record)!;
+  const covering = {
+    ...base, seq: records.length,
+    tokensIn: records.reduce((sum, record) => sum + (record.inputTokens ?? 0), 0),
+    tokensOut: records.reduce((sum, record) => sum + (record.outputTokens ?? 0), 0),
+    costUsd: records.reduce((sum, record) => sum + (record.costUsd ?? 0), 0),
+    ...(records.some((record) => record.costIsEstimate) ? { costIsEstimate: true as const } : {}),
+    ...(options.entries === false ? {} : { ratePricedUsage: [...ratePricedUsage] }),
+  };
+  const page = () => db.appendHydratedPage(id, { afterSeq: 0, historyEpoch: 1, eventEpoch: 0 },
+    records.map((payload, index) => ({ seq: index + 1, ts: 2_000 + index, payload })));
+  if (order === "event") {
+    assert.equal(page().applied, true);
+    db.updateSessionFromSnapshot(id, covering, 3_000);
+  } else {
+    db.updateSessionFromSnapshot(id, covering, 3_000);
+    assert.equal(page().applied, true, "covered records replay into the timeline without accruing again");
+  }
+  return { db, id, usage: db.sessionUsageByModel(id), costUsd: db.getSession(id)!.costUsd };
+}
+
+test("a snapshot covering unseen rate-priced records books the cost and cache buckets of event-first ingestion", () => {
+  const claude = [
+    claudeRepublished("claude-test-model", 10, 5, 1_000, 200),
+    claudeRepublished("claude-small-model", 20, 8, 3_000, 0),
+    claudeRepublished("claude-test-model", 7, 3, 500, 50),
+  ];
+  const codex: UsagePayload[] = [
+    { kind: "token_usage", model: "gpt-test-codex", inputTokens: 1_000, cachedInputTokens: 600, outputTokens: 100,
+      reasoningOutputTokens: 40, pricingContext: { requestInputTokens: 1_000, serviceTier: "default" } },
+    // A later update that only adds a previously absent cache count is normalized on its own.
+    { kind: "token_usage", model: "gpt-test-codex", inputTokens: 2_000, outputTokens: 10,
+      pricingContext: { requestInputTokens: 2_000, serviceTier: "default" } },
+    { kind: "token_usage", model: "gpt-test-codex", inputTokens: 0, cachedInputTokens: 600,
+      pricingContext: { requestInputTokens: 2_000, serviceTier: "default" } },
+    // App Server child threads omit an ambiguous request size; Codex exec omits the context entirely.
+    { kind: "token_usage", model: "gpt-test-codex", inputTokens: 500, cachedInputTokens: 400, outputTokens: 50,
+      parentToolUseId: "child", independentUsage: true, pricingContext: { requestInputTokens: undefined, serviceTier: "default" } },
+    { kind: "token_usage", model: "gpt-test-codex", inputTokens: 300, cachedInputTokens: 100, outputTokens: 20 },
+  ];
+  for (const [driver, model, records] of [
+    ["claude-code", "claude-test-model", claude],
+    ["codex-app-server", "gpt-test-codex", codex],
+  ] as const) {
+    const eventFirst = ingestRatePriced("event", driver, model, [...records]);
+    const snapshotFirst = ingestRatePriced("snapshot", driver, model, [...records]);
+    assert.ok(eventFirst.usage.totals.cachedInputTokens > 0 && eventFirst.usage.totals.costUsd > 0);
+    assert.equal(eventFirst.usage.totals.costSource, "modelPriced");
+    assert.deepEqual(snapshotFirst.usage.totals, eventFirst.usage.totals, `${driver} session ledger`);
+    assert.deepEqual(snapshotFirst.usage.byModel, eventFirst.usage.byModel, `${driver} per-model ledger`);
+    assert.equal(snapshotFirst.costUsd, eventFirst.costUsd, `${driver} session cost`);
+
+    // A pre-v219 runner's flat totals still price the catch-up as uncached input, as before.
+    const legacy = ingestRatePriced("snapshot", driver, model, [...records], { entries: false });
+    assert.equal(legacy.usage.totals.cachedInputTokens, 0);
+    assert.notEqual(legacy.costUsd, eventFirst.costUsd);
+  }
+  // CR-4.1's record: 10 input, 5 output, 1,000 cache-read and 200 cache-write tokens.
+  const record = [claudeRepublished("claude-test-model", 10, 5, 1_000, 200)];
+  const exact = 10 * 0.000003 + 5 * 0.000015 + 1_000 * 0.0000003 + 200 * 0.00000375;
+  assert.ok(Math.abs(ingestRatePriced("snapshot", "claude-code", "claude-test-model", record).costUsd - exact) < 1e-12);
+  assert.ok(ingestRatePriced("snapshot", "claude-code", "claude-test-model", record, { entries: false }).costUsd < exact / 5,
+    "flat totals under-count a cache-heavy Claude record");
+  // Codex input includes cache reads, so flat totals over-count a cache-heavy Codex record instead.
+  const codexRecord = [codex[0]!];
+  assert.ok(ingestRatePriced("snapshot", "codex-app-server", "gpt-test-codex", codexRecord, { entries: false }).costUsd >
+    ingestRatePriced("event", "codex-app-server", "gpt-test-codex", codexRecord).costUsd);
+});
+
+test("a snapshot residual whose request-size tier cannot be reconstructed is booked unpriced", () => {
+  // Both records share a pricing key, but one request crossed the 200k long-context threshold.
+  const records = [
+    claudeRepublished("claude-test-model", 10, 5, 1_000, 200),
+    claudeRepublished("claude-test-model", 10, 5, 240_000, 0),
+  ];
+  const eventFirst = ingestRatePriced("event", "claude-code", "claude-test-model", records);
+  const snapshotFirst = ingestRatePriced("snapshot", "claude-code", "claude-test-model", records);
+  assert.equal(eventFirst.usage.totals.costSource, "modelPriced");
+  assert.equal(snapshotFirst.usage.totals.costSource, "unpriced");
+  assert.equal(snapshotFirst.usage.totals.unpricedRecords, 1);
+  assert.equal(snapshotFirst.costUsd, 0, "never priced at the lower standard rate");
+  assert.equal(snapshotFirst.usage.totals.cachedInputTokens, eventFirst.usage.totals.cachedInputTokens);
+  assert.equal(snapshotFirst.usage.totals.cacheCreationTokens, eventFirst.usage.totals.cacheCreationTokens);
+
+  // A range wholly above the threshold reconstructs the long-context tier exactly.
+  const longContext = [claudeRepublished("claude-test-model", 10, 5, 240_000, 0), claudeRepublished("claude-test-model", 4, 2, 300_000, 0)];
+  assert.deepEqual(ingestRatePriced("snapshot", "claude-code", "claude-test-model", longContext).usage.totals,
+    ingestRatePriced("event", "claude-code", "claude-test-model", longContext).usage.totals);
+});
+
+test("records with a provider-reported cost keep flat snapshot catch-up beside exact rate-priced residuals", () => {
+  const records: UsagePayload[] = [
+    { kind: "token_usage", model: "claude-test-model", inputTokens: 40, outputTokens: 20, cachedInputTokens: 900,
+      costUsd: 0.25, costIsEstimate: true },
+    claudeRepublished("claude-test-model", 10, 5, 1_000, 200),
+  ];
+  const eventFirst = ingestRatePriced("event", "claude-code", "claude-test-model", records);
+  const snapshotFirst = ingestRatePriced("snapshot", "claude-code", "claude-test-model", records);
+  assert.ok(Math.abs(snapshotFirst.costUsd - eventFirst.costUsd) < 1e-12);
+  assert.deepEqual(
+    [snapshotFirst.usage.totals.inputTokens, snapshotFirst.usage.totals.outputTokens],
+    [eventFirst.usage.totals.inputTokens, eventFirst.usage.totals.outputTokens],
+  );
+  // The provider-costed record's tokens arrive flat, as before; only its cache reads are unknown.
+  assert.equal(snapshotFirst.usage.totals.cachedInputTokens, 1_000);
+  assert.equal(snapshotFirst.usage.totals.cacheCreationTokens, 200);
+});
+
+test("a ledger that predates per-key counting keeps flat snapshot catch-up and never double counts", () => {
+  const first = claudeRepublished("claude-test-model", 10, 5, 1_000, 200);
+  const flat = ingestRatePriced("snapshot", "claude-code", "claude-test-model", [first], { entries: false });
+  const incomplete = ingestRatePriced("snapshot", "claude-code", "claude-test-model", [first], { ratePricedStatus: 1 });
+  assert.deepEqual(incomplete.usage.totals, flat.usage.totals, "incomplete counts price exactly as a pre-v219 snapshot");
+  const { db, id } = incomplete;
+  const second = claudeRepublished("claude-test-model", 7, 3, 500, 50);
+  const entries = accrueRatePricedUsage(accrueRatePricedUsage([], first)!, second)!;
+  const base = snapshot({ id, driver: "claude-code", config: { model: "claude-test-model" }, historyEpoch: 1, seq: 2 });
+  db.updateSessionFromSnapshot(id, { ...base, tokensIn: 17, tokensOut: 8, ratePricedUsage: [...entries] }, 4_000);
+  db.updateSessionFromSnapshot(id, { ...base, tokensIn: 17, tokensOut: 8, ratePricedUsage: [...entries] }, 5_000);
+  const totals = db.sessionUsageByModel(id).totals;
+  assert.deepEqual([totals.inputTokens, totals.outputTokens, totals.cachedInputTokens], [17, 8, 0]);
+  assert.equal(db.raw().prepare("SELECT rate_priced_status AS s FROM usage_session_state WHERE session_id=?").get(id)!.s, 1);
+});
+
+test("malformed snapshot entries fall back to flat totals", () => {
+  const record = claudeRepublished("claude-test-model", 10, 5, 1_000, 200);
+  const db = withRunner();
+  db.setUsageRateTable(parseRateTable(ratePricedRateDocument));
+  db.createSessionFromSnapshot(snapshot({ id: "bad", driver: "claude-code", config: { model: "claude-test-model" }, historyEpoch: 1,
+    seq: 1, tokensIn: 10, tokensOut: 5,
+    ratePricedUsage: [{ ...accrueRatePricedUsage([], record)![0]!, cachedInputTokens: -1 }] }), "runner-1", 1_000);
+  const usage = db.sessionUsageByModel("bad").totals;
+  assert.deepEqual([usage.inputTokens, usage.cachedInputTokens], [10, 0]);
+  // The flat fallback booked that record, so the next valid entries are a baseline, not a residual.
+  db.updateSessionFromSnapshot("bad", snapshot({ id: "bad", driver: "claude-code", config: { model: "claude-test-model" },
+    historyEpoch: 1, seq: 1, tokensIn: 10, tokensOut: 5, ratePricedUsage: [...accrueRatePricedUsage([], record)!] }), 2_000);
+  assert.deepEqual(db.sessionUsageByModel("bad").totals, usage);
+});
+
+test("service tiers price identically in both orders, including padded and empty tiers", () => {
+  for (const serviceTier of [" standard ", "", "priority", "standard"]) {
+    const records: UsagePayload[] = [{ ...claudeRepublished("claude-small-model", 10, 5, 1_000, 200),
+      pricingContext: { requestInputTokens: 1_210, serviceTier } }];
+    const eventFirst = ingestRatePriced("event", "claude-code", "claude-small-model", records);
+    const snapshotFirst = ingestRatePriced("snapshot", "claude-code", "claude-small-model", records);
+    assert.deepEqual(snapshotFirst.usage.totals, eventFirst.usage.totals, JSON.stringify(serviceTier));
+    assert.equal(snapshotFirst.costUsd, eventFirst.costUsd, JSON.stringify(serviceTier));
+  }
+});
+
+test("a runner rotating pricing keys cannot grow the per-key ledger without bound", () => {
+  const db = withRunner();
+  db.setUsageRateTable(parseRateTable(ratePricedRateDocument));
+  const base = snapshot({ id: "rotating", driver: "codex-app-server", config: { model: "gpt-test-codex" }, historyEpoch: 1 });
+  db.createSessionFromSnapshot(base, "runner-1", 1_000);
+  let tokensIn = 0;
+  for (let batch = 0; batch < 3; batch++) {
+    const entries = Array.from({ length: 32 }, (_, index) => ({ model: `rotating-${batch}-${index}`, inputTokens: 1, netInputTokens: 1,
+      outputTokens: 0, cachedInputTokens: 0, cacheCreationInputTokens: 0, reasoningOutputTokens: 0 }));
+    tokensIn += 32;
+    db.updateSessionFromSnapshot("rotating", { ...base, seq: batch + 1, tokensIn, ratePricedUsage: entries }, 2_000 + batch);
+  }
+  const rows = (db.raw().prepare("SELECT COUNT(*) AS n FROM usage_session_rate_priced WHERE session_id='rotating'").get() as { n: number }).n;
+  assert.equal(rows, 64);
+  assert.equal(db.raw().prepare("SELECT rate_priced_status AS s FROM usage_session_state WHERE session_id='rotating'").get()!.s, 1);
+  assert.equal(db.sessionUsageByModel("rotating").totals.inputTokens, 96, "the abandoned batch still books its flat residual");
+});
+
+test("a v219 runner's registration snapshot books nothing before its buffered events and negotiated snapshot", () => {
+  const record = claudeRepublished("claude-test-model", 10, 5, 1_000, 200);
+  const entries = [...accrueRatePricedUsage([], record)!];
+  const book = (protocolVersion: number | null) => {
+    const db = ControlPlaneDb.open(":memory:");
+    db.registerRunner(meta(), 500, protocolVersion);
+    db.setUsageRateTable(parseRateTable(ratePricedRateDocument));
+    const base = snapshot({ id: "buffered", driver: "claude-code", config: { model: "claude-test-model" }, historyEpoch: 1 });
+    db.createSessionFromSnapshot(base, "runner-1", 1_000);
+    // Registration: pre-negotiation, so seq 0 and no history epoch, but cumulative totals.
+    db.updateSessionsFromSnapshots([{ ...base, seq: 0, historyEpoch: undefined, tokensIn: 10, tokensOut: 5, ratePricedUsage: entries }], 2_000);
+    // The runner then flushes its buffered event and publishes its negotiated snapshot.
+    db.appendHydratedPage("buffered", { afterSeq: 0, historyEpoch: 1, eventEpoch: 0 }, [{ seq: 1, ts: 3_000, payload: record }]);
+    db.updateSessionFromSnapshot("buffered", { ...base, seq: 1, tokensIn: 10, tokensOut: 5, ratePricedUsage: entries }, 4_000);
+    return db.sessionUsageByModel("buffered").totals;
+  };
+  const eventFirst = ingestRatePriced("event", "claude-code", "claude-test-model", [record]).usage.totals;
+  assert.deepEqual(book(PROTOCOL_VERSION), eventFirst);
+  assert.equal(book(218).inputTokens, 20, "an older runner's registration keeps today's flat catch-up");
+});
+
+test("cost the runner already acknowledged is not charged again for its rate-priced residual", () => {
+  const record = claudeRepublished("claude-test-model", 10, 5, 1_000, 200);
+  const eventFirst = ingestRatePriced("event", "claude-code", "claude-test-model", [record]);
+  const acknowledged = eventFirst.costUsd;
+  // A restored or new control plane: the runner's cost is the acknowledged price of that record.
+  const db = withRunner();
+  db.setUsageRateTable(parseRateTable(ratePricedRateDocument));
+  db.createSessionFromSnapshot(snapshot({ id: "restored", driver: "claude-code", config: { model: "claude-test-model" },
+    historyEpoch: 1, seq: 1, tokensIn: 10, tokensOut: 5, costUsd: acknowledged, acknowledgedCostUsd: acknowledged,
+    ratePricedUsage: [...accrueRatePricedUsage([], record)!] }), "runner-1", 1_000);
+  const restored = db.sessionUsageByModel("restored").totals;
+  assert.equal(db.getSession("restored")!.costUsd, acknowledged);
+  assert.deepEqual([restored.cachedInputTokens, restored.cacheCreationTokens], [1_000, 200]);
+
+  // Beside missing provider-costed tokens the split is unknowable: never twice, and flagged.
+  const mixed = withRunner();
+  mixed.setUsageRateTable(parseRateTable(ratePricedRateDocument));
+  mixed.createSessionFromSnapshot(snapshot({ id: "mixed", driver: "claude-code", config: { model: "claude-test-model" },
+    historyEpoch: 1, seq: 2, tokensIn: 50, tokensOut: 25, costUsd: acknowledged + 0.25, acknowledgedCostUsd: acknowledged,
+    costIsEstimate: true, ratePricedUsage: [...accrueRatePricedUsage([], record)!] }), "runner-1", 1_000);
+  assert.ok(Math.abs(mixed.getSession("mixed")!.costUsd - (acknowledged + 0.25)) < 1e-12);
+  assert.equal(mixed.sessionUsageByModel("mixed").totals.costSource, "unpriced");
+
+  // The residual keeps its cost under the model that produced it, even when the session moved on.
+  const moved = withRunner();
+  moved.setUsageRateTable(parseRateTable(ratePricedRateDocument));
+  moved.createSessionFromSnapshot(snapshot({ id: "moved", driver: "claude-code", config: { model: "claude-small-model" },
+    historyEpoch: 1, seq: 1, tokensIn: 10, tokensOut: 5, costUsd: acknowledged, acknowledgedCostUsd: acknowledged,
+    ratePricedUsage: [...accrueRatePricedUsage([], record)!] }), "runner-1", 1_000);
+  assert.deepEqual(moved.sessionUsageByModel("moved").byModel, eventFirst.usage.byModel);
+
+  // Sub-micro acknowledged cost is absorbed exactly, not once per remainder.
+  const cheap = [{ kind: "token_usage" as const, model: "cheap-model", inputTokens: 1 }];
+  const cheapTable = parseRateTable({ "cheap-model": { input_cost_per_token: 0.00000015, output_cost_per_token: 0 } });
+  const fraction = withRunner();
+  fraction.setUsageRateTable(cheapTable);
+  fraction.createSessionFromSnapshot(snapshot({ id: "fraction", driver: "codex-app-server", config: { model: "cheap-model" },
+    historyEpoch: 1, seq: 1, tokensIn: 1, costUsd: 0.00000015, acknowledgedCostUsd: 0.00000015,
+    ratePricedUsage: [...accrueRatePricedUsage([], cheap[0]!)!] }), "runner-1", 1_000);
+  assert.ok(Math.abs(fraction.getSession("fraction")!.costUsd - 0.00000015) < 1e-15);
+});
+
+test("flat catch-up without entries leaves the per-key counts incomplete", () => {
+  const record = claudeRepublished("claude-test-model", 10, 5, 1_000, 200);
+  const db = withRunner();
+  db.setUsageRateTable(parseRateTable(ratePricedRateDocument));
+  const base = snapshot({ id: "downgraded", driver: "claude-code", config: { model: "claude-test-model" }, historyEpoch: 1 });
+  db.createSessionFromSnapshot(base, "runner-1", 1_000);
+  db.updateSessionFromSnapshot("downgraded", { ...base, seq: 1, tokensIn: 10, tokensOut: 5 }, 2_000);
+  const flat = db.sessionUsageByModel("downgraded").totals;
+  db.updateSessionFromSnapshot("downgraded", { ...base, seq: 1, tokensIn: 10, tokensOut: 5,
+    ratePricedUsage: [...accrueRatePricedUsage([], record)!] }, 3_000);
+  assert.deepEqual(db.sessionUsageByModel("downgraded").totals, flat);
+  assert.equal(db.raw().prepare("SELECT rate_priced_status AS s FROM usage_session_state WHERE session_id='downgraded'").get()!.s, 1);
+});
+
+test("existing usage ledgers are marked incomplete on upgrade", () => {
+  const temp = mkdtempSync(join(tmpdir(), "wollipog-rate-priced-"));
+  const location = join(temp, "control-plane.db");
+  try {
+    let db = ControlPlaneDb.open(location);
+    db.registerRunner(meta(), 500);
+    db.createSession(newSession({ driver: "claude-code", config: { model: "claude-test-model" } }));
+    db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 10, outputTokens: 2 }, 1_000, { accrueUsage: true });
+    assert.equal(db.raw().prepare("SELECT rate_priced_status AS s FROM usage_session_state").get()!.s, 0);
+    db.close();
+    const raw = new DatabaseSync(location);
+    raw.exec("ALTER TABLE usage_session_state DROP COLUMN rate_priced_status");
+    raw.close();
+    db = ControlPlaneDb.open(location);
+    assert.equal(db.raw().prepare("SELECT rate_priced_status AS s FROM usage_session_state").get()!.s, 1);
+    db.close();
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
 });
 
 test("usage aggregation splits each time bucket per driver for stacked series", () => {
