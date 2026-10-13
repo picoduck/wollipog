@@ -684,10 +684,6 @@ interface ActiveSession {
   /** Provider error of the immediately preceding submission the provider provably rejected without
    * starting a turn (#3100). Any other outcome, an uncertain failure included, clears it. */
   lastProviderRejection?: string;
-  /** An automatic turn repeated that rejection, so automatic turns wait in the FIFO instead of
-   * reaching the provider. A person's prompt dispatches ahead of them and clears it; a Restart
-   * replaces this entry and settles them as never sent. */
-  providerRejectionHold?: string;
   /** A runner prompt has crossed its provider boundary in this logical turn. */
   providerPromptSubmitted?: boolean;
   /** Only an interrupted runner prompt, rather than an idle process or manual command, resumes. */
@@ -1267,6 +1263,11 @@ export class SessionManager {
   /** Sessions whose control-plane hold outlived their process: recovery must not drain their
    * queue, and the replacement entry inherits the hold, until the control plane releases it. */
   private readonly recoveryHolds = new Set<string>();
+  /** Provider error of a rejection hold (#3100): an automatic turn repeated the immediately
+   * preceding provable rejection, so automatic turns wait in the FIFO instead of reaching the
+   * provider. Session-scoped so a provider exit and its automatic recovery keep it. A person's
+   * prompt dispatches ahead of the held turns and clears it; Restart and Stop discard it. */
+  private readonly providerRejectionHolds = new Map<string, string>();
   /** Prompts received after a session was materialized but before capacity admission. They must
    * join the original launch instead of starting a competing resume generation. Durable command
    * lifecycles make this in-memory FIFO recoverable after a runner restart. */
@@ -10255,7 +10256,7 @@ export class SessionManager {
           editRevision: this.queuedPromptEditRevision(q),
         };
       }),
-      ...(entry && (this.queueHeld(entry) || entry.providerRejectionHold) ? { held: true } : {}),
+      ...(entry && (this.queueHeld(entry) || this.providerRejectionHolds.has(sessionId)) ? { held: true } : {}),
       ...(entry?.providerInitiatedTurnActive && entry.providerInitiatedTurnId
         ? { activeTurnId: entry.providerInitiatedTurnId }
         : entry?.running && entry.activeTurnId ? { activeTurnId: entry.activeTurnId } : {}),
@@ -10611,7 +10612,7 @@ export class SessionManager {
     this.cancelQueued(replaced.filter((prompt) => (prompt.syntheticRecovery || prompt.providerRecovery)), "session restart replaced the conversation");
     // Automatic turns a provider rejection hold parked were never sent (#3100). Their senders own
     // any retry, so the Restart that clears the hold settles them rather than replaying them.
-    const rejectionHeld = existing?.providerRejectionHold
+    const rejectionHeld = this.providerRejectionHolds.has(sessionId)
       ? replaced.filter((prompt) => automaticTurn(prompt) && !(prompt.syntheticRecovery || prompt.providerRecovery))
       : [];
     this.cancelQueued(rejectionHeld,
@@ -11174,10 +11175,10 @@ export class SessionManager {
     // Schedulers may race with cancellation or interruption and leave an empty generation. Do not
     // claim—or queue for—an active-work permit when there is no provider work to dispatch.
     if (entry.queue.length === 0) return;
-    if (!this.promotePromptPastRejectionHold(entry)) {
+    if (!this.promotePromptPastRejectionHold(sessionId, entry)) {
       // Admission may have reported the held automatic turn as running; restore the blocker.
       this.emitStatus(sessionId, "input_required",
-        this.providerRejectionBlocker(sessionId, entry.providerRejectionHold!));
+        this.providerRejectionBlocker(sessionId, this.providerRejectionHolds.get(sessionId)!));
       return;
     }
     if (!this.acquireActiveTurn(sessionId)) return;
@@ -11201,12 +11202,12 @@ export class SessionManager {
       while (this.active.has(sessionId) && entry.queue.length && !entry.authenticationBlocked &&
           !entry.historyQuarantined &&
           this.promoteQueuedRecoveredAnswer(sessionId, entry.queue) &&
-          this.promotePromptPastRejectionHold(entry)) {
+          this.promotePromptPastRejectionHold(sessionId, entry)) {
         if (this.steerFences(entry).size || this.reservedPromotionPrecedesQueue(sessionId, entry)) break;
         const next = entry.queue.shift()!;
         this.ensureQueueOrdinal(sessionId, next);
         // A person's prompt is the way out of a rejection hold; the turns it held follow it.
-        if (entry.providerRejectionHold) entry.providerRejectionHold = undefined;
+        this.providerRejectionHolds.delete(sessionId);
         entry.activeTurnId = next.id;
         this.emitQueue(sessionId); // it just left the queue and is about to run
         // This is the exact per-turn boundary. Reset before the first awaited configuration/image
@@ -11336,7 +11337,7 @@ export class SessionManager {
         await this.rebindProjectMemory(sessionId, entry);
       } else if (this.active.get(sessionId) === entry && entry.queue.length &&
           !entry.authenticationBlocked && !entry.historyQuarantined && !entry.historyIntegrityFailure &&
-          !entry.governanceTripped && !this.queueHeld(entry) && this.promotePromptPastRejectionHold(entry)) {
+          !entry.governanceTripped && !this.queueHeld(entry) && this.promotePromptPastRejectionHold(sessionId, entry)) {
         setImmediate(() => this.scheduleDrain(sessionId));
       }
     }
@@ -12707,6 +12708,9 @@ export class SessionManager {
       ? { id: "direct", text: prompt, images: legacyImages }
       : prompt;
     if (queued.sessionCommand) {
+      // A provider command between two rejections means they were not consecutive (#3100).
+      const commandEntry = this.active.get(sessionId);
+      if (commandEntry) commandEntry.lastProviderRejection = undefined;
       await this.runSessionCommand(sessionId, queued);
       return;
     }
@@ -13244,7 +13248,7 @@ export class SessionManager {
         this.emitStatus(sessionId, "stopped");
       } else if (rejectedAnswerBlocker) {
         this.emitStatus(sessionId, "input_required", rejectedAnswerBlocker);
-      } else if (rejectionHoldBlocker && entry.providerRejectionHold) {
+      } else if (rejectionHoldBlocker && this.providerRejectionHolds.has(sessionId)) {
         this.emitStatus(sessionId, "input_required", rejectionHoldBlocker);
       } else {
         // The provider completed before the interrupt took effect. Do not fabricate Interrupted
@@ -15716,7 +15720,7 @@ export class SessionManager {
     const repeated = rejection !== undefined && rejection === entry.lastProviderRejection;
     entry.lastProviderRejection = rejection;
     if (!repeated || !automaticTurn(prompt)) return undefined;
-    entry.providerRejectionHold = rejection;
+    this.providerRejectionHolds.set(sessionId, rejection);
     this.log(JSON.stringify({ event: "provider_rejection_hold", sessionId, queued: entry.queue.length }));
     const blocker = this.providerRejectionBlocker(sessionId, rejection);
     // An error row stays visible in the transcript, where an Agent Log line would be hidden.
@@ -15737,8 +15741,8 @@ export class SessionManager {
 
   /** While automatic turns are held, only a person's prompt may reach the provider. It runs ahead
    * of the held turns, which keep their order behind it. False when nothing may dispatch. */
-  private promotePromptPastRejectionHold(entry: ActiveSession): boolean {
-    if (!entry.providerRejectionHold) return true;
+  private promotePromptPastRejectionHold(sessionId: string, entry: ActiveSession): boolean {
+    if (!this.providerRejectionHolds.has(sessionId)) return true;
     const index = entry.queue.findIndex((prompt) => !automaticTurn(prompt));
     if (index < 0) return false;
     if (index > 0) entry.queue.unshift(entry.queue.splice(index, 1)[0]!);
@@ -16097,6 +16101,7 @@ export class SessionManager {
     this.recoveryQueues.delete(sessionId);
     this.recoveryLaunching.delete(sessionId);
     this.recoveryHolds.delete(sessionId);
+    this.providerRejectionHolds.delete(sessionId);
   }
 
   /** Returns whether every provider driver was disposed cleanly. When false, some provider process
@@ -16261,6 +16266,13 @@ export class SessionManager {
     if (status === "input_required" && authMeta?.providerAuthBlock && !authMeta.pendingApproval) {
       status = "idle";
       detail = undefined;
+    }
+    // A rejection hold outlives unrelated settles (a threshold edit, a provider exit): while it
+    // lasts, the session is not idle but waiting for a person, and says why (#3100).
+    const rejectionHold = this.providerRejectionHolds.get(sessionId);
+    if (status === "idle" && rejectionHold !== undefined) {
+      status = "input_required";
+      detail = this.providerRejectionBlocker(sessionId, rejectionHold);
     }
     const entry = this.active.get(sessionId);
     const terminal = status === "completed" || status === "failed" || status === "stopped";

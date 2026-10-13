@@ -44,10 +44,12 @@ function haveGit(): boolean {
 function fakeProvider(options: { reportsDelivery?: boolean } = {}) {
   const reportsDelivery = options.reportsDelivery ?? true;
   const prompts: Array<{ provider: number; text: string }> = [];
+  const callbacks: DriverCallbacks[] = [];
   let providers = 0;
   let next: Outcome = "reject";
   const factory = (_driver: unknown, _launch: unknown, cb: DriverCallbacks) => {
     const provider = providers++;
+    callbacks.push(cb);
     let turnError: string | null = null;
     let undelivered = false;
     return {
@@ -76,6 +78,7 @@ function fakeProvider(options: { reportsDelivery?: boolean } = {}) {
   return {
     factory,
     prompts,
+    callbacks,
     texts: () => prompts.map((prompt) => prompt.text),
     setOutcome: (outcome: Outcome) => { next = outcome; },
   };
@@ -92,7 +95,7 @@ function recordingLifecycle(commandId: string, log: string[]): DurableCommandLif
   };
 }
 
-function setup(name: string, provider: ReturnType<typeof fakeProvider>) {
+function setup(name: string, provider: ReturnType<typeof fakeProvider>, driver: "claude-code" | "codex-app-server" = "claude-code") {
   const root = mkdtempSync(join(tmpdir(), `wollipog-rejection-hold-${name}-`));
   const repo = join(root, "repo");
   execFileSync("git", ["init", repo]);
@@ -105,8 +108,8 @@ function setup(name: string, provider: ReturnType<typeof fakeProvider>) {
   const manager = new SessionManager((message) => { sent.push(message); }, () => {}, store, "runner", undefined,
     provider.factory as never, dataDir, 1);
   const spec: SessionLaunchSpec = {
-    sessionId: `s_${name}`, workspaceId: "repo", workspacePath: repo, agentId: "claude",
-    command: "claude", args: [], env: {}, useWorktree: false, driver: "claude-code",
+    sessionId: `s_${name}`, workspaceId: "repo", workspacePath: repo, agentId: driver === "claude-code" ? "claude" : "codex",
+    command: driver === "claude-code" ? "claude" : "codex", args: [], env: {}, useWorktree: false, driver,
     context: { kind: "native" },
   };
   const log: string[] = [];
@@ -346,6 +349,76 @@ test("a stop settles the held automatic turns as never sent (#3100)", { skip: !h
     assert.equal(h.userEventFor("third"), false);
     assert.equal(provider.prompts.length, 2);
     assert.deepEqual(h.latestQueue()?.queue, []);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("a provider exit and its automatic recovery keep the hold (#3100)", { skip: !haveGit() }, async () => {
+  const provider = fakeProvider();
+  const h = setup("provider_exit", provider, "codex-app-server");
+  try {
+    await h.manager.start(h.spec);
+    await engageHold(h);
+    h.continuation("third");
+    await settle();
+
+    // The app-server exits; its unsent queue is recovered into a fresh process automatically.
+    provider.callbacks[0]!.onExit(1);
+    await waitFor(() => provider.callbacks.length === 2, "the provider was not relaunched for the recovered queue");
+    await settle();
+    assert.deepEqual(provider.texts(), ["continue first", "continue second"], "recovery does not release the hold");
+    assert.deepEqual(h.log.filter((step) => step.startsWith("third:")), ["third:queued"]);
+    const blocker = h.statuses().at(-1)!;
+    assert.equal(blocker.status, "input_required");
+    assert.match(blocker.detail ?? "", /^Codex rejected two turns in a row with the same error: turn\/start failed/u);
+
+    provider.setOutcome("accept");
+    h.message("person");
+    await waitFor(() => h.settled("third"), "the held continuation did not run after a person's message");
+    assert.deepEqual(provider.prompts.slice(2), [
+      { provider: 1, text: "message person" }, { provider: 1, text: "continue third" },
+    ]);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("a threshold edit while held keeps the blocker instead of reporting the session idle (#3100)", { skip: !haveGit() }, async () => {
+  const provider = fakeProvider();
+  const h = setup("threshold", provider);
+  try {
+    await h.manager.start(h.spec);
+    await engageHold(h);
+    const blocker = h.statuses().at(-1)!;
+    h.manager.rearmGovernance(h.spec.sessionId, { costBudgetUsd: 5 });
+    const after = h.statuses().at(-1)!;
+    assert.equal(after.status, "input_required");
+    assert.equal(after.detail, blocker.detail);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("a provider command between two rejections means they were not consecutive (#3100)", { skip: !haveGit() }, async () => {
+  const provider = fakeProvider();
+  const h = setup("command", provider);
+  try {
+    await h.manager.start(h.spec);
+    h.continuation("first");
+    await waitFor(() => h.settled("first"), "the first continuation did not settle");
+    // Run a provider command turn through the prompt path; its own execution is not under test.
+    const internals = h.manager as unknown as {
+      runSessionCommand: () => Promise<void>;
+      runPrompt: (sessionId: string, prompt: unknown) => Promise<void>;
+    };
+    internals.runSessionCommand = async () => {};
+    await internals.runPrompt(h.spec.sessionId, { id: "command", text: "", images: [], sessionCommand: {} });
+    h.continuation("second");
+    await waitFor(() => h.settled("second"), "the second continuation did not settle");
+    h.continuation("third");
+    await waitFor(() => h.settled("third"), "the command did not end the rejection streak");
+    assert.equal(provider.prompts.length, 3);
   } finally {
     h.cleanup();
   }
