@@ -944,12 +944,20 @@ export class CodexAppServerDriver implements Driver {
       });
     } catch (error) {
       const failure = this.initializationFailure(error);
+      const stalled = failure instanceof CodexAppServerInitializationStalledError;
       if (this.opts.isolation?.backend === "wsl-bwrap") {
-        await waitForWslProviderAttemptTeardown(child, this.kill);
-        // That teardown killed a provider whose handshake stalled. Its exit is ours, not a crash:
-        // reporting it through onExit would hand held prompts to crash recovery, which relaunches
-        // into the same stall instead of settling them as never sent (#3099).
-        if (failure instanceof CodexAppServerInitializationStalledError) this.initializationExit = null;
+        try {
+          await waitForWslProviderAttemptTeardown(child, this.kill);
+        } catch (teardownError) {
+          // A refused teardown still names the stalled method instead of replacing it.
+          if (!stalled) throw teardownError;
+          throw new WslProviderAttemptTeardownError(`${failure.message}; ${(teardownError as Error).message}`);
+        } finally {
+          // That teardown killed a provider whose handshake stalled. Its exit is ours, not a crash:
+          // reporting it through onExit would hand held prompts to crash recovery, which relaunches
+          // into the same stall instead of settling them as never sent (#3099).
+          if (stalled) this.initializationExit = null;
+        }
       }
       throw failure;
     }

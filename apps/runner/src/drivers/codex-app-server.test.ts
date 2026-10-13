@@ -4808,9 +4808,9 @@ test("an initialize request that is never answered fails initialization within t
   assert.deepEqual(stderr, []);
 });
 
-test("tearing down a stalled Direct WSL initialize is not reported as a provider exit (#3099)", async () => {
+for (const reapProven of [true, false]) test(`tearing down a stalled Direct WSL initialize is not reported as a provider exit (reap ${reapProven ? "proven" : "unproven"}) (#3099)`, async () => {
   const child = fakeAgentProcess();
-  child.wslReapCompletion = Promise.resolve(true);
+  child.wslReapCompletion = Promise.resolve(reapProven);
   const exits: Array<number | null> = [];
   const driver = new CodexAppServerDriver({
     command: "codex", args: [], cwd: "/tmp/work", env: {}, config: {}, context: { kind: "native" },
@@ -4823,8 +4823,14 @@ test("tearing down a stalled Direct WSL initialize is not reported as a provider
   });
   try {
     await assert.rejects(driver.initialize(), (error: unknown) => {
-      assert.ok(error instanceof CodexAppServerInitializationStalledError);
-      assert.equal(error.method, "initialize");
+      if (reapProven) {
+        assert.ok(error instanceof CodexAppServerInitializationStalledError);
+        assert.equal(error.method, "initialize");
+      } else {
+        // The teardown refusal still names the stalled method rather than replacing it.
+        assert.equal((error as Error).message, "Codex app-server did not answer initialize within 30 ms; " +
+          "Direct WSL provider process-group reap was not proven");
+      }
       return true;
     });
     await nextTask();
