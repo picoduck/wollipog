@@ -82,7 +82,7 @@ function positional(args: string[], extraValueOptions: readonly string[] = []): 
     "--url", "--token-file", "--runner", "--agent", "--workspace", "--path", "--prompt",
     "--title", "--model", "--effort", "--permission-mode", "--after", "--limit", "--for", "--timeout",
     "--interval", "--cost-budget", "--max-tool-calls", "--session", "--branch", "--base", "--base-ref",
-    "--max-child-sessions", "--offset", "--event-epoch",
+    "--max-child-sessions", "--offset", "--event-epoch", "--work-item",
     "--revision",
     ...extraValueOptions,
   ]);
@@ -515,6 +515,10 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       if (effortRequested && (!effort?.trim() || effort.startsWith("--"))) {
         return { error: "session create --effort requires a non-empty value" };
       }
+      const campaignWorkItemId = option(args, "--work-item");
+      if (optionPresent(args, "--work-item") && (!campaignWorkItemId?.trim() || campaignWorkItemId.startsWith("--"))) {
+        return { error: "session create --work-item requires a campaign work item ID" };
+      }
       return {
         tool: "create_session",
         input: {
@@ -531,6 +535,7 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
           costBudgetUsd: numeric(option(args, "--cost-budget")),
           maxToolCalls: numeric(option(args, "--max-tool-calls")),
           maxChildSessions: numeric(option(args, "--max-child-sessions")),
+          campaignWorkItemId,
         },
       };
     }
@@ -744,7 +749,9 @@ export async function runWollipogCli(
   const workflowDecisionTools = new Set([
     "request_workflow_decision", "get_workflow_decision", "consume_workflow_decision",
   ]);
-  const requiredProtocol = parsed.tool === "create_session" && typeof parsed.input.effort === "string"
+  const requiredProtocol = parsed.tool === "create_session" && typeof parsed.input.campaignWorkItemId === "string"
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorkItemAtCreation
+    : parsed.tool === "create_session" && typeof parsed.input.effort === "string"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControlReasoningEffort
     : parsed.tool === "list_workflow_decisions" || (parsed.tool === "get_workflow_decision" &&
       typeof parsed.input.sessionId === "string" && parsed.input.sessionId !== sessionId)

@@ -25256,6 +25256,149 @@ test("issue closure binds only children whose work bears on the issue (#3084)", 
   }
 });
 
+test("child creation records the named campaign work item before the launch is sent (#3106)", () => {
+  const { db, svc, hub, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+  try {
+    const plan = svc.recordCampaignPlan(parent.id, { items: [{ key: "first" }, { key: "second" }, { key: "dropped" }],
+      planComplete: true });
+    assert.ok(plan.ok && plan.data, plan.error);
+    const [first, second, dropped] = plan.data.items.map((item) => item.workItemId);
+    assert.ok(svc.updateCampaignWorkItem(parent.id, { workItemId: dropped!, commitment: { state: "cancelled", reason: "Out of scope" } }).ok);
+    const children = () => (db.db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE parent_session_id=?")
+      .get(parent.id) as { n: number }).n;
+    const create = (campaignWorkItemId: string | undefined, parentSessionId: string | null = parent.id) => {
+      const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, prompt: "Deliver the item",
+        ...(campaignWorkItemId === undefined ? {} : { campaignWorkItemId }) };
+      const context = parentSessionId ? { parentSessionId } : undefined;
+      let result = svc.createSession(request, undefined, undefined, false, false, false, context);
+      if (result.status === 428 && parentSessionId) {
+        assert.ok(svc.approve(parentSessionId, db.getSession(parentSessionId)!.pendingApproval!.requestId, "allow").ok);
+        result = svc.createSession(request, undefined, undefined, false, false, false, context);
+      }
+      return result;
+    };
+    // The attempt is already open when the runner receives the launch carrying the first prompt.
+    const atLaunch = new Map<string, string | null>();
+    hub.deliveryHandler = (_runnerId, msg) => {
+      if (msg.type === "start_session") {
+        atLaunch.set(msg.spec.sessionId, db.campaignWorkLedger.currentAssignment(msg.spec.sessionId)?.workItemId ?? null);
+      }
+      return true;
+    };
+
+    const created = create(first);
+    assert.ok(created.ok && created.data, created.error);
+    const child = created.data.id;
+    assert.equal(created.data.campaignMembership?.campaignSessionId, parent.id);
+    assert.equal(created.data.campaignMembership?.currentWorkItemId, first, "the creation result shows the open attempt");
+    assert.ok(created.data.campaignMembership?.currentAttemptId);
+    assert.equal(atLaunch.get(child), first, "the attempt exists before the initial prompt is delivered");
+
+    // Naming an item that already has an open attempt supersedes it, as assign_campaign_work_item does.
+    const successor = create(first);
+    assert.ok(successor.ok && successor.data, successor.error);
+    assert.equal(successor.data.campaignMembership?.currentWorkItemId, first);
+    assert.equal(db.campaignWorkLedger.currentAssignment(child), null);
+    const ended = db.db.prepare("SELECT end_reason FROM campaign_work_attempts WHERE session_id=?").get(child) as
+      { end_reason: string };
+    assert.equal(ended.end_reason, "superseded");
+
+    // Without an item, creation behaves exactly as before: the child stays unattributed.
+    const plain = create(undefined);
+    assert.ok(plain.ok && plain.data, plain.error);
+    assert.equal(plain.data.campaignMembership?.currentWorkItemId, null);
+    assert.equal(atLaunch.get(plain.data.id), null);
+
+    // Every refusal names its reason and creates nothing. Free live-child slots first.
+    for (const id of [child, plain.data.id]) db.updateSessionStatus(id, "stopped", Date.now());
+    const other = db.createSession({ id: "other-campaign", runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID,
+      agentId: "test-orchestrator", title: "Other Campaign", driver: "claude-code", config: { permissionMode: "orchestrator" },
+      orchestratorPolicy: parent.orchestratorPolicy, role: "orchestrator", useWorktree: false, now: Date.now() });
+    const otherPlan = svc.recordCampaignPlan(other.id, { items: [{ key: "elsewhere" }], planComplete: true });
+    assert.ok(otherPlan.ok && otherPlan.data, otherPlan.error);
+    const worker = spawn(parent.id, "Deliver the second item");
+    const before = children();
+    const sent = hub.sentToRunner.length;
+    for (const [label, result, status, reason] of [
+      ["unknown item", create("cwi_missing"), 404, /cwi_missing: work item not found in this campaign/u],
+      ["another campaign's item", create(otherPlan.data.items[0]!.workItemId), 404, /work item not found in this campaign/u],
+      ["cancelled item", create(dropped), 409, /cancelled work item cannot be assigned/u],
+      ["blank item", create("  "), 400, /non-empty work item ID/u],
+      ["human creation", create(second, null), 400, /only an Orchestrator/u],
+      ["non-Orchestrator parent", create(second, worker), 404, /Orchestrator campaign not found/u],
+    ] as const) {
+      assert.equal(result.ok, false, label);
+      assert.equal(result.status, status, `${label}: ${result.error}`);
+      assert.match(result.error ?? "", reason, label);
+    }
+    assert.equal(children(), before, "no refused creation leaves a session");
+
+    // An attempt that cannot be recorded after the row exists (the item changed concurrently)
+    // removes the child before its launch is sent.
+    const ledger = db.campaignWorkLedger;
+    const assign = ledger.assign;
+    ledger.assign = (() => ({ ok: false, status: 409, error: "a cancelled work item cannot be assigned; recommit it first" })) as typeof assign;
+    const raced = create(second);
+    ledger.assign = assign;
+    assert.equal(raced.ok, false);
+    assert.equal(raced.status, 409);
+    assert.match(raced.error ?? "", /cannot record the child's attempt on campaign work item .*cancelled/u);
+    assert.equal(children(), before);
+    assert.ok(hub.sentToRunner.slice(sent).every(({ msg }) => msg.type !== "start_session"), "no launch was sent");
+  } finally { db.close(); }
+});
+
+test("a child created with an unrelated work item never revokes an approved issue closure (#3106)", async () => {
+  const { db, svc, hub, parent } = stopAndArchiveCampaignFixture("retain");
+  try {
+    const plan = svc.recordCampaignPlan(parent.id, { items: [
+      { key: "issue", issue: { repository: "picoduck/wollipog", number: 1440 } }, { key: "unrelated" },
+    ], planComplete: true });
+    assert.ok(plan.ok && plan.data, plan.error);
+    const unrelatedItem = plan.data.items[1]!.workItemId;
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, prompt: "Deliver the unrelated item",
+      campaignWorkItemId: unrelatedItem };
+    let created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+    if (created.status === 428) {
+      assert.ok(svc.approve(parent.id, db.getSession(parent.id)!.pendingApproval!.requestId, "allow").ok);
+      created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+    }
+    assert.ok(created.ok && created.data, created.error);
+    const child = created.data.id;
+    db.updateSessionStatus(child, "running", Date.now());
+    // The runner echoes the launch prompt as the first user message.
+    db.appendEvent(child, { kind: "user_message", text: "Deliver the unrelated item" }, Date.now());
+
+    let executions = 0;
+    hub.requestHandler = (message) => {
+      if (message.type !== "github_issue_closure") throw new Error("unexpected runner command");
+      if (message.operation === "inspect") return { type: "github_issue_closure_result", requestId: message.requestId,
+        sessionId: parent.id, ok: true, inspection: { repository: "picoduck/wollipog", issue: message.issue, title: "Merged work",
+          url: `https://github.com/picoduck/wollipog/issues/${message.issue}`, state: "OPEN",
+          forgeDigest: "a".repeat(64), openPullRequests: [] } };
+      executions++;
+      return { type: "github_issue_closure_result", requestId: message.requestId, sessionId: parent.id,
+        ok: true, result: { outcome: "closed", completedAt: Date.now() } };
+    };
+    const requested = await svc.requestGithubIssueClosure(parent.id, { requestId: "closure-1440", issue: 1440,
+      reason: "completed", explanation: "The work merged.", evidence: ["Merged in the campaign."] });
+    assert.ok(requested.ok && requested.data?.decision, requested.error);
+    const decision = requested.data.decision;
+    assert.ok(decision.resourceSnapshot.category === "issue_closure");
+    assert.ok(!decision.resourceSnapshot.activeChildren.some((bound) => bound.sessionId === child),
+      "the child is attributed elsewhere without a separate assign_campaign_work_item call");
+    assert.ok(svc.approve(parent.id, decision.occurrenceId, "approve", { kind: "human", id: "reviewer" }).ok);
+
+    db.stageSessionPromptCommand({ commandId: "prompt-unrelated", sessionId: child, runnerId: RUNNER_ID,
+      payloadJson: JSON.stringify({ text: "Continue." }), payloadSha256: "c".repeat(64),
+      expiresAt: Date.now() + 60_000, now: Date.now() });
+    const result = await svc.executeGithubIssueClosure(parent.id, decision.occurrenceId, decision.resourceDigest);
+    assert.ok(result.ok && result.data, result.error);
+    assert.equal(result.data.issueClosureResult?.outcome, "closed");
+    assert.equal(executions, 1);
+  } finally { db.close(); }
+});
+
 test("issue-closure attribution treats work recorded before its history as related (#3084)", () => {
   const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
   try {

@@ -272,6 +272,23 @@ async function issueClosureCompatibilityError(deps: McpDeps): Promise<ToolResult
     ? null : errorResult("Human-approved issue closure requires control plane protocol v194; update Wollipog");
 }
 
+/** A pre-v219 control plane would ignore `campaignWorkItemId` and start the child unattributed,
+ * so the attempt the caller asked for would silently never be recorded. Refuse by name instead. */
+async function campaignWorkItemAtCreationCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorkItemAtCreation;
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const compatibility = await cpFetch(deps, "GET", "/api/compatibility");
+    if (!compatibility.ok) {
+      return errorResult(`Naming a campaign work item at child creation requires control plane protocol v${required}, but compatibility could not be verified: ${compatibility.message}`);
+    }
+    actual = compatibility.data?.protocolVersion;
+  }
+  return Number.isInteger(actual) && actual! >= required
+    ? null
+    : errorResult(`Naming a campaign work item at child creation requires control plane protocol v${required}; connected control plane reports v${String(actual ?? "unknown")}. Update Wollipog; no child was created.`);
+}
+
 /** A pre-v196 control plane has no campaign work ledger. It would ignore an unknown `workItem` or
  * `originWorkItemIds` field, silently recording nothing, so refuse by name instead. */
 async function campaignWorkLedgerCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
@@ -581,6 +598,8 @@ function mapSession(s: Json): Json {
     parentControl: s?.parentControl ?? "off",
     ...(s?.orchestratorPolicy ? { orchestratorPolicy: s.orchestratorPolicy } : {}),
     ...(s?.orchestratorCampaign ? { orchestratorCampaign: s.orchestratorCampaign } : {}),
+    // A campaign child's root and its open work-item attempt, if any (#2417, #3106).
+    ...(s?.campaignMembership ? { campaignMembership: s.campaignMembership } : {}),
     ...(s?.campaignRequests ? { campaignRequests: s.campaignRequests } : {}),
     costUsd: s?.costUsd,
     // A running Claude turn's requests that no total includes yet, with a rate-table estimate (#3086).
@@ -2621,7 +2640,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "create_session",
     description:
-      "Start a child session with an optional model and reasoning effort applied before its initial task. Unsupported model/effort pairs fail before launch; omitting effort preserves saved/default resolution. It gets its own worktree unless you pass useWorktree: false, so its branch, diff, checkpoints, review, and PR state are visible. Omitted cost and tool-call limits remain unlimited unless Project defaults, a finite parent ceiling, or governance policy supplies them; explicit 0 opts out when the parent is unbounded. The result reports the effective model, effort, and each guardrail as a value or null (none). A pending human approval returns after about 45 seconds, stating how long the control plane keeps it pending between calls; repeat the identical call promptly, without ending your turn, to keep waiting. Subject to session permissions and governance policies.",
+      "Start a child session with an optional model and reasoning effort applied before its initial task. An Orchestrator passes campaignWorkItemId to record the child's attempt on that campaign work item before the task is delivered; if the attempt cannot be recorded, no child is created. Unsupported model/effort pairs fail before launch; omitting effort preserves saved/default resolution. It gets its own worktree unless you pass useWorktree: false, so its branch, diff, checkpoints, review, and PR state are visible. Omitted cost and tool-call limits remain unlimited unless Project defaults, a finite parent ceiling, or governance policy supplies them; explicit 0 opts out when the parent is unbounded. The result reports the effective model, effort, and each guardrail as a value or null (none). A pending human approval returns after about 45 seconds, stating how long the control plane keeps it pending between calls; repeat the identical call promptly, without ending your turn, to keep waiting. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2638,6 +2657,7 @@ export const TOOLS: McpTool[] = [
         costBudgetUsd: { type: "number" },
         maxToolCalls: { type: "number" },
         maxChildSessions: { type: "integer", minimum: 0, maximum: 64 },
+        campaignWorkItemId: { type: "string", minLength: 1, maxLength: 256, description: "Campaign work item (cwi_…) the child works on; same assignment rules as assign_campaign_work_item" },
       },
       required: ["runnerId", "agentId"],
       additionalProperties: false,
@@ -2657,8 +2677,16 @@ export const TOOLS: McpTool[] = [
           `permissionMode must be one of ${WORKER_PERMISSION_MODES.join(", ")} — bypassPermissions is never allowed`,
         );
       }
+      if (args.campaignWorkItemId !== undefined &&
+          (typeof args.campaignWorkItemId !== "string" || !args.campaignWorkItemId.trim())) {
+        return errorResult("campaignWorkItemId must be a non-empty campaign work item ID");
+      }
       if (typeof args.effort === "string") {
         const compatibilityError = await explicitEffortCompatibilityError(deps);
+        if (compatibilityError) return compatibilityError;
+      }
+      if (typeof args.campaignWorkItemId === "string") {
+        const compatibilityError = await campaignWorkItemAtCreationCompatibilityError(deps);
         if (compatibilityError) return compatibilityError;
       }
       const config: Json = {};
@@ -2673,6 +2701,7 @@ export const TOOLS: McpTool[] = [
       if (typeof args.workspacePath === "string") body.workspacePath = args.workspacePath;
       if (typeof args.title === "string") body.title = args.title;
       if (typeof args.prompt === "string") body.prompt = args.prompt;
+      if (typeof args.campaignWorkItemId === "string") body.campaignWorkItemId = args.campaignWorkItemId;
       // A child that starts in the primary checkout has no branch, so diff, checkpoint, review,
       // and PR surfaces are blind to it. An agent asks for a worktree by default; only an explicit
       // `useWorktree: false` keeps the in-place behavior. Human/UI-created sessions are unaffected

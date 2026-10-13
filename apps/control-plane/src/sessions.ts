@@ -3712,6 +3712,24 @@ export class SessionsService {
     const campaignAuthority = this.orchestratorCampaignController(parentSession);
     if (campaignAuthority === "refused") return fail(MALFORMED_ANCESTRY_AUTHORITY_REFUSAL, 409);
     const campaignController = campaignAuthority;
+    // A named work item is checked before anything is written, and the attempt is recorded before
+    // the launch is sent, so the child never runs unattributed (#3106).
+    const campaignWorkItemId = req.campaignWorkItemId;
+    let campaignWorkScope: { caller: SessionView; root: SessionView } | null = null;
+    if (campaignWorkItemId !== undefined) {
+      if (!boundedDecisionString(campaignWorkItemId, 256)) {
+        return fail("campaignWorkItemId must be a non-empty work item ID of at most 256 characters", 400);
+      }
+      const refused = (reason: string, status: number) =>
+        fail<SessionView>(`cannot record the child's attempt on campaign work item ${campaignWorkItemId}: ${reason}`, status);
+      if (!parentSessionId) return refused("only an Orchestrator creating its own campaign child may name a work item", 400);
+      if (delivery) return refused("pre-staged session creation cannot record a work item", 409);
+      const scope = this.campaignLedgerScope(parentSessionId, () => true);
+      if (!scope.ok || !scope.data) return refused(scope.error ?? "Orchestrator campaign not found", scope.status);
+      const assignable = this.db.campaignWorkLedger.assignableItem(scope.data.root.id, campaignWorkItemId);
+      if (!assignable.ok) return refused(assignable.error, assignable.status);
+      campaignWorkScope = scope.data;
+    }
     if (req.config?.maxChildSessions !== undefined &&
         (!Number.isSafeInteger(req.config.maxChildSessions) || req.config.maxChildSessions < 0 ||
           req.config.maxChildSessions > 64)) {
@@ -4527,6 +4545,15 @@ export class SessionsService {
         return failAs(externalized, "prompt images could not be stored");
       }
       if (command.type === "start_session") command.initialImages = nonEmpty(externalized.data);
+    }
+    if (campaignWorkScope) {
+      const recorded = this.recordCampaignAttempt(campaignWorkScope, campaignWorkItemId!, this.db.getSession(id) ?? session);
+      if (!recorded.ok) {
+        this.db.deleteSession(id);
+        if (session.projectId) this.hub.projectChangedById(session.projectId);
+        return fail(`cannot record the child's attempt on campaign work item ${campaignWorkItemId}: ${recorded.error}`,
+          recorded.status);
+      }
     }
     this.hub.sessionChanged(this.db.getSession(id) ?? session);
     // The runner emits the user_message into the box store (source of truth) when it runs the
@@ -7277,11 +7304,21 @@ export class SessionsService {
     if (!child || !this.db.isSessionDescendant(callerSessionId, child.id) || !canAccess(child.id)) {
       return fail("campaign child not found", 404);
     }
+    return this.recordCampaignAttempt(scope.data, request.workItemId, child);
+  }
+
+  /** Opens the child's attempt on a work item. Shared by `assign_campaign_work_item` and by child
+   * creation that names its work item (#3106), so both follow the same assignment rules. */
+  private recordCampaignAttempt(
+    scope: { caller: SessionView; root: SessionView },
+    workItemId: string,
+    child: SessionView,
+  ): ServiceResult<AssignCampaignWorkItemResponse> {
     const agent = child.agentId
       ? this.db.getRunner(child.runnerId)?.agents.find((candidate) => candidate.id === child.agentId)
       : undefined;
-    return this.ledgerWrite(scope.data, () => this.db.campaignWorkLedger.assign(
-      scope.data!.root.id, callerSessionId, request.workItemId, child.id, {
+    return this.ledgerWrite(scope, () => this.db.campaignWorkLedger.assign(
+      scope.root.id, scope.caller.id, workItemId, child.id, {
         title: child.title || null,
         harness: child.agentId
           ? { agentId: child.agentId, driver: child.driver, context: agent?.context ?? { kind: "native" } }

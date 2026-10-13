@@ -1064,6 +1064,17 @@ export class CampaignWorkLedgerStore {
 
   /* ------------------------------ assign_campaign_work_item ------------------------------ */
 
+  /** The item checks `assign` applies, without writing, so child creation can refuse a work item
+   * it could not record before any session exists. */
+  assignableItem(campaignId: string, workItemId: string): LedgerResult<null> {
+    const item = this.item(campaignId, workItemId);
+    if (!item) return fail("work item not found in this campaign", 404);
+    if (item.commitment !== "committed") {
+      return fail(`a ${item.commitment === "cancelled" ? "cancelled" : "removed"} work item cannot be assigned; recommit it first`, 409);
+    }
+    return done(null);
+  }
+
   assign(
     campaignId: string,
     actorSessionId: string,
@@ -1078,11 +1089,9 @@ export class CampaignWorkLedgerStore {
     created: boolean;
   }> {
     return this.transact(() => {
-      const item = this.item(campaignId, workItemId);
-      if (!item) return fail("work item not found in this campaign", 404);
-      if (item.commitment !== "committed") {
-        return fail(`a ${item.commitment === "cancelled" ? "cancelled" : "removed"} work item cannot be assigned; recommit it first`, 409);
-      }
+      const assignable = this.assignableItem(campaignId, workItemId);
+      if (!assignable.ok) return assignable;
+      const item = this.item(campaignId, workItemId)!;
       const sessionOpen = this.openAttemptForSession(childSessionId);
       if (sessionOpen?.work_item_id === item.id) {
         return done({ revision: this.revision(campaignId), attempt: this.attemptView(sessionOpen), closedAttempts: [], created: false });
