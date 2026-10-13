@@ -25336,6 +25336,26 @@ test("child creation records the named campaign work item before the launch is s
     }
     assert.equal(children(), before, "no refused creation leaves a session");
 
+    // A creation whose write fails to commit publishes nothing: not the rolled-back child, and not
+    // the superseded assignment of the item's current holder, which SQLite restores.
+    const sql = (db as unknown as { db: { exec(query: string): void } }).db;
+    const transaction = db.campaignChildCreationTransaction;
+    db.campaignChildCreationTransaction = ((work: () => unknown) => {
+      sql.exec("BEGIN IMMEDIATE");
+      try { work(); } finally { sql.exec("ROLLBACK"); }
+      throw new Error("disk I/O error");
+    }) as typeof transaction;
+    const published = hub.sessionChangedByIdCalls.length;
+    const changedBefore = new Set([...hub.sessionChangedByIdCalls, ...hub.sessionChangedCalls.map((view) => view.id)]);
+    assert.throws(() => create(first), /disk I\/O error/u);
+    db.campaignChildCreationTransaction = transaction;
+    const changed = [...hub.sessionChangedByIdCalls, ...hub.sessionChangedCalls.map((view) => view.id)];
+    assert.ok(changed.every((id) => changedBefore.has(id) || db.getSession(id)), "no rolled-back child is published");
+    assert.equal(db.campaignWorkLedger.currentAssignment(successor.data.id)?.workItemId, first);
+    assert.ok(!hub.sessionChangedByIdCalls.slice(published).includes(successor.data.id),
+      "the holder's restored assignment is never published as cleared");
+    assert.equal(children(), before);
+
     // If the ledger still refuses after the row exists, the child is removed before its launch is sent.
     const ledger = db.campaignWorkLedger;
     const assign = ledger.assign;

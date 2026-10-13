@@ -1,5 +1,6 @@
 import { acknowledgementRepairFrame } from "./claude-cost-repair.js";
 import type { HumanPrincipal } from "./identity.js";
+import type { CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl } from "./campaign-authority.js";
 import { campaignAuthorityPreflight, controlledReviewCapabilityKey, standingRootQuestionAnswers, type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary } from "@wollipog/protocol";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, campaignNeedsEpicScope } from "./campaign-issue-scope.js";
@@ -7311,7 +7312,8 @@ export class SessionsService {
   }
 
   /** Inserts a campaign child and opens its work-item attempt as one write, so a refused or failed
-   * recording leaves no session, campaign reservation, or parent charge behind (#3106). */
+   * recording leaves no session, campaign reservation, or parent charge behind (#3106). Views are
+   * broadcast only after the write commits. */
   private insertCampaignChild(
     scope: { caller: SessionView; root: SessionView },
     workItemId: string,
@@ -7319,17 +7321,21 @@ export class SessionsService {
   ): SessionView {
     const refusal = (reason: string, status: number) =>
       new CampaignAttemptRefusal(`cannot record the child's attempt on campaign work item ${workItemId}: ${reason}`, status);
-    return this.db.campaignChildCreationTransaction(() => {
-      const child = insert();
-      let recorded: ServiceResult<AssignCampaignWorkItemResponse>;
+    const attemptsBefore = this.db.campaignWorkLedger.openAttemptsBySession(scope.root.id);
+    const child = this.db.campaignChildCreationTransaction(() => {
+      const inserted = insert();
+      let recorded: ReturnType<CampaignWorkLedgerStore["assign"]>;
       try {
-        recorded = this.recordCampaignAttempt(scope, workItemId, child);
+        recorded = this.assignCampaignAttempt(scope, workItemId, inserted);
       } catch (error) {
         throw refusal((error as Error).message, 500);
       }
-      if (!recorded.ok) throw refusal(recorded.error ?? "the ledger refused the attempt", recorded.status);
-      return this.db.getSession(child.id) ?? child;
+      if (!recorded.ok) throw refusal(recorded.error, recorded.status);
+      return inserted;
     });
+    this.campaignLedgerChanged(scope.root.id, scope.caller.id);
+    this.campaignMembershipsChanged(scope.root.id, attemptsBefore);
+    return this.db.getSession(child.id) ?? child;
   }
 
   /** Opens the child's attempt on a work item. Shared by `assign_campaign_work_item` and by child
@@ -7339,10 +7345,18 @@ export class SessionsService {
     workItemId: string,
     child: SessionView,
   ): ServiceResult<AssignCampaignWorkItemResponse> {
+    return this.ledgerWrite(scope, () => this.assignCampaignAttempt(scope, workItemId, child));
+  }
+
+  private assignCampaignAttempt(
+    scope: { caller: SessionView; root: SessionView },
+    workItemId: string,
+    child: SessionView,
+  ): ReturnType<CampaignWorkLedgerStore["assign"]> {
     const agent = child.agentId
       ? this.db.getRunner(child.runnerId)?.agents.find((candidate) => candidate.id === child.agentId)
       : undefined;
-    return this.ledgerWrite(scope, () => this.db.campaignWorkLedger.assign(
+    return this.db.campaignWorkLedger.assign(
       scope.root.id, scope.caller.id, workItemId, child.id, {
         title: child.title || null,
         harness: child.agentId
@@ -7351,7 +7365,7 @@ export class SessionsService {
         agentName: child.agentName,
         model: child.model,
         effort: child.effort,
-      }, Date.now()));
+      }, Date.now());
   }
 
   adjudicateCampaignRecommendation(
