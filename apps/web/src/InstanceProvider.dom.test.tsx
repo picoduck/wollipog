@@ -675,3 +675,64 @@ test("the close confirmation's Show Sessions opens the local instance's Sessions
   container.remove();
   assert.equal(links.current().showSessions, undefined, "an unmounted provider offers nothing");
 });
+
+test("an instance's old Keyboard address opens Behavior with its focus target, at startup and on Back (#3023)", async () => {
+  let manager!: InstanceManager;
+  const closes: string[] = [];
+  const desktop = {
+    isTauri: () => true,
+    async invoke<T>(command: string, args?: Record<string, unknown> | Uint8Array): Promise<T> {
+      if (command === "instance_registry") return registry("local") as T;
+      if (command === "set_active_instance") return registry((args as Record<string, string>).profileId) as T;
+      throw new Error(`unexpected ${command}`);
+    },
+    channel<T>() { return { onmessage: (_event: T) => {} }; },
+  };
+  function Probe() {
+    manager = useInstances();
+    return null;
+  }
+  const behavior = { name: "settings", section: "behavior" } as const;
+  const keyboard = { ...behavior, focus: { target: "keyboard-shortcuts" } };
+  const alias = (profileId: string) => `${instanceViewPath(profileId, { name: "inbox" }).replace(/\/$/, "")}/settings/keyboard`;
+  domWindow.history.replaceState(null, "", alias("local"));
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <InstanceProvider
+        desktop={desktop}
+        createLocalRuntime={() => runtime("local", closes)}
+        createRemoteRuntime={async (profileId) => runtime(profileId, closes)}
+      >
+        <Probe />
+      </InstanceProvider>,
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  try {
+    assert.equal(manager.phase, "ready", "an existing instance opens; the alias is not a missing route");
+    assert.equal(domWindow.location.pathname, instanceViewPath("local", behavior), "the alias replaced its own entry");
+    // What the store reads when it mounts: the canonical address, with the redirect's focus target.
+    assert.deepEqual(manager.navigation!.current(), keyboard);
+    assert.deepEqual(manager.navigation!.current(), behavior, "held for that one read only");
+
+    // Back onto another instance's old Keyboard entry switches to it and keeps the target.
+    domWindow.history.pushState(null, "", alias(profiles[1]!.id));
+    await act(async () => {
+      domWindow.dispatchEvent(new domWindow.PopStateEvent("popstate"));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(manager.activeProfile.id, profiles[1]!.id);
+    assert.equal(domWindow.location.pathname, instanceViewPath(profiles[1]!.id, behavior));
+    assert.deepEqual(manager.navigation!.current(), keyboard);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+    domWindow.history.replaceState(null, "", "/");
+  }
+});

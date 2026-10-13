@@ -6,16 +6,16 @@ import {
   AppearancePanel,
   BehaviorPanel,
   ExperimentalPanel,
-  KeyboardPanel,
   NavigationRailPanel,
   NetworkPanel,
   NotificationsPanel,
-  PendingSetting,
   SettingsView,
 } from "../components/SettingsView.js";
 import { DEFAULT_ORCHESTRATOR_DEFAULTS, type AgentHarnessDefaultsView } from "@wollipog/protocol";
 import { OrchestratorSettingsPanel } from "../components/OrchestratorSettingsPanel.js";
-import { SettingsGroup } from "../components/ui/SettingsRows.js";
+import { FeedbackProvider } from "../components/FeedbackProvider.js";
+import { interceptLeave } from "../leave-guard.js";
+import { StaticRow } from "../components/ui/SettingsRows.js";
 import { RowKinds } from "./setting-row-kinds.js";
 import { ApprovalsPanel } from "../components/ApprovalsPanel.js";
 import { createApiClient } from "../api.js";
@@ -32,6 +32,8 @@ import {
   type ColorScheme,
 } from "../theme.js";
 import { SETTINGS_SECTIONS, viewFromPath, viewPath, type SettingsSection, type View } from "../navigation.js";
+import { browserInstanceManager, InstancesContextProvider, type InstanceManager } from "../instances-context.js";
+import type { TailnetAccessSetting } from "../tailnet-access.js";
 import "../styles.css";
 
 /**
@@ -78,6 +80,56 @@ type State = (typeof STATES)[number];
 const TOPOLOGIES = ["full", "minimal"] as const;
 type Topology = (typeof TOPOLOGIES)[number];
 
+/**
+ * Settings › Network's Tailnet Access in each state the desktop shell can report (#3027), or
+ * `browser`, where there is no desktop shell and so no Tailnet group. Without `tailnet`, the row
+ * follows `state` and `topology` as every other row does.
+ */
+const TAILNET_STATES = [
+  "browser", "off", "on", "restarting", "unavailable", "unmanaged", "checking", "read-failed", "write-failed",
+] as const;
+type TailnetState = (typeof TAILNET_STATES)[number];
+
+function tailnetFixture(state: TailnetState): TailnetAccessSetting {
+  const base: TailnetAccessSetting = {
+    status: { available: true, enabled: false, managed: true },
+    loading: false,
+    desktop: true,
+    busy: false,
+    error: null,
+    toggle: () => undefined,
+    retry: () => undefined,
+  };
+  switch (state) {
+    case "browser": return { ...base, status: null, desktop: false };
+    case "off": return base;
+    case "on": return { ...base, status: { available: true, enabled: true, managed: true } };
+    case "restarting": return { ...base, busy: true };
+    case "unavailable": return { ...base, status: { available: false, enabled: false, managed: true } };
+    case "unmanaged": return { ...base, status: { available: true, enabled: false, managed: false } };
+    case "checking": return { ...base, status: null, loading: true };
+    case "read-failed": return { ...base, status: null, error: "The desktop shell did not answer." };
+    case "write-failed": return {
+      ...base,
+      error: "Tailscale refused the change. Check that the Tailscale app is running, then try again.",
+    };
+  }
+}
+
+/** The desktop app connected to a saved remote server, with Connections › Instances available. */
+const desktopInstances: InstanceManager = {
+  ...browserInstanceManager,
+  desktopMultiInstance: true,
+  activeProfile: {
+    id: "studio",
+    serverInstanceId: "studio",
+    kind: "remote",
+    label: "Home Studio",
+    origin: "https://studio.example.ts.net",
+    createdAt: "",
+  },
+};
+
 const harnessDefaultsView: AgentHarnessDefaultsView = {
   defaults: [
     {
@@ -123,11 +175,26 @@ harnessDefaultsRepairedView.defaults[0]!.installations[0]!.models = [
 ];
 harnessDefaultsRepairedView.defaults[0]!.installations[0]!.effortLevels = ["low"];
 
+/** Behavior › Evidence's preference, kept for the page's life so a saved change reads back. */
+let artifactUploadPreference = "manual";
+/** What a save in Settings › Orchestrator stored, for as long as the page is open. */
+let orchestratorSaved: typeof DEFAULT_ORCHESTRATOR_DEFAULTS | null = null;
+
 const harnessDefaultsTransport: ApiTransport = {
   instanceId: "settings-fixture",
   publicOrigin: window.location.origin,
   close() {},
-  async request(path) {
+  async request(path, init) {
+    // Behavior › Evidence (#3023). Unstubbed, the read fell through to the agent defaults below and
+    // every Behavior capture showed a load failure. `artifact=save-fails` makes a change fail the way
+    // a dropped connection does, for the danger notice and its Retry.
+    if (path === "/api/artifact-upload-settings") {
+      if (init?.method === "PUT") {
+        if (new URLSearchParams(window.location.search).get("artifact") === "save-fails") throw new TypeError("Failed to fetch");
+        artifactUploadPreference = (JSON.parse(String(init.body)) as { preference: string }).preference;
+      }
+      return Response.json({ preference: artifactUploadPreference });
+    }
     if (path === "/api/instance") {
       return new Response(JSON.stringify({
         service: "wollipog-control-plane",
@@ -154,12 +221,34 @@ const harnessDefaultsTransport: ApiTransport = {
     }
     if (path === "/api/identity") return Response.json({ context: { userId: "fixture-user", organizationId: "fixture-org" } });
     if (path === "/api/orchestrator-settings") {
-      const drifted = new URLSearchParams(window.location.search).get("defaults") === "agent-repair";
-      const defaults = structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS);
+      const params = new URLSearchParams(window.location.search);
+      const drifted = params.get("defaults") === "agent-repair";
+      // `orchestrator=unavailable`: no machine advertises child capabilities (#3026's warning);
+      // `orchestrator=save-fails`: every save is refused, for the save bar's error state.
+      const mode = params.get("orchestrator");
+      if (init?.method === "PUT") {
+        if (mode === "save-fails") {
+          return new Response(JSON.stringify({ error: "Wollipog couldn't store your defaults. Try again in a moment." }),
+            { status: 503, headers: { "content-type": "application/json" } });
+        }
+        orchestratorSaved = (JSON.parse(String(init.body)) as { defaults: typeof DEFAULT_ORCHESTRATOR_DEFAULTS }).defaults;
+      }
+      const defaults = orchestratorSaved ? structuredClone(orchestratorSaved) : structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS);
       if (drifted) defaults.behavior.childModel = "retired-model";
+      if (mode === "unavailable") {
+        return new Response(JSON.stringify({
+          defaults,
+          source: orchestratorSaved ? "user_default" : "system_default",
+          capabilities: {
+            harnesses: [], models: [], effortLevels: [], supportedPairs: [],
+            installations: 0, compatibleInstallations: 0, status: "unavailable",
+            reason: "No current Agent Harness installation advertises child model and effort capabilities. Connect or update a runner, then retry.",
+          },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
       return new Response(JSON.stringify({
         defaults,
-        source: "user_default",
+        source: orchestratorSaved || drifted ? "user_default" : "system_default",
         capabilities: {
           harnesses: [{
             agentId: "codex-app-server",
@@ -268,6 +357,8 @@ function Harness() {
   }, []);
   const routed = route === null ? null : viewFromPath(route);
   const navigate = (view: View) => {
+    // As the store's navigate does: an editor with unsaved changes asks first (#3026).
+    if (interceptLeave(() => navigate(view))) return;
     const next = new URLSearchParams(window.location.search);
     next.set("route", viewPath(view));
     window.history.pushState(null, "", `?${next}`);
@@ -282,6 +373,10 @@ function Harness() {
   const tailnetError = params.get("tailnet-error") === "1"
     ? "Tailscale refused the change. Check that the Tailscale app is running, then try again."
     : null;
+  const askedTailnet = params.get("tailnet") as TailnetState | null;
+  const tailnetState = askedTailnet && TAILNET_STATES.includes(askedTailnet) ? askedTailnet : null;
+  // `multi` is the desktop app with more than one instance allowed, where Manage Instances shows.
+  const instances = params.get("instances") === "multi" ? desktopInstances : browserInstanceManager;
   const schemes = params.get("copy") === "long"
     ? COLOR_SCHEMES.map((option) => ({
       ...option,
@@ -321,13 +416,13 @@ function Harness() {
   // at #root, which is the class of miss every earlier round of this file was fixing. Settings draws
   // its own page header (#1801), so there is no app-level top bar above it.
   return (
+    <InstancesContextProvider value={instances}>
     <div className="app">
       <main className="main">
         <div className="main-body">
           <SettingsView
             section={section}
             onNavigate={navigate}
-            onOpenShortcuts={() => undefined}
             panels={kinds ? Object.fromEntries(SETTINGS_SECTIONS.map((entry) => [entry.id, groupWidth
               ? <div className="settings-panel" style={{ width: groupWidth }}><RowKinds /></div>
               : <RowKinds />])) as Record<SettingsSection, React.ReactNode> : {
@@ -373,43 +468,52 @@ function Harness() {
                   disabled={disabled}
                 />
               ),
-              keyboard: <KeyboardPanel shortcutLabel="Reference · ?" disabled={disabled} onOpenShortcuts={() => undefined} />,
+              // Both slots are always filled, as the shell fills them; the fixture rows stand in for
+              // panels that need a control plane.
               behavior: (
-                <BehaviorPanel
-                  agentHarnessDefaults={showAgentDefaults ? (
-                    <ApiProvider client={harnessDefaultsApi}><AgentHarnessDefaultsPanel /></ApiProvider>
-                  ) : undefined}
-                  sessionNaming={(
-                    <SettingsGroup title="Session Naming">
-                      <PendingSetting
-                        title="Session Naming"
-                        description="Controls automatic session titles."
-                        reason="The visual fixture does not connect to a control plane."
+                <ApiProvider client={harnessDefaultsApi}>
+                  <BehaviorPanel
+                    agentHarnessDefaults={showAgentDefaults ? <AgentHarnessDefaultsPanel /> : (
+                      <StaticRow
+                        title="Default Models, Efforts, and Permissions"
+                        description="The visual fixture does not load agent defaults."
                       />
-                    </SettingsGroup>
-                  )}
-                />
+                    )}
+                    sessionNaming={(
+                      <StaticRow title="Session Naming" description="The visual fixture does not connect to a control plane." />
+                    )}
+                    onOpenShortcuts={() => undefined}
+                  />
+                </ApiProvider>
               ),
               approvals: (
                 <ApiProvider client={harnessDefaultsApi}>
                   <ApprovalsPanel policyId={routed?.name === "settings" ? routed.policyId : undefined} />
                 </ApiProvider>
               ),
-              orchestrator: <ApiProvider client={harnessDefaultsApi}><OrchestratorSettingsPanel /></ApiProvider>,
+              // With the confirmation provider its leave prompt opens in, as the shell has.
+              orchestrator: (
+                <FeedbackProvider>
+                  <ApiProvider client={harnessDefaultsApi}><OrchestratorSettingsPanel /></ApiProvider>
+                </FeedbackProvider>
+              ),
               network: (
                 <NetworkPanel
-                  tailnet={{
+                  tailnet={tailnetState ? tailnetFixture(tailnetState) : {
                     // `managed: false` is how production reaches a DISABLED tailnet switch: another
-                    // control plane owns the port, so the row renders and cannot be operated.
+                    // Wollipog server is using the port, so the row renders and cannot be operated.
+                    // `minimal` is Tailscale missing, the other disabled form.
                     status: topology === "full"
                       ? { available: true, enabled: true, managed: !disabled }
-                      : null,
+                      : { available: false, enabled: false, managed: true },
                     loading: false,
                     desktop: true,
                     busy,
                     error: tailnetError,
                     toggle: () => undefined,
+                    retry: () => undefined,
                   }}
+                  onNavigate={navigate}
                 />
               ),
               // The production panel with injected state, like Notifications above. Storage is
@@ -426,6 +530,7 @@ function Harness() {
         </div>
       </main>
     </div>
+    </InstancesContextProvider>
   );
 }
 

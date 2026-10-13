@@ -63,8 +63,8 @@ import {
   bareDigitPressed,
   isEditableShortcutTarget,
   matchesShortcut,
-  shortcutDisplay,
   shortcutLayerActive,
+  SHOW_SHORTCUTS_ID,
 } from "./shortcuts.js";
 import { COLOR_SCHEMES, DENSITY_OPTIONS, THEME_OPTIONS, type ThemePreference } from "./theme.js";
 import {
@@ -135,7 +135,6 @@ const NavigationRailPanel = lazy(() => import("./components/SettingsView.js").th
 const BehaviorPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.BehaviorPanel })));
 const AgentHarnessDefaultsPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.AgentHarnessDefaultsPanel })));
 const ExperimentalPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.ExperimentalPanel })));
-const KeyboardPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.KeyboardPanel })));
 const NetworkPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.NetworkPanel })));
 const NotificationsPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.NotificationsPanel })));
 const SettingsView = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.SettingsView })));
@@ -371,14 +370,14 @@ export function Shell() {
   const openShortcutReference = useCallback((returnFocus?: HTMLElement | null) => {
     const target = returnFocus ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
     shortcutReturnFocusRef.current = target;
-    // A CHAIN, because the opener can disappear in more than one way. Opened from the Settings
-    // Keyboard row, then Back while the reference is still open: the row is gone, and a selector
-    // that only knew about the gear resolved to null. The page heading is the last resort and
-    // always exists, so closing the reference can never drop focus on <body>.
+    // A CHAIN, because the opener can disappear in more than one way. Opened from Settings ›
+    // Behavior's Show Shortcuts, then Back while the reference is still open: the button is gone, and
+    // a selector that only knew about the gear resolved to null. The page heading is the last resort
+    // and always exists, so closing the reference can never drop focus on <body>.
     shortcutReturnSelectorRef.current = target?.closest(".rail-settings")
       ? ".rail-settings .rail-item"
-      : target?.closest(".settings-view")
-      ? ".settings-view .setting-row-link"
+      : target?.id === SHOW_SHORTCUTS_ID
+      ? `#${SHOW_SHORTCUTS_ID}`
       : null;
     setShortcutReferenceOpener(target);
     setShortcutReferenceOpen(true);
@@ -949,7 +948,6 @@ export function Shell() {
             <SettingsView
               section={view.section}
               onNavigate={navigate}
-              onOpenShortcuts={openShortcutReference}
               panels={{
                 appearance: (
                   <>
@@ -975,21 +973,17 @@ export function Shell() {
                   </>
                 ),
                 notifications: <NotificationsPanel notify={notify} push={push} />,
-                keyboard: (
-                  <KeyboardPanel
-                    shortcutLabel={`Reference · ${shortcutDisplay("shortcut-reference")}`}
-                    onOpenShortcuts={openShortcutReference}
-                  />
-                ),
                 behavior: (
                   <BehaviorPanel
                     agentHarnessDefaults={<AgentHarnessDefaultsPanel discoveryRevision={runners} />}
                     sessionNaming={<SessionNamingPanel />}
+                    onOpenShortcuts={openShortcutReference}
+                    focus={view.focus}
                   />
                 ),
                 approvals: <ApprovalsPanel policyId={view.policyId} />,
                 orchestrator: <OrchestratorSettingsPanel discoveryRevision={runners} />,
-                network: <NetworkPanel tailnet={tailnet} />,
+                network: <NetworkPanel tailnet={tailnet} onNavigate={navigate} />,
                 experimental: (
                   <ExperimentalPanel
                     flags={experiments.flags}
@@ -1044,7 +1038,9 @@ export function Shell() {
       )}
       {dialog?.kind === "run" && <NewRunDialog onClose={() => setDialog(null)} />}
       {dialog?.kind === "pod" && <NewPodDialog onClose={() => setDialog(null)} />}
-      {palette !== null && <CommandPalette initialQuery={palette} onClose={() => setPalette(null)} />}
+      {palette !== null && (
+        <CommandPalette initialQuery={palette} onClose={() => setPalette(null)} onOpenShortcuts={openShortcutReference} />
+      )}
       {shortcutReferenceOpen && (
         <ShortcutReference
           onClose={closeShortcutReference}
@@ -1221,6 +1217,8 @@ function useTailnetAccessSetting(): TailnetAccessSetting {
   // Read once, not per panel visit. Computed rather than stored: it cannot change without a reload.
   const desktop = useMemo(() => isTauriRuntime(), []);
 
+  // Bumped by Try Again after a failed read, which reads again from the start.
+  const [readAttempt, setReadAttempt] = useState(0);
   useEffect(() => {
     let disposed = false;
     readTailnetAccess()
@@ -1236,10 +1234,10 @@ function useTailnetAccessSetting(): TailnetAccessSetting {
     return () => {
       disposed = true;
     };
-  }, []);
+  }, [readAttempt]);
 
   const toggle = useCallback(() => {
-    if (!status || busy || !status.managed) return;
+    if (!status || busy || !status.available || !status.managed) return;
     setBusy(true);
     setError(null);
     writeTailnetAccess(!status.enabled)
@@ -1248,5 +1246,17 @@ function useTailnetAccessSetting(): TailnetAccessSetting {
       .finally(() => setBusy(false));
   }, [busy, status]);
 
-  return { status, loading, desktop, busy, error, toggle };
+  // A failed write leaves the confirmed status in place, so trying again repeats the same change.
+  const retry = useCallback(() => {
+    if (status) {
+      toggle();
+      return;
+    }
+    if (loading) return;
+    setError(null);
+    setLoading(true);
+    setReadAttempt((attempt) => attempt + 1);
+  }, [loading, status, toggle]);
+
+  return { status, loading, desktop, busy, error, toggle, retry };
 }

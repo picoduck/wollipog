@@ -3033,6 +3033,13 @@ button.status { cursor: pointer; }
 }
 /* In Settings the bar floats 16px above the panel's bottom edge. */
 .settings-panel > .save-bar { bottom: var(--space-4); }
+/* On a phone its two actions share the full width under the message (and a failure's icon, which
+   the message leaves room for), as a phone sheet's footer does (§7.5). */
+@media (max-width: 760px) {
+  .settings-panel > .save-bar { flex-wrap: wrap; }
+  .settings-panel > .save-bar > .save-bar-message { flex: 1 1 calc(100% - var(--space-6)); }
+  .settings-panel > .save-bar > .btn { flex: 1; max-width: none; }
+}
 
 /* ---------------------------------- Steps ----------------------------------
    Numbered instructions (docs/design-system.md §8.7), rendered by Steps.tsx. Each step is an <li>
@@ -13068,7 +13075,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .inbox-row-shell.thread-child .inbox-row-primary-cell::before { top: 50%; left: -15px; width: 11px; height: 2px; }
 /* The family chip, directly after a parent's title (#2215): dots first, then the rollup. It is sized
    to the pills it shares a card with, and it never grows the card. Below a 600px list (a narrow
-   column, Preview Right, a phone) it keeps only its dots; its name and tooltip keep the rollup. */
+   column, Preview Right, a phone) it keeps its dots and working count; its name and tooltip keep the rollup. */
 .inbox-thread-family {
   display: inline-flex;
   flex: none;
@@ -13088,10 +13095,14 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 }
 .inbox-thread-family.waiting { border-color: transparent; color: var(--accent-2-on-tint); background: color-mix(in srgb, var(--accent-2) 12%, transparent); }
 .inbox-thread-family-text { overflow: hidden; text-overflow: ellipsis; }
+.inbox-thread-working { display: none; overflow: hidden; text-overflow: ellipsis; }
 /* A Board card decides by its own width instead (`.card-status > .inbox-thread-family.dots-only`). */
 @container list (max-width: 599px) {
-  :not(.card-status) > .inbox-thread-family { gap: 0; padding-inline: var(--space-1); }
+  :not(.card-status) > .inbox-thread-family { gap: var(--space-1); padding-inline: var(--space-1); }
   :not(.card-status) > .inbox-thread-family > .inbox-thread-family-text { display: none; }
+  :not(.card-status) > .inbox-thread-family > .inbox-thread-working { display: inline; flex: none; }
+  .inbox-row-copy .inbox-thread-dots { min-width: 0; overflow: hidden; flex-shrink: 1; }
+  .inbox-row-copy .inbox-thread-dot { flex: none; }
 }
 .inbox-thread-dots { display: inline-flex; flex: none; gap: 3px; }
 .inbox-thread-dot { display: inline-block; width: 7px; height: 7px; border-radius: var(--radius-pill); background: var(--border-strong); }
@@ -13277,6 +13288,10 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .icon-btn.inbox-row-more { width: var(--control-h-sm); height: var(--control-h-sm); }
 @media (pointer: fine) {
   :is(.inbox-row-shell:hover, .inbox-row-shell:focus-within) .inbox-row-actions { display: inline-flex; }
+  @container list (max-width: 879px) {
+    /* Keep the family rollup readable when the action tray covers the title line. */
+    .inbox-row-shell.thread-parent:is(:hover, :focus-within) .inbox-row-copy { padding-right: var(--inbox-row-col-actions); }
+  }
   /* The row keeps its hover fill while the pointer is on its actions, which are beside its button. */
   .inbox-row-shell:is(:hover, :focus-within):not(.selected, .stacked) .inbox-row { background: var(--bg-elev-2); }
 }
@@ -13293,6 +13308,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   .inbox-row-action:not(.inbox-row-more) { display: none; }
   .icon-btn.inbox-row-more { width: var(--control-h); height: var(--control-h); }
   .inbox-row-shell .inbox-row { padding-right: var(--control-h); }
+  .inbox-row-shell.stacked .inbox-row { padding-right: calc(var(--control-h) + var(--space-2)); }
 }
 /* What the session wants, after the title (#2218): only a list wide enough for it shows it. */
 .inbox-row-snippet { display: none; }
@@ -17323,6 +17339,8 @@ button.setting-row { cursor: pointer; }
 .settings-group-action { margin-inline-start: auto; }
 .settings-group-desc,
 .settings-group-foot { margin: 0; color: var(--text-dim); font: var(--type-small); }
+/* A foot that is a disclosure (§5.5) holds sentences, spaced by the disclosure body's gap. */
+.settings-group-foot p { margin: 0; }
 /* The surface is the size container for the rows' 560px rule. Select lists stay in place inside it
    and correct for its containing block (§2.10), so it can be one. */
 .settings-group-surface { container-type: inline-size; }
@@ -17446,9 +17464,31 @@ button.setting-row { cursor: pointer; }
 .policy-meta-item + .policy-meta-item { margin-inline-start: var(--space-3); }
 .policy-meta-item > svg { display: inline-block; margin-right: var(--space-1); vertical-align: text-bottom; }
 
-/* Orchestrator defaults keep Behavior and Decision Delegation visibly separate while reusing the
-   settings row controls and their keyboard contracts. */
-.orchestrator-settings { display: grid; gap: var(--space-5); color: var(--text); }
+/* Settings › Orchestrator (#3026): the groups are the panel's own children, so its save bar is the
+   settings panel's and floats above its bottom edge (§8.6). What remains here is the gate label
+   inside Decision Delegation's surface and the two group feet. */
+/* At a setting row's own inset, so the label starts where the row titles under it do. */
+.orchestrator-gates-label {
+  margin: 0;
+  padding: var(--space-2) var(--space-4) var(--space-1);
+  color: var(--text-dim);
+  font: var(--type-small);
+  font-weight: var(--weight-semibold);
+}
+.orchestrator-about > .disclosure-body > p { margin: 0; }
+/* A touch target on touch, as every other control in the panel is. */
+@media (pointer: coarse) {
+  .orchestrator-about > summary { min-height: var(--control-h); }
+}
+.orchestrator-human-only {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-1);
+  margin: var(--space-1) 0 0;
+}
+/* On the first line's centre when the sentence wraps on a phone. */
+.orchestrator-human-only > svg { flex: none; margin-top: 2px; }
+.orchestrator-about[open] + .orchestrator-human-only { margin-top: var(--space-3); }
 .orchestrator-policy-control input {
   width: 100%;
   color: var(--text);
@@ -17458,8 +17498,6 @@ button.setting-row { cursor: pointer; }
   padding: 7px 9px;
   font: inherit;
 }
-.orchestrator-settings .form-error { margin: 0 var(--row-pad-x); }
-.orchestrator-settings-actions { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
 
 .new-session-orchestrator-policy { display: grid; gap: var(--space-3); margin-top: var(--space-2); }
 .new-session-provider-permissions { display: grid; gap: var(--space-1); margin-top: var(--space-2); }
@@ -17539,7 +17577,7 @@ button.setting-row { cursor: pointer; }
 
 @media (max-width: 760px) {
   .orchestrator-policy-control { grid-template-columns: minmax(0, 1fr); }
-  .orchestrator-settings-actions, .orchestrator-policy-unavailable { align-items: stretch; flex-direction: column; }
+  .orchestrator-policy-unavailable { align-items: stretch; flex-direction: column; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -18428,10 +18466,6 @@ a.tab { text-decoration: none; }
   .rail-order-row { gap: var(--space-2); }
   .rail-order-controls > :last-child { min-width: 0; }
 }
-
-/* Settings › Behavior › Artifact Uploads: what its last change did, under the row's text. */
-.artifact-upload-status { display: grid; gap: var(--space-2); padding: 0 var(--space-4) var(--space-3); }
-.artifact-upload-status > p { margin: 0; color: var(--text-dim); font: var(--type-small); }
 
 .agent-defaults-list {
   display: flex;

@@ -25,7 +25,7 @@ import {
 } from "@wollipog/protocol";
 import { createHash } from "node:crypto";
 import { isAbsolute, join, posix } from "node:path";
-import { JsonRpcPeer } from "../jsonrpc.js";
+import { JsonRpcPeer, type RpcError } from "../jsonrpc.js";
 import { campaignOperationEvidence } from "../campaign-operation-evidence.js";
 import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
 import {
@@ -429,6 +429,28 @@ function resumeError(threadId: string, err: Json): CodexAppServerResumeError {
   return new CodexAppServerResumeError(`could not resume Codex thread ${threadId}: ${message}`, threadId, retryable, err?.code);
 }
 
+/** Each launch handshake request (`initialize`, `thread/read`, `thread/resume`, `thread/start`)
+ * must settle within this bound (#3099). An unanswered one would otherwise leave the session
+ * Starting forever, holding every prompt admitted meanwhile. A discarded oversized record fails the
+ * pending request at once instead of waiting for the bound. */
+export const CODEX_INITIALIZATION_REQUEST_TIMEOUT_MS = 120_000;
+
+/** A launch handshake request that will not settle. The message names only the method, never
+ * provider payload, so it is safe to surface as the session's launch error. */
+export class CodexAppServerInitializationStalledError extends Error {
+  readonly name = "CodexAppServerInitializationStalledError";
+
+  constructor(readonly method: string, readonly reason: "timeout" | "oversized_record", timeoutMs: number) {
+    super(reason === "timeout"
+      ? `Codex app-server did not answer ${method} within ${formatDuration(timeoutMs)}`
+      : `Codex app-server sent a record larger than the JSON-RPC limit while ${method} was pending; it was discarded`);
+  }
+}
+
+function formatDuration(ms: number): string {
+  return ms % 1_000 === 0 ? `${ms / 1_000} seconds` : `${ms} ms`;
+}
+
 /** A skill catalog is display metadata; an unanswered lookup must not stay pending indefinitely. */
 const SKILL_CATALOG_TIMEOUT_MS = 30_000;
 const PLUGIN_RECONCILE_TIMEOUT_MS = 30_000;
@@ -543,6 +565,7 @@ export class CodexAppServerDriver implements Driver {
   private readonly readRolloutProof: typeof readCodexRolloutCompletedCommand;
   private readonly descendantOwner = {};
   private readonly deps: { permissionProfile: typeof decideCodexPermissionProfile };
+  private readonly initializationRequestTimeoutMs: number;
   /**
    * The permission-profile base the running app-server carries, or null when it carries none.
    * Bound at spawn, because a profile is selected by config and `turn/start` has no per-turn
@@ -577,6 +600,7 @@ export class CodexAppServerDriver implements Driver {
       kill: typeof killTree;
       readRolloutProof: typeof readCodexRolloutCompletedCommand;
       permissionProfile: typeof decideCodexPermissionProfile;
+      initializationRequestTimeoutMs: number;
     }> = {},
   ) {
     this.cwd = opts.cwd;
@@ -585,6 +609,32 @@ export class CodexAppServerDriver implements Driver {
     this.kill = deps.kill ?? killTree;
     this.readRolloutProof = deps.readRolloutProof ?? readCodexRolloutCompletedCommand;
     this.deps = { permissionProfile: deps.permissionProfile ?? decideCodexPermissionProfile };
+    this.initializationRequestTimeoutMs = deps.initializationRequestTimeoutMs ?? CODEX_INITIALIZATION_REQUEST_TIMEOUT_MS;
+  }
+
+  /** Send one launch handshake request under the initialization bound (#3099). This returns the
+   * peer's own promise, unwrapped: the peer settles a response before it dispatches notifications
+   * that followed it in the same chunk, and any intermediate continuation would let those run before
+   * the caller installs the thread they belong to. Map failures with initializationFailure. */
+  private initializationRequest<T>(peer: JsonRpcPeer, method: string, params: Json): Promise<T> {
+    return peer.request<T>(method, params, {
+      deadlineAt: Date.now() + this.initializationRequestTimeoutMs,
+      failOnDiscardedRecord: true,
+    });
+  }
+
+  /** A timed-out or discarded handshake request becomes an error naming only its method. Provider
+   * errors pass through unchanged. */
+  private initializationFailure(error: unknown): unknown {
+    const rpc = error as RpcError | undefined;
+    if (!rpc?.method) return error;
+    if (rpc.requestTimeout) {
+      return new CodexAppServerInitializationStalledError(rpc.method, "timeout", this.initializationRequestTimeoutMs);
+    }
+    if (rpc.discardedRecord) {
+      return new CodexAppServerInitializationStalledError(rpc.method, "oversized_record", this.initializationRequestTimeoutMs);
+    }
+    return error;
   }
 
   get pid(): number | undefined {
@@ -888,15 +938,28 @@ export class CodexAppServerDriver implements Driver {
     this.registerHandlers(peer);
     let initialized: Json;
     try {
-      initialized = await peer.request<Json>("initialize", {
+      initialized = await this.initializationRequest<Json>(peer, "initialize", {
         clientInfo: { name: "wollipog", version: "0.4.0" },
         capabilities: { experimentalApi: true },
       });
     } catch (error) {
+      const failure = this.initializationFailure(error);
+      const stalled = failure instanceof CodexAppServerInitializationStalledError;
       if (this.opts.isolation?.backend === "wsl-bwrap") {
-        await waitForWslProviderAttemptTeardown(child, this.kill);
+        try {
+          await waitForWslProviderAttemptTeardown(child, this.kill);
+        } catch (teardownError) {
+          // A refused teardown still names the stalled method instead of replacing it.
+          if (!stalled) throw teardownError;
+          throw new WslProviderAttemptTeardownError(`${failure.message}; ${(teardownError as Error).message}`);
+        } finally {
+          // That teardown killed a provider whose handshake stalled. Its exit is ours, not a crash:
+          // reporting it through onExit would hand held prompts to crash recovery, which relaunches
+          // into the same stall instead of settling them as never sent (#3099).
+          if (stalled) this.initializationExit = null;
+        }
       }
-      throw error;
+      throw failure;
     }
     this.serverIdentity = diagnosticValue(initialized?.userAgent);
     peer.notify("initialized", {});
@@ -949,6 +1012,7 @@ export class CodexAppServerDriver implements Driver {
     this.cwd = cwd;
     await this.reconcilePlugins("session_start");
     if (this.disposed || !this.peer) throw new Error("codex app-server is not running");
+    const peer = this.peer;
     const resumeId = this.opts.resumeId;
     // Keep mutable upload authorization in each current turn, never in persisted developer
     // instructions. Codex may replay stale developer text after a cold resume/fork (#19045).
@@ -957,7 +1021,7 @@ export class CodexAppServerDriver implements Driver {
     let res: Json;
     try {
       if (resumeId) {
-        const read = await this.peer!.request<Json>("thread/read", { threadId: resumeId, includeTurns: false });
+        const read = await this.initializationRequest<Json>(peer, "thread/read", { threadId: resumeId, includeTurns: false });
         const readId = read?.thread?.id;
         if (readId !== resumeId) {
           throw new CodexAppServerResumeError(
@@ -973,19 +1037,20 @@ export class CodexAppServerDriver implements Driver {
             true,
           );
         }
-        res = await this.peer!.request<Json>("thread/resume", {
+        res = await this.initializationRequest<Json>(peer, "thread/resume", {
           threadId: resumeId,
           // The runner owns transcript history; full turn hydration can exceed the RPC frame limit.
           excludeTurns: true,
           ...configuredServiceTier(this.config, this.opts.capabilities),
         });
       } else {
-        res = await this.peer!.request<Json>("thread/start", {
+        res = await this.initializationRequest<Json>(peer, "thread/start", {
           cwd,
           ...configuredServiceTier(this.config, this.opts.capabilities),
         });
       }
-    } catch (err) {
+    } catch (caught) {
+      const err = this.initializationFailure(caught);
       if (err instanceof CodexAppServerResumeError) throw err;
       if (resumeId) throw resumeError(resumeId, err);
       throw err;

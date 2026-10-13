@@ -110,7 +110,14 @@ function RowText({
           <span className={`setting-row-desc-slot${failure ? " is-failed" : replacement ? " is-busy" : ""}`}>
             {descriptionNode}
             {replacement && (
-              <span className={failure ? "setting-row-desc setting-row-failure" : "setting-row-desc"}>{replacement}</span>
+              // The busy sentence has an id of its own, so a control can be described by what is
+              // happening rather than by the hidden sentence it covers.
+              <span
+                className={failure ? "setting-row-desc setting-row-failure" : "setting-row-desc"}
+                id={!failure && descriptionId ? `${descriptionId}-busy` : undefined}
+              >
+                {replacement}
+              </span>
             )}
           </span>
         ) : descriptionNode}
@@ -120,12 +127,25 @@ function RowText({
   );
 }
 
+/** A failed change in place of the description (§8.5): the sentence, then Try Again. */
+function FailureSentence({ id, failure }: { id: string; failure: RowFailure }) {
+  return (
+    <>
+      <span id={id} title={failure.detail}>{failure.message}</span>{" "}
+      <button type="button" className="link setting-row-retry" onClick={failure.onRetry}>Try Again</button>
+    </>
+  );
+}
+
 /**
  * The §8.2 grid with any control, for a setting none of the row kinds fits. Prefer a row kind: each
  * one carries its control's affordance and accessible names.
  *
  * `trailing` keeps the control beside the text in a narrow container, as switch, link and action rows
  * do; otherwise it drops under the text at full width.
+ *
+ * `failure` shows a failed read or change in place of the description with Try Again (§8.5), as
+ * `SwitchRow` does, for a row that has no value to show until it succeeds. The caller announces it.
  */
 export function SettingRow({
   title,
@@ -140,13 +160,16 @@ export function SettingRow({
   busy,
   busyLabel,
   saved,
+  failure,
   className,
 }: Omit<RowTextProps, "failure" | "descriptionHidden"> & {
   control?: ReactNode;
   trailing?: boolean;
   disabled?: boolean;
+  failure?: RowFailure | null;
   className?: string;
 }) {
+  const id = useId();
   return (
     <div className={rowClass(trailing ? "setting-row setting-row-trailing" : "setting-row", { disabled, extra: className })} aria-busy={busy || undefined}>
       <RowText
@@ -156,9 +179,10 @@ export function SettingRow({
         badge={badge}
         description={description}
         descriptionId={descriptionId}
-        busy={busy}
+        busy={busy && !failure}
         busyLabel={busyLabel}
         saved={saved}
+        failure={failure === undefined ? undefined : failure && <FailureSentence id={`${id}-failure`} failure={failure} />}
       />
       {control && <span className="setting-row-control">{control}</span>}
       {saved !== undefined && <span className="sr-only" role="status">{rowStatus(title, saved)}</span>}
@@ -258,6 +282,9 @@ const DESCRIBED_MENU_WIDTH_PX = 360;
  * The control is the shared `Select`, so the closed row STATES the current value rather than only
  * naming the setting. Its list is at least as wide as the trigger and 280px, and 360px when options
  * carry descriptions, by default rather than per caller.
+ *
+ * An invalid value, in an editor that saves several rows at once, is `aria-invalid` with a
+ * `FieldError` under the trigger (§8.5), as `NumberRow`'s is.
  */
 export function SelectRow({
   title,
@@ -266,6 +293,7 @@ export function SelectRow({
   value,
   disabled,
   disabledReason,
+  error,
   onChange,
   onPreview,
   label,
@@ -282,6 +310,8 @@ export function SelectRow({
   disabled?: boolean;
   /** Why the row cannot be operated: visible under the control and part of its description. */
   disabledReason?: string;
+  /** One sentence that says what is wrong with the value and how to fix it. */
+  error?: string | null;
   onChange: (value: string) => void;
   /** For a setting whose effect can be shown while the list is browsed. See `Select`. */
   onPreview?: (value: string | null) => void;
@@ -295,8 +325,10 @@ export function SelectRow({
   const id = useId();
   const descriptionId = `${id}-desc`;
   const reasonId = `${id}-reason`;
+  const errorId = `${id}-error`;
   const reason = disabled && disabledReason ? disabledReason : undefined;
-  const describedBy = [description ? descriptionId : null, reason ? reasonId : null].filter(Boolean).join(" ") || undefined;
+  const describedBy = [error ? errorId : null, description ? descriptionId : null, reason ? reasonId : null]
+    .filter(Boolean).join(" ") || undefined;
   return (
     <div className={rowClass("setting-row", { disabled })} aria-busy={busy || undefined}>
       <RowText
@@ -307,7 +339,8 @@ export function SelectRow({
         busyLabel={busyLabel}
         saved={saved}
       />
-      <span className="setting-row-control">
+      {/* A `.field` while invalid, for the field's red edge (§8.5). */}
+      <span className={error ? "setting-row-control field" : "setting-row-control"}>
         <Select
           label={label ?? title}
           options={options}
@@ -316,10 +349,12 @@ export function SelectRow({
           onPreview={onPreview}
           describedBy={describedBy}
           disabled={disabled}
+          invalid={Boolean(error)}
           menuWidth={menuWidth ?? (options.some((option) => option.description) ? DESCRIBED_MENU_WIDTH_PX : undefined)}
           estimatedOptionHeight={estimatedOptionHeight}
         />
-        {reason && <small id={reasonId} className="setting-row-reason">{reason}</small>}
+        {error && <FieldError id={errorId}>{error}</FieldError>}
+        {reason &&<small id={reasonId} className="setting-row-reason">{reason}</small>}
       </span>
       {saved !== undefined && <span className="sr-only" role="status">{rowStatus(title, saved)}</span>}
     </div>
@@ -414,8 +449,9 @@ export function NumberRow({
 
 /**
  * A read-only value in the control column: an address, a version, a count. `mono` for addresses,
- * versions and ids (§11.3). `copy` adds Copy, an `.icon-btn.sm` named for the value ("Copy Server
- * Address"): `true` copies `value` itself, a string copies that text instead.
+ * versions and ids (§11.3). `copy` adds Copy, an `.icon-btn.sm` named "Copy <Title>", or `copyLabel`
+ * where the title does not name the value ("Copy Address" for Connected To): `true` copies `value`
+ * itself, a string copies that text instead. It confirms with its icon.
  */
 export function ValueRow({
   title,
@@ -424,6 +460,7 @@ export function ValueRow({
   value,
   mono,
   copy,
+  copyLabel,
 }: {
   title: string;
   description?: ReactNode;
@@ -431,6 +468,8 @@ export function ValueRow({
   value: ReactNode;
   mono?: boolean;
   copy?: boolean | string;
+  /** The Copy button's name, in Title Case. */
+  copyLabel?: string;
 }) {
   const copyText = typeof copy === "string" ? copy : copy && typeof value === "string" ? value : undefined;
   return (
@@ -444,7 +483,7 @@ export function ValueRow({
           {value}
         </span>
         {copyText !== undefined && (
-          <CopyButton text={copyText} iconOnly className="icon-btn sm" ariaLabel={`Copy ${title}`} />
+          <CopyButton text={copyText} iconOnly className="icon-btn sm" ariaLabel={copyLabel ?? `Copy ${title}`} />
         )}
       </span>
     </div>
@@ -534,6 +573,8 @@ export function ActionRow({
   icon,
   badge,
   actionLabel,
+  actionIcon,
+  actionId,
   onAction,
   disabled,
   hasPopup,
@@ -545,12 +586,17 @@ export function ActionRow({
   badge?: ReactNode;
   /** Title Case, with an ellipsis when it opens a dialog: "Edit…". */
   actionLabel: string;
+  /** A 14px icon before the label. Icons are `aria-hidden`, so the label alone names the button. */
+  actionIcon?: ReactNode;
+  /** A stable id for the button, for a caller that finds it again after it remounts. */
+  actionId?: string;
   onAction: () => void;
   disabled?: boolean;
   hasPopup?: "dialog";
   buttonRef?: Ref<HTMLButtonElement>;
 }) {
   const id = useId();
+  const buttonId = actionId ?? `${id}-action`;
   return (
     <div className={rowClass("setting-row setting-row-trailing", { disabled })}>
       <RowText
@@ -564,15 +610,16 @@ export function ActionRow({
       <span className="setting-row-control">
         <button
           ref={buttonRef}
-          id={`${id}-action`}
+          id={buttonId}
           type="button"
           className="btn"
           disabled={disabled}
           aria-haspopup={hasPopup}
-          aria-labelledby={`${id}-action ${id}-title`}
+          aria-labelledby={`${buttonId} ${id}-title`}
           aria-describedby={description ? `${id}-desc` : undefined}
           onClick={onAction}
         >
+          {actionIcon}
           {actionLabel}
         </button>
       </span>
@@ -701,18 +748,16 @@ export function SwitchRow({
       descriptionId={`${id}-desc`}
       busy={busy && !failed}
       busyLabel={busyLabel}
-      failure={failure === undefined ? undefined : failure && (
-        <>
-          <span id={`${id}-failure`} title={failure.detail}>{failure.message}</span>{" "}
-          <button type="button" className="link setting-row-retry" onClick={failure.onRetry}>Try Again</button>
-        </>
-      )}
+      failure={failure === undefined ? undefined : failure && <FailureSentence id={`${id}-failure`} failure={failure} />}
     />
   );
   const control = {
     switchRef,
     labelledBy: `${id}-title`,
-    describedBy: failed ? `${id}-failure` : description ? `${id}-desc` : undefined,
+    // While busy the visible sentence is the busy line, and that is what the switch is described by.
+    describedBy: failed ? `${id}-failure`
+      : busy && (busyLabel !== undefined || !description) ? `${id}-desc-busy`
+      : description ? `${id}-desc` : undefined,
     checked,
     disabled,
     busy,
@@ -756,10 +801,11 @@ export function SwitchRow({
  * - An optional one-sentence description (`intro`).
  * - One `.surface` holding the rows, hairlines between them. It is the size container for the 560px
  *   rule, so the rows answer to the group's width rather than the viewport's.
- * - An optional foot line.
+ * - An optional foot line, or a disclosure (§5.5) holding what the rows leave out.
  *
  * `failure` is for an instant save that is not a switch (a switch fails in place): a compact danger
- * notice above the surface, with Retry.
+ * notice above the surface, with Retry. `notice` is any other compact notice about the whole group,
+ * in the same place, such as a capability the group's settings are waiting for.
  */
 export function SettingsGroup({
   title,
@@ -767,19 +813,25 @@ export function SettingsGroup({
   action,
   intro,
   foot,
+  notice,
   failure,
   className,
+  headingRef,
   children,
 }: {
   title?: string;
+  /** For a caller that moves focus to the group: the title becomes a programmatic focus target. */
+  headingRef?: Ref<HTMLHeadingElement>;
   /** Who or what the group's settings apply to, in Title Case. */
   scope?: string;
   /** One `.btn.sm` (or `.btn.sm.ghost`) for the whole group, such as Reset to Default. */
   action?: ReactNode;
   /** One sentence in sentence case, between the head and the surface. */
   intro?: ReactNode;
-  /** One line under the surface. */
+  /** One line under the surface, or a disclosure with the rest of what the group needs to say. */
   foot?: ReactNode;
+  /** A compact `Notice` (§13.2) between the description and the surface. */
+  notice?: ReactNode;
   failure?: RowFailure | null;
   className?: string;
   children: ReactNode;
@@ -790,12 +842,15 @@ export function SettingsGroup({
     <section className={`settings-group${className ? ` ${className}` : ""}`} aria-labelledby={title ? titleId : undefined}>
       {(title || scope || action) && (
         <div className="settings-group-head">
-          {title && <h3 className="settings-group-title" id={titleId}>{title}</h3>}
+          {title && (
+            <h3 ref={headingRef} className="settings-group-title" id={titleId} tabIndex={headingRef ? -1 : undefined}>{title}</h3>
+          )}
           {scope && <span className="settings-group-scope">{scope}</span>}
           {action && <span className="settings-group-action">{action}</span>}
         </div>
       )}
       {intro && <p className="settings-group-desc">{intro}</p>}
+      {notice}
       {failure && (
         <Notice
           tone="danger"
@@ -807,7 +862,8 @@ export function SettingsGroup({
         </Notice>
       )}
       <div className="settings-group-surface surface">{children}</div>
-      {foot && <p className="settings-group-foot">{foot}</p>}
+      {/* A block, not a paragraph, so the foot can be a disclosure (§5.5) as well as a line. */}
+      {foot && <div className="settings-group-foot">{foot}</div>}
     </section>
   );
 }

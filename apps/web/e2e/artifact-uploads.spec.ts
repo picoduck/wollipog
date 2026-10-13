@@ -19,10 +19,11 @@ for (const width of [1280, 390]) {
       await picker.click();
       await page.getByRole("option", { name: label, exact: true }).click();
       await expect(picker).toHaveAccessibleName(`Artifact Uploads: ${label}`);
-      await expect(page.getByRole("status")).toHaveText("Artifact upload preference saved.");
+      await expect(page.getByRole("status")).toHaveText("Artifact Uploads saved");
       await page.reload();
       await expect(picker).toHaveAccessibleName(`Artifact Uploads: ${label}`);
     }
+    await page.getByText("About Artifact Uploads", { exact: true }).click();
     await expect(page.getByText(/Explicit task and project hosting requirements take priority/)).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(0);
     await page.screenshot({ path: testInfo.outputPath(`artifact-settings-external-${width}.png`), fullPage: true });
@@ -39,5 +40,6 @@ for (const width of [1280, 390]) {
 test("an unsupported endpoint explains the disabled preference", async ({ page }) => {
   await page.goto("/artifact-uploads-e2e.html?entry=settings&unsupported=1");
   await expect(page.getByRole("button", { name: "Artifact Uploads: Manual" })).toHaveAttribute("aria-disabled", "true");
-  await expect(page.getByRole("alert")).toContainText("Update Wollipog");
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByText("Update Wollipog to change this setting.", { exact: true })).toBeVisible();
 });

@@ -1,5 +1,5 @@
 import { setHideAccountEmails, useAccountEmailPrivacy } from "../account-email-privacy.js";
-import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { ArtifactUploadSettings } from "./ArtifactUploadSettings.js";
 import { Notice } from "./Notice.js";
 import { State } from "./State.js";
@@ -46,11 +46,12 @@ import {
 } from "../rail-preferences.js";
 import { useRailPreferences } from "../use-rail-preferences.js";
 import { useInstanceScope } from "../instance-scope.js";
-import { useIsCompact, useIsMobile } from "./useIsMobile.js";
+import { instancePublicOrigin, useInstances } from "../instances-context.js";
+import { useIsCompact, useIsMobile, useIsTouchOnly } from "./useIsMobile.js";
 import { EXPERIMENT_COPY, experimentForViewName } from "../experiments.js";
 import { useExperiments } from "../use-experiments.js";
 import { destination } from "../navigation.js";
-import { LinkRow, SegmentedRow, SelectRow, SettingsGroup, StaticRow, SwitchRow } from "./ui/SettingsRows.js";
+import { ActionRow, LinkRow, SegmentedRow, SelectRow, SettingRow, SettingsGroup, StaticRow, SwitchRow, ValueRow } from "./ui/SettingsRows.js";
 import { Select } from "./ui/ChoiceControls.js";
 import { SCHEME_SWATCHES, type ColorScheme, type ResolvedTheme } from "../theme.js";
 import type { SessionsPreviewLayout } from "../sessions-preview-layout.js";
@@ -58,7 +59,8 @@ import { useSessionsPreviewLayout } from "../use-sessions-preview-layout.js";
 import { setTerminalPlacement, useTerminalPlacement, type TerminalPlacement } from "../terminal-placement.js";
 import { setEnterKeyBehavior, useEnterKeyBehavior, type EnterKeyBehavior } from "../enter-key.js";
 import { setShowAgentLogs, useShowAgentLogs } from "../agent-logs.js";
-import { SETTINGS_SECTIONS, viewPath, type SettingsSection, type SettingsSectionEntry, type View } from "../navigation.js";
+import { SETTINGS_SECTIONS, viewPath, type SettingsFocus, type SettingsSection, type SettingsSectionEntry, type View } from "../navigation.js";
+import { SHOW_SHORTCUTS_ID, shortcutDisplay } from "../shortcuts.js";
 import type { ExperimentFlags, ExperimentId } from "../experiments.js";
 import { effortLabel, permissionModeLabel, titleCaseLabel } from "../format.js";
 import { useFeedback } from "./FeedbackProvider.js";
@@ -81,9 +83,31 @@ export interface SettingsViewProps {
   /** Absent for `/settings` itself: the index on a phone, the first section elsewhere. */
   section?: SettingsSection;
   onNavigate: (view: View) => void;
-  onOpenShortcuts: (returnFocus: HTMLElement | null) => void;
   /** Each section's content, supplied by the shell that owns the underlying state. */
   panels: Record<SettingsSection, ReactNode>;
+}
+
+/**
+ * What an open section's panel puts in the section's head in place of its entry's: a longer
+ * description than the 38 characters a phone's index row allows, and a meta label (§11.3) that
+ * depends on what the panel loaded, such as Orchestrator's "Your Defaults". `meta` replaces the
+ * entry's scope; `null` shows none, while the panel does not know yet.
+ */
+export interface SettingsPanelHead {
+  description?: string;
+  meta?: string | null;
+}
+
+const SettingsPanelHeadContext = createContext<(head: SettingsPanelHead | null) => void>(() => undefined);
+
+/** Sets the open section's head (see `SettingsPanelHead`) for as long as the calling panel is open. */
+export function useSettingsPanelHead({ description, meta }: SettingsPanelHead): void {
+  const setHead = useContext(SettingsPanelHeadContext);
+  // Before paint, so the head never shows the entry's line for a frame and then changes.
+  useLayoutEffect(() => {
+    setHead({ description, meta });
+    return () => setHead(null);
+  }, [setHead, description, meta]);
 }
 
 /** The page header's one line (§4.2), hidden on phones as every page description is. */
@@ -93,7 +117,6 @@ export const SETTINGS_DESCRIPTION = "Preferences for this device and your accoun
 const SECTION_ICONS: Record<SettingsSection, (props: { size?: number }) => ReactNode> = {
   appearance: AppearanceIcon,
   notifications: NotificationsIcon,
-  keyboard: KeyboardIcon,
   behavior: TuningIcon,
   approvals: ShieldCheckIcon,
   orchestrator: OrchestratorControlsIcon,
@@ -135,6 +158,8 @@ export function SettingsView({ section, onNavigate, panels }: SettingsViewProps)
   const current = SETTINGS_SECTIONS.find((entry) => entry.id === section) ?? SETTINGS_SECTIONS[0]!;
   const headingRef = useRef<HTMLHeadingElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const [panelHead, setPanelHead] = useState<SettingsPanelHead | null>(null);
+  const scope = panelHead && panelHead.meta !== undefined ? panelHead.meta : current.scope;
   // Back/Forward between sections swaps `panels[current.id]`. If the focused control was inside the
   // outgoing panel it is now detached and focus is on <body>. Focusing the heading only in that
   // case keeps link-driven navigation as it is — the link keeps focus, and its `aria-current`
@@ -284,11 +309,11 @@ export function SettingsView({ section, onNavigate, panels }: SettingsViewProps)
           <div className="settings-panel-head">
             <div className="settings-panel-heading">
               <h2 id="settings-panel-heading" ref={headingRef} tabIndex={-1}>{current.title}</h2>
-              <p className="settings-panel-desc">{current.panelDescription ?? current.description}</p>
+              <p className="settings-panel-desc">{panelHead?.description ?? current.panelDescription ?? current.description}</p>
             </div>
-            {current.scope && <span className="settings-panel-scope">{current.scope}</span>}
+            {scope && <span className="settings-panel-scope">{scope}</span>}
           </div>
-          {panels[current.id]}
+          <SettingsPanelHeadContext.Provider value={setPanelHead}>{panels[current.id]}</SettingsPanelHeadContext.Provider>
         </section>
       </div>
     </div>
@@ -553,31 +578,6 @@ export function NavigationRailPanel() {
   );
 }
 
-export function KeyboardPanel({
-  shortcutLabel,
-  disabled = false,
-  onOpenShortcuts,
-}: {
-  shortcutLabel: string;
-  /** Production never disables this; the Playwright harness renders the state to measure it. */
-  disabled?: boolean;
-  onOpenShortcuts: (returnFocus: HTMLElement | null) => void;
-}) {
-  return (
-    <SettingsGroup>
-      <LinkRow
-        title="Keyboard Shortcuts"
-        description={shortcutLabel}
-        icon={<KeyboardIcon size={16} />}
-        disabled={disabled}
-        // Resolved from the DOM rather than a ref, as the dialog version did: the reference dialog
-        // returns focus here, and this row is the thing to return it to.
-        onClick={() => onOpenShortcuts(document.querySelector<HTMLElement>(".settings-view .setting-row-link"))}
-      />
-    </SettingsGroup>
-  );
-}
-
 /**
  * A setting that exists but cannot be changed here yet.
  *
@@ -594,74 +594,96 @@ export function PendingSetting({ title, description, reason }: { title: string; 
   );
 }
 
+/**
+ * Settings › Behavior (#3023): six groups, each naming once where its settings are kept (§11.3), so
+ * no row repeats "Stored on this device." Keyboard is not a section of its own: its one row is here,
+ * under Input, and `/settings/keyboard` lands on it (`focus`).
+ *
+ * Agent Defaults and Session Titles are slots: the shell supplies their panels' rows, and the head is
+ * drawn here so the order and the scope labels are one decision.
+ */
 export function BehaviorPanel({
   agentHarnessDefaults,
   sessionNaming,
-}: { agentHarnessDefaults?: ReactNode; sessionNaming?: ReactNode } = {}) {
+  onOpenShortcuts,
+  focus,
+}: {
+  agentHarnessDefaults?: ReactNode;
+  sessionNaming?: ReactNode;
+  /** Opens the Keyboard Shortcuts reference, which returns focus to the element it is given. */
+  onOpenShortcuts?: (returnFocus: HTMLElement | null) => void;
+  /** Set by a redirect: the control to focus. Each arrival is a new object, so it focuses again. */
+  focus?: SettingsFocus;
+} = {}) {
   const privacy = useAccountEmailPrivacy();
   const enterKey = useEnterKeyBehavior();
   const agentLogs = useShowAgentLogs();
+  // Shortcuts need a hardware keyboard (§15.1, §15.3): not offered on a phone or a touch-only
+  // device. `?` still opens the reference wherever a keyboard is attached.
+  const phone = useIsMobile();
+  const touchOnly = useIsTouchOnly();
+  const showShortcuts = !phone && !touchOnly;
+  const shortcutsRef = useRef<HTMLButtonElement>(null);
+  const inputHeadingRef = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    if (focus?.target !== "keyboard-shortcuts") return;
+    // A dialog open over the page keeps its focus: Back onto an old Keyboard entry with the
+    // reference open must not move focus behind the dialog, where Tab would wander the page.
+    if (document.activeElement?.closest('[aria-modal="true"]')) return;
+    // Where the row is withheld, the group it would be in.
+    (shortcutsRef.current ?? inputHeadingRef.current)?.focus();
+  }, [focus]);
   return (
     <>
-      <SettingsGroup title="Defaults">
-      {/* Stored per device and only on an explicit choice; the unstored default derives from the
-          device class (touch phones get newline, everything else send), so this row shows each
-          device's own effective behavior. The pair swaps as a unit — see enter-key.ts. */}
-      <SegmentedRow
-        title="Enter Key"
-        options={[
-          {
-            value: "send",
-            label: "Send Message",
-            description: "Enter sends; Shift+Enter inserts a new line. Stored on this device.",
-          },
-          {
-            value: "newline",
-            label: "Insert New Line",
-            description: "Enter inserts a new line; Shift+Enter sends. Stored on this device.",
-          },
-        ]}
-        value={enterKey}
-        onChange={(value) => setEnterKeyBehavior(value as EnterKeyBehavior)}
-      />
-      <ArtifactUploadSettings />
-      <PendingSetting
-        title="Reduce Motion"
-        description="Follows your system setting."
-        reason="Change it in your operating system's accessibility settings; an in-app override is not built yet."
-      />
-      <PendingSetting
-        title="Confirm Before Deleting"
-        description="Ask before removing a session, project, or connection."
-        reason="Not built yet."
-      />
-      {agentHarnessDefaults ?? (
-        <PendingSetting
-          title="Default Models, Efforts, and Permissions"
-          description="What each Agent Harness uses for a new session."
-          reason="Chosen per session when you create it; defaults are not available in this client."
+      <SettingsGroup title="Input" scope="This Device" headingRef={inputHeadingRef}>
+        {/* Stored per device and only on an explicit choice; the unstored default derives from the
+            device class (touch phones get newline, everything else send), so this row shows each
+            device's own effective behavior. The pair swaps as a unit — see enter-key.ts. */}
+        <SegmentedRow
+          title="Enter Key"
+          options={[
+            { value: "send", label: "Send Message", description: "Shift+Enter adds a new line." },
+            { value: "newline", label: "New Line", description: "Shift+Enter sends the message." },
+          ]}
+          value={enterKey}
+          onChange={(value) => setEnterKeyBehavior(value as EnterKeyBehavior)}
         />
-      )}
+        {showShortcuts && (
+          <ActionRow
+            title="Keyboard Shortcuts"
+            description={`Press ${shortcutDisplay("shortcut-reference")} anywhere to see them.`}
+            actionLabel="Show Shortcuts"
+            actionIcon={<KeyboardIcon size={14} />}
+            actionId={SHOW_SHORTCUTS_ID}
+            hasPopup="dialog"
+            buttonRef={shortcutsRef}
+            onAction={() => onOpenShortcuts?.(shortcutsRef.current)}
+          />
+        )}
       </SettingsGroup>
-      <SettingsGroup title="Transcript">
+      <SettingsGroup title="Transcript" scope="This Device">
         <SwitchRow
           title="Show Agent Logs"
-          description="Show work that holds only an agent harness's own output, such as its startup line. Stored on this device."
+          description={agentLogs
+            ? "Work that only holds agent startup logs is shown."
+            : "Work that only holds agent startup logs stays hidden."}
           checked={agentLogs}
           onClick={() => setShowAgentLogs(!agentLogs)}
         />
       </SettingsGroup>
-      <SettingsGroup title="Privacy">
+      <SettingsGroup title="Privacy" scope="This Device">
         <SwitchRow
           title="Hide Account Emails"
           description={privacy.persistent
-            ? "Hide account emails until you choose Show. Stored on this device."
+            ? "Hide account emails until you choose Show."
             : "This choice lasts until reload because this device could not save it."}
           checked={privacy.hide}
           onClick={() => setHideAccountEmails(!privacy.hide)}
         />
       </SettingsGroup>
-      {sessionNaming}
+      {agentHarnessDefaults && <SettingsGroup title="Agent Defaults" scope="Your Account">{agentHarnessDefaults}</SettingsGroup>}
+      {sessionNaming && <SettingsGroup title="Session Titles" scope="Your Account">{sessionNaming}</SettingsGroup>}
+      <ArtifactUploadSettings />
     </>
   );
 }
@@ -1487,8 +1509,9 @@ export function SessionNamingPanel() {
     (draftMode === "session_agent_account" && (legacyFollowAvailable || Boolean(machine && harness && harnessModel && effort))) ||
     (draftMode === "custom_model_endpoint" && (customDraftChanged ? customFormComplete : Boolean(custom)));
 
+  // Rows only: Behavior draws the Session Titles group around them (#3023).
   return (
-    <SettingsGroup title="Session Naming">
+    <>
       <LinkRow
         title="Session Naming"
         description={summaryStatus}
@@ -1712,7 +1735,7 @@ export function SessionNamingPanel() {
           </div>
         </div>
       )}
-    </SettingsGroup>
+    </>
   );
 }
 
@@ -1750,61 +1773,125 @@ export function ExperimentalPanel({
   );
 }
 
-export function NetworkPanel({ tailnet }: { tailnet: TailnetAccessSetting }) {
-  // ONE row is conditional, not the whole group. An early return here dropped Control-Plane Origin
-  // and Manage Instances in every browser — the exact discoverability rule this panel was fixed to
-  // satisfy a commit earlier, undone by the shape of the fix.
-  const status = tailnet.status;
-  const tailnetRow = status?.available ? (
-    <SwitchRow
-      title="Enable Tailnet Access for This Machine"
-      description={
-        <span className={tailnet.error ? "danger-text" : undefined}>
-          {tailnet.busy ? "Restarting the local control plane…" : tailnet.error ?? tailnetAccessDescription(status)}
-        </span>
-      }
-      checked={status.enabled}
-      // `busy`, not folded into `disabled`. SwitchRow disables a busy control itself and keeps
-      // showing the confirmed value; passing only `disabled` left the row announcing nothing about
-      // the write in flight while its own description said the control plane was restarting.
-      busy={tailnet.busy}
-      disabled={!status.managed}
-      onClick={tailnet.toggle}
-    />
-  ) : (
-    // Four different situations used to render the same sentence — "Tailscale is not installed or
-    // not detected" — including "we have not finished asking yet" and "the read failed". Two of
-    // those are false statements about the user's machine, and the third told them a transient
-    // state was a permanent one.
-    //
-    // `desktop` is tested BEFORE `loading`: in a browser the answer is already known synchronously,
-    // and the first paint claimed a check was running that this runtime cannot perform.
-    <PendingSetting
-      title="Enable Tailnet Access for This Machine"
-      description="Reach this control plane from your other devices."
-      reason={!tailnet.desktop
-        ? "Tailnet access is managed by the Wollipog desktop app; this is a browser."
-        : tailnet.loading
-        ? "Checking whether Tailscale is available on this machine…"
-        : tailnet.error
-        ? `Could not read the Tailscale status: ${tailnet.error}`
-        : "Tailscale is not installed or not detected on this machine."}
-    />
-  );
+/**
+ * Which Wollipog this window talks to, and whether other devices can reach this machine.
+ *
+ * Connection is about this window and shows everywhere. Tailnet is about the machine the desktop
+ * app runs on, so a browser has no Tailnet group, only a foot line saying where it is turned on.
+ */
+export function NetworkPanel({ tailnet, onNavigate }: { tailnet: TailnetAccessSetting; onNavigate: (view: View) => void }) {
+  const instances = useInstances();
+  const phone = useIsMobile();
+  // Null for the packaged desktop app's own server, which has no address another device could use;
+  // the row then names it as the instance menu does, with nothing to copy.
+  const address = instancePublicOrigin(instances);
   return (
-    <SettingsGroup>
-      {tailnetRow}
-      <PendingSetting
-        title="Control-Plane Origin"
-        description="Which control plane this window talks to."
-        reason="Switch it from the instance menu in the sidebar; an editable field here is not built yet."
-      />
-      <PendingSetting
-        title="Manage Instances"
-        description="Add, rename, or remove the control planes you connect to."
-        reason="Managed from the instance menu in the sidebar for now."
-      />
-    </SettingsGroup>
+    <>
+      <SettingsGroup
+        title="Connection"
+        scope="This Window"
+        foot={tailnet.desktop ? undefined : "Tailnet access is turned on in the Wollipog desktop app, on the machine that runs the server."}
+      >
+        <ValueRow
+          title="Connected To"
+          description="The Wollipog server this window uses."
+          value={address ?? instances.activeProfile.label}
+          mono={address !== null}
+          copy={address ?? undefined}
+          copyLabel="Copy Address"
+        />
+        {/* Where Connections › Instances exists: the desktop app with more than one instance
+            allowed, and not on a phone, whose Connections has no Instances tab (#2984). */}
+        {instances.desktopMultiInstance && !phone && (
+          <LinkRow
+            title="Manage Instances"
+            description="Add, rename or switch Wollipog servers."
+            trailing="Connections"
+            onClick={() => onNavigate({ name: "runners", section: "instances" })}
+          />
+        )}
+      </SettingsGroup>
+      {tailnet.desktop && (
+        <SettingsGroup title="Tailnet" scope="This Machine">
+          <TailnetAccessRow tailnet={tailnet} />
+        </SettingsGroup>
+      )}
+    </>
+  );
+}
+
+const TAILNET_ACCESS = "Tailnet Access";
+/** The row's frame in every state, so focus can be found again when the row changes shape. */
+const TAILNET_ACCESS_ROW_ID = "settings-tailnet-access";
+const CHECKING_FOR_TAILSCALE = "Checking for Tailscale…";
+
+/**
+ * The desktop app's Tailnet Access, in one of its states (§8.2, §8.4, §8.5).
+ *
+ * Until a status has been read there is no switch: a disabled switch announces
+ * `aria-checked="false"`, which CLAIMS the setting is off, and for a network-exposure setting that
+ * claim would be made precisely when its value is unknown. Checking and a failed read are a row
+ * with no control; Try Again after a failed read checks again.
+ */
+function TailnetAccessRow({ tailnet }: { tailnet: TailnetAccessSetting }) {
+  const status = tailnet.status;
+  const frameRef = useRef<HTMLDivElement>(null);
+  // Set when Try Again moved focus into the frame: a read that then succeeds replaces the frame with
+  // the switch, and focus goes to the switch unless it has since moved somewhere else. A disabled
+  // switch (Tailscale missing, another server on the port) cannot hold focus, so the row's frame
+  // takes it instead, as the checking frame did.
+  const holdingFocus = useRef(false);
+  useLayoutEffect(() => {
+    if (!status || !holdingFocus.current) return;
+    holdingFocus.current = false;
+    const active = document.activeElement;
+    if (active && active !== document.body && active.isConnected) return;
+    const row = document.getElementById(TAILNET_ACCESS_ROW_ID);
+    const control = row?.querySelector<HTMLButtonElement>('[role="switch"]');
+    if (control && !control.disabled) {
+      control.focus();
+    } else if (row) {
+      row.tabIndex = -1;
+      row.focus();
+    }
+  }, [status]);
+  if (!status) {
+    const failure = tailnet.loading || !tailnet.error ? null : {
+      message: "Couldn't check for Tailscale.",
+      detail: tailnet.error,
+      // Try Again is replaced by the checking line, so focus is kept in the row rather than dropped.
+      onRetry: () => {
+        frameRef.current?.focus();
+        holdingFocus.current = true;
+        tailnet.retry();
+      },
+    };
+    return (
+      <div ref={frameRef} id={TAILNET_ACCESS_ROW_ID} className="setting-row-frame" tabIndex={-1}>
+        <SettingRow
+          title={TAILNET_ACCESS}
+          busy={tailnet.loading}
+          busyLabel={CHECKING_FOR_TAILSCALE}
+          failure={failure}
+        />
+        <span className="sr-only" role="status">{failure ? failure.message : tailnet.loading ? CHECKING_FOR_TAILSCALE : ""}</span>
+      </div>
+    );
+  }
+  return (
+    <SwitchRow
+      title={TAILNET_ACCESS}
+      description={tailnetAccessDescription(status)}
+      // The confirmed value, also while busy: SwitchRow disables a busy control itself and keeps
+      // showing what is live until the write settles.
+      checked={status.enabled}
+      busy={tailnet.busy}
+      busyLabel="Restarting Wollipog on this machine…"
+      disabled={!status.available || !status.managed}
+      failure={tailnet.error ? { message: "Couldn't change Tailnet Access.", detail: tailnet.error, onRetry: tailnet.retry } : null}
+      onClick={tailnet.toggle}
+      anchorId={TAILNET_ACCESS_ROW_ID}
+    />
   );
 }
 

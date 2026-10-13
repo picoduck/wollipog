@@ -1,5 +1,5 @@
 import type { SessionReminderView, SessionView } from "@wollipog/protocol";
-import { sessionFollowUp } from "./session-follow-up.js";
+import { sessionFollowUp, sessionWorking } from "./session-follow-up.js";
 import { reminderBadgeDescription, reminderBadgeLabel, snoozedSessionAttentionReason } from "./session-reminders.js";
 import {
   sessionStatusSummary,
@@ -77,11 +77,12 @@ function snoozedCondition(session: SessionStatusSource, needs: readonly SessionC
  *    attention reasons count among them.
  * 2. Else Background Work Lost, Disconnected, then Waiting on External Job (`sessionStatusSummary()`).
  * 3. Else a fired reminder's Returned.
- * 4. Else an outstanding human result's Ready for Review.
+ * 4. Else an outstanding human result's Ready for Review, once the session has stopped working (#3074).
  * 5. Else the lifecycle status, except Awaiting Prompt, which shows no badge.
  *
  * A family's human-attention reason is visible on its parent's badge at every list width, including
- * narrow desktop columns where the chip shows only dots. The parent's own higher-ranked request wins.
+ * narrow desktop columns where the chip shows only dots. The parent's own higher-ranked request wins,
+ * and a working parent keeps its working status over the family's Ready for Review (#3074).
  * Stalled is not a second badge (#2215). A stalled session whose badge would be its busy lifecycle
  * (Queued, Starting, Running) reads Stalled instead; an attention badge keeps its own label.
  * Either way the badge takes the danger tone, stops pulsing, and its tooltip says how long the session
@@ -110,12 +111,13 @@ export function sessionRowStatus(session: SessionStatusSource, context: SessionR
   if ((!primary || (primary.kind === "lifecycle" && primary.meta.tone !== "danger" && !session.stopOperation)) &&
       needs.length === 0 && reminder?.state !== "fired" &&
       session.attention && sessionFollowUp(session as SessionView).group === "ready_for_review") {
-    primary = { kind: "lifecycle", meta: { label: "Ready for Review", tone: "warning", pulse: false },
+    primary = { kind: "lifecycle", meta: { label: "Ready for Review", tone: "neutral", pulse: false },
       description: "A new result is waiting for your assessment or next instructions.", needsYou: true };
   }
   const others = needs.slice(1).map(conditionName);
   const familyLabel = context.familyFollowUpLabel;
   if (familyLabel && primary?.meta.label !== familyLabel && needs.length === 0 &&
+      (familyLabel === "Needs Your Input" || !sessionWorking(session as SessionView)) &&
       (familyLabel === "Needs Your Input" ? 3 : 2) >= sessionFollowUp(session as SessionView).priority) {
     const previous = primary;
     const keepPrevious = previous && previous.meta.label !== familyLabel &&
@@ -125,7 +127,7 @@ export function sessionRowStatus(session: SessionStatusSource, context: SessionR
       ? "A session in this family is waiting for your input."
       : "A result in this family is waiting for your assessment or next instructions.";
     primary = { kind: "lifecycle", meta: { label: familyLabel,
-      tone: keepPrevious && previous.meta.tone === "danger" ? "danger" : "warning", pulse: false },
+      tone: keepPrevious && previous.meta.tone === "danger" ? "danger" : familyLabel === "Needs Your Input" ? "warning" : "neutral", pulse: false },
       description: keepPrevious ? `${description} ${previous.description}` : description, needsYou: true };
   }
   if (!primary) return { badge: null, others };

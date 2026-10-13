@@ -11,7 +11,8 @@ import {
   parseInboxSplitRatio,
   parseSessionFilters,
 } from "./store.js";
-import { encodeResourceId, type View } from "./navigation.js";
+import { encodeResourceId, viewFromPath, type View } from "./navigation.js";
+import { registerLeaveGuard } from "./leave-guard.js";
 import { uiStreamSubscriptions } from "./ui-subscriptions.js";
 import { saveInstanceStorageValue, type KeyValueStorage } from "./instance-storage.js";
 import type { SessionEvent, SessionView } from "@wollipog/protocol";
@@ -46,6 +47,26 @@ test("repeated identical attention activation updates an ephemeral nonce without
   assert.deepEqual(pushed, [], "repeat activation must not add an identical browser history entry");
 });
 
+test("Back onto /settings/keyboard while Behavior is open still delivers its focus target (#3023)", () => {
+  const pushed: View[] = [];
+  const store = new Store({ name: "settings", section: "behavior" }, (view) => pushed.push(view));
+  const focusOf = () => {
+    const view = store.getState().view;
+    return view.name === "settings" ? view.focus : undefined;
+  };
+
+  store.navigateFromHistory(viewFromPath("/settings/keyboard")!);
+  assert.deepEqual(focusOf(), { target: "keyboard-shortcuts", activationId: 1 },
+    "the same address is still an arrival the panel must answer");
+  store.navigateFromHistory(viewFromPath("/settings/keyboard")!);
+  assert.equal(focusOf()?.activationId, 2, "each arrival is a new activation");
+  store.navigate(viewFromPath("/settings/keyboard")!);
+  assert.equal(focusOf()?.activationId, 3);
+  assert.deepEqual(pushed, [], "an activation on the same address writes no history");
+  store.navigateFromHistory({ name: "settings", section: "behavior" });
+  assert.equal(focusOf()?.activationId, 3, "a plain visit to the same address changes nothing");
+});
+
 test("history traversal updates view state without writing a new entry", () => {
   const pushed: View[] = [];
   const store = new Store({ name: "board" }, (view) => pushed.push(view));
@@ -70,7 +91,7 @@ test("Settings records one exact return view without accumulating nested Setting
   store.navigate({ name: "settings" });
   assert.deepEqual(store.getState().settingsReturnView, origin);
 
-  store.navigate({ name: "settings", section: "keyboard" });
+  store.navigate({ name: "settings", section: "behavior" });
   store.navigate({ name: "settings", section: "network" });
   assert.deepEqual(store.getState().settingsReturnView, origin,
     "section navigation must not replace the non-Settings origin");
@@ -95,6 +116,47 @@ test("direct Settings entry has an Inbox fallback and browser traversal shares r
   assert.deepEqual(store.getState().settingsReturnView, { name: "inbox" });
   store.navigateFromHistory({ name: "usage" });
   assert.equal(store.getState().settingsReturnView, null);
+});
+
+test("an editor's leave guard holds in-app navigation until it lets the person leave (#3026)", () => {
+  const pushed: View[] = [];
+  const store = new Store({ name: "settings", section: "orchestrator" }, (view) => pushed.push(view));
+  const asked: Array<() => void> = [];
+  const release = registerLeaveGuard((leave) => asked.push(leave));
+  try {
+    store.navigate({ name: "settings", section: "orchestrator" });
+    assert.equal(asked.length, 0, "the view already on screen is not a leave");
+
+    store.navigate({ name: "settings", section: "appearance" });
+    assert.equal(asked.length, 1);
+    assert.deepEqual(store.getState().view, { name: "settings", section: "orchestrator" }, "held while it asks");
+    assert.deepEqual(pushed, []);
+
+    // Choosing to leave goes where the link was going, and the guard does not ask again.
+    asked[0]!();
+    assert.deepEqual(store.getState().view, { name: "settings", section: "appearance" });
+    assert.deepEqual(pushed, [{ name: "settings", section: "appearance" }]);
+    store.navigate({ name: "inbox" });
+    assert.equal(asked.length, 1, "the guard released itself before leaving");
+    assert.deepEqual(store.getState().view, { name: "inbox" });
+  } finally {
+    release();
+  }
+});
+
+test("browser Back and Forward are never held, so no history entry is rewritten (#3026)", () => {
+  const pushed: View[] = [];
+  const store = new Store({ name: "settings", section: "orchestrator" }, (view) => pushed.push(view));
+  const asked: Array<() => void> = [];
+  const release = registerLeaveGuard((leave) => asked.push(leave));
+  try {
+    store.navigateFromHistory({ name: "usage" });
+    assert.equal(asked.length, 0);
+    assert.deepEqual(store.getState().view, { name: "usage" });
+    assert.deepEqual(pushed, [], "pushing the editor's address back would drop the forward entries");
+  } finally {
+    release();
+  }
 });
 
 test("Inbox state preserves one selection per split and clamps the persisted ratio", () => {

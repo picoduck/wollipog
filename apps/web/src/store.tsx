@@ -27,7 +27,7 @@ import type {
   ShellStatus,
   UiToControlPlane,
 } from "@wollipog/protocol";
-import { pendingRequests } from "@wollipog/protocol";
+import { pendingRequests, UI_SUBSCRIPTION_RATE_WINDOW_MS } from "@wollipog/protocol";
 import { reconcileQuestionDrafts } from "./question-drafts.js";
 import { CONTROL_PLANE_WS } from "./config.js";
 import { expireFollowTailAnchor } from "./useFollowTail.js";
@@ -49,6 +49,7 @@ import {
 } from "./activity.js";
 import { BrowserNavigation, sameView, viewFromNotificationMessage, type View, type ViewNavigation } from "./navigation.js";
 import { defaultPublishScheduler, type StorePublishScheduler } from "./store-publish-scheduler.js";
+import { interceptLeave } from "./leave-guard.js";
 export { animationFramePublishScheduler, setDefaultPublishScheduler, type StorePublishScheduler } from "./store-publish-scheduler.js";
 import {
   INBOX_SELECTION_STORAGE_KEY,
@@ -72,6 +73,7 @@ import {
 import {
   EMPTY_UI_SUBSCRIPTION_DELIVERY,
   eventHighWater,
+  UiSubscriptionPacer,
   UiSubscriptionSynchronizer,
   isSessionActivityObservable,
   type UiSubscriptionDeliveryState,
@@ -2238,22 +2240,37 @@ export class Store {
    */
   reconnectNow = (): boolean => this.reconnectHandler?.() ?? false;
 
+  /**
+   * A view that asks for something to be focused — a session's attention target, or a Settings
+   * control a redirect lands on (#3023) — is an activation: each arrival gets a fresh id, so arriving
+   * again on the same address focuses it again rather than being dropped as the same view.
+   */
+  private activate(view: View): { view: View; activation: boolean } {
+    if (view.name === "session" && view.attention) {
+      return { view: { ...view, attention: { ...view.attention, activationId: ++this.attentionActivation } }, activation: true };
+    }
+    if (view.name === "settings" && view.focus) {
+      return { view: { ...view, focus: { ...view.focus, activationId: ++this.attentionActivation } }, activation: true };
+    }
+    return { view, activation: false };
+  }
   navigate = (view: View): void => {
-    const activated = view.name === "session" && view.attention
-      ? { ...view, attention: { ...view.attention, activationId: ++this.attentionActivation } }
-      : view;
+    const { view: activated, activation } = this.activate(view);
     if (sameView(this.state.view, activated)) {
-      if (activated.name === "session" && activated.attention) this.dispatch({ type: "navigate", view: activated });
+      if (activation) this.dispatch({ type: "navigate", view: activated });
       return;
     }
+    // An editor with unsaved changes asks first (leave-guard.ts), and navigates here itself if the
+    // person chooses to leave.
+    if (interceptLeave(() => this.navigate(view))) return;
     this.dispatch({ type: "navigate", view: activated });
     this.onNavigate?.(activated);
   };
   navigateFromHistory = (view: View): void => {
-    const activated = view.name === "session" && view.attention
-      ? { ...view, attention: { ...view.attention, activationId: ++this.attentionActivation } }
-      : view;
-    if (!sameView(this.state.view, activated) || (activated.name === "session" && activated.attention)) {
+    const { view: activated, activation } = this.activate(view);
+    // Not asked of a leave guard: Back and Forward have already moved the history position, and
+    // putting the editor's address back would truncate the forward entries (#3026's review).
+    if (!sameView(this.state.view, activated) || activation) {
       this.dispatch({ type: "navigate", view: activated });
     }
   };
@@ -2873,17 +2890,30 @@ export function StoreProvider({
     let reconnectDelay = 1_500;
     let cancelBackgroundObservations = () => {};
     const subscriptionSync = new UiSubscriptionSynchronizer();
+    // Lives as long as the store, not the socket: the server's admission window survives reconnects.
+    const subscriptionPacer = new UiSubscriptionPacer();
+    let subscriptionPaceTimer: number | null = null;
     const syncSubscriptions = () => {
       const ws = wsRef.current;
-      if (!ws || ws.readyState !== UI_SOCKET_OPEN) return;
+      // A scheduled trailing send reads the store when it fires, so it carries the latest selection.
+      if (!ws || ws.readyState !== UI_SOCKET_OPEN || subscriptionPaceTimer !== null) return;
       const state = store.getState();
-      const msg: UiToControlPlane | null = subscriptionSync.nextMessage(
-        state,
-        // A paged header and partial rows are not an authoritative selection. Sending each
-        // growing inventory wastes the principal's shared admission window on every connect.
-        state.streamSubscriptions.mode === "targeted" && state.snapshotLoaded,
-      );
+      // A paged header and partial rows are not an authoritative selection. Sending each
+      // growing inventory wastes the principal's shared admission window on every connect.
+      const enabled = state.streamSubscriptions.mode === "targeted" && state.snapshotLoaded;
+      if (!subscriptionSync.pending(state, enabled)) return;
+      // Monotonic: a wall-clock step forward must not grant refill the server's window never granted.
+      const wait = subscriptionPacer.delay(performance.now());
+      if (wait > 0) {
+        subscriptionPaceTimer = window.setTimeout(() => {
+          subscriptionPaceTimer = null;
+          if (!closed) syncSubscriptions();
+        }, wait);
+        return;
+      }
+      const msg: UiToControlPlane | null = subscriptionSync.nextMessage(state, enabled);
       if (!msg || msg.type !== "session_subscriptions") return;
+      subscriptionPacer.take(performance.now());
       // Freeze the durable recovery cursor before the server can apply this replacement. A live
       // event delivered immediately after its acknowledgement must not advance us past older gaps.
       store.prepareSubscriptionRecovery(msg.revision, msg.sessionIds);
@@ -2977,7 +3007,12 @@ export function StoreProvider({
         const unauthorized = ev.code === 1008;
         dispatch({ type: "conn", conn: unauthorized ? "unauthorized" : "offline", authRequired: unauthorized || undefined });
         // Equal jitter avoids synchronized retry waves, while the exponential window is capped.
-        const delay = unauthorized ? 10_000 : reconnectDelay * (0.5 + Math.random() * 0.5);
+        const jittered = reconnectDelay * (0.5 + Math.random() * 0.5);
+        // 1013 is the CP's per-window admission refusing this caller (#3122). Its window survives
+        // reconnects, so retrying inside it is refused again; wait it out once instead of flapping.
+        // The wait stays bounded by the same 30-second ceiling as ordinary backoff.
+        const delay = unauthorized ? 10_000
+          : ev.code === 1013 ? Math.max(jittered, UI_SUBSCRIPTION_RATE_WINDOW_MS) : jittered;
         if (!unauthorized) reconnectDelay = Math.min(30_000, reconnectDelay * 2);
         reconnectRef.current = window.setTimeout(() => {
           reconnectRef.current = null;
@@ -3023,6 +3058,8 @@ export function StoreProvider({
       cancelBackgroundObservations();
       if (reconnectRef.current) window.clearTimeout(reconnectRef.current);
       reconnectRef.current = null;
+      if (subscriptionPaceTimer !== null) window.clearTimeout(subscriptionPaceTimer);
+      subscriptionPaceTimer = null;
       const ws = wsRef.current;
       if (ws) {
         ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;

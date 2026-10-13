@@ -8,8 +8,11 @@ import {
   type DelegatableWorkflowDecisionCategory,
 } from "@wollipog/protocol";
 import { agentHarnessOptionLabel } from "../agent-presentation.js";
+import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { effortLabel } from "../format.js";
+import { useLeaveGuard } from "../leave-guard.js";
+import { viewPath } from "../navigation.js";
 import {
   ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE,
   INTEGRATION_ISOLATION_BY_HARNESS,
@@ -17,9 +20,16 @@ import {
   INTEGRATION_ISOLATION_PRESERVED,
   controlPlaneSupportsIntegrationIsolation,
 } from "../session-preset-defaults.js";
+import { useOptionalNavigate } from "../store.js";
 import { DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE } from "../ui-evidence-disclosure.js";
+import { useFeedback } from "./FeedbackProvider.js";
+import { ChevronRightIcon, LockIcon } from "./Icons.js";
+import { Notice } from "./Notice.js";
+import { SkeletonRows } from "./QuestionPoliciesPanel.js";
+import { SaveBar } from "./SaveBar.js";
+import { useSettingsPanelHead } from "./SettingsView.js";
 import type { SelectOption } from "./ui/ChoiceControls.js";
-import { NumberRow, SegmentedRow, SelectRow, SettingsGroup, StaticRow } from "./ui/SettingsRows.js";
+import { NumberRow, SegmentedRow, SelectRow, SettingsGroup } from "./ui/SettingsRows.js";
 
 const AUTO = "__automatic__";
 const DECISION_LABELS: Record<DelegatableWorkflowDecisionCategory, string> = {
@@ -31,9 +41,9 @@ const DECISION_LABELS: Record<DelegatableWorkflowDecisionCategory, string> = {
 };
 /*
  * A listbox rather than pills, by SettingsRows' own split: these options each need a sentence to
- * choose between, and "Questions and Approvals" is no short label. In the panel's 260px value column
- * three equal pills are 83px each, so that label drew over its neighbour at every width (#2413).
- * New Session offers the same choice as a Select.
+ * choose between, and "Questions and Approvals" is no short label. As three equal pills in the old
+ * 260px value column they were 83px each, so that label drew over its neighbour at every width
+ * (#2413). New Session offers the same choice as a Select.
  */
 const PARENT_CONTROL_OPTIONS: SelectOption<OrchestratorDefaults["delegation"]["parentControl"]>[] = [
   { value: "off", label: "Human", description: "Keep descendant questions and ordinary approvals human-owned." },
@@ -52,10 +62,42 @@ const FOLLOW_UP_OPTIONS: SelectOption<OrchestratorDefaults["behavior"]["followUp
   { value: "execute_approved", label: "Execute Approved", description: "Continue with follow-ups after their required approval." },
 ];
 
-function unavailableError(caught: unknown): string {
-  return caught instanceof Error && "status" in caught && (caught as Error & { status?: unknown }).status === 404
-    ? "This version of Wollipog does not support Orchestrator settings. Update or restart Wollipog so it matches this dashboard, then try again."
-    : caught instanceof Error ? caught.message : "Could not load Orchestrator settings.";
+/*
+ * Off | On rather than a switch: this is a draft that saves from the save bar, and a switch means
+ * "applies now" (§8.4, §8.6). The same two pills as New Session's Orchestrator Policy dialog.
+ *
+ * Both policies bound the Orchestrator session itself, not its children: the control plane attaches
+ * them to the Orchestrator's launch only, and children keep their own permissions and integrations.
+ * The sentences say so rather than promising a boundary children do not have.
+ */
+const STRICT_ISOLATION_OPTIONS = [
+  { value: "off", label: "Off", description: "The Orchestrator uses its agent's own permissions and governance." },
+  { value: "on", label: "On", description: "The Orchestrator can't write to the project. Needs a supported sandbox." },
+];
+const INTEGRATION_ISOLATION_OPTIONS = [
+  { value: "off", label: "Off", description: "The Orchestrator loads the same integrations as any other session." },
+  { value: "on", label: "On", description: "The Orchestrator gets Wollipog's management tools and no other integration." },
+];
+
+const PANEL_DESCRIPTION = "Defaults for new campaigns. Running campaigns keep their own.";
+const SKELETON_DELAY_MS = 300;
+const HARNESS_UNSUPPORTED = "Update Wollipog on a machine to choose a fixed Child Harness.";
+const PAIR_ERROR = "Choose a model and effort this agent supports, or Automatic.";
+const LIMIT_ERROR = `Enter a whole number from 0 to ${MAX_LIVE_CHILD_LIMIT}.`;
+
+type LoadFailure = { kind: "unsupported" } | { kind: "failed"; detail: string };
+
+function loadFailure(caught: unknown): LoadFailure {
+  return caught instanceof ApiError && caught.status === 404
+    ? { kind: "unsupported" }
+    : { kind: "failed", detail: caught instanceof Error ? caught.message : String(caught) };
+}
+
+/** A failed save in one sentence: the server's own when it answered, which says what to change. */
+function saveFailure(caught: unknown): string {
+  return caught instanceof ApiError && caught.message
+    ? caught.message
+    : "Couldn't reach Wollipog to save your defaults.";
 }
 
 function cloneDefaults(defaults: OrchestratorDefaults): OrchestratorDefaults {
@@ -66,29 +108,50 @@ function cloneDefaults(defaults: OrchestratorDefaults): OrchestratorDefaults {
   };
 }
 
+/** The same JSON whatever order its keys were written in, so a draft equals what it was cloned from. */
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) =>
+      `${JSON.stringify(key)}:${canonical((value as Record<string, unknown>)[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "undefined";
+}
+
+/**
+ * Settings › Orchestrator: the policy every new campaign starts with, as an editor (§8.6). Changes
+ * are a draft, saved together from the save bar, which shows only while the draft differs from the
+ * saved defaults or a save failed. Each problem is shown at the setting that causes it, and while
+ * any is, the bar says how many to fix instead of saving.
+ */
 export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevision?: object } = {}) {
   const api = useApi();
+  const { confirm } = useFeedback();
+  const navigate = useOptionalNavigate();
   const [view, setView] = useState<OrchestratorSettingsView | null>(null);
   const [draft, setDraft] = useState<OrchestratorDefaults | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [failure, setFailure] = useState<LoadFailure | null>(null);
+  const [showSkeleton, setShowSkeleton] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const generation = useRef(0);
-  const draftDirty = useRef(false);
+
+  const dirty = !!draft && !!view && canonical(draft) !== canonical(view.defaults);
+  // Read by a refresh that lands later: discovery brings new capabilities, never a lost draft.
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
 
   const load = useCallback(async () => {
     const current = ++generation.current;
-    setLoading(true);
-    setError(null);
+    setFailure(null);
     try {
       const next = await api.orchestratorSettings();
       if (generation.current !== current) return;
       setView(next);
-      if (!draftDirty.current) setDraft(cloneDefaults(next.defaults));
+      if (!dirtyRef.current) setDraft(cloneDefaults(next.defaults));
     } catch (caught) {
-      if (generation.current === current) setError(unavailableError(caught));
-    } finally {
-      if (generation.current === current) setLoading(false);
+      // A refresh that fails keeps the loaded editor; only a first load has nothing else to show.
+      if (generation.current === current) setFailure(loadFailure(caught));
     }
   }, [api]);
 
@@ -97,11 +160,53 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
     return () => { generation.current += 1; };
   }, [load, discoveryRevision]);
 
+  // §12.3: nothing for the first 300ms, so a quick load never flashes a skeleton.
+  useEffect(() => {
+    const timer = window.setTimeout(() => setShowSkeleton(true), SKELETON_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  useSettingsPanelHead({
+    description: PANEL_DESCRIPTION,
+    meta: view ? (view.source === "user_default" ? "Your Defaults" : "Wollipog Defaults") : null,
+  });
+
+  const askToLeave = (leave: () => void) => {
+    void confirm({
+      title: "Discard Changes",
+      message: "Your Orchestrator defaults have changes that aren't saved. Discarding them keeps the saved defaults.",
+      confirmLabel: "Discard Changes",
+      cancelLabel: "Keep Editing",
+      // Danger opens with focus on Keep Editing, the choice that loses nothing (§7.4).
+      tone: "danger",
+    // The confirmation belongs to the app, so it can outlive this panel (browser Back is not held):
+    // confirmed after the editor is gone, there is nothing left to leave from.
+    }).then((discard) => { if (discard && alive.current) leave(); });
+  };
+  // A save in flight cannot be discarded (Discard is disabled while busy, §8.6), so leaving waits
+  // for it: a saved draft then leaves without asking, and a refused one asks as any dirty draft does.
+  const busyRef = useRef(false);
+  busyRef.current = busy;
+  const leaveAfterSave = useRef<(() => void) | null>(null);
+  // Whether the editor is still on screen. Gone before a save settled or a confirmation was answered
+  // (browser Back is not held), nothing is left to leave from.
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      leaveAfterSave.current = null;
+    };
+  }, []);
+  useLeaveGuard(dirty, (leave) => {
+    if (busyRef.current) leaveAfterSave.current = leave;
+    else askToLeave(leave);
+  });
+
   const updateBehavior = <K extends keyof OrchestratorDefaults["behavior"]>(
     key: K,
     value: OrchestratorDefaults["behavior"][K],
   ) => {
-    draftDirty.current = true;
     setDraft((current) => current ? {
       ...current,
       behavior: { ...current.behavior, [key]: value },
@@ -111,7 +216,6 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
     category: DelegatableWorkflowDecisionCategory,
     authority: "human" | "orchestrator",
   ) => {
-    draftDirty.current = true;
     setDraft((current) => current ? {
       ...current,
       delegation: {
@@ -124,7 +228,6 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
     key: Key,
     value: OrchestratorDefaults["execution"][Key],
   ) => {
-    draftDirty.current = true;
     setDraft((current) => current ? {
       ...current,
       execution: { ...current.execution, [key]: value },
@@ -134,9 +237,9 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
   // Strict Project Isolation's harness shapes carry no user integration at all, so the settings
   // panel shows the value those launches actually have rather than the one stored underneath it.
   const integrationIsolationImplied = draft?.execution.strictProjectIsolation === true;
-  // An older control plane's update parser rejects a defaults payload carrying this key, so the
-  // control is disabled there. The draft is a plain spread of the served payload, so a save from
-  // this panel round-trips WITHOUT the field and every unrelated default stays saveable.
+  // An older server's update parser rejects a defaults payload carrying this key, so the control is
+  // disabled there. The draft is a plain spread of the served payload, so a save from this panel
+  // round-trips WITHOUT the field and every unrelated default stays saveable.
   const integrationIsolationSupported = controlPlaneSupportsIntegrationIsolation(view?.defaults);
   const harnessPolicySupported = view?.capabilities.harnesses !== undefined;
   const harnesses = view?.capabilities.harnesses ?? [];
@@ -153,7 +256,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
       label: "Automatic",
       description: harnessPolicySupported
         ? "Choose one compatible Agent Harness with the selected model and effort at child creation."
-        : "Update Wollipog to configure a fixed Child Harness.",
+        : HARNESS_UNSUPPORTED,
     }];
     for (const harness of harnesses) {
       options.push({
@@ -166,6 +269,11 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
     }
     return options;
   }, [harnessPolicySupported, harnesses]);
+  // A saved model that no current installation advertises, which only another choice can repair.
+  const advertisedModels = harnessPolicySupported
+    ? candidateHarnesses.flatMap((harness) => harness.models)
+    : view?.capabilities.models ?? [];
+  const modelRetired = !!selectedModel && !advertisedModels.some((model) => model.id === selectedModel);
   const modelOptions = useMemo(() => {
     const options = [{ value: AUTO, label: "Automatic", description: "Choose from live child capabilities at creation time." }];
     const models = new Map<string, { names: Set<string>; displayName: string }>();
@@ -255,45 +363,122 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
           : view.capabilities.installations > 0
       : view?.capabilities.status === "available");
 
+  /*
+   * Each problem at the setting that causes it (§8.5). A fixed harness no installation advertises is
+   * the harness's to fix; a retired model is the model's; anything else unsupported is the model and
+   * effort the person chose together. Automatic is never the cause.
+   */
+  const harnessRetired = harnessPolicySupported && !!selectedHarness && (selectedHarnessCapability?.installations ?? 0) === 0;
+  const harnessError = !fixedPairValid && harnessRetired ? "Choose another Child Harness, or Automatic." : null;
+  const modelError = fixedPairValid || harnessError ? null
+    : modelRetired ? "Choose another model."
+      : selectedModel ? PAIR_ERROR : null;
+  const effortError = fixedPairValid || harnessError || modelRetired ? null : selectedEffort ? PAIR_ERROR : null;
+  // An unsupported fixed harness with Automatic model and effort still has to be fixed somewhere.
+  const pairFallbackError = !fixedPairValid && !harnessError && !modelError && !effortError && selectedHarness
+    ? "Choose another Child Harness, or Automatic." : null;
+  const limitError = limitValid ? null : LIMIT_ERROR;
+  const invalidCount = [harnessError ?? pairFallbackError, modelError, effortError, limitError].filter(Boolean).length;
+
+  // No installation advertises child capabilities at all: the group says so once, at its top, and
+  // a model or effort left on Automatic has nothing else to offer until one does.
+  const capabilities = view?.capabilities;
+  const capabilityNotice = !capabilities ? null
+    : capabilities.status === "unavailable" && capabilities.installations === 0
+      ? capabilities.reason ?? "No machine advertises child models and efforts yet."
+      : !harnessPolicySupported ? HARNESS_UNSUPPORTED : null;
+  const noInstallations = capabilities?.status === "unavailable" && capabilities.installations === 0;
+  // Under each disabled select, pointing at the notice rather than repeating its sentences.
+  const noInstallationsReason = noInstallations ? "Unavailable until a machine advertises models and efforts." : undefined;
+
   const save = async () => {
-    if (!draft || busy || !limitValid || !fixedPairValid) return;
+    if (!draft || busy || invalidCount > 0) return;
     generation.current += 1;
+    busyRef.current = true;
     setBusy(true);
-    setError(null);
+    setSaveError(null);
+    let saved = false;
     try {
       const next = await api.updateOrchestratorSettings({ defaults: draft });
       setView(next);
       setDraft(cloneDefaults(next.defaults));
-      draftDirty.current = false;
+      saved = true;
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not save Orchestrator defaults.");
+      // The draft stays as typed, and the bar offers Try Again (§8.6).
+      setSaveError(saveFailure(caught));
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
+    const leave = leaveAfterSave.current;
+    leaveAfterSave.current = null;
+    if (leave) {
+      if (saved) leave();
+      else askToLeave(leave);
+    }
+  };
+  const discard = () => {
+    if (view) setDraft(cloneDefaults(view.defaults));
+    setSaveError(null);
   };
 
-  if (!draft) {
-    return <SettingsGroup title="Behavior">
-      <StaticRow
-        title="Orchestrator Defaults"
-        description={error ?? (loading ? "Loading Orchestrator defaults…" : "Orchestrator defaults are unavailable.")}
-      />
-      {error && <button type="button" className="btn ghost sm" onClick={() => void load()}>Retry</button>}
-    </SettingsGroup>;
+  if (!draft || !view) {
+    if (failure?.kind === "unsupported") {
+      return <Notice
+        tone="danger"
+        role="alert"
+        title="Orchestrator Settings Need a Newer Wollipog"
+        actions={<button type="button" className="btn sm" onClick={() => void load()}>Retry</button>}
+      >
+        This version of Wollipog does not support Orchestrator settings. Update or restart Wollipog so it matches this dashboard, then try again.
+      </Notice>;
+    }
+    if (failure) {
+      return <Notice
+        tone="danger"
+        role="alert"
+        title="Couldn't Load Orchestrator Settings"
+        actions={<button type="button" className="btn sm" onClick={() => void load()}>Retry</button>}
+        details={<code>{failure.detail}</code>}
+      >
+        Your saved defaults are unchanged. Retry to load them again.
+      </Notice>;
+    }
+    if (!showSkeleton) return null;
+    return <>
+      <SettingsGroup title="Children"><SkeletonRows count={6} announce="Loading Orchestrator defaults…" /></SettingsGroup>
+      <SettingsGroup title="Execution Permissions"><SkeletonRows count={2} announce="" /></SettingsGroup>
+      <SettingsGroup title="Decision Delegation"><SkeletonRows count={6} announce="" /></SettingsGroup>
+    </>;
   }
-  const capabilities = view!.capabilities;
-  const source = view!.source;
 
-  return <div className="orchestrator-settings" aria-busy={busy || loading || undefined}>
-    <SettingsGroup title="Behavior" intro="Defaults apply to new campaigns only. Each campaign stores its own effective policy.">
+  const limit = draft.behavior.maximumConcurrentChildren;
+  return <>
+    <SettingsGroup
+      title="Children"
+      notice={capabilityNotice && <Notice
+        tone="warning"
+        compact
+        actions={<a
+          className="btn sm"
+          href={viewPath({ name: "runners", section: "machines" })}
+          onClick={(event) => {
+            if (!navigate || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+            event.preventDefault();
+            navigate({ name: "runners", section: "machines" });
+          }}
+        >Open Connections</a>}
+      >
+        {capabilityNotice}
+      </Notice>}
+    >
       <SelectRow
         title="Child Harness"
-        description={harnessPolicySupported
-          ? "Automatic or a fixed stable Agent Harness identity. Execution context is part of the identity."
-          : "Fixed Child Harness policy is unavailable on this version of Wollipog. Update or restart Wollipog to enable this control."}
+        description="The agent that runs each child."
         options={harnessOptions}
         value={selectedHarness ? agentHarnessIdentityKey(selectedHarness) : AUTO}
         disabled={!harnessPolicySupported}
+        error={harnessError ?? pairFallbackError}
         onChange={(value) => {
           const childHarness = value === AUTO
             ? null
@@ -301,7 +486,6 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
               const harness = harnesses.find((candidate) => agentHarnessIdentityKey(candidate) === value);
               return harness ? { agentId: harness.agentId, driver: harness.driver, context: harness.context } : null;
             })();
-          draftDirty.current = true;
           setDraft((current) => current ? {
             ...current,
             behavior: { ...current.behavior, childHarness, childModel: null, childEffort: null },
@@ -310,9 +494,13 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
       />
       <SelectRow
         title="Child Model"
-        description="Automatic or a model advertised through a compatible Child Harness."
+        description="Automatic lets each child's agent choose."
         options={modelOptions}
         value={draft.behavior.childModel ?? AUTO}
+        // A saved model stays changeable, so it can be put back to Automatic.
+        disabled={noInstallations && !selectedModel}
+        disabledReason={noInstallationsReason}
+        error={modelError}
         onChange={(value) => {
           const childModel = value === AUTO ? null : value;
           const effortCompatible = !draft.behavior.childEffort || candidateHarnesses.some((harness) =>
@@ -320,7 +508,6 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
               ? harness.supportedPairs.some((pair) => pair.modelId === childModel &&
                 pair.effortLevels.includes(draft.behavior.childEffort!))
               : harness.effortLevels.includes(draft.behavior.childEffort!));
-          draftDirty.current = true;
           setDraft((current) => current ? {
             ...current,
             behavior: { ...current.behavior, childModel, ...(!effortCompatible ? { childEffort: null } : {}) },
@@ -329,20 +516,24 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
       />
       <SelectRow
         title="Child Effort"
-        description="Automatic or an effort advertised for the selected harness and model combination."
+        description="Automatic uses the model's own default."
         options={effortOptions}
         value={draft.behavior.childEffort ?? AUTO}
+        disabled={noInstallations && !selectedEffort}
+        disabledReason={noInstallationsReason}
+        error={effortError}
         onChange={(value) => updateBehavior("childEffort", value === AUTO ? null : value)}
       />
       <NumberRow
         title="Maximum Concurrent Children"
-        description="Uses the existing live-child admission limit. Choose 0 to pause child admission."
+        description={`0 pauses new children. Up to ${MAX_LIVE_CHILD_LIMIT}.`}
         inputId="orchestrator-max-children"
         min={0}
         max={MAX_LIVE_CHILD_LIMIT}
-        value={draft.behavior.maximumConcurrentChildren}
-        error={limitValid ? null : `Enter a whole number from 0 to ${MAX_LIVE_CHILD_LIMIT}.`}
-        onChange={(value) => updateBehavior("maximumConcurrentChildren", Number(value))}
+        // An emptied field is NaN in the draft, so it is invalid rather than a silent 0.
+        value={Number.isNaN(limit) ? "" : limit}
+        error={limitError}
+        onChange={(value) => updateBehavior("maximumConcurrentChildren", value.trim() === "" ? Number.NaN : Number(value))}
       />
       <SelectRow
         title="Follow-Ups"
@@ -365,75 +556,65 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
 
     <SettingsGroup
       title="Execution Permissions"
-      intro="The Orchestrator role defaults to delegation. Execution permissions are a separate policy and apply only to new campaigns."
+      foot={<details className="disclosure orchestrator-about">
+        <summary><ChevronRightIcon className="disclosure-chevron" />About Isolation</summary>
+        <div className="disclosure-body">
+          <p>{draft.execution.strictProjectIsolation
+            ? "Project writes are blocked by operating-system or audited provider sandbox enforcement. Unsupported harness and isolation combinations are refused."
+            : "Provider approval controls and repository governance still apply. Orchestrator mode does not claim operating-system read-only enforcement. Explicit parent implementation must use its own worktree."}</p>
+          <p>{!integrationIsolationSupported
+            ? INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED
+            : integrationIsolationImplied
+              ? `Strict Project Isolation already launches without provider integrations, so Integration Isolation is implied and cannot be turned off. ${ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE}`
+              : draft.execution.integrationIsolation
+                ? `${INTEGRATION_ISOLATION_BY_HARNESS} ${INTEGRATION_ISOLATION_PRESERVED}`
+                : "Hooks, plugins, extensions, skills, and configured MCP servers load exactly as they would for a normal session."}</p>
+        </div>
+      </details>}
     >
       <SegmentedRow
         title="Strict Project Isolation"
-        options={[
-          {
-            value: "disabled",
-            label: "Disabled",
-            description: "Use provider permissions and governance. Explicit parent implementation must use its own worktree.",
-          },
-          {
-            value: "enabled",
-            label: "Enabled",
-            description: "Enforce the legacy scratch-only project boundary with a compatible isolation backend.",
-          },
-        ]}
-        value={draft.execution.strictProjectIsolation ? "enabled" : "disabled"}
-        onChange={(value) => updateExecution("strictProjectIsolation", value === "enabled")}
-      />
-      <StaticRow
-        title="Effective Boundary"
-        description={draft.execution.strictProjectIsolation
-          ? "Project writes are blocked by operating-system or audited provider sandbox enforcement. Unsupported harness and isolation combinations are refused."
-          : "Provider approval controls and repository governance still apply. Orchestrator mode does not claim operating-system read-only enforcement."}
+        options={STRICT_ISOLATION_OPTIONS}
+        value={draft.execution.strictProjectIsolation ? "on" : "off"}
+        onChange={(value) => updateExecution("strictProjectIsolation", value === "on")}
       />
       <SegmentedRow
         title="Integration Isolation"
-        options={[
-          {
-            value: "disabled",
-            label: "Disabled",
-            description: "Load the same integrations as a normal session with the selected harness.",
-          },
-          {
-            value: "enabled",
-            label: "Enabled",
-            // Account defaults have no selected harness, so the pill states the shared promise and
-            // the row below it carries the per-harness differences.
-            description: "Launch with Wollipog's management tools as the only integration.",
-          },
-        ]}
+        options={INTEGRATION_ISOLATION_OPTIONS}
         // Strict Project Isolation already launches without any provider integration, so the value
         // it implies is shown here rather than the stored one, and the control cannot contradict it.
-        value={integrationIsolationImplied || draft.execution.integrationIsolation ? "enabled" : "disabled"}
+        value={integrationIsolationImplied || draft.execution.integrationIsolation ? "on" : "off"}
         disabled={integrationIsolationImplied || !integrationIsolationSupported}
         disabledReason={integrationIsolationImplied
-          ? "Strict Project Isolation already launches without provider integrations."
+          ? "Included with Strict Project Isolation."
           : !integrationIsolationSupported
             ? INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED
             : undefined}
-        onChange={(value) => updateExecution("integrationIsolation", value === "enabled")}
-      />
-      <StaticRow
-        title="Effective Integrations"
-        description={!integrationIsolationSupported
-          ? INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED
-          : integrationIsolationImplied
-          ? `Strict Project Isolation already launches without provider integrations, so Integration Isolation is implied and cannot be disabled. ${ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE}`
-          : draft.execution.integrationIsolation
-            ? `${INTEGRATION_ISOLATION_BY_HARNESS} ${INTEGRATION_ISOLATION_PRESERVED}`
-            : "Hooks, plugins, extensions, skills, and configured MCP servers load exactly as they would for a normal session."}
+        onChange={(value) => updateExecution("integrationIsolation", value === "on")}
       />
     </SettingsGroup>
 
     <SettingsGroup
       title="Decision Delegation"
-      intro="Human ownership is the default. Delegation changes apply only to new campaigns and never grant authority to existing sessions."
-      // Under the surface rather than between its rows: every child of a group's surface is a row.
-      foot={DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE}
+      intro="You decide by default. Delegation never applies to campaigns that are already running."
+      foot={<>
+        <details className="disclosure orchestrator-about">
+          <summary><ChevronRightIcon className="disclosure-chevron" />About UI Evidence Delegation</summary>
+          <div className="disclosure-body">
+            <p>
+              The Orchestrator resolves this gate only when its runner, harness, and model can inspect images and the
+              evidence is attached as a Session artifact. Video normally routes to a human; an operator may enable one
+              short-frame validation campaign. Externally stored evidence and unsupported clients route to a human, and
+              the campaign shows why.
+            </p>
+            <p>{DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE}</p>
+          </div>
+        </details>
+        <p className="orchestrator-human-only">
+          <LockIcon size={14} aria-hidden="true" />
+          Secrets, sign-in, permission grants, governance changes, budgets and guardrails always stay with you.
+        </p>
+      </>}
     >
       <SelectRow
         title="Descendant Requests"
@@ -442,41 +623,40 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
         options={PARENT_CONTROL_OPTIONS}
         value={draft.delegation.parentControl}
         onChange={(value) => {
-          draftDirty.current = true;
           setDraft((current) => current ? {
             ...current,
             delegation: { ...current.delegation, parentControl: value as OrchestratorDefaults["delegation"]["parentControl"] },
           } : current);
         }}
       />
+      {/* A label inside the surface rather than a group of its own: the five gates are the same
+          choice, made once per gate. */}
+      <h4 className="orchestrator-gates-label">Who Decides at Each Gate</h4>
+      {/* Human | Orchestrator under that label needs no sentence per gate. UI Evidence Approval
+          keeps one, because delegating it depends on what the Orchestrator can see. */}
       {WORKFLOW_DECISION_CATEGORIES.map((category) => <SegmentedRow
         key={category}
         title={DECISION_LABELS[category]}
+        description={category === "ui_evidence_approval"
+          ? "The Orchestrator reviews only evidence images it can see."
+          : undefined}
         options={[
-          { value: "human", label: "Human", description: "Require a human decision for this exact workflow gate." },
-          { value: "orchestrator", label: "Orchestrator", description: category === "ui_evidence_approval"
-            ? "Let the campaign Orchestrator see each evidence image and resolve this gate. Takes effect only when its runner, harness, and model can inspect images and the evidence is attached as a Session artifact. Video normally routes to a human; an operator may enable one short-frame validation campaign. Externally stored evidence and unsupported clients route to a human, and the campaign shows why."
-            : "Allow the campaign Orchestrator to resolve this typed gate." },
+          { value: "human", label: "Human" },
+          { value: "orchestrator", label: "Orchestrator" },
         ]}
         value={draft.delegation.decisions[category]}
         onChange={(value) => updateDelegation(category, value as "human" | "orchestrator")}
       />)}
-      <StaticRow
-        title="Human-Only Decisions"
-        description="Secrets, authentication, persistent permission grants, governance changes, cost budgets, and tool guardrails cannot be delegated. Change those controls as an authenticated human."
-      />
     </SettingsGroup>
 
-    {!fixedPairValid && <p className="form-error" role="alert">
-      The fixed Child Harness, Child Model, and Child Effort are not supported together by a current installation. Choose Automatic or another advertised combination.
-    </p>}
-    {fixedPairValid && capabilities.status === "unavailable" && <p className="form-error" role="alert">{capabilities.reason}</p>}
-    {error && <p className="form-error" role="alert">{error}</p>}
-    <div className="orchestrator-settings-actions">
-      <span className="muted">Current Source: {source === "user_default" ? "User Default" : "Wollipog Default"}</span>
-      <button type="button" className="btn primary" disabled={busy || !limitValid || !fixedPairValid} onClick={() => void save()}>
-        {busy ? "Saving…" : "Save Defaults"}
-      </button>
-    </div>
-  </div>;
+    <SaveBar
+      dirty={dirty}
+      busy={busy}
+      error={saveError}
+      saveLabel="Save Defaults"
+      blockedReason={invalidCount > 0 ? `Fix ${invalidCount} setting${invalidCount === 1 ? "" : "s"} to save` : null}
+      onDiscard={discard}
+      onSave={() => void save()}
+    />
+  </>;
 }

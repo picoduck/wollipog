@@ -1,11 +1,20 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { PodView, RunView, SessionView } from "@wollipog/protocol";
+import {
+  MAX_UI_SUBSCRIPTION_UPDATES_PER_WINDOW,
+  UI_SUBSCRIPTION_RATE_WINDOW_MS,
+  type PodView,
+  type RunView,
+  type SessionView,
+} from "@wollipog/protocol";
 import {
   eventHighWater,
   isSessionActivityObservable,
   MAX_UI_SESSION_SUBSCRIPTIONS,
   subscriptionRecoveryRevision,
+  UI_SUBSCRIPTION_PACE_BURST,
+  UI_SUBSCRIPTION_PACE_MARGIN_MS,
+  UiSubscriptionPacer,
   UiSubscriptionSynchronizer,
   uiStreamSubscriptions,
 } from "./ui-subscriptions.js";
@@ -201,4 +210,47 @@ test("activity observability requires a legacy stream or an applied targeted sel
   assert.equal(isSessionActivityObservable({
     mode: "unknown", requestedRevision: 0, appliedRevision: 0, sessionIds: [], podIds: [],
   }, "s1"), false);
+});
+
+test("subscription pacing keeps continuous switching inside the server window, with jitter margin", () => {
+  const pacer = new UiSubscriptionPacer();
+  const sent: number[] = [];
+  // Switch every millisecond for six server windows: the worst case a held-down key can produce.
+  for (let now = 0; now < 6 * UI_SUBSCRIPTION_RATE_WINDOW_MS; now++) {
+    if (pacer.delay(now) > 0) continue;
+    pacer.take(now);
+    sent.push(now);
+  }
+  assert.equal(sent[UI_SUBSCRIPTION_PACE_BURST - 1], UI_SUBSCRIPTION_PACE_BURST - 1,
+    "an idle dashboard's first burst of switches is not delayed");
+  const padded = UI_SUBSCRIPTION_RATE_WINDOW_MS + UI_SUBSCRIPTION_PACE_MARGIN_MS;
+  for (const [index, start] of sent.entries()) {
+    let inWindow = 0;
+    for (let next = index; next < sent.length && sent[next]! < start + padded; next++) inWindow++;
+    assert.ok(inWindow <= MAX_UI_SUBSCRIPTION_UPDATES_PER_WINDOW,
+      `${inWindow} replacements within ${padded} ms of ${start} would be closed with 1013`);
+  }
+  assert.ok(sent.length > 4 * MAX_UI_SUBSCRIPTION_UPDATES_PER_WINDOW, "pacing still spends most of the budget");
+});
+
+test("subscription pacing reports a finite wait and survives a clock stepping backwards", () => {
+  const pacer = new UiSubscriptionPacer(1, 0.001);
+  assert.equal(pacer.delay(5_000), 0);
+  pacer.take(5_000);
+  assert.equal(pacer.delay(5_000), 1_000);
+  assert.equal(pacer.delay(5_400), 600);
+  assert.equal(pacer.delay(1_000), 600, "a backwards step neither refills nor extends the wait");
+  assert.equal(pacer.delay(1_600), 0);
+});
+
+test("pending reports an unsent selection without spending a revision", () => {
+  const synchronizer = new UiSubscriptionSynchronizer();
+  const state = { view: { name: "session" as const, id: "s1" }, sessions, runs: new Map(), pods: new Map() };
+  assert.equal(synchronizer.pending(state, false), false);
+  assert.equal(synchronizer.pending(state, true), true);
+  assert.equal(synchronizer.pending(state, true), true);
+  assert.deepEqual(synchronizer.nextMessage(state, true), {
+    type: "session_subscriptions", revision: 1, sessionIds: ["s1"], podIds: [],
+  });
+  assert.equal(synchronizer.pending(state, true), false);
 });

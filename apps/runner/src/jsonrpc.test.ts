@@ -136,6 +136,41 @@ test("an oversized stdout record is isolated and the next JSON-RPC response stil
   assert.equal(await response, "alive");
 });
 
+test("a discarded oversized record fails only the requests that opted in, without waiting for their deadline (#3099)", async () => {
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const transportErrors: string[] = [];
+  const peer = new JsonRpcPeer(stdin, stdout, (err) => transportErrors.push(err.message), 128);
+  const sensitive = peer.request("thread/resume", { threadId: "t" }, {
+    deadlineAt: Date.now() + 60_000,
+    failOnDiscardedRecord: true,
+  });
+  stdin.read();
+  const ordinary = peer.request("turn/start");
+  const ordinarySent = JSON.parse(String(stdin.read()).trim());
+
+  stdout.write(`${JSON.stringify({ id: 1, result: { secret: "x".repeat(256) } })}\n`);
+  await assert.rejects(sensitive, (err: { code?: number; message?: string; discardedRecord?: boolean; transportFailure?: boolean; requestTimeout?: boolean; method?: string }) => {
+    assert.equal(err.discardedRecord, true);
+    assert.equal(err.method, "thread/resume");
+    assert.equal(err.transportFailure, true);
+    assert.equal(err.requestTimeout, undefined);
+    assert.equal(err.message, "discarded an oversized JSON-RPC record while awaiting thread/resume");
+    return true;
+  });
+  assert.deepEqual(transportErrors, ["discarded oversized JSON-RPC stdout record"]);
+
+  // A request without the option still settles from its own later response.
+  stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: ordinarySent.id, result: "alive" })}\n`);
+  assert.equal(await ordinary, "alive");
+
+  // A request opted in after the discard is unaffected by it.
+  const later = peer.request("thread/start", {}, { failOnDiscardedRecord: true });
+  const laterSent = JSON.parse(String(stdin.read()).trim());
+  stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: laterSent.id, result: "started" })}\n`);
+  assert.equal(await later, "started");
+});
+
 test("request() rejects immediately once the peer is disposed (no hang)", async () => {
   const { peer } = makePeer();
   peer.dispose("process exited");

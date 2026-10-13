@@ -170,12 +170,9 @@ test.describe("on a 390px phone", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
   test("the reference is a sheet that leads with the hardware keyboard and keeps its keycaps", async ({ page }) => {
-    await page.goto(shell("/settings/keyboard"));
-    await page.getByRole("button", { name: /Keyboard Shortcuts/ }).first().click();
-    const reference = page.getByRole("dialog", { name: "Keyboard Shortcuts" });
-    await expect(reference).toBeVisible();
-    await expect(reference.locator(".shortcut-column").first()).toBeVisible();
-    await settle(page);
+    // Settings offers no Keyboard Shortcuts row on a phone (#3023); a hardware keyboard's `?` still
+    // opens the reference.
+    const reference = await openWithKey(page, SKILLS);
     await expect(reference.locator(".modal-desc")).toHaveText(/^These shortcuts need a hardware keyboard\./);
     // A touch screen opens on the sheet, not the filter: focusing the field would raise the
     // software keyboard over a sheet nobody has read yet.

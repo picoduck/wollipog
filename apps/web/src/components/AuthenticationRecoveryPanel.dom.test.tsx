@@ -46,7 +46,7 @@ const approval: PendingApproval = {
   kind: "authentication",
   requestId: CARD,
   title: "Authentication Required — Claude Code",
-  options: [{ optionId: "auth:revalidate", name: "Recheck Authentication", kind: "allow_once" }],
+  options: [{ optionId: "auth:revalidate", name: "Retry", kind: "allow_once" }],
 };
 
 function session(overrides: Partial<SessionView> = {}): SessionView {
@@ -216,7 +216,7 @@ test("the sentence under the facts names the situation and what the primary does
       "this session with it.",
     signedOut: "Claude Code is signed out. Start Sign-In signs in on this machine, and the session continues.",
     readOnly: "Wollipog can't start a sign-in here. Sign in to Claude Code on the machine as the request details " +
-      "describe, then choose Recheck Authentication.",
+      "describe, then choose Retry.",
   };
   for (const key of ["different", "signedOut", "readOnly"] as const) {
     const request = { ...approval, options: [...extra[key], ...approval.options] } as PendingApproval;
@@ -287,7 +287,7 @@ test("the sentence never claims a mismatch Signed In Now cannot show", async () 
   }
 });
 
-test("Check Again runs the recheck, then reads the identity again; it is absent without one", async () => {
+test("Retry runs the recheck, then reads the identity again; it is absent without one", async () => {
   const api = client();
   const runs: string[] = [];
   const view = await render(
@@ -301,14 +301,14 @@ test("Check Again runs the recheck, then reads the identity again; it is absent 
     api.value,
   );
   try {
-    const check = view.button("Check Again");
-    assert.ok(check && fact(view.container, "Last Checked")!.contains(check), "Check Again is on the Last Checked fact");
+    const check = view.button("Retry");
+    assert.ok(check && fact(view.container, "Last Checked")!.contains(check), "Retry is on the Last Checked fact");
     assert.ok(check.classList.contains("sm") && check.classList.contains("ghost"));
     await act(async () => { check.click(); await tick(); await tick(); });
     assert.deepEqual(runs, ["auth:revalidate"]);
     assert.equal(api.calls.identity, 2);
     await view.draw(<AuthenticationRecoveryPanel session={session()} approval={approval} runner={runner()} runnerOnline />);
-    assert.equal(view.button("Check Again"), undefined, "Recheck Authentication is the card's primary instead");
+    assert.equal(view.button("Retry"), undefined, "Retry is the card's primary instead");
   } finally {
     await view.cleanup();
   }

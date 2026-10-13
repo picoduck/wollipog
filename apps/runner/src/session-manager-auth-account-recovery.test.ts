@@ -67,7 +67,7 @@ function fakeController(homes: Record<string, HomeState>) {
 
 function harness(
   homes: Record<string, HomeState>,
-  failAuthenticationOn?: string,
+  failAuthenticationOn?: string | ((text: string) => boolean),
   initializeGate: (home: string) => Promise<void> = async () => {},
   onPrompt: (text: string) => void = () => {},
 ) {
@@ -106,7 +106,9 @@ function harness(
   const logs: string[] = [];
   const prompts: Array<{ home: string; text: string; resumeId?: string }> = [];
   const disposedHomes: string[] = [];
+  let latestCallbacks!: DriverCallbacks;
   const factory = (_kind: AgentDriverKind, options: DriverOptions, callbacks: DriverCallbacks): Driver => {
+    latestCallbacks = callbacks;
     const home = options.env.CLAUDE_CONFIG_DIR ?? "<none>";
     return {
       get pid() { return undefined; },
@@ -118,7 +120,7 @@ function harness(
         prompts.push({ home, text, ...(options.resumeId ? { resumeId: options.resumeId } : {}) });
         callbacks.onPromptAccepted?.();
         onPrompt(text);
-        if (text === failAuthenticationOn) callbacks.onAuthenticationFailure?.();
+        if (typeof failAuthenticationOn === "function" ? failAuthenticationOn(text) : text === failAuthenticationOn) callbacks.onAuthenticationFailure?.();
         return "end_turn";
       },
       setConfig: () => {},
@@ -168,6 +170,7 @@ function harness(
     logs,
     prompts,
     disposedHomes,
+    callbacks: () => latestCallbacks,
     probes,
     manager,
     cleanup: () => {
@@ -486,5 +489,113 @@ test("a policy change during an auth-failed turn preserves the provider and queu
     assert.deepEqual(internals.active.get(SESSION)?.queue.map(item => item.text), ["queued after first"]);
     assert.deepEqual(h.prompts.map(item => item.text), ["first"]);
     assert.ok(h.store.readMeta(SESSION)?.providerAuthBlock);
+  } finally { h.cleanup(); }
+});
+
+
+test("mid-turn authentication recovery continues automatically after the same account is verified", async () => {
+  const h = harness({ "/claude/work": { observations: [{ status: "authenticated", identityId: "identity-work" }] } }, "original task");
+  try {
+    h.manager.prompt(SESSION, "original task");
+    await waitFor(() => h.prompts.length === 2, "authentication recovery left the interrupted session idle");
+    assert.match(h.prompts[1]!.text, /Continue/);
+    assert.equal(h.store.readEvents(SESSION).filter((event) => event.payload.kind === "user_message").length, 1);
+    assert.equal(h.prompts.filter((prompt) => prompt.text === "original task").length, 1);
+  } finally { h.cleanup(); }
+});
+
+
+test("manual Retry continues a mid-turn authentication failure once credentials recover", async () => {
+  const state: HomeState = { observations: [
+    { status: "authenticated", identityId: "identity-work" },
+    { status: "unauthenticated" },
+  ] };
+  const h = harness({ "/claude/work": state }, "original task");
+  try {
+    h.manager.prompt(SESSION, "original task");
+    await waitFor(() => h.store.readMeta(SESSION)?.pendingApproval?.kind === "authentication", "no recovery card");
+    const card = h.store.readMeta(SESSION)!.pendingApproval!;
+    assert.equal(card.options.find((option) => option.optionId === "auth:revalidate")?.name, "Retry");
+    state.observations = [{ status: "authenticated", identityId: "identity-work" }];
+    h.manager.resolvePermission(SESSION, card.requestId, "auth:revalidate");
+    await waitFor(() => h.prompts.length === 2, "manual Retry did not continue");
+    assert.match(h.prompts[1]!.text, /Continue/);
+    assert.equal(h.store.readEvents(SESSION).filter((event) => event.payload.kind === "user_message").length, 1);
+  } finally { h.cleanup(); }
+});
+
+test("repeated mid-turn authentication failure stops automatic retries and offers Retry", async () => {
+  const h = harness({ "/claude/work": { observations: [{ status: "authenticated", identityId: "identity-work" }] } },
+    () => true);
+  try {
+    h.manager.prompt(SESSION, "original task");
+    await waitFor(() => h.store.readMeta(SESSION)?.pendingApproval?.kind === "authentication", "repeated failure did not surface recovery");
+    assert.equal(h.prompts.length, 2, "only one automatic continuation is allowed without a healthy turn");
+  } finally { h.cleanup(); }
+});
+
+for (const lane of ["idle", "provider", "command"]) test(`authentication recovery never invents a prompt for the ${lane} lane`, async () => {
+  const h = harness({ "/claude/work": { observations: [{ status: "authenticated", identityId: "identity-work" }] } });
+  try {
+    h.manager.prompt(SESSION, "finished task");
+    await waitFor(() => h.prompts.length === 1 && !(h.manager as any).active.get(SESSION)?.running, "initial task did not finish");
+    const entry = (h.manager as any).active.get(SESSION);
+    if (lane === "provider") entry.providerInitiatedTurnActive = true;
+    if (lane === "command") entry.currentSessionCommand = { commandId: "manual-command" };
+    h.callbacks().onAuthenticationFailure?.();
+    if (lane === "provider") entry.providerInitiatedTurnActive = false;
+    if (lane === "command") entry.currentSessionCommand = undefined;
+    await waitFor(() => !h.store.readMeta(SESSION)?.providerAuthBlock, "authentication did not recover");
+    assert.equal(h.prompts.length, 1, "no runner prompt was interrupted");
+    assert.equal(h.store.readEvents(SESSION).filter((event) => event.payload.kind === "user_message").length, 1);
+  } finally { h.cleanup(); }
+});
+
+test(" a post-completion auth diagnostic never starts another task", async () => {
+  const h = harness({ "/claude/work": { observations: [{ status: "authenticated", identityId: "identity-work" }] } });
+  let first = true;
+  (h.manager as any).captureDiff = async () => {
+    if (first) { first = false; h.callbacks().onAuthenticationFailure?.(); }
+    return null;
+  };
+  try {
+    h.manager.prompt(SESSION, "task that already completed");
+    await waitFor(() => h.prompts.length > 1 || (!first && !h.store.readMeta(SESSION)?.providerAuthBlock), "recovery did not settle");
+    assert.equal(h.prompts.length, 1, "a healthy provider turn had already completed before auth failed");
+  } finally { h.cleanup(); }
+});
+
+for (const race of [false, true]) test(`authentication continuation respects a background-blocked worktree change ${race ? "queued concurrently" : "already pending"}`, async () => {
+  const state: HomeState = { observations: [
+    { status: "authenticated", identityId: "identity-work" }, { status: "unauthenticated" },
+  ] };
+  const h = harness({ "/claude/work": state }, "original task");
+  try {
+    h.manager.prompt(SESSION, "original task");
+    await waitFor(() => h.store.readMeta(SESSION)?.pendingApproval?.kind === "authentication", "no recovery card");
+    const card = h.store.readMeta(SESSION)!.pendingApproval!;
+    const hold = () => {
+      const entry = (h.manager as any).active.get(SESSION);
+      entry.pendingWorktreeRebind = "/workspace/selected";
+      h.store.patchMeta(SESSION, { backgroundWorkState: "running", pendingBackgroundTaskIds: ["running-job"] });
+    };
+    if (race) {
+      const schedule = (h.manager as any).scheduleDrain.bind(h.manager);
+      (h.manager as any).scheduleDrain = (id: string) => {
+        if ((h.manager as any).active.get(id)?.queue.some((prompt: any) => prompt.providerRecovery)) hold();
+        schedule(id);
+      };
+    } else hold();
+    state.observations = [{ status: "authenticated", identityId: "identity-work" }];
+    h.manager.resolvePermission(SESSION, card.requestId, "auth:revalidate");
+    await waitFor(() => !h.store.readMeta(SESSION)?.providerAuthBlock, "authentication did not recover");
+    for (let i = 0; i < 10; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(h.prompts.length, 1, "no continuation may run in the old worktree before the selected handoff");
+    const entry = (h.manager as any).active.get(SESSION);
+    assert.equal(entry.pendingWorktreeRebind, "/workspace/selected");
+    if (race) {
+      assert.equal(entry.queue.length, 1, "the raced continuation stays queued behind the handoff");
+      assert.equal(h.manager.sessionSnapshots()[0]!.queueHold?.kind, "worktree_rebind");
+    }
   } finally { h.cleanup(); }
 });

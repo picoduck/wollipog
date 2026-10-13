@@ -178,10 +178,12 @@ if (threads) {
   } as never;
   approval.attentionOwners = [{ requestId: "test-289", toolCallId: "verifier", resolved: true, name: "Verifier", role: "tester" }];
   const familyFollowUp = new URLSearchParams(location.search).get("family-follow-up");
-  if (familyFollowUp === "review" || familyFollowUp === "controlled") {
+  if (familyFollowUp === "review" || familyFollowUp === "review-working" || familyFollowUp === "controlled") {
+    // Ready for Review needs a result at rest; "review-working" keeps the parent itself working (#3074).
+    if (familyFollowUp === "review") sessions.find((item) => item.id === "s-orchestrator")!.status = "idle";
     for (const child of sessions.filter((item) => item.parentSessionId === "s-orchestrator")) {
-      if (familyFollowUp === "review") {
-        child.status = "running";
+      if (familyFollowUp !== "controlled") {
+        child.status = child.id === "s-child-601" ? "idle" : "running";
         child.pendingApproval = null;
       } else if (child.pendingApproval) {
         child.pendingRequestOwners = { human: 0, orchestrator: 1,

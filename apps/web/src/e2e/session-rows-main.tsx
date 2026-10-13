@@ -142,6 +142,9 @@ const FAMILY_ROWS: readonly InboxListEntry[] = [
     status: "running", lastEventAt: SESSION_ROWS_NOW - minutes(0) }),
   familyChild("family-done", "Completed Child: Roll the Daily Budget Over", {
     status: "completed", lastEventAt: SESSION_ROWS_NOW - minutes(30) }),
+  ...(QUERY.get("family") === "large" ? Array.from({ length: 12 }, (_, index) =>
+    familyChild(`family-extra-${index}`, `Extra Child ${index + 1}`, {
+      status: "running", lastEventAt: SESSION_ROWS_NOW })) : []),
 ];
 const STALLED = new Set(["session-stalled", "family-stalled"]);
 

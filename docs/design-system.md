@@ -1280,7 +1280,13 @@ Rules
   its tooltip with the key (T), and is not a tab stop: the list owns the keyboard (T, Shift+T, P). The
   title shrinks to its content and the **family chip** follows it directly (dots, then the rollup,
   "4 Children · 1 Awaiting Input"). Below a 600px list (a narrow column, Preview Right, phones) the
-  chip keeps only its dots; it is an image named by the whole rollup, which its tooltip repeats.
+  chip keeps its dots and a compact "N Working" count while descendants are working; its accessible
+  name and tooltip keep the full rollup. On narrow lists, dots give up space before the working
+  count so a large family cannot hide ongoing work. List rollups count nested descendants; Board
+  chips count direct children because Board cards remain flat. The list count remains visible
+  when collapsed. Available human-owned results use a neutral **Ready for Review** badge; questions
+  retain the amber **Answer Required** badge. A result is available for assessment independently of
+  lifecycle and does not imply that the session or its campaign has finished.
   Children indent under a 2px `--border-strong` spine with a tick into each row. A stalled parent or
   child says so once, with its one status badge (§11.1); there is no stalled rail or border, because
   the leading edge is the selection bar.
@@ -1802,16 +1808,18 @@ Only a disabled row dims, and only its title (`--text-faint`, never opacity, §3
 | `SegmentedRow` | `.seg` filling the column. | For two or three options whose labels fit the column (labels never wrap); a `Select` otherwise. `disabledReason` under the pills. |
 | `SelectRow` | `Select` filling the column. | Its `.menu.listbox` is at least as wide as the trigger and 280px, and 360px when options carry descriptions, by default. `disabledReason` is visible under the trigger and part of its description. |
 | `NumberRow` | A `.w-xs` (96px) field with its unit inside (§8.3). | Named by the title and unit; a long unit goes in the title or description. An invalid value is `aria-invalid` with a `FieldError` under the field (§8.5). |
-| `ValueRow` | A read-only value, right-aligned. | `mono` for addresses, versions and ids; `copy` adds Copy, an `.icon-btn.sm` named "Copy <Title>". |
+| `ValueRow` | A read-only value, right-aligned. | `mono` for addresses, versions and ids; `copy` adds Copy, an `.icon-btn.sm` named "Copy <Title>", or `copyLabel` where the title does not name the value ("Copy Address" beside Connected To). It confirms with its icon. |
 | `LinkRow` | Trailing `ChevronRight`, after an optional trailing word. | Navigation only; the whole row is the button. |
-| `ActionRow` | One `.btn` (`--control-h`), such as Edit…. | Named by its label and the row's title ("Edit… Claude Code"). |
+| `ActionRow` | One `.btn` (`--control-h`), such as Edit…, with an optional 14px icon before its label. | Named by its label and the row's title ("Edit… Claude Code"). |
 | `StaticRow` | None. | States something; its title is full contrast and it has no role. |
 
 **States.** A busy row (`busy`) keeps its control's confirmed value and leads its description with a
 12px spinner, or replaces it with `busyLabel` (the description stays underneath, hidden, so the row
 keeps its height). `saved` shows the §8.6 check: before the track on a switch row, at the end of the
 text cell otherwise, announced by a polite region beside the control. A failed instant save that is
-not a switch is the group's failure notice (below).
+not a switch is the group's failure notice (below). A `SettingRow` with no value to show until a read
+succeeds (Settings › Network's Tailnet Access before its status is known) takes `failure` too, in
+place of its description with Try Again, so an unknown value is never drawn as a control.
 
 **Narrow.** Under a 560px **container** the control drops below the text at full width; switch, link
 and action rows (`.setting-row-trailing`) keep their control trailing. The container is the group's
@@ -1823,8 +1831,9 @@ section: an optional head (the title in `--type-section`, written in Title Case 
 `text-transform`; an optional scope label as §11.3 meta, such as "This Device", "Your Account", "This
 Window" or "This Machine"; at most one head action), an optional one-sentence description in
 `--type-small` `--text-dim`, one `.surface` (`.settings-group-surface`) with hairlines between its
-rows, and an optional foot line. The surface is the size container for the 560px rule. A failed
-instant save that is not a switch shows a compact danger `Notice` above the surface with Retry. Rows
+rows, and an optional foot line, or a §5.5 disclosure where the group needs more than one line
+(Behavior's About Artifact Uploads, #3023). The surface is the size container for the 560px rule. A
+failed instant save that is not a switch shows a compact danger `Notice` above the surface with Retry. Rows
 inside a surface never turn into cards: hover is a `--bg-elev-2` fill without a border, only on rows
 that are one link or button, on fine pointers. A switch row with `saved` or `failure` is one framed
 child of the surface (`.setting-row-frame`), its status region inside the frame, and so is any other
@@ -1908,8 +1917,8 @@ to these form choice groups.
   `TriangleAlert` in `--amber` and `--type-small` text in `--text-dim`, never amber text. The field's
   `aria-describedby` points at it. It is the sibling of the field error (`FieldError`), which blocks
   submission and replaces the helper. No screen uses it yet.
-- A failed instant-apply setting (Settings › Network › Tailnet) shows its error in place of the
-  row's description in `--danger-text` (`.danger-text`).
+- A failed instant-apply setting (Settings › Network › Tailnet Access) shows its failure in place of
+  the row's description in `--danger-text` (`.setting-row-failure`), with Try Again after it.
 
 ### 8.6 Save Models
 
@@ -1924,7 +1933,11 @@ The editor save bar is `.save-bar` (`SaveBar`): sticky at the bottom of its regi
 while there is something to save or a save failed. When a save fails it becomes `.save-bar.is-error`:
 the notice's danger wash (7% `--red` over `--bg-elev`, a 32% `--red` edge), a `CircleAlert`, the
 failure in one sentence (`role="alert"`), and Save becomes **Try Again**. In Settings it floats 16px
-above the bottom of the settings panel. No screen uses it yet.
+above the bottom of the settings panel; on a phone its two actions share the bar's full width under
+the message. Settings › Orchestrator is its first screen (#3026): the editor's groups are the
+settings panel's own children so the bar is too, a field error at a setting (`NumberRow`'s or
+`SelectRow`'s `error`) blocks Save with "Fix N settings to save", and leaving the section or the
+page with a dirty draft asks **Keep Editing** or **Discard Changes** first (`useLeaveGuard`).
 
 An editor names its actions and states with four props, and changes nothing in `SaveBar` itself:
 

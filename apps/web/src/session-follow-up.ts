@@ -9,6 +9,11 @@ export function outstandingSessionResult(session: Pick<SessionView, "attention">
     ? facts.result : null;
 }
 
+/** Queued, starting, running, or stopping: a result is only ready for review once the session has stopped (#3074). */
+export function sessionWorking(session: Pick<SessionView, "status" | "stopOperation">) {
+  return ["running", "starting", "queued"].includes(session.status) || session.stopOperation?.status === "stop_pending";
+}
+
 export function sessionFollowUp(session: SessionView) {
   const humanActions = session.attention?.humanActions ?? pendingRequests(session.pendingApproval)
     .filter((request) => {
@@ -22,11 +27,11 @@ export function sessionFollowUp(session: SessionView) {
   const recovery = !session.attention && (session.historyQuarantine || session.worktreeRecovery || session.stopOperation?.status === "stop_failed" ||
     session.backgroundDeliveries?.some((delivery) =>
       delivery.watchdogState === "continuation_blocked" || delivery.watchdogState === "accepted_without_result"));
-  const result = outstandingSessionResult(session);
+  const result = sessionWorking(session) ? null : outstandingSessionResult(session);
   const group: SessionFollowUpGroup = firstAction || recovery || (sessionCampaignRequests(session)?.human ?? 0) > 0 ||
     (!session.attention && !session.pendingRequestOwners && session.status === "input_required")
     ? "needs_input" : result ? "ready_for_review" :
-      ["running", "starting", "queued", "input_required"].includes(session.status) ? "working" : "quiet";
+      sessionWorking(session) || session.status === "input_required" ? "working" : "quiet";
   return { group, priority: { needs_input: 3, ready_for_review: 2, working: 1, quiet: 0 }[group],
     requestRank: firstAction?.rank ?? (recovery ? 0 : 6),
     at: firstAction?.requestedAt ?? result?.at ?? session.attention?.meaningfulAt ?? session.createdAt ?? 0,

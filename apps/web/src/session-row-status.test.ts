@@ -17,11 +17,27 @@ const label = (status: ReturnType<typeof sessionRowStatus>) => status.badge?.met
 test("outstanding human results use the single row badge without overriding human input", () => {
   const attention = { version: 1 as const, humanActions: [], meaningfulAt: 1,
     result: { revision: "r1", at: 1, owner: "human" as const }, acknowledgedRevision: null };
-  assert.equal(label(sessionRowStatus(session({ status: "running", attention }))), "Ready for Review");
   assert.equal(label(sessionRowStatus(session({ status: "idle", attention }))), "Ready for Review");
-  assert.equal(label(sessionRowStatus(session({ status: "running", attention: { ...attention, acknowledgedRevision: "r1" } }))), "Running");
-  assert.equal(label(sessionRowStatus(session({ status: "running", attention: { ...attention,
-    result: { ...attention.result, owner: "orchestrator" } } }))), "Running");
+  assert.equal(label(sessionRowStatus(session({ status: "completed", attention }))), "Ready for Review");
+  assert.equal(sessionRowStatus(session({ status: "idle", attention: { ...attention, acknowledgedRevision: "r1" } })).badge, null);
+  assert.equal(label(sessionRowStatus(session({ status: "idle", attention: { ...attention,
+    result: { ...attention.result, owner: "orchestrator" } } }))), null);
+  const question = { requestId: "q", kind: "question" as const, title: "Choose", options: [] };
+  assert.equal(label(sessionRowStatus(session({ status: "idle", pendingApproval: question,
+    attention: { ...attention, humanActions: [{ requestId: "q", rank: 3, requestedAt: 1 }] } }))), "Answer Required");
+});
+
+test("a working session shows its working status, never Ready for Review, until its turn ends (#3074)", () => {
+  const attention = { version: 1 as const, humanActions: [], meaningfulAt: 1,
+    result: { revision: "r1", at: 1, owner: "human" as const }, acknowledgedRevision: null };
+  for (const [status, expected] of [["running", "Running"], ["starting", "Starting"], ["queued", "Queued"]] as const) {
+    assert.equal(label(sessionRowStatus(session({ status, attention }))), expected, status);
+  }
+  assert.equal(label(sessionRowStatus(session({ status: "idle", attention, stopOperation: {
+    operationId: "stop", status: "stop_pending", requestedAt: 1, lastAttemptAt: 1, attemptCount: 1, capacityReleased: false } }))), "Stop Pending");
+  // The same unacknowledged result is ready once the turn ends.
+  assert.equal(label(sessionRowStatus(session({ status: "idle", attention }))), "Ready for Review");
+  // A request that needs the person still ranks above the working status.
   const question = { requestId: "q", kind: "question" as const, title: "Choose", options: [] };
   assert.equal(label(sessionRowStatus(session({ status: "running", pendingApproval: question,
     attention: { ...attention, humanActions: [{ requestId: "q", rank: 3, requestedAt: 1 }] } }))), "Answer Required");
@@ -112,9 +128,13 @@ test("a snoozed session's background result counts toward its one status", () =>
 test("phone family reasons use one badge while preserving warnings and stronger own input", () => {
   assert.equal(label(sessionRowStatus(session({ status: "running" }), {
     familyFollowUpLabel: "Needs Your Input" })), "Needs Your Input");
-  assert.equal(label(sessionRowStatus(session({ status: "running" }), {
+  assert.equal(label(sessionRowStatus(session({ status: "idle" }), {
     familyFollowUpLabel: "Ready for Review" })), "Ready for Review");
-  const disconnected = sessionRowStatus(session({ status: "running" }), {
+  // A working parent shows its working status, not its family's Ready for Review (#3074).
+  for (const [status, expected] of [["running", "Running"], ["starting", "Starting"], ["queued", "Queued"]] as const) {
+    assert.equal(label(sessionRowStatus(session({ status }), { familyFollowUpLabel: "Ready for Review" })), expected, status);
+  }
+  const disconnected = sessionRowStatus(session({ status: "idle" }), {
     runnerOnline: false, familyFollowUpLabel: "Ready for Review" });
   assert.equal(label(disconnected), "Ready for Review");
   assert.deepEqual(disconnected.others, [], "passive warnings never inflate the actionable +N count");
@@ -129,7 +149,7 @@ test("phone family reasons use one badge while preserving warnings and stronger 
   assert.equal(label(returned), "Needs Your Input");
   assert.deepEqual(returned.others, []);
   assert.match(returned.badge?.title ?? "", /returned|reminder/i);
-  const ownResult = session({ status: "running", attention: { version: 1, meaningfulAt: 10, humanActions: [],
+  const ownResult = session({ status: "idle", attention: { version: 1, meaningfulAt: 10, humanActions: [],
     result: { revision: "own", at: 10, owner: "human" }, acknowledgedRevision: null } });
   assert.equal(sessionRowStatus(ownResult, { familyFollowUpLabel: "Ready for Review" }).badge?.title,
     sessionRowStatus(ownResult).badge?.title, "an identical family reason preserves the parent's own result description");
@@ -165,4 +185,20 @@ test("a stalled session's badge turns danger, stops pulsing, and says how long i
   assert.equal(silenceDuration(10 * 60_000), "10 minutes");
   assert.equal(silenceDuration(125 * 60_000), "2 hours");
   assert.equal(silenceDuration(61 * 60_000), "1 hour");
+});
+
+
+test("available results use a neutral badge while required answers keep warning priority", () => {
+  const attention = { version: 1 as const, humanActions: [], meaningfulAt: 1,
+    result: { revision: "r1", at: 1, owner: "human" as const }, acknowledgedRevision: null };
+  const result = sessionRowStatus(session({ status: "idle", attention }));
+  assert.equal(result.badge?.meta.label, "Ready for Review");
+  assert.equal(result.badge?.meta.tone, "neutral");
+  assert.equal(result.badge?.ariaLabel, "Status: Ready for Review");
+  const question = sessionRowStatus(session({ status: "running", attention: { ...attention,
+    humanActions: [{ requestId: "q", rank: 3, requestedAt: 2 }] },
+    pendingApproval: { requestId: "q", kind: "question", title: "Choose", options: [] } }), {
+    familyFollowUpLabel: "Ready for Review" });
+  assert.equal(question.badge?.meta.label, "Answer Required");
+  assert.equal(question.badge?.meta.tone, "warning");
 });

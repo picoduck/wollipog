@@ -10,8 +10,8 @@ import type { View } from "./store.js";
  * their order, Recent's cap and the transcript deduplication are unit-tested without a DOM.
  */
 
-/** The palette actions. Each names the state it switches to, so its label changes with the state. */
-export type PaletteActionId = "toggle-sessions-view" | "toggle-rail-labels";
+/** The palette actions. A toggle names the state it switches to, so its label changes with the state. */
+export type PaletteActionId = "toggle-sessions-view" | "toggle-rail-labels" | "open-shortcut-reference";
 
 interface PaletteRow {
   /** Stable within one render: the React key and the option id's seed. */
@@ -30,7 +30,7 @@ export type PaletteEntry =
   | PaletteRow & { kind: "session"; status: StatusMeta; view: View }
   | PaletteRow & { kind: "transcript"; view: View }
   | PaletteRow & { kind: "destination"; icon: GlobalViewName | "settings"; view: View }
-  | PaletteRow & { kind: "action"; action: PaletteActionId; icon: "board" | "list" | "labels-on" | "labels-off" };
+  | PaletteRow & { kind: "action"; action: PaletteActionId; icon: "board" | "list" | "labels-on" | "labels-off" | "keyboard" };
 
 export type PaletteSectionId = "recent" | "sessions" | "transcripts" | "go-to" | "actions";
 

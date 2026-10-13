@@ -100,7 +100,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `PlanPendingIcon` | Lucide | `Circle` | A plan step not started yet. |
 | `PlanInProgressIcon` | Lucide | `CircleDot` | The plan step in progress. |
 | `ErrorIcon` | Lucide | `CircleAlert` | The danger tone icon on toasts and notices; the failed count on a work ledger line; a UI evidence tile that Can't Load or Can't Show. |
-| `KeyboardIcon` | Lucide | `Keyboard` | Keyboard shortcuts, and Settings › Keyboard. |
+| `KeyboardIcon` | Lucide | `Keyboard` | Keyboard shortcuts: the palette action and Settings › Behavior's Show Shortcuts. |
 | `AccountIcon` | Lucide | `CircleUserRound` | The provider account a session runs under. |
 | `SignInIcon` | Lucide | `KeyRound` | The Request Card's Sign-In kind: a sign-in the session waits for (#2198). |
 | `LockIcon` | Lucide | `Lock` | Locked or restricted state; a masked identifier that is not an email. |

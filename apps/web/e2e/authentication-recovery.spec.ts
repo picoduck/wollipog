@@ -66,7 +66,7 @@ test("each state shows one primary for what the session needs, with Dismiss Reco
     ["signed-out", "Authentication Required — Claude Code",
       ["Dismiss Recovery", "Choose Another Account…", "Start Sign-In (primary)"]],
     ["readonly", "Authentication Required — Claude Code",
-      ["Dismiss Recovery", "Choose Another Account…", "Recheck Authentication (primary)"]],
+      ["Dismiss Recovery", "Choose Another Account…", "Retry (primary)"]],
     ["methods", "Sign in to OpenCode", ["Cancel Sign-In", "Start Sign-In (primary)"]],
     ["signing-in", "Signing In — Claude Code", ["Cancel Sign-In"]],
   ];
@@ -74,15 +74,15 @@ test("each state shows one primary for what the session needs, with Dismiss Reco
     const card = await open(page, `scenario=${scenario}`, title);
     expect(await footer(card), scenario).toEqual(expected);
     await expect(card.locator(".primary")).toHaveCount(expected.some((name) => name.endsWith("(primary)")) ? 1 : 0);
-    await expect(card.getByRole("button", { name: "Check Again" }))
-      .toHaveCount(scenario === "email" || scenario === "signed-out" ? 1 : 0);
+    await expect(card.getByRole("button", { name: "Retry" }))
+      .toHaveCount(scenario === "email" || scenario === "signed-out" || scenario === "readonly" ? 1 : 0);
   }
 });
 
-test("Check Again on the Last Checked fact runs the runner's recheck", async ({ page }) => {
+test("Retry on the Last Checked fact runs the runner's recheck", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const card = await open(page, "scenario=email");
-  await fact(card, "Last Checked").getByRole("button", { name: "Check Again" }).click();
+  await fact(card, "Last Checked").getByRole("button", { name: "Retry" }).click();
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_AUTH_RECOVERY_E2E__.decisions()))
     .toEqual([{ requestId: "provider-auth:recovery-e2e", optionId: "auth:revalidate" }]);
 });
@@ -262,7 +262,7 @@ test("an older runner keeps the card's actions with update guidance and no ident
   await expect(card.locator(".sign-in-sentence")).toHaveText("This machine's runner can't tell which account " +
     "Claude Code uses. Use Current Account continues this session with whatever account Claude Code is signed in to.");
   expect(await footer(card)).toEqual(["Dismiss Recovery", "Use Current Account (primary)"]);
-  await expect(fact(card, "Last Checked").getByRole("button", { name: "Check Again" })).toBeVisible();
+  await expect(fact(card, "Last Checked").getByRole("button", { name: "Retry" })).toBeVisible();
   expect(await page.evaluate(() => window.__WOLLIPOG_AUTH_RECOVERY_E2E__.identityRequests())).toBe(0);
 });
 
@@ -318,11 +318,11 @@ test.describe("touch phone", () => {
     }
   });
 
-  test("Show Email and Check Again each keep their own 44px touch target (#2730)", async ({ page }) => {
+  test("Show Email and Retry each keep their own 44px touch target (#2730)", async ({ page }) => {
     const card = await open(page, "scenario=email&width=390&height=844");
     for (const [label, name, selector] of [
       ["Signed In Now", "Show Email", ".pid-toggle"],
-      ["Last Checked", "Check Again", "button.btn"],
+      ["Last Checked", "Retry", "button.btn"],
     ] as const) {
       const control = fact(card, label).getByRole("button", { name });
       // The card's body scrolls on a phone (#2179): centre the control, away from the body's clipping

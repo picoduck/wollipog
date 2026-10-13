@@ -19,12 +19,12 @@ const THEMES = ["dark", "light"] as const;
 const SETTLED: Record<SettingsSection, (page: Page) => Locator> = {
   appearance: (page) => page.getByRole("radiogroup", { name: "Theme" }),
   notifications: (page) => page.getByRole("switch", { name: "Desktop Alerts" }),
-  keyboard: (page) => page.getByRole("button", { name: /^Keyboard Shortcuts/ }),
-  behavior: (page) => page.getByRole("radiogroup", { name: "Enter Key" }),
+  // Evidence describes the chosen option once the account's preference has loaded.
+  behavior: (page) => page.getByText("Upload only when the task or project asks for it.", { exact: true }),
   // The tool policies arrive after the routine questions they load with.
   approvals: (page) => page.getByRole("button", { name: /^Review Agent-Created Sessions/ }),
   orchestrator: (page) => page.getByRole("radiogroup", { name: "Completion" }),
-  network: (page) => page.getByRole("switch", { name: "Enable Tailnet Access for This Machine" }),
+  network: (page) => page.getByRole("switch", { name: "Tailnet Access" }),
   experimental: (page) => page.getByRole("switch").first(),
   about: (page) => page.getByText("0.27.0", { exact: true }),
 };

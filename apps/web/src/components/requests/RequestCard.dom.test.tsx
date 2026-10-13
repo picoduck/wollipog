@@ -520,7 +520,7 @@ async function renderWithRunner(element: React.ReactElement, runner: Partial<Run
 const AUTH = {
   acceptCurrent: { optionId: "auth:accept-current", name: "Use Current Account", kind: "allow_once" },
   login: { optionId: "auth:login", name: "Start Sign-In", kind: "allow_once" },
-  revalidate: { optionId: "auth:revalidate", name: "Recheck Authentication", kind: "allow_once" },
+  revalidate: { optionId: "auth:revalidate", name: "Retry", kind: "allow_once" },
   dismiss: { optionId: "auth:dismiss", name: "Dismiss Recovery", kind: "reject_once" },
   cancel: { optionId: "auth:cancel", name: "Cancel Sign-In", kind: "reject_once" },
 } as const;
@@ -555,7 +555,7 @@ test("each sign-in state has exactly one primary, or only Cancel Sign-In while a
       { providerAccountId: undefined, providerAccountLabel: undefined },
       ["Dismiss Recovery", "Start Sign-In (primary)"], true],
     ["read-only", recovery([AUTH.revalidate, AUTH.dismiss]), {},
-      ["Dismiss Recovery", "Choose Another Account…", "Recheck Authentication (primary)"], false],
+      ["Dismiss Recovery", "Choose Another Account…", "Retry (primary)"], false],
     ["sign-in methods", methods, { driver: "acp" }, ["Cancel Sign-In", "Start Sign-In (primary)"], false],
     ["sign-in running", recovery([AUTH.cancel], "Signing In — Claude Code"), {}, ["Cancel Sign-In"], false],
   ];
@@ -566,8 +566,8 @@ test("each sign-in state has exactly one primary, or only Cancel Sign-In while a
       assert.deepEqual(footer(view.container), expected, state);
       assert.equal(view.container.querySelectorAll(".request-card .primary").length, expected.some((name) =>
         name.endsWith("(primary)")) ? 1 : 0, `${state}: one primary in the whole card`);
-      const check = [...view.container.querySelectorAll("button")].find((button) => button.textContent === "Check Again");
-      assert.equal(Boolean(check), checkAgain, `${state}: Check Again`);
+      const check = [...view.container.querySelectorAll("button")].find((button) => button.textContent === "Retry" && button.classList.contains("ghost"));
+      assert.equal(Boolean(check), checkAgain, `${state}: Retry`);
       assert.equal(view.container.querySelector(".request-card button[title]")?.outerHTML ?? null, null, `${state}: no button has a title`);
       assert.equal(view.container.querySelector(".request-card-head svg.lucide-key-round") !== null, true, `${state}: KeyRound`);
     } finally {
@@ -576,9 +576,9 @@ test("each sign-in state has exactly one primary, or only Cancel Sign-In while a
   }
 });
 
-test("without the recovery body, Recheck Authentication stays a footer secondary", async () => {
+test("without the recovery body, Retry stays a footer secondary", async () => {
   // A harness without the recovery body (an ACP agent's sign-in), or a child's sign-in whose account
-  // an older server did not send (#2714): its Check Again does not render.
+  // an older server did not send (#2714): its Retry does not render.
   const decisions: unknown[] = [];
   const request = recovery([AUTH.login, AUTH.revalidate, AUTH.dismiss]);
   const view = await renderWithRunner(
@@ -586,10 +586,10 @@ test("without the recovery body, Recheck Authentication stays a footer secondary
     { approve: async (_id, body) => { decisions.push(body); return signInSession(request); } },
   );
   try {
-    assert.deepEqual(footer(view.container), ["Dismiss Recovery", "Recheck Authentication", "Start Sign-In (primary)"]);
+    assert.deepEqual(footer(view.container), ["Dismiss Recovery", "Retry", "Start Sign-In (primary)"]);
     assert.equal(view.container.querySelectorAll(".request-card .primary").length, 1);
     const recheck = [...view.container.querySelectorAll<HTMLButtonElement>(".request-card-foot > button")]
-      .find((button) => button.textContent === "Recheck Authentication")!;
+      .find((button) => button.textContent === "Retry")!;
     await act(async () => { recheck.click(); await tick(); await tick(); });
     assert.deepEqual(decisions, [{ requestId: "provider-auth:card", optionId: "auth:revalidate" }]);
   } finally {
@@ -655,7 +655,7 @@ test("a child's sign-in in the Requests panel reads the child's harness and acco
       assert.deepEqual(factTerms(view.container), ["This Session Uses", "Signed In Now", "Last Checked"], name);
       assert.match(factValue(view.container, "This Session Uses") ?? "", /^Claude Work/, name);
       assert.doesNotMatch(view.container.textContent ?? "", /Claude Parent/, name);
-      assert.equal(factValue(view.container, "Last Checked")?.includes("Check Again"), true, name);
+      assert.equal(factValue(view.container, "Last Checked")?.includes("Retry"), true, name);
       assert.ok(identities.length > 0 && identities.every((id) => id === "session-child"), `${name}: the child's identity is read`);
       const choose = [...view.container.querySelectorAll<HTMLButtonElement>(".request-card-foot button")]
         .find((button) => button.textContent === "Choose Another Account…");
@@ -696,13 +696,13 @@ test("a child's sign-in from an older server, without the child's account, shows
     assert.deepEqual(factTerms(view.container).filter((term) =>
       term === "This Session Uses" || term === "Signed In Now" || term === "Last Checked"), []);
     assert.doesNotMatch(view.container.textContent ?? "", /Claude Parent|Machine Default Sign-In/);
-    assert.deepEqual(footer(view.container), ["Dismiss Recovery", "Recheck Authentication", "Use Current Account (primary)"]);
+    assert.deepEqual(footer(view.container), ["Dismiss Recovery", "Retry", "Use Current Account (primary)"]);
   } finally {
     await view.unmount();
   }
 });
 
-test("Check Again on the Last Checked fact runs the runner's recheck; Dismiss Recovery sits at the far left", async () => {
+test("Retry on the Last Checked fact runs the runner's recheck; Dismiss Recovery sits at the far left", async () => {
   const decisions: unknown[] = [];
   const request = recovery([AUTH.acceptCurrent, AUTH.revalidate, AUTH.dismiss]);
   const view = await renderWithRunner(
@@ -712,7 +712,7 @@ test("Check Again on the Last Checked fact runs the runner's recheck; Dismiss Re
   try {
     const lastChecked = [...view.container.querySelectorAll("dt")].find((dt) => dt.textContent === "Last Checked")!;
     const check = lastChecked.nextElementSibling!.querySelector<HTMLButtonElement>("button")!;
-    assert.equal(check.textContent, "Check Again");
+    assert.equal(check.textContent, "Retry");
     await act(async () => { check.click(); await tick(); await tick(); });
     assert.deepEqual(decisions, [{ requestId: "provider-auth:card", optionId: "auth:revalidate" }]);
     const dismiss = view.container.querySelector(".request-card-foot > button")!;

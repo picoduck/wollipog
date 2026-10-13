@@ -40,6 +40,10 @@ interface HarnessOptions {
   defaults?: "pending" | "agent" | "agent-missing" | "agent-repair";
   /** Notifications where the browser blocks alerts, or where neither kind can work (#3022). */
   alerts?: "available" | "blocked" | "unavailable";
+  /** Settings › Network's Tailnet Access in one reported state, or `browser` (#3027). */
+  tailnet?: "browser" | "off" | "on" | "restarting" | "unavailable" | "unmanaged" | "checking" | "read-failed" | "write-failed";
+  /** `multi`: the desktop app with Connections › Instances. */
+  instances?: "single" | "multi";
 }
 
 
@@ -52,10 +56,10 @@ interface HarnessOptions {
 async function useHarness(
   page: Page,
   theme: Theme,
-  { state = "rest", topology = "full", section = "appearance", copy = "default", defaults = "pending", alerts = "available" }: HarnessOptions = {},
+  { state = "rest", topology = "full", section = "appearance", copy = "default", defaults = "pending", alerts = "available", tailnet, instances = "single" }: HarnessOptions = {},
 ) {
   await page.goto(
-    `/settings-rows-e2e.html?theme=${theme}&state=${state}&topology=${topology}&section=${section}&copy=${copy}&defaults=${defaults}&alerts=${alerts}`,
+    `/settings-rows-e2e.html?theme=${theme}&state=${state}&topology=${topology}&section=${section}&copy=${copy}&defaults=${defaults}&alerts=${alerts}&instances=${instances}${tailnet ? `&tailnet=${tailnet}` : ""}`,
   );
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
   // The SECTION's own heading, not a fixed control: asserting a radio here would silently pass on
@@ -68,6 +72,17 @@ async function useHarness(
 async function useRow(page: Page, theme: Theme, key: RowKey, options: Omit<HarnessOptions, "section"> = {}) {
   await useHarness(page, theme, { ...options, section: ROWS[key].section });
   return rowOf(page, key);
+}
+
+/**
+ * A disabled navigation row inside the real Settings page. The harness's `disabled` state reached one
+ * through the Keyboard section, which folded into Behavior (#3023), and no production navigation row
+ * takes a harness-driven disable; the row-kinds gallery's disabled Manage Instances row is that state.
+ */
+async function useDisabledNavRow(page: Page, theme: Theme) {
+  await page.goto(`/settings-rows-e2e.html?theme=${theme}&view=kinds`);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  return page.getByRole("button", { name: /^Manage Instances/ });
 }
 
 interface Rgba { r: number; g: number; b: number; a: number }
@@ -217,7 +232,7 @@ async function inkOf(page: Page, locator: Locator, options: InkOptions = {}): Pr
  *   theme (an on track is the low end: its edge is its fill), and 124–180 with the knob hidden, so
  *   `track` is 215, between the two.
  */
-const INK = { track: 215, knob: 80, chevron: 20, icon: 55 } as const;
+const INK = { track: 215, knob: 80, chevron: 20 } as const;
 
 /**
  * Floors for the Appearance controls, set as ANTI-ERASURE bars rather than as tuned baselines.
@@ -253,9 +268,10 @@ const APPEARANCE_INK = { pills: 100, swatch: 40 } as const;
 const ROWS = {
   switchOff: { section: "notifications", role: "switch", name: /^Desktop Alerts/, affordance: ".ui-switch", minSize: 16, floor: INK.track },
   switchOn: { section: "notifications", role: "switch", name: /^Push Notifications/, affordance: ".ui-switch", minSize: 16, floor: INK.track },
-  tailnetOn: { section: "network", role: "switch", name: /^Enable Tailnet Access/, affordance: ".ui-switch", minSize: 16, floor: INK.track },
-  navChevron: { section: "keyboard", role: "button", name: /^Keyboard Shortcuts/, affordance: ".setting-row-chevron", minSize: 8, floor: INK.chevron },
-  navIcon: { section: "keyboard", role: "button", name: /^Keyboard Shortcuts/, affordance: ".setting-row-icon", minSize: 8, floor: INK.icon },
+  tailnetOn: { section: "network", role: "switch", name: /^Tailnet Access/, affordance: ".ui-switch", minSize: 16, floor: INK.track },
+  // A tool policy: Keyboard Shortcuts, the row this used to be, folded into Behavior as an action
+  // row (#3023), and Behavior's navigation rows are being rebuilt (#3024, #3025).
+  navChevron: { section: "approvals", role: "button", name: /^Review Agent-Created Sessions/, affordance: ".setting-row-chevron", minSize: 8, floor: INK.chevron },
 } as const satisfies Record<string, {
   section: SettingsSection;
   role: "switch" | "button";
@@ -524,9 +540,7 @@ const PIXELS = { threshold: 0.1, animations: "disabled" } as const;
 
 for (const theme of THEMES) {
   test(`every affordance is painted in ${theme} @production`, async ({ page }) => {
-    // Every row in the registry, each on the section that owns it. The nav row's leading icon is in
-    // here because nothing else looks at it: `.setting-row-icon { opacity: 0 }` takes it off the
-    // production Keyboard Shortcuts row and every other assertion stays green.
+    // Every row in the registry, each on the section that owns it.
     for (const key of Object.keys(ROWS) as RowKey[]) {
       const spec = ROWS[key];
       const row = await useRow(page, theme, key);
@@ -639,7 +653,9 @@ for (const theme of THEMES) {
     // `.setting-row-switch.is-disabled[aria-checked="false"] .ui-switch { opacity: 0 }` green.
     for (const label of Object.keys(ROWS) as RowKey[]) {
       const { affordance, minSize, floor } = ROWS[label];
-      const row = await useRow(page, theme, label, { state: "disabled" });
+      const row = label === "navChevron"
+        ? await useDisabledNavRow(page, theme)
+        : await useRow(page, theme, label, { state: "disabled" });
       await expect(row).toBeDisabled();
       await expect(row).toHaveClass(/is-disabled/);
       expectPainted(await painted(row.locator(affordance)), `the disabled ${label}`, minSize);
@@ -708,19 +724,23 @@ test("the reduced topology production can render is covered too @production", as
   await expectInk(page, rowOf(page, "switchOff").locator(".ui-switch"),
     "the sole notification switch", INK.track);
 
-  // Network in its unavailable form: an explanation instead of a switch, which is the shape
-  // §11.3 requires — the setting stays visible and says why it cannot be changed.
+  // Network with Tailscale missing (#3027): the switch stays, disabled, with its reason as the
+  // visible text it is described by — §11.3's rule that a setting which could exist stays visible.
   await useHarness(page, "dark", { topology: "minimal", section: "network" });
-  // The row is still THERE — §11.3's rule is that a setting which could exist stays visible — but
-  // it is an EXPLANATION, not a control in the off position. A disabled switch announces
-  // `aria-checked="false"`, which claims the setting is off; when the value cannot be read, that
-  // claim is false, and for a network-exposure setting it is false in the dangerous direction.
-  await expect(page.getByRole("switch", { name: /^Enable Tailnet Access/ }),
-    "an unknown value must not be announced as off").toHaveCount(0);
-  await expect(page.getByText("Enable Tailnet Access for This Machine"),
-    "and the setting must still be visible").toBeVisible();
-  await expect(page.getByText(/Tailscale is not installed/),
+  const tailnet = page.getByRole("switch", { name: /^Tailnet Access/ });
+  await expect(tailnet).toBeDisabled();
+  await expect(tailnet.getByText("Tailscale isn't installed or running on this machine."),
     "an unavailable setting has to say why it is unavailable").toBeVisible();
+  await expectInk(page, tailnet.locator(".ui-switch"), "the disabled tailnet track", INK.track);
+
+  // A value that has not been read yet is a different fact: no switch, because a disabled switch
+  // announces `aria-checked="false"`, which for a network-exposure setting claims it is off.
+  await useHarness(page, "dark", { section: "network", tailnet: "checking" });
+  await expect(page.getByRole("switch"), "an unknown value must not be announced as off").toHaveCount(0);
+  await expect(page.locator(".setting-row").getByText("Checking for Tailscale…")).toBeVisible();
+  await useHarness(page, "dark", { section: "network", tailnet: "read-failed" });
+  await expect(page.getByRole("switch")).toHaveCount(0);
+  await expect(page.locator(".setting-row-failure")).toHaveText("Couldn't check for Tailscale. Try Again");
 });
 
 test("Notifications says where alerts come from when none can work, and how to allow blocked ones", async ({ page }) => {
@@ -776,8 +796,9 @@ test("the tailnet switch says it is busy, not merely unavailable", async ({ page
   // not see it, because its Network state hardcoded `busy: false` and every busy assertion in this
   // file was measuring Push.
   await useHarness(page, "dark", { state: "busy-on", section: "network" });
-  const row = page.getByRole("switch", { name: /^Enable Tailnet Access/ });
+  const row = page.getByRole("switch", { name: /^Tailnet Access/ });
   await expect(row).toHaveAttribute("aria-busy", "true");
+  await expect(row.getByText("Restarting Wollipog on this machine…")).toBeVisible();
   await expect(row).toHaveClass(/is-busy/);
   // Still showing the value the server last confirmed, which is the whole point of a busy state.
   await expect(row).toHaveAttribute("aria-checked", "true");
@@ -786,13 +807,36 @@ test("the tailnet switch says it is busy, not merely unavailable", async ({ page
 });
 
 test("an unavailable tailnet does not take the rest of Network with it", async ({ page }) => {
-  // The round-one fix added Control-Plane Origin and Manage Instances; the round-two fix stopped an
-  // early return from dropping them in every browser, which is where `available` is always false.
-  await useHarness(page, "dark", { topology: "minimal", section: "network" });
-  for (const title of ["Control-Plane Origin", "Manage Instances"]) {
-    await expect(page.getByText(title, { exact: true }),
+  // An early return once dropped the other Network rows wherever Tailscale was missing.
+  await useHarness(page, "dark", { topology: "minimal", section: "network", tailnet: "unavailable", instances: "multi" });
+  for (const title of ["Connected To", "Manage Instances"]) {
+    await expect(page.locator(".setting-row-title").getByText(title, { exact: true }),
       `${title} must survive an unavailable tailnet`).toBeVisible();
   }
+});
+
+test("Network in a browser names this window's server and where Tailnet access is turned on", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await useHarness(page, "dark", { section: "network", tailnet: "browser" });
+  const panel = page.locator(".settings-panel");
+  await expect(panel.locator(".setting-row-value-text")).toHaveText(new URL(page.url()).origin);
+  await expect(panel.getByRole("button", { name: "Copy Address" })).toBeVisible();
+  await expect(panel.locator(".settings-group-foot"))
+    .toHaveText("Tailnet access is turned on in the Wollipog desktop app, on the machine that runs the server.");
+  await expect(panel.locator(".settings-group-title")).toHaveText(["Connection"]);
+  await expect(panel).not.toContainText(/not built yet|instance menu|control plane/i);
+});
+
+test("Manage Instances opens Connections › Instances, and is absent on a phone", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await useHarness(page, "dark", { section: "network", tailnet: "off", instances: "multi" });
+  await page.getByRole("button", { name: /^Manage Instances/ }).click();
+  expect(new URL(page.url()).searchParams.get("route")).toBe("/connections/instances");
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await useHarness(page, "dark", { section: "network", tailnet: "off", instances: "multi" });
+  await expect(page.getByText("Connected To", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Manage Instances/ })).toHaveCount(0);
 });
 
 test("a fresh load leaves the tab order at the top of the page", async ({ page }) => {
@@ -824,7 +868,6 @@ for (const width of [1440, 390]) {
   test(`navigation rows without an icon start their titles where switch rows do at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     let iconless = 0;
-    let withIcon = 0;
     for (const { id, title } of SETTINGS_SECTIONS) {
       await useHarness(page, "dark", { section: id, defaults: "agent" });
       const rows = await page.locator(".settings-panel .setting-row").evaluateAll((elements) => elements.map((row) => {
@@ -841,7 +884,6 @@ for (const width of [1440, 390]) {
       expect(switchOffsets.length, `${title}: every switch title starts at one x`).toBeLessThanOrEqual(1);
       for (const row of rows.filter((candidate) => candidate.kind === "nav")) {
         if (row.iconWidth !== null) {
-          withIcon += 1;
           expect(row.iconWidth, `${title}: "${row.name}" keeps its 16px icon`).toBe(16);
           expect(row.offset, `${title}: "${row.name}" starts its title after its icon`).toBeGreaterThan(16);
         } else if (switchOffsets.length === 1) {
@@ -850,10 +892,10 @@ for (const width of [1440, 390]) {
         }
       }
     }
-    // Behavior has icon-less navigation rows beside switch rows, and Keyboard has a row with an
-    // icon; without them this test would pass having measured nothing.
+    // Behavior has icon-less navigation rows beside switch rows; without them this test would pass
+    // having measured nothing. No production navigation row has an icon since Keyboard folded into
+    // Behavior (#3023); one that gains one is still measured above.
     expect(iconless, "icon-less navigation rows were measured beside switch rows").toBeGreaterThanOrEqual(1);
-    expect(withIcon, "a navigation row with an icon was measured").toBeGreaterThanOrEqual(1);
   });
 }
 
@@ -979,7 +1021,6 @@ for (const theme of THEMES) {
       ["switch-off", "switchOff"],
       ["switch-on", "switchOn"],
       ["chevron", "navChevron"],
-      ["nav-icon", "navIcon"],
     ] as const) {
       const locator = (await useRow(page, theme, key)).locator(ROWS[key].affordance);
       await locator.scrollIntoViewIfNeeded();
@@ -1170,8 +1211,10 @@ test("tabbing through each section reaches every row kind", async ({ page }) => 
   // Appearance is not here because its rows are not focusable: they are containers, and the thing
   // Tab lands on is the pill or the trigger inside. That claim is the Appearance block's, at the
   // end of this file, and it is the same claim — it just has a different element to make it about.
-  for (const section of ["notifications", "keyboard"] as const) {
-    await useHarness(page, "dark", { section });
+  // Behavior with its agent defaults loaded holds a navigation row: Keyboard Shortcuts, the row this
+  // reached before, folded into Behavior as an action row (#3023).
+  for (const [section, wanted] of [["notifications", "setting-row-switch"], ["behavior", "setting-row-link"]] as const) {
+    await useHarness(page, "dark", { section, defaults: "agent" });
     for (let press = 0; press < 24; press += 1) {
       await page.keyboard.press("Tab");
       const kind = await page.evaluate(() => {
@@ -1182,10 +1225,8 @@ test("tabbing through each section reaches every row kind", async ({ page }) => 
         }
         return null;
       });
-      if (kind) {
-        reached.add(kind);
-        break;
-      }
+      if (kind) reached.add(kind);
+      if (kind === wanted) break;
     }
   }
   expect([...reached].sort(), "every row kind must be reachable by Tab")
@@ -1265,16 +1306,12 @@ test.describe("with a touch pointer", () => {
 });
 
 test("Agent Harness defaults distinguish version skew and politely explain repaired drafts", async ({ page }) => {
-  await page.route("**/api/artifact-upload-settings", (route) => route.fulfill({
-    status: 503,
-    contentType: "application/json",
-    body: JSON.stringify({ error: "Artifact preferences are temporarily unavailable" }),
-  }));
   await useHarness(page, "light", { section: "behavior", defaults: "agent-missing" });
   await expect(page.getByText("Wollipog Update Required", { exact: true })).toBeVisible();
   await expect(page.getByText(/This version of Wollipog does not support Agent Harness defaults/)).toBeVisible();
   await expect(page.getByText(/Update or restart Wollipog so it matches this dashboard/)).toBeVisible();
-  await expect(page.getByRole("button", { name: "Retry", exact: true })).toHaveCount(2);
+  // Agent Defaults' own Retry, and no other: the harness answers Evidence's read (#3023).
+  await expect(page.getByRole("button", { name: "Retry", exact: true })).toHaveCount(1);
   await expect(page.locator(".setting-row-static").filter({
     hasText: "This version of Wollipog does not support Agent Harness defaults",
   }).getByRole("button", { name: "Retry" })).toBeVisible();
