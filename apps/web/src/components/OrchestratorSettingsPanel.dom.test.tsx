@@ -587,8 +587,7 @@ function SettingsShell({ store, transport, onView }: { store: Store; transport: 
   panels.orchestrator = <OrchestratorSettingsPanel />;
   return <FeedbackProvider>
     <ApiProvider client={createApiClient(transport)}>
-      <SettingsView section={view.name === "settings" ? view.section : undefined} onNavigate={store.navigate}
-        onOpenShortcuts={() => undefined} panels={panels} />
+      <SettingsView section={view.name === "settings" ? view.section : undefined} onNavigate={store.navigate} panels={panels} />
     </ApiProvider>
   </FeedbackProvider>;
 }
