@@ -48,7 +48,7 @@ import type {
 } from "./driver.js";
 import { classifyPoisonedProviderHistory, poisonedProviderHistoryMessage } from "./poisoned-provider-history.js";
 import { providerRejectionShape } from "./provider-rejection-shape.js";
-import { isProviderAuthenticationFailure } from "./provider-auth-failure.js";
+import { isProviderAuthenticationFailure, shouldRecoverProviderAuthentication } from "./provider-auth-failure.js";
 import { codexFailureCategory, type ProviderFailureCategory } from "./provider-failure.js";
 import { codexHttpFallbackWarning, codexInferenceConfiguration, type CodexInferenceConfiguration } from "./codex-inference-transport.js";
 import { stagePromptImages, type StagedPromptImages } from "./prompt-images.js";
@@ -1361,15 +1361,15 @@ export class CodexAppServerDriver implements Driver {
         if (generation !== this.promptGeneration || !this.turnResolve) return;
         this.turnFailureCategory = codexFailureCategory(e);
         const authenticationDiagnostic = isProviderAuthenticationFailure(e?.message);
-        this.turnStartError = this.turnFailureCategory === "authentication" ? "Provider authentication is required."
-          : authenticationDiagnostic ? (this.turnFailureCategory == null
-            ? "Provider authentication is required." : "The provider could not complete this turn.")
+        const authentication = shouldRecoverProviderAuthentication(this.turnFailureCategory, authenticationDiagnostic);
+        this.turnStartError = authentication ? "Provider authentication is required."
+          : authenticationDiagnostic ? "The provider could not complete this turn."
           : `turn/start failed: ${e?.message ?? String(e)}`;
         // Codex's own error response proves no turn started; a broken transport after the write
         // cannot say whether Codex saw the request.
         this.turnStartUndelivered = !e?.transportFailure || e?.notSent === true;
         // Route from original evidence before its safe replacement loses the auth pattern.
-        if (this.turnFailureCategory == null && authenticationDiagnostic) this.signalAuthenticationFailure();
+        if (authentication) this.signalAuthenticationFailure();
         else this.emitDriverError(this.turnStartError, this.turnFailureCategory);
         this.closeTurnUsage();
         this.settleTurn("refusal");
@@ -2277,7 +2277,7 @@ export class CodexAppServerDriver implements Driver {
       }
     }
     const authenticationDiagnostic = isProviderAuthenticationFailure(message);
-    const authentication = category === "authentication" || (category == null && authenticationDiagnostic);
+    const authentication = shouldRecoverProviderAuthentication(category, authenticationDiagnostic);
     const deduplicationKey = authentication ? `authentication:${message}` : message;
     if (!message || this.emittedErrors.has(deduplicationKey)) return;
     this.emittedErrors.add(deduplicationKey);

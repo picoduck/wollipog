@@ -1291,7 +1291,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   assert.doesNotMatch(legacyExhaustionBody, /capacity_retry_exhausted|retryExhaustedAt/,
     "legacy HTTP clients never receive an unknown watchdog or its new fields");
   for (const path of ["/api/sessions", "/api/sessions?archived=true"]) {
-    for (const version of [undefined, "218", "219", String(PROTOCOL_VERSION)]) {
+    for (const version of [undefined, "218", "219", "220", String(PROTOCOL_VERSION)]) {
       const response = await fetchWithBearer(`${httpBase}${path}`, ownerToken, {
         headers: version === undefined ? {} : { "x-wollipog-ui-protocol": version },
       });

@@ -56,7 +56,7 @@ import type {
   PreparedDriverCommand,
   StopReason,
 } from "./driver.js";
-import { isProviderAuthenticationFailure } from "./provider-auth-failure.js";
+import { isProviderAuthenticationFailure, shouldRecoverProviderAuthentication } from "./provider-auth-failure.js";
 import { SKILL_TOOL_KIND, skillToolTitle } from "./skill-tool.js";
 import { readCompatibleEnv, type Environment } from "../env-compat.js";
 
@@ -3333,8 +3333,7 @@ export class ClaudeCodeDriver implements Driver {
             // phrase that identifies it while keeping a credential near the front.
             this.turnFailureCategory = rejection ? "context" : claudeFailureCategory(msg);
             const authenticationDiagnostic = isProviderAuthenticationFailure(candidate);
-            const authentication = !rejection && (this.turnFailureCategory === "authentication" ||
-              (this.turnFailureCategory == null && authenticationDiagnostic));
+            const authentication = !rejection && shouldRecoverProviderAuthentication(this.turnFailureCategory, authenticationDiagnostic);
             const message = authentication ? PROVIDER_AUTHENTICATION_ERROR
               : authenticationDiagnostic ? "The provider could not complete this turn."
               : candidate ? truncate(candidate, 2_000) : null;

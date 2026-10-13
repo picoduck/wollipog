@@ -3366,7 +3366,8 @@ test("pre-acceptance retry exhaustion is protocol gated and never becomes a miss
   }] });
   assert.equal(metaToSnapshot(m, 218).backgroundJobs![0]!.continuationRetryExhaustedAt, undefined);
   assert.equal(metaToSnapshot(m, 219).backgroundJobs![0]!.continuationRetryExhaustedAt, undefined);
-  const current = metaToSnapshot(m, 220).backgroundJobs![0]!;
+  assert.equal(metaToSnapshot(m, 220).backgroundJobs![0]!.continuationRetryExhaustedAt, undefined);
+  const current = metaToSnapshot(m, CURRENT_PEER).backgroundJobs![0]!;
   assert.equal(current.continuationRetryExhaustedAt, 5);
   assert.equal(current.continuationAcceptedAt, undefined);
   assert.equal(current.continuationMissingResultAt, undefined);

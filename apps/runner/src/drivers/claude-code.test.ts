@@ -5530,3 +5530,13 @@ test("a local Claude capability rejection cannot inherit prior capacity evidence
   assert.equal((h.driver as any).turnFailureCategory, "capacity", "an active provider accumulator remains owned by its turn");
   h.driver.dispose();
 });
+
+
+test("Claude revoked OAuth recovery survives generic structured permission status", () => {
+  const h=makeHarness();
+  h.feed({ type: "result", is_error: true, api_error_status: 403,
+    result: "API Error: 403 permission_error OAuth token has been revoked. synthetic-secret" });
+  assert.equal(h.driver.lastTurnFailureCategory(),"permission");
+  assert.equal(h.authenticationFailures,1);
+  assert.doesNotMatch(JSON.stringify([h.events,h.stderr,h.driver.lastTurnError()]),/synthetic-secret/);
+});

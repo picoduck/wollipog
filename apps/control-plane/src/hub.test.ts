@@ -1630,10 +1630,10 @@ test("every live UI send downgrades exhaustion for legacy clients, including tar
   const message = { type: "session_upsert", session: { id: "session", runnerId: "runner", backgroundDeliveries: [{
     parentTurnId: "turn", jobCount: 1, terminalCount: 1, retryExhaustedAt: 5, watchdogState: "capacity_retry_exhausted",
   }] } };
-  internal.uiClients.set(client, { uiProtocolVersion: 218, close: () => {} });
+  internal.uiClients.set(client, { uiProtocolVersion: 220, close: () => {} });
   internal.safeSend(client, message);
   assert.doesNotMatch(frames[0]!, /capacity_retry_exhausted|retryExhaustedAt/);
-  internal.uiClients.set(client, { uiProtocolVersion: 220, close: () => {} });
+  internal.uiClients.set(client, { uiProtocolVersion: 221, close: () => {} });
   internal.safeSend(client, message);
   assert.match(frames[1]!, /capacity_retry_exhausted/);
   assert.equal(message.session.backgroundDeliveries[0]!.watchdogState, "capacity_retry_exhausted");
@@ -1647,8 +1647,8 @@ test("broadcast session updates downgrade exhaustion for legacy clients alongsid
   const current = {} as Socket;
   const frames = new Map<Socket, string[]>();
   internal.sendRaw = (client: Socket, data: string) => frames.set(client, [...(frames.get(client) ?? []), data]);
-  internal.uiClients.set(legacy, { uiProtocolVersion: 219, close: () => {} });
-  internal.uiClients.set(current, { uiProtocolVersion: 220, close: () => {} });
+  internal.uiClients.set(legacy, { uiProtocolVersion: 220, close: () => {} });
+  internal.uiClients.set(current, { uiProtocolVersion: 221, close: () => {} });
   const message = { type: "session_upsert", session: { id: "session", runnerId: "runner", backgroundDeliveries: [{
     continuationId: "continuation", parentTurnId: "turn", jobCount: 1, terminalCount: 1,
     retryExhaustedAt: 5, watchdogState: "capacity_retry_exhausted",

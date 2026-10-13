@@ -1459,9 +1459,11 @@ These form responses grant no tool or governance authorization.
 drivers reset it before submission and bind terminal evidence to that turn. Codex App Server uses
 its `CodexErrorInfo` and standard request-rejection codes; Claude Code uses terminal API status
 evidence, including [529 overload](https://platform.claude.com/docs/en/api/errors). A known category
-overrides display wording. Unknown codes and drivers without structured evidence keep conservative
-text classification. Authentication-looking diagnostics remain redacted even when the reliable
-category chooses another recovery lane.
+overrides display wording for capacity retries. Unknown codes and drivers without structured
+evidence keep conservative text classification. A precise invalid/revoked credential diagnostic
+still uses existing sign-in recovery with generic permission or transport statuses, including
+OAuth 403; capacity and definite invalid-request evidence take priority over conflicting prose.
+Authentication-looking diagnostics remain redacted in every lane.
 
 The existing capacity retry policy remains three attempts after 1, 2, and 4 seconds. The
 `provider_capacity_retry` log's `classification` is a category or `text_fallback`; it contains no

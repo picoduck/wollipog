@@ -4994,3 +4994,36 @@ test("uncategorized Codex authentication rejection retains safe sign-in recovery
   assert.equal(h.authenticationFailures(), 1);
   assert.doesNotMatch(JSON.stringify([h.events, h.stderr, h.driver.lastTurnError()]), /synthetic-secret/);
 });
+
+
+test("Codex revoked OAuth recovery survives structured permission rejection", async () => {
+  const h=makeHarness();
+  (h.driver as any).threadId="thread-ready";
+  (h.driver as any).peer={
+    request: async (method: string) => {
+      if(method==="turn/start") throw { code: -32000, message: "OAuth token has been revoked. synthetic-secret",
+        data: { codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 403 } } } };
+      return {};
+    }, requestWithDeadline: async () => ({}),
+  };
+  assert.equal(await h.driver.prompt("task"),"refusal");
+  assert.equal(h.driver.lastTurnFailureCategory(),"permission");
+  assert.equal(h.authenticationFailures(),1);
+  assert.doesNotMatch(JSON.stringify([h.events,h.stderr,h.driver.lastTurnError()]),/synthetic-secret/);
+});
+
+test("Codex revoked OAuth recovery survives structured permission terminal", async () => {
+  const h=makeHarness();const driver=h.driver as any;
+  driver.threadId="thread-ready";
+  driver.peer={ request: async () => ({ turn: { id: "turn-revoked" } }), requestWithDeadline: async () => ({}) };
+  const pending=h.driver.prompt("task");
+  await waitForCondition(() => driver.turnId==="turn-revoked");
+  driver.completeRootTurn({ turn: { id: "turn-revoked", status: "failed", error: {
+    message: "OAuth token has been revoked. synthetic-secret",
+    codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 403 } },
+  } } },driver.promptGeneration,"turn-revoked");
+  assert.equal(await pending,"refusal");
+  assert.equal(h.driver.lastTurnFailureCategory(),"permission");
+  assert.equal(h.authenticationFailures(),1);
+  assert.doesNotMatch(JSON.stringify([h.events,h.stderr,h.driver.lastTurnError()]),/synthetic-secret/);
+});

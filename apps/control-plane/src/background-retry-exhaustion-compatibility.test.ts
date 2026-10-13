@@ -17,7 +17,7 @@ test("legacy HTTP and websocket view shapes omit new exhaustion data without mut
     }
   }
   assert.equal(projectBackgroundRetryExhaustionForUi(exhausted, 221), exhausted);
-  assert.equal(projectBackgroundRetryExhaustionForUi(exhausted, 221), exhausted);
+  assert.equal(projectBackgroundRetryExhaustionForUi(exhausted, 222), exhausted);
 });
 
 test("legacy projection preserves accepted missing-result authority and unrelated payload data", () => {
