@@ -167,10 +167,11 @@ function InboxRowInner({
   const baseRef = worktree ? displayBaseRef(worktree) : null;
 
   const childrenLabel = children ? inboxThreadChildrenLabel(children) : null;
+  const workingChildren = children?.working ?? children?.children.filter((child) => child.state === "running").length ?? 0;
   /* The family chip: one dot per child and the rollup, directly after the parent's title (#2215). It
      reads the same whether the thread is expanded or collapsed, which is the point of putting the
      rollup on the parent — a collapsed thread can never hide a waiting child (#896). Its tint follows
-     the attention colour only while a child is waiting. Below a 600px list it shows only its dots,
+     the attention colour only while a child is waiting. Below a 600px list it shows its dots and working count,
      so it is an image named by the whole rollup, which the row's name keeps at every width. A span,
      not a button: it lives inside the row button, and the chevron beside the row is the control;
      clicking here merely forwards to it. */
@@ -190,6 +191,9 @@ function InboxRowInner({
         {children.children.map((child) => <ThreadDot key={child.id} state={child.state} title={child.title} />)}
       </span>
       <span className="inbox-thread-family-text" aria-hidden="true">{childrenLabel}</span>
+      {workingChildren > 0 && (
+        <span className="inbox-thread-working" aria-hidden="true">{workingChildren} Working</span>
+      )}
     </span>
   ) : null;
 

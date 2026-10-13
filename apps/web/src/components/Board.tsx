@@ -171,10 +171,13 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
     for (const session of scoped) {
       const parentId = session.parentSessionId;
       if (!parentId || !present.has(parentId) || parentId === session.id) continue;
-      const entry = map.get(parentId) ?? { count: 0, waiting: 0, children: [] };
+      const entry = map.get(parentId) ?? { count: 0, working: 0, waiting: 0, children: [] };
       entry.count += 1;
       if (isInboxBlocked(session)) entry.waiting += 1;
-      entry.children.push({ id: session.id, title: session.title, state: inboxThreadChildState(session, stalledSessionIds.has(session.id)) });
+      const stalled = stalledSessionIds.has(session.id);
+      const state = inboxThreadChildState(session, stalled);
+      if (!stalled && state === "running") entry.working = (entry.working ?? 0) + 1;
+      entry.children.push({ id: session.id, title: session.title, state });
       map.set(parentId, entry);
     }
     return map;

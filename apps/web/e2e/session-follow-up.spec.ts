@@ -155,3 +155,53 @@ if (process.env.WOLLIPOG_CAPTURE_EVIDENCE === "1") {
     });
   }
 }
+
+
+for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
+  test(`questions stand out from available results while collapsed children keep working at ${width}px in ${theme}`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await open(page);
+    await page.evaluate((theme) => {
+      document.documentElement.dataset.theme = theme;
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-working", { parentSessionId: "session-review" });
+    }, theme);
+    const parent = row(page, result);
+    const resultBadge = parent.locator(".status");
+    const answerBadge = row(page, input).locator(".status");
+    await expect(resultBadge).toHaveText("Ready for Review");
+    await expect(resultBadge).toHaveClass(/t-neutral/);
+    await expect(answerBadge).toHaveText("Answer Required");
+    await expect(answerBadge).toHaveClass(/t-warning/);
+    expect(await resultBadge.evaluate((badge) => getComputedStyle(badge).color))
+      .not.toBe(await answerBadge.evaluate((badge) => getComputedStyle(badge).color));
+    await parent.locator(".inbox-thread-toggle").click();
+    await expect(row(page, work)).toHaveCount(0);
+    const working = parent.locator(width < 600 ? ".inbox-thread-working" : ".inbox-thread-family-text");
+    await expect(working).toBeVisible();
+    await expect(working).toContainText("1 Working");
+    await parent.hover();
+    const actions = parent.locator(".inbox-row-actions");
+    await expect(actions).toBeVisible();
+    const workingBox = await working.boundingBox();
+    const actionsBox = await actions.boundingBox();
+    expect(workingBox).not.toBeNull();
+    expect(actionsBox).not.toBeNull();
+    expect(workingBox!.x + workingBox!.width).toBeLessThanOrEqual(actionsBox!.x);
+    expect(await working.evaluate((label) => label.scrollWidth <= label.clientWidth)).toBe(true);
+    await expect(parent.locator(".inbox-thread-family")).toHaveAttribute("aria-label", /1 Working/);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.emulateMedia({ forcedColors: "active" });
+    await expect(answerBadge).toHaveAccessibleName("Status: Answer Required");
+    await expect(resultBadge).toHaveAccessibleName("Status: Ready for Review");
+    await expect(working).toBeVisible();
+    await page.emulateMedia({ forcedColors: "none" });
+    await page.evaluate(() => {
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-working", { status: "completed" });
+    });
+    await expect(parent.locator(".inbox-thread-working")).toHaveCount(0);
+    await expect(resultBadge).toHaveText("Ready for Review");
+    await parent.click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Mark Reviewed", exact: true }).click();
+    await expect(resultBadge).toHaveCount(0);
+  });
+}
