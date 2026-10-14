@@ -53,6 +53,22 @@ test("native compatibility builds real packages and verifies baseline without pu
   assert.match(validation, /if: github.event_name != 'pull_request' \|\| github.event.action == 'ready_for_review' \|\| github.event.pull_request.draft == false/);
 });
 
+test("minimal native Linux containers install pinned Node and npm before pnpm while retaining its cache", () => {
+  for (const workflow of [release, validation]) {
+    const bootstrap = workflow.indexOf("- name: Bootstrap Node 24 for Linux Container");
+    const pnpm = workflow.indexOf("- name: Setup pnpm", bootstrap);
+    const cachedNode = workflow.indexOf("- name: Setup Node 24", pnpm);
+    assert.ok(bootstrap >= 0 && pnpm > bootstrap && cachedNode > pnpm,
+      "pnpm's npm bootstrap must have Node installed first on both native architectures");
+    const step = workflow.slice(bootstrap, pnpm);
+    assert.match(step, /uses: actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020/);
+    assert.match(step, /node-version-file: \.nvmrc/);
+    assert.match(step, /package-manager-cache: false/);
+    assert.doesNotMatch(step, /^\s+cache: pnpm/m, "pnpm cache cannot resolve before pnpm exists");
+    assert.match(workflow.slice(cachedNode).split(/\n      - /)[0], /cache: pnpm/);
+  }
+});
+
 function fixture() {
   const directory = mkdtempSync(join(tmpdir(), "linux-release-abi-"));
   const binary = join(directory, "synthetic-binary");
