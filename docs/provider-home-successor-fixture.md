@@ -5,7 +5,8 @@ released legacy lease. It still requires exactly one winner, one competing-owner
 successful exits. Structured fail-closed lease refusals and the explicit checkpoint-in-progress refusal count as
 losing outcomes. Before publishing its result, the
 loser also verifies that the winner's completed canonical lease is readable and excludes a competing
-process. Errors outside those recognized refusal paths fail. Invalid stable lease evidence or a
+process with the exact winning PID. Provisional outcome/PID claims diagnose two refusals immediately
+instead of making the contenders wait on each other's final results. Errors outside those recognized refusal paths fail. Invalid stable lease evidence or a
 second successful acquirer also fails; the registry may wrap errors during chain verification as
 structured refusals, so this fixture does not classify the original cause of every refusal.
 
@@ -40,7 +41,8 @@ acquisition, and publication timings separately.
 Failures report each contender's phase, elapsed times, outcome, exit status, signal, and bounded,
 path-sanitized stderr. Startup failure, readiness/publication hangs, failed exit, and cancellation
 are covered with real children. Cleanup signals only the owned child trees and removes their
-temporary root (including helper staging outside the HOME) after observed closure; incomplete cleanup retains that HOME and fails explicitly.
+temporary root (including helper staging outside the HOME) after observed closure; incomplete cleanup retains that HOME and fails explicitly. Cleanup errors remain visible after an
+earlier failure; tree termination must be followed by observed child closure within its existing bound.
 
 ## Five Runs Under Concurrent Load
 

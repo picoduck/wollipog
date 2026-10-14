@@ -696,7 +696,8 @@ type SuccessorRaceOptions = {
   cleanupGraceMs?: number;
   signal?: AbortSignal;
   onReady?: () => void;
-  fault?: "before-ready" | "hang-before-ready" | "hang-in-publication" | "hang-after-report";
+  beforeRemoveRoot?: (root: string) => void;
+  fault?: "before-ready" | "hang-before-ready" | "hang-in-publication" | "hang-after-report" | "both-refuse";
 };
 
 async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOptions = {}) {
@@ -712,10 +713,11 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
     child: AgentProcess; name: string; phase: string; phaseAt: number; spawnedAt: number;
     ready: boolean; reported: boolean; closed: boolean; code: number | null;
     signal: NodeJS.Signals | null; stderr: string; error?: string;
-    timings: Record<string, number>;
+    timings: Record<string, number>; outcome?: string;
   }> = [];
   let failure: string | undefined;
   let cleanupProved = true;
+  const cleanupFailures: string[] = [];
   let outcomes: string[] = [];
   const sanitize = (text: string) => text.replaceAll(home, "<fixture-home>")
     .replaceAll(home.replaceAll("\\", "/"), "<fixture-home>")
@@ -725,7 +727,7 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
     contender: state.name, phase: state.phase,
     elapsedMs: Math.round(performance.now() - state.spawnedAt),
     phaseElapsedMs: Math.round(performance.now() - state.phaseAt),
-    timings: state.timings, outcome: sanitize(outcomes[states.indexOf(state)] ?? "unreported"),
+    timings: state.timings, outcome: sanitize(state.outcome ?? outcomes[states.indexOf(state)] ?? "unreported"),
     exitCode: state.code, signal: state.signal, closed: state.closed,
     stderr: sanitize(state.stderr), error: state.error,
   }));
@@ -743,14 +745,17 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
   }
-  async function forceCleanup(child: AgentProcess): Promise<boolean> {
-    if (child.closeObserved || !child.pid) return true;
+  async function forceCleanup(state: (typeof states)[number]): Promise<boolean> {
+    const child = state.child;
+    if (state.closed) return true;
+    const deadline = performance.now() + 5_000;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      return await Promise.race([
+      const cleaned = await Promise.race([
         killTreeAndWait(child),
         new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), 5_000); }),
       ]);
+      return cleaned && await waitUntil(() => state.closed, Math.max(0, deadline - performance.now()));
     } finally { if (timer) clearTimeout(timer); }
   }
   try {
@@ -758,13 +763,13 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
     mkdirSync(staging, { mode: 0o700 });
     writeLegacyLease(home, { pid: 2_147_483_647 });
     writeFileSync(helper, `
-      import { existsSync, writeFileSync } from "node:fs";
+      import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
       import { ProviderHomeLeaseRegistry } from ${JSON.stringify(moduleUrl)};
       import { ensureLeaseIoAvailable, withLeaseIoOptions, LeaseIoError } from ${JSON.stringify(ioUrl)};
       const [home, result, start, release, fault, peerResult] = process.argv.slice(2);
       const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-      const phase = (name, timings = {}) => new Promise((resolve, reject) => {
-        process.send({ phase: name, timings }, (error) => error ? reject(error) : resolve());
+      const phase = (name, timings = {}, outcome) => new Promise((resolve, reject) => {
+        process.send({ phase: name, timings, outcome }, (error) => error ? reject(error) : resolve());
       });
       const waitFor = (path) => {
         const deadline = performance.now() + 20_000;
@@ -803,8 +808,11 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
           if (!refusal && !/already in use by process|lease changed during recovery/.test(message)) throw error;
           outcome = "lost:" + message;
         }
+        if (fault === "both-refuse") outcome = "lost:synthetic refusal after acquisition";
         const acquisitionMs = performance.now() - acquisitionAt;
-        await phase("publishing", { acquisitionMs });
+        writeFileSync(result + ".claim.tmp", JSON.stringify({ outcome, pid: process.pid }));
+        renameSync(result + ".claim.tmp", result + ".claim");
+        await phase("publishing", { acquisitionMs }, outcome);
         if (fault === "hang-in-publication") await hang();
         const publicationAt = performance.now();
         pause(${options.publicationDelayMs ?? 0});
@@ -812,6 +820,10 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
         if (outcome.startsWith("lost:")) {
           // A transient verification refusal is a valid losing outcome, but after the
           // winner publishes, its canonical lease must be readable and exclude us.
+          waitFor(peerResult + ".claim");
+          const peer = JSON.parse(readFileSync(peerResult + ".claim", "utf8"));
+          if (peer.outcome !== "won") throw new Error("both contenders refused; no winning claim");
+          if (!Number.isInteger(peer.pid) || peer.pid === process.pid) throw new Error("invalid winning process claim");
           waitFor(peerResult);
           const verificationAt = performance.now();
           const verifier = new ProviderHomeLeaseRegistry(${JSON.stringify(OWNER_A)}, { hostname: "host-a" });
@@ -819,7 +831,9 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
           try {
             verifier.acquire({ driver: "claude-code", command: "claude", context: { kind: "native" }, env: { HOME: home } });
           } catch (error) {
-            if (!(error instanceof Error) || !/already in use by process/.test(error.message)) throw error;
+            if (!(error instanceof Error)) throw error;
+            const ownerPid = /already in use by process (\\d+)/.exec(error.message)?.[1];
+            if (Number(ownerPid) !== peer.pid) throw error;
             excluded = true;
           } finally { verifier.releaseAll(); }
           if (!excluded) throw new Error("a live winning process must exclude a competing process");
@@ -843,7 +857,7 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
     const results = [join(root, "result-a"), join(root, "result-b")];
     for (const [index, result] of results.entries()) {
       const spawnedAt = performance.now();
-      const child = spawn(process.execPath, ["--import", "tsx", helper, home, result, start, release, index === 0 ? options.fault ?? "" : "", results[1 - index]!], {
+      const child = spawn(process.execPath, ["--import", "tsx", helper, home, result, start, release, (index === 0 || options.fault === "both-refuse") ? options.fault ?? "" : "", results[1 - index]!], {
         env: { ...process.env, TMPDIR: staging, TMP: staging, TEMP: staging },
         detached: process.platform !== "win32", stdio: ["ignore", "ignore", "pipe", "ipc"],
       }) as AgentProcess;
@@ -851,15 +865,16 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
         child, name: `contender-${index === 0 ? "a" : "b"}`, phase: "launching", phaseAt: spawnedAt,
         spawnedAt, ready: false, reported: false, closed: false,
         code: null as number | null, signal: null as NodeJS.Signals | null, stderr: "",
-        error: undefined as string | undefined, timings: {} as Record<string, number>,
+        error: undefined as string | undefined, outcome: undefined as string | undefined, timings: {} as Record<string, number>,
       };
       states.push(state);
       child.stderr?.on("data", (chunk) => { state.stderr = (state.stderr + String(chunk)).slice(-8_192); });
       child.on("message", (message) => {
-        const report = message as { phase: string; timings: Record<string, number> };
+        const report = message as { phase: string; timings: Record<string, number>; outcome?: string };
         state.phase = report.phase;
         state.phaseAt = performance.now();
         Object.assign(state.timings, report.timings);
+        if (report.outcome !== undefined) state.outcome = report.outcome;
         if (report.phase === "ready") {
           state.ready = true;
           state.timings.startupMs = state.phaseAt - spawnedAt;
@@ -885,20 +900,23 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
   } catch (error) {
     failure = sanitize(error instanceof Error ? error.message : String(error));
   } finally {
-    try { writeFileSync(release, "done"); } catch { failure ??= "fixture release publication failed"; }
+    try { writeFileSync(release, "done"); } catch { cleanupFailures.push("fixture release publication failed"); }
     if (!await waitUntil(() => states.every((state) => state.closed), options.cleanupGraceMs ?? 5_000)) {
       failure ??= "contenders required forced cleanup";
-      const cleaned = await Promise.all(states.map((state) => forceCleanup(state.child)));
+      const cleaned = await Promise.all(states.map((state) => forceCleanup(state)));
       cleanupProved = cleaned.every(Boolean);
-      if (!cleanupProved) failure += "; fixture-owned tree cleanup incomplete";
+      if (!cleanupProved) cleanupFailures.push("fixture-owned tree cleanup incomplete");
     }
     if (cleanupProved && states.every((state) => state.closed)) {
-      try { rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }); }
-      catch (error) { failure ??= "temporary fixture cleanup failed: " + sanitize(String(error)); }
+      try {
+        options.beforeRemoveRoot?.(root);
+        rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+      } catch (error) { cleanupFailures.push("temporary fixture cleanup failed: " + sanitize(String(error))); }
     } else {
-      failure ??= "fixture-owned tree cleanup incomplete; temporary HOME retained";
+      cleanupFailures.push("fixture-owned tree cleanup incomplete; temporary HOME retained");
     }
   }
+  if (cleanupFailures.length) failure = [failure, ...cleanupFailures].filter(Boolean).join("; ");
   if (states.some((state) => state.code !== 0)) failure ??= "contenders must exit successfully";
   if (failure) throw new Error(`${failure}; ${JSON.stringify(details())}`);
   t.diagnostic(`successor election phases: ${JSON.stringify(states.map((state) => ({ contender: state.name, ...state.timings })))}`);
@@ -950,6 +968,32 @@ test("successor election rejects a contender that reports but cannot exit", asyn
   await assert.rejects(runSuccessorElectionRace(t, {
     fault: "hang-after-report", cleanupGraceMs: 50,
   }), (error) => assertSuccessorFailureClosed(error, /contenders required forced cleanup/));
+});
+
+test("successor election diagnoses two refusals without a publication timeout", async (t) => {
+  await assert.rejects(runSuccessorElectionRace(t, { fault: "both-refuse", cleanupGraceMs: 50 }), (error: Error) => {
+    assert.match(error.message, /both contenders refused; no winning claim/);
+    assert.doesNotMatch(error.message, /both contenders report before the race deadline/);
+    assert.equal((error.message.match(/"outcome":"lost:/g) ?? []).length, 2);
+    return assertSuccessorFailureClosed(error, /contender failed before publishing/);
+  });
+});
+
+test("successor election preserves removal errors after an earlier failure", async (t) => {
+  await assert.rejects(runSuccessorElectionRace(t, {
+    fault: "before-ready", cleanupGraceMs: 50,
+    beforeRemoveRoot: (root) => {
+      t.after(() => rmSync(root, { recursive: true, force: true }));
+      throw new Error("synthetic removal failure");
+    },
+  }), (error: Error) => {
+    assert.match(error.message, /contender failed before publishing/);
+    assert.match(error.message, /temporary fixture cleanup failed: Error: synthetic removal failure/);
+    const contenders = JSON.parse(error.message.slice(error.message.indexOf("; [") + 2)) as Array<{ closed: boolean }>;
+    assert.equal(contenders.length, 2);
+    assert.ok(contenders.every((contender) => contender.closed));
+    return true;
+  });
 });
 
 test("successor election cancellation cleans its contenders and preserves an unrelated child", async (t) => {
