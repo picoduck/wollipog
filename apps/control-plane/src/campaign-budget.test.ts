@@ -491,6 +491,24 @@ test("authorizing protection during a running turn sizes allocations above its l
   } finally { h.db.close(); }
 });
 
+test("an open live window that survives the upgrade adding its timestamp still counts toward today (#3196)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "live-observed-"));
+  const path = join(dir, "cp.sqlite");
+  try {
+    const h = harness(path);
+    h.svc.onSessionEvent("root", liveRequest(10_000));
+    const owner = [h.principal.organizationId, h.principal.userId] as const;
+    assert.equal(h.db.ownerLiveCostUsd(...owner), 0.01);
+    h.db.raw().prepare("UPDATE sessions SET live_observed_at=NULL").run();
+    assert.equal(h.db.ownerLiveCostUsd(...owner), 0, "as a window opened before the column existed");
+    h.db.close();
+    const reopened = ControlPlaneDb.open(path);
+    try {
+      assert.equal(reopened.ownerLiveCostUsd(...owner), 0.01, "the migration backfills it from its last provisional request");
+    } finally { reopened.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("a worker whose live estimate reaches its allocation stops, as a settled crossing does (#3196)", () => {
   const h = harness();
   try {

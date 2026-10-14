@@ -6476,6 +6476,12 @@ export class ControlPlaneDb {
         /* column already present */
       }
     }
+    // A window left open across the upgrade that added `live_observed_at` takes the time of its last
+    // provisional request, so the daily budget still counts it on that day (#3196). Every later
+    // request sets the column, and closing the window clears the estimate with it.
+    db.exec(`UPDATE sessions SET live_observed_at=COALESCE((SELECT MAX(e.ts) FROM session_events e
+        WHERE e.session_id=sessions.id AND e.kind='token_usage' AND json_extract(e.payload,'$.liveUsage')='provisional'), updated_at)
+      WHERE live_observed_at IS NULL AND live_cost_usd>0`);
     try {
       db.exec("ALTER TABLE orchestrator_settings ADD COLUMN strict_project_isolation INTEGER NOT NULL DEFAULT 0 CHECK (strict_project_isolation IN (0, 1))");
     } catch {
