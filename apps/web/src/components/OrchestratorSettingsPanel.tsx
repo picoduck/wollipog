@@ -30,6 +30,7 @@ import { SaveBar } from "./SaveBar.js";
 import { useSettingsPanelHead } from "./SettingsView.js";
 import type { SelectOption } from "./ui/ChoiceControls.js";
 import { NumberRow, SegmentedRow, SelectRow, SettingsGroup } from "./ui/SettingsRows.js";
+import { FullControlPreparation } from "./FullControlPreparation.js";
 
 const AUTO = "__automatic__";
 const DECISION_LABELS: Record<DelegatableWorkflowDecisionCategory, string> = {
@@ -133,6 +134,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
   const [failure, setFailure] = useState<LoadFailure | null>(null);
   const [showSkeleton, setShowSkeleton] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [controlPreview, setControlPreview] = useState<"custom" | "full_control">("custom");
   const [saveError, setSaveError] = useState<string | null>(null);
   const generation = useRef(0);
 
@@ -392,7 +394,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
   const noInstallationsReason = noInstallations ? "Unavailable until a machine advertises models and efforts." : undefined;
 
   const save = async () => {
-    if (!draft || busy || invalidCount > 0) return;
+    if (!draft || busy || invalidCount > 0 || controlPreview === "full_control") return;
     generation.current += 1;
     busyRef.current = true;
     setBusy(true);
@@ -454,6 +456,8 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
 
   const limit = draft.behavior.maximumConcurrentChildren;
   return <>
+    <FullControlPreparation surface="defaults" defaults={draft} mode={controlPreview}
+      onChange={setControlPreview} disabled={busy} />
     <SettingsGroup
       title="Children"
       notice={capabilityNotice && <Notice
@@ -654,7 +658,8 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
       busy={busy}
       error={saveError}
       saveLabel="Save Defaults"
-      blockedReason={invalidCount > 0 ? `Fix ${invalidCount} setting${invalidCount === 1 ? "" : "s"} to save` : null}
+      blockedReason={controlPreview === "full_control" ? "Full Control activation is unavailable. Choose Custom to save defaults."
+        : invalidCount > 0 ? `Fix ${invalidCount} setting${invalidCount === 1 ? "" : "s"} to save` : null}
       onDiscard={discard}
       onSave={() => void save()}
     />

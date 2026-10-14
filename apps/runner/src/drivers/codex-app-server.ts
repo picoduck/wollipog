@@ -1842,7 +1842,9 @@ export class CodexAppServerDriver implements Driver {
           title: approvalTitle(params),
           options: method === PERMISSIONS_METHOD
             ? [
-                { optionId: "allow", name: "Allow", kind: "allow_once" },
+                // This method returns scope: session, so it is a persistent provider grant.
+                // Accurate lifetime also keeps it outside one-time campaign delegation.
+                { optionId: "allow", name: "Allow for Session", kind: "allow_always" },
                 { optionId: "deny", name: "Reject", kind: "reject_once" },
               ]
             : [

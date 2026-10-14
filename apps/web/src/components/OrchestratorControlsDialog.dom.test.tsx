@@ -186,6 +186,24 @@ async function open(
 
 const flush = () => act(async () => { for (let i = 0; i < 5; i += 1) await Promise.resolve(); });
 
+test("active Full Control preview exposes revision and human gates without changing campaign state", async () => {
+  const writes: unknown[] = [];
+  const harness = await open(orchestrator(), {
+    setParentControl: async (...args) => { writes.push(args); return orchestrator(); },
+    setParentControlPolicy: async (...args) => { writes.push(args); return orchestrator(); },
+  });
+  const dialog = harness.dialog();
+  const full = dialog.querySelector<HTMLInputElement>('[data-control-mode="full_control"]');
+  assert.ok(full);
+  await act(async () => full.click());
+  assert.match(dialog.textContent ?? "", /Effective Mode: Custom/);
+  assert.match(dialog.textContent ?? "", /revokes incompatible unused approvals/);
+  assert.match(dialog.textContent ?? "", /Issue expansion and closure retain their human gate/);
+  assert.equal([...dialog.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Authorize Full Control")?.disabled, true);
+  assert.deepEqual(writes, []);
+  assert.deepEqual(harness.changed, []);
+});
+
 function gate(dialog: HTMLElement, label: string): HTMLElement {
   const group = dialog.querySelector<HTMLElement>(`[role="radiogroup"][aria-label="${label}"]`);
   assert.ok(group, `${label} has its own segmented control`);
@@ -223,7 +241,7 @@ test("the dialog has three titled sections, the campaign's facts and a close-onl
   const harness = await open(orchestrator(), {});
   const dialog = harness.dialog();
   assert.equal(dialog.querySelector(".modal-title, h2")?.textContent, "Orchestrator Controls");
-  assert.deepEqual(sectionTitles(dialog), ["Child Session Requests", "Workflow Decisions", "Campaign Behavior"]);
+  assert.deepEqual(sectionTitles(dialog), ["Orchestrator Control", "Child Session Requests", "Workflow Decisions", "Campaign Behavior"]);
 
   const requests = dialog.querySelector<HTMLElement>('[role="radiogroup"][aria-label="Child Session Requests"]');
   assert.ok(requests);

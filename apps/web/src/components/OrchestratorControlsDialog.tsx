@@ -23,6 +23,7 @@ import { Notice } from "./Notice.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { ChoiceRows, SegmentedControl, type ChoiceRowOption } from "./ui/ChoiceControls.js";
 import { SAVED_MS } from "./ui/SettingsRows.js";
+import { FullControlPreparation } from "./FullControlPreparation.js";
 
 /** Who answers a descendant session's requests (§8.4 choice rows). The off choice is "Human",
  * matching each gate's Human | Orchestrator (#2192). */
@@ -196,6 +197,7 @@ export function OrchestratorControlsDialog({
 }) {
   const api = useApi();
   const ids = useId();
+  const [controlPreview, setControlPreview] = useState<"custom" | "full_control">(() => session.orchestratorPolicy?.control?.mode ?? "custom");
   // The choices still saving on this session, from this dialog or one closed before it.
   const pending = useSyncExternalStore(
     subscribePending,
@@ -279,6 +281,8 @@ export function OrchestratorControlsDialog({
       footer={<button type="button" className="btn" onClick={onClose}>Done</button>}
     >
       {refusal !== null && <Notice tone="neutral" compact>{refusal}</Notice>}
+      {session.orchestratorPolicy && <FullControlPreparation surface="campaign" session={session}
+        defaults={session.orchestratorPolicy} mode={controlPreview} onChange={setControlPreview} disabled={refusal !== null} />}
 
       <section className="section" aria-labelledby={`${ids}-requests`}>
         <div className="section-head">

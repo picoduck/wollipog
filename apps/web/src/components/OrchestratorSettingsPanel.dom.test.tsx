@@ -189,13 +189,36 @@ function fieldError(control: Element): Element | null {
   return node?.classList.contains("field-error") ? node : null;
 }
 
-test("the editor has three groups and no footer row, and a change saves the whole default from the save bar", async () => {
+test("Full Control defaults preview blocks saving and never mutates authenticated defaults", async () => {
+  const { transport, writes } = server(settings());
+  const view = await mount(panel(transport));
+  try {
+    const { container } = view;
+    const limit = container.querySelector<HTMLInputElement>("#orchestrator-max-children")!;
+    await act(async () => fireDomEvent.change(limit, { target: { value: "8" } }));
+    const save = button(container, "Save Defaults")!;
+    await act(async () => container.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
+    assert.match(container.textContent ?? "", /Activation Unavailable/);
+    assert.match(container.textContent ?? "", /Defaults apply only to new campaigns/);
+    assert.equal(save.getAttribute("aria-disabled"), "true");
+    await act(async () => save.click());
+    assert.equal(writes.length, 0);
+    await act(async () => container.querySelector<HTMLInputElement>('[data-control-mode="custom"]')!.click());
+    assert.equal(save.getAttribute("aria-disabled"), null);
+    await act(async () => save.click());
+    await settle();
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0]!.defaults.behavior.maximumConcurrentChildren, 8);
+  } finally { await view.cleanup(); }
+});
+
+test("the editor has control preparation and three settings groups, and a change saves the whole default from the save bar", async () => {
   const { transport, writes } = server(settings());
   const view = await mount(panel(transport));
   try {
     const { container } = view;
     assert.deepEqual([...container.querySelectorAll("h3")].map((node) => node.textContent),
-      ["Children", "Execution Permissions", "Decision Delegation"]);
+      ["Orchestrator Control", "Children", "Execution Permissions", "Decision Delegation"]);
     assertNoDomNode(container.querySelector(".save-bar"), "with no changes, no save bar renders");
     assert.doesNotMatch(container.textContent ?? "", /Current Source|Human-Only Decisions|Effective Boundary|Effective Integrations/);
     assertNoDomNode(container.querySelector(".form-error"));
