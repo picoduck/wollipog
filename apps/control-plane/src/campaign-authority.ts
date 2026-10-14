@@ -47,6 +47,7 @@ export function evaluateCampaignAuthority(
     follow_up_issue_publication: "human", ui_evidence_approval: "human",
   } },
   controllerProtocol: number | null | undefined = protocol,
+  peerContracts?: { requester?: unknown; controller?: unknown },
 ): CampaignAuthorityEvaluation {
   const control = controller.orchestratorPolicy?.control;
   const full = control?.mode === "full_control";
@@ -54,8 +55,8 @@ export function evaluateCampaignAuthority(
   const pending = "requestId" in request ? request : undefined;
   const evaluated = resolveCampaignAuthority({ control, parentControl: controller.parentControl ?? "off",
     decisions: policy.decisions, root: controller.id === requester.id,
-    supported: full ? campaignAuthorityPreflight(control, requester.driver, protocol).supported &&
-      campaignAuthorityPreflight(control, controller.driver, controllerProtocol).supported : (protocol ?? 0) >= (snapshot ? 139 : 136),
+    supported: full ? campaignAuthorityPreflight(control, requester.driver, protocol, peerContracts?.requester).supported &&
+      campaignAuthorityPreflight(control, controller.driver, controllerProtocol, peerContracts?.controller).supported : (protocol ?? 0) >= (snapshot ? 139 : 136),
     snapshot, request: pending, trustedSource: snapshot ? "workflow_route" : pending?.requestSource,
     humanRequired: pending?.humanRequired, repositoryRoot: requester.repositoryRoot });
   const repositoryBound = !pending || (controller.runnerId !== undefined && requester.runnerId === controller.runnerId &&

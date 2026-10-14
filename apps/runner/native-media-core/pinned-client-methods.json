@@ -1,0 +1,892 @@
+{
+  "sdkCommit": "092d3acd6bec3e3a14bdc7e7a2810ab628ab759d",
+  "sdkTree": "572cdecd45cd985f0ad80b63d8b86ffcb345f47a",
+  "sourceFiles": [
+    {
+      "path": "app-server-protocol/src/protocol/common.rs",
+      "sha256": "e25ebb90bf79be79def79ebf2dd704057577fa9806710fbea0ee240a909d0dc1"
+    },
+    {
+      "path": "app-server-protocol/src/protocol/v2/thread.rs",
+      "sha256": "553d99d01eed0c7a9073f481938f7dd68ef633879be0e1ffd8373778c937b158"
+    },
+    {
+      "path": "app-server/src/request_processors/thread_processor.rs",
+      "sha256": "2c40a6db590c9823a6775b28c2e125544583246318ce038166d28fb57a10ab29"
+    },
+    {
+      "path": "core/src/thread_manager.rs",
+      "sha256": "3b613970b46385d16c423b130a92fcb2749478aaa385d668b9e2ae38133b6e0b"
+    }
+  ],
+  "clientRoutes": [
+    {
+      "variant": "Initialize",
+      "method": "initialize",
+      "line": 500
+    },
+    {
+      "variant": "ServerDiagnostics",
+      "method": "server/diagnostics",
+      "line": 508
+    },
+    {
+      "variant": "UserVerificationStatus",
+      "method": "userVerification/status",
+      "line": 515
+    },
+    {
+      "variant": "UserVerificationEnroll",
+      "method": "userVerification/enroll",
+      "line": 522
+    },
+    {
+      "variant": "UserVerificationDelete",
+      "method": "userVerification/delete",
+      "line": 529
+    },
+    {
+      "variant": "UserVerificationVerify",
+      "method": "userVerification/verify",
+      "line": 536
+    },
+    {
+      "variant": "UserVerificationCancel",
+      "method": "userVerification/cancel",
+      "line": 543
+    },
+    {
+      "variant": "ThreadStart",
+      "method": "thread/start",
+      "line": 552
+    },
+    {
+      "variant": "ThreadResume",
+      "method": "thread/resume",
+      "line": 558
+    },
+    {
+      "variant": "ThreadFork",
+      "method": "thread/fork",
+      "line": 564
+    },
+    {
+      "variant": "ThreadArchive",
+      "method": "thread/archive",
+      "line": 570
+    },
+    {
+      "variant": "ThreadDelete",
+      "method": "thread/delete",
+      "line": 575
+    },
+    {
+      "variant": "ThreadUnsubscribe",
+      "method": "thread/unsubscribe",
+      "line": 580
+    },
+    {
+      "variant": "ThreadIncrementElicitation",
+      "method": "thread/increment_elicitation",
+      "line": 590
+    },
+    {
+      "variant": "ThreadDecrementElicitation",
+      "method": "thread/decrement_elicitation",
+      "line": 599
+    },
+    {
+      "variant": "ThreadSetName",
+      "method": "thread/name/set",
+      "line": 604
+    },
+    {
+      "variant": "ThreadPredictionRequest",
+      "method": "thread/prediction/request",
+      "line": 610
+    },
+    {
+      "variant": "ThreadGoalSet",
+      "method": "thread/goal/set",
+      "line": 615
+    },
+    {
+      "variant": "ThreadGoalGet",
+      "method": "thread/goal/get",
+      "line": 620
+    },
+    {
+      "variant": "ThreadGoalClear",
+      "method": "thread/goal/clear",
+      "line": 625
+    },
+    {
+      "variant": "ThreadQueueAdd",
+      "method": "thread/queue/add",
+      "line": 631
+    },
+    {
+      "variant": "ThreadQueueList",
+      "method": "thread/queue/list",
+      "line": 637
+    },
+    {
+      "variant": "ThreadQueueUpdate",
+      "method": "thread/queue/update",
+      "line": 643
+    },
+    {
+      "variant": "ThreadQueueDelete",
+      "method": "thread/queue/delete",
+      "line": 649
+    },
+    {
+      "variant": "ThreadQueueReorder",
+      "method": "thread/queue/reorder",
+      "line": 655
+    },
+    {
+      "variant": "ThreadQueueStart",
+      "method": "thread/queue/start",
+      "line": 661
+    },
+    {
+      "variant": "ThreadMetadataUpdate",
+      "method": "thread/metadata/update",
+      "line": 666
+    },
+    {
+      "variant": "ThreadAttachmentAdd",
+      "method": "thread/attachment/add",
+      "line": 672
+    },
+    {
+      "variant": "ThreadAttachmentList",
+      "method": "thread/attachment/list",
+      "line": 677
+    },
+    {
+      "variant": "ThreadAttachmentOwnerList",
+      "method": "thread/attachmentOwner/list",
+      "line": 682
+    },
+    {
+      "variant": "ThreadAttachmentRemove",
+      "method": "thread/attachment/remove",
+      "line": 687
+    },
+    {
+      "variant": "ThreadSectionMove",
+      "method": "thread/section/move",
+      "line": 692
+    },
+    {
+      "variant": "ThreadSettingsUpdate",
+      "method": "thread/settings/update",
+      "line": 698
+    },
+    {
+      "variant": "ThreadMemoryModeSet",
+      "method": "thread/memoryMode/set",
+      "line": 705
+    },
+    {
+      "variant": "MemoryStatus",
+      "method": "memory/status",
+      "line": 711
+    },
+    {
+      "variant": "MemoryReset",
+      "method": "memory/reset",
+      "line": 717
+    },
+    {
+      "variant": "RolloutCompress",
+      "method": "rollout/compress",
+      "line": 724
+    },
+    {
+      "variant": "ThreadUnarchive",
+      "method": "thread/unarchive",
+      "line": 729
+    },
+    {
+      "variant": "ThreadCompactStart",
+      "method": "thread/compact/start",
+      "line": 734
+    },
+    {
+      "variant": "ThreadShellCommand",
+      "method": "thread/shellCommand",
+      "line": 739
+    },
+    {
+      "variant": "ThreadApproveGuardianDeniedAction",
+      "method": "thread/approveGuardianDeniedAction",
+      "line": 744
+    },
+    {
+      "variant": "ThreadBackgroundTerminalsClean",
+      "method": "thread/backgroundTerminals/clean",
+      "line": 750
+    },
+    {
+      "variant": "ThreadBackgroundTerminalsList",
+      "method": "thread/backgroundTerminals/list",
+      "line": 756
+    },
+    {
+      "variant": "ThreadBackgroundTerminalsTerminate",
+      "method": "thread/backgroundTerminals/terminate",
+      "line": 762
+    },
+    {
+      "variant": "ThreadRevert",
+      "method": "thread/revert",
+      "line": 767
+    },
+    {
+      "variant": "ThreadList",
+      "method": "thread/list",
+      "line": 772
+    },
+    {
+      "variant": "ProjectList",
+      "method": "project/list",
+      "line": 779
+    },
+    {
+      "variant": "ProjectRead",
+      "method": "project/read",
+      "line": 785
+    },
+    {
+      "variant": "ProjectCreate",
+      "method": "project/create",
+      "line": 791
+    },
+    {
+      "variant": "ProjectImport",
+      "method": "project/import",
+      "line": 797
+    },
+    {
+      "variant": "ProjectUpdate",
+      "method": "project/update",
+      "line": 803
+    },
+    {
+      "variant": "ProjectMove",
+      "method": "project/move",
+      "line": 809
+    },
+    {
+      "variant": "ProjectDelete",
+      "method": "project/delete",
+      "line": 815
+    },
+    {
+      "variant": "ThreadSectionList",
+      "method": "threadSection/list",
+      "line": 820
+    },
+    {
+      "variant": "ThreadSectionCreate",
+      "method": "threadSection/create",
+      "line": 825
+    },
+    {
+      "variant": "ThreadSectionUpdate",
+      "method": "threadSection/update",
+      "line": 830
+    },
+    {
+      "variant": "ThreadSectionDelete",
+      "method": "threadSection/delete",
+      "line": 835
+    },
+    {
+      "variant": "ThreadSearch",
+      "method": "thread/search",
+      "line": 841
+    },
+    {
+      "variant": "ThreadSearchOccurrences",
+      "method": "thread/searchOccurrences",
+      "line": 847
+    },
+    {
+      "variant": "ThreadLoadedList",
+      "method": "thread/loaded/list",
+      "line": 853
+    },
+    {
+      "variant": "ThreadRead",
+      "method": "thread/read",
+      "line": 858
+    },
+    {
+      "variant": "ThreadTurnsList",
+      "method": "thread/turns/list",
+      "line": 863
+    },
+    {
+      "variant": "ThreadItemsList",
+      "method": "thread/items/list",
+      "line": 869
+    },
+    {
+      "variant": "ThreadInjectItems",
+      "method": "thread/inject_items",
+      "line": 876
+    },
+    {
+      "variant": "SkillsList",
+      "method": "skills/list",
+      "line": 881
+    },
+    {
+      "variant": "SkillsExtraRootsSet",
+      "method": "skills/extraRoots/set",
+      "line": 886
+    },
+    {
+      "variant": "HooksList",
+      "method": "hooks/list",
+      "line": 891
+    },
+    {
+      "variant": "MarketplaceAdd",
+      "method": "marketplace/add",
+      "line": 896
+    },
+    {
+      "variant": "MarketplaceRemove",
+      "method": "marketplace/remove",
+      "line": 901
+    },
+    {
+      "variant": "MarketplaceUpgrade",
+      "method": "marketplace/upgrade",
+      "line": 906
+    },
+    {
+      "variant": "PluginList",
+      "method": "plugin/list",
+      "line": 911
+    },
+    {
+      "variant": "PluginSearch",
+      "method": "plugin/search",
+      "line": 917
+    },
+    {
+      "variant": "PluginInstalled",
+      "method": "plugin/installed",
+      "line": 922
+    },
+    {
+      "variant": "PluginReconcile",
+      "method": "plugin/reconcile",
+      "line": 927
+    },
+    {
+      "variant": "PluginRead",
+      "method": "plugin/read",
+      "line": 932
+    },
+    {
+      "variant": "PluginSkillRead",
+      "method": "plugin/skill/read",
+      "line": 937
+    },
+    {
+      "variant": "PluginShareSave",
+      "method": "plugin/share/save",
+      "line": 942
+    },
+    {
+      "variant": "PluginShareUpdateTargets",
+      "method": "plugin/share/updateTargets",
+      "line": 947
+    },
+    {
+      "variant": "PluginShareList",
+      "method": "plugin/share/list",
+      "line": 952
+    },
+    {
+      "variant": "PluginShareCheckout",
+      "method": "plugin/share/checkout",
+      "line": 957
+    },
+    {
+      "variant": "PluginShareDelete",
+      "method": "plugin/share/delete",
+      "line": 962
+    },
+    {
+      "variant": "AppsRead",
+      "method": "app/read",
+      "line": 967
+    },
+    {
+      "variant": "AppsList",
+      "method": "app/list",
+      "line": 972
+    },
+    {
+      "variant": "AppsInstalled",
+      "method": "app/installed",
+      "line": 977
+    },
+    {
+      "variant": "FsReadFile",
+      "method": "fs/readFile",
+      "line": 984
+    },
+    {
+      "variant": "FsWriteFile",
+      "method": "fs/writeFile",
+      "line": 989
+    },
+    {
+      "variant": "FsCreateDirectory",
+      "method": "fs/createDirectory",
+      "line": 994
+    },
+    {
+      "variant": "FsGetMetadata",
+      "method": "fs/getMetadata",
+      "line": 999
+    },
+    {
+      "variant": "FsReadDirectory",
+      "method": "fs/readDirectory",
+      "line": 1004
+    },
+    {
+      "variant": "FsRemove",
+      "method": "fs/remove",
+      "line": 1009
+    },
+    {
+      "variant": "FsCopy",
+      "method": "fs/copy",
+      "line": 1014
+    },
+    {
+      "variant": "FsWatch",
+      "method": "fs/watch",
+      "line": 1019
+    },
+    {
+      "variant": "FsUnwatch",
+      "method": "fs/unwatch",
+      "line": 1024
+    },
+    {
+      "variant": "SkillsConfigWrite",
+      "method": "skills/config/write",
+      "line": 1029
+    },
+    {
+      "variant": "PluginInstall",
+      "method": "plugin/install",
+      "line": 1034
+    },
+    {
+      "variant": "PluginUninstall",
+      "method": "plugin/uninstall",
+      "line": 1039
+    },
+    {
+      "variant": "TurnStart",
+      "method": "turn/start",
+      "line": 1044
+    },
+    {
+      "variant": "TurnSettingsUpdate",
+      "method": "turn/settings/update",
+      "line": 1051
+    },
+    {
+      "variant": "TurnSteer",
+      "method": "turn/steer",
+      "line": 1056
+    },
+    {
+      "variant": "TurnInterrupt",
+      "method": "turn/interrupt",
+      "line": 1062
+    },
+    {
+      "variant": "ThreadRealtimeStart",
+      "method": "thread/realtime/start",
+      "line": 1068
+    },
+    {
+      "variant": "ThreadRealtimeAppendAudio",
+      "method": "thread/realtime/appendAudio",
+      "line": 1074
+    },
+    {
+      "variant": "ThreadRealtimeAppendText",
+      "method": "thread/realtime/appendText",
+      "line": 1080
+    },
+    {
+      "variant": "ThreadRealtimeAppendSpeech",
+      "method": "thread/realtime/appendSpeech",
+      "line": 1086
+    },
+    {
+      "variant": "ThreadRealtimeStop",
+      "method": "thread/realtime/stop",
+      "line": 1092
+    },
+    {
+      "variant": "ThreadTimelineList",
+      "method": "thread/timeline/list",
+      "line": 1098
+    },
+    {
+      "variant": "ThreadRealtimeListVoices",
+      "method": "thread/realtime/listVoices",
+      "line": 1104
+    },
+    {
+      "variant": "ReviewStart",
+      "method": "review/start",
+      "line": 1109
+    },
+    {
+      "variant": "ModelList",
+      "method": "model/list",
+      "line": 1115
+    },
+    {
+      "variant": "GatewayOAuthRead",
+      "method": "account/gatewayOAuth/read",
+      "line": 1120
+    },
+    {
+      "variant": "GatewayOAuthLogin",
+      "method": "account/gatewayOAuth/login",
+      "line": 1125
+    },
+    {
+      "variant": "GatewayOAuthCancel",
+      "method": "account/gatewayOAuth/cancel",
+      "line": 1130
+    },
+    {
+      "variant": "ModelProviderCapabilitiesRead",
+      "method": "modelProvider/capabilities/read",
+      "line": 1135
+    },
+    {
+      "variant": "ExperimentalFeatureList",
+      "method": "experimentalFeature/list",
+      "line": 1140
+    },
+    {
+      "variant": "PermissionProfileList",
+      "method": "permissionProfile/list",
+      "line": 1145
+    },
+    {
+      "variant": "ExperimentalFeatureEnablementSet",
+      "method": "experimentalFeature/enablement/set",
+      "line": 1150
+    },
+    {
+      "variant": "RemoteControlEnable",
+      "method": "remoteControl/enable",
+      "line": 1156
+    },
+    {
+      "variant": "RemoteControlDisable",
+      "method": "remoteControl/disable",
+      "line": 1162
+    },
+    {
+      "variant": "RemoteControlStatusRead",
+      "method": "remoteControl/status/read",
+      "line": 1168
+    },
+    {
+      "variant": "RemoteControlPairingStart",
+      "method": "remoteControl/pairing/start",
+      "line": 1174
+    },
+    {
+      "variant": "RemoteControlPairingStatus",
+      "method": "remoteControl/pairing/status",
+      "line": 1180
+    },
+    {
+      "variant": "RemoteControlClientsList",
+      "method": "remoteControl/client/list",
+      "line": 1186
+    },
+    {
+      "variant": "RemoteControlClientsRevoke",
+      "method": "remoteControl/client/revoke",
+      "line": 1192
+    },
+    {
+      "variant": "CollaborationModeList",
+      "method": "collaborationMode/list",
+      "line": 1199
+    },
+    {
+      "variant": "MockExperimentalMethod",
+      "method": "mock/experimentalMethod",
+      "line": 1206
+    },
+    {
+      "variant": "EnvironmentAdd",
+      "method": "environment/add",
+      "line": 1213
+    },
+    {
+      "variant": "EnvironmentInfo",
+      "method": "environment/info",
+      "line": 1220
+    },
+    {
+      "variant": "EnvironmentStatus",
+      "method": "environment/status",
+      "line": 1227
+    },
+    {
+      "variant": "McpServerOauthLogin",
+      "method": "mcpServer/oauth/login",
+      "line": 1233
+    },
+    {
+      "variant": "McpServerRefresh",
+      "method": "config/mcpServer/reload",
+      "line": 1239
+    },
+    {
+      "variant": "McpServerStatusList",
+      "method": "mcpServerStatus/list",
+      "line": 1245
+    },
+    {
+      "variant": "McpResourceRead",
+      "method": "mcpServer/resource/read",
+      "line": 1251
+    },
+    {
+      "variant": "McpServerEventStreamStart",
+      "method": "mcpServer/event/stream/start",
+      "line": 1258
+    },
+    {
+      "variant": "McpServerEventStreamStop",
+      "method": "mcpServer/event/stream/stop",
+      "line": 1265
+    },
+    {
+      "variant": "McpServerToolCall",
+      "method": "mcpServer/tool/call",
+      "line": 1271
+    },
+    {
+      "variant": "WindowsSandboxSetupStart",
+      "method": "windowsSandbox/setupStart",
+      "line": 1277
+    },
+    {
+      "variant": "WindowsSandboxReadiness",
+      "method": "windowsSandbox/readiness",
+      "line": 1282
+    },
+    {
+      "variant": "LoginAccount",
+      "method": "account/login/start",
+      "line": 1288
+    },
+    {
+      "variant": "BedrockDiscover",
+      "method": "account/bedrock/discover",
+      "line": 1296
+    },
+    {
+      "variant": "BedrockSetup",
+      "method": "account/bedrock/setup",
+      "line": 1303
+    },
+    {
+      "variant": "BedrockCheckGovCloudRequirements",
+      "method": "account/bedrock/checkGovCloudRequirements",
+      "line": 1310
+    },
+    {
+      "variant": "CancelLoginAccount",
+      "method": "account/login/cancel",
+      "line": 1316
+    },
+    {
+      "variant": "LogoutAccount",
+      "method": "account/logout",
+      "line": 1322
+    },
+    {
+      "variant": "GetAccountRateLimits",
+      "method": "account/rateLimits/read",
+      "line": 1328
+    },
+    {
+      "variant": "ConsumeAccountRateLimitResetCredit",
+      "method": "account/rateLimitResetCredit/consume",
+      "line": 1334
+    },
+    {
+      "variant": "GetAccountTokenUsage",
+      "method": "account/usage/read",
+      "line": 1340
+    },
+    {
+      "variant": "GetWorkspaceMessages",
+      "method": "account/workspaceMessages/read",
+      "line": 1346
+    },
+    {
+      "variant": "SendAddCreditsNudgeEmail",
+      "method": "account/sendAddCreditsNudgeEmail",
+      "line": 1352
+    },
+    {
+      "variant": "FeedbackUpload",
+      "method": "feedback/upload",
+      "line": 1358
+    },
+    {
+      "variant": "OneOffCommandExec",
+      "method": "command/exec",
+      "line": 1365
+    },
+    {
+      "variant": "CommandExecWrite",
+      "method": "command/exec/write",
+      "line": 1372
+    },
+    {
+      "variant": "CommandExecTerminate",
+      "method": "command/exec/terminate",
+      "line": 1378
+    },
+    {
+      "variant": "CommandExecResize",
+      "method": "command/exec/resize",
+      "line": 1384
+    },
+    {
+      "variant": "ProcessSpawn",
+      "method": "process/spawn",
+      "line": 1391
+    },
+    {
+      "variant": "ProcessWriteStdin",
+      "method": "process/writeStdin",
+      "line": 1398
+    },
+    {
+      "variant": "ProcessKill",
+      "method": "process/kill",
+      "line": 1405
+    },
+    {
+      "variant": "ProcessResizePty",
+      "method": "process/resizePty",
+      "line": 1412
+    },
+    {
+      "variant": "ConfigRead",
+      "method": "config/read",
+      "line": 1418
+    },
+    {
+      "variant": "ExternalAgentConfigDetect",
+      "method": "externalAgentConfig/detect",
+      "line": 1423
+    },
+    {
+      "variant": "ExternalAgentConfigImport",
+      "method": "externalAgentConfig/import",
+      "line": 1428
+    },
+    {
+      "variant": "ExternalAgentConfigImportHistoryRecord",
+      "method": "externalAgentConfig/import/recordHistory",
+      "line": 1433
+    },
+    {
+      "variant": "ExternalAgentConfigImportHistoriesRead",
+      "method": "externalAgentConfig/import/readHistories",
+      "line": 1438
+    },
+    {
+      "variant": "ConfigValueWrite",
+      "method": "config/value/write",
+      "line": 1443
+    },
+    {
+      "variant": "ConfigBatchWrite",
+      "method": "config/batchWrite",
+      "line": 1449
+    },
+    {
+      "variant": "ConfigRequirementsRead",
+      "method": "configRequirements/read",
+      "line": 1456
+    },
+    {
+      "variant": "GetAccount",
+      "method": "account/read",
+      "line": 1462
+    },
+    {
+      "variant": "GetConversationSummary",
+      "method": "getConversationSummary",
+      "line": 1469
+    },
+    {
+      "variant": "GitDiffToRemote",
+      "method": "gitDiffToRemote",
+      "line": 1474
+    },
+    {
+      "variant": "GetAuthStatus",
+      "method": "getAuthStatus",
+      "line": 1480
+    },
+    {
+      "variant": "FuzzyFileSearch",
+      "method": "fuzzyFileSearch",
+      "line": 1487
+    },
+    {
+      "variant": "FuzzyFileSearchSessionStart",
+      "method": "fuzzyFileSearch/sessionStart",
+      "line": 1493
+    },
+    {
+      "variant": "FuzzyFileSearchSessionUpdate",
+      "method": "fuzzyFileSearch/sessionUpdate",
+      "line": 1499
+    },
+    {
+      "variant": "FuzzyFileSearchSessionStop",
+      "method": "fuzzyFileSearch/sessionStop",
+      "line": 1505
+    }
+  ],
+  "count": 173,
+  "mode": "read-only pinned-source inventory; not route enforcement or runtime evidence",
+  "provenanceCorrection": "v1 retained: line-offset calculation corrected; same 173 variants/methods, source hashes unchanged."
+}

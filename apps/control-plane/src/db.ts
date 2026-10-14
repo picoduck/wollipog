@@ -777,6 +777,7 @@ CREATE TABLE IF NOT EXISTS workflow_decisions (
   status                TEXT NOT NULL CHECK (status IN ('pending','approved','denied','consumed','revoked','superseded')),
   selected_option_id    TEXT,
   evidence_reviewed     TEXT,
+  delegated_video_evidence TEXT,
   rationale_digest      TEXT,
   human_fallback        TEXT,
   authority_evaluation  TEXT,
@@ -3007,13 +3008,18 @@ function campaignAuthorityFromRows(
   protocol: number | null | undefined,
   request: PendingApproval,
   controllerProtocol: number | null | undefined = protocol,
+  peerContractForSession?: (id: string) => unknown,
 ) {
+  const policy = orchestratorCampaignPolicyFromJson(controller.orchestrator_policy) ?? undefined;
+  const control = policy?.control;
+  const peerContracts = control?.mode === "full_control" && control.boundary.evidenceAuthority
+    ? { controller: peerContractForSession?.(controller.id), requester: peerContractForSession?.(requester.id) } : undefined;
   return evaluateCampaignAuthority({ id: controller.id, driver: controller.driver as SessionView["driver"], runnerId: controller.runner_id, workspaceId: controller.workspace_id,
-    orchestratorPolicy: orchestratorCampaignPolicyFromJson(controller.orchestrator_policy) ?? undefined,
+    orchestratorPolicy: policy,
     parentControl: controller.parent_control as ParentControlMode,
     parentControlPolicy: { revision: controller.parent_control_policy_revision,
       decisions: parentControlDecisionPolicyFromJson(controller.parent_control_policy) ?? { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } },
-  }, requester, protocol, request, undefined, controllerProtocol);
+  }, requester, protocol, request, undefined, controllerProtocol, peerContracts);
 }
 
 /** The content-free identity under which a campaign publishes one pending request. A typed workflow
@@ -3031,6 +3037,7 @@ function addCampaignRequestSummary(
   controllerProtocol?: number | null,
   repositoryRoot?: string,
   currentRequest?: (pending: PendingApproval) => PendingApproval,
+  peerContractForSession?: (id: string) => unknown,
 ): void {
   if (request.type === "typed") {
     if (request.authority !== "human" && request.authority !== "orchestrator") return;
@@ -3043,7 +3050,7 @@ function addCampaignRequestSummary(
   for (const pending of pendingRequests(parseJson<PendingApproval>(request.pending_approval))) {
     if (pending.kind === "workflow_decision") continue;
     const authority = controller ? campaignAuthorityFromRows(controller,
-      { id: request.session_id, driver: request.driver, repositoryRoot, runnerId: request.runner_id ?? undefined, workspaceId: request.workspace_id }, runnerProtocol, currentRequest?.(pending) ?? pending, controllerProtocol).owner
+      { id: request.session_id, driver: request.driver, repositoryRoot, runnerId: request.runner_id ?? undefined, workspaceId: request.workspace_id }, runnerProtocol, currentRequest?.(pending) ?? pending, controllerProtocol, peerContractForSession).owner
       : evaluateCampaignAuthority({ id: "controller", driver: request.driver, parentControl: mode },
         { id: request.session_id, driver: request.driver }, runnerProtocol, pending).owner;
     counts[authority]++;
@@ -6198,6 +6205,7 @@ export class ControlPlaneDb {
       "action_provider_thread_id TEXT",
       "action_runner_history_epoch INTEGER",
       "child_message TEXT",
+      "delegated_video_evidence TEXT",
       "human_fallback TEXT",
       "authority_evaluation TEXT",
       "issue_closure_result TEXT",
@@ -10831,7 +10839,8 @@ export class ControlPlaneDb {
       .all(sessionId,65-ancestors.length,sessionId,orchestratorCampaignPolicyFromJson(root.orchestrator_policy)?.control?.mode === "full_control" ? 1 : 0,...authorization.params,sessionId,...authorization.params) as unknown as
       Array<CampaignRequestSummaryRow & { protocol_version: number | null }>;
     for (const request of requests) addCampaignRequestSummary(counts,request,root.parent_control,request.protocol_version,root, root.runner_protocol,
-      orchestratorCampaignPolicyFromJson(root.orchestrator_policy)?.control?.mode === "full_control" ? this.sessionRepositoryRoot(request.session_id) : undefined, (pending) => this.campaignPolicyRequest(request.session_id, orchestratorCampaignPolicyFromJson(root.orchestrator_policy)?.control, pending));
+      orchestratorCampaignPolicyFromJson(root.orchestrator_policy)?.control?.mode === "full_control" ? this.sessionRepositoryRoot(request.session_id) : undefined, (pending) => this.campaignPolicyRequest(request.session_id, orchestratorCampaignPolicyFromJson(root.orchestrator_policy)?.control, pending),
+      (id) => this.campaignPeerContract(id));
     counts.humanRequestTokens!.sort();
     return counts;
   }
@@ -11055,7 +11064,8 @@ export class ControlPlaneDb {
         const counts=context.campaignRequests.get(rootId);
         if (!counts) continue;
         const root=context.rows.get(rootId)!;
-        addCampaignRequestSummary(counts,request,root.parent_control,context.runnerProtocols.get(request.runner_id!) ?? null,root,context.runnerProtocols.get(root.runner_id) ?? null, orchestratorCampaignPolicyFromJson(root.orchestrator_policy)?.control?.mode === "full_control" ? this.repositoryRootFromRow(context.rows.get(request.session_id)!) : undefined, (pending) => this.campaignPolicyRequest(request.session_id, orchestratorCampaignPolicyFromJson(root.orchestrator_policy)?.control, pending));
+        addCampaignRequestSummary(counts,request,root.parent_control,context.runnerProtocols.get(request.runner_id!) ?? null,root,context.runnerProtocols.get(root.runner_id) ?? null, orchestratorCampaignPolicyFromJson(root.orchestrator_policy)?.control?.mode === "full_control" ? this.repositoryRootFromRow(context.rows.get(request.session_id)!) : undefined, (pending) => this.campaignPolicyRequest(request.session_id, orchestratorCampaignPolicyFromJson(root.orchestrator_policy)?.control, pending),
+          (id) => this.campaignPeerContract(id));
       }
     }
     for (const counts of context.campaignRequests.values()) counts.humanRequestTokens!.sort();
@@ -17799,7 +17809,8 @@ export class ControlPlaneDb {
       for (const request of pendingRequests(parseJson<PendingApproval>(campaign.pending_approval)).filter((item) => item.kind !== "workflow_decision")) {
         const evaluation = campaignAuthorityFromRows(campaign, { id: campaign.id, driver: campaign.driver as SessionView["driver"],
           runnerId: campaign.runner_id, workspaceId: campaign.workspace_id, repositoryRoot: this.sessionRepositoryRoot(campaign.id) },
-        this.getRunner(campaign.runner_id)?.protocolVersion, this.campaignPolicyRequest(campaign.id, policy.control, request));
+        this.getRunner(campaign.runner_id)?.protocolVersion, this.campaignPolicyRequest(campaign.id, policy.control, request), undefined,
+          (id) => this.campaignPeerContract(id));
         if (evaluation.owner === "orchestrator") {
           pendingGenericOrchestrator += 1;
           orchestratorRequestTokens.push(campaignRequestToken("generic", campaign.id, request.occurrenceId ?? request.requestId));
@@ -17815,7 +17826,8 @@ export class ControlPlaneDb {
       const generic = pendingRequests(approval).filter((request) => request.kind !== "workflow_decision");
       let childHasHumanRequest = childPending.some((decision) => decision.authority === "human");
       for (const request of generic) {
-        if (campaignAuthorityFromRows(campaign, { id: child.id, driver: child.driver, runnerId: child.runner_id, workspaceId: child.workspace_id, repositoryRoot: policy.control?.mode === "full_control" ? this.sessionRepositoryRoot(child.id) : undefined }, this.getRunner(child.runner_id)?.protocolVersion, this.campaignPolicyRequest(child.id, policy.control, request), policy.control?.mode === "full_control" ? this.getRunner(campaign.runner_id)?.protocolVersion : undefined).owner === "orchestrator") {
+        if (campaignAuthorityFromRows(campaign, { id: child.id, driver: child.driver, runnerId: child.runner_id, workspaceId: child.workspace_id, repositoryRoot: policy.control?.mode === "full_control" ? this.sessionRepositoryRoot(child.id) : undefined }, this.getRunner(child.runner_id)?.protocolVersion, this.campaignPolicyRequest(child.id, policy.control, request), policy.control?.mode === "full_control" ? this.getRunner(campaign.runner_id)?.protocolVersion : undefined,
+          (id) => this.campaignPeerContract(id)).owner === "orchestrator") {
           pendingGenericOrchestrator += 1;
           orchestratorRequestTokens.push(campaignRequestToken("generic", child.id, request.occurrenceId ?? request.requestId));
         } else {
@@ -17852,7 +17864,7 @@ export class ControlPlaneDb {
     const effectiveOwners = { ...policy.delegation.decisions };
     if (policy.control?.mode === "full_control") {
       const supported = campaignAuthorityPreflight(policy.control, campaign.driver,
-        this.getRunner(campaign.runner_id)?.protocolVersion).supported && campaignBoundaryCurrent({ orchestratorPolicy: policy,
+        this.getRunner(campaign.runner_id)?.protocolVersion, this.campaignPeerContract(campaign.id)).supported && campaignBoundaryCurrent({ orchestratorPolicy: policy,
         parentControlPolicy: { revision: campaign.parent_control_policy_revision, decisions: policy.delegation.decisions } });
       for (const category of WORKFLOW_DECISION_CATEGORIES) effectiveOwners[category] = campaignWorkflowOwner(policy.control, policy.delegation.decisions, category, supported);
     }
@@ -18173,15 +18185,16 @@ export class ControlPlaneDb {
     rationaleDigest?: string,
     childMessage?: string,
     oweResume = false,
+    delegatedVideoEvidence?: WorkflowDecisionView["delegatedVideoEvidence"],
   ): WorkflowDecisionView | null {
     const owed = oweResume ? ", resume_state='held', resume_command_id=NULL, resume_updated_at=?" : "";
     const result = this.stmt(
       `UPDATE workflow_decisions SET status=?, selected_option_id=?, evidence_reviewed=?,
-       rationale_digest=?, child_message=?, resolved_at=?${owed}
+       rationale_digest=?, child_message=?, delegated_video_evidence=?, resolved_at=?${owed}
        WHERE occurrence_id=? AND status='pending' AND authority=?`,
     ).run(
       outcome, selectedOptionId ?? null, evidenceReviewed ? JSON.stringify(evidenceReviewed) : null,
-      rationaleDigest ?? null, childMessage ?? null, now, ...(oweResume ? [now] : []), occurrenceId, expectedAuthority,
+      rationaleDigest ?? null, childMessage ?? null, delegatedVideoEvidence ? JSON.stringify(delegatedVideoEvidence) : null, now, ...(oweResume ? [now] : []), occurrenceId, expectedAuthority,
     );
     return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
   }
@@ -22867,6 +22880,14 @@ export class ControlPlaneDb {
     return mandatory ? { ...request, humanRequired: true } : request;
   }
 
+  /** Compatibility metadata from the current authenticated catalog and exact durable selection.
+   * Read raw identity columns to avoid recursion through SessionView authority projections. */
+  private campaignPeerContract(sessionId: string): unknown {
+    const row = this.stmt("SELECT runner_id,agent_id FROM sessions WHERE id=?").get(sessionId) as
+      { runner_id: string; agent_id: string } | undefined;
+    return row ? this.getRunner(row.runner_id)?.agents.find((agent) => agent.id === row.agent_id)?.capabilities?.pacedVideoReviewContract : undefined;
+  }
+
   /** Resolve descendant request ownership from durable ancestry and the current root policy.
    * This keeps list counts, reminders, and notifications aligned after policy changes or reloads
    * without trusting a stale owner copied into a provider request. */
@@ -22881,7 +22902,8 @@ export class ControlPlaneDb {
         operation: request.workflowDecision?.category ?? "tool_approval",
       };
       return campaignAuthorityFromRows(row, { id: row.id, driver: row.driver as SessionView["driver"], runnerId: row.runner_id, workspaceId: row.workspace_id, repositoryRoot: this.repositoryRootFromRow(row) },
-        summary ? summary.runnerProtocols.get(row.runner_id) : this.getRunner(row.runner_id)?.protocolVersion, this.campaignPolicyRequest(row.id, orchestratorCampaignPolicyFromJson(row.orchestrator_policy)?.control, request));
+        summary ? summary.runnerProtocols.get(row.runner_id) : this.getRunner(row.runner_id)?.protocolVersion, this.campaignPolicyRequest(row.id, orchestratorCampaignPolicyFromJson(row.orchestrator_policy)?.control, request), undefined,
+        (id) => this.campaignPeerContract(id));
     }
     if (!row.parent_session_id) return undefined;
     const seen = new Set<string>([row.id]);
@@ -22911,7 +22933,8 @@ export class ControlPlaneDb {
     };
     return campaignAuthorityFromRows(controller, { id: row.id, driver: row.driver as SessionView["driver"], runnerId: row.runner_id, workspaceId: row.workspace_id, repositoryRoot: orchestratorCampaignPolicyFromJson(controller.orchestrator_policy)?.control?.mode === "full_control" ? this.repositoryRootFromRow(row) : undefined },
       summary ? summary.runnerProtocols.get(row.runner_id) : this.getRunner(row.runner_id)?.protocolVersion, this.campaignPolicyRequest(row.id, orchestratorCampaignPolicyFromJson(controller.orchestrator_policy)?.control, request),
-      summary ? summary.runnerProtocols.get(controller.runner_id) : orchestratorCampaignPolicyFromJson(controller.orchestrator_policy)?.control?.mode === "full_control" ? this.getRunner(controller.runner_id)?.protocolVersion : undefined);
+      summary ? summary.runnerProtocols.get(controller.runner_id) : orchestratorCampaignPolicyFromJson(controller.orchestrator_policy)?.control?.mode === "full_control" ? this.getRunner(controller.runner_id)?.protocolVersion : undefined,
+      (id) => this.campaignPeerContract(id));
   }
 
   private parentedRequestOwner(row: SessionRow, request: PendingApproval, summary?: SessionSummaryContext): WorkflowDecisionAuthority | undefined {
@@ -26004,8 +26027,9 @@ export class ControlPlaneDb {
       for (const row of ids) {
         if (row.kind === "video") {
           this.stmt(`DELETE FROM artifacts WHERE session_id=? AND kind='screenshot'
-            AND created_by_kind='system' AND created_by_id='video-review-v1' AND json_valid(metadata)
-            AND json_extract(metadata, '$.purpose')='video_review_frame'
+            AND created_by_kind='system' AND json_valid(metadata)
+            AND ((created_by_id='video-review-v1' AND json_extract(metadata, '$.purpose')='video_review_frame')
+              OR (created_by_id='video-review-v2' AND json_extract(metadata, '$.purpose')='temporal_video_review_frame'))
             AND json_extract(metadata, '$.sourceArtifactId')=?`).run(row.session_id, row.id);
         }
         this.stmt("DELETE FROM artifacts WHERE id=?").run(row.id);
@@ -26017,6 +26041,26 @@ export class ControlPlaneDb {
     }
     this.collectWorkflowArtifactBlobs();
     return ids.length;
+  }
+
+  /** Internal temporal-frame staging can outlive a crashed derivation. Expire only our exact
+   * server-authored format; caller-authored metadata cannot nominate pixels for deletion. */
+  pruneExpiredTemporalVideoFrames(now: number, limit = 1_000): number {
+    if (!Number.isSafeInteger(now) || now <= 0) return 0;
+    const bounded = Number.isSafeInteger(limit) ? Math.max(1, Math.min(limit, 10_000)) : 1_000;
+    const rows = this.stmt(`SELECT id FROM artifacts WHERE kind='screenshot'
+      AND created_by_kind='system' AND created_by_id='video-review-v2' AND json_valid(metadata)
+      AND json_extract(metadata,'$.purpose')='temporal_video_review_frame'
+      AND json_extract(metadata,'$.profile')='paced-silent-complete-frames-v1'
+      AND json_type(metadata,'$.expiresAt')='integer' AND json_extract(metadata,'$.expiresAt')>0
+      AND json_extract(metadata,'$.expiresAt')<=? ORDER BY created_at,id LIMIT ?`)
+      .all(now, bounded) as Array<{ id: string }>;
+    if (!rows.length) return 0;
+    this.atomic(() => {
+      for (const row of rows) this.stmt("DELETE FROM artifacts WHERE id=?").run(row.id);
+    });
+    this.collectWorkflowArtifactBlobs();
+    return rows.length;
   }
 
   /** How much agents have attached to one session. Sizes are summed per artifact, so identical
@@ -26062,8 +26106,9 @@ export class ControlPlaneDb {
       // Agent-provided metadata alone can never nominate another artifact for deletion.
       if (source.kind === "video" && source.session_id) {
         this.stmt(`DELETE FROM artifacts WHERE session_id=? AND kind='screenshot'
-          AND created_by_kind='system' AND created_by_id='video-review-v1' AND json_valid(metadata)
-          AND json_extract(metadata, '$.purpose')='video_review_frame'
+          AND created_by_kind='system' AND json_valid(metadata)
+          AND ((created_by_id='video-review-v1' AND json_extract(metadata, '$.purpose')='video_review_frame')
+            OR (created_by_id='video-review-v2' AND json_extract(metadata, '$.purpose')='temporal_video_review_frame'))
           AND json_extract(metadata, '$.sourceArtifactId')=?`).run(source.session_id, artifactId);
       }
       return Number(this.stmt("DELETE FROM artifacts WHERE id=?").run(artifactId).changes) > 0;
@@ -28746,6 +28791,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     status?: WorkflowDecisionStatus;
     selected_option_id?: string | null;
     evidence_reviewed?: string | null;
+    delegated_video_evidence?: string | null;
     human_fallback?: string | null;
     authority_evaluation?: string | null;
     created_at?: number;
@@ -28770,6 +28816,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
   const resourceSnapshot = parseJson<WorkflowDecisionView["resourceSnapshot"]>(row.resource_snapshot);
   if (!resourceSnapshot) return null;
   const evidenceReviewed = parseJson<string[]>(row.evidence_reviewed ?? null);
+  const delegatedVideoEvidence = parseJson<NonNullable<WorkflowDecisionView["delegatedVideoEvidence"]>>(row.delegated_video_evidence ?? null);
   const humanFallback = parseJson<NonNullable<WorkflowDecisionView["humanFallback"]>>(row.human_fallback ?? null);
   return {
     requestId: row.request_id,
@@ -28788,6 +28835,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     ...(row.issue_closure_result ? { issueClosureResult: JSON.parse(row.issue_closure_result) as NonNullable<WorkflowDecisionView["issueClosureResult"]> } : {}),
     ...(row.selected_option_id ? { selectedOptionId: row.selected_option_id } : {}),
     ...(evidenceReviewed ? { evidenceReviewed } : {}),
+    ...(delegatedVideoEvidence ? { delegatedVideoEvidence } : {}),
     createdAt: row.created_at!,
     ...(row.resolved_at != null ? { resolvedAt: row.resolved_at } : {}),
     ...(row.consumed_at != null ? { consumedAt: row.consumed_at } : {}),

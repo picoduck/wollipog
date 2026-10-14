@@ -21,6 +21,9 @@ import {
   POLICY_HOOK_POLL_CAPABILITY_HEADER,
   advertisesOrchestratorAdditiveRole,
   PROTOCOL_VERSION,
+  PACED_VIDEO_REVIEW_MIN_PROTOCOL,
+  PACED_VIDEO_REVIEW_CONTRACT_ID,
+  supportsPacedVideoReviewPeer,
   UNIVERSAL_QUESTION_TEXT_MIN_PROTOCOL,
   SESSION_NAMING_CLEANUP_BUDGET_MS,
   SESSION_NAMING_GENERATION_BUDGET_MS,
@@ -102,6 +105,30 @@ import {
   type ReadQueuedPromptMessage,
   type ReadQueuedPromptResultMessage,
 } from "./index.js";
+
+test("private media compatibility stays unadvertised and cannot borrow public221 or222", () => {
+  const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
+  assert.equal(PROTOCOL_VERSION, 222);
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
+  assert.equal(PACED_VIDEO_REVIEW_MIN_PROTOCOL, 223);
+  assert.ok(Object.values(RUNNER_CAPABILITY_MIN_PROTOCOL).every((value) => value <= PROTOCOL_VERSION));
+  for (const version of [undefined, null, "223", NaN, Infinity, 223.5, 221, 222]) {
+    assert.equal(supportsPacedVideoReviewPeer(version, metadata), false);
+  }
+  for (const version of [223, 224, 999]) {
+    assert.equal(supportsPacedVideoReviewPeer(version, metadata), true, "compatibility only, not runtime readiness");
+    for (const claim of [undefined, null, true, [], {}, { id: "other", revision: 1 },
+      { ...metadata, revision: 2 }, { ...metadata, ready: true }, { ...metadata, [Symbol("hidden")]: true }]) {
+      assert.equal(supportsPacedVideoReviewPeer(version, claim), false);
+    }
+  }
+  let read = 0;
+  const accessorClaim = { get id() { read++; return PACED_VIDEO_REVIEW_CONTRACT_ID; }, revision: 1 };
+  assert.equal(supportsPacedVideoReviewPeer(223, accessorClaim), false);
+  assert.equal(read, 0, "metadata validation cannot execute caller accessors");
+  assert.equal(supportsPacedVideoReviewPeer(223, new Proxy({}, { ownKeys() { throw new Error("unknown"); } })), false);
+});
 
 test("agent context identity ignores JSON property order", () => {
   assert.equal(agentContextKey({ kind: "wsl", distro: "Ubuntu" }),

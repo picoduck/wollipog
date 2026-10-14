@@ -1,4 +1,6 @@
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
+import { mediaSessionMutationAllowed } from "./media-session-route-policy.js";
+import { MEDIA_SESSION_PURPOSE_ERROR } from "./prepared-media-session-runtime.js";
 import { registerCampaignIssueScopeRoutes } from "./campaign-issue-scope-routes.js";
 /**
  * Control plane: routes UI commands to runners, ingests runner events, persists
@@ -578,7 +580,9 @@ function authedApiPrincipal(
   if (local) return local;
   const routePath = req.routeOptions?.url ?? req.url.split("?")[0] ?? "";
   const agentControl = authedAgentControl(req);
-  if (agentControl && isAgentControlApiRouteAllowed(req.method, routePath, sessionRole(agentControl))) {
+  const mediaPurpose = agentControl ? svc.mediaSessionPurposes.owns(agentControl.id) : false;
+  if (agentControl && mediaPurpose && !svc.mediaSessionPurposes.credentialCurrent(agentControl.id)) return null;
+  if (agentControl && isAgentControlApiRouteAllowed(req.method, routePath, sessionRole(agentControl), mediaPurpose)) {
     const delegatedScope = db.sessionScope(agentControl.id);
     if (!delegatedScope) return null;
     return {
@@ -736,6 +740,8 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   if (sessionId && !db.canAccessSession(principal, sessionId)) {
     return { statusCode: 404, error: "session not found" };
   }
+  const mediaTarget = routePath.startsWith("/api/sessions/:id/") ? params.id : null;
+  if (typeof mediaTarget === "string" && svc.mediaSessionPurposes.owns(mediaTarget) && !mediaSessionMutationAllowed(req.method, routePath)) return MEDIA_SESSION_PURPOSE_ERROR;
   const runnerId = typeof params.runnerId === "string" ? params.runnerId
     : typeof params.id === "string" && routePath.startsWith("/api/runners/") ? params.id : null;
   if (runnerId) {
@@ -1382,6 +1388,12 @@ app.register(async (instance) => {
       case "campaign_review_job_update":
         if(runnerId) svc.onCampaignReviewJobUpdate(runnerId,msg);
         break;
+      case "media_review_never_dispatched":
+        if (runnerId) svc.onMediaReviewNeverDispatched(runnerId, msg.receipt);
+        break;
+      case "media_review_stop_acknowledged":
+        if (runnerId) svc.onMediaReviewStopAcknowledged(runnerId, msg.receipt);
+        break;
       case "policy_hook_credential":
         {
           if (deferNewCredentialBinding(msg)) break;
@@ -1976,6 +1988,7 @@ app.get("/healthz", async () => ({
 // while its parent's turn is live; create tools quote it instead of a client-side constant.
 app.get("/api/compatibility", async () => ({
   protocolVersion: PROTOCOL_VERSION,
+  // No pacedVideoReviewContract declaration: no audited production media runtime is registered.
   spawnApprovalAbandonmentMs: SPAWN_APPROVAL_ABANDONMENT_MS,
 }));
 
@@ -6412,6 +6425,7 @@ const artifactMaintenanceTimer = setInterval(() => {
     db.pruneSessionCommandInvocations(now - SESSION_COMMAND_INVOCATION_RETENTION_MS, 1_000);
     db.compactSteeringAttempts(now, 1_000);
     db.collectExpiredPreparedPromptImages(now, 1_000);
+    db.pruneExpiredTemporalVideoFrames(now, 1_000);
     const expiredAttachments = db.pruneExpiredSessionAttachments(now - SESSION_ARTIFACT_RETENTION_MS, 1_000);
     if (expiredAttachments) app.log.info({ event: "session_artifacts_expired", count: expiredAttachments }, "session attachments expired");
     db.collectOrphanedSteeringPromptImages(1_000);

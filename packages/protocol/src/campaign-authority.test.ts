@@ -22,6 +22,36 @@ const tool: PendingApproval = { requestId: "p", kind: "permission", title: "Insp
 const evaluate = (request: PendingApproval, override: Partial<Parameters<typeof resolveCampaignAuthority>[0]> = {}) =>
   resolveCampaignAuthority({ ...base, request, trustedSource: request.requestSource, repositoryRoot: "/repo", ...override });
 
+// Static source-validator fixture, not a server mint or a live disclosure/runtime grant.
+const mediaControl: CampaignControl = { ...control, boundary: { ...control.boundary, evidenceAuthority: {
+  version: 1, revision: control.boundary.revision, authorizedByUserId: control.boundary.authorizedByUserId,
+  authorizedAt: control.boundary.authorizedAt, campaignRootSessionId: "root", repository: control.boundary.repository,
+  objective: control.boundary.objective, issueScopeRevision: control.boundary.issueScopeRevision,
+  scope: "relevant_task_evidence_only", destination: { kind: "session_artifacts", configurationId: "synthetic-private",
+    organizationId: "synthetic", privacy: "private", disclosureRevision: 1 },
+  providers: [{ providerId: "synthetic-provider", disclosureRevision: 1, retentionDisclosure: "Synthetic source fixture only.",
+    reviewers: [{ driver: "codex-app-server", modelId: "synthetic-model" }] }],
+} } };
+for (const [label, version, metadata] of [
+  ["public221", 221, undefined], ["public222", 222, undefined],
+  ["private number alone", 223, undefined], ["future number alone", 999, undefined],
+  ["wrong identity", 223, { id: "other", revision: 1 }],
+  ["wrong revision", 223, { id: "wollipog-paced-video-review-v1", revision: 2 }],
+] as const) {
+  test(`media authority preflight refuses ${label} without exact private compatibility`, () => {
+    assert.ok(validCampaignControl(mediaControl), "exercise the actual guard with a valid source boundary");
+    const result = Reflect.apply(campaignAuthorityPreflight, undefined, [mediaControl, "codex-app-server", version, metadata]);
+    assert.equal(result.supported, false, "numeric public support is not private media compatibility");
+  });
+}
+
+test("exact private metadata is only a compatibility condition and ordinary authority is unchanged", () => {
+  const metadata = { id: "wollipog-paced-video-review-v1", revision: 1 };
+  assert.equal(Reflect.apply(campaignAuthorityPreflight, undefined, [mediaControl, "codex-app-server", 223, metadata]).supported, true);
+  assert.equal(campaignAuthorityPreflight(control, "codex-app-server", 215).supported, true);
+  assert.equal(campaignAuthorityPreflight({ mode: "custom" }, "acp", 1).supported, true);
+});
+
 test("Full Control planning uses trusted provenance; Custom preserves keyword-based protection", () => {
   for (const text of ["Which authentication library should we implement?", "Should the OAuth flow use PKCE?",
     "Which validation test should use sample@example.com?", "Which approach should the login component use?",

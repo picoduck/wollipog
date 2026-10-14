@@ -14,7 +14,7 @@ import { Hub } from "./hub.js";
 import { SessionsService, canonicalPrMergeEnqueueCommand } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy, parseOrchestratorOverrides } from "./orchestrator-settings.js";
 import type { HumanPrincipal } from "./identity.js";
-import { campaignBoundaryCurrent } from "./campaign-authority.js";
+import { campaignBoundaryCurrent, evaluateCampaignAuthority } from "./campaign-authority.js";
 
 function harness(protocol = PROTOCOL_VERSION, workspacePath = "/repos/test", driver: "claude-code" | "codex-app-server" = "claude-code") {
   const db = ControlPlaneDb.open(":memory:");
@@ -54,6 +54,31 @@ function harness(protocol = PROTOCOL_VERSION, workspacePath = "/repos/test", dri
   });
   return { db, svc, principal, sent, enable, ask, generic, snapshot, make };
 }
+
+test("pure media authority requires both participant contract inputs and never invents missing metadata", () => {
+  const h = harness(223); try {
+    assert.ok(h.enable().ok);
+    const root = h.db.getSession("root")!, child = h.db.getSession("child")!;
+    const control = root.orchestratorPolicy!.control!;
+    assert.equal(control.mode, "full_control"); if (control.mode !== "full_control") assert.fail("fixture boundary missing");
+    const b = control.boundary;
+    // Local pure-input fixture only. No server evidence admission, runtime or provider grant.
+    b.evidenceAuthority = { version: 1, revision: b.revision, authorizedByUserId: b.authorizedByUserId,
+      authorizedAt: b.authorizedAt, campaignRootSessionId: "root", repository: b.repository, objective: b.objective,
+      issueScopeRevision: b.issueScopeRevision, scope: "relevant_task_evidence_only",
+      destination: { kind: "session_artifacts", configurationId: "synthetic", organizationId: "synthetic",
+        privacy: "private", disclosureRevision: 1 }, providers: [{ providerId: "synthetic", disclosureRevision: 1,
+        retentionDisclosure: "Synthetic source input only.", reviewers: [{ driver: "claude-code", modelId: "synthetic" }] }] };
+    const metadata = { id: "wollipog-paced-video-review-v1", revision: 1 };
+    for (const peers of [undefined, {}, { controller: metadata }, { requester: metadata },
+      { controller: metadata, requester: { id: "other", revision: 1 } }]) {
+      assert.equal(evaluateCampaignAuthority(root, child, 223, h.snapshot, root.parentControlPolicy, 223, peers).owner, "human");
+    }
+    assert.equal(evaluateCampaignAuthority(root, child, 223, h.snapshot, root.parentControlPolicy, 223,
+      { controller: metadata, requester: metadata }).owner, "orchestrator", "compatibility source input, not a live media decision");
+    assert.deepEqual(h.sent, []);
+  } finally { h.db.close(); }
+});
 
 test("human admission preserves defaults, mode omission, scope and provider restrictions", () => {
   const h = harness();

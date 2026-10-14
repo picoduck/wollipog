@@ -1,0 +1,55 @@
+[
+  {
+    "type": "function",
+    "name": "review_video_evidence_frame",
+    "description": "Inspect the next complete consecutive native video-frame window for this exact grant. Every image has its source timestamp and receipt. Continue at nextIndex until frameCount; these receipts alone are not a quality verdict.",
+    "inputSchema": {
+      "type": "object",
+      "properties": { "index": { "type": "integer", "minimum": 0, "maximum": 899 } },
+      "required": ["index"],
+      "additionalProperties": false
+    },
+    "deferLoading": false
+  },
+  {
+    "type": "function",
+    "name": "submit_video_evidence_verdict",
+    "description": "Record pass/fail/blocked observations for every pinned criterion after inspecting every source frame. This records the actual worker's quality verdict; the authorized owner separately resolves the original typed UI gate.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["report"],
+      "properties": {
+        "report": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["outcome", "criteria", "rationale"],
+          "properties": {
+            "outcome": { "type": "string", "enum": ["accept", "reject"] },
+            "rationale": { "type": "string", "minLength": 1, "maxLength": 8000 },
+            "criteria": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 64,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["criterionId", "outcome", "observedFrameIndices", "observation"],
+                "properties": {
+                  "criterionId": { "type": "string", "minLength": 1, "maxLength": 256 },
+                  "outcome": { "type": "string", "enum": ["pass", "fail", "blocked"] },
+                  "observedFrameIndices": {
+                    "type": "array", "minItems": 1, "maxItems": 900, "uniqueItems": true,
+                    "items": { "type": "integer", "minimum": 0, "maximum": 899 }
+                  },
+                  "observation": { "type": "string", "minLength": 1, "maxLength": 4000 }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "deferLoading": false
+  }
+]

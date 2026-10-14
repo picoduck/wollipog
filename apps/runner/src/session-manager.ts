@@ -5487,6 +5487,13 @@ export class SessionManager {
       materializationReported = true;
       onMaterialized?.(ready);
     };
+    if (spec.mediaReviewPurpose !== undefined) {
+      // This refusal precedes any workspace remap, generation replacement, credential or driver
+      // action. A prepared purpose cannot fall through to the ordinary unrestricted launch path.
+      durable?.failed("Media review requires its exact dedicated admitted dispatcher.", "INVALID_COMMAND");
+      reportMaterialized(false);
+      return false;
+    }
     if (this.shuttingDown) {
       durable?.failed("runner shutdown is in progress", "COMMAND_CANCELLED");
       reportMaterialized(false);

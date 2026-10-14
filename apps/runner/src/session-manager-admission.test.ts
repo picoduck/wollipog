@@ -34,6 +34,26 @@ function launchSpec(root: string, sessionId: string): SessionLaunchSpec {
   };
 }
 
+test("prepared media purpose never reaches generic driver construction, remap, generation or credential setup", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-media-purpose-admission-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const store = new SessionStore(join(root, "sessions"));
+  let configured = false, constructed = false;
+  const manager = new SessionManager(() => {}, () => {}, store, "runner",
+    () => { configured = true; return { command: "claude", args: [], env: {} }; },
+    () => { constructed = true; throw new Error("media purpose escaped into generic driver"); });
+  t.after(() => manager.shutdownAll());
+  let materialized: boolean | undefined;
+  const spec = { ...launchSpec(root, "purpose-bound-media"), mediaReviewPurpose: {
+    rootSessionId: "root", childSessionId: "child", admissionId: "admission", occurrenceId: "gate",
+    evidenceId: "video", generation: "original-generation",
+  } };
+  assert.equal(await manager.start(spec, undefined, undefined, undefined, (ready) => { materialized = ready; }), false);
+  assert.equal(materialized, false);
+  assert.equal(configured, false); assert.equal(constructed, false);
+  assert.equal(store.has(spec.sessionId), false);
+});
+
 test("native launches reject control-plane argv that differs from the exact runner-local agent", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-native-launch-allowlist-"));
   try {
