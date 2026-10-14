@@ -153,12 +153,15 @@ export class CampaignBudgetLedger {
       }
       // All live members need finite reservations before authority is usable. Preserve tighter
       // existing session ceilings; otherwise divide free capacity, including a root share.
-      const rows = this.sql.prepare("SELECT * FROM campaign_budget_members WHERE root_id=? AND active=1").all(rootId) as unknown as Member[];
+      const rows = this.sql.prepare(`SELECT m.*, ${LIVE_COST} AS live_cost FROM campaign_budget_members m
+        LEFT JOIN sessions s ON s.id=m.session_id WHERE m.root_id=? AND m.active=1`).all(rootId) as unknown as Array<Member & { live_cost: number }>;
       const used = this.view(rootId)!;
       for (const r of rows) {
         if (old && (authority.costUsd === undefined || r.cost_limit !== null) && (authority.toolCalls === undefined || r.tool_limit !== null)) continue;
+        // A turn running at authorization has spent its estimate already, as `used` counts it (#3196).
+        const spent = r.live_cost > 0 ? roundUsdMicros(r.cost + r.live_cost) : r.cost;
         const cost = authority.costUsd === undefined ? r.cost_limit : Math.min(r.cost_limit ?? Infinity,
-          r.cost + Math.max(0, authority.costUsd - used.actual.costUsd) / Math.max(1, rows.length + (authority.concurrency ?? 1)));
+          spent + Math.max(0, authority.costUsd - used.actual.costUsd) / Math.max(1, rows.length + (authority.concurrency ?? 1)));
         const tools = authority.toolCalls === undefined ? r.tool_limit : Math.min(r.tool_limit ?? Infinity,
           r.tools + Math.floor(Math.max(0, authority.toolCalls - used.actual.toolCalls) / Math.max(1, rows.length + (authority.concurrency ?? 1))));
         this.sql.prepare("UPDATE campaign_budget_members SET cost_limit=?,tool_limit=? WHERE session_id=?").run(cost,tools,r.session_id);

@@ -477,6 +477,20 @@ test("running turns' live estimates exhaust the campaign mid-turn and refuse new
   } finally { h.db.close(); }
 });
 
+test("authorizing protection during a running turn sizes allocations above its live estimate (#3196)", () => {
+  const h = harness();
+  try {
+    h.svc.onSessionEvent("root", liveRequest(40_000_000));
+    assert.ok(h.enable(allowance({ costUsd: 100, concurrency: 1 })).ok);
+    const allocation = h.db.campaignBudgets.allocation("root")!.costUsd!;
+    assert.ok(allocation > 40, `the $${allocation} allocation leaves room past the $40 already estimated`);
+    assert.equal(h.db.campaignBudgets.admissionError("root"), null);
+    h.svc.onSessionEvent("root", liveRequest(1_000_000));
+    assert.equal(h.db.getSession("root")!.status, "running", "the next request does not stop the root");
+    assert.equal(h.db.campaignBudgets.view("root")!.state, "active");
+  } finally { h.db.close(); }
+});
+
 test("a worker whose live estimate reaches its allocation stops, as a settled crossing does (#3196)", () => {
   const h = harness();
   try {
