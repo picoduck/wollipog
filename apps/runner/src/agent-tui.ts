@@ -9,6 +9,7 @@ import { windowsCommandLine } from "./windows-conpty.js";
 import { isOrchestratorLaunch, runnerSupportsProtocol, usesOrchestratorPresetPermissions } from "@wollipog/protocol";
 import {
   codexOrchestratorMcpArgs,
+  stripSessionCodexMcpArgs,
   supportsNativeOrchestratorBoundary,
   type OrchestratorIsolationMode,
 } from "./orchestrator-preset.js";
@@ -63,6 +64,12 @@ export async function prepareAgentTuiLaunch(
     await dependencies.acquireProviderHome?.(meta);
     dependencies.assertSessionNotDeleted(meta.sessionId);
     await dependencies.assertLaunchCurrent?.();
+    // An ordinary TUI is not provisioned with Agent Control, so the structured launch's persisted
+    // `wollipog` entry (#3123) would name a credential the TUI was never given: a relay it cannot
+    // reach, or a token file it should not read. Launch it without that entry.
+    if (meta.driver === "codex" || meta.driver === "codex-app-server") {
+      meta = { ...meta, args: stripSessionCodexMcpArgs(meta.args) };
+    }
     if (pluginProviderForDriver(meta.driver)) {
       meta = { ...meta, args: inheritProviderPlugins(meta) };
     }
