@@ -606,11 +606,14 @@ function policyRequest(): PendingApproval {
   };
 }
 
-function budgetRequest(): PendingApproval {
+function budgetRequest(estimate = false): PendingApproval {
   return {
     requestId: "cost-budget:session:1",
     kind: "cost_budget",
-    title: "Cost budget reached — $5.02 of $5.00. Continue?",
+    // A running Claude turn's live estimate counts toward the budget, and the title says so (#3112).
+    title: estimate
+      ? "Cost budget reached — $5.02 of $5.00, including an estimate for the running turn. Continue?"
+      : "Cost budget reached — $5.02 of $5.00. Continue?",
     options: [
       { optionId: "continue", name: "Continue", kind: "allow_once" },
       { optionId: "cancel", name: "Stop", kind: "reject_once" },
@@ -696,6 +699,7 @@ const DOCK_SCENARIOS: Record<string, { title: string; requests: () => PendingApp
   permission: { title: "Deploy the Request Dock", requests: () => [permissionRequest()] },
   policy: { title: "Deploy Behind a Policy", requests: () => [policyRequest()] },
   budget: { title: "Budgeted Session", requests: () => [budgetRequest()] },
+  "budget-estimate": { title: "Budgeted Claude Turn", requests: () => [budgetRequest(true)] },
   "tool-calls": { title: "Tool-Limited Session", requests: () => [toolCallsRequest()] },
   workflow: { title: "Campaign Merge", requests: () => [workflowRequest()] },
   // Arrival order: the permission came first, the sign-in last. The dock orders them by priority.

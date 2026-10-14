@@ -26,8 +26,11 @@ export interface PolicyInput {
   status: SessionStatus;
   costUsd: number;
   toolCallCount: number;
-  /** Tokens are recorded but none of them could be priced, so `costUsd` says nothing (v105). */
+  /** Tokens are recorded but none of them could be priced, so `costUsd` says nothing (v105), or a
+   * running Claude turn has live tokens without a rate (#3112). */
   unpriced?: boolean;
+  /** `costUsd` includes a running Claude turn's live rate-table estimate (#3112). */
+  includesEstimate?: boolean;
 }
 
 /** The guardrail fields a session carries, as the rule builder reads them (v105 adds the soft
@@ -438,6 +441,7 @@ export function budgetDecision(
 
 /** Evaluate every rule against the session state. Terminal sessions never ask (nothing to park). */
 export function evaluatePolicies(input: PolicyInput, rules: PolicyRule[]): PolicyDecision[] {
+  const estimate = input.includesEstimate ? ", including an estimate for the running turn" : "";
   return rules.map((rule) => {
     if (isTerminal(input.status)) return { rule, decision: "ok" };
     if (rule.kind === "cost_budget") {
@@ -445,7 +449,7 @@ export function evaluatePolicies(input: PolicyInput, rules: PolicyRule[]): Polic
         return {
           rule,
           decision: "ask",
-          title: `Cost budget reached — $${input.costUsd.toFixed(2)} of $${rule.budgetUsd.toFixed(2)}. Continue?`,
+          title: `Cost budget reached — $${input.costUsd.toFixed(2)} of $${rule.budgetUsd.toFixed(2)}${estimate}. Continue?`,
         };
       }
       return { rule, decision: "ok" };
@@ -455,7 +459,7 @@ export function evaluatePolicies(input: PolicyInput, rules: PolicyRule[]): Polic
         return {
           rule,
           decision: "ask",
-          title: `Cost checkpoint — $${input.costUsd.toFixed(2)} of $${rule.checkpointUsd.toFixed(2)}. Continue?`,
+          title: `Cost checkpoint — $${input.costUsd.toFixed(2)} of $${rule.checkpointUsd.toFixed(2)}${estimate}. Continue?`,
         };
       }
       return { rule, decision: "ok" };

@@ -19,7 +19,7 @@ import type { GithubIssueClosureRequest, GithubIssueClosureResult, GithubIssueCl
 
 import { createHash, randomUUID } from "node:crypto";
 import { posix, win32 } from "node:path";
-import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
+import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   addPendingRequest, removePendingRequest, pendingRequests, parentControlRequestEligible, campaignHumanAttentionAdded,
   CODEX_APP_SERVER_IMAGE_MIME_TYPES,
   MAX_PROMPT_IMAGE_BYTES,
@@ -242,7 +242,7 @@ import { childRestartAllowanceError, childSessionGuardrails, DEFAULT_CHILD_SPAWN
 import { capabilityRefusal, failureBody } from "./capability-refusal.js";
 import { NATIVE_TUI_DAILY_BUDGET_ERROR, NATIVE_TUI_TRACKED_GUARDRAILS_ERROR } from "./native-tui-launch.js";
 import { redactOperationalTranscriptText } from "./share-projection.js";
-import { type GuardrailFields, normalizeCostCheckpoints,
+import { type GuardrailFields, type PolicyInput, normalizeCostCheckpoints,
   approvalForDecision,
   sessionSpawnSafetyPolicy,
   evaluateApprovalPolicies,
@@ -5707,7 +5707,8 @@ export class SessionsService {
     if (guardrailChanged && parkedGuardrail) {
       const remaining = removePendingRequest(this.db.getSession(sessionId)?.pendingApproval, parkedGuardrail.requestId);
       this.db.setPendingApproval(sessionId, remaining);
-      this.db.updateSessionStatus(sessionId, hasBlockingPendingRequest(remaining) ? "input_required" : "idle", now);
+      this.db.updateSessionStatus(sessionId, hasBlockingPendingRequest(remaining) ? "input_required" :
+        this.estimateOnlyBudgetCardStatus(session, parkedGuardrail), now);
       this.recordRunnerGuardrailResolution(session, parkedGuardrail, "dismissed", actor, now, { content: config });
       this.gateOnPolicy(sessionId, now);
       this.reconcilePolicyHookTimeouts(now, sessionId);
@@ -10900,7 +10901,9 @@ export class SessionsService {
             nextConfig.costBudgetUsd = null;
           } else {
             if (!session.costBudgetUsd || !step) return fail("cost guardrail has no re-arm window", 409);
-            const observed = Math.max(session.costUsd, pending.runnerGuardrail?.observed ?? session.costUsd);
+            // A running Claude turn's live estimate counts as spend here, as it did for the trip (#3112).
+            const spent = this.policyInput(session, []).costUsd;
+            const observed = Math.max(spent, pending.runnerGuardrail?.observed ?? spent);
             nextConfig.costBudgetUsd = pending.runnerGuardrail && session.costBudgetUsd > observed
               ? session.costBudgetUsd
               : Math.max(session.costBudgetUsd, observed) + step;
@@ -10947,7 +10950,8 @@ export class SessionsService {
         } else if (nextConfig.maxToolCalls != null && nextConfig.maxToolCalls !== session.maxToolCalls) {
           this.db.updateSessionMaxToolCalls(sessionId, nextConfig.maxToolCalls, now, session.maxToolCallsStep);
         }
-        this.db.updateSessionStatus(sessionId, hasBlockingPendingRequest(remaining) ? "input_required" : "idle", now);
+        this.db.updateSessionStatus(sessionId, hasBlockingPendingRequest(remaining) ? "input_required" :
+          this.estimateOnlyBudgetCardStatus(session, pending), now);
         // Asks are serialized through the single approval slot: if ANOTHER rule is also tripped,
         // park again immediately with its own card instead of waiting for the next turn settle.
         this.gateOnPolicy(sessionId, now);
@@ -13346,17 +13350,47 @@ export class SessionsService {
    * run past a soft card (they still stop at the runner-owned thresholds). */
   private runnerHoldAfter(session: SessionView, fields: GuardrailFields): RunnerHoldKind | undefined {
     const rules = rulesFromSession(fields);
-    const ask = firstAsk(evaluatePolicies({
-      status: "idle",
-      costUsd: session.costUsd,
-      toolCallCount: session.toolCallCount ?? 0,
-      unpriced: rules.some((rule) => rule.kind === "cost_unpriced") && this.db.sessionUsageUnpriced(session.id),
-    }, rules))?.rule.kind;
+    const ask = firstAsk(evaluatePolicies(this.policyInput(session, rules, "idle"), rules));
     if (!ask) return undefined;
-    const hard = runnerHoldFor(ask);
+    const hard = this.runnerTrips(session, ask);
     if (hard) return hard;
     const runner = this.db.getRunner(session.runnerId);
     return runnerSupportsProtocol(runner?.protocolVersion, "controlPlaneQueueHold") ? "control_plane" : undefined;
+  }
+
+  /** What the guardrail rules read for a session (#3112). Cost is the settled cost plus a running
+   * Claude turn's live estimate, which no total includes, at micro-USD precision; live tokens
+   * without a rate count as unpriced usage rather than free. While a checkpoint is accounting the
+   * window, its records are already in the settled cost, so the estimate is left out until the
+   * window closes. The unpriced check costs a ledger read, so it runs only when a rule can act. */
+  private policyInput(s: SessionView, rules: readonly PolicyRule[], status = s.status): PolicyInput {
+    const live = this.db.sessionLiveGuardrail(s.id);
+    const unpriced = rules.some((rule) => rule.kind === "cost_unpriced") &&
+      (this.db.sessionUsageUnpriced(s.id) || live.unpriced);
+    return {
+      status,
+      costUsd: live.costUsd > 0 ? roundUsdMicros(s.costUsd + live.costUsd) : s.costUsd,
+      toolCallCount: s.toolCallCount ?? 0,
+      unpriced,
+      ...(live.costUsd > 0 ? { includesEstimate: true } : {}),
+    };
+  }
+
+  /** The runner-owned threshold that trips this ask on the runner itself, if any. A runner cancels
+   * only on the settled cost, so a budget crossed by the live estimate alone is a control-plane card
+   * that holds the runner's queue (#3112). */
+  private runnerTrips(s: SessionView, ask: PolicyDecision): RunnerGuardrailKind | undefined {
+    if (ask.rule.kind === "cost_budget" && s.costUsd < ask.rule.budgetUsd) return undefined;
+    return runnerHoldFor(ask.rule.kind);
+  }
+
+  /** A budget card the live estimate alone raised parked a turn no runner cancelled (#3112). Like
+   * a soft card, clearing it returns the session to idle only if the runner's idle arrived while
+   * parked. */
+  private estimateOnlyBudgetCardStatus(session: SessionView, card: PendingApproval): "running" | "idle" {
+    const uncancelled = card.kind === "cost_budget" && !card.runnerGuardrail && session.costBudgetUsd != null &&
+      session.costUsd < session.costBudgetUsd && this.db.policyResumeStatus(session.id) !== "idle";
+    return uncancelled ? "running" : "idle";
   }
 
   /** Releases or re-holds a runner's queue around a control-plane card. Re-sends the CURRENT
@@ -13386,16 +13420,13 @@ export class SessionsService {
     if (occupied.some((request) => request.kind !== "workflow_decision" && !request.async)) return null;
     const rules = rulesFromSession(this.guardrailFields(s));
     if (rules.length === 0) return null;
-    // sessionView already computed the count when the guardrail is armed — don't re-query.
-    const toolCallCount = s.toolCallCount ?? 0;
-    // The unpriced check costs a ledger read, so it runs only when a rule can act on it.
-    const unpriced = rules.some((rule) => rule.kind === "cost_unpriced") && this.db.sessionUsageUnpriced(s.id);
-    const ask = firstAsk(evaluatePolicies({ status: s.status, costUsd: s.costUsd, toolCallCount, unpriced }, rules));
+    // sessionView already computed the tool-call count when the guardrail is armed — don't re-query.
+    const ask = firstAsk(evaluatePolicies(this.policyInput(s, rules), rules));
     if (!ask) return null;
     // A runner-enforced threshold armed on a live session is the runner's to trip: it receives
     // the threshold with the config write, cancels at the crossing, and settles into this gate.
     // Parking on it here would show a hard card the runner knows nothing about.
-    if (softOnly && runnerHoldFor(ask.rule.kind)) return null;
+    if (softOnly && this.runnerTrips(s, ask)) return null;
     return ask;
   }
 
@@ -13410,7 +13441,7 @@ export class SessionsService {
     if (s.status === "idle") this.db.notePolicyResumeStatus(sessionId, "idle");
     // A control-plane-only card must also stop the runner draining queued prompts behind the
     // turn it parks; the runner-owned thresholds already tripped on the runner itself.
-    if (!runnerHoldFor(ask.rule.kind)) this.rearmRunnerAfterCard(s, "control_plane");
+    if (!this.runnerTrips(s, ask)) this.rearmRunnerAfterCard(s, "control_plane");
     let combined = approval;
     for (const request of occupied) combined = appendPendingApproval(combined, request);
     this.db.setPendingApproval(sessionId, combined);
@@ -14957,6 +14988,7 @@ export class SessionsService {
     let throughSeq: number | undefined;
     let eventEpoch = initial.eventEpoch;
     let trailingAsk: PendingApproval | null = null;
+    let hydratedUsage = false;
     const limit = 200;
     const maxSerializedBytes = 32 * 1024 * 1024;
     let requestId = "";
@@ -15088,6 +15120,7 @@ export class SessionsService {
           const attribution = this.restoreQuestionPolicyAttribution(event);
           if (attribution) this.hub.sessionEvent(attribution);
         }
+        if (applied.events.some(({ payload }) => payload.kind === "token_usage")) hydratedUsage = true;
         if (projectedBackgroundDelivery || projectedSteering) this.hub.sessionChangedById(sessionId);
         // Each page releases its staging once applied, so a long chain holds one page at a time.
         releaseStaged();
@@ -15102,6 +15135,14 @@ export class SessionsService {
       rejectPage("runner_request_or_apply_failed");
     } finally {
       releaseStaged();
+      // A running Claude turn's live estimate may have arrived through this gap rather than the
+      // live path that gates it (#3112). Committed pages are gated even when a later one fails.
+      if (hydratedUsage) {
+        const before = this.db.getSession(sessionId);
+        // A park is an attention moment, as on the live path.
+        if (this.gateOnPolicy(sessionId, Date.now()) && before) this.notifyTransition(before, sessionId);
+        this.hub.sessionChangedById(sessionId);
+      }
     }
   }
 
@@ -15577,6 +15618,12 @@ export class SessionsService {
 }
 
 type RunnerHoldKind = RunnerGuardrailKind | "control_plane";
+
+/** A sum of float USD amounts at the ledger's micro-USD precision, so ten $0.01 requests reach a
+ * $0.10 threshold (#3112). */
+function roundUsdMicros(usd: number): number {
+  return Math.round(usd * 1_000_000) / 1_000_000;
+}
 
 function runnerHoldFor(kind: PolicyRuleKind | undefined): RunnerGuardrailKind | undefined {
   return kind === "cost_budget" || kind === "max_tool_calls" ? kind : undefined;

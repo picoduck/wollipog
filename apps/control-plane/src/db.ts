@@ -741,6 +741,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   live_input_tokens  INTEGER NOT NULL DEFAULT 0,
   live_output_tokens INTEGER NOT NULL DEFAULT 0,
   live_cost_usd      REAL NOT NULL DEFAULT 0,
+  live_unpriced_records INTEGER NOT NULL DEFAULT 0,
+  live_settling  INTEGER NOT NULL DEFAULT 0,
   created_at     INTEGER NOT NULL,
   updated_at     INTEGER NOT NULL,
   last_event_at  INTEGER,
@@ -6365,6 +6367,13 @@ export class ControlPlaneDb {
       "live_input_tokens INTEGER NOT NULL DEFAULT 0",
       "live_output_tokens INTEGER NOT NULL DEFAULT 0",
       "live_cost_usd REAL NOT NULL DEFAULT 0",
+      // Open live requests the rate table could not price (#3112). Cost guardrails fail closed on
+      // them instead of reading the estimate as free.
+      "live_unpriced_records INTEGER NOT NULL DEFAULT 0",
+      // A multi-model checkpoint accrues its records before the `settled` one that closes the
+      // window (#3112). Until then the settled cost already includes them, so guardrails leave
+      // the estimate out.
+      "live_settling INTEGER NOT NULL DEFAULT 0",
       // Phase 2: highest runner-owned event seq the cache has ingested (incremental hydration).
       "hydrated_seq INTEGER NOT NULL DEFAULT 0",
       // CP-owned event-log generation. Reprocess increments it so reconnecting dashboards can
@@ -13040,15 +13049,34 @@ export class ControlPlaneDb {
 
   /** Called only inside an existing write transaction after the owning event/snapshot is accepted. */
   /** The settled session cost after ledger pricing; cheaper than a full session view. */
-  /** A running Claude turn's requests that no total includes yet (#3086). Display-only: nothing
-   * that accounts, budgets, or acknowledges cost reads it. */
+  /** A running Claude turn's requests that no total includes yet (#3086). Nothing that accounts or
+   * acknowledges cost reads it; cost guardrails add it to the settled cost (#3112). */
   private static liveUsageView(row: Pick<SessionRow, "live_input_tokens" | "live_output_tokens" | "live_cost_usd">): Pick<SessionView, "liveUsage"> {
     const tokensIn = row.live_input_tokens ?? 0, tokensOut = row.live_output_tokens ?? 0, costUsd = row.live_cost_usd ?? 0;
     return tokensIn || tokensOut || costUsd ? { liveUsage: { tokensIn, tokensOut, costUsd } } : {};
   }
 
   private clearLiveUsageInTransaction(sessionId: string): void {
-    this.stmt("UPDATE sessions SET live_input_tokens=0, live_output_tokens=0, live_cost_usd=0 WHERE id=?").run(sessionId);
+    this.stmt(`UPDATE sessions SET live_input_tokens=0, live_output_tokens=0, live_cost_usd=0, live_unpriced_records=0,
+      live_settling=0 WHERE id=?`).run(sessionId);
+  }
+
+  /** What cost guardrails add to the settled cost for a running Claude turn (#3112): the open
+   * estimate, and whether an open request could not be priced. Nothing while a checkpoint is
+   * accounting the window, whose records the settled cost already includes. */
+  sessionLiveGuardrail(sessionId: string): { costUsd: number; unpriced: boolean } {
+    const row = this.stmt("SELECT live_cost_usd, live_unpriced_records, live_settling FROM sessions WHERE id=?").get(sessionId) as
+      { live_cost_usd: number; live_unpriced_records: number; live_settling: number } | undefined;
+    if (!row || row.live_settling) return { costUsd: 0, unpriced: false };
+    return { costUsd: Number(row.live_cost_usd), unpriced: Number(row.live_unpriced_records) > 0 };
+  }
+
+  /** True while an open live request has tokens the rate table could not price (#3112): the live
+   * estimate then understates spend, so cost guardrails must not read it as free. */
+  sessionLiveUsageUnpriced(sessionId: string): boolean {
+    const row = this.stmt("SELECT live_unpriced_records FROM sessions WHERE id=?").get(sessionId) as
+      { live_unpriced_records: number } | undefined;
+    return Number(row?.live_unpriced_records ?? 0) > 0;
   }
 
   sessionCostUsd(sessionId: string): number {
@@ -13216,10 +13244,15 @@ export class ControlPlaneDb {
           uncachedInputTokens: inputTokens, cachedInputTokens: ControlPlaneDb.usageToken(payload.cachedInputTokens),
           cacheCreationTokens: ControlPlaneDb.usageToken(payload.cacheCreationInputTokens), outputTokens,
         }, null, payload.pricingContext);
+        const unpriced = priced.costSource === "unpriced" && (inputTokens > 0 || outputTokens > 0 ||
+          ControlPlaneDb.usageToken(payload.cachedInputTokens) > 0 || ControlPlaneDb.usageToken(payload.cacheCreationInputTokens) > 0);
+        // A new request means no checkpoint is mid-flight. If one left the window open, counting its
+        // requests twice is the fail-closed side (#3112).
         this.stmt(
           `UPDATE sessions SET live_input_tokens=live_input_tokens+?, live_output_tokens=live_output_tokens+?,
-             live_cost_usd=live_cost_usd+?, updated_at=? WHERE id=?`,
-        ).run(inputTokens, outputTokens, priced.costUsd, occurredAt, sessionId);
+             live_cost_usd=live_cost_usd+?, live_unpriced_records=live_unpriced_records+?, live_settling=0,
+             updated_at=? WHERE id=?`,
+        ).run(inputTokens, outputTokens, priced.costUsd, unpriced ? 1 : 0, occurredAt, sessionId);
       }
     }
     if (payload.kind === "token_usage" && (!payload.parentToolUseId || payload.independentUsage === true) &&
@@ -13288,7 +13321,9 @@ export class ControlPlaneDb {
          ON CONFLICT(session_id) DO UPDATE SET cost_remainder_picousd=excluded.cost_remainder_picousd`,
       ).run(sessionId, combinedRemainder - carryMicrousd * 1_000_000, occurredAt);
       if (payload.liveUsage === "republished") {
-        // The request it shows live is now accounted, at the same price (#3086).
+        // The request it shows live is now accounted, at the same price (#3086). Its unpriced mark,
+        // if any, stays until the window closes: a rate that arrived since cannot tell which open
+        // request was unpriced, so guardrails keep failing closed until then (#3112).
         this.stmt(
           `UPDATE sessions SET live_input_tokens=MAX(0, live_input_tokens-?), live_output_tokens=MAX(0, live_output_tokens-?),
              live_cost_usd=MAX(0, live_cost_usd-?) WHERE id=?`,
@@ -13300,6 +13335,11 @@ export class ControlPlaneDb {
                        FROM usage_session_state WHERE session_id=?),
            updated_at=? WHERE id=?`,
       ).run(sessionId, occurredAt, sessionId);
+      if (payload.liveUsage === undefined && (hasTokens || cost.microusd + carryMicrousd > 0)) {
+        // A checkpoint record before the one that closes an open window (#3112).
+        this.stmt(`UPDATE sessions SET live_settling=1 WHERE id=? AND (live_input_tokens>0 OR live_output_tokens>0
+          OR live_cost_usd>0 OR live_unpriced_records>0)`).run(sessionId);
+      }
     }
     if (closesLiveUsage) this.clearLiveUsageInTransaction(sessionId);
     if (source) {
@@ -23292,6 +23332,9 @@ export class ControlPlaneDb {
               SET runner_history_epoch=?, covered_through_seq=?, updated_at=?
             WHERE session_id=?`,
         ).run(expected.historyEpoch, events[events.length - 1]!.seq, Date.now(), sessionId);
+        // The replaced history may have closed a live Claude window this page never charges (#3086),
+        // and a stale estimate would keep tripping cost guardrails (#3112).
+        this.clearLiveUsageInTransaction(sessionId);
       }
 
       let cpSeq = ((this.stmt("SELECT MAX(seq) AS m FROM session_events WHERE session_id=?")

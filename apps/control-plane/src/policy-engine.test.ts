@@ -50,6 +50,14 @@ test("evaluatePolicies: cost_budget asks at/over the budget, ok below", () => {
   assert.equal(over.title, "Cost budget reached — $6.00 of $5.00. Continue?"); // shipped Phase 7 copy, verbatim
 });
 
+test("evaluatePolicies: a cost card says when its spend includes a running turn's estimate (#3112)", () => {
+  const rules = rulesFromSession({ costBudgetUsd: 5, costCheckpointsUsd: [2], costUnpricedAcknowledged: true });
+  assert.deepEqual(evaluatePolicies(running({ costUsd: 6, includesEstimate: true }), rules).map((decision) => decision.title), [
+    "Cost checkpoint — $6.00 of $2.00, including an estimate for the running turn. Continue?",
+    "Cost budget reached — $6.00 of $5.00, including an estimate for the running turn. Continue?",
+  ]);
+});
+
 test("evaluatePolicies: max_tool_calls asks at/over the limit, ok below", () => {
   const rules = rulesFromSession({ maxToolCalls: 3 });
   assert.equal(evaluatePolicies(running({ toolCallCount: 2 }), rules)[0]!.decision, "ok");

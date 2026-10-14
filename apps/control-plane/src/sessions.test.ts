@@ -12718,6 +12718,298 @@ test("live Claude requests show while running, but a runtime snapshot cannot tur
   assert.deepEqual([session.tokensIn, session.costUsd, session.liveUsage], [10, 0.01, undefined]);
 });
 
+function liveClaudeGuardrailHarness() {
+  const harness = makeHarness();
+  harness.db.setUsageRateTable(parseRateTable({
+    "claude-test": { input_cost_per_token: 0.001, output_cost_per_token: 0.002 },
+  }));
+  const id = seedSession(harness.svc, harness.hub);
+  const live = (inputTokens: number, outputTokens: number, model = "claude-test") =>
+    harness.svc.onSessionEvent(id, { kind: "token_usage", model, inputTokens, outputTokens,
+      pricingContext: { requestInputTokens: inputTokens }, liveUsage: "provisional" });
+  return { ...harness, id, live };
+}
+
+test("a running Claude turn parks at its cost budget on the live estimate, and settlement still books the provider total", () => {
+  const { db, hub, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.sentToRunner.length = 0;
+
+  live(10, 5);
+  assert.equal(db.getSession(id)!.status, "running", "$0.02 estimated is below the budget");
+  live(20, 10);
+  let session = db.getSession(id)!;
+  assert.equal(session.status, "input_required", "the estimate crosses the budget before any result");
+  assert.equal(session.pendingApproval?.kind, "cost_budget");
+  assert.equal(session.pendingApproval?.title, "Cost budget reached — $0.06 of $0.05, including an estimate for the running turn. Continue?");
+  assert.equal(session.costUsd, 0, "the estimate is never accrued");
+  assert.deepEqual(hub.sentOfType("priced_session_cost").at(-1), { type: "priced_session_cost", sessionId: id, costUsd: 0 },
+    "the runner's acknowledged price never includes the estimate");
+  assert.equal(hub.sentOfType("rearm_governance").at(-1)?.holdFor, "control_plane",
+    "no runner cancels on the estimate, so the control plane holds its queue");
+
+  // The turn's result settles lower than the estimate. Only the provider total accrues.
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-test", inputTokens: 30, outputTokens: 15,
+    costUsd: 0.045, liveUsage: "settled" });
+  svc.onSessionStatus(id, "idle");
+  session = db.getSession(id)!;
+  assert.deepEqual([session.tokensIn, session.tokensOut, session.costUsd, session.liveUsage], [30, 15, 0.045, undefined]);
+  assert.equal(db.sessionUsageByModel(id).totals.costUsd, 0.045);
+  assert.equal(session.status, "input_required", "the card survives the trailing idle");
+
+  assert.ok(svc.approve(id, session.pendingApproval!.requestId, "continue").ok);
+  session = db.getSession(id)!;
+  assert.equal(session.costBudgetUsd, 0.1, "Continue re-arms one window past the settled spend");
+  assert.deepEqual([session.status, session.costUsd], ["idle", 0.045], "the swallowed idle settles it");
+});
+
+test("Continue on an estimate-only budget card keeps the uncancelled turn running until its idle arrives", () => {
+  const { db, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  db.updateSessionStatus(id, "running", Date.now());
+  live(20, 15);
+  const card = db.getSession(id)!.pendingApproval!;
+  assert.equal(card.kind, "cost_budget");
+  assert.ok(svc.approve(id, card.requestId, "continue").ok);
+  assert.equal(db.getSession(id)!.status, "running");
+  assert.equal(db.getSession(id)!.costBudgetUsd, 0.1, "one window past the estimated spend");
+  svc.onSessionStatus(id, "idle");
+  assert.equal(db.getSession(id)!.status, "idle");
+});
+
+test("raising the budget past an estimate-only card keeps the uncancelled turn running", () => {
+  const { db, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  db.updateSessionStatus(id, "running", Date.now());
+  live(20, 20);
+  assert.equal(db.getSession(id)!.pendingApproval?.kind, "cost_budget");
+  assert.ok(svc.setConfig(id, { costBudgetUsd: 0.2 }).ok);
+  const session = db.getSession(id)!;
+  assert.deepEqual([session.status, session.pendingApproval], ["running", null]);
+});
+
+test("a turn settled by republished requests after a live budget card accrues each request once", () => {
+  const { db, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.03 });
+  db.updateSessionStatus(id, "running", Date.now());
+  live(10, 5);
+  live(10, 5);
+  assert.equal(db.getSession(id)!.pendingApproval?.kind, "cost_budget");
+  svc.onSessionStatus(id, "idle");
+  assert.deepEqual(db.getSession(id)!.liveUsage, { tokensIn: 20, tokensOut: 10, costUsd: 0.04 },
+    "a killed process leaves its requests open until the next process accounts them");
+  for (const liveUsage of ["republished", "settled"] as const) {
+    svc.onSessionEvent(id, { kind: "token_usage", model: "claude-test", inputTokens: 10, outputTokens: 5,
+      pricingContext: { requestInputTokens: 10 }, liveUsage });
+  }
+  const session = db.getSession(id)!;
+  assert.deepEqual([session.tokensIn, session.tokensOut, session.costUsd, session.liveUsage], [20, 10, 0.04, undefined]);
+  assert.equal(db.sessionUsageByModel(id).totals.costUsd, 0.04);
+});
+
+test("a cost checkpoint is raised mid-turn when settled cost plus the live estimate crosses it", () => {
+  const { db, hub, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-test", inputTokens: 10, outputTokens: 5, costUsd: 0.02 });
+  svc.setConfig(id, { costCheckpointsUsd: [0.05] });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.sentToRunner.length = 0;
+
+  live(10, 5);
+  assert.equal(db.getSession(id)!.status, "running", "$0.02 settled plus $0.02 estimated is below the checkpoint");
+  live(20, 0);
+  const session = db.getSession(id)!;
+  assert.equal(session.status, "input_required");
+  assert.equal(session.pendingApproval?.kind, "cost_checkpoint");
+  assert.equal(session.pendingApproval?.title, "Cost checkpoint — $0.06 of $0.05, including an estimate for the running turn. Continue?");
+  assert.equal(session.costUsd, 0.02);
+  assert.equal(hub.sentOfType("rearm_governance").at(-1)?.holdFor, "control_plane", "the queue stays held behind the soft card");
+});
+
+test("live tokens without a rate are not free toward a budget", () => {
+  const { db, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-test", inputTokens: 10, outputTokens: 5, costUsd: 0.02 });
+  svc.setConfig(id, { costBudgetUsd: 10 });
+  db.updateSessionStatus(id, "running", Date.now());
+  assert.equal(db.getSession(id)!.pendingApproval, null);
+
+  live(1_000_000, 1_000_000, "claude-unrated");
+  let session = db.getSession(id)!;
+  assert.deepEqual(session.liveUsage, { tokensIn: 1_000_000, tokensOut: 1_000_000, costUsd: 0 });
+  assert.equal(session.status, "input_required", "a priced settled cost does not make unpriced live usage free");
+  assert.equal(session.pendingApproval?.kind, "cost_unpriced");
+
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-unrated", inputTokens: 1_000_000, outputTokens: 1_000_000,
+    costUsd: 3, liveUsage: "settled" });
+  assert.equal(db.sessionLiveUsageUnpriced(id), false);
+  session = db.getSession(id)!;
+  assert.equal(session.costUsd, 3.02);
+  assert.ok(svc.approve(id, session.pendingApproval!.requestId, "continue").ok);
+  assert.equal(db.getSession(id)!.pendingApproval, null, "nothing unpriced remains after settlement");
+});
+
+test("an unpriced live mark lasts until its window closes, even when a rate arrives before republication", () => {
+  const { db, svc, id, live } = liveClaudeGuardrailHarness();
+  db.updateSessionStatus(id, "running", Date.now());
+  live(10, 5, "claude-unrated");
+  live(10, 5);
+  assert.equal(db.sessionLiveUsageUnpriced(id), true);
+  db.setUsageRateTable(parseRateTable({
+    "claude-test": { input_cost_per_token: 0.001, output_cost_per_token: 0.002 },
+    "claude-unrated": { input_cost_per_token: 0.001, output_cost_per_token: 0.002 },
+  }));
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-unrated", inputTokens: 10, outputTokens: 5,
+    pricingContext: { requestInputTokens: 10 }, liveUsage: "republished" });
+  assert.equal(db.sessionLiveUsageUnpriced(id), true, "which open request was unpriced is unknown, so it fails closed");
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-test", inputTokens: 10, outputTokens: 5,
+    pricingContext: { requestInputTokens: 10 }, liveUsage: "settled" });
+  assert.equal(db.sessionLiveUsageUnpriced(id), false, "the record that closes the window clears it");
+  assert.equal(db.getSession(id)!.liveUsage, undefined);
+});
+
+test("an unrated live request of cache tokens alone still fails closed", () => {
+  const { db, svc, id } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 10 });
+  db.updateSessionStatus(id, "running", Date.now());
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-unrated", inputTokens: 0, outputTokens: 0,
+    cachedInputTokens: 50_000, cacheCreationInputTokens: 2_000, liveUsage: "provisional" });
+  const session = db.getSession(id)!;
+  assert.equal(session.liveUsage, undefined, "nothing visible to add to the totals");
+  assert.equal(session.pendingApproval?.kind, "cost_unpriced");
+});
+
+test("arming a budget below a running turn's live estimate parks at once and holds the queue", () => {
+  const { db, hub, svc, id, live } = liveClaudeGuardrailHarness();
+  db.updateSessionStatus(id, "running", Date.now());
+  live(20, 40);
+  assert.equal(db.getSession(id)!.pendingApproval, null);
+  hub.sentToRunner.length = 0;
+  assert.ok(svc.setConfig(id, { costBudgetUsd: 0.05 }).ok);
+  const session = db.getSession(id)!;
+  assert.equal(session.status, "input_required");
+  assert.equal(session.pendingApproval?.kind, "cost_budget");
+  assert.equal(hub.sentOfType("rearm_governance").at(-1)?.holdFor, "control_plane");
+});
+
+test("a multi-model checkpoint does not count its records twice while the window it covers is still open", () => {
+  const { db, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.08, costCheckpointsUsd: [0.07] });
+  db.updateSessionStatus(id, "running", Date.now());
+  live(10, 20);
+  assert.equal(db.getSession(id)!.liveUsage?.costUsd, 0.05);
+
+  // The result's checkpoint covers both models; only its last record is marked settled.
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-test", inputTokens: 10, outputTokens: 20, costUsd: 0.05 });
+  assert.equal(db.getSession(id)!.pendingApproval, null, "$0.05 settled is the same spend as the $0.05 estimate, not $0.10");
+  // Another entry point evaluating the guardrails before the window closes sees the same spend.
+  assert.ok(svc.setConfig(id, { maxToolCalls: 100 }).ok);
+  assert.equal(db.getSession(id)!.pendingApproval, null);
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-other", inputTokens: 5, outputTokens: 0, costUsd: 0.01,
+    liveUsage: "settled" });
+  const session = db.getSession(id)!;
+  assert.deepEqual([session.costUsd, session.liveUsage, session.pendingApproval], [0.06, undefined, null]);
+});
+
+test("a checkpoint that leaves its window open stops suppressing the estimate at the next request", () => {
+  const { db, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.09 });
+  db.updateSessionStatus(id, "running", Date.now());
+  live(10, 0);
+  // A lower restored total accounts part of the window without closing it.
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-test", inputTokens: 5, outputTokens: 0, costUsd: 0.005 });
+  assert.equal(db.sessionLiveGuardrail(id).costUsd, 0, "settled cost alone while the checkpoint is accounting");
+  live(20, 30);
+  assert.equal(db.sessionLiveGuardrail(id).costUsd, 0.09, "the next request ends the suppression");
+  assert.equal(db.getSession(id)!.pendingApproval?.kind, "cost_budget", "$0.005 settled plus $0.09 estimated crosses the budget");
+});
+
+test("a checkpoint record that crosses a budget on settled cost alone still trips while the window is open", () => {
+  const { db, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.04 });
+  db.updateSessionStatus(id, "running", Date.now());
+  live(10, 0);
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-test", inputTokens: 10, outputTokens: 0, costUsd: 0.05 });
+  assert.equal(db.getSession(id)!.pendingApproval?.kind, "cost_budget", "settled cost is a safe lower bound to gate on");
+});
+
+test("a checkpoint record does not raise a false unpriced card for a live request it is accounting", () => {
+  const { db, svc, id, live } = liveClaudeGuardrailHarness();
+  db.updateSessionStatus(id, "running", Date.now());
+  live(10, 5, "claude-unrated");
+  svc.setConfig(id, { costBudgetUsd: 10 });
+  const card = db.getSession(id)!.pendingApproval;
+  assert.equal(card?.kind, "cost_unpriced");
+  assert.ok(svc.approve(id, card!.requestId, "continue").ok);
+  db.raw().prepare("UPDATE sessions SET cost_unpriced_ack=0 WHERE id=?").run(id);
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-unrated", inputTokens: 10, outputTokens: 5, costUsd: 0.02 });
+  assert.equal(db.getSession(id)!.pendingApproval, null, "the provider-costed record covers the unpriced request");
+  svc.onSessionEvent(id, { kind: "token_usage", liveUsage: "settled" });
+  assert.equal(db.getSession(id)!.pendingApproval, null);
+});
+
+test("cost guardrails compare live spend at micro-USD precision", () => {
+  const { db, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.1 });
+  db.updateSessionStatus(id, "running", Date.now());
+  for (let request = 0; request < 10; request++) live(10, 0);
+  assert.notEqual(db.sessionLiveGuardrail(id).costUsd, 0.1, "ten $0.01 requests accumulate float error");
+  assert.equal(db.getSession(id)!.pendingApproval?.kind, "cost_budget", "ten $0.01 requests reach a $0.10 budget");
+});
+
+test("a settled-only comparison keeps its exact amount", () => {
+  const { db, svc, id } = liveClaudeGuardrailHarness();
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-test", inputTokens: 1, outputTokens: 0, costUsd: 0.0999996 });
+  svc.setConfig(id, { costBudgetUsd: 0.1 });
+  assert.equal(db.getSession(id)!.pendingApproval, null, "without an estimate, nothing is rounded up to the budget");
+});
+
+test("a live estimate committed by one hydration page is gated even when a later page fails", async () => {
+  const { db, hub, svc, id } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  db.updateSessionStatus(id, "running", Date.now());
+  db.reconcileRunnerHistory(id, 1, 3);
+  const provisional = { kind: "token_usage" as const, model: "claude-test", inputTokens: 20, outputTokens: 20,
+    pricingContext: { requestInputTokens: 20 }, liveUsage: "provisional" as const };
+  let pages = 0;
+  hub.requestHandler = (msg) => {
+    if (++pages > 1) throw new Error("runner did not respond in time");
+    return { type: "session_history_page_result", requestId: "requestId" in msg ? msg.requestId! : "history",
+      sessionId: id, ok: true, events: [{ seq: 1, ts: 100, payload: { kind: "agent_message", text: "working" } }, { seq: 2, ts: 101, payload: provisional }],
+      page: { logEpoch: 1, throughSeq: 3, nextAfterSeq: 2, hasMore: true } };
+  };
+  await svc.hydrateHistory(id);
+  assert.equal(pages, 2, "the second page failed");
+  const session = db.getSession(id)!;
+  assert.equal(session.liveUsage?.costUsd, 0.06);
+  assert.equal(session.pendingApproval?.kind, "cost_budget");
+});
+
+test("a live estimate that arrives through history hydration is gated once the gap is filled", async () => {
+  const { db, hub } = makeHarness();
+  const notified: Array<[SessionStatus, SessionStatus]> = [];
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG, (previous, current) => {
+    notified.push([previous.status, current.status]);
+  });
+  db.setUsageRateTable(parseRateTable({
+    "claude-test": { input_cost_per_token: 0.001, output_cost_per_token: 0.002 },
+  }));
+  const id = seedSession(svc, hub);
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  db.updateSessionStatus(id, "running", Date.now());
+  db.reconcileRunnerHistory(id, 1, 2);
+  const provisional = { kind: "token_usage" as const, model: "claude-test", inputTokens: 20, outputTokens: 20,
+    pricingContext: { requestInputTokens: 20 }, liveUsage: "provisional" as const };
+  hub.requestHandler = (msg) => ({ type: "session_history_page_result", requestId: "requestId" in msg ? msg.requestId! : "history",
+    sessionId: id, ok: true, events: [{ seq: 1, ts: 100, payload: { kind: "agent_message", text: "working" } }, { seq: 2, ts: 101, payload: provisional }],
+    page: { logEpoch: 1, throughSeq: 2, nextAfterSeq: 2, hasMore: false } });
+  notified.length = 0;
+  await svc.hydrateHistory(id);
+  const session = db.getSession(id)!;
+  assert.equal(session.liveUsage?.costUsd, 0.06);
+  assert.equal(session.pendingApproval?.kind, "cost_budget", "hydration gates the estimate the live path never saw");
+  assert.deepEqual(notified, [["running", "input_required"]], "the park is pushed, as on the live path");
+});
+
 test("priced cost acknowledgements are not sent to pre-v106 runners", () => {
   const { db, hub, svc } = makeHarness();
   db.registerRunner(runnerMeta(), Date.now(), 105);
