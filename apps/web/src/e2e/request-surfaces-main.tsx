@@ -621,6 +621,21 @@ function budgetRequest(estimate = false): PendingApproval {
   };
 }
 
+/** The owner's daily allowance crossed while Claude turns run: their live estimates count, and the
+ * title says so (#3196). */
+function dailyBudgetEstimateRequest(): PendingApproval {
+  return {
+    requestId: "daily-budget:session:1",
+    kind: "daily_budget",
+    title: "Daily budget reached — $20.04 of $20.00 today across your sessions, including an estimate for running turns. " +
+      "New turns pause until the day rolls over or an owner or admin raises it.",
+    options: [
+      { optionId: "continue", name: "Check Again", kind: "allow_once" },
+      { optionId: "cancel", name: "Stop", kind: "reject_once" },
+    ],
+  };
+}
+
 function toolCallsRequest(): PendingApproval {
   return {
     requestId: "max-tool-calls:session:1",
@@ -700,6 +715,7 @@ const DOCK_SCENARIOS: Record<string, { title: string; requests: () => PendingApp
   policy: { title: "Deploy Behind a Policy", requests: () => [policyRequest()] },
   budget: { title: "Budgeted Session", requests: () => [budgetRequest()] },
   "budget-estimate": { title: "Budgeted Claude Turn", requests: () => [budgetRequest(true)] },
+  "daily-budget-estimate": { title: "Claude Turn Past the Daily Budget", requests: () => [dailyBudgetEstimateRequest()] },
   "tool-calls": { title: "Tool-Limited Session", requests: () => [toolCallsRequest()] },
   workflow: { title: "Campaign Merge", requests: () => [workflowRequest()] },
   // Arrival order: the permission came first, the sign-in last. The dock orders them by priority.

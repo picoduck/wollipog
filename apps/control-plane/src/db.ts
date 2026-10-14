@@ -13071,6 +13071,19 @@ export class ControlPlaneDb {
     return { costUsd: Number(row.live_cost_usd), unpriced: Number(row.live_unpriced_records) > 0 };
   }
 
+  /** The open live estimates of one user's live sessions, which their daily budget adds to today's
+   * settled spend (#3196), on the same terms as `sessionLiveGuardrail`. A terminal session runs no
+   * turn, and its window is accounted only if it is relaunched, so it is left out rather than
+   * shrinking every later day's allowance. */
+  ownerLiveCostUsd(organizationId: string, userId: string): number {
+    const row = this.stmt(
+      `SELECT COALESCE(SUM(s.live_cost_usd), 0) AS usd FROM sessions s JOIN session_ownership o ON o.session_id=s.id
+        WHERE o.organization_id=? AND o.owner_kind='user' AND o.owner_id=? AND s.live_settling=0 AND s.live_cost_usd>0
+          AND s.status NOT IN ('completed','failed','stopped')`,
+    ).get(organizationId, userId) as { usd: number };
+    return Number(row.usd);
+  }
+
   /** True while an open live request has tokens the rate table could not price (#3112): the live
    * estimate then understates spend, so cost guardrails must not read it as free. */
   sessionLiveUsageUnpriced(sessionId: string): boolean {
@@ -16604,9 +16617,11 @@ export class ControlPlaneDb {
     return Number(row.tokens) > 0 && Number(row.unpriced_records) > 0 && Number(row.cost_microusd) === 0 && Number(row.cost_remainder_picousd) === 0;
   }
 
+  /** Recorded unpriced usage, or an open live request the rate table could not price (#3196),
+   * which would otherwise read as free toward the campaign allowance. */
   campaignUsageHasUnpriced(id: string): boolean {
     return Boolean((this.stmt("SELECT unpriced_records FROM usage_session_state WHERE session_id=?").get(id) as
-      { unpriced_records: number } | undefined)?.unpriced_records);
+      { unpriced_records: number } | undefined)?.unpriced_records) || this.sessionLiveGuardrail(id).unpriced;
   }
 
   getUsageDailyBudget(organizationId: string): UsageDailyBudgetPolicy {

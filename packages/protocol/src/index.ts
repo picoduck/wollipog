@@ -4963,8 +4963,9 @@ export type PolicyRule =
   /** A budgeted session whose recorded usage has no price fails closed rather than spending
    * unbounded (v105). */
   | { kind: "cost_unpriced" }
-  /** The organization's per-user daily allowance, measured across the owner's sessions (v105). */
-  | { kind: "daily_budget"; budgetUsd: number; spentUsd: number };
+  /** The organization's per-user daily allowance, measured across the owner's sessions (v105).
+   * `includesEstimate`: `spentUsd` adds their running Claude turns' open live estimates (#3196). */
+  | { kind: "daily_budget"; budgetUsd: number; spentUsd: number; includesEstimate?: boolean };
 
 export type PolicyRuleKind = PolicyRule["kind"];
 /** The rules a v47 runner enforces mid-turn; every other rule parks only on the control plane. */

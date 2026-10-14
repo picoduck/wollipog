@@ -44,6 +44,7 @@ import {
   WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
   WORKSPACE_REFERENCE_MIME_TYPE,
   pendingRequests,
+  projectSessionEventPayloadForProtocol,
 } from "@wollipog/protocol";
 import { dispatch as dispatchManagerTool } from "../../runner/src/session-management-mcp.js";
 import { ControlPlaneDb, campaignRequestToken } from "./db.js";
@@ -21697,6 +21698,130 @@ test("a daily-budget fan-out counts eligible siblings rather than blocked rows t
     ["question", "permission"], "an unrelated blocking card remains authoritative");
   assert.deepEqual(pendingRequests(db.getSession(blocked[1]!)!.pendingApproval).map((request) => request.kind),
     ["daily_budget", "workflow_decision"]);
+});
+
+function liveDailyBudgetHarness(budgetUsd: number) {
+  const harness = makeHarness();
+  harness.db.setUsageRateTable(parseRateTable({
+    "claude-test": { input_cost_per_token: 0.001, output_cost_per_token: 0.002 },
+  }));
+  harness.db.setUsageDailyBudget("org_personal", budgetUsd, Date.now());
+  const own = harness.db.raw().prepare("UPDATE session_ownership SET owner_kind='user', owner_id='usr_local_owner' WHERE session_id=?");
+  const seed = () => {
+    const id = seedSession(harness.svc, harness.hub, { prompt: "Spend" });
+    own.run(id);
+    harness.db.updateSessionStatus(id, "running", Date.now());
+    return id;
+  };
+  const live = (id: string, inputTokens: number, outputTokens: number, model = "claude-test") =>
+    harness.svc.onSessionEvent(id, { kind: "token_usage", model, inputTokens, outputTokens,
+      pricingContext: { requestInputTokens: inputTokens }, liveUsage: "provisional" });
+  const settle = (id: string, inputTokens: number, outputTokens: number, costUsd: number) =>
+    harness.svc.onSessionEvent(id, { kind: "token_usage", model: "claude-test", inputTokens, outputTokens, costUsd, liveUsage: "settled" });
+  const today = () => harness.db.userCostTodayUsd("org_personal", "usr_local_owner");
+  return { ...harness, seed, live, settle, today };
+}
+
+test("running turns' live estimates alone park the owner's sessions at the daily budget, and settlement books only provider totals (#3196)", () => {
+  const { db, svc, seed, live, settle, today } = liveDailyBudgetHarness(0.05);
+  const a = seed(), b = seed();
+
+  live(a, 10, 5);
+  live(b, 10, 5);
+  assert.deepEqual([db.getSession(a)!.status, db.getSession(b)!.status], ["running", "running"],
+    "$0.04 estimated across two turns is below the budget, and neither turn alone is near it");
+  live(b, 10, 0);
+  for (const id of [a, b]) {
+    const session = db.getSession(id)!;
+    assert.equal(session.status, "input_required", "the crossing parks every live session the owner has");
+    assert.equal(session.pendingApproval?.kind, "daily_budget");
+    assert.equal(session.pendingApproval?.title, "Daily budget reached — $0.05 of $0.05 today across your sessions, " +
+      "including an estimate for running turns. New turns pause until the day rolls over or an owner or admin raises it.");
+    assert.equal(session.costUsd, 0, "the estimate is never accrued");
+  }
+  assert.equal(today(), 0, "the ledger holds settled cost only");
+
+  const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, useWorktree: false }, undefined, {
+    organizationId: "org_personal", owner: { kind: "user", userId: "usr_local_owner" },
+  });
+  assert.equal(created.ok, false);
+  assert.match(created.error ?? "", /^daily budget reached — \$0\.05 of \$0\.05 today, including an estimate for running turns;/);
+
+  const card = db.getSession(a)!.pendingApproval!;
+  assert.ok(svc.approve(a, card.requestId, "continue").ok);
+  assert.equal(db.getSession(a)!.pendingApproval?.kind, "daily_budget", "Check Again still sees the open estimates");
+
+  // Both turns settle lower than their estimates. Only the provider totals accrue, once each.
+  settle(a, 10, 5, 0.015);
+  settle(b, 20, 5, 0.02);
+  svc.onSessionStatus(a, "idle");
+  svc.onSessionStatus(b, "idle");
+  assert.equal(today(), 0.035);
+  assert.deepEqual([db.getSession(a)!.costUsd, db.getSession(a)!.liveUsage, db.getSession(b)!.costUsd, db.getSession(b)!.liveUsage],
+    [0.015, undefined, 0.02, undefined]);
+  for (const id of [a, b]) {
+    assert.ok(svc.approve(id, db.getSession(id)!.pendingApproval!.requestId, "continue").ok);
+    assert.deepEqual([db.getSession(id)!.pendingApproval, db.getSession(id)!.status], [null, "idle"],
+      "settled spend is below the budget, so Check Again releases the session");
+  }
+});
+
+test("the daily budget compares today's settled spend plus the live estimate (#3196)", () => {
+  const { db, seed, live, today } = liveDailyBudgetHarness(0.05);
+  const a = seed();
+  db.appendEvent(a, { kind: "token_usage", model: "claude-test", inputTokens: 1, costUsd: 0.03 }, Date.now(), { accrueUsage: true });
+  live(a, 10, 0);
+  assert.equal(db.getSession(a)!.status, "running", "$0.03 settled plus $0.01 estimated is below the budget");
+  live(a, 10, 0);
+  assert.match(db.getSession(a)!.pendingApproval?.title ?? "",
+    /^Daily budget reached — \$0\.05 of \$0\.05 today across your sessions, including an estimate/);
+  assert.equal(today(), 0.03);
+});
+
+test("a stopped session's open estimate does not count toward the owner's daily spend (#3196)", () => {
+  const { db, seed, live } = liveDailyBudgetHarness(0.05);
+  const a = seed();
+  live(a, 20, 10);
+  db.updateSessionStatus(a, "stopped", Date.now());
+  const b = seed();
+  live(b, 10, 5);
+  assert.equal(db.getSession(b)!.status, "running",
+    "$0.02 estimated for the running turn; the stopped session's $0.04 is accounted only if it is relaunched");
+});
+
+test("live tokens without a rate are not free toward the daily budget, while recorded unpriced usage keeps its old handling (#3196)", () => {
+  const { db, svc, seed, live } = liveDailyBudgetHarness(10);
+  const a = seed();
+  live(a, 10, 5, "unrated-model");
+  let session = db.getSession(a)!;
+  assert.equal(session.status, "input_required");
+  assert.equal(session.pendingApproval?.kind, "cost_unpriced", "the session without its own budget still fails closed");
+  assert.ok(svc.approve(a, session.pendingApproval!.requestId, "continue").ok);
+  session = db.getSession(a)!;
+  assert.deepEqual([session.status, session.pendingApproval], ["running", null], "Continue acknowledges it for the session");
+
+  const b = seed();
+  db.appendEvent(b, { kind: "token_usage", model: "unrated-model", inputTokens: 10, outputTokens: 5 }, Date.now(), { accrueUsage: true });
+  svc.onSessionStatus(b, "idle");
+  assert.equal(db.getSession(b)!.pendingApproval, null, "recorded unpriced usage concerns only a session's own cost guardrails");
+});
+
+test("a stream without live records, as from a peer before v216, gates the daily budget on settled cost alone (#3196)", () => {
+  const { db, svc, seed, today } = liveDailyBudgetHarness(0.05);
+  const a = seed();
+  const turn: SessionEventPayload[] = [
+    { kind: "token_usage", model: "claude-test", inputTokens: 20, outputTokens: 10, pricingContext: { requestInputTokens: 20 }, liveUsage: "provisional" },
+    { kind: "token_usage", model: "claude-test", inputTokens: 20, outputTokens: 10, pricingContext: { requestInputTokens: 20 }, liveUsage: "provisional" },
+    { kind: "token_usage", model: "claude-test", inputTokens: 40, outputTokens: 20, costUsd: 0.07, liveUsage: "settled" },
+  ];
+  const projected = turn.map((payload) => projectSessionEventPayloadForProtocol(payload, 215));
+  assert.deepEqual(projected.slice(0, 2), [null, null], "an older peer never receives provisional records");
+  svc.onSessionEvent(a, projected[2]!);
+  assert.equal(db.getSession(a)!.liveUsage, undefined);
+  svc.onSessionStatus(a, "idle");
+  assert.equal(today(), 0.07);
+  assert.equal(db.getSession(a)!.pendingApproval?.title, "Daily budget reached — $0.07 of $0.05 today across your sessions. " +
+    "New turns pause until the day rolls over or an owner or admin raises it.");
 });
 
 test("arming a soft guardrail on an unparked session that already exceeds it parks it at once", () => {

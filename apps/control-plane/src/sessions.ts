@@ -13332,9 +13332,9 @@ export class SessionsService {
    * inputs re-derived each call, so re-application is idempotent. Returns true if it gated.
    */
   /** The owner's daily allowance and spend, when the session belongs to a user in an
-   * organization that set one. Three statements at most on the ingestion path: owner, budget,
-   * today's sum. */
-  private dailyBudgetFor(sessionId: string): { budgetUsd: number; spentUsd: number } | null {
+   * organization that set one. Four statements at most on the ingestion path: owner, budget,
+   * today's sum, and the open live estimates. */
+  private dailyBudgetFor(sessionId: string): DailyBudget | null {
     const owner = this.db.sessionOwnerUser(sessionId);
     return owner ? this.dailyBudgetForOwner(owner.organizationId, owner.userId) : null;
   }
@@ -13344,13 +13344,21 @@ export class SessionsService {
     if (scope?.owner.kind !== "user") return null;
     const daily = this.dailyBudgetForOwner(scope.organizationId, scope.owner.userId);
     if (!daily || daily.spentUsd < daily.budgetUsd) return null;
-    return `daily budget reached — $${daily.spentUsd.toFixed(2)} of $${daily.budgetUsd.toFixed(2)} today; new sessions wait for the day to roll over or an owner or admin to raise it`;
+    return `daily budget reached — $${daily.spentUsd.toFixed(2)} of $${daily.budgetUsd.toFixed(2)} today${
+      daily.includesEstimate ? ", including an estimate for running turns" : ""}; new sessions wait for the day to roll over or an owner or admin to raise it`;
   }
 
-  private dailyBudgetForOwner(organizationId: string, userId: string): { budgetUsd: number; spentUsd: number } | null {
+  /** Today's settled spend plus the open live estimates of the owner's running Claude turns, which
+   * no settled total includes yet (#3196), at micro-USD precision. The estimate is never accrued:
+   * once the turns settle, the figure is the ledger's again. */
+  private dailyBudgetForOwner(organizationId: string, userId: string): DailyBudget | null {
     const budget = this.db.getUsageDailyBudget(organizationId).perUserUsd;
     if (budget == null || budget <= 0) return null;
-    return { budgetUsd: budget, spentUsd: this.db.userCostTodayUsd(organizationId, userId) };
+    const settled = this.db.userCostTodayUsd(organizationId, userId);
+    const live = this.db.ownerLiveCostUsd(organizationId, userId);
+    return live > 0
+      ? { budgetUsd: budget, spentUsd: roundUsdMicros(settled + live), includesEstimate: true }
+      : { budgetUsd: budget, spentUsd: settled };
   }
 
   /** The guardrail fields the rule builder reads for a session, including the owner's allowance. */
@@ -13379,8 +13387,11 @@ export class SessionsService {
    * window closes. The unpriced check costs a ledger read, so it runs only when a rule can act. */
   private policyInput(s: SessionView, rules: readonly PolicyRule[], status = s.status): PolicyInput {
     const live = this.db.sessionLiveGuardrail(s.id);
+    // Recorded unpriced usage concerns the session's own budget and checkpoints; the daily budget
+    // fails closed only on a live request it would otherwise read as free (#3196).
+    const ownCostGuardrail = (s.costBudgetUsd ?? 0) > 0 || (s.costCheckpointsUsd ?? []).some((usd) => usd > 0);
     const unpriced = rules.some((rule) => rule.kind === "cost_unpriced") &&
-      (this.db.sessionUsageUnpriced(s.id) || live.unpriced);
+      ((ownCostGuardrail && this.db.sessionUsageUnpriced(s.id)) || live.unpriced);
     return {
       status,
       costUsd: live.costUsd > 0 ? roundUsdMicros(s.costUsd + live.costUsd) : s.costUsd,
@@ -15685,6 +15696,8 @@ export class SessionsService {
 }
 
 type RunnerHoldKind = RunnerGuardrailKind | "control_plane";
+
+type DailyBudget = NonNullable<GuardrailFields["dailyBudget"]>;
 
 /** A sum of float USD amounts at the ledger's micro-USD precision, so ten $0.01 requests reach a
  * $0.10 threshold (#3112). */

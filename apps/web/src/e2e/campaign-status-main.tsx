@@ -220,7 +220,9 @@ const projectionFor = (rev: number) => campaignProjection(
     limits: { maximumConcurrentChildren: 4, occupied: 3, remaining: 1, costBudgetUsd: 40, maxToolCalls: null },
     ...(params.get("budget") === "1" ? { budget: {
       authority: { version: 1 as const, costUsd: 100, toolCalls: 2000, concurrency: 4, acceptedFollowUps: 3, accounting: "managed_workers_only" as const, unpriced: "stop" as const },
-      state: "active" as const, actual: { costUsd: 12, toolCalls: 100 }, outstanding: { costUsd: 50, toolCalls: 900 },
+      // `estimate=1`: recorded spend includes running Claude turns' live estimates (#3196).
+      state: "active" as const, actual: { costUsd: 12, toolCalls: 100, ...(params.get("estimate") === "1" ? { includesEstimate: true } : {}) },
+      outstanding: { costUsd: 50, toolCalls: 900 },
       remaining: { costUsd: 38, toolCalls: 1000 }, occupied: 3, acceptedFollowUps: 1, reachedCheckpointsUsd: [],
       enforcement: "admission_and_best_effort_cancellation" as const, externalWorkers: "unsupported" as const,
       sessionLimits: {costBudgetUsd:40,maxToolCalls:null},rootAllocation:{sessionId:"s_parent",costUsd:25,toolCalls:500},costAccounting:"priced" as const,
