@@ -509,6 +509,20 @@ test("an open live window that survives the upgrade adding its timestamp still c
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("rounding a live estimate never manufactures spend beyond the reservations it moves (#3196)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ costUsd: 10, concurrency: 1 })).ok);
+    assert.ok(h.svc.allocateCampaignBudget("root", { sessionId: "root", costUsd: 10 }).ok);
+    // $0.1000015 at the fixture's $0.000001 per token, split so the stored sum is not a micro-USD multiple.
+    h.svc.onSessionEvent("root", liveRequest(100_000));
+    h.db.raw().prepare("UPDATE sessions SET live_cost_usd=live_cost_usd+0.0000015 WHERE id='root'").run();
+    const view = h.db.campaignBudgets.view("root")!;
+    assert.equal(view.actual.costUsd + view.outstanding.costUsd, 10, "spend plus reservations is still the allocation");
+    assert.ok(h.enable(allowance({ costUsd: 10, concurrency: 1 }), 2).ok, "the same human grant is still accepted");
+  } finally { h.db.close(); }
+});
+
 test("a worker whose live estimate reaches its allocation stops, as a settled crossing does (#3196)", () => {
   const h = harness();
   try {

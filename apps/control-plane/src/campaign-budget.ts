@@ -107,7 +107,14 @@ export class CampaignBudgetLedger {
         outstanding.toolCalls += Math.max(0, (row.tool_limit ?? row.tools) - row.tools);
       }
     }
-    if (live > 0) { actual.costUsd = roundUsdMicros(actual.costUsd); outstanding.costUsd = roundUsdMicros(outstanding.costUsd); actual.includesEstimate = true; }
+    if (live > 0) {
+      // Round the conserved total, then split it, so spend plus reservations stays what the
+      // reservations sum to rather than gaining a rounding unit from each half.
+      const total = roundUsdMicros(actual.costUsd + outstanding.costUsd);
+      actual.costUsd = roundUsdMicros(actual.costUsd);
+      outstanding.costUsd = roundUsdMicros(total - actual.costUsd);
+      actual.includesEstimate = true;
+    }
     const exhausted = authority.costUsd !== undefined && actual.costUsd >= authority.costUsd ||
       authority.toolCalls !== undefined && actual.toolCalls >= authority.toolCalls;
     if (exhausted && header.state === "active") {
