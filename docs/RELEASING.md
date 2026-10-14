@@ -15,14 +15,40 @@ from the host. Each target therefore builds on a matching runner.
 | `macos-15-intel`  | `x86_64-apple-darwin`        | `.dmg`, `.app.tar.gz`       |
 | `windows-latest`  | `x86_64-pc-windows-msvc`     | `.msi`, NSIS `.exe`         |
 | `windows-11-arm`  | `aarch64-pc-windows-msvc`    | `.msi`, NSIS `.exe`         |
-| `ubuntu-22.04`    | `x86_64-unknown-linux-gnu`   | `.deb`, `.rpm`, `.AppImage` |
-| `ubuntu-22.04-arm`| `aarch64-unknown-linux-gnu`  | `.deb`, `.rpm`, `.AppImage` |
+| `ubuntu-24.04`    | `x86_64-unknown-linux-gnu`   | `.deb`, `.rpm`, `.AppImage` |
+| `ubuntu-24.04-arm`| `aarch64-unknown-linux-gnu`  | `.deb`, `.rpm`, `.AppImage` |
 
 These six triples are the exhaustive supported native release set, not examples. A standalone
 `pnpm --filter @wollipog/runner build:binary` invocation may set `TARGET_TRIPLE` only to one of
 these six values, and the desktop sidecar accepts the same closed set through
 `TAURI_ENV_TARGET_TRIPLE`. Both producers reject an unsupported triple or a supported triple built
 on the wrong OS/architecture because a Node SEA embeds its build host's runtime.
+
+The Linux hosts are explicitly Ubuntu 24.04 x64/ARM64; only their release build jobs run in
+an architecture-matched Ubuntu 22.04 container pinned by its multiarchitecture image digest.
+This preserves the previous Jammy build/runtime baseline (glibc 2.35 and WebKitGTK 4.1),
+instead of silently increasing the required libc when the hosted image changes. Windows and
+macOS jobs still use their native host userland. The container bootstrap installs Git before
+checkout and the normal Linux build dependencies inside the container, including AppImage
+tooling; it does not change host packages, signing settings, or workflow permissions.
+GitHub CLI is installed from architecture-specific, SHA-256-verified 2.102.0 archives:
+Jammy's older distro CLI cannot run the existing `gh api --paginate --slurp` digest checks.
+
+The publication-free **Linux Release Compatibility** PR workflow builds the same real unsigned
+Linux packages on both native architectures in that pinned userland. Its baseline verifier checks
+each desktop/sidecar/standalone ELF's architecture and GLIBC requirements, resolves libraries and
+relocations with the Jammy loader, executes the runner/control-plane release entry points, and
+compares their bundled and standalone bytes. The release workflow runs that same verifier.
+AppImage tools self-extract during the container build with `APPIMAGE_EXTRACT_AND_RUN=1`;
+neither privileged containers nor access to `/dev/fuse` is needed. This does not remove the
+usual FUSE requirement when users launch the resulting AppImage.
+
+When refreshing the pinned image, verify both architectures and keep the glibc 2.35 userland.
+Update the matching pins in both workflows together. A successful build on a newer host alone
+does not establish compatibility with existing Linux installations; retain the baseline checks.
+GitHub's [Ubuntu 22.04 hosted-image retirement notice](https://github.com/actions/runner-images/issues/14254)
+and [supported runner labels](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
+are the migration references. No queue-causation or speed improvement is inferred from this change.
 
 Each desktop bundle contains the matching local-runner sidecar for one-click setup. Each matrix job
 also builds a **standalone runner binary** as `wollipog-runner-<triple>[.exe]` (a Node SEA via

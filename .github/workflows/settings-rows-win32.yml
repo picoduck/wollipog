@@ -35,7 +35,7 @@ permissions:
 jobs:
   scope:
     name: Detect Settings-Rows Changes
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       affected: ${{ steps.scope.outputs.affected }}

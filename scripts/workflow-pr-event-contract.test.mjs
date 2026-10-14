@@ -239,7 +239,7 @@ test("the required CI check aggregates parallel jobs that each own a time budget
   // here keeps this expectation about sharding. Everything else is fixed, in order, with nothing
   // between the lines.
   const header = structural.match(
-    /^  browser:\n    if: [^\n]*\n    name: Browser End-to-End Tests\n    runs-on: ubuntu-22\.04\n    timeout-minutes: \d+\n    strategy:\n      fail-fast: false\n      matrix:\n        shard: \[([^\]]*)\]\n    steps:$/m,
+    /^  browser:\n    if: [^\n]*\n    name: Browser End-to-End Tests\n    runs-on: ubuntu-24\.04\n    timeout-minutes: \d+\n    strategy:\n      fail-fast: false\n      matrix:\n        shard: \[([^\]]*)\]\n    steps:$/m,
   );
   assert.ok(header,
     "browser: the job header must be exactly its guard, name, runner, timeout, `fail-fast: false`, " +
@@ -331,7 +331,7 @@ test("workflow actions use immutable commit pins", () => {
 test("real WSL isolation CI keeps automatic PE/binfmt interop out of the provider boundary", () => {
   const platform = readFileSync(resolve(process.cwd(), WORKFLOWS[2]), "utf8");
 
-  assert.match(platform, /os: \[ubuntu-22\.04, windows-latest, windows-2025, macos-latest\]/u);
+  assert.match(platform, /os: \[ubuntu-24\.04, windows-latest, windows-2025, macos-latest\]/u);
   assert.match(platform, /Verify WSL Boundaries Stay Fail-Closed/u);
   assert.match(platform, /WOLLIPOG_WSL_FAIL_CLOSED_DISTRO = "Ubuntu-24\.04"/u);
   assert.match(platform, /node --import tsx --test --test-reporter=tap apps\/runner\/src\/wsl-bwrap-fail-closed\.integration\.test\.ts/u,

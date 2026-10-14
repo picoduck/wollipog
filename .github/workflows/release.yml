@@ -35,7 +35,7 @@ jobs:
   # colliding throwaway "test" releases from ever reaching the (expensive) matrix build.
   preflight:
     name: Resolve tag & check version
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
       release_tag: ${{ steps.resolve.outputs.release_tag }}
@@ -132,6 +132,9 @@ jobs:
     name: ${{ matrix.label }}
     needs: preflight
     runs-on: ${{ matrix.os }}
+    # Preserve the Jammy/glibc 2.35 release userland on supported native 24.04 hosts.
+    # Missing matrix.container evaluates to an empty string: Windows/macOS use the host.
+    container: ${{ matrix.container }}
     # macOS legs wait on the notary service (tauri passes --wait with no cap of its own). A
     # first submission from a newly enrolled team has sat in Apple's queue for over 40 minutes;
     # later ones normally clear in minutes. Keep the other platforms on the tighter budget.
@@ -160,28 +163,29 @@ jobs:
             os: windows-11-arm
             target: aarch64-pc-windows-msvc
           - label: Linux x64
-            os: ubuntu-22.04
+            os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            container: ubuntu:22.04@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401
           - label: Linux ARM64
-            os: ubuntu-22.04-arm
+            os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            container: ubuntu:22.04@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401
     steps:
+      # The base container is minimal. Install Git before checkout so it does not
+      # fall back to a source archive; no host packages or privileges are changed.
+      - name: Bootstrap Linux Build Container
+        if: startsWith(matrix.os, 'ubuntu')
+        shell: bash
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl git sudo
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Tauri v2 Linux build/runtime deps (webkit2gtk 4.1, tray, AppImage tooling).
       - name: Install Linux build deps
         if: startsWith(matrix.os, 'ubuntu')
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            build-essential \
-            libssl-dev \
-            file
+        run: bash scripts/install-linux-release-deps.sh
 
       - name: Setup pnpm
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
@@ -203,7 +207,7 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: apps/desktop/src-tauri
-          key: ${{ matrix.target }}
+          key: ${{ matrix.target }}${{ matrix.container && '-ubuntu22.04' || '' }}
 
       # Must precede the Tauri build: tauri.conf.json beforeBuildCommand runs
       # sidecar:build + web build, which need node_modules. allowBuilds:esbuild in
@@ -447,6 +451,9 @@ jobs:
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # AppImage tooling self-extracts inside the build container; no /dev/fuse or
+          # privileged container is needed. This does not change the shipped AppImage.
+          APPIMAGE_EXTRACT_AND_RUN: ${{ startsWith(matrix.os, 'ubuntu') && '1' || '' }}
           WOLLIPOG_RUNNER_RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
           # Read by the bundler only when the overlay above enabled update artifacts.
           TAURI_SIGNING_PRIVATE_KEY: ${{ needs.preflight.outputs.updater_signing == '1' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
@@ -479,6 +486,11 @@ jobs:
             > carry a separate update signature, which the app checks before installing.
           releaseDraft: true
           prerelease: ${{ needs.preflight.outputs.prerelease }}
+
+      - name: Verify Linux Release Baseline
+        if: startsWith(matrix.os, 'ubuntu')
+        shell: bash
+        run: bash scripts/verify-linux-release-baseline.sh "${{ matrix.target }}"
 
       # Prove the signed bundle rather than trusting the bundler's exit code: a Developer ID
       # signature on the app and both sidecars, hardened runtime, Gatekeeper acceptance, and a
@@ -630,7 +642,7 @@ jobs:
   verify-runner-release:
     name: Verify runner release assets
     needs: [preflight, build]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -34,7 +34,7 @@ jobs:
   checks:
     if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false
     name: Typecheck, Unit Tests & Bundles
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     # Everything except the video decoder install took a median of 539 seconds and at most 771 over
     # 615 successful jobs from 2026-09-28 to 2026-10-01 (Unit Tests alone at most 615). Both install
     # attempts at their seven-minute bounds plus that slowest remainder is just under 27 minutes
@@ -245,7 +245,7 @@ jobs:
   browser:
     if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false
     name: Browser End-to-End Tests
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     # A recovered six-minute install timeout plus 377 passing tests still exhausted 25 minutes
     # (#2700, run 37478932815). Thirty-six identified jobs on 2026-10-06 include all five shards
     # on current main: the slowest non-install remainder was 1448 seconds, including other setup,
@@ -416,7 +416,7 @@ jobs:
     # Keep the draft/ready-for-review guard; see docs/ci-aggregation.md for the verification limits.
     if: ${{ (github.event_name != 'pull_request' || !cancelled()) && (github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false) }}
     name: Typecheck, Test & Sidecar Bundle
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     needs: [checks, browser, win32]
     steps:
