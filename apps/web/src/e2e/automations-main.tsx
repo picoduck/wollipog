@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import type {
   AutomationExecution,
   AutomationSchedule,
+  AutomationSpec,
   AutomationTriggerView,
   OutboundEventDeliveryView,
   OutboundEventSubscriptionView,
@@ -317,17 +318,42 @@ const navigation: ViewNavigation = {
   listen: () => () => {},
 };
 
+// Opt-in fault injection for recovery tests; ordinary fixture scenarios keep their API behavior.
+const pollingFixture = params.has("polling-recovery") ? {
+  failure: null as "list" | "trigger" | null,
+  mutationFailure: false,
+  holdTriggers: false,
+  pendingTriggers: [] as Array<() => void>,
+  listCalls: 0,
+  release() { this.pendingTriggers.splice(0).forEach((resolve) => resolve()); },
+} : null;
+if (pollingFixture) Object.assign(window, { automationPollingFixture: pollingFixture });
+
 const client = {
   ...api,
-  automations: async () => ({ automations: items }),
+  automations: async () => {
+    if (pollingFixture) pollingFixture.listCalls++;
+    if (pollingFixture?.failure === "list") throw new Error("Synthetic polling failure");
+    return { automations: items };
+  },
   automation: async (id: string) => ({
     automation: items.find((item) => item.automationId === id)!,
     executions: id === "automation-nightly-sweep" ? executions : [],
     events: [],
   }),
-  automationTriggers: async (id: string) => ({
-    triggers: id === "automation-nightly-sweep" ? triggerItems : [],
-  }),
+  automationTriggers: async (id: string) => {
+    if (pollingFixture?.holdTriggers) {
+      await new Promise<void>((resolve) => { pollingFixture.pendingTriggers.push(resolve); });
+    }
+    if (pollingFixture?.failure === "trigger") throw new Error("Synthetic polling failure");
+    return { triggers: id === "automation-nightly-sweep" ? triggerItems : [] };
+  },
+  ...(pollingFixture ? { updateAutomation: async (id: string, spec: AutomationSpec) => {
+    if (pollingFixture.mutationFailure) throw new Error("Synthetic Pause failure");
+    const index = items.findIndex((item) => item.automationId === id);
+    items[index] = { ...items[index]!, ...spec };
+    return items[index]!;
+  } } : {}),
   outboundEventSubscriptions: async () => outboundSubscriptions,
   outboundEventDeliveries: async () => outboundDeliveries,
   workflowDefinitions: async () => workflowDefinitions,
