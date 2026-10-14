@@ -743,6 +743,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   live_cost_usd      REAL NOT NULL DEFAULT 0,
   live_unpriced_records INTEGER NOT NULL DEFAULT 0,
   live_settling  INTEGER NOT NULL DEFAULT 0,
+  live_observed_at INTEGER,
   created_at     INTEGER NOT NULL,
   updated_at     INTEGER NOT NULL,
   last_event_at  INTEGER,
@@ -6374,6 +6375,9 @@ export class ControlPlaneDb {
       // window (#3112). Until then the settled cost already includes them, so guardrails leave
       // the estimate out.
       "live_settling INTEGER NOT NULL DEFAULT 0",
+      // When the open window last saw a request (#3196). The daily budget counts a window only on
+      // the UTC day it ran, so an interrupted turn's window cannot spend every later day.
+      "live_observed_at INTEGER",
       // Phase 2: highest runner-owned event seq the cache has ingested (incremental hydration).
       "hydrated_seq INTEGER NOT NULL DEFAULT 0",
       // CP-owned event-log generation. Reprocess increments it so reconnecting dashboards can
@@ -6472,6 +6476,12 @@ export class ControlPlaneDb {
         /* column already present */
       }
     }
+    // A window left open across the upgrade that added `live_observed_at` takes the time of its last
+    // provisional request, so the daily budget still counts it on that day (#3196). Every later
+    // request sets the column, and closing the window clears the estimate with it.
+    db.exec(`UPDATE sessions SET live_observed_at=COALESCE((SELECT MAX(e.ts) FROM session_events e
+        WHERE e.session_id=sessions.id AND e.kind='token_usage' AND json_extract(e.payload,'$.liveUsage')='provisional'), updated_at)
+      WHERE live_observed_at IS NULL AND live_cost_usd>0`);
     try {
       db.exec("ALTER TABLE orchestrator_settings ADD COLUMN strict_project_isolation INTEGER NOT NULL DEFAULT 0 CHECK (strict_project_isolation IN (0, 1))");
     } catch {
@@ -13058,7 +13068,7 @@ export class ControlPlaneDb {
 
   private clearLiveUsageInTransaction(sessionId: string): void {
     this.stmt(`UPDATE sessions SET live_input_tokens=0, live_output_tokens=0, live_cost_usd=0, live_unpriced_records=0,
-      live_settling=0 WHERE id=?`).run(sessionId);
+      live_settling=0, live_observed_at=NULL WHERE id=?`).run(sessionId);
   }
 
   /** What cost guardrails add to the settled cost for a running Claude turn (#3112): the open
@@ -13069,6 +13079,20 @@ export class ControlPlaneDb {
       { live_cost_usd: number; live_unpriced_records: number; live_settling: number } | undefined;
     if (!row || row.live_settling) return { costUsd: 0, unpriced: false };
     return { costUsd: Number(row.live_cost_usd), unpriced: Number(row.live_unpriced_records) > 0 };
+  }
+
+  /** The open live estimates of one user's live sessions, which their daily budget adds to today's
+   * settled spend (#3196), on the same terms as `sessionLiveGuardrail`. A window counts on the UTC
+   * day it last saw a request: an interrupted turn's window stays open until the next process
+   * accounts it, and the ledger books it on that later day, so it must not spend every day in
+   * between. A terminal session runs no turn and is accounted only if it is relaunched. */
+  ownerLiveCostUsd(organizationId: string, userId: string, now = Date.now()): number {
+    const row = this.stmt(
+      `SELECT COALESCE(SUM(s.live_cost_usd), 0) AS usd FROM sessions s JOIN session_ownership o ON o.session_id=s.id
+        WHERE o.organization_id=? AND o.owner_kind='user' AND o.owner_id=? AND s.live_settling=0 AND s.live_cost_usd>0
+          AND s.live_observed_at>=? AND s.status NOT IN ('completed','failed','stopped')`,
+    ).get(organizationId, userId, Math.floor(now / 86_400_000) * 86_400_000) as { usd: number };
+    return Number(row.usd);
   }
 
   /** True while an open live request has tokens the rate table could not price (#3112): the live
@@ -13251,8 +13275,8 @@ export class ControlPlaneDb {
         this.stmt(
           `UPDATE sessions SET live_input_tokens=live_input_tokens+?, live_output_tokens=live_output_tokens+?,
              live_cost_usd=live_cost_usd+?, live_unpriced_records=live_unpriced_records+?, live_settling=0,
-             updated_at=? WHERE id=?`,
-        ).run(inputTokens, outputTokens, priced.costUsd, unpriced ? 1 : 0, occurredAt, sessionId);
+             live_observed_at=?, updated_at=? WHERE id=?`,
+        ).run(inputTokens, outputTokens, priced.costUsd, unpriced ? 1 : 0, occurredAt, occurredAt, sessionId);
       }
     }
     if (payload.kind === "token_usage" && (!payload.parentToolUseId || payload.independentUsage === true) &&
@@ -16604,9 +16628,11 @@ export class ControlPlaneDb {
     return Number(row.tokens) > 0 && Number(row.unpriced_records) > 0 && Number(row.cost_microusd) === 0 && Number(row.cost_remainder_picousd) === 0;
   }
 
+  /** Recorded unpriced usage, or an open live request the rate table could not price (#3196),
+   * which would otherwise read as free toward the campaign allowance. */
   campaignUsageHasUnpriced(id: string): boolean {
     return Boolean((this.stmt("SELECT unpriced_records FROM usage_session_state WHERE session_id=?").get(id) as
-      { unpriced_records: number } | undefined)?.unpriced_records);
+      { unpriced_records: number } | undefined)?.unpriced_records) || this.sessionLiveGuardrail(id).unpriced;
   }
 
   getUsageDailyBudget(organizationId: string): UsageDailyBudgetPolicy {

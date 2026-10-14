@@ -29,3 +29,21 @@ for (const theme of ["dark", "light"]) {
     });
   }
 }
+
+for (const theme of ["dark", "light"]) {
+  for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
+    test(`recorded campaign spend says when it includes running turns' estimates at ${viewport.width} ${theme}`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await page.goto(`/campaign-status-e2e.html?scenario=campaign&budget=1&estimate=1&theme=${theme}`);
+      const summary = page.locator(".campaign-status-summary");
+      const spend = summary.locator("dt", { hasText: "Recorded Campaign Spend" }).locator("+ dd");
+      await expect(spend).toHaveText("$12.00, 100 tool callsIncludes an estimate for running turns.");
+      const size = await summary.evaluate((el) => ({ width: el.clientWidth, scroll: el.scrollWidth }));
+      expect(size.scroll).toBeLessThanOrEqual(size.width + 1);
+      if (process.env.CAMPAIGN_BUDGET_EVIDENCE_DIR) {
+        await spend.scrollIntoViewIfNeeded();
+        await summary.screenshot({ path: `${process.env.CAMPAIGN_BUDGET_EVIDENCE_DIR}/campaign-budget-estimate-${viewport.width}-${theme}.png` });
+      }
+    });
+  }
+}

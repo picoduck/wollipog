@@ -34,7 +34,9 @@ export interface CampaignBudgetView {
   authority: CampaignBudgetAuthority;
   state: "active" | "exhausted" | "revoked" | "accounting_unavailable";
   reason?: string;
-  actual: { costUsd: number; toolCalls: number };
+  /** `includesEstimate`: `costUsd` adds running Claude turns' open live estimates to the members'
+   * recorded spend (#3196). */
+  actual: { costUsd: number; toolCalls: number; includesEstimate?: boolean };
   outstanding: { costUsd: number; toolCalls: number };
   remaining: { costUsd: number | null; toolCalls: number | null };
   occupied: number;

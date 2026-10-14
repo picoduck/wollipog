@@ -5,8 +5,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import fc from "fast-check";
-import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
-  validCampaignBudgetAuthority, type CampaignBudgetAuthority, type RunnerMetadata } from "@wollipog/protocol";
+import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, projectSessionEventPayloadForProtocol,
+  validCampaignBudgetAuthority, type CampaignBudgetAuthority, type RunnerMetadata, type SessionEventPayload } from "@wollipog/protocol";
 import { ControlPlaneDb, RUNNER_REPORTED_STOP } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
@@ -434,6 +434,131 @@ test("mixed priced and unpriced usage is unavailable rather than zero, even afte
     assert.equal(h.svc.campaignBudgetWorkerPreflight("root", { kind: "managed", sessionId: "root" }).ok, false);
     assert.match(h.db.campaignBudgetAccountingError("codex-app-server", "missing-model", true)!, /unpriced/);
     assert.match(h.db.campaignBudgetAccountingError("codex-exec", "anything", true)!, /unsupported/);
+  } finally { h.db.close(); }
+});
+
+/** A running Claude turn's completed request, priced live at the fixture's $0.000001 per token. */
+const liveRequest = (inputTokens: number, model = "claude-opus-5-5"): SessionEventPayload =>
+  ({ kind: "token_usage", model, inputTokens, outputTokens: 0, pricingContext: { requestInputTokens: inputTokens }, liveUsage: "provisional" });
+const settledTurn = (inputTokens: number, costUsd: number): SessionEventPayload =>
+  ({ kind: "token_usage", model: "claude-opus-5-5", inputTokens, outputTokens: 0, costUsd, liveUsage: "settled" });
+
+test("running turns' live estimates exhaust the campaign mid-turn and refuse new children; settlement books provider totals (#3196)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ costUsd: 1, concurrency: 1 })).ok);
+    h.make("worker", "root");
+    const before = h.db.campaignBudgets.view("root")!;
+    assert.equal(before.actual.costUsd, 0);
+
+    h.svc.onSessionEvent("worker", liveRequest(100_000));
+    let view = h.db.campaignBudgets.view("root")!;
+    assert.equal(view.state, "active");
+    assert.deepEqual(view.actual, { costUsd: 0.1, toolCalls: 0, includesEstimate: true });
+    assert.equal(view.remaining.costUsd, before.remaining.costUsd, "an estimate inside its allocation is not reserved twice");
+    assert.equal(h.db.getSession("worker")!.costUsd, 0, "the estimate is never accrued");
+
+    h.svc.onSessionEvent("root", liveRequest(1_000_000));
+    view = h.db.campaignBudgets.view("root")!;
+    assert.equal(view.state, "exhausted", "the estimate alone crosses the campaign allowance");
+    assert.deepEqual([h.db.getSession("root")!.status, h.db.getSession("worker")!.status], ["stopped", "stopped"],
+      "protected workers stop mid-turn");
+    assert.ok(h.logs.some((line) => JSON.parse(line).event === "campaign_budget_admission_stopped"));
+    const child = h.svc.createSession({ runnerId: "r", workspaceId: "w", agentId: "claude", config: { model: "claude-opus-5-5" }, prompt: "Implement authorized #2936" },
+      undefined, undefined, false, false, false, { parentSessionId: "root" });
+    assert.equal(child.ok, false, "child admission is refused");
+
+    // The stopped turns settle lower than their estimates. Only the provider totals accrue.
+    h.svc.onSessionEvent("worker", settledTurn(100_000, 0.05));
+    h.svc.onSessionEvent("root", settledTurn(1_000_000, 0.6));
+    view = h.db.campaignBudgets.view("root")!;
+    assert.deepEqual(view.actual, { costUsd: 0.65, toolCalls: 0 }, "settled totals replace the estimates, once each");
+    assert.equal(view.state, "exhausted", "a trip on the estimate stays tripped, like any exhausted allowance");
+  } finally { h.db.close(); }
+});
+
+test("authorizing protection during a running turn sizes allocations above its live estimate (#3196)", () => {
+  const h = harness();
+  try {
+    h.svc.onSessionEvent("root", liveRequest(40_000_000));
+    assert.ok(h.enable(allowance({ costUsd: 100, concurrency: 1 })).ok);
+    const allocation = h.db.campaignBudgets.allocation("root")!.costUsd!;
+    assert.ok(allocation > 40, `the $${allocation} allocation leaves room past the $40 already estimated`);
+    assert.equal(h.db.campaignBudgets.admissionError("root"), null);
+    h.svc.onSessionEvent("root", liveRequest(1_000_000));
+    assert.equal(h.db.getSession("root")!.status, "running", "the next request does not stop the root");
+    assert.equal(h.db.campaignBudgets.view("root")!.state, "active");
+  } finally { h.db.close(); }
+});
+
+test("an open live window that survives the upgrade adding its timestamp still counts toward today (#3196)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "live-observed-"));
+  const path = join(dir, "cp.sqlite");
+  try {
+    const h = harness(path);
+    h.svc.onSessionEvent("root", liveRequest(10_000));
+    const owner = [h.principal.organizationId, h.principal.userId] as const;
+    assert.equal(h.db.ownerLiveCostUsd(...owner), 0.01);
+    h.db.raw().prepare("UPDATE sessions SET live_observed_at=NULL").run();
+    assert.equal(h.db.ownerLiveCostUsd(...owner), 0, "as a window opened before the column existed");
+    h.db.close();
+    const reopened = ControlPlaneDb.open(path);
+    try {
+      assert.equal(reopened.ownerLiveCostUsd(...owner), 0.01, "the migration backfills it from its last provisional request");
+    } finally { reopened.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("rounding a live estimate never manufactures spend beyond the reservations it moves (#3196)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ costUsd: 10, concurrency: 1 })).ok);
+    assert.ok(h.svc.allocateCampaignBudget("root", { sessionId: "root", costUsd: 10 }).ok);
+    // $0.1000015 at the fixture's $0.000001 per token, split so the stored sum is not a micro-USD multiple.
+    h.svc.onSessionEvent("root", liveRequest(100_000));
+    h.db.raw().prepare("UPDATE sessions SET live_cost_usd=live_cost_usd+0.0000015 WHERE id='root'").run();
+    const view = h.db.campaignBudgets.view("root")!;
+    assert.equal(view.actual.costUsd + view.outstanding.costUsd, 10, "spend plus reservations is still the allocation");
+    assert.ok(h.enable(allowance({ costUsd: 10, concurrency: 1 }), 2).ok, "the same human grant is still accepted");
+  } finally { h.db.close(); }
+});
+
+test("a worker whose live estimate reaches its allocation stops, as a settled crossing does (#3196)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ costUsd: 10 })).ok);
+    h.make("worker", "root", { costBudgetUsd: 0.5 });
+    assert.equal(h.db.campaignBudgets.allocation("worker")!.costUsd, 0.5);
+    h.svc.onSessionEvent("worker", liveRequest(400_000));
+    assert.equal(h.db.getSession("worker")!.status, "running");
+    h.svc.onSessionEvent("worker", liveRequest(100_000));
+    assert.equal(h.db.getSession("worker")!.status, "stopped", "$0.50 estimated reaches the $0.50 allocation");
+    assert.equal(h.db.campaignBudgets.view("root")!.state, "active", "the campaign allowance is not reached");
+    assert.equal(h.db.getSession("root")!.status, "running");
+  } finally { h.db.close(); }
+});
+
+test("live tokens without a rate stop protected admission rather than reading as free (#3196)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ costUsd: 100 })).ok);
+    h.svc.onSessionEvent("root", liveRequest(100, "unrated-model"));
+    const view = h.db.campaignBudgets.view("root")!;
+    assert.deepEqual([view.state, view.costAccounting], ["accounting_unavailable", "unavailable"]);
+    assert.equal(h.db.getSession("root")!.status, "stopped");
+  } finally { h.db.close(); }
+});
+
+test("a stream without live records, as from a peer before v216, keeps the campaign gate on settled cost (#3196)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ costUsd: 1 })).ok);
+    const turn = [liveRequest(1_000_000), settledTurn(1_000_000, 1.2)].map((payload) => projectSessionEventPayloadForProtocol(payload, 215));
+    assert.equal(turn[0], null, "an older peer never receives provisional records");
+    assert.equal(h.db.campaignBudgets.view("root")!.state, "active");
+    h.svc.onSessionEvent("root", turn[1]!);
+    const view = h.db.campaignBudgets.view("root")!;
+    assert.deepEqual([view.state, view.actual], ["exhausted", { costUsd: 1.2, toolCalls: 0 }]);
   } finally { h.db.close(); }
 });
 
