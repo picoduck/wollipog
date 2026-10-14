@@ -11,7 +11,10 @@ import { formatDuration, formatRecordedRelativeTime } from "../format.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import {
   backgroundLostSentence,
-  requestMissingResultAcknowledgement,
+  backgroundDeliveryAcknowledgement,
+  backgroundDeliveryRecoveryKind,
+  requestBackgroundDeliveryAcknowledgement,
+  type BackgroundDeliveryAcknowledgement,
   shownWatchdogDelivery,
   type BackgroundRecoverySubject,
 } from "../background-delivery-status.js";
@@ -110,8 +113,8 @@ type AcknowledgementFeedback = {
   message: string;
 };
 
-function acknowledgementKey(sessionId: string, continuationId: string): string {
-  return JSON.stringify([sessionId, continuationId]);
+function acknowledgementKey(sessionId: string, continuationId: string, kind: BackgroundDeliveryAcknowledgement["kind"]): string {
+  return JSON.stringify([sessionId, continuationId, kind]);
 }
 
 /**
@@ -125,7 +128,9 @@ function deliveryRecoveryState(
 ): BackgroundDeliveryWatchdogState | null {
   const missing = delivery.missingResultAt != null && delivery.runnerResultPersistedAt == null;
   const state = delivery.watchdogState ?? (missing ? "accepted_without_result" : null);
-  return state === "accepted_without_result" && acknowledged ? null : state;
+  const exhausted = delivery.retryExhaustedAt != null && delivery.acceptedAt == null && delivery.runnerResultPersistedAt == null;
+  const recovery = state ?? (exhausted ? "capacity_retry_exhausted" : null);
+  return (recovery === "accepted_without_result" || recovery === "capacity_retry_exhausted") && acknowledged ? null : recovery;
 }
 
 /**
@@ -211,7 +216,8 @@ export function BackgroundWorkPanel({
   const showSkeleton = useDelayedFlag(inventoryPending && !inventoryError, BACKGROUND_WORK_SKELETON_DELAY_MS);
   const machine = machineName?.trim() || null;
   const locallyAcknowledgedDelivery = (delivery: BackgroundDeliveryView) =>
-    delivery.continuationId != null && locallyAcknowledged.has(acknowledgementKey(session.id, delivery.continuationId));
+    delivery.continuationId != null && !(backgroundDeliveryRecoveryKind(delivery) === "retry_exhaustion" && delivery.acceptedAt != null) &&
+    locallyAcknowledged.has(acknowledgementKey(session.id, delivery.continuationId, backgroundDeliveryRecoveryKind(delivery)));
 
   // A successful Acknowledge removes its notice, button and all; focus goes to the turn's heading,
   // whose badge now reads Missing Result Acknowledged. The turn is found by its key once the panel
@@ -229,12 +235,13 @@ export function BackgroundWorkPanel({
     // Once per acknowledgement, reading the groups of the render that shows it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [locallyAcknowledged]);
-  const acknowledge = (continuationId: string, groupKey: string) => {
-    const key = acknowledgementKey(session.id, continuationId);
+  const acknowledge = (acknowledgement: BackgroundDeliveryAcknowledgement, groupKey: string) => {
+    const { continuationId } = acknowledgement;
+    const key = acknowledgementKey(session.id, continuationId, acknowledgement.kind);
     if (acknowledgementFeedback.get(key)?.state === "pending") return;
     const token = Symbol("missing-result-acknowledgement");
     setAcknowledgementFeedback((current) => new Map(current).set(key, { token, state: "pending" }));
-    void requestMissingResultAcknowledgement(api, session.id, continuationId).then((failure) => {
+    void requestBackgroundDeliveryAcknowledgement(api, session.id, acknowledgement).then((failure) => {
       if (failure === null) {
         acknowledgedFocus.current = { sessionId: session.id, groupKey };
         setLocallyAcknowledged((current) => new Set(current).add(key));
@@ -321,7 +328,8 @@ export function BackgroundWorkPanel({
             job, session.backgroundWorkState, runnerOnline, inventorySupported, now)] as const));
           const lostCount = [...states.values()].filter((state) => state === "lost").length;
           const recoveries =group.deliveries.flatMap((delivery, deliveryIndex) => {
-            const state = deliveryRecoveryState(delivery, delivery.missingResultAcknowledgedAt != null ||
+            const state = deliveryRecoveryState(delivery, (backgroundDeliveryRecoveryKind(delivery) === "retry_exhaustion"
+              ? delivery.retryExhaustionAcknowledgedAt != null : delivery.missingResultAcknowledgedAt != null) ||
               locallyAcknowledgedDelivery(delivery));
             return state === null ? [] : [{ delivery, deliveryIndex, state }];
           });
@@ -337,7 +345,7 @@ export function BackgroundWorkPanel({
                 {/* Result Missing's notice says it; the badge returns once it is acknowledged. A turn
                     whose unfinished jobs were all lost is waiting for nothing: the Lost notice and the
                     rows say what happened. */}
-                {status.key !== "result_missing" && !(status.key === "waiting" && lostCount >= status.unfinished) && (
+                {status.key !== "result_missing" && status.key !== "retry_exhausted" && !(status.key === "waiting" && lostCount >= status.unfinished) && (
                   <StatusBadge meta={backgroundJobGroupBadge(status)} inline />
                 )}
                 {turnViewable(group.parentTurnId) && (
@@ -352,9 +360,8 @@ export function BackgroundWorkPanel({
                 const continuationId = delivery.continuationId;
                 const feedback = continuationId == null
                   ? undefined
-                  : acknowledgementFeedback.get(acknowledgementKey(session.id, continuationId));
-                const acknowledgeable = state === "accepted_without_result" && continuationId != null &&
-                  delivery.missingResultAt != null && delivery.runnerResultPersistedAt == null;
+                  : acknowledgementFeedback.get(acknowledgementKey(session.id, continuationId, backgroundDeliveryRecoveryKind(delivery)));
+                const acknowledgement = backgroundDeliveryAcknowledgement({ ...delivery, watchdogState: state });
                 // Result Blocked's Stop ends the turn's one unfinished job. The bounded list can leave
                 // some out, so the receipt's own count of them must be one too. Like that count, a job
                 // the runner no longer lists is not one of them.
@@ -368,11 +375,11 @@ export function BackgroundWorkPanel({
                 return (
                   <BackgroundRecoveryNotice key={continuationId ?? `${group.key}:${deliveryIndex}`}
                     sessionId={session.id} state={state} subject={recoverySubject(delivery, deliveredJobs)}
-                    finishedAt={latestFinish(deliveredJobs)} now={now} missingSince={delivery.missingResultAt}
-                    acknowledgement={acknowledgeable ? {
+                    finishedAt={latestFinish(deliveredJobs)} now={now} missingSince={state === "capacity_retry_exhausted" ? delivery.retryExhaustedAt : delivery.missingResultAt}
+                    acknowledgement={acknowledgement ? {
                       busy: feedback?.state === "pending",
                       error: feedback?.state === "error" ? feedback.message : null,
-                      onAcknowledge: () => acknowledge(continuationId, group.key),
+                      onAcknowledge: () => acknowledge(acknowledgement, group.key),
                     } : null}
                     jobStop={jobStop}
                     stopTarget={target && {
@@ -422,7 +429,7 @@ export function BackgroundWorkPanel({
                             <StatusBadge meta={statusMeta("job", state)} />
                           </span>
                           <span className="row-line">
-                            <span className="row-sub">{backgroundJobRowSentence(job, state, unfinishedSiblings, now)}</span>
+                            <span className="row-sub">{backgroundJobRowSentence(job, state, unfinishedSiblings, now, group.deliveries)}</span>
                             <span className="row-trail">{formatDuration(Math.max(0, end - job.registeredAt))}</span>
                           </span>
                         </span>

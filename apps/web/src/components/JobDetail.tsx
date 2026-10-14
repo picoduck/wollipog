@@ -157,7 +157,7 @@ export function JobDetail({
           <div><dt>Finished</dt><dd><RecordedAge at={job.terminalObservedAt} now={now} /></dd></div>
         )}
         <div><dt>Last Activity</dt><dd><RecordedAge at={job.lastObservedAt} now={now} /></dd></div>
-        <div><dt>Result</dt><dd>{backgroundJobResultSentence(job, state, unfinishedSiblings, now)}</dd></div>
+        <div><dt>Result</dt><dd>{backgroundJobResultSentence(job, state, unfinishedSiblings, now, group.deliveries)}</dd></div>
         {notification && <div><dt>Notification</dt><dd>{notification}</dd></div>}
         <div>
           <dt>Started By</dt>

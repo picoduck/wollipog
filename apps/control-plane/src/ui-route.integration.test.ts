@@ -38,6 +38,14 @@ test("missing-limit event reads page 50,000 cached events with exact continuatio
     agentId: "fixture", title: "Fixture", useWorktree: false, driver: "claude-code", config: {}, now: 1,
   });
   seed.registerRunner({
+    runnerId: "v221-default-events", hostname: "fixture-v221", os: "linux", version: "fixture",
+    workspaces: [{ id: "fixture", name: "Fixture", path: temp }], agents: [],
+  }, Date.now(), 221); // Merged #3170 adds retry exhaustion while retaining the unsafe reader.
+  seed.createSession({
+    id: "v221-event-reader", runnerId: "v221-default-events", workspaceId: "fixture",
+    agentId: "fixture", title: "V221 Reader", useWorktree: false, driver: "claude-code", config: {}, now: 1,
+  });
+  seed.registerRunner({
     runnerId: "current-default-events", hostname: "fixture-current", os: "linux", version: "fixture",
     workspaces: [{ id: "fixture", name: "Fixture", path: temp }], agents: [],
   }, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads);
@@ -46,8 +54,10 @@ test("missing-limit event reads page 50,000 cached events with exact continuatio
     agentId: "fixture", title: "Current Reader", useWorktree: false, driver: "claude-code", config: {}, now: 1,
   });
   const oldReaderToken = "fixture-old-event-reader";
+  const v221ReaderToken = "fixture-v221-event-reader";
   const currentReaderToken = "fixture-current-event-reader";
   assert.equal(seed.setAgentControlCredential("default-events", "offline-default-events", hashToken(oldReaderToken), Date.now()), true);
+  assert.equal(seed.setAgentControlCredential("v221-event-reader", "v221-default-events", hashToken(v221ReaderToken), Date.now()), true);
   assert.equal(seed.setAgentControlCredential("current-event-reader", "current-default-events", hashToken(currentReaderToken), Date.now()), true);
   const raw = seed.raw();
   const insert = raw.prepare("INSERT INTO session_events(session_id,seq,ts,kind,payload) VALUES(?,?,?,?,?)");
@@ -73,6 +83,7 @@ test("missing-limit event reads page 50,000 cached events with exact continuatio
   // so the production auth path, rather than a forged header, determines the reader's runner.
   const actors = ControlPlaneDb.open(databasePath);
   actors.updateSessionStatus("default-events", "running", Date.now());
+  actors.updateSessionStatus("v221-event-reader", "running", Date.now());
   actors.updateSessionStatus("current-event-reader", "running", Date.now());
   actors.close();
   const read = (query = "") => fetchWithBearer(`${base}/api/sessions/default-events/events${query}`, ownerToken);
@@ -86,6 +97,12 @@ test("missing-limit event reads page 50,000 cached events with exact continuatio
   assert.equal(upgrade.code, "session_event_reader_upgrade_required");
   assert.equal(upgrade.requiredProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads);
   assert.match(upgrade.error, /Update the Wollipog runner/);
+  const v221Fallback = await agentRead("v221-event-reader", v221ReaderToken, "default-events", "?after=0");
+  assert.equal(v221Fallback.status, 426, "merged protocol-221 readers still cannot treat the default page as newest history");
+  const v221Upgrade = await v221Fallback.json() as { error: string; code: string; requiredProtocolVersion: number };
+  assert.equal(v221Upgrade.code, "session_event_reader_upgrade_required");
+  assert.equal(v221Upgrade.requiredProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads);
+  assert.match(v221Upgrade.error, /Update the Wollipog runner/);
   assert.equal((await agentRead("default-events", oldReaderToken, "current-event-reader", "?after=0")).status, 426,
     "the guard uses the credential actor's old runner even when the target is on a new runner");
   assert.equal((await agentRead("current-event-reader", currentReaderToken, "default-events", "?after=0")).status, 200,
@@ -93,6 +110,8 @@ test("missing-limit event reads page 50,000 cached events with exact continuatio
   for (const query of ["", "?after=0&eventEpoch=0", "?direction=backward&limit=30&eventEpoch=0", "?after=0&limit=30&eventEpoch=0"]) {
     assert.equal((await agentRead("default-events", oldReaderToken, "default-events", query)).status, 200,
       `ordinary/default and explicit paged agent reads remain valid: ${query}`);
+    assert.equal((await agentRead("v221-event-reader", v221ReaderToken, "default-events", query)).status, 200,
+      `ordinary/default and explicit paged protocol-221 reads remain valid: ${query}`);
   }
   assert.equal((await agentRead("current-event-reader", oldReaderToken, "default-events", "?after=0")).status, 401,
     "a token cannot claim a different actor to bypass the compatibility guard");
@@ -1041,8 +1060,11 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   });
   assert.equal(invalidScopedReveal.status, 400, "member scope does not bypass the exact workspace-root gate");
 
-  const ownerFetch = (path: string, init?: RequestInit) =>
-    fetchWithBearer(`${httpBase}${path}`, ownerToken, init);
+  const ownerFetch = (path: string, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+    headers.set("x-wollipog-ui-protocol", String(PROTOCOL_VERSION));
+    return fetchWithBearer(`${httpBase}${path}`, ownerToken, { ...init, headers });
+  };
 
   for (const body of [
     { action: "commit", message: "must stay isolated" },
@@ -1372,6 +1394,74 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     "/api/sessions/session-target/background-deliveries/bgcont-route-absent/acknowledge-missing-result",
     { method: "POST" },
   )).status, 404, "an unknown continuation remains indistinguishable from inaccessible history");
+
+  const exhaustionJob = {
+    ...terminalMissingJobs[0]!, id: "route-exhaustion-job", parentTurnId: "route-exhaustion-turn",
+    continuationId: "bgcont-route-exhaustion", continuationAcceptedAt: undefined,
+    continuationMissingResultAt: undefined, continuationRetryExhaustedAt: 7_000,
+  };
+  runner.send(JSON.stringify({ type: "session_runtime_updated", snapshot: {
+    ...sessionSnapshot("session-target"), backgroundWorkTracking: "managed",
+    backgroundJobs: [exhaustionJob],
+  } }));
+  for (const inbox of [uiInbox, operatorUiInbox]) {
+    await inbox.take((message) => message.type === "session_upsert" &&
+      (message.session as { id?: string; backgroundDeliveries?: Array<{ continuationId?: string; watchdogState?: string }> } | undefined)
+        ?.backgroundDeliveries?.some((delivery) => delivery.continuationId === "bgcont-route-exhaustion" &&
+          delivery.watchdogState === "capacity_retry_exhausted") === true);
+  }
+  assert.equal((await ownerFetch(
+    "/api/sessions/session-target/background-deliveries/bgcont-route-exhaustion/acknowledge-missing-result",
+    { method: "POST" },
+  )).status, 409, "exhaustion does not grant accepted missing-result authority");
+  const legacyExhaustionView = await fetchWithBearer(`${httpBase}/api/sessions/session-target`, ownerToken, {
+    headers: { "x-wollipog-ui-protocol": "218" },
+  });
+  assert.equal(legacyExhaustionView.status, 200);
+  const legacyExhaustionBody = await legacyExhaustionView.text();
+  assert.doesNotMatch(legacyExhaustionBody, /capacity_retry_exhausted|retryExhaustedAt/,
+    "legacy HTTP clients never receive an unknown watchdog or its new fields");
+  for (const path of ["/api/sessions", "/api/sessions?archived=true"]) {
+    for (const version of [undefined, "218", "219", "220", String(PROTOCOL_VERSION)]) {
+      const response = await fetchWithBearer(`${httpBase}${path}`, ownerToken, {
+        headers: version === undefined ? {} : { "x-wollipog-ui-protocol": version },
+      });
+      assert.equal(response.status, 200);
+      const body = await response.text();
+      if (version === String(PROTOCOL_VERSION)) assert.match(body, /capacity_retry_exhausted/);
+      else assert.doesNotMatch(body, /capacity_retry_exhausted|retryExhaustedAt|retryExhaustionAcknowledgedAt/,
+        `${path} must project legacy ${version ?? "unnegotiated"} clients even when its JSON is cached`);
+    }
+  }
+  const exhaustionAcknowledgement = await ownerFetch(
+    "/api/sessions/session-target/background-deliveries/bgcont-route-exhaustion/acknowledge-retry-exhaustion",
+    { method: "POST" },
+  );
+  assert.equal(exhaustionAcknowledgement.status, 200, await exhaustionAcknowledgement.clone().text());
+  const exhaustionSession = await exhaustionAcknowledgement.json() as {
+    backgroundDeliveries?: Array<{ continuationId?: string; acceptedAt?: number; missingResultAt?: number;
+      retryExhaustedAt?: number; retryExhaustionAcknowledgedAt?: number; watchdogState?: string }>;
+  };
+  const acknowledgedExhaustion = exhaustionSession.backgroundDeliveries?.find((delivery) =>
+    delivery.continuationId === "bgcont-route-exhaustion");
+  assert.ok(acknowledgedExhaustion?.retryExhaustionAcknowledgedAt);
+  assert.equal(acknowledgedExhaustion.retryExhaustedAt, 7_000);
+  assert.equal(acknowledgedExhaustion.acceptedAt, undefined);
+  assert.equal(acknowledgedExhaustion.missingResultAt, undefined);
+  assert.equal(acknowledgedExhaustion.watchdogState, undefined);
+  assert.equal((await ownerFetch(
+    "/api/sessions/session-target/background-deliveries/bgcont-route-exhaustion/acknowledge-retry-exhaustion",
+    { method: "POST" },
+  )).status, 200, "repeat exhaustion acknowledgement is idempotent");
+  assert.equal((await ownerFetch(
+    "/api/sessions/session-target/background-deliveries/bgcont-route-absent/acknowledge-retry-exhaustion",
+    { method: "POST" },
+  )).status, 404);
+
+  for (const inbox of [uiInbox, operatorUiInbox]) {
+    await inbox.take((message) => message.type === "session_upsert" &&
+      (message.session as { id?: string } | undefined)?.id === "session-target");
+  }
 
   const plainStopResponse = await ownerFetch("/api/sessions/session-other/stop", { method: "POST" });
   assert.equal(plainStopResponse.status, 200);
@@ -2519,8 +2609,11 @@ test("legacy workspace rename cannot bypass durable Project management authority
   });
 
   const httpBase = `http://127.0.0.1:${port}`;
-  const ownerFetch = (path: string, init?: RequestInit) =>
-    fetchWithBearer(`${httpBase}${path}`, ownerToken, init);
+  const ownerFetch = (path: string, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+    headers.set("x-wollipog-ui-protocol", String(PROTOCOL_VERSION));
+    return fetchWithBearer(`${httpBase}${path}`, ownerToken, { ...init, headers });
+  };
   const operatorHeaders = {
     authorization: `Bearer ${operatorToken}`,
     "content-type": "application/json",

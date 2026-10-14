@@ -39,6 +39,27 @@ test("200 files start with ten bodies; Expand All, Collapse All and an individua
   await expect(tail.locator(".dfile-toggle")).toHaveAttribute("aria-expanded", "true");
 });
 
+for (const theme of ["dark", "light"]) {
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+    test(`file growth after a per-path choice stays bounded at ${viewport.width}px in ${theme} (#3161)`, async ({ page }) => {
+      await open(page, `files=5&expanded=1&theme=${theme}`, viewport);
+      const first = page.locator('.dfile[data-path="src/file-0.ts"] .dfile-toggle');
+      await first.click();
+      await first.click();
+      await page.evaluate(() => window.__DIFF_SECTIONS_E2E__.setFileCount(200));
+      await page.getByRole("button", { name: "Refresh Review", exact: true }).click();
+      await expect(page.locator(".dfile")).toHaveCount(200);
+      await expect(page.locator(".dfile-body")).toHaveCount(10);
+      await expect(first).toHaveAttribute("aria-expanded", "true");
+      await (await viewOption(page, "Collapse All Files")).click();
+      await (await viewOption(page, "Expand All Files")).click();
+      await page.evaluate(() => window.__DIFF_SECTIONS_E2E__.setFileCount(201));
+      await page.getByRole("button", { name: "Refresh Review", exact: true }).click();
+      await expect(page.locator(".dfile-body")).toHaveCount(201);
+    });
+  }
+}
+
 test("at a 320px panel every hunk header is one line, and Stage Hunk shows on hover with a mouse", async ({ page }) => {
   await open(page, "width=320");
   const headers = page.locator(".diff-hunk-header");

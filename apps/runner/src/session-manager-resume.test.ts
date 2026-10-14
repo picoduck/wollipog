@@ -7326,6 +7326,7 @@ for (const hold of [false, true]) test(`unaccepted capacity continuation ${hold 
     if (hold) {
       assert.equal(meta.backgroundJobs![0]!.continuationSubmittedAt, undefined);
       assert.equal(meta.backgroundJobs![0]!.continuationMissingResultAt, undefined);
+      assert.equal(meta.backgroundJobs![0]!.continuationRetryExhaustedAt, undefined);
       h.manager.rearmGovernance("resume-session", {});
       await (h.manager as any).runBackgroundContinuation("resume-session");
       for (let i = 0; i < 100 && !h.store.readMeta("resume-session")?.backgroundJobs![0]!.assistantResultPersistedAt; i++) await shortDelay();
@@ -7333,8 +7334,13 @@ for (const hold of [false, true]) test(`unaccepted capacity continuation ${hold 
       assert.ok(h.store.readMeta("resume-session")!.backgroundJobs![0]!.assistantResultPersistedAt);
     } else {
       assert.equal(h.prompts.length, 4);
-      assert.ok(meta.backgroundJobs![0]!.continuationMissingResultAt);
+      assert.equal(meta.backgroundJobs![0]!.continuationMissingResultAt, undefined);
+      assert.ok(meta.backgroundJobs![0]!.continuationRetryExhaustedAt);
       assert.equal(meta.backgroundWorkState, undefined);
+      assert.equal((h.manager as any).hasAuthoritativeBackgroundWork(meta), false,
+        "exhausted audit state must not consume active-turn capacity");
+      assert.equal((h.manager as any).activeTurnAdmitted.has("resume-session"), false,
+        "the exhausted continuation releases its active-work permit");
       await (h.manager as any).runBackgroundContinuation("resume-session");
       await shortDelay();
       assert.equal(h.prompts.length, 4, "exhaustion cannot start a second automatic burst");
@@ -7435,3 +7441,25 @@ test("an unaccepted background capacity retry carries its complete results befor
     assert.equal(h.store.readEvents("resume-session").filter((event) => event.payload.kind === "background_continuation_delivered").length, 1);
   } finally { h.manager.shutdownAll(); h.cleanup(); }
 });
+
+for (const category of ["capacity", "quota", "transport", null] as const) {
+  test(`runner capacity retry prefers the exact ${category ?? "legacy"} category`, async () => {
+    let h!: ReturnType<typeof harness>;
+    let attempts = 0;
+    h = harness({}, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, () => {
+      const driver = (h.manager as any).active.get("resume-session").client;
+      driver.lastTurnFailureCategory = () => attempts <= 1 ? category : null;
+      if (++attempts === 1) {
+        h.callbacks().onEvent({ kind: "error", message: category === "capacity" ? "wording changed" : "overloaded_error" });
+        return "refusal";
+      }
+    });
+    try {
+      h.manager.prompt("resume-session", "task");
+      const expected = category === "capacity" || category == null ? 2 : 1;
+      for (let index = 0; index < 300 && (h.prompts.length < expected || (h.manager as any).active.get("resume-session")?.running); index++) await shortDelay();
+      assert.equal(h.prompts.length, expected);
+      if (expected === 2) assert.match(h.prompts[1]!, /Continue the interrupted task/);
+    } finally { h.manager.shutdownAll(); h.cleanup(); }
+  });
+}

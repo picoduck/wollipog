@@ -104,7 +104,7 @@ export function groupBackgroundHistory(
 export type BackgroundJobGroupStatus =
   | { key: "waiting"; unfinished: number }
   | { key: "finished"; finished: number; total: number }
-  | { key: "returning" | "returned" | "result_missing" | "missing_acknowledged" | "unverified" };
+  | { key: "returning" | "returned" | "result_missing" | "missing_acknowledged" | "retry_exhausted" | "retry_exhaustion_acknowledged" | "unverified" };
 
 /** The group status's badge, with its count in the label where it has one. */
 export function backgroundJobGroupBadge(status: BackgroundJobGroupStatus): StatusMeta {
@@ -116,6 +116,15 @@ export function backgroundJobGroupBadge(status: BackgroundJobGroupStatus): Statu
   return meta;
 }
 
+function retryReceiptStatus(deliveries: readonly BackgroundDeliveryView[], acknowledged: (delivery: BackgroundDeliveryView) => boolean): BackgroundJobGroupStatus | null {
+  const exhausted = deliveries.filter((delivery) => delivery.retryExhaustedAt != null &&
+    delivery.acceptedAt == null && delivery.runnerResultPersistedAt == null);
+  if (exhausted.some((delivery) => delivery.retryExhaustionAcknowledgedAt == null && !acknowledged(delivery))) {
+    return { key: "retry_exhausted" };
+  }
+  return exhausted.length ? { key: "retry_exhaustion_acknowledged" } : null;
+}
+
 /** Where one or more delivery receipts stand, for a group or a receipt with no listed jobs. */
 export function deliveryReceiptStatus(
   deliveries: readonly BackgroundDeliveryView[],
@@ -124,6 +133,8 @@ export function deliveryReceiptStatus(
   if (deliveries.some((delivery) => delivery.runnerResultPersistedAt != null)) return { key: "returned" };
   if (deliveries.some((delivery) => delivery.missingResultAt != null &&
       delivery.missingResultAcknowledgedAt == null && !acknowledged(delivery))) return { key: "result_missing" };
+  const retry = retryReceiptStatus(deliveries, acknowledged);
+  if (retry) return retry;
   if (deliveries.some((delivery) => delivery.missingResultAcknowledgedAt != null || acknowledged(delivery))) {
     return { key: "missing_acknowledged" };
   }
@@ -176,6 +187,8 @@ export function backgroundJobGroupStatus(
   const pending = group.deliveries.filter((delivery) => delivery.runnerResultPersistedAt == null);
   if (pending.some((delivery) => delivery.missingResultAt != null &&
       delivery.missingResultAcknowledgedAt == null && !acknowledged(delivery))) return { key: "result_missing" };
+  const retry = retryReceiptStatus(pending, acknowledged);
+  if (retry) return retry;
   if (pending.some((delivery) => delivery.missingResultAcknowledgedAt != null || acknowledged(delivery))) {
     return { key: "missing_acknowledged" };
   }
@@ -184,6 +197,13 @@ export function backgroundJobGroupStatus(
 }
 
 const finishedStates: ReadonlySet<BackgroundJobCurrentState> = new Set(["completed", "failed", "killed"]);
+
+/** Delivery evidence supplements the bounded job view without rewriting its lifecycle. */
+function backgroundJobRetryExhausted(job: ManagedBackgroundJobView, deliveries: readonly BackgroundDeliveryView[]): boolean {
+  return job.continuationId != null && job.continuationAcceptedAt == null && job.assistantResultPersistedAt == null &&
+    deliveries.some((delivery) => delivery.continuationId === job.continuationId && delivery.retryExhaustedAt != null &&
+      delivery.acceptedAt == null && delivery.runnerResultPersistedAt == null);
+}
 
 /**
  * A job row's second line (#2858): one sentence about its result, "Started 10m ago", "Result waits
@@ -195,12 +215,14 @@ export function backgroundJobRowSentence(
   state: BackgroundJobCurrentState,
   unfinishedSiblings: number,
   now: number,
+  deliveries: readonly BackgroundDeliveryView[] = [],
 ): string {
   const ago = (timestamp: number | undefined) => formatRecordedRelativeTime(timestamp, now);
   if (state === "running" || state === "stalled") return `Started ${ago(job.registeredAt)}`;
   if (!finishedStates.has(state)) return `Last seen ${ago(job.lastObservedAt)}`;
   if (job.assistantResultPersistedAt != null) return `Result returned ${ago(job.assistantResultPersistedAt)}`;
   if (job.continuationMissingResultAt != null) return "Result never arrived";
+  if (backgroundJobRetryExhausted(job, deliveries)) return "Result return stopped";
   if (job.continuationAcceptedAt != null || job.continuationSubmittedAt != null || job.continuationQueuedAt != null) {
     return "Returning result";
   }
@@ -216,11 +238,13 @@ export function backgroundJobResultSentence(
   state: BackgroundJobCurrentState,
   unfinishedSiblings: number,
   now: number,
+  deliveries: readonly BackgroundDeliveryView[] = [],
 ): string {
   if (job.assistantResultPersistedAt != null) {
     return `Returned to this conversation ${formatRecordedRelativeTime(job.assistantResultPersistedAt, now)}`;
   }
   if (job.continuationMissingResultAt != null) return "Never reached this conversation";
+  if (backgroundJobRetryExhausted(job, deliveries)) return "Automatic capacity retries ended before this result was accepted";
   if (job.continuationAcceptedAt != null || job.continuationSubmittedAt != null || job.continuationQueuedAt != null) {
     return "Returning to this conversation now";
   }

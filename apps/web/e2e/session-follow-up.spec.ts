@@ -176,7 +176,7 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
       .not.toBe(await answerBadge.evaluate((badge) => getComputedStyle(badge).color));
     await parent.locator(".inbox-thread-toggle").click();
     await expect(row(page, work)).toHaveCount(0);
-    const working = parent.locator(width < 600 ? ".inbox-thread-working" : ".inbox-thread-family-text");
+    const working = parent.locator(".inbox-thread-working");
     await expect(working).toBeVisible();
     await expect(working).toContainText("1 Working");
     await parent.hover();

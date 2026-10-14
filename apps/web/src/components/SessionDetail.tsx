@@ -3269,13 +3269,13 @@ function SessionDetailLoaded({
     }
 
     // A transcript waits until the reader is genuinely near its head, rather than treating every
-    // follow-tail scroll as a request for history. A zero-range viewport cannot produce real
-    // reader scrolling, so it remains bounded until the explicit control starts paging.
+    // follow-tail scroll as a request for history.
     const maxScrollTop = Math.max(0, scroll.scrollHeight - scroll.clientHeight);
-    // A zero-range scroll event can be a browser layout clamp, but cannot be produced by reader
-    // navigation. Keep a bounded opening inert until the reader has started from scrollable
-    // geometry (or used the explicit control).
-    if (!state.readerStarted && maxScrollTop <= 1) {
+    // A zero-range scroll event can be a layout clamp. Explicit upward input at the head is
+    // reader navigation even when the loaded turn fits on one screen (#3156), but a hidden or
+    // unmeasured viewport must stay inert rather than start filling history in the background.
+    const hasUsableGeometry = scroll.clientHeight > 0 && scroll.scrollHeight > 0;
+    if (!state.readerStarted && maxScrollTop <= 1 && (source !== "input" || !hasUsableGeometry)) {
       clearEarlierActivityIntent();
       return;
     }

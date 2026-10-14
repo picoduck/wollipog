@@ -911,7 +911,7 @@ function managedBackgroundWorkState(
   jobs: readonly DurableBackgroundJob[],
 ): "running" | "continuation_pending" | undefined {
   if (jobs.some((job) => job.continuationRequired && !job.assistantResultPersistedAt &&
-      !job.continuationMissingResultAt)) {
+      !job.continuationMissingResultAt && !job.continuationRetryExhaustedAt)) {
     return "continuation_pending";
   }
   return jobs.some((job) => !job.terminalStatus) ? "running" : undefined;
@@ -965,7 +965,8 @@ function carryBackgroundWorkAcrossRestart(
     // A job that finished inside a provider turn reached the conversation there, and one Wollipog
     // ended has no result: neither is owed a continuation. A result already recorded missing is
     // settled too, and is never reported again by a later restart.
-    if (!job.continuationRequired || job.continuationMissingResultAt !== undefined) return job;
+    if (!job.continuationRequired || job.continuationMissingResultAt !== undefined ||
+        job.continuationRetryExhaustedAt !== undefined) return job;
     if (job.continuationSubmittedAt !== undefined) return { ...job, continuationMissingResultAt: now };
     if (!deliver) return { ...job, continuationMissingResultAt: now, restartedAt: now };
     return {
@@ -7085,7 +7086,7 @@ export class SessionManager {
     if (liveDetachedWork) return true;
     const continuationPending = meta.backgroundWorkState === "continuation_pending" ||
       !!meta.backgroundJobs?.some((job) => job.continuationRequired &&
-        !job.assistantResultPersistedAt && !job.continuationMissingResultAt);
+        !job.assistantResultPersistedAt && !job.continuationMissingResultAt && !job.continuationRetryExhaustedAt);
     return continuationPending && automaticClaudeRecoveryAllowed(meta) && !this.backgroundRecoveryHeld(meta);
   }
 
@@ -9353,7 +9354,10 @@ export class SessionManager {
     }
     const entry = this.active.get(request.sessionId);
     if (!entry) return this.makeSteeringResult(request, "rejected", "no_active_provider_turn");
-    const activeEligibility = this.steeringEligibility(entry);
+    const promoted = request.promotePromptId
+      ? entry.queue.find((prompt) => prompt.id === request.promotePromptId)
+      : undefined;
+    const activeEligibility = this.steeringEligibility(entry, promoted);
     if (!activeEligibility.eligible) {
       return hasDirect && activeEligibility.reason === "no_active_provider_turn"
         ? this.handleDefiniteSteeringFailure(operation, activeEligibility.reason, activeEligibility.message)
@@ -9396,6 +9400,11 @@ export class SessionManager {
     return null;
   }
 
+  private isSteerableAsyncAnswer(prompt: QueuedPrompt | undefined): boolean {
+    return Boolean(prompt?.recoveredQuestion?.pendingQuestion.async &&
+      prompt.durable?.beginSteering && prompt.durable.steeringRejected);
+  }
+
   /** Authoritative runner-known steering admission gates. Protocol negotiation is owned by the
    * control plane, so callers must additionally require the steering protocol before presenting
    * this projection as actionable. */
@@ -9403,7 +9412,9 @@ export class SessionManager {
     if (entry.historyIntegrityFailure) {
       return { eligible: false, reason: "history_integrity_failure", message: entry.historyIntegrityFailure };
     }
-    if (entry.currentDurable || entry.currentSessionCommand) {
+    // An answer continues work requested by the automation without taking ownership of its
+    // command receipt. Ordinary steering still cannot alter an automation-owned turn.
+    if ((entry.currentDurable && !this.isSteerableAsyncAnswer(prompt)) || entry.currentSessionCommand) {
       return {
         eligible: false,
         reason: "policy_blocked",
@@ -9462,8 +9473,7 @@ export class SessionManager {
       };
     }
     if (!prompt) return { eligible: true };
-    if ((prompt.durable && (!prompt.recoveredQuestion?.pendingQuestion.async ||
-        !prompt.durable.beginSteering || !prompt.durable.steeringRejected)) ||
+    if ((prompt.durable && !this.isSteerableAsyncAnswer(prompt)) ||
         prompt.sessionCommand || (prompt.syntheticRecovery || prompt.providerRecovery)) {
       return {
         eligible: false,
@@ -9526,7 +9536,9 @@ export class SessionManager {
         "Resolve the pending agent input before steering the active turn.",
       );
     }
-    if (entry.currentDurable) return this.handleDefiniteSteeringFailure(operation, "policy_blocked", "automation-owned turns cannot be steered");
+    if (entry.currentDurable && !this.isSteerableAsyncAnswer(operation.source)) {
+      return this.handleDefiniteSteeringFailure(operation, "policy_blocked", "automation-owned turns cannot be steered");
+    }
     if (entry.cancelRequested || entry.interruptRequested || this.queueHeld(entry)) {
       return this.handleDefiniteSteeringFailure(operation, "policy_blocked");
     }
@@ -9571,7 +9583,9 @@ export class SessionManager {
         "Resolve the pending agent input before steering the active turn.",
       );
     }
-    if (entry.currentDurable) return this.handleDefiniteSteeringFailure(operation, "policy_blocked", "automation-owned turns cannot be steered");
+    if (entry.currentDurable && !this.isSteerableAsyncAnswer(operation.source)) {
+      return this.handleDefiniteSteeringFailure(operation, "policy_blocked", "automation-owned turns cannot be steered");
+    }
     if (entry.cancelRequested || entry.interruptRequested || this.queueHeld(entry)) {
       return this.handleDefiniteSteeringFailure(operation, "policy_blocked");
     }
@@ -13098,14 +13112,17 @@ export class SessionManager {
             this.flushTextDeltas(sessionId);
           });
         } catch (error) {
-          if (!isProviderCapacityFailure(errText(error))) throw error;
+          if (!isProviderCapacityFailure(errText(error), entry.client.lastTurnFailureCategory?.())) throw error;
           entry.providerCapacityFailure = true;
           caughtCapacityError = true;
           this.emitEvent(sessionId, { kind: "stderr", text: "The provider reported that model capacity is temporarily unavailable." });
           stop = "refusal";
         }
         const terminalError = entry.client.lastTurnError?.();
-        if (!caughtCapacityError && terminalError) entry.providerCapacityFailure = isProviderCapacityFailure(terminalError);
+        const failureCategory = entry.client.lastTurnFailureCategory?.();
+        if (!caughtCapacityError && (terminalError || failureCategory != null)) {
+          entry.providerCapacityFailure = isProviderCapacityFailure(terminalError ?? "", failureCategory);
+        }
         if (retryOriginalInput && entry.client.lastPromptUndelivered?.() !== true) inputMayHaveBeenDelivered = true;
         // Capacity backoff still owns unfinished runner work, even though the failed call settled.
         if (stop === "refusal" && entry.providerCapacityFailure) entry.providerPromptSubmitted = true;
@@ -13140,7 +13157,8 @@ export class SessionManager {
         );
         const delayMs = 1000 * 2 ** attempt;
         this.emitEvent(sessionId, { kind: "stderr", text: `Model capacity is temporarily unavailable. Retrying in ${delayMs / 1000} seconds (attempt ${attempt + 1}/3).` });
-        this.log(JSON.stringify({ event: "provider_capacity_retry", sessionId, entryPoint: "prompt", attempt: attempt + 1, delayMs }));
+        this.log(JSON.stringify({ event: "provider_capacity_retry", sessionId, entryPoint: "prompt", attempt: attempt + 1, delayMs,
+          classification: failureCategory ?? "text_fallback" }));
         const deadline = Date.now() + delayMs;
         while (canRetry() && Date.now() < deadline) {
           await new Promise((resolve) => setTimeout(resolve, Math.min(100, deadline - Date.now())));
@@ -13169,9 +13187,9 @@ export class SessionManager {
       this.captureAgentSessionId(sessionId, entry.client); // codex threadId becomes known after turn 1
       if (backgroundJobIds?.length && stop === "refusal" && !entry.backgroundPromptAccepted) {
         if (capacityRetriesExhausted) {
-          // Keep the terminal result for inspection, with an explicit missing-result audit fact.
+          // Keep the terminal result for inspection with separate pre-acceptance exhaustion evidence.
           // Exhaustion must not strand a pending submission or create another automatic retry burst.
-          this.markBackgroundContinuationMissingResult(sessionId, backgroundJobIds, true);
+          this.markBackgroundContinuationRetryExhausted(sessionId, backgroundJobIds);
         } else {
           this.resetBackgroundContinuationSubmission(sessionId, backgroundJobIds);
           this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
@@ -15586,9 +15604,9 @@ export class SessionManager {
     this.emitStatus(sessionId, status);
   }
 
-  /** Deliver a structured answer as a later user turn when the original callback was lost or
-   * the question was async. The durable command journal owns deduplication; runPrompt records
-   * the correlated resolution before invoking the continuation turn. */
+  /** Deliver an async answer by steering the active turn when eligible, or as a later user turn
+   * when steering is unavailable or the original callback was lost. The durable command journal
+   * owns deduplication; runPrompt records the correlated resolution before invoking the continuation turn. */
   answerRecoveredQuestion(
     sessionId: string,
     requestId: string,
@@ -17419,7 +17437,7 @@ export class SessionManager {
   private queuedBackgroundJobIds(meta: SessionMeta | null): string[] {
     const queued = (meta?.backgroundJobs ?? [])
       .filter((job) => job.continuationQueuedAt && !job.continuationSubmittedAt &&
-        !job.assistantResultPersistedAt)
+        !job.assistantResultPersistedAt && !job.continuationRetryExhaustedAt)
       .sort((left, right) => left.continuationQueuedAt! - right.continuationQueuedAt!);
     const continuationId = queued[0]?.continuationId;
     if (!continuationId) return [];
@@ -17556,7 +17574,7 @@ export class SessionManager {
     const backgroundJobs = current.backgroundJobs.map((job) => {
       if (!selected.has(job.id) || job.continuationAcceptedAt || job.assistantResultPersistedAt) return job;
       changed = true;
-      return { ...job, continuationAcceptedAt: acceptedAt };
+      return { ...job, continuationAcceptedAt: acceptedAt, continuationRetryExhaustedAt: undefined };
     });
     if (!changed) return;
     const updated = this.store.patchMeta(sessionId, { backgroundJobs, backgroundWorkState: "continuation_pending" });
@@ -17581,14 +17599,34 @@ export class SessionManager {
   /** Provider acceptance is the at-most-once fence. Once that exact turn has ended without a
    * complete durable result, retain a terminal audit fact instead of replaying or claiming the
    * continuation is still in flight. */
-  private markBackgroundContinuationMissingResult(sessionId: string, jobIds: string[], exhaustedBeforeAcceptance = false): void {
+  private markBackgroundContinuationRetryExhausted(sessionId: string, jobIds: string[]): void {
+    const current = this.store.readMeta(sessionId);
+    if (!current?.backgroundJobs) return;
+    const selected = new Set(jobIds);
+    const exhaustedAt = Date.now();
+    let changed = false;
+    const backgroundJobs = current.backgroundJobs.map((job) => {
+      if (!selected.has(job.id) || job.continuationAcceptedAt || job.assistantResultPersistedAt ||
+          job.continuationRetryExhaustedAt) return job;
+      changed = true;
+      return { ...job, continuationRetryExhaustedAt: exhaustedAt };
+    });
+    if (!changed) return;
+    const updated = this.store.patchMeta(sessionId, { backgroundJobs, backgroundWorkState: managedBackgroundWorkState(backgroundJobs) });
+    if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+    this.log(JSON.stringify({ event: "background_capacity_retry_exhausted", sessionId, entryPoint: "background_continuation",
+      jobCount: selected.size, attempts: 3 }));
+    if (!updated?.backgroundWorkState) this.resumeDeferredHandoff(sessionId);
+  }
+
+  private markBackgroundContinuationMissingResult(sessionId: string, jobIds: string[]): void {
     const current = this.store.readMeta(sessionId);
     if (!current?.backgroundJobs) return;
     const selected = new Set(jobIds);
     const missingResultAt = Date.now();
     let changed = false;
     const backgroundJobs = current.backgroundJobs.map((job) => {
-      if (!selected.has(job.id) || (!job.continuationAcceptedAt && !exhaustedBeforeAcceptance) || job.assistantResultPersistedAt ||
+      if (!selected.has(job.id) || !job.continuationAcceptedAt || job.assistantResultPersistedAt ||
           job.continuationMissingResultAt) return job;
       changed = true;
       return { ...job, continuationMissingResultAt: missingResultAt };
@@ -18010,7 +18048,7 @@ export class SessionManager {
     const entry = this.active.get(sessionId);
     if (entry?.historyIntegrityFailure) return;
     if (entry?.running && payload.kind === "error") {
-      entry.providerCapacityFailure = isProviderCapacityFailure(payload.message);
+      entry.providerCapacityFailure = isProviderCapacityFailure(payload.message, entry.client.lastTurnFailureCategory?.());
     }
     if (entry?.providerInitiatedTurnActive &&
         (payload.kind === "permission_request" || payload.kind === "question_request" && !payload.async)) {

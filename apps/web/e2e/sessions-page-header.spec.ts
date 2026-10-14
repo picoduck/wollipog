@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { dialogMotionSettled } from "./dialog-motion.js";
 
 /**
  * The Sessions page header (#2159): the List / Board switch, the Snoozed toggle, ⋯ and New Session
@@ -146,6 +147,7 @@ test.describe("with a coarse pointer", () => {
     await header(page).getByRole("button", { name: "More Actions" }).tap();
     const items = page.getByRole("menu", { name: "More Actions" }).locator('[role^="menuitem"]');
     await expect(items).toHaveCount(2);
+    await dialogMotionSettled(page);
     for (const box of await items.evaluateAll((elements) => elements.map((element) => element.getBoundingClientRect().height))) {
       expect(box).toBeGreaterThanOrEqual(44);
     }

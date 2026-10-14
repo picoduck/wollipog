@@ -244,6 +244,8 @@ test("PROTOCOL_VERSION is 222", () => {
   assert.equal(runnerSupportsProtocol(222, "boundedSessionEventReads"), true);
   assert.equal(runnerSupportsProtocol(219, "campaignWorkItemAtCreation"), false);
   assert.equal(runnerSupportsProtocol(220, "campaignWorkItemAtCreation"), true);
+  assert.equal(runnerSupportsProtocol(220, "backgroundRetryExhaustion"), false);
+  assert.equal(runnerSupportsProtocol(221, "backgroundRetryExhaustion"), true);
   assert.equal(runnerSupportsProtocol(217, "campaignBudgetAdmission"), false);
   assert.equal(runnerSupportsProtocol(218, "campaignBudgetAdmission"), true);
   assert.equal(runnerSupportsProtocol(215, "claudeLiveUsage"), false);

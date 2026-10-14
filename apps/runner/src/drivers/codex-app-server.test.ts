@@ -2323,6 +2323,32 @@ test("completed async agentMessage retains its text and exposes structured quest
   });
 });
 
+for (const length of [2001, 2264, 4750, 5348, 64 * 1024]) {
+  test(`an async question with ${length} characters retains its full approval context and choices`, () => {
+    const h = makeHarness();
+    const prefix = "Approve the reviewed change?\n\nCommit: `" + "a".repeat(40) + "`\n\n";
+    const title = prefix + "Context\n".repeat(Math.ceil(length / 8)).slice(0, length - prefix.length);
+    const options = ["Approve After CI Passes", "Wait"];
+    h.onItem({ type: "agentMessage", id: `long-${length}`, text: title, delivery: "async",
+      questions: [{ title, options }] }, true);
+    assert.deepEqual(h.events.map(event => event.kind), ["agent_message", "question_request"]);
+    const question = h.events.find(event => event.kind === "question_request");
+    assert.equal(question?.kind, "question_request");
+    if (question?.kind !== "question_request") assert.fail("expected the long question to remain answerable");
+    assert.equal(question.questions[0]!.question, title, "approval context must never be truncated");
+    assert.deepEqual(question.questions[0]!.options, options.map(label => ({ label })));
+    assert.equal(question.questions[0]!.allowOther, true);
+    assert.equal(question.requestId, `codex-async:long-${length}`);
+  });
+}
+
+test("an async question exceeding the supported context bound remains a compatibility failure", () => {
+  const h = makeHarness();
+  h.onItem({ type: "agentMessage", id: "oversized-question", text: "Context is too large.", delivery: "async",
+    questions: [{ title: "a".repeat(64 * 1024 + 1), options: ["Approve", "Wait"] }] }, true);
+  assert.deepEqual(h.events.map(event => event.kind), ["agent_message", "error"]);
+});
+
 test("a later Codex turn may reuse an async message item id", async () => {
   const h = makeHarness();
   const message = { type: "agentMessage", id: "ask", text: "First turn", delivery: "async",
@@ -4918,3 +4944,112 @@ for (const resumeId of [undefined, "thread-held"] as const) {
     }
   });
 }
+
+test("structured Codex turn categories reset before submission and ignore completed terminals", async () => {
+  const h = makeHarness();
+  const driver = h.driver as any;
+  driver.threadId = "thread-ready";
+  let turn = 0;
+  driver.peer = {
+    request: async (method: string) => {
+      if (method !== "turn/start") return {};
+      if (++turn === 1) throw { code: -32000, message: "changed provider wording", data: { codexErrorInfo: "serverOverloaded" } };
+      return { turn: { id: "turn-current" } };
+    },
+    requestWithDeadline: async () => ({}),
+  };
+  assert.equal(await h.driver.prompt("first"), "refusal");
+  assert.equal(h.driver.lastTurnFailureCategory(), "capacity");
+  const next = h.driver.prompt("second");
+  assert.equal(h.driver.lastTurnFailureCategory(), null, "no stale capacity while the next submission is pending");
+  await waitForCondition(() => driver.turnId === "turn-current");
+  driver.completeRootTurn({ turn: { id: "old-turn", status: "failed", error: { codexErrorInfo: "serverOverloaded" } } }, driver.promptGeneration, "old-turn");
+  assert.equal(h.driver.lastTurnFailureCategory(), null);
+  driver.completeRootTurn({ turn: { id: "turn-current", status: "failed", error: { message: "overloaded_error", codexErrorInfo: "usageLimitExceeded" } } }, driver.promptGeneration, "turn-current");
+  assert.equal(await next, "refusal");
+  assert.equal(h.driver.lastTurnFailureCategory(), "quota");
+  driver.completeRootTurn({ turn: { id: "turn-current", status: "failed", error: { codexErrorInfo: "serverOverloaded" } } }, driver.promptGeneration, "turn-current");
+  assert.equal(h.driver.lastTurnFailureCategory(), "quota", "a duplicate terminal cannot replace settled evidence");
+});
+
+test("structured Codex authentication rejection never publishes provider secret text", async () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "thread-ready";
+  (h.driver as any).peer = {
+    request: async (method: string) => {
+      if (method === "turn/start") throw { code: -32000, message: "synthetic-secret", data: { codexErrorInfo: "unauthorized" } };
+      return {};
+    },
+    requestWithDeadline: async () => ({}),
+  };
+  assert.equal(await h.driver.prompt("task"), "refusal");
+  assert.equal(h.driver.lastTurnFailureCategory(), "authentication");
+  assert.equal(h.authenticationFailures(), 1);
+  assert.doesNotMatch(JSON.stringify([h.events, h.stderr, h.driver.lastTurnError()]), /synthetic-secret/);
+});
+
+test("Codex structured capacity evidence outranks conflicting authentication prose without leaking it", async () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "thread-ready";
+  (h.driver as any).peer = {
+    request: async (method: string) => {
+      if (method === "turn/start") throw { code: -32000, message: "invalid API key supplied: synthetic-secret", data: { codexErrorInfo: "serverOverloaded" } };
+      return {};
+    },
+    requestWithDeadline: async () => ({}),
+  };
+  assert.equal(await h.driver.prompt("task"), "refusal");
+  assert.equal(h.driver.lastTurnFailureCategory(), "capacity");
+  assert.equal(h.authenticationFailures(), 0);
+  assert.doesNotMatch(JSON.stringify([h.events, h.stderr, h.driver.lastTurnError()]), /synthetic-secret/);
+});
+
+
+test("uncategorized Codex authentication rejection retains safe sign-in recovery", async () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "thread-ready";
+  (h.driver as any).peer = {
+    request: async (method: string) => {
+      if (method === "turn/start") throw { code: -32000, message: "401 Unauthorized: invalid api key synthetic-secret" };
+      return {};
+    },
+    requestWithDeadline: async () => ({}),
+  };
+  assert.equal(await h.driver.prompt("task"), "refusal");
+  assert.equal(h.driver.lastTurnFailureCategory(), null);
+  assert.equal(h.authenticationFailures(), 1);
+  assert.doesNotMatch(JSON.stringify([h.events, h.stderr, h.driver.lastTurnError()]), /synthetic-secret/);
+});
+
+
+test("Codex revoked OAuth recovery survives structured permission rejection", async () => {
+  const h=makeHarness();
+  (h.driver as any).threadId="thread-ready";
+  (h.driver as any).peer={
+    request: async (method: string) => {
+      if(method==="turn/start") throw { code: -32000, message: "OAuth token has been revoked. synthetic-secret",
+        data: { codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 403 } } } };
+      return {};
+    }, requestWithDeadline: async () => ({}),
+  };
+  assert.equal(await h.driver.prompt("task"),"refusal");
+  assert.equal(h.driver.lastTurnFailureCategory(),"permission");
+  assert.equal(h.authenticationFailures(),1);
+  assert.doesNotMatch(JSON.stringify([h.events,h.stderr,h.driver.lastTurnError()]),/synthetic-secret/);
+});
+
+test("Codex revoked OAuth recovery survives structured permission terminal", async () => {
+  const h=makeHarness();const driver=h.driver as any;
+  driver.threadId="thread-ready";
+  driver.peer={ request: async () => ({ turn: { id: "turn-revoked" } }), requestWithDeadline: async () => ({}) };
+  const pending=h.driver.prompt("task");
+  await waitForCondition(() => driver.turnId==="turn-revoked");
+  driver.completeRootTurn({ turn: { id: "turn-revoked", status: "failed", error: {
+    message: "OAuth token has been revoked. synthetic-secret",
+    codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 403 } },
+  } } },driver.promptGeneration,"turn-revoked");
+  assert.equal(await pending,"refusal");
+  assert.equal(h.driver.lastTurnFailureCategory(),"permission");
+  assert.equal(h.authenticationFailures(),1);
+  assert.doesNotMatch(JSON.stringify([h.events,h.stderr,h.driver.lastTurnError()]),/synthetic-secret/);
+});

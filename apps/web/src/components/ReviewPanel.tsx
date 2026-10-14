@@ -25,7 +25,7 @@ import { useApi } from "../api-context.js";
 import { formatClock } from "../format.js";
 import {
   GitDiffViewer,
-  useInitiallyCollapsedDiffPaths,
+  useDiffFileExpansion,
   StageRaceNotice,
   type DiffFileFocus,
   type DiffFileNotice,
@@ -73,7 +73,6 @@ import {
 
 /** No diff on screen means nothing is anchored; one shared empty set keeps that allocation-free. */
 const NO_ANCHORED_FINDINGS: ReadonlySet<string> = new Set<string>();
-const NO_COLLAPSED_FILES: ReadonlySet<string> = new Set<string>();
 
 /** The last segment of a path, which a stage race notice names. */
 const fileNameOf = (path: string) => path.slice(path.lastIndexOf("/") + 1);
@@ -307,12 +306,6 @@ export function ReviewPanel({
   const splitFits = usePanelAtLeast(scrollElement, SPLIT_MIN_PANEL_PX);
   const shownLayout: DiffLayout = splitFits ? layout : "unified";
   const selectLinesFits = usePanelAtLeast(scrollElement, SELECT_LINES_TOOLBAR_MIN_PANEL_PX);
-  // Collapsed files by path, so refreshes keep the person's choices. Until the first choice,
-  // another session or a newly loaded diff uses the bounded initial expansion below.
-  const [collapsed, setCollapsed] = useState<{ sessionId: string; paths: ReadonlySet<string> | null }>(
-    () => ({ sessionId: session.id, paths: null }),
-  );
-  const setCollapsedPaths = (paths: ReadonlySet<string>) => setCollapsed({ sessionId: session.id, paths });
   const [diff, setDiff] = useState<GitDiffInfo | null>(null);
   /** Completed diff reads, so a request can tell a read that landed after it from one before. */
   const [diffReads, setDiffReads] = useState(0);
@@ -982,8 +975,8 @@ export function ReviewPanel({
     [fineDiffSupported, pane, scope, scopedDiff],
   );
 
-  const initialCollapsedPaths = useInitiallyCollapsedDiffPaths(shownDiff?.files ?? [], `${session.id}:${scope}:${pane}`);
-  const collapsedPaths = (collapsed.sessionId === session.id ? collapsed.paths : null) ?? initialCollapsedPaths;
+  const expansion = useDiffFileExpansion(shownDiff?.files ?? [], `${session.id}:${scope}:${pane}`, session.id);
+  const collapsedPaths = expansion.collapsedPaths;
 
   // Which change set the findings and the unsent drafts belong to. A pane switch is a different
   // lineage even at the same line number: pane-local anchor identities exist so a finding authored
@@ -1172,9 +1165,7 @@ export function ReviewPanel({
             } : null}
             files={shownDiff && shownDiff.files.length > 0 ? {
               collapsed: shownDiff.files.every((file) => collapsedPaths.has(file.path)),
-              onCollapseAll: (collapse) => setCollapsedPaths(
-                collapse ? new Set(shownDiff.files.map((file) => file.path)) : NO_COLLAPSED_FILES,
-              ),
+              onCollapseAll: (collapse) => expansion.setAllFilesExpanded(!collapse),
             } : null}
             refusal={gitRefusal === null ? null : { reason: gitRefusal, id: gitRefusalId }}
             viewOptionsRef={viewOptionsRef}
@@ -1321,7 +1312,7 @@ export function ReviewPanel({
                     layout={shownLayout}
                     wrap={wrapChoice === "wrap"}
                     collapsedPaths={collapsedPaths}
-                    onCollapsedPathsChange={setCollapsedPaths}
+                    onFileExpandedChange={expansion.setFileExpanded}
                     fileNotice={fileNoticeShown}
                     onOpenSourceLocation={onOpenSourceLocation}
                     onAttachWorkspaceReference={onAttachWorkspaceReference}

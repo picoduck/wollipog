@@ -1,6 +1,6 @@
 import { useCallback, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import type { VirtualScrollAnchor } from "./components/MeasuredVirtualList.js";
-import { dispatchVirtualViewportIntent, VIRTUAL_ROW_RESIZE_EVENT } from "./viewport-intent.js";
+import { dispatchVirtualViewportIntent, VIRTUAL_ROW_RESIZE_EVENT, VIRTUAL_VIEWPORT_CORRECTION_EVENT } from "./viewport-intent.js";
 
 export const FOLLOW_TAIL_THRESHOLD_PX = 48;
 export const FOLLOW_TAIL_RESUME_THRESHOLD_PX = 2;
@@ -344,6 +344,17 @@ export function useFollowTail({
     layoutScrollPredictionRef.current = null;
     return false;
   }, []);
+
+  useLayoutEffect(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+    const onAnchorCorrection = () => {
+      observeViewportGeometry(element);
+      layoutScrollPredictionRef.current = element.scrollTop;
+    };
+    element.addEventListener(VIRTUAL_VIEWPORT_CORRECTION_EVENT, onAnchorCorrection);
+    return () => element.removeEventListener(VIRTUAL_VIEWPORT_CORRECTION_EVENT, onAnchorCorrection);
+  }, [observeViewportGeometry, scrollRef]);
 
   const scrollToBottom = useCallback(() => {
     const element = scrollRef.current;

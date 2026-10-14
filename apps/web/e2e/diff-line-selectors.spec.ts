@@ -1,4 +1,5 @@
 import { devices, expect, test, type Locator } from "@playwright/test";
+import { dialogMotionSettled } from "./dialog-motion.js";
 
 /**
  * A diff line's own controls (#2849): with a mouse, Add Finding's "+" in the gutter on hover, never
@@ -106,6 +107,7 @@ test.describe("on touch", () => {
     const menu = page.getByRole("menu", { name: "Line 19 Actions" });
     await expect(menu).toBeVisible();
     await expect(menu.getByRole("menuitem")).toHaveText(["Add Finding…", "Select Line"]);
+    await dialogMotionSettled(page);
     // A sheet: it spans the viewport's width at its bottom edge.
     const [box, viewport] = [await menu.boundingBox(), page.viewportSize()!];
     expect(Math.round(box!.width)).toBe(viewport.width);
