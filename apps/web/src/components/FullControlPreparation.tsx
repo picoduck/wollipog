@@ -11,13 +11,14 @@ export function FullControlModeChoice({ mode, onChange, disabled = false, prefer
   mode: CampaignControlMode; onChange: (mode: CampaignControlMode) => void;
   disabled?: boolean; preferenceSupported?: boolean;
 }) {
-  return <SegmentedControl<CampaignControlMode> label="Orchestrator Control" value={mode} onChange={onChange}
+  return <span className="setting-row-control"><SegmentedControl<CampaignControlMode> className="sm"
+    label="Orchestrator Control" value={mode} onChange={onChange}
     options={[
       { value: "custom", label: "Custom", description: "Choose individual workflow owners. Defaults apply only to new campaigns.", disabled },
       { value: "full_control", label: "Full Control", description: preferenceSupported
         ? "Prefer Full Control for new campaigns; each needs authenticated human authorization."
         : "Preview Full Control; this version cannot save the preference.", disabled },
-    ]} />;
+    ]} /></span>;
 }
 
 /** Shared preference/preflight display. Launch uses only the exact Human endpoint, which refuses
