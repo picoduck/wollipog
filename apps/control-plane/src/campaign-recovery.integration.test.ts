@@ -883,6 +883,53 @@ test("Custom completion retains its existing report-based compatibility with exp
   } finally { h.db.close(); }
 });
 
+
+for (const outcome of ["incomplete", "delivered"] as const) {
+  test(`stale Full Control authority preserves explicit ${outcome} completion truth without repair`, () => {
+    const h = mergedWorkVerificationFixture(outcome);
+    try {
+      const policy = h.db.parentControlPolicy("root")!;
+      assert.ok(h.db.updateSessionParentControlPolicy("root", { ...policy.decisions }, h.now + 1, policy.revision));
+      assert.equal(h.db.getSession("root")!.orchestratorPolicy!.control!.mode, "full_control");
+      assert.equal(h.db.campaignContinuationAdmission("root").state, "authority_unavailable");
+      assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, outcome === "incomplete" ? "recovery_held" : "complete");
+      assert.equal(h.db.campaignProjection("root")!.status, outcome === "incomplete" ? "blocked" : "verified_complete");
+      const checks = { state: "failing" as const, failing: 1, passing: 0, pending: 0 };
+      h.db.campaignForgeObservations.record("root", "r", [{ ref: h.ref,
+        observation: { ...h.observation, state: "open", mergeCommitSha: null, checks, requiredChecks: checks } }], h.now);
+      h.sent.length = 0;
+      h.recovery.maintain(h.now);
+      h.svc.retryDuePrompts(h.now + 31_000);
+      assert.deepEqual(h.db.campaignRecoveryCompletion("root", h.now).recoveryIds, []);
+      assert.equal(h.db.latestCampaignContinuation("root"), null);
+      assert.equal(h.sent.some(message => (message as { type: string }).type === "durable_session_command"), false);
+    } finally { h.db.close(); }
+  });
+}
+
+test("stale-boundary report-only legacy and intentional Custom completion retain compatibility", () => {
+  const legacy = completedPrFixture();
+  const explicit = mergedWorkVerificationFixture("incomplete");
+  try {
+    const passing = { state: "passing" as const, failing: 0, passing: 1, pending: 0 };
+    legacy.db.campaignForgeObservations.record("root", "r", [{ ref: legacy.ref,
+      observation: { ...legacy.observation, state: "merged", mergeCommitSha: "b".repeat(40),
+        checks: passing, requiredChecks: passing } }], legacy.now);
+    const policy = legacy.db.parentControlPolicy("root")!;
+    assert.ok(legacy.db.updateSessionParentControlPolicy("root", { ...policy.decisions }, legacy.now + 1, policy.revision));
+    assert.equal(legacy.db.campaignContinuationAdmission("root").state, "authority_unavailable");
+    assert.equal(legacy.db.campaignRecoveryCompletion("root", legacy.now).state, "complete");
+    assert.equal(legacy.db.campaignProjection("root")!.status, "verified_complete");
+    const previous = explicit.db.parentControlPolicy("root")!;
+    const updated = explicit.db.updateSessionParentControlPolicy("root", { ...previous.decisions }, explicit.now + 1, previous.revision);
+    assert.ok(updated);
+    assert.ok(explicit.svc.setCampaignControl("root", { mode: "custom" }, updated.revision,
+      { ...explicit.identity, kind: "human", actorId: explicit.identity.userId }).ok);
+    assert.equal(explicit.db.campaignRecoveryCompletion("root", explicit.now).state, "complete");
+    assert.equal(explicit.db.campaignProjection("root")!.status, "verified_complete");
+  } finally { legacy.db.close(); explicit.db.close(); }
+});
+
 test("an original unknown outcome cannot reopen a child-verified campaign or spend a recovery turn", () => {
   const h = completedPrFixture();
   try {

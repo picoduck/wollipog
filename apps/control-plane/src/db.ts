@@ -5320,10 +5320,11 @@ export class ControlPlaneDb {
       return { state: "children_unfinished", recoveryIds: [] };
     }
     const scope = policy.issueScope;
-    if (policy.control?.mode !== "full_control" || !scope ||
-        !campaignBoundaryCurrent({ orchestratorPolicy: policy, parentControlPolicy: this.parentControlPolicy(campaignId) ?? undefined })) {
+    if (policy.control?.mode !== "full_control" || !scope) {
       return { state: "complete", recoveryIds: [] };
     }
+    const boundaryCurrent = campaignBoundaryCurrent({ orchestratorPolicy: policy,
+      parentControlPolicy: this.parentControlPolicy(campaignId) ?? undefined });
     const records = this.campaignRecovery.activeRecords(campaignId);
     const recoveryIds = new Set<string>();
     let unfinished = false, cursor: string | undefined;
@@ -5343,6 +5344,9 @@ export class ControlPlaneDb {
           WHERE v.campaign_session_id=? AND v.work_item_id=? ORDER BY v.rowid DESC LIMIT 1`)
           .get(campaignId, item.id) as { outcome: "delivered" | "incomplete" } | undefined;
         if (verification?.outcome === "incomplete") unfinished = true;
+        // A stale grant cannot establish delivery or admit a forge/review repair.
+        // Only completion truth is retained; the existing admission still fences all effects.
+        if (!boundaryCurrent) continue;
         const refs = item.stage?.pullRequests.filter(ref => ref.repository.toLowerCase() === scope.repository.toLowerCase()) ?? [];
         if (refs.length === 0) { unfinished = true; continue; }
         for (const { ref, fact } of this.campaignForgeObservations.facts(campaignId, refs, now)) {

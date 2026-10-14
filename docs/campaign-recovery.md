@@ -71,6 +71,10 @@ current-attempt `delivered` verification supersedes it. Equal verification times
 random identifier order a delivery proof. Existing report-based completion without an explicit
 incomplete attestation, and ordinary Custom behavior, retain their compatibility. Actual merged
 facts and verified cleanup restore completion only when no such incomplete obligation remains.
+A stale Full Control authority boundary also cannot turn an explicit incomplete obligation into
+delivery: it remains visibly blocked while continuation stays authority-unavailable. No forge or
+review repair becomes eligible under that stale boundary. This does not change intentional Custom
+completion or legacy report-based completion without an explicit incomplete attestation.
 A fourth already-reserved
 repair remains deliverable; another signal cannot reset its four-attempt ceiling.
 
