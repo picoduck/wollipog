@@ -1330,7 +1330,7 @@ test("execution history shows content-free signed delivery provenance", async ()
 });
 
 function pageError(fixture: Fixture): string | null {
-  return fixture.container.querySelector('.automation-error[role="alert"]')?.textContent ?? null;
+  return fixture.container.querySelector('.page > .automation-error[role="alert"]')?.textContent ?? null;
 }
 
 async function invokePolls(intervals: Set<() => void>): Promise<void> {
@@ -1582,6 +1582,249 @@ for (const mutationFails of [false, true]) {
         await act(settle);
         assert.equal(pageError(fixture), "New client polling failed");
         assert.equal(oldReads, 1, "the obsolete action cannot read with its old client");
+      } finally { release?.(); await unmountFixture(fixture); }
+    });
+  });
+}
+
+
+for (const failedEndpoint of ["list", "workflow", "detail", "trigger"] as const) {
+  test(`accepted Pause recovers its post-mutation ${failedEndpoint} read error`, async () => {
+    const items = [schedule("automation-a", "Alpha")];
+    const intervals = new Set<() => void>();
+    let fail = false;
+    let writes = 0;
+    const reads = { list: 0, workflow: 0, detail: 0, trigger: 0 };
+    const read = (endpoint: keyof typeof reads) => {
+      reads[endpoint]++;
+      if (fail && endpoint === failedEndpoint) throw new Error("Accepted Pause refresh failed");
+    };
+    await withScopedClockOverrides(domWindow, {
+      setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => {},
+    }, async () => {
+      const fixture = await mountFixture(items, {}, {}, [], {}, runners, [], {
+        automations: async () => { read("list"); return { automations: structuredClone(items) }; },
+        workflowDefinitions: async () => { read("workflow"); return []; },
+        automation: async () => { read("detail"); return { automation: items[0]!, executions: [], events: [] }; },
+        automationTriggers: async () => { read("trigger"); return { triggers: [] }; },
+        updateAutomation: async (_id, spec) => {
+          writes++;
+          items[0] = { ...items[0]!, ...spec };
+          fail = true;
+          return items[0]!;
+        },
+        outboundEventSubscriptions: async () => { throw new Error("Unrelated subscription warning"); },
+      });
+      const subscriptionError = () => fixture.container.querySelector('.outbound-events .automation-error')?.textContent;
+      try {
+        await expandCard(fixture, "Alpha");
+        await act(async () => { button(fixture.container, "Pause").click(); });
+        await act(settle);
+        assert.equal(pageError(fixture), "Accepted Pause refresh failed");
+        assert.equal(items[0]!.enabled, false);
+        fail = false;
+        items[0] = { ...items[0]!, name: "Recovered" };
+        const before = { ...reads };
+        await invokePolls(intervals);
+        for (const endpoint of Object.keys(reads) as Array<keyof typeof reads>) {
+          assert.equal(reads[endpoint], before[endpoint] + 1, `healthy ${endpoint} read completed`);
+        }
+        assert.ok(maybeCardToggle(fixture.container, "Recovered"));
+        assert.ok(button(fixture.container, "Enable"));
+        assert.equal(pageError(fixture), null);
+        assert.equal(subscriptionError(), "Unrelated subscription warning", "automation recovery leaves subscription errors alone");
+        await invokePolls(intervals);
+        assert.equal(pageError(fixture), null);
+        assert.equal(writes, 1, "recovery must never retry the mutation");
+      } finally { await unmountFixture(fixture); }
+    });
+  });
+}
+
+for (const outcome of ["accepted", "rejected", "unknown acceptance"] as const) {
+  test(`healthy polls preserve the ${outcome} Pause outcome without another write`, async () => {
+    const items = [schedule("automation-a", "Alpha")];
+    const intervals = new Set<() => void>();
+    let writes = 0;
+    await withScopedClockOverrides(domWindow, {
+      setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => {},
+    }, async () => {
+      const fixture = await mountFixture(items, {}, {}, [], {}, runners, [], {
+        updateAutomation: async (_id, spec) => {
+          writes++;
+          // A transport failure after the server changes state still does not prove acceptance
+          // to the caller. Authoritative polling must not clear that failed write's error.
+          if (outcome !== "rejected") items[0] = { ...items[0]!, ...spec };
+          if (outcome !== "accepted") throw new Error(`Pause ${outcome}`);
+          return items[0]!;
+        },
+      });
+      try {
+        await expandCard(fixture, "Alpha");
+        await act(async () => { button(fixture.container, "Pause").click(); });
+        await act(settle);
+        await invokePolls(intervals);
+        assert.equal(pageError(fixture), outcome === "accepted" ? null : `Pause ${outcome}`);
+        assert.equal(items[0]!.enabled, outcome === "rejected");
+        assert.ok(button(fixture.container, outcome === "rejected" ? "Pause" : "Enable"));
+        assert.equal(writes, 1);
+      } finally { await unmountFixture(fixture); }
+    });
+  });
+}
+
+test("post-mutation read recovery needs a complete visible refresh", async () => {
+  const items = [schedule("automation-a", "Alpha")];
+  const intervals = new Set<() => void>();
+  let fail = false;
+  let hold = false;
+  let writes = 0;
+  let listReads = 0;
+  let release: (() => void) | undefined;
+  await withScopedClockOverrides(domWindow, {
+    setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => {},
+  }, async () => {
+    const fixture = await mountFixture(items, {}, {}, [], {}, runners, [], {
+      automations: async () => { listReads++; return { automations: structuredClone(items) }; },
+      workflowDefinitions: async () => { if (fail) throw new Error("Post-action workflow unavailable"); return []; },
+      automationTriggers: async () => {
+        if (hold) await new Promise<void>((resolve) => { release = resolve; });
+        return { triggers: [] };
+      },
+      updateAutomation: async (_id, spec) => { writes++; items[0] = { ...items[0]!, ...spec }; fail = true; return items[0]!; },
+    });
+    const visibility = Object.getOwnPropertyDescriptor(domWindow.document, "visibilityState");
+    try {
+      await expandCard(fixture, "Alpha");
+      await act(async () => { button(fixture.container, "Pause").click(); });
+      await act(settle);
+      assert.equal(pageError(fixture), "Post-action workflow unavailable");
+      await invokePolls(intervals);
+      assert.equal(pageError(fixture), "Post-action workflow unavailable", "another failed refresh is not recovery");
+      fail = false;
+      const beforeHidden = listReads;
+      Object.defineProperty(domWindow.document, "visibilityState", { configurable: true, value: "hidden" });
+      await invokePolls(intervals);
+      assert.equal(listReads, beforeHidden);
+      assert.equal(pageError(fixture), "Post-action workflow unavailable");
+      Object.defineProperty(domWindow.document, "visibilityState", { configurable: true, value: "visible" });
+      hold = true;
+      items[0] = { ...items[0]!, name: "Fresh List" };
+      await invokePolls(intervals);
+      assert.ok(maybeCardToggle(fixture.container, "Fresh List"));
+      assert.equal(pageError(fixture), "Post-action workflow unavailable", "partial fan-out completion cannot clear it");
+      const beforeBusy = listReads;
+      await invokePolls(intervals);
+      assert.equal(listReads, beforeBusy, "busy polls preserve serialization");
+      hold = false;
+      await act(async () => { release?.(); });
+      await act(settle);
+      assert.equal(pageError(fixture), null);
+      assert.equal(writes, 1);
+    } finally {
+      release?.();
+      if (visibility) Object.defineProperty(domWindow.document, "visibilityState", visibility);
+      else Reflect.deleteProperty(domWindow.document, "visibilityState");
+      await unmountFixture(fixture);
+    }
+  });
+});
+
+for (const recoveryFails of [false, true]) {
+  test(`a ${recoveryFails ? "failed" : "healthy"} read recovery cannot overwrite a newer failed action`, async () => {
+    const items = [schedule("automation-a", "Alpha")];
+    const intervals = new Set<() => void>();
+    let failAfterWrite = false;
+    let holdRecovery = false;
+    let writes = 0;
+    let release: (() => void) | undefined;
+    await withScopedClockOverrides(domWindow, {
+      setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => {},
+    }, async () => {
+      const fixture = await mountFixture(items, {}, {}, [], {}, runners, [], {
+        workflowDefinitions: async () => { if (failAfterWrite) throw new Error("Old post-action read failed"); return []; },
+        automationTriggers: async () => {
+          if (holdRecovery) {
+            await new Promise<void>((resolve) => { release = resolve; });
+            if (recoveryFails) throw new Error("Old recovery failed");
+          }
+          return { triggers: [] };
+        },
+        updateAutomation: async (_id, spec) => {
+          writes++;
+          if (writes > 1) throw new Error("New Enable write failed");
+          items[0] = { ...items[0]!, ...spec }; failAfterWrite = true; return items[0]!;
+        },
+      });
+      try {
+        await expandCard(fixture, "Alpha");
+        await act(async () => { button(fixture.container, "Pause").click(); });
+        await act(settle);
+        assert.equal(pageError(fixture), "Old post-action read failed");
+        failAfterWrite = false; holdRecovery = true;
+        await invokePolls(intervals);
+        await act(async () => { button(fixture.container, "Enable").click(); });
+        await act(settle);
+        assert.equal(pageError(fixture), "New Enable write failed");
+        await act(async () => { release?.(); });
+        await act(settle);
+        assert.equal(pageError(fixture), "New Enable write failed");
+        holdRecovery = false;
+        await invokePolls(intervals);
+        assert.equal(pageError(fixture), "New Enable write failed");
+        assert.equal(writes, 2);
+      } finally { release?.(); await unmountFixture(fixture); }
+    });
+  });
+}
+
+for (const obsoleteReadFails of [false, true]) {
+  test(`API replacement revokes an accepted write's obsolete ${obsoleteReadFails ? "failed" : "healthy"} recovery`, async () => {
+    const items = [schedule("automation-a", "Alpha")];
+    const intervals = new Set<() => void>();
+    let hold = false;
+    let failAfterWrite = false;
+    let release: (() => void) | undefined;
+    let writes = 0;
+    let listReads = 0;
+    await withScopedClockOverrides(domWindow, {
+      setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => { intervals.clear(); },
+    }, async () => {
+      const fixture = await mountFixture(items, {}, {}, [], {}, runners, [], {
+        automations: async () => { listReads++; return { automations: structuredClone(items) }; },
+        workflowDefinitions: async () => {
+          if (failAfterWrite) throw new Error("Accepted-write refresh failed");
+          if (hold) {
+            await new Promise<void>((resolve) => { release = resolve; });
+            if (obsoleteReadFails) throw new Error("Obsolete accepted-write refresh failed");
+          }
+          return [];
+        },
+        updateAutomation: async (_id, spec) => { writes++; items[0] = { ...items[0]!, ...spec }; failAfterWrite = true; return items[0]!; },
+      });
+      try {
+        await expandCard(fixture, "Alpha");
+        await act(async () => { button(fixture.container, "Pause").click(); });
+        await act(settle);
+        assert.equal(pageError(fixture), "Accepted-write refresh failed");
+        failAfterWrite = false;
+        hold = true;
+        await invokePolls(intervals);
+        assert.ok(release, "the old client's recovery is in flight");
+        await fixture.replaceClient({
+          workflowDefinitions: async () => [],
+          updateAutomation: async () => { throw new Error("Replacement Enable failed"); },
+        });
+        await act(async () => { button(fixture.container, "Enable").click(); });
+        await act(settle);
+        assert.equal(pageError(fixture), "Replacement Enable failed");
+        await act(async () => { release?.(); });
+        await act(settle);
+        assert.equal(pageError(fixture), "Replacement Enable failed");
+        await invokePolls(intervals);
+        assert.equal(pageError(fixture), "Replacement Enable failed");
+        assert.equal(writes, 1);
+        assert.equal(listReads, 5, "initial, accepted-action, old recovery and two current-client reads only");
       } finally { release?.(); await unmountFixture(fixture); }
     });
   });

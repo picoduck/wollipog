@@ -320,7 +320,9 @@ const navigation: ViewNavigation = {
 
 // Opt-in fault injection for recovery tests; ordinary fixture scenarios keep their API behavior.
 const pollingFixture = params.has("polling-recovery") ? {
-  failure: null as "list" | "trigger" | null,
+  failure: null as "list" | "trigger" | "workflow" | null,
+  failRefreshAfterMutation: false,
+  mutationCalls: 0,
   mutationFailure: false,
   holdTriggers: false,
   pendingTriggers: [] as Array<() => void>,
@@ -349,14 +351,19 @@ const client = {
     return { triggers: id === "automation-nightly-sweep" ? triggerItems : [] };
   },
   ...(pollingFixture ? { updateAutomation: async (id: string, spec: AutomationSpec) => {
+    pollingFixture.mutationCalls++;
     if (pollingFixture.mutationFailure) throw new Error("Synthetic Pause failure");
     const index = items.findIndex((item) => item.automationId === id);
     items[index] = { ...items[index]!, ...spec };
+    if (pollingFixture.failRefreshAfterMutation) pollingFixture.failure = "workflow";
     return items[index]!;
   } } : {}),
   outboundEventSubscriptions: async () => outboundSubscriptions,
   outboundEventDeliveries: async () => outboundDeliveries,
-  workflowDefinitions: async () => workflowDefinitions,
+  workflowDefinitions: async () => {
+    if (pollingFixture?.failure === "workflow") throw new Error("Synthetic post-mutation refresh failure");
+    return workflowDefinitions;
+  },
 } as unknown as ApiClient;
 
 const root = document.getElementById("root");
