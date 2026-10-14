@@ -12796,6 +12796,55 @@ test("a live estimate that crosses the budget interrupts the running turn, holds
   assert.equal(db.getSession(id)!.costUsd, 0, "the interrupted turn's requests stay open until the next process accounts them");
 });
 
+test("a live estimate crossing behind a pending workflow decision still interrupts the running turn", () => {
+  const { db, hub, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  hub.setSessionQueue(id, [], false, "turn-decision");
+  db.setPendingApproval(id, { requestId: "decision-1", kind: "workflow_decision", title: "PR Merge Approval Required",
+    options: [{ optionId: "approve", name: "Approve", kind: "allow_once" }] });
+  db.updateSessionStatus(id, "input_required", Date.now());
+  hub.sentToRunner.length = 0;
+  live(20, 20);
+  assert.ok(pendingRequests(db.getSession(id)!.pendingApproval).some((request) => request.kind === "cost_budget"));
+  assert.deepEqual(hub.sentOfType("interrupt_turn").map((message) => message.turnId), ["turn-decision"],
+    "the decision does not stop the provider turn, so the budget card does");
+});
+
+test("a live estimate crossing before a reconnecting runner reports its turn interrupts once the turn is known", () => {
+  const { db, hub, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.sentToRunner.length = 0;
+  live(20, 20);
+  assert.equal(db.getSession(id)!.pendingApproval?.kind, "cost_budget");
+  assert.equal(hub.sentOfType("interrupt_turn").length, 0, "no turn coordinate yet");
+  assert.ok(svc.onSessionQueue(RUNNER_ID, id, [], true, "turn-reconnected"));
+  assert.deepEqual(hub.sentOfType("interrupt_turn").map((message) => message.turnId), ["turn-reconnected"]);
+  assert.ok(svc.onSessionQueue(RUNNER_ID, id, [], true, "turn-reconnected"));
+  assert.equal(hub.sentOfType("interrupt_turn").length, 1, "the deferred interruption is sent once");
+});
+
+test("a deferred estimate interruption is dropped when the turn ended or the card was answered", () => {
+  const { db, hub, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.sentToRunner.length = 0;
+  live(20, 20);
+  assert.ok(svc.onSessionQueue(RUNNER_ID, id, [], true));
+  assert.ok(svc.onSessionQueue(RUNNER_ID, id, [], true, "turn-next"));
+  assert.equal(hub.sentOfType("interrupt_turn").length, 0, "a queue with no active turn had nothing to stop");
+
+  const other = liveClaudeGuardrailHarness();
+  other.svc.setConfig(other.id, { costBudgetUsd: 0.05 });
+  other.db.updateSessionStatus(other.id, "running", Date.now());
+  other.live(20, 20);
+  const card = other.db.getSession(other.id)!.pendingApproval!;
+  assert.ok(other.svc.approve(other.id, card.requestId, "continue").ok);
+  other.hub.sentToRunner.length = 0;
+  assert.ok(other.svc.onSessionQueue(RUNNER_ID, other.id, [], false, "turn-admitted"));
+  assert.equal(other.hub.sentOfType("interrupt_turn").length, 0, "an answered card never stops a turn Continue admitted");
+});
+
 test("a budget crossed on settled cost is the runner's to cancel, so the control plane does not interrupt", () => {
   const { db, hub, svc, id } = liveClaudeGuardrailHarness();
   svc.setConfig(id, { costBudgetUsd: 0.05 });
