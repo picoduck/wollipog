@@ -255,6 +255,30 @@ test("current installation removal revokes source preparation while preserving i
   assert.deepEqual(h.db.campaignBudgets.view("root"), before);
   assert.deepEqual(h.messages, []);
 });
+
+for (const sessionId of ["root", "child"] as const) {
+  for (const selection of [null, "", " "] as const) {
+    test(`missing selected installation ${sessionId}/${JSON.stringify(selection)} cannot borrow another catalog or model contract`, (t) => {
+      const h = harness(); t.after(() => h.db.close());
+      const selected = h.metadata.agents[0]!;
+      h.metadata.agents.push({ ...selected, id: "other-valid-installation", capabilities: { ...selected.capabilities! } });
+      (selected.capabilities!.models[0] as unknown as Record<string, unknown>).pacedVideoReviewContract =
+        { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
+      h.db.registerRunner(h.metadata, 3, PACED_VIDEO_REVIEW_MIN_PROTOCOL);
+      h.db.raw().prepare("UPDATE sessions SET agent_id=? WHERE id=?").run(selection, sessionId);
+      const before = h.db.campaignBudgets.view("root"), messagesBefore = h.messages.slice();
+      const gate = h.db.workflowDecisionByOccurrence(h.subject.occurrenceId);
+      const result = h.service.preflightPreparedMediaSession(h.identity, h.subject);
+      assert.equal(result.ok, false); assert.equal(result.status, 409);
+      assert.deepEqual(h.db.campaignBudgets.view("root"), before);
+      assert.deepEqual(h.messages, messagesBefore);
+      assert.deepEqual(h.db.workflowDecisionByOccurrence(h.subject.occurrenceId), gate);
+      assert.equal(h.db.raw().prepare("SELECT COUNT(*) AS n FROM sessions").get()!.n, 2);
+      assert.equal(h.db.raw().prepare("SELECT COUNT(*) AS n FROM prepared_media_sessions").get()!.n, 0);
+      assert.equal(h.db.raw().prepare("SELECT COUNT(*) AS n FROM media_session_purposes").get()!.n, 0);
+    });
+  }
+}
 test("validation worker messages, changed authority/profile/source, expiry/revocation and unknown permit cannot prepare", (t) => {
   const mutations = [
     (h: ReturnType<typeof harness>) => { h.permits!.revoke(h.human, h.permit!.permitId); },

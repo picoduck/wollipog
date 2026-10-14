@@ -6730,7 +6730,8 @@ export class SessionsService {
 
   /** Read only the current authenticated catalog row for this exact selected installation.
    * Session config, model metadata and another agent's declaration cannot supply compatibility. */
-  private pacedVideoInstallationContract(runnerId: string, agentId: string): unknown {
+  private pacedVideoInstallationContract(runnerId: string, agentId: string | null | undefined): unknown {
+    if (typeof agentId !== "string" || !agentId.trim()) return undefined;
     return this.db.getRunner(runnerId)?.agents.find((agent) => agent.id === agentId)?.capabilities?.pacedVideoReviewContract;
   }
 

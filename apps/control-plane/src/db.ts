@@ -22884,8 +22884,9 @@ export class ControlPlaneDb {
    * Read raw identity columns to avoid recursion through SessionView authority projections. */
   private campaignPeerContract(sessionId: string): unknown {
     const row = this.stmt("SELECT runner_id,agent_id FROM sessions WHERE id=?").get(sessionId) as
-      { runner_id: string; agent_id: string } | undefined;
-    return row ? this.getRunner(row.runner_id)?.agents.find((agent) => agent.id === row.agent_id)?.capabilities?.pacedVideoReviewContract : undefined;
+      { runner_id: string; agent_id: string | null } | undefined;
+    if (!row || typeof row.agent_id !== "string" || !row.agent_id.trim()) return undefined;
+    return this.getRunner(row.runner_id)?.agents.find((agent) => agent.id === row.agent_id)?.capabilities?.pacedVideoReviewContract;
   }
 
   /** Resolve descendant request ownership from durable ancestry and the current root policy.
