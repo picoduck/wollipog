@@ -11,6 +11,7 @@ pub enum TransportError {
     WrongAck,
     Incomplete,
     Replay,
+    AdmissionUnavailable,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum NativeProfileSource {
@@ -24,6 +25,7 @@ pub struct CanonicalFrameTimeSource {
     pub duration_us: u64,
 }
 /// Metadata SOURCE only. Successful bounds checks do not authenticate bytes, profile or timing.
+#[derive(Clone, PartialEq, Eq)]
 pub struct NativeEnvelopeSource {
     pub profile: NativeProfileSource,
     pub width: u32,
@@ -36,16 +38,26 @@ pub struct NativeEnvelopeSource {
 }
 impl NativeEnvelopeSource {
     pub fn validate_source_bounds(&self) -> Result<(), TransportError> {
-        let (width, height, source_bytes, duration, frames, interval) = match self.profile {
-            NativeProfileSource::Candidate => (640, 360, 8 * 1024 * 1024, 4_000_000, 16, 250_000),
-            NativeProfileSource::PacedComplete => {
-                (1280, 720, 32 * 1024 * 1024, 30_000_000, 900, 33_333)
-            }
-        };
+        let (min_width, min_height, width, height, source_bytes, duration, frames, interval) =
+            match self.profile {
+                NativeProfileSource::Candidate => {
+                    (640, 360, 640, 360, 8 * 1024 * 1024, 4_000_000, 16, 250_000)
+                }
+                NativeProfileSource::PacedComplete => (
+                    960,
+                    540,
+                    1280,
+                    720,
+                    32 * 1024 * 1024,
+                    30_000_000,
+                    900,
+                    33_000,
+                ),
+            };
         if !self.webm_vp9
             || self.audio_channels != 0
-            || self.width == 0
-            || self.height == 0
+            || self.width < min_width
+            || self.height < min_height
             || self.width > width
             || self.height > height
             || self.source_bytes == 0
@@ -116,6 +128,7 @@ struct PendingWindow {
 }
 pub struct WindowTransportSource {
     binding: HostCodeBindings,
+    commitments: Option<crate::host_bridge::SourceAdmissionCommitments>,
     source_sha256: String,
     manifest_sha256: String,
     frame_count: usize,
@@ -166,6 +179,7 @@ impl WindowTransportSource {
         }
         Ok(Self {
             binding,
+            commitments: None,
             source_sha256,
             manifest_sha256,
             frame_count,
@@ -268,6 +282,36 @@ impl WindowTransportSource {
         });
         Ok(())
     }
+    // Freeze metadata only on a pristine SOURCE transport; never a runtime permit.
+    fn bind_source_commitments(
+        mut self,
+        source: &crate::host_bridge::SourceAdmissionCommitments,
+    ) -> Result<Self, TransportError> {
+        source
+            .validate_source(&self.binding)
+            .map_err(|_| TransportError::Binding)?;
+        if self.commitments.is_some()
+            || self.next != 0
+            || self.pending.is_some()
+            || self.last_ack.is_some()
+            || source.frame_count() != self.frame_count
+        {
+            return Err(TransportError::Binding);
+        }
+        self.commitments = Some(source.clone());
+        Ok(self)
+    }
+    fn require_source_commitments(
+        &self,
+        current: &HostCodeBindings,
+        source: &crate::host_bridge::SourceAdmissionCommitments,
+    ) -> Result<(), TransportError> {
+        self.commitments
+            .as_ref()
+            .ok_or(TransportError::Binding)?
+            .require_same_source(source, current)
+            .map_err(|_| TransportError::Binding)
+    }
     pub fn acknowledge_source_window(
         &mut self,
         current: &HostCodeBindings,
@@ -320,14 +364,73 @@ impl WindowTransportSource {
     }
 }
 
+/// Pure SOURCE validation shared by the SDK adapter and offline regression tests.
+/// It authenticates neither pixels nor admission; the SDK wrapper must still require its issuer.
+fn require_source_image_profile(
+    transport: &WindowTransportSource,
+    window: &SourceWindow,
+    envelope: &NativeEnvelopeSource,
+) -> Result<(), TransportError> {
+    envelope.validate_source_bounds()?;
+    if transport.frame_count != envelope.frames.len() {
+        return Err(TransportError::InvalidWindow);
+    }
+    let (frame_cap, total_cap) = match envelope.profile {
+        NativeProfileSource::Candidate => (1024 * 1024, 8 * 1024 * 1024),
+        NativeProfileSource::PacedComplete => (2 * 1024 * 1024, 128 * 1024 * 1024),
+    };
+    if transport.derived_bytes > total_cap {
+        return Err(TransportError::InvalidWindow);
+    }
+    for image in &window.images {
+        if !image_url(&image.data_url) {
+            return Err(TransportError::InvalidWindow);
+        }
+        let timing = envelope
+            .frames
+            .get(image.ordinal)
+            .ok_or(TransportError::InvalidWindow)?;
+        if timing.presentation_us != image.presentation_us
+            || timing.duration_us != image.duration_us
+        {
+            return Err(TransportError::InvalidWindow);
+        }
+        let encoded = image
+            .data_url
+            .strip_prefix("data:image/png;base64,")
+            .ok_or(TransportError::InvalidWindow)?;
+        let decoded = encoded.len() / 4 * 3 - (encoded.len() - encoded.trim_end_matches('=').len());
+        if decoded > frame_cap {
+            return Err(TransportError::InvalidWindow);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(feature = "native-core")]
 pub(crate) mod sdk {
     use super::*;
     use codex_protocol::dynamic_tools::{
         DynamicToolCallOutputContentItem, DynamicToolCallRequest, DynamicToolResponse,
     };
+    pub(crate) fn source_transport_for_admission(
+        admission: &crate::host_bridge::ProductionAdmission,
+        binding: &HostCodeBindings,
+        source_sha256: String,
+        manifest_sha256: String,
+    ) -> Result<WindowTransportSource, TransportError> {
+        let source = admission.checked_source(binding).map_err(admission_error)?;
+        WindowTransportSource::new(
+            binding.clone(),
+            source_sha256,
+            manifest_sha256,
+            source.frame_count(),
+        )?
+        .bind_source_commitments(source)
+    }
     pub(crate) struct PreparedToolResponse {
         binding: HostCodeBindings,
+        commitments: crate::host_bridge::SourceAdmissionCommitments,
         call_id: String,
         turn_id: String,
         response: DynamicToolResponse,
@@ -338,8 +441,15 @@ pub(crate) mod sdk {
             binding: &HostCodeBindings,
             call_id: &str,
             turn_id: &str,
+            commitments: &crate::host_bridge::SourceAdmissionCommitments,
         ) -> bool {
-            &self.binding == binding && self.call_id == call_id && self.turn_id == turn_id
+            &self.binding == binding
+                && self.call_id == call_id
+                && self.turn_id == turn_id
+                && self
+                    .commitments
+                    .require_same_source(commitments, binding)
+                    .is_ok()
         }
         pub(crate) fn into_sdk_parts(self) -> (String, DynamicToolResponse) {
             (self.call_id, self.response)
@@ -485,11 +595,37 @@ pub(crate) mod sdk {
         Ok(())
     }
     pub(crate) fn source_verdict_response(
+        admission: &crate::host_bridge::ProductionAdmission,
         binding: &HostCodeBindings,
         call: &DynamicToolCallRequest,
-        criteria: &[String],
         transport: &mut WindowTransportSource,
     ) -> Result<PreparedToolResponse, TransportError> {
+        let source = admission.checked_source(binding).map_err(admission_error)?;
+        prepare_source_verdict_response(binding, call, transport, source)
+    }
+    fn admission_error(error: crate::host_bridge::BridgeError) -> TransportError {
+        match error {
+            crate::host_bridge::BridgeError::RuntimeIssuerUnavailable => {
+                TransportError::AdmissionUnavailable
+            }
+            _ => TransportError::Binding,
+        }
+    }
+    // Private pure SOURCE core. Tests never construct a production admission/host/Stop permit.
+    pub(super) fn prepare_source_verdict_response(
+        binding: &HostCodeBindings,
+        call: &DynamicToolCallRequest,
+        transport: &mut WindowTransportSource,
+        source: &crate::host_bridge::SourceAdmissionCommitments,
+    ) -> Result<PreparedToolResponse, TransportError> {
+        source
+            .validate_source(binding)
+            .map_err(|_| TransportError::Binding)?;
+        transport.require_source_commitments(binding, source)?;
+        if source.frame_count() != transport.frame_count {
+            return Err(TransportError::InvalidWindow);
+        }
+        let criteria = source.criterion_ids();
         validate_scoped_call(call, criteria, transport.frame_count)?;
         if call.tool != crate::MEDIA_TOOLS[1] {
             return Err(TransportError::InvalidCall);
@@ -500,18 +636,42 @@ pub(crate) mod sdk {
         }
         transport.source_verdict = Some(call.arguments.clone());
         // Only source report recording, never UI approval, runtime attestation or settlement.
-        Ok(PreparedToolResponse{binding:binding.clone(),call_id:call.call_id.clone(),turn_id:call.turn_id.clone(),response:DynamicToolResponse{content_items:vec![DynamicToolCallOutputContentItem::InputText{text:"Source verdict recorded; original owner gate and authentic runtime receipts remain required.".into()}],success:true}})
+        Ok(PreparedToolResponse {
+            binding: binding.clone(),
+            commitments: source.clone(),
+            call_id: call.call_id.clone(),
+            turn_id: call.turn_id.clone(),
+            response: DynamicToolResponse {
+                content_items: vec![DynamicToolCallOutputContentItem::InputText {
+                    text: "Source verdict recorded; original owner gate and authentic runtime receipts remain required.".into(),
+                }],
+                success: true,
+            },
+        })
     }
     /// Convert only an already source-ACKed window; actual authenticated byte validation and
     /// genuine delivery ACK must precede use in a real host. No issuer/runtime permit is minted.
     pub(crate) fn source_image_response(
+        admission: &crate::host_bridge::ProductionAdmission,
         binding: &HostCodeBindings,
         call: &DynamicToolCallRequest,
         window: &SourceWindow,
         transport: &WindowTransportSource,
-        envelope: &NativeEnvelopeSource,
     ) -> Result<PreparedToolResponse, TransportError> {
-        envelope.validate_source_bounds()?;
+        let source = admission.checked_source(binding).map_err(admission_error)?;
+        prepare_source_image_response(binding, call, window, transport, source)
+    }
+    pub(super) fn prepare_source_image_response(
+        binding: &HostCodeBindings,
+        call: &DynamicToolCallRequest,
+        window: &SourceWindow,
+        transport: &WindowTransportSource,
+        source: &crate::host_bridge::SourceAdmissionCommitments,
+    ) -> Result<PreparedToolResponse, TransportError> {
+        source
+            .validate_source(binding)
+            .map_err(|_| TransportError::Binding)?;
+        transport.require_source_commitments(binding, source)?;
         let index = frame_index(call)?;
         let coordinates = SourceCallCoordinates {
             call_id: call.call_id.clone(),
@@ -526,39 +686,7 @@ pub(crate) mod sdk {
         {
             return Err(TransportError::WrongAck);
         }
-        if transport.frame_count != envelope.frames.len() {
-            return Err(TransportError::InvalidWindow);
-        }
-        let (frame_cap, total_cap) = match envelope.profile {
-            NativeProfileSource::Candidate => (1024 * 1024, 8 * 1024 * 1024),
-            NativeProfileSource::PacedComplete => (2 * 1024 * 1024, 128 * 1024 * 1024),
-        };
-        if transport.derived_bytes > total_cap {
-            return Err(TransportError::InvalidWindow);
-        }
-        for image in &window.images {
-            if !image_url(&image.data_url) {
-                return Err(TransportError::InvalidWindow);
-            }
-            let timing = envelope
-                .frames
-                .get(image.ordinal)
-                .ok_or(TransportError::InvalidWindow)?;
-            if timing.presentation_us != image.presentation_us
-                || timing.duration_us != image.duration_us
-            {
-                return Err(TransportError::InvalidWindow);
-            }
-            let encoded = image
-                .data_url
-                .strip_prefix("data:image/png;base64,")
-                .ok_or(TransportError::InvalidWindow)?;
-            let decoded =
-                encoded.len() / 4 * 3 - (encoded.len() - encoded.trim_end_matches('=').len());
-            if decoded > frame_cap {
-                return Err(TransportError::InvalidWindow);
-            }
-        }
+        require_source_image_profile(transport, window, source.envelope())?;
         let mut content_items = Vec::new();
         for image in &window.images {
             content_items.push(DynamicToolCallOutputContentItem::InputText {
@@ -584,6 +712,7 @@ pub(crate) mod sdk {
         }
         Ok(PreparedToolResponse {
             binding: binding.clone(),
+            commitments: source.clone(),
             call_id: call.call_id.clone(),
             turn_id: call.turn_id.clone(),
             response,
@@ -594,6 +723,189 @@ pub(crate) mod sdk {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn profile_envelope(
+        profile: NativeProfileSource,
+        width: u32,
+        height: u32,
+        interval: u64,
+    ) -> NativeEnvelopeSource {
+        NativeEnvelopeSource {
+            profile,
+            width,
+            height,
+            source_bytes: 1,
+            duration_us: interval,
+            audio_channels: 0,
+            webm_vp9: true,
+            frames: vec![CanonicalFrameTimeSource {
+                ordinal: 0,
+                presentation_us: 0,
+                duration_us: interval,
+            }],
+        }
+    }
+    fn sixteen_frame_envelope(profile: NativeProfileSource) -> NativeEnvelopeSource {
+        let (width, height) = match profile {
+            NativeProfileSource::Candidate => (640, 360),
+            NativeProfileSource::PacedComplete => (960, 540),
+        };
+        let mut e = profile_envelope(profile, width, height, 250_000);
+        e.duration_us = 4_000_000;
+        e.frames = (0..16)
+            .map(|ordinal| CanonicalFrameTimeSource {
+                ordinal,
+                presentation_us: ordinal as u64 * 250_000,
+                duration_us: 250_000,
+            })
+            .collect();
+        e
+    }
+    fn candidate_timing_window(start: usize, count: usize, encoded_bytes: usize) -> SourceWindow {
+        let mut w = window(start, count);
+        for image in &mut w.images {
+            image.presentation_us = image.ordinal as u64 * 250_000;
+            image.duration_us = 250_000;
+            // Invented text payload, not actual PNG/media bytes or a trusted delivery receipt.
+            image.data_url = format!("data:image/png;base64,{}", "A".repeat(encoded_bytes));
+        }
+        w
+    }
+    #[test]
+    fn candidate_frame_and_total_caps_cannot_borrow_alternate_paced_profile() {
+        let b = binding();
+        let candidate = sixteen_frame_envelope(NativeProfileSource::Candidate);
+        let paced = sixteen_frame_envelope(NativeProfileSource::PacedComplete);
+        candidate.validate_source_bounds().unwrap();
+        paced.validate_source_bounds().unwrap();
+        let candidate_source = crate::host_bridge::tests::source_commitments(candidate.clone());
+        let paced_source = crate::host_bridge::tests::source_commitments(paced.clone());
+        let mut t = WindowTransportSource::new(b.clone(), "1".repeat(64), "2".repeat(64), 16)
+            .unwrap()
+            .bind_source_commitments(&candidate_source)
+            .unwrap();
+        let w = candidate_timing_window(0, 1, 2 * 1024 * 1024); // exactly1.5MiB fake decoded-size claim
+        let c = call(0);
+        t.prepare_source_window(&b, c.clone(), &w).unwrap();
+        t.acknowledge_source_window(&b, &c, &w.window_sha256)
+            .unwrap();
+        assert_eq!(
+            require_source_image_profile(&t, &w, &candidate),
+            Err(TransportError::InvalidWindow)
+        );
+        require_source_image_profile(&t, &w, &paced).unwrap(); // independent SOURCE cap control only
+        assert_eq!(
+            t.require_source_commitments(&b, &paced_source),
+            Err(TransportError::Binding)
+        );
+        assert_eq!(t.next_source_index(), 1);
+        assert!(t.commitments.as_ref() == Some(&candidate_source));
+
+        let mut total = WindowTransportSource::new(b.clone(), "1".repeat(64), "2".repeat(64), 16)
+            .unwrap()
+            .bind_source_commitments(&candidate_source)
+            .unwrap();
+        for start in [0, 8] {
+            let w = candidate_timing_window(start, 8, 800 * 1024); //600KiB/frame; each serialized window<8MiB
+            let c = call(start);
+            total.prepare_source_window(&b, c.clone(), &w).unwrap();
+            total
+                .acknowledge_source_window(&b, &c, &w.window_sha256)
+                .unwrap();
+            if start == 0 {
+                require_source_image_profile(&total, &w, &candidate).unwrap();
+            } else {
+                assert!(total.derived_bytes > 8 * 1024 * 1024);
+                assert_eq!(
+                    require_source_image_profile(&total, &w, &candidate),
+                    Err(TransportError::InvalidWindow)
+                );
+                require_source_image_profile(&total, &w, &paced).unwrap();
+                assert_eq!(
+                    total.require_source_commitments(&b, &paced_source),
+                    Err(TransportError::Binding)
+                );
+            }
+        }
+        assert_eq!(
+            crate::host_bridge::production_issuer_status(),
+            Err(crate::host_bridge::BridgeError::RuntimeIssuerUnavailable)
+        );
+    }
+    #[test]
+    fn frozen_transport_source_commitment_rejects_valid_replacement_before_state_change() {
+        let b = binding();
+        let original = crate::host_bridge::tests::source_commitments(sixteen_frame_envelope(
+            NativeProfileSource::PacedComplete,
+        ));
+        let mut alternate_envelope = sixteen_frame_envelope(NativeProfileSource::PacedComplete);
+        alternate_envelope.source_bytes = 2;
+        alternate_envelope.validate_source_bounds().unwrap();
+        let replacement = crate::host_bridge::tests::source_commitments(alternate_envelope);
+        let t = WindowTransportSource::new(b.clone(), "1".repeat(64), "2".repeat(64), 16)
+            .unwrap()
+            .bind_source_commitments(&original)
+            .unwrap();
+        assert_eq!(
+            t.require_source_commitments(&b, &replacement),
+            Err(TransportError::Binding)
+        );
+        assert_eq!(t.next_source_index(), 0);
+        assert!(t.pending.is_none() && t.completed_calls.is_empty() && t.last_ack.is_none());
+        assert!(t.bind_source_commitments(&replacement).is_err());
+    }
+    #[test]
+    fn candidate_undersized_geometry_refuses_without_borrowing_paced_bounds() {
+        for (width, height) in [(639, 360), (640, 359), (1, 1)] {
+            assert_eq!(
+                profile_envelope(NativeProfileSource::Candidate, width, height, 250_000)
+                    .validate_source_bounds(),
+                Err(TransportError::InvalidWindow)
+            );
+        }
+    }
+    #[test]
+    fn paced_undersized_geometry_refuses() {
+        for (width, height) in [(959, 540), (960, 539), (1, 1)] {
+            assert_eq!(
+                profile_envelope(NativeProfileSource::PacedComplete, width, height, 33_333)
+                    .validate_source_bounds(),
+                Err(TransportError::InvalidWindow)
+            );
+        }
+    }
+    #[test]
+    fn exact_retained_33000us_interval_is_accepted_without_rounding() {
+        let envelope = profile_envelope(NativeProfileSource::PacedComplete, 960, 540, 33_000);
+        envelope.validate_source_bounds().unwrap();
+        assert_eq!(envelope.frames[0].duration_us, 33_000);
+        require_lossless_millisecond_mapping(33, 33_000).unwrap();
+    }
+    #[test]
+    fn profile_geometry_and_interval_positive_controls_are_valid_source_only() {
+        for (profile, width, height, interval) in [
+            (NativeProfileSource::Candidate, 640, 360, 250_000),
+            (NativeProfileSource::PacedComplete, 960, 540, 33_333),
+            (NativeProfileSource::PacedComplete, 1280, 720, 33_333),
+        ] {
+            profile_envelope(profile, width, height, interval)
+                .validate_source_bounds()
+                .unwrap();
+        }
+        assert!(
+            profile_envelope(NativeProfileSource::Candidate, 640, 360, 249_999)
+                .validate_source_bounds()
+                .is_err()
+        );
+        assert!(
+            profile_envelope(NativeProfileSource::PacedComplete, 960, 540, 32_999)
+                .validate_source_bounds()
+                .is_err()
+        );
+        assert_eq!(
+            crate::host_bridge::production_issuer_status(),
+            Err(crate::host_bridge::BridgeError::RuntimeIssuerUnavailable)
+        );
+    }
     fn binding() -> HostCodeBindings {
         crate::host_bridge::tests::binding()
     }
@@ -717,7 +1029,7 @@ mod tests {
                 4 => envelope.audio_channels = 1,
                 5 => envelope.webm_vp9 = false,
                 6 => envelope.frames[0].presentation_us = 1,
-                7 => envelope.frames[0].duration_us = 33332,
+                7 => envelope.frames[0].duration_us = 32999,
                 _ => envelope.profile = NativeProfileSource::Candidate,
             }
             assert!(envelope.validate_source_bounds().is_err());
@@ -757,6 +1069,69 @@ mod tests {
     }
     #[cfg(feature = "native-core")]
     #[test]
+    fn sdk_source_converter_uses_frozen_profile_and_final_response_provenance() {
+        let b = binding();
+        let candidate = crate::host_bridge::tests::source_commitments(sixteen_frame_envelope(
+            NativeProfileSource::Candidate,
+        ));
+        let paced = crate::host_bridge::tests::source_commitments(sixteen_frame_envelope(
+            NativeProfileSource::PacedComplete,
+        ));
+        let w = candidate_timing_window(0, 1, 2 * 1024 * 1024);
+        let c = call(0);
+        let sdk_call = codex_protocol::dynamic_tools::DynamicToolCallRequest {
+            call_id: c.call_id.clone(),
+            turn_id: c.turn_id.clone(),
+            started_at_ms: 0,
+            namespace: None,
+            tool: crate::MEDIA_TOOLS[0].into(),
+            arguments: serde_json::json!({"index":0}),
+        };
+        let mut candidate_t =
+            WindowTransportSource::new(b.clone(), "1".repeat(64), "2".repeat(64), 16)
+                .unwrap()
+                .bind_source_commitments(&candidate)
+                .unwrap();
+        candidate_t
+            .prepare_source_window(&b, c.clone(), &w)
+            .unwrap();
+        candidate_t
+            .acknowledge_source_window(&b, &c, &w.window_sha256)
+            .unwrap();
+        assert!(matches!(
+            sdk::prepare_source_image_response(&b, &sdk_call, &w, &candidate_t, &candidate),
+            Err(TransportError::InvalidWindow)
+        ));
+        assert!(matches!(
+            sdk::prepare_source_image_response(&b, &sdk_call, &w, &candidate_t, &paced),
+            Err(TransportError::Binding)
+        ));
+        assert_eq!(candidate_t.next_source_index(), 1);
+        assert!(candidate_t.pending.is_none());
+
+        let mut paced_t = WindowTransportSource::new(b.clone(), "1".repeat(64), "2".repeat(64), 16)
+            .unwrap()
+            .bind_source_commitments(&paced)
+            .unwrap();
+        paced_t.prepare_source_window(&b, c.clone(), &w).unwrap();
+        paced_t
+            .acknowledge_source_window(&b, &c, &w.window_sha256)
+            .unwrap();
+        let response =
+            sdk::prepare_source_image_response(&b, &sdk_call, &w, &paced_t, &paced).unwrap();
+        let mut fake_submissions = 0;
+        if response.coordinates_match(&b, &c.call_id, &c.turn_id, &candidate) {
+            fake_submissions += 1;
+        }
+        assert_eq!(fake_submissions, 0);
+        assert!(response.coordinates_match(&b, &c.call_id, &c.turn_id, &paced));
+        assert_eq!(
+            crate::host_bridge::production_issuer_status(),
+            Err(crate::host_bridge::BridgeError::RuntimeIssuerUnavailable)
+        );
+    }
+    #[cfg(feature = "native-core")]
+    #[test]
     fn pinned_sdk_image_and_verdict_shapes_preserve_ack_timing_and_refuse_mutation() {
         let b = binding();
         let mut t =
@@ -785,12 +1160,18 @@ mod tests {
                 duration_us: 33333,
             }],
         };
-        assert!(sdk::source_image_response(&b, &sdk_call, &w, &t, &envelope).is_err());
+        let source = crate::host_bridge::tests::source_commitments(envelope.clone());
+        t = t.bind_source_commitments(&source).unwrap();
+        assert!(sdk::prepare_source_image_response(&b, &sdk_call, &w, &t, &source).is_err());
         t.prepare_source_window(&b, c.clone(), &w).unwrap();
         t.acknowledge_source_window(&b, &c, &w.window_sha256)
             .unwrap();
-        let prepared = sdk::source_image_response(&b, &sdk_call, &w, &t, &envelope).unwrap();
-        assert!(prepared.coordinates_match(&b, &c.call_id, &c.turn_id));
+        let prepared = sdk::prepare_source_image_response(&b, &sdk_call, &w, &t, &source).unwrap();
+        assert!(prepared.coordinates_match(&b, &c.call_id, &c.turn_id, &source));
+        let mut alternate = envelope.clone();
+        alternate.source_bytes = 2;
+        let alternate_source = crate::host_bridge::tests::source_commitments(alternate);
+        assert!(!prepared.coordinates_match(&b, &c.call_id, &c.turn_id, &alternate_source));
         let (_, response) = prepared.into_sdk_parts();
         assert_eq!(response.content_items.len(), 2);
         assert!(
@@ -801,7 +1182,12 @@ mod tests {
         );
         let mut malformed = w.clone();
         malformed.images[0].data_url = "data:image/png;base64,====".into();
-        assert!(sdk::source_image_response(&b, &sdk_call, &malformed, &t, &envelope).is_err());
+        assert!(
+            sdk::prepare_source_image_response(&b, &sdk_call, &malformed, &t, &source).is_err()
+        );
+        assert!(
+            sdk::prepare_source_image_response(&b, &sdk_call, &w, &t, &alternate_source).is_err()
+        );
         let verdict = codex_protocol::dynamic_tools::DynamicToolCallRequest {
             call_id: "fake-verdict".into(),
             turn_id: c.turn_id,
@@ -810,11 +1196,20 @@ mod tests {
             tool: crate::MEDIA_TOOLS[1].into(),
             arguments: serde_json::json!({"report":{"outcome":"reject","rationale":"Invented source observation.","criteria":[{"criterionId":"fake-criterion","outcome":"fail","observedFrameIndices":[0],"observation":"Invented source defect."}]}}),
         };
-        sdk::source_verdict_response(&b, &verdict, &["fake-criterion".into()], &mut t).unwrap();
-        assert!(t.source_verdict.is_some());
         assert!(
-            sdk::source_verdict_response(&b, &verdict, &["fake-criterion".into()], &mut t).is_err()
+            sdk::prepare_source_verdict_response(&b, &verdict, &mut t, &alternate_source).is_err()
         );
+        assert!(t.source_verdict.is_none());
+        let response = sdk::prepare_source_verdict_response(&b, &verdict, &mut t, &source).unwrap();
+        assert!(response.coordinates_match(&b, &verdict.call_id, &verdict.turn_id, &source));
+        assert!(!response.coordinates_match(
+            &b,
+            &verdict.call_id,
+            &verdict.turn_id,
+            &alternate_source
+        ));
+        assert!(t.source_verdict.is_some());
+        assert!(sdk::prepare_source_verdict_response(&b, &verdict, &mut t, &source).is_err());
         assert_eq!(
             crate::host_bridge::production_issuer_status(),
             Err(crate::host_bridge::BridgeError::RuntimeIssuerUnavailable)

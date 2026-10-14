@@ -120,9 +120,10 @@ impl SourceStartup {
     }
 }
 
-/// No constructor/Deserialize/Clone/test factory. No production issuer is installed.
-/// Neither SourceStartup nor an all-true route claim can produce this type.
-pub(crate) struct ProductionAdmission {
+/// Exact immutable metadata SOURCE snapshot, never an admission or a runtime grant.
+/// Pure comparisons/tests may construct source snapshots; they cannot mint production types.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct SourceAdmissionCommitments {
     binding: HostCodeBindings,
     criteria_text: String,
     criteria_ids: Vec<String>,
@@ -131,8 +132,8 @@ pub(crate) struct ProductionAdmission {
     durable_anchor_sha256: String,
     native_envelope: crate::native_transport::NativeEnvelopeSource,
 }
-impl ProductionAdmission {
-    fn check_current(&self, current: &HostCodeBindings) -> Result<(), BridgeError> {
+impl SourceAdmissionCommitments {
+    pub(crate) fn validate_source(&self, current: &HostCodeBindings) -> Result<(), BridgeError> {
         if &self.binding != current {
             return Err(BridgeError::InvalidDispatch);
         }
@@ -140,6 +141,20 @@ impl ProductionAdmission {
             .validate_source_bounds()
             .map_err(|_| BridgeError::InvalidDispatch)?;
         if self.native_envelope.frames.len() != self.frame_count
+            || self.criteria_text.is_empty()
+            || self.criteria_text.len() > 32768
+            || self.criteria_ids.is_empty()
+            || self.criteria_ids.len() > 64
+            || self
+                .criteria_ids
+                .iter()
+                .any(|v| v.is_empty() || v.len() > 256 || v.chars().any(char::is_control))
+            || self
+                .criteria_ids
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != self.criteria_ids.len()
             || [&self.dispatch_sha256, &self.durable_anchor_sha256]
                 .iter()
                 .any(|v| {
@@ -151,7 +166,47 @@ impl ProductionAdmission {
         {
             return Err(BridgeError::InvalidDispatch);
         }
+        Ok(()) // SOURCE validity never supplies the missing issuer or measured runtime authority.
+    }
+    pub(crate) fn require_same_source(
+        &self,
+        supplied: &Self,
+        current: &HostCodeBindings,
+    ) -> Result<(), BridgeError> {
+        self.validate_source(current)?;
+        supplied.validate_source(current)?;
+        if self != supplied {
+            return Err(BridgeError::InvalidDispatch);
+        }
+        Ok(())
+    }
+    pub(crate) fn envelope(&self) -> &crate::native_transport::NativeEnvelopeSource {
+        &self.native_envelope
+    }
+    pub(crate) fn criterion_ids(&self) -> &[String] {
+        &self.criteria_ids
+    }
+    pub(crate) fn frame_count(&self) -> usize {
+        self.frame_count
+    }
+}
+
+/// No constructor/Deserialize/Clone/test factory. No production issuer is installed.
+/// Even a valid SourceAdmissionCommitments value cannot produce this type.
+pub(crate) struct ProductionAdmission {
+    commitments: SourceAdmissionCommitments,
+}
+impl ProductionAdmission {
+    fn check_current(&self, current: &HostCodeBindings) -> Result<(), BridgeError> {
+        self.commitments.validate_source(current)?;
         production_issuer_status()
+    }
+    pub(crate) fn checked_source(
+        &self,
+        current: &HostCodeBindings,
+    ) -> Result<&SourceAdmissionCommitments, BridgeError> {
+        self.check_current(current)?;
+        Ok(&self.commitments)
     }
 }
 pub fn production_issuer_status() -> Result<(), BridgeError> {
@@ -169,13 +224,12 @@ pub(crate) mod sdk {
 
     pub(crate) struct OwnedNativeHost {
         thread: Arc<CodexThread>,
-        binding: HostCodeBindings,
+        commitments: SourceAdmissionCommitments,
         sdk_thread_id: String,
         turn_id: Option<String>,
         initial_turn_attempted: bool,
         pending_call: Option<(String, String)>,
         consumed_calls: std::collections::BTreeSet<String>,
-        dispatch_sha256: String,
     }
     pub(crate) enum ScopedEventSource {
         Tool(DynamicToolCallRequest),
@@ -192,6 +246,7 @@ pub(crate) mod sdk {
         // MUST precede start_thread, which can prewarm provider transport. Currently always
         // refuses: no registered issuer, authenticated namespace or actual admission exists.
         admission.check_current(current)?;
+        let commitments = admission.commitments.clone(); // freeze BEFORE possible startup/prewarm
         let options = preparation
             .into_host_start_options(&current.media)
             .map_err(|_| BridgeError::InvalidDispatch)?;
@@ -202,12 +257,11 @@ pub(crate) mod sdk {
         Ok(OwnedNativeHost {
             sdk_thread_id: started.thread_id.to_string(),
             thread: started.thread,
-            binding: current.clone(),
+            commitments,
             turn_id: None,
             initial_turn_attempted: false,
             pending_call: None,
             consumed_calls: Default::default(),
-            dispatch_sha256: admission.dispatch_sha256.clone(),
         })
     }
     impl OwnedNativeHost {
@@ -216,9 +270,11 @@ pub(crate) mod sdk {
             admission: &ProductionAdmission,
             current: &HostCodeBindings,
         ) -> Result<(), BridgeError> {
-            if &self.binding != current || self.sdk_thread_id.is_empty() {
+            if self.sdk_thread_id.is_empty() {
                 return Err(BridgeError::InvalidDispatch);
             }
+            self.commitments
+                .require_same_source(&admission.commitments, current)?;
             admission.check_current(current)
         }
         pub(crate) async fn start_criteria_turn(
@@ -228,15 +284,15 @@ pub(crate) mod sdk {
         ) -> Result<(), BridgeError> {
             self.current(admission, current)?;
             if self.initial_turn_attempted
-                || admission.criteria_text.is_empty()
-                || admission.criteria_text.len() > 32768
+                || admission.commitments.criteria_text.is_empty()
+                || admission.commitments.criteria_text.len() > 32768
             {
                 return Err(BridgeError::InvalidDispatch);
             }
             self.initial_turn_attempted = true; // unknown submission is never automatically repeated
             let request = codex_core::TurnInputRequest::user_input(vec![
                 codex_protocol::user_input::UserInput::Text {
-                    text: admission.criteria_text.clone(),
+                    text: admission.commitments.criteria_text.clone(),
                     text_elements: vec![],
                 },
             ]);
@@ -274,8 +330,8 @@ pub(crate) mod sdk {
                     }
                     crate::native_transport::sdk::validate_scoped_call(
                         &call,
-                        &admission.criteria_ids,
-                        admission.frame_count,
+                        &admission.commitments.criteria_ids,
+                        admission.commitments.frame_count,
                     )
                     .map_err(|_| BridgeError::UnsupportedEvent)?;
                     self.pending_call = Some((call.call_id.clone(), call.turn_id.clone()));
@@ -298,7 +354,7 @@ pub(crate) mod sdk {
                 .pending_call
                 .as_ref()
                 .ok_or(BridgeError::InvalidDispatch)?;
-            if !response.coordinates_match(current, call_id, turn_id) {
+            if !response.coordinates_match(current, call_id, turn_id, &self.commitments) {
                 return Err(BridgeError::InvalidDispatch);
             }
             let (id, response) = response.into_sdk_parts();
@@ -325,7 +381,11 @@ pub(crate) mod sdk {
             intent: &crate::native_cleanup::ProductionStopIntent,
         ) -> Result<(), BridgeError> {
             self.current(admission, current)?;
-            intent.check(current, &self.sdk_thread_id, &self.dispatch_sha256)?; // exact durable owning intent, immediately before effect
+            intent.check(
+                current,
+                &self.sdk_thread_id,
+                &self.commitments.dispatch_sha256,
+            )?; // exact durable owning intent, immediately before effect
             self.thread
                 .shutdown_and_wait()
                 .await
@@ -340,6 +400,88 @@ pub(crate) mod sdk {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    /// Invented, untrusted SOURCE values only; this cannot create ProductionAdmission.
+    pub(crate) fn source_commitments(
+        native_envelope: crate::native_transport::NativeEnvelopeSource,
+    ) -> SourceAdmissionCommitments {
+        SourceAdmissionCommitments {
+            binding: binding(),
+            criteria_text: "Invented source criteria.".into(),
+            criteria_ids: vec!["fake-criterion".into()],
+            frame_count: native_envelope.frames.len(),
+            dispatch_sha256: "f".repeat(64),
+            durable_anchor_sha256: "a".repeat(64),
+            native_envelope,
+        }
+    }
+    #[test]
+    fn replacement_source_commitments_refuse_before_fake_effect_without_admission_factory() {
+        use crate::native_transport::{
+            CanonicalFrameTimeSource, NativeEnvelopeSource, NativeProfileSource,
+        };
+        let original = source_commitments(NativeEnvelopeSource {
+            profile: NativeProfileSource::PacedComplete,
+            width: 960,
+            height: 540,
+            source_bytes: 1,
+            duration_us: 66_000,
+            audio_channels: 0,
+            webm_vp9: true,
+            frames: (0..2)
+                .map(|ordinal| CanonicalFrameTimeSource {
+                    ordinal,
+                    presentation_us: ordinal as u64 * 33_000,
+                    duration_us: 33_000,
+                })
+                .collect(),
+        });
+        let b = binding();
+        let mut fake_effects = 0;
+        original.require_same_source(&original.clone(), &b).unwrap();
+        fake_effects += 1; // the sole identical SOURCE control; no SDK handle exists
+        for field in 0..17 {
+            let mut replacement = original.clone();
+            match field {
+                0 => replacement.dispatch_sha256 = "b".repeat(64),
+                1 => replacement.durable_anchor_sha256 = "c".repeat(64),
+                2 => replacement.native_envelope.profile = NativeProfileSource::Candidate,
+                3 => replacement.native_envelope.width = 1280,
+                4 => replacement.native_envelope.height = 720,
+                5 => replacement.native_envelope.source_bytes = 2,
+                6 => replacement.native_envelope.duration_us += 1,
+                7 => replacement.native_envelope.audio_channels = 1,
+                8 => replacement.native_envelope.webm_vp9 = false,
+                9 => replacement.frame_count += 1,
+                10 => replacement.native_envelope.frames[0].ordinal = 1,
+                11 => replacement.native_envelope.frames[0].presentation_us = 1,
+                12 => replacement.native_envelope.frames[0].duration_us += 1,
+                13 => replacement.criteria_text.push('x'),
+                14 => replacement.criteria_ids[0].push('x'),
+                15 => replacement.criteria_ids.push("fake-other".into()),
+                _ => replacement.binding.media.generation.push('x'),
+            }
+            if original.require_same_source(&replacement, &b).is_ok() {
+                fake_effects += 1;
+            }
+            assert_eq!(
+                original.require_same_source(&replacement, &b),
+                Err(BridgeError::InvalidDispatch)
+            );
+            assert_eq!(fake_effects, 1);
+        }
+        let mut two_ids = original.clone();
+        two_ids.criteria_ids.push("fake-other".into());
+        let mut reordered = two_ids.clone();
+        reordered.criteria_ids.reverse();
+        assert_eq!(
+            two_ids.require_same_source(&reordered, &b),
+            Err(BridgeError::InvalidDispatch)
+        );
+        assert_eq!(
+            production_issuer_status(),
+            Err(BridgeError::RuntimeIssuerUnavailable)
+        );
+    }
     pub(crate) fn binding() -> HostCodeBindings {
         HostCodeBindings {
             media: crate::MediaCodeBindings {
