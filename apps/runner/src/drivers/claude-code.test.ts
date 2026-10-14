@@ -5483,3 +5483,60 @@ test("fixed-rule one-shot native command keeps plain stdin and exact text despit
   assert.equal(await pending, "end_turn");
   driver.dispose();
 });
+
+test("Claude terminal categories reset at turn ownership and preserve settled runner evidence", () => {
+  const h = makeHarness();
+  const driver = h.driver as any;
+  h.feed({ type: "result", is_error: true, api_error_status: 529, result: "new provider wording" });
+  assert.equal(h.driver.lastTurnFailureCategory(), "capacity");
+  driver.resetTurnEventState();
+  assert.equal(h.driver.lastTurnFailureCategory(), null);
+  h.feed({ type: "result", is_error: true, api_error_status: 429, result: "overloaded_error" });
+  assert.equal(h.driver.lastTurnFailureCategory(), "rate_limit");
+  driver.settledRunnerTurnFailureCategory = "rate_limit";
+  driver.resetTurnEventState();
+  h.feed({ type: "result", is_error: true, api_error_status: 529, result: "provider-owned turn" });
+  assert.equal(h.driver.lastTurnFailureCategory(), "rate_limit", "later provider-owned work cannot alter the settled runner turn");
+});
+
+test("Claude structured authentication errors sanitize prose before recovery", () => {
+  const h = makeHarness();
+  h.feed({ type: "result", is_error: true, api_error_status: 401, result: "synthetic-secret" });
+  assert.equal(h.driver.lastTurnFailureCategory(), "authentication");
+  assert.equal(h.authenticationFailures, 1);
+  assert.doesNotMatch(JSON.stringify([h.events, h.stderr]), /synthetic-secret/);
+});
+
+test("Claude structured capacity evidence outranks conflicting authentication prose without leaking it", () => {
+  const h = makeHarness();
+  h.feed({ type: "result", is_error: true, api_error_status: 529, result: "invalid API key supplied: synthetic-secret" });
+  assert.equal(h.driver.lastTurnFailureCategory(), "capacity");
+  assert.equal(h.authenticationFailures, 0);
+  assert.doesNotMatch(JSON.stringify([h.events, h.stderr, h.driver.lastTurnError()]), /synthetic-secret/);
+});
+
+
+test("a local Claude capability rejection cannot inherit prior capacity evidence", async () => {
+  const h = makeHarness({
+    config: { effort: "max" },
+    capabilities: { models: [], effortLevels: ["low"], slashCommands: [], supportsImages: false,
+      supportsApprovals: false, permissionModes: ["acceptEdits"] },
+  });
+  h.feed({ type: "result", is_error: true, api_error_status: 529, result: "provider capacity unavailable" });
+  assert.equal(h.driver.lastTurnFailureCategory(), "capacity");
+  assert.equal(await h.driver.prompt("next task"), "refusal");
+  assert.match(h.driver.lastTurnError()!, /effort/);
+  assert.equal(h.driver.lastTurnFailureCategory(), null);
+  assert.equal((h.driver as any).turnFailureCategory, "capacity", "an active provider accumulator remains owned by its turn");
+  h.driver.dispose();
+});
+
+
+test("Claude revoked OAuth recovery survives generic structured permission status", () => {
+  const h=makeHarness();
+  h.feed({ type: "result", is_error: true, api_error_status: 403,
+    result: "API Error: 403 permission_error OAuth token has been revoked. synthetic-secret" });
+  assert.equal(h.driver.lastTurnFailureCategory(),"permission");
+  assert.equal(h.authenticationFailures,1);
+  assert.doesNotMatch(JSON.stringify([h.events,h.stderr,h.driver.lastTurnError()]),/synthetic-secret/);
+});

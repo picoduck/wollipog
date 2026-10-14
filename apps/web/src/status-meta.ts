@@ -162,6 +162,8 @@ const VOCABULARY = {
     returned: success("Result Returned"),
     result_missing: warning("Result Missing"),
     missing_acknowledged: neutral("Missing Result Acknowledged"),
+    retry_exhausted: warning("Retry Exhausted"),
+    retry_exhaustion_acknowledged: neutral("Retry Exhaustion Acknowledged"),
     unverified: neutral("Unverified", { hollow: true }),
   },
   /** A session's aggregate background work, as its header shows it. */

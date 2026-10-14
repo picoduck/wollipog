@@ -1,3 +1,5 @@
+import type { ProviderFailureCategory } from "./provider-failure.js";
+
 /**
  * Recognize provider/harness authentication failures without forwarding their raw text across the
  * driver boundary. Messages can contain tokens, authorization URLs, or credential diagnostics, so
@@ -30,4 +32,15 @@ export function isProviderAuthenticationFailure(message: unknown): boolean {
     /\b(?:auth(?:entication)?|bearer|basic|credential|token|api[ -]?key|login|sign[ -]?in)\b/.test(normalized) ||
     /\b(?:unexpected status|status code|stream error|api retry|retrying)\b/.test(normalized)
   );
+}
+
+
+/** Generic status categories can carry a precise revoked/invalid credential diagnostic (OAuth403).
+ * Capacity and definite request-shape evidence conflict with that lane; redaction is separate. */
+export function shouldRecoverProviderAuthentication(
+  category: ProviderFailureCategory | null | undefined,
+  authenticationDiagnostic: boolean,
+): boolean {
+  return category === "authentication" ||
+    (category !== "capacity" && category !== "invalid_request" && authenticationDiagnostic);
 }

@@ -9497,3 +9497,74 @@ test("new Claude snapshot catch-up preserves estimate provenance without a legac
   assert.equal(usage.totals.costSource, "modelPriced");
   assert.equal(usage.legacyClaudeCostRecords, 0);
 });
+
+test("pre-acceptance retry exhaustion is durable, individually resolvable, and distinct from missing results", () => {
+  const root = mkdtempSync(join(tmpdir(), "background-retry-exhaustion-"));
+  const file = join(root, "control-plane.sqlite");
+  let db = ControlPlaneDb.open(file);
+  const job = (id: string): ManagedBackgroundJobSnapshot => ({
+    id, parentTurnId: "parent", runnerId: "runner-1", workspaceId: null, launchType: "agent",
+    registeredAt: 1, terminalStatus: "completed", terminalObservedAt: 2, continuationRequired: true,
+    continuationId: `continuation-${id}`, continuationQueuedAt: 3, continuationSubmittedAt: 4,
+    continuationRetryExhaustedAt: 5,
+  });
+  try {
+    db.registerRunner(meta(), 500);
+    db.createSessionFromSnapshot(snapshot({ id: "exhausted", driver: "claude_code", backgroundJobs: [job("a"), job("b")] }), "runner-1", 10);
+    let deliveries = db.getSession("exhausted")!.backgroundDeliveries!;
+    assert.equal(deliveries.length, 2);
+    assert.ok(deliveries.every((delivery) => delivery.watchdogState === "capacity_retry_exhausted"));
+    assert.ok(deliveries.every((delivery) => delivery.acceptedAt === undefined && delivery.missingResultAt === undefined));
+    const summaries = db.listSessionSummaries(undefined, true).find((session) => session.id === "exhausted")!;
+    assert.deepEqual(summaries.backgroundDeliveries?.map((delivery) => [delivery.continuationId, delivery.watchdogState]),
+      deliveries.map((delivery) => [delivery.continuationId, delivery.watchdogState]));
+    assert.equal(db.acknowledgeBackgroundMissingResult("exhausted", "continuation-a", 20), false);
+    assert.equal(db.acknowledgeBackgroundRetryExhaustion("exhausted", "continuation-a", 20), true);
+    assert.equal(db.acknowledgeBackgroundRetryExhaustion("exhausted", "continuation-a", 21), false);
+    assert.equal(db.backgroundRetryExhaustionResolution("exhausted", "continuation-a"), "resolved");
+    assert.equal(db.backgroundRetryExhaustionResolution("exhausted", "continuation-b"), "exhausted");
+    db.close();
+    db = ControlPlaneDb.open(file);
+    // An older or abbreviated inventory must not erase durable exhaustion or its resolution.
+    db.updateSessionFromSnapshot("exhausted", snapshot({ id: "exhausted", driver: "claude_code",
+      backgroundJobs: [job("a"), { ...job("b"), continuationRetryExhaustedAt: undefined }] }), 30);
+    deliveries = db.getSession("exhausted")!.backgroundDeliveries!;
+    const a = deliveries.find((delivery) => delivery.continuationId === "continuation-a")!;
+    assert.equal(a.retryExhaustedAt, 5);
+    assert.equal(a.retryExhaustionAcknowledgedAt, 20);
+    assert.equal(a.watchdogState, undefined);
+    assert.equal(a.acceptedAt, undefined, "acknowledgement cannot manufacture acceptance");
+    assert.equal(deliveries.find((delivery) => delivery.continuationId === "continuation-b")?.watchdogState, "capacity_retry_exhausted");
+    db.updateSessionFromSnapshot("exhausted", snapshot({ id: "exhausted", driver: "claude_code",
+      backgroundJobs: [job("a"), { ...job("b"), continuationAcceptedAt: 40 }] }), 50);
+    const accepted = db.getSession("exhausted")!.backgroundDeliveries!.find((delivery) => delivery.continuationId === "continuation-b")!;
+    assert.equal(accepted.acceptedAt, 40);
+    assert.equal(accepted.retryExhaustedAt, 5, "retain the audit fact after later acceptance");
+    assert.equal(accepted.watchdogState, undefined, "accepted work is no longer pre-acceptance exhaustion");
+    assert.equal(db.backgroundRetryExhaustionResolution("exhausted", "continuation-b"), "resolved");
+    db.updateSessionFromSnapshot("exhausted", snapshot({ id: "exhausted", driver: "claude_code",
+      backgroundJobs: [job("a"), { ...job("b"), continuationAcceptedAt: 40, assistantResultPersistedAt: 60 }] }), 70);
+    assert.notEqual(db.getSession("exhausted")!.backgroundDeliveries!.find((delivery) => delivery.continuationId === "continuation-b")!.watchdogState, "capacity_retry_exhausted");
+  } finally { db.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("pre-acceptance exhaustion cannot be fabricated from incomplete job lifecycle evidence", () => {
+  const db = withRunner();
+  const base: ManagedBackgroundJobSnapshot = {
+    id: "job", parentTurnId: "parent", runnerId: "runner-1", workspaceId: null, launchType: "agent",
+    registeredAt: 1, continuationRequired: true, continuationId: "continuation", continuationRetryExhaustedAt: 5,
+  };
+  try {
+    db.createSessionFromSnapshot(snapshot({ id: "no-exhaustion", backgroundJobs: [base] }), "runner-1", 10);
+    assert.equal(db.getSession("no-exhaustion")!.backgroundDeliveries![0]!.retryExhaustedAt, undefined);
+    assert.equal(db.backgroundRetryExhaustionResolution("no-exhaustion", "continuation"), "not_terminal");
+    assert.equal(db.acknowledgeBackgroundRetryExhaustion("no-exhaustion", "continuation", 20), false);
+    assert.equal(db.backgroundRetryExhaustionResolution("no-exhaustion", "other-continuation"), undefined);
+    db.updateSessionFromSnapshot("no-exhaustion", snapshot({ id: "no-exhaustion", backgroundJobs: [{
+      ...base, terminalStatus: "completed", terminalObservedAt: 2, continuationQueuedAt: 3,
+      continuationSubmittedAt: 4, continuationAcceptedAt: 5,
+    }] }), 30);
+    assert.equal(db.getSession("no-exhaustion")!.backgroundDeliveries![0]!.retryExhaustedAt, undefined,
+      "an already accepted snapshot cannot introduce a pre-acceptance marker");
+  } finally { db.close(); }
+});

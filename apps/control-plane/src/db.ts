@@ -1,3 +1,4 @@
+import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
 /**
  * Control-plane persistence, backed by `node:sqlite` (built into Node >=22.5).
  * Using the built-in driver means there is no native module to compile — the
@@ -1162,6 +1163,8 @@ CREATE TABLE IF NOT EXISTS managed_background_deliveries (
   accepted_at                INTEGER,
   missing_result_at          INTEGER,
   missing_result_acknowledged_at INTEGER,
+  retry_exhausted_at         INTEGER,
+  retry_exhaustion_acknowledged_at INTEGER,
   runner_result_persisted_at INTEGER,
   transcript_projected_at    INTEGER,
   projected_event_epoch      INTEGER,
@@ -5600,6 +5603,8 @@ export class ControlPlaneDb {
       "status_settled_at INTEGER",
       "missing_result_at INTEGER",
       "missing_result_acknowledged_at INTEGER",
+      "retry_exhausted_at INTEGER",
+      "retry_exhaustion_acknowledged_at INTEGER",
     ]) {
       try {
         db.exec(`ALTER TABLE managed_background_deliveries ADD COLUMN ${column}`);
@@ -10812,12 +10817,27 @@ export class ControlPlaneDb {
     return counts;
   }
 
-  private readonly sessionSummaryReads = new Map<string,{ revision: string; sessions: SessionView[]; json: string; bytes: number }>();
+  private readonly sessionSummaryReads = new Map<string,{ revision: string; sessions: SessionView[]; json: string; legacyJson?: string; bytes: number }>();
   private sessionSummaryReadBytes = 0;
 
   /** REST and dashboard connects share the exact authorized serialized list until a DB write. */
-  sessionListJsonForPrincipal(principal: AuthPrincipal, includeArchived = false): string {
-    return this.sessionSummaryRead(principal,includeArchived).json;
+  sessionListJsonForPrincipal(principal: AuthPrincipal, includeArchived = false, supportsRetryExhaustion = true): string {
+    const cached = this.sessionSummaryRead(principal,includeArchived);
+    if (supportsRetryExhaustion) return cached.json;
+    if (cached.legacyJson !== undefined) return cached.legacyJson;
+    // This REST route sends serialized text, bypassing Fastify preSerialization. Keep canonical
+    // data shared and cache the legacy projection lazily, only within the same memory budget.
+    const payload={ sessions: cached.sessions };
+    const legacy=projectBackgroundRetryExhaustionForUi(payload,null);
+    const legacyJson=legacy===payload ? cached.json : JSON.stringify(legacy);
+    const extraBytes=legacyJson===cached.json ? 0 : Buffer.byteLength(legacyJson);
+    if (this.sessionSummaryReads.get(JSON.stringify([principal,includeArchived]))===cached &&
+        this.sessionSummaryReadBytes+extraBytes<=32*1024*1024) {
+      cached.legacyJson=legacyJson;
+      cached.bytes+=extraBytes;
+      this.sessionSummaryReadBytes+=extraBytes;
+    }
+    return legacyJson;
   }
 
   cachedSessionSummariesForPrincipal(principal: AuthPrincipal): SessionView[] | undefined {
@@ -10838,7 +10858,7 @@ export class ControlPlaneDb {
     const sessions=this.listSessionSummaries(principal,includeArchived);
     const json=JSON.stringify({ sessions });
     const bytes=Buffer.byteLength(json);
-    const entry={ revision,sessions,json,bytes };
+    const entry: { revision: string; sessions: SessionView[]; json: string; legacyJson?: string; bytes: number }={ revision,sessions,json,bytes };
     const limit=32*1024*1024;
     if (bytes<=limit) {
       while (this.sessionSummaryReads.size>=4 || this.sessionSummaryReadBytes+bytes>limit) {
@@ -11063,11 +11083,15 @@ export class ControlPlaneDb {
     }
     const deliveries=this.stmt(`WITH candidates AS (
       SELECT delivery.session_id,delivery.continuation_id,delivery.parent_turn_id,delivery.queued_at,
-        delivery.accepted_at,delivery.missing_result_at,delivery.notification_queued_at,delivery.dashboard_observed_at,
+        delivery.accepted_at,delivery.missing_result_at,delivery.retry_exhausted_at,delivery.retry_exhaustion_acknowledged_at,
+        delivery.notification_queued_at,delivery.dashboard_observed_at,
         COALESCE(delivery.notification_queued_at,delivery.updated_at) AS sort_at,COUNT(job.job_id) AS job_count,
         SUM(CASE WHEN job.terminal_observed_at IS NOT NULL THEN 1 ELSE 0 END) AS terminal_count,
         0 AS unfinished_sibling_count,NULL AS held_since,
-        CASE WHEN SUM(job.source_present)>0 AND delivery.missing_result_at IS NOT NULL AND
+        CASE WHEN SUM(job.source_present)>0 AND delivery.retry_exhausted_at IS NOT NULL AND
+            delivery.retry_exhaustion_acknowledged_at IS NULL AND delivery.accepted_at IS NULL AND
+            delivery.runner_result_persisted_at IS NULL THEN 'capacity_retry_exhausted'
+          WHEN SUM(job.source_present)>0 AND delivery.missing_result_at IS NOT NULL AND
             delivery.missing_result_acknowledged_at IS NULL AND delivery.runner_result_persisted_at IS NULL
           THEN 'accepted_without_result'
           WHEN SUM(job.source_present)>0 AND delivery.runner_result_persisted_at IS NOT NULL AND delivery.transcript_projected_at IS NULL
@@ -11081,7 +11105,7 @@ export class ControlPlaneDb {
       WHERE ${authorization.sql} AND session.status!='stopped'
       GROUP BY delivery.session_id,delivery.continuation_id HAVING watchdog_state IS NOT NULL
       UNION ALL
-      SELECT job.session_id,NULL,job.parent_turn_id,NULL,NULL,NULL,NULL,NULL,NULL,COUNT(*) AS job_count,
+      SELECT job.session_id,NULL,job.parent_turn_id,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,COUNT(*) AS job_count,
         SUM(CASE WHEN job.terminal_observed_at IS NOT NULL THEN 1 ELSE 0 END) AS terminal_count,
         (SELECT COUNT(*) FROM managed_background_jobs sibling WHERE sibling.session_id=job.session_id
           AND sibling.parent_turn_id=job.parent_turn_id AND sibling.source_present=1 AND sibling.terminal_observed_at IS NULL) AS unfinished_sibling_count,
@@ -11096,6 +11120,7 @@ export class ControlPlaneDb {
         FROM candidates) WHERE position<=32 ORDER BY session_id,continuation_id IS NULL,sort_at DESC,COALESCE(continuation_id,parent_turn_id)`).all(...authorization.params,...authorization.params) as Array<{
         session_id: string; continuation_id: string | null; parent_turn_id: string; queued_at: number | null;
         accepted_at: number | null; missing_result_at: number | null; job_count: number; terminal_count: number;
+        retry_exhausted_at: number | null; retry_exhaustion_acknowledged_at: number | null;
         notification_queued_at: number | null; dashboard_observed_at: number | null;
         unfinished_sibling_count: number; held_since: number | null; watchdog_state: BackgroundDeliveryWatchdogState | null;
       }>;
@@ -11109,6 +11134,9 @@ export class ControlPlaneDb {
         ...(entry.continuation_id ? { continuationId: entry.continuation_id } : {}),
         ...(entry.queued_at!=null ? { queuedAt: entry.queued_at } : {}),
         ...(entry.accepted_at!=null ? { acceptedAt: entry.accepted_at } : {}),
+        ...(entry.retry_exhausted_at!=null ? { retryExhaustedAt: entry.retry_exhausted_at } : {}),
+        ...(entry.retry_exhaustion_acknowledged_at!=null
+          ? { retryExhaustionAcknowledgedAt: entry.retry_exhaustion_acknowledged_at } : {}),
         ...(entry.missing_result_at!=null ? { missingResultAt: entry.missing_result_at } : {}),
         ...(entry.notification_queued_at!=null ? { notificationQueuedAt: entry.notification_queued_at } : {}),
         ...(entry.dashboard_observed_at!=null ? { dashboardObservedAt: entry.dashboard_observed_at } : {}),
@@ -15209,14 +15237,15 @@ export class ControlPlaneDb {
     const upsertDelivery = this.stmt(
       `INSERT INTO managed_background_deliveries
         (session_id, continuation_id, parent_turn_id, queued_at, submitted_at, accepted_at,
-         missing_result_at, runner_result_persisted_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         missing_result_at, retry_exhausted_at, runner_result_persisted_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(session_id, continuation_id) DO UPDATE SET
          parent_turn_id=managed_background_deliveries.parent_turn_id,
          queued_at=COALESCE(managed_background_deliveries.queued_at, excluded.queued_at),
          submitted_at=COALESCE(managed_background_deliveries.submitted_at, excluded.submitted_at),
          accepted_at=COALESCE(managed_background_deliveries.accepted_at, excluded.accepted_at),
          missing_result_at=COALESCE(managed_background_deliveries.missing_result_at, excluded.missing_result_at),
+         retry_exhausted_at=COALESCE(managed_background_deliveries.retry_exhausted_at, excluded.retry_exhausted_at),
          runner_result_persisted_at=COALESCE(managed_background_deliveries.runner_result_persisted_at, excluded.runner_result_persisted_at),
          updated_at=MAX(managed_background_deliveries.updated_at, excluded.updated_at)`,
     );
@@ -15236,12 +15265,18 @@ export class ControlPlaneDb {
           !validOptionalBackgroundTimestamp(job.continuationSubmittedAt) ||
           !validOptionalBackgroundTimestamp(job.continuationAcceptedAt) ||
           !validOptionalBackgroundTimestamp(job.continuationMissingResultAt) ||
+          !validOptionalBackgroundTimestamp(job.continuationRetryExhaustedAt) ||
           !validOptionalBackgroundTimestamp(job.assistantResultPersistedAt)) continue;
       // Missing-result is a post-acceptance terminal fact. Ignore an out-of-order marker from a
       // malformed or incompatible runner rather than manufacturing acknowledgement authority.
       const continuationMissingResultAt = job.continuationAcceptedAt == null
         ? null
         : job.continuationMissingResultAt ?? null;
+      // A separate pre-acceptance fact cannot manufacture accepted missing-result authority.
+      const retryExhaustedAt = job.continuationRequired === true && job.terminalObservedAt != null &&
+        job.continuationQueuedAt != null && job.continuationSubmittedAt != null &&
+        job.continuationAcceptedAt == null && job.assistantResultPersistedAt == null
+        ? job.continuationRetryExhaustedAt ?? null : null;
       // A malformed account of who ended the job drops only that account, never the job.
       const endedBy = job.terminalStatus === "killed" ? validBackgroundJobEnd(job.endedBy) : null;
       // The runner keeps a record's registration time for its whole life, so a later one under the
@@ -15286,6 +15321,7 @@ export class ControlPlaneDb {
           job.continuationSubmittedAt ?? null,
           job.continuationAcceptedAt ?? null,
           continuationMissingResultAt,
+          retryExhaustedAt,
           job.assistantResultPersistedAt ?? null,
           now,
         );
@@ -15435,6 +15471,38 @@ export class ControlPlaneDb {
     return row.missing_result_at != null ? "missing" : "not_terminal";
   }
 
+  /** Clear only pre-acceptance exhaustion attention. This never changes acceptance or sends work. */
+  acknowledgeBackgroundRetryExhaustion(sessionId: string, continuationId: string, now: number): boolean {
+    if (!validBackgroundIdentity(sessionId) || !validBackgroundIdentity(continuationId) ||
+        !Number.isSafeInteger(now) || now < 0) return false;
+    return Number(this.stmt(
+      `UPDATE managed_background_deliveries
+          SET retry_exhaustion_acknowledged_at=COALESCE(retry_exhaustion_acknowledged_at, ?),
+              updated_at=MAX(updated_at, ?)
+        WHERE session_id=? AND continuation_id=? AND retry_exhausted_at IS NOT NULL
+          AND accepted_at IS NULL AND runner_result_persisted_at IS NULL
+          AND retry_exhaustion_acknowledged_at IS NULL`,
+    ).run(now, now, sessionId, continuationId).changes) > 0;
+  }
+
+  backgroundRetryExhaustionResolution(
+    sessionId: string,
+    continuationId: string,
+  ): "exhausted" | "resolved" | "not_terminal" | undefined {
+    if (!validBackgroundIdentity(sessionId) || !validBackgroundIdentity(continuationId)) return undefined;
+    const row = this.stmt(
+      `SELECT retry_exhausted_at, retry_exhaustion_acknowledged_at, accepted_at, runner_result_persisted_at
+         FROM managed_background_deliveries WHERE session_id=? AND continuation_id=?`,
+    ).get(sessionId, continuationId) as {
+      retry_exhausted_at: number | null; retry_exhaustion_acknowledged_at: number | null;
+      accepted_at: number | null; runner_result_persisted_at: number | null;
+    } | undefined;
+    if (!row) return undefined;
+    if (row.retry_exhaustion_acknowledged_at != null || row.accepted_at != null ||
+        row.runner_result_persisted_at != null) return "resolved";
+    return row.retry_exhausted_at != null ? "exhausted" : "not_terminal";
+  }
+
   /** A live delivery frame diverted through catch-up hydration by a sequence gap must arm its
    * settlement BEFORE the hydration round-trip: the runner's trailing idle can arrive first, and
    * once the session is idle the projection-time arming would refuse. Creates the durable row
@@ -15486,6 +15554,7 @@ export class ControlPlaneDb {
       `SELECT delivery.continuation_id, delivery.parent_turn_id, delivery.queued_at,
               delivery.submitted_at, delivery.accepted_at, delivery.missing_result_at,
               delivery.missing_result_acknowledged_at, delivery.runner_result_persisted_at,
+              delivery.retry_exhausted_at, delivery.retry_exhaustion_acknowledged_at,
               delivery.transcript_projected_at, delivery.notification_queued_at,
               delivery.dashboard_observed_at, delivery.status_settled_at,
               COUNT(job.job_id) AS job_count,
@@ -15497,6 +15566,10 @@ export class ControlPlaneDb {
         WHERE delivery.session_id=?
         GROUP BY delivery.session_id, delivery.continuation_id
         ORDER BY CASE
+                   WHEN COALESCE(SUM(job.source_present), 0) > 0
+                     AND delivery.retry_exhausted_at IS NOT NULL AND delivery.accepted_at IS NULL
+                     AND delivery.retry_exhaustion_acknowledged_at IS NULL
+                     AND delivery.runner_result_persisted_at IS NULL THEN 0
                    WHEN COALESCE(SUM(job.source_present), 0) > 0
                      AND delivery.missing_result_at IS NOT NULL
                      AND delivery.missing_result_acknowledged_at IS NULL
@@ -15517,6 +15590,8 @@ export class ControlPlaneDb {
       accepted_at: number | null;
       missing_result_at: number | null;
       missing_result_acknowledged_at: number | null;
+      retry_exhausted_at: number | null;
+      retry_exhaustion_acknowledged_at: number | null;
       runner_result_persisted_at: number | null;
       transcript_projected_at: number | null;
       notification_queued_at: number | null;
@@ -15532,7 +15607,11 @@ export class ControlPlaneDb {
     );
     const views = rows.map((row): BackgroundDeliveryView => {
       let watchdogState: BackgroundDeliveryWatchdogState | undefined;
-      if (status !== "stopped" && row.active_job_count > 0 &&
+      if (status !== "stopped" && row.active_job_count > 0 && row.retry_exhausted_at != null &&
+          row.retry_exhaustion_acknowledged_at == null && row.accepted_at == null &&
+          row.runner_result_persisted_at == null) {
+        watchdogState = "capacity_retry_exhausted";
+      } else if (status !== "stopped" && row.active_job_count > 0 &&
           row.missing_result_at != null && row.missing_result_acknowledged_at == null &&
           row.runner_result_persisted_at == null) {
         watchdogState = "accepted_without_result";
@@ -15550,6 +15629,9 @@ export class ControlPlaneDb {
         ...(row.queued_at != null ? { queuedAt: row.queued_at } : {}),
         ...(row.submitted_at != null ? { submittedAt: row.submitted_at } : {}),
         ...(row.accepted_at != null ? { acceptedAt: row.accepted_at } : {}),
+        ...(row.retry_exhausted_at != null ? { retryExhaustedAt: row.retry_exhausted_at } : {}),
+        ...(row.retry_exhaustion_acknowledged_at != null
+          ? { retryExhaustionAcknowledgedAt: row.retry_exhaustion_acknowledged_at } : {}),
         ...(row.missing_result_at != null ? { missingResultAt: row.missing_result_at } : {}),
         ...(row.missing_result_acknowledged_at != null
           ? { missingResultAcknowledgedAt: row.missing_result_acknowledged_at }

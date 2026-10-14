@@ -160,3 +160,20 @@ test("native API transport cannot miss an abort that races IPC registration", as
   );
   assert.deepEqual(calls, ["remote_http_request", "remote_http_cancel"]);
 });
+
+
+test("native API transport forwards UI protocol negotiation without credential headers", async () => {
+  let frame: Uint8Array | undefined;
+  const desktop: NativeInvokeRuntime = {
+    async invoke<T>(_command: string, args?: Record<string, unknown> | Uint8Array): Promise<T> {
+      frame = args as Uint8Array;
+      return responseFrame(200, new TextEncoder().encode("{}")) as T;
+    },
+  };
+  const transport = createNativeApiTransport({ instanceId: "a", runtimeKey: "a:1", publicOrigin: "https://a.test", desktop });
+  await transport.request("/api/sessions", { headers: { "x-wollipog-ui-protocol": "220", authorization: "must-not-pass" } });
+  const length = new DataView(frame!.buffer, frame!.byteOffset).getUint32(0, true);
+  const meta = JSON.parse(new TextDecoder().decode(frame!.subarray(4, 4 + length)));
+  assert.deepEqual(meta.headers, [["x-wollipog-ui-protocol", "220"]]);
+  assert.doesNotMatch(new TextDecoder().decode(frame), /must-not-pass/);
+});

@@ -20,6 +20,7 @@
 import { ClaudeUsageAccounting, claudeRestoresUsage, claudeUsageCheckpoint } from "./claude-usage-accounting.js";
 import { parseClaudeInitCatalog } from "../discovery/claude-slash-catalog.js";
 import { randomUUID } from "node:crypto";
+import { claudeFailureCategory, type ProviderFailureCategory } from "./provider-failure.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { BACKGROUND_HANDOFF_WAIT_MAX_MS, type AgentQuestion, type PlanEntry, type PromptImage, type SessionConfig } from "@wollipog/protocol";
@@ -55,7 +56,7 @@ import type {
   PreparedDriverCommand,
   StopReason,
 } from "./driver.js";
-import { isProviderAuthenticationFailure } from "./provider-auth-failure.js";
+import { isProviderAuthenticationFailure, shouldRecoverProviderAuthentication } from "./provider-auth-failure.js";
 import { SKILL_TOOL_KIND, skillToolTitle } from "./skill-tool.js";
 import { readCompatibleEnv, type Environment } from "../env-compat.js";
 
@@ -602,6 +603,8 @@ export class ClaudeCodeDriver implements Driver {
   /** Provider account of why the active turn produced no output, kept for the durable receipt the
    * session manager writes after `prompt()` resolves. */
   private turnErrorText: string | null = null;
+  private turnFailureCategory: ProviderFailureCategory | null = null;
+  private settledRunnerTurnFailureCategory: ProviderFailureCategory | null | undefined;
   /** Error captured at a runner-owned settlement boundary. An unsolicited provider turn may begin
    * in the same stdout chunk before the runner promise resumes, so the next turn's accumulator
    * cannot be the durable receipt's only source. */
@@ -730,6 +733,11 @@ export class ClaudeCodeDriver implements Driver {
 
   lastTurnError(): string | null {
     return this.settledRunnerTurnErrorText ?? this.turnErrorText;
+  }
+
+  lastTurnFailureCategory(): ProviderFailureCategory | null {
+    return this.settledRunnerTurnFailureCategory !== undefined
+      ? this.settledRunnerTurnFailureCategory : this.turnFailureCategory;
   }
 
   setConfig(config: SessionConfig): void {
@@ -1061,6 +1069,7 @@ export class ClaudeCodeDriver implements Driver {
     // against an awaited pre-turn step would otherwise launch an invisible rogue turn).
     if (this.disposed) return Promise.resolve("cancelled");
     this.settledRunnerTurnErrorText = null;
+    this.settledRunnerTurnFailureCategory = undefined;
     const capabilityError = claudeCapabilityError(
       this.config,
       images ?? [],
@@ -1068,6 +1077,9 @@ export class ClaudeCodeDriver implements Driver {
       this.opts.orchestrator?.strictProjectIsolation !== false,
     );
     if (capabilityError) {
+      // This submission never owns the provider stream. Bind its local refusal without erasing
+      // an unsolicited turn's accumulator or inheriting the previous runner turn's category.
+      this.settledRunnerTurnFailureCategory = null;
       this.settledRunnerTurnErrorText = capabilityError;
       this.cb.onEvent({ kind: "error", message: capabilityError });
       return Promise.resolve("refusal");
@@ -1098,6 +1110,7 @@ export class ClaudeCodeDriver implements Driver {
     this.turnAnonymousShownText = "";
     this.turnAnonymousShownOverflow = false;
     this.turnErrorText = null;
+    this.turnFailureCategory = null;
   }
 
   async steer({ submissionId, text, images = [], deadlineAt }: DriverSteerInput): Promise<DriverSteerResult> {
@@ -1295,6 +1308,7 @@ export class ClaudeCodeDriver implements Driver {
         if (r !== "refusal" && r !== "cancelled") this.markSessionEstablished();
         if (r !== "refusal" && r !== "cancelled") this.settleUnverifiedBackgroundTasks();
         this.settledRunnerTurnErrorText = this.turnErrorText;
+        this.settledRunnerTurnFailureCategory = this.turnFailureCategory;
         resolve(r);
       };
 
@@ -1722,7 +1736,10 @@ export class ClaudeCodeDriver implements Driver {
     if (reason !== "cancelled") this.preparedBaseArgs();
     if (reason !== "refusal" && reason !== "cancelled") this.markSessionEstablished();
     if (reason !== "refusal" && reason !== "cancelled") this.settleUnverifiedBackgroundTasks();
-    if (turn.origin === "runner") this.settledRunnerTurnErrorText = this.turnErrorText;
+    if (turn.origin === "runner") {
+      this.settledRunnerTurnErrorText = this.turnErrorText;
+      this.settledRunnerTurnFailureCategory = this.turnFailureCategory;
+    }
     this.settlePersistentTurn(turn, reason);
     // Claude may have committed this result just before consuming a concurrently written steer as
     // its next input turn. The absent replay receipt makes that unknowable. Retire this process so
@@ -3310,12 +3327,15 @@ export class ClaudeCodeDriver implements Driver {
             const candidate = rejection ??
               claudeErrorResultText(msg, this.turnUnshownText, this.turnShownText);
             // An authentication diagnostic can carry a token or an authorization URL, so its raw
-            // text must never cross this boundary — it is replaced with static guidance and routed
-            // to the provider-auth recovery lane, exactly as every other driver call site does.
+            // text must never cross this boundary. Always redact it; reliable categories decide
+            // the recovery lane, while uncategorized diagnostics keep authentication fallback.
             // The complete text is classified before any bounding, because truncation can drop the
             // phrase that identifies it while keeping a credential near the front.
-            const authentication = !rejection && isProviderAuthenticationFailure(candidate);
+            this.turnFailureCategory = rejection ? "context" : claudeFailureCategory(msg);
+            const authenticationDiagnostic = isProviderAuthenticationFailure(candidate);
+            const authentication = !rejection && shouldRecoverProviderAuthentication(this.turnFailureCategory, authenticationDiagnostic);
             const message = authentication ? PROVIDER_AUTHENTICATION_ERROR
+              : authenticationDiagnostic ? "The provider could not complete this turn."
               : candidate ? truncate(candidate, 2_000) : null;
             if (message) {
               this.turnErrorText = message;

@@ -2371,6 +2371,19 @@ const client = {
     pushSession(value);
     return structuredClone(value);
   },
+  acknowledgeBackgroundRetryExhaustion: async (id: string, continuationId: string) => {
+    const value = model.sessions.find((candidate) => candidate.id === id);
+    if (!value) throw new Error("session not found");
+    const delivery = value.backgroundDeliveries?.find((candidate) => candidate.continuationId === continuationId);
+    if (!delivery?.retryExhaustedAt || delivery.acceptedAt || delivery.runnerResultPersistedAt) {
+      throw new Error("background delivery has not exhausted its retries");
+    }
+    delivery.retryExhaustionAcknowledgedAt = Date.now();
+    delete delivery.watchdogState;
+    value.updatedAt += 1;
+    pushSession(value);
+    return structuredClone(value);
+  },
   retitleSession: async (id: string) => {
     const value = model.sessions.find((candidate) => candidate.id === id);
     if (!value) throw new Error("session not found");

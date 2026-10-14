@@ -127,3 +127,15 @@ test("a blocked receipt's unfinished siblings hold the turn even when the bounde
   assert.equal(backgroundJobResultSentence(listed[0]!, "completed", unfinishedSiblings, NOW),
     "Returns to this conversation when the other job finishes");
 });
+
+
+test("exhausted delivery wording supersedes stale Returning result until acceptance", () => {
+  const item = finished({ continuationId: "continuation", continuationSubmittedAt: NOW });
+  const delivery: BackgroundDeliveryView = { continuationId: "continuation", parentTurnId: item.parentTurnId,
+    jobCount: 1, terminalCount: 1, retryExhaustedAt: NOW, watchdogState: "capacity_retry_exhausted" };
+  assert.equal(backgroundJobRowSentence(item, "completed", 0, NOW, [delivery]), "Result return stopped");
+  assert.equal(backgroundJobResultSentence(item, "completed", 0, NOW, [delivery]), "Automatic capacity retries ended before this result was accepted");
+  assert.equal(backgroundJobRowSentence(item, "completed", 0, NOW, [{ ...delivery, retryExhaustionAcknowledgedAt: NOW }]), "Result return stopped");
+  assert.equal(backgroundJobRowSentence(item, "completed", 0, NOW, [{ ...delivery, acceptedAt: NOW }]), "Returning result");
+  assert.equal(backgroundJobRowSentence(item, "completed", 0, NOW, [{ ...delivery, continuationId: "unrelated" }]), "Returning result");
+});

@@ -188,6 +188,7 @@ async function requestJson<T>(transport: ApiTransport, path: string, init?: Requ
     ...init,
     headers: {
       "content-type": "application/json",
+      "x-wollipog-ui-protocol": String(PROTOCOL_VERSION),
       ...(init?.headers ?? {}),
     },
   });
@@ -1146,6 +1147,12 @@ export function createApiClient(transport: ApiTransport) {
   acknowledgeBackgroundMissingResult: (id: string, continuationId: string) =>
     req<SessionView>(
       `/api/sessions/${encodeURIComponent(id)}/background-deliveries/${encodeURIComponent(continuationId)}/acknowledge-missing-result`,
+      { method: "POST" },
+    ),
+
+  acknowledgeBackgroundRetryExhaustion: (id: string, continuationId: string) =>
+    req<SessionView>(
+      `/api/sessions/${encodeURIComponent(id)}/background-deliveries/${encodeURIComponent(continuationId)}/acknowledge-retry-exhaustion`,
       { method: "POST" },
     ),
 

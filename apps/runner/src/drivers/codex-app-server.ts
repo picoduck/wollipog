@@ -48,7 +48,8 @@ import type {
 } from "./driver.js";
 import { classifyPoisonedProviderHistory, poisonedProviderHistoryMessage } from "./poisoned-provider-history.js";
 import { providerRejectionShape } from "./provider-rejection-shape.js";
-import { isProviderAuthenticationFailure } from "./provider-auth-failure.js";
+import { isProviderAuthenticationFailure, shouldRecoverProviderAuthentication } from "./provider-auth-failure.js";
+import { codexFailureCategory, type ProviderFailureCategory } from "./provider-failure.js";
 import { codexHttpFallbackWarning, codexInferenceConfiguration, type CodexInferenceConfiguration } from "./codex-inference-transport.js";
 import { stagePromptImages, type StagedPromptImages } from "./prompt-images.js";
 import {
@@ -553,6 +554,7 @@ export class CodexAppServerDriver implements Driver {
    * answering turn/start with an error, or the driver refusing to send it, proves non-delivery;
    * a transport failure after the write does not. */
   private turnStartError: string | null = null;
+  private turnFailureCategory: ProviderFailureCategory | null = null;
   private turnStartUndelivered = false;
   private promptBusy = false;
   /** Provider diagnostics are held until startup succeeds so an expected unsupported-feature
@@ -647,6 +649,10 @@ export class CodexAppServerDriver implements Driver {
 
   lastTurnError(): string | null {
     return this.turnStartError;
+  }
+
+  lastTurnFailureCategory(): ProviderFailureCategory | null {
+    return this.turnFailureCategory;
   }
 
   lastPromptUndelivered(): boolean {
@@ -1163,7 +1169,8 @@ export class CodexAppServerDriver implements Driver {
     const status = payload?.turn?.status;
     if (status === "failed") {
       this.streamedAgentResponse = false;
-      this.emitDriverError(payload?.turn?.error);
+      this.turnFailureCategory = codexFailureCategory(payload?.turn?.error);
+      this.emitDriverError(payload?.turn?.error, this.turnFailureCategory);
       this.settleTurn("refusal");
     } else if (status === "interrupted") {
       this.streamedAgentResponse = false;
@@ -1267,6 +1274,7 @@ export class CodexAppServerDriver implements Driver {
     // An in-flight turn has not settled, so its own outcome is still unset; clearing here keeps a
     // refused submission from reporting the previous one.
     this.turnStartError = null;
+    this.turnFailureCategory = null;
     this.turnStartUndelivered = false;
     if (this.promptBusy) {
       this.cb.onEvent({ kind: "error", message: "codex app-server already has a turn in progress" });
@@ -1333,7 +1341,7 @@ export class CodexAppServerDriver implements Driver {
         // thread is not established yet (#3085), so the turn is never sent and stays retriable.
         this.turnStartUndelivered = true;
         this.turnStartError = "turn/start not sent: threadId is null because the Codex thread is not established";
-        this.emitDriverError(this.turnStartError);
+        this.emitDriverError(this.turnStartError, this.turnFailureCategory);
         this.closeTurnUsage();
         this.settleTurn("refusal");
         return;
@@ -1351,11 +1359,18 @@ export class CodexAppServerDriver implements Driver {
         }
       }).catch((e: Json) => {
         if (generation !== this.promptGeneration || !this.turnResolve) return;
-        this.turnStartError = `turn/start failed: ${e?.message ?? String(e)}`;
+        this.turnFailureCategory = codexFailureCategory(e);
+        const authenticationDiagnostic = isProviderAuthenticationFailure(e?.message);
+        const authentication = shouldRecoverProviderAuthentication(this.turnFailureCategory, authenticationDiagnostic);
+        this.turnStartError = authentication ? "Provider authentication is required."
+          : authenticationDiagnostic ? "The provider could not complete this turn."
+          : `turn/start failed: ${e?.message ?? String(e)}`;
         // Codex's own error response proves no turn started; a broken transport after the write
         // cannot say whether Codex saw the request.
         this.turnStartUndelivered = !e?.transportFailure || e?.notSent === true;
-        this.emitDriverError(this.turnStartError);
+        // Route from original evidence before its safe replacement loses the auth pattern.
+        if (authentication) this.signalAuthenticationFailure();
+        else this.emitDriverError(this.turnStartError, this.turnFailureCategory);
         this.closeTurnUsage();
         this.settleTurn("refusal");
       });
@@ -2249,7 +2264,7 @@ export class CodexAppServerDriver implements Driver {
     });
   }
 
-  private emitDriverError(error: unknown): void {
+  private emitDriverError(error: unknown, category?: ProviderFailureCategory | null): void {
     let message = "";
     if (typeof error === "string") message = error;
     else if (error && typeof error === "object" && typeof (error as { message?: unknown }).message === "string") {
@@ -2261,12 +2276,16 @@ export class CodexAppServerDriver implements Driver {
         message = String(error);
       }
     }
-    if (!message || this.emittedErrors.has(message)) return;
-    this.emittedErrors.add(message);
-    if (isProviderAuthenticationFailure(message)) {
+    const authenticationDiagnostic = isProviderAuthenticationFailure(message);
+    const authentication = shouldRecoverProviderAuthentication(category, authenticationDiagnostic);
+    const deduplicationKey = authentication ? `authentication:${message}` : message;
+    if (!message || this.emittedErrors.has(deduplicationKey)) return;
+    this.emittedErrors.add(deduplicationKey);
+    if (authentication) {
       this.signalAuthenticationFailure();
       return;
     }
+    if (authenticationDiagnostic) message = "The provider could not complete this turn.";
     const poisoned = classifyPoisonedProviderHistory(message);
     if (poisoned) {
       // The rejection belongs in the transcript as the user-visible evidence for the quarantine,
