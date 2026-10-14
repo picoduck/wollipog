@@ -207,7 +207,9 @@ def read_owned_lease_chain_bounded(root, lock, include_snapshot=False, include_d
     migrating = anchor.get("version") == 4 and anchor["checkpoint"]["migration"] and len(present_retired) > CHECKPOINT_LIMITS["directoryEntries"] - CHECKPOINT_LIMITS["hardTransitions"]
     cap = CHECKPOINT_LIMITS["directoryEntries"] if anchor.get("version") == 4 and not migrating else CHECKPOINT_LIMITS["migrationEntries"]
     if len(root_entries) > cap or len(entries) > cap: fail("negotiated lease metadata storage limit exceeded")
-    metadata_bytes = sum(os.stat(name, dir_fd=directory, follow_symlinks=False).st_size for directory, names in ((root, [name for name in root_entries if name != "mutable-home.lock"]), (lock, entries)) for name in names)
+    # A staging link can disappear or grow while its writer finishes publication. Charge its
+    # complete allowed size without reopening it; staging never supplies ownership evidence.
+    metadata_bytes = sum(4096 if directory == root and PUBLICATION_TEMP.fullmatch(name) else os.stat(name, dir_fd=directory, follow_symlinks=False).st_size for directory, names in ((root, [name for name in root_entries if name != "mutable-home.lock"]), (lock, entries)) for name in names)
     if metadata_bytes > (10 if cap == CHECKPOINT_LIMITS["directoryEntries"] else 40) * 1024 * 1024: fail("negotiated lease metadata byte limit exceeded")
     if ".mutable-home.retired" in root_entries:
         info = os.stat(".mutable-home.retired", dir_fd=root, follow_symlinks=False)
