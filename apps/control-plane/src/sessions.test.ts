@@ -21789,6 +21789,27 @@ test("a stopped session's open estimate does not count toward the owner's daily 
     "$0.02 estimated for the running turn; the stopped session's $0.04 is accounted only if it is relaunched");
 });
 
+test("an interrupted turn's open estimate counts toward the day it ran, not every later day (#3196)", (t) => {
+  const { db, svc, seed, live, today } = liveDailyBudgetHarness(0.05);
+  const day = 86_400_000, start = Math.floor(Date.now() / day) * day + 12 * 3_600_000;
+  t.mock.timers.enable({ apis: ["Date"], now: start });
+  const a = seed();
+  live(a, 30, 10);
+  svc.onSessionStatus(a, "idle");
+  const card = db.getSession(a)!.pendingApproval!;
+  assert.equal(card.kind, "daily_budget", "the turn's spend happened today, though no process has accounted it yet");
+  assert.ok(db.getSession(a)!.liveUsage, "an interrupted turn leaves its window open");
+
+  t.mock.timers.setTime(start + day);
+  assert.equal(today(), 0);
+  assert.ok(svc.approve(a, card.requestId, "continue").ok);
+  assert.equal(db.getSession(a)!.pendingApproval, null, "the next day's allowance is not spent by yesterday's window");
+  const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, useWorktree: false }, undefined, {
+    organizationId: "org_personal", owner: { kind: "user", userId: "usr_local_owner" },
+  });
+  assert.ok(created.ok, created.error);
+});
+
 test("live tokens without a rate are not free toward the daily budget, while recorded unpriced usage keeps its old handling (#3196)", () => {
   const { db, svc, seed, live } = liveDailyBudgetHarness(10);
   const a = seed();

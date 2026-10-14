@@ -743,6 +743,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   live_cost_usd      REAL NOT NULL DEFAULT 0,
   live_unpriced_records INTEGER NOT NULL DEFAULT 0,
   live_settling  INTEGER NOT NULL DEFAULT 0,
+  live_observed_at INTEGER,
   created_at     INTEGER NOT NULL,
   updated_at     INTEGER NOT NULL,
   last_event_at  INTEGER,
@@ -6374,6 +6375,9 @@ export class ControlPlaneDb {
       // window (#3112). Until then the settled cost already includes them, so guardrails leave
       // the estimate out.
       "live_settling INTEGER NOT NULL DEFAULT 0",
+      // When the open window last saw a request (#3196). The daily budget counts a window only on
+      // the UTC day it ran, so an interrupted turn's window cannot spend every later day.
+      "live_observed_at INTEGER",
       // Phase 2: highest runner-owned event seq the cache has ingested (incremental hydration).
       "hydrated_seq INTEGER NOT NULL DEFAULT 0",
       // CP-owned event-log generation. Reprocess increments it so reconnecting dashboards can
@@ -13058,7 +13062,7 @@ export class ControlPlaneDb {
 
   private clearLiveUsageInTransaction(sessionId: string): void {
     this.stmt(`UPDATE sessions SET live_input_tokens=0, live_output_tokens=0, live_cost_usd=0, live_unpriced_records=0,
-      live_settling=0 WHERE id=?`).run(sessionId);
+      live_settling=0, live_observed_at=NULL WHERE id=?`).run(sessionId);
   }
 
   /** What cost guardrails add to the settled cost for a running Claude turn (#3112): the open
@@ -13072,15 +13076,16 @@ export class ControlPlaneDb {
   }
 
   /** The open live estimates of one user's live sessions, which their daily budget adds to today's
-   * settled spend (#3196), on the same terms as `sessionLiveGuardrail`. A terminal session runs no
-   * turn, and its window is accounted only if it is relaunched, so it is left out rather than
-   * shrinking every later day's allowance. */
-  ownerLiveCostUsd(organizationId: string, userId: string): number {
+   * settled spend (#3196), on the same terms as `sessionLiveGuardrail`. A window counts on the UTC
+   * day it last saw a request: an interrupted turn's window stays open until the next process
+   * accounts it, and the ledger books it on that later day, so it must not spend every day in
+   * between. A terminal session runs no turn and is accounted only if it is relaunched. */
+  ownerLiveCostUsd(organizationId: string, userId: string, now = Date.now()): number {
     const row = this.stmt(
       `SELECT COALESCE(SUM(s.live_cost_usd), 0) AS usd FROM sessions s JOIN session_ownership o ON o.session_id=s.id
         WHERE o.organization_id=? AND o.owner_kind='user' AND o.owner_id=? AND s.live_settling=0 AND s.live_cost_usd>0
-          AND s.status NOT IN ('completed','failed','stopped')`,
-    ).get(organizationId, userId) as { usd: number };
+          AND s.live_observed_at>=? AND s.status NOT IN ('completed','failed','stopped')`,
+    ).get(organizationId, userId, Math.floor(now / 86_400_000) * 86_400_000) as { usd: number };
     return Number(row.usd);
   }
 
@@ -13264,8 +13269,8 @@ export class ControlPlaneDb {
         this.stmt(
           `UPDATE sessions SET live_input_tokens=live_input_tokens+?, live_output_tokens=live_output_tokens+?,
              live_cost_usd=live_cost_usd+?, live_unpriced_records=live_unpriced_records+?, live_settling=0,
-             updated_at=? WHERE id=?`,
-        ).run(inputTokens, outputTokens, priced.costUsd, unpriced ? 1 : 0, occurredAt, sessionId);
+             live_observed_at=?, updated_at=? WHERE id=?`,
+        ).run(inputTokens, outputTokens, priced.costUsd, unpriced ? 1 : 0, occurredAt, occurredAt, sessionId);
       }
     }
     if (payload.kind === "token_usage" && (!payload.parentToolUseId || payload.independentUsage === true) &&
