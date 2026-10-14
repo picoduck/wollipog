@@ -3,6 +3,7 @@ import { CopyButton, Spinner } from "../common.js";
 import { FieldError } from "../FieldError.js";
 import { CheckIcon, ChevronRightIcon } from "../Icons.js";
 import { Notice } from "../Notice.js";
+import { affixSuffixRef } from "./affix-suffix.js";
 import { SegmentedControl, Select, type SelectOption } from "./ChoiceControls.js";
 
 /**
@@ -437,7 +438,7 @@ export function NumberRow({
               onChange={(event) => onChange(event.currentTarget.value)}
               onBlur={onBlur}
             />
-            {unit && <span className="input-affix-text" id={unitId}>{unit}</span>}
+            {unit && <span className="input-affix-text" id={unitId} ref={affixSuffixRef}>{unit}</span>}
           </span>
           {error && <FieldError id={errorId}>{error}</FieldError>}
         </span>

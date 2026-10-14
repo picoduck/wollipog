@@ -8,6 +8,7 @@ import { Modal } from "./common.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { FieldError } from "./FieldError.js";
 import { Notice } from "./Notice.js";
+import { affixSuffixRef } from "./ui/affix-suffix.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { Select } from "./ui/ChoiceControls.js";
 import {
@@ -319,7 +320,7 @@ export function TitleEndpointDialog({
                   onChange={(event) => setField("timeout", event.target.value)}
                   onBlur={() => blur("timeout")}
                 />
-                <span className="input-affix-text" id={id("timeout-unit")}>ms</span>
+                <span className="input-affix-text" id={id("timeout-unit")} ref={affixSuffixRef}>ms</span>
               </span>
             </div>
           </div>

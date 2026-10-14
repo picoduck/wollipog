@@ -3263,7 +3263,10 @@ input {
 /* Input affix (§8.1): a prefix or unit suffix drawn inside the field's own edge, on its height, in
    --text-dim. The input keeps its border, height and focus ring; its padding makes room for the
    affix, so an affixed field is exactly as tall as a plain one. A suffix sits after the input and
-   a prefix before it; the affix is not a target (a click reaches the input under it). */
+   a prefix before it; the affix is not a target (a click reaches the input under it). A unit's room
+   is the unit as drawn (`affixSuffixRef` measures it into --affix-suffix-w, #3185): it is set in the
+   row's type and the system face, so 2em of the field's font, the room before measuring, cost a
+   96px field a digit and on 16px field text two. */
 .input-affix {
   position: relative;
   display: block;
@@ -3284,9 +3287,25 @@ input {
 .input-affix-text:first-child { inset-inline-start: var(--space-3); }
 .input-affix-text:last-child { inset-inline-end: var(--space-3); }
 .input-affix:has(> .input-affix-text:first-child) > input { padding-inline-start: calc(var(--space-3) + 1em + var(--space-1)); }
-.input-affix:has(> .input-affix-text:last-child) > input { padding-inline-end: calc(var(--space-3) + 2em + var(--space-1)); }
-/* Field widths (§8.3): `.w-xs` for numbers, ports and counts, with the unit inside the field. */
+.input-affix:has(> .input-affix-text:last-child) > input {
+  padding-inline-end: calc(var(--space-3) + var(--affix-suffix-w, 2em) + var(--space-1));
+}
+/* A number field with a unit has no spin buttons: the engine keeps their room (about 15px) beside
+   the value even at rest, which is a digit and a half of a 96px field. The arrow keys still step. */
+.input-affix:has(> .input-affix-text:last-child) > input[type="number"] { appearance: textfield; }
+.input-affix:has(> .input-affix-text:last-child) > input[type="number"]::-webkit-inner-spin-button,
+.input-affix:has(> .input-affix-text:last-child) > input[type="number"]::-webkit-outer-spin-button {
+  appearance: none;
+  margin: 0;
+}
+/* Field widths (§8.3): `.w-xs` for numbers, ports and counts, with the unit inside the field. Field
+   text is 16px on phones and coarse pointers (the iOS focus-zoom guard at the end of this file), and
+   five digits of it beside a unit need 120px. It weighs one class, as `.w-xs` does, so a layout that
+   stretches the field (a stacked setting row) still wins. */
 .w-xs { width: 96px; }
+@media (max-width: 760px), (pointer: coarse) {
+  .w-xs:where(.input-affix:has(> .input-affix-text:last-child)) { width: 120px; }
+}
 /* SSH-config import picker in "Add a box" — match the dialog's text inputs. */
 textarea {
   padding: var(--space-2) var(--space-3);
@@ -18590,14 +18609,6 @@ a.tab { text-decoration: none; }
   gap: var(--space-3);
 }
 .title-endpoint-pair > .field { min-width: 0; }
-/* The shared affix keeps 12px insets and 2em for its suffix, which leaves a 96px field about 40px for
-   digits: too little for 30,000 in a wide system face (DejaVu Sans). "ms" needs 1.5em, and 8px
-   insets keep it clear of the edge. */
-.title-endpoint-pair .input-affix:has(> .input-affix-text:last-child) > input {
-  padding-inline-start: var(--space-2);
-  padding-inline-end: calc(var(--space-2) + 1.5em + var(--space-1));
-}
-.title-endpoint-pair .input-affix-text:last-child { inset-inline-end: var(--space-2); }
 .title-endpoint-secret {
   display: flex;
   flex-wrap: wrap;
@@ -18611,12 +18622,6 @@ a.tab { text-decoration: none; }
   color: var(--text-dim);
 }
 .title-endpoint-secret-actions { display: flex; gap: var(--space-2); }
-/* Field text is 16px on phones and coarse pointers (the iOS focus-zoom guard), and a 96px field with
-   "ms" inside it then shows four digits of a five-digit timeout. The field grows just enough to show
-   30,000 whole. */
-@media (max-width: 760px), (pointer: coarse) {
-  .title-endpoint-pair .w-xs { width: 120px; }
-}
 
 /* A phone's Settings index (§6.2): the sections as two-line rows in three surfaces, each opening its
    own page. No row is ever selected. */

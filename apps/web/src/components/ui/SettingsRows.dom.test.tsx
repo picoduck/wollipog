@@ -20,6 +20,7 @@ import {
   SwitchRow,
   ValueRow,
 } from "./SettingsRows.js";
+import { AFFIX_SUFFIX_PROPERTY } from "./affix-suffix.js";
 import { SELECT_LIST_CHROME_PX, SELECT_LIST_MIN_WIDTH_PX, resetSelectPreviewRegistry, type SelectOption } from "./ChoiceControls.js";
 import { AppearancePanel } from "../SettingsView.js";
 import { ThemeProvider, useTheme } from "../ThemeProvider.js";
@@ -1726,6 +1727,61 @@ test("a number row is a 96px field with its unit inside, named by the title and 
   } finally {
     await cleanup();
   }
+});
+
+test("a number row's unit reserves its drawn width, written only on change, until the unit goes (#3185)", async () => {
+  // happy-dom does no layout, so the observer is one this test fires by hand.
+  const live = new Set<FakeResizeObserver>();
+  class FakeResizeObserver {
+    readonly targets: Element[] = [];
+    constructor(readonly callback: ResizeObserverCallback) { live.add(this); }
+    observe(target: Element) { this.targets.push(target); }
+    unobserve() {}
+    disconnect() { live.delete(this); }
+    resize(inlineSize: number) {
+      const entry = { borderBoxSize: [{ inlineSize, blockSize: 16 }], contentRect: { width: inlineSize } };
+      this.callback([entry as unknown as ResizeObserverEntry], this as unknown as ResizeObserver);
+    }
+  }
+  const priorObserver = (globalThis as Record<string, unknown>).ResizeObserver;
+  Object.defineProperty(globalThis, "ResizeObserver", { configurable: true, writable: true, value: FakeResizeObserver });
+  let setUnit!: (unit: string | undefined) => void;
+  function Row() {
+    const [unit, update] = React.useState<string | undefined>("min");
+    setUnit = update;
+    return <NumberRow title="Idle Timeout" value="30" unit={unit} onChange={() => undefined} />;
+  }
+  const { container, cleanup } = await render(<Row />);
+  try {
+    const field = container.querySelector<HTMLElement>(".input-affix")!;
+    assert.equal(live.size, 1, "one observer per unit");
+    const [observer] = live;
+    assert.equal(observer!.targets[0], field.querySelector(".input-affix-text"), "it watches the unit");
+    assert.equal(field.style.getPropertyValue(AFFIX_SUFFIX_PROPERTY), "", "unmeasured, the stylesheet's 2em holds");
+
+    const writes: string[] = [];
+    const setProperty = field.style.setProperty.bind(field.style);
+    field.style.setProperty = (name: string, value: string | null, priority?: string) => {
+      writes.push(`${name}: ${value}`);
+      setProperty(name, value, priority);
+    };
+    observer!.resize(21.703125);
+    observer!.resize(21.703125);
+    assert.deepEqual(writes, [`${AFFIX_SUFFIX_PROPERTY}: 21.703125px`], "an unchanged width writes nothing");
+    assert.equal(field.style.getPropertyValue(AFFIX_SUFFIX_PROPERTY), "21.703125px");
+
+    await act(async () => { setUnit(undefined); });
+    assert.equal(container.querySelector(".input-affix"), field, "the same field, now without a unit");
+    assert.equal(live.size, 0, "removing the unit disconnects its observer");
+    assert.equal(field.style.getPropertyValue(AFFIX_SUFFIX_PROPERTY), "", "and clears its reservation");
+
+    await act(async () => { setUnit("s"); });
+    assert.equal(live.size, 1, "a unit that returns is measured again");
+  } finally {
+    await cleanup();
+    Object.defineProperty(globalThis, "ResizeObserver", { configurable: true, writable: true, value: priorObserver });
+  }
+  assert.equal(live.size, 0, "unmounting the row disconnects its observer");
 });
 
 test("an invalid number is aria-invalid with a field error under the field, which it points at first", async () => {
