@@ -1233,6 +1233,17 @@ Provider `thread/archive` is used only as best-effort cleanup for a newly minted
 fails before the target session becomes durable. That thread is manager-owned and has no external
 consumer yet.
 
+Both requests are bounded. `thread/fork` must settle within `CODEX_THREAD_FORK_REQUEST_TIMEOUT_MS`
+(120 seconds) and `thread/archive` within `CODEX_THREAD_ARCHIVE_REQUEST_TIMEOUT_MS` (30 seconds).
+An unanswered request fails with an error that names only its method (for example
+`Codex app-server did not answer thread/fork within 120 seconds`), never request or provider
+payload. A stalled fork fails the fork operation with that error. A stalled archive is logged and
+abandoned, and the original fork failure is still reported after the target worktree is removed.
+Unlike the launch handshake, these requests do not fail early on a discarded oversized record,
+because a live session may stream unrelated large records while they are pending. If `thread/fork`
+times out but the provider creates the thread later, the runner never learns that thread's id. It
+cannot archive that thread.
+
 ### 3.8 Privacy-safe operational telemetry
 
 Protocol v29 reports content-free observations for `launch`, `resume`, `approval`, `crash`, and
