@@ -150,6 +150,8 @@ const RUNTIME_PROPERTIES = new Map([
   // InboxView measures the stacked list's head, the notice slot and the order line (#2221); absent,
   // it takes no rows.
   ["--sessions-list-head-rows", { why: "set by InboxView from the list head's measured height", fallback: "0" }],
+  // affixSuffixRef measures an affix field's unit (#3185); unmeasured, the suffix keeps 2em.
+  ["--affix-suffix-w", { why: "measured by affixSuffixRef from the unit as drawn", fallback: "2em" }],
 ]);
 
 /** Every declaration value in the stylesheet. */

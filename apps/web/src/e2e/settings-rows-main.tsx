@@ -16,6 +16,7 @@ import { OrchestratorSettingsPanel } from "../components/OrchestratorSettingsPan
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { interceptLeave } from "../leave-guard.js";
 import { SettingsGroup, StaticRow } from "../components/ui/SettingsRows.js";
+import { NumberFields } from "./setting-number-fields.js";
 import { RowKinds } from "./setting-row-kinds.js";
 import { ApprovalsPanel } from "../components/ApprovalsPanel.js";
 import { createApiClient } from "../api.js";
@@ -379,6 +380,7 @@ function Harness() {
     : COLOR_SCHEMES;
   document.documentElement.setAttribute("data-theme", theme);
   const kinds = params.get("view") === "kinds";
+  const numbers = params.get("view") === "numbers";
   const groupWidth = Number(params.get("group-width")) || null;
 
   const disabled = state === "disabled";
@@ -417,7 +419,8 @@ function Harness() {
           <SettingsView
             section={section}
             onNavigate={navigate}
-            panels={kinds ? Object.fromEntries(SETTINGS_SECTIONS.map((entry) => [entry.id, groupWidth
+            panels={numbers ? Object.fromEntries(SETTINGS_SECTIONS.map((entry) => [entry.id, <NumberFields />])) as Record<SettingsSection, React.ReactNode>
+              : kinds ? Object.fromEntries(SETTINGS_SECTIONS.map((entry) => [entry.id, groupWidth
               ? <div className="settings-panel" style={{ width: groupWidth }}><RowKinds /></div>
               : <RowKinds />])) as Record<SettingsSection, React.ReactNode> : {
               appearance: (

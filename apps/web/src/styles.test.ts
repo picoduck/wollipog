@@ -113,6 +113,8 @@ test("every referenced custom property is defined in the shared root scope", () 
     "--sessions-list-rows",
     // The whole rows the stacked list's head takes (#2221); absent means none.
     "--sessions-list-head-rows",
+    // affixSuffixRef's measured unit (#3185); absent means the suffix keeps 2em.
+    "--affix-suffix-w",
   ]);
 
   // Component-local by design (docs/design-system.md §19.4 rejects promoting them): each is
