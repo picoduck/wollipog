@@ -6,6 +6,7 @@ import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { monitorEventLoopDelay } from "node:perf_hooks";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -98,6 +99,62 @@ test("a real WebSocket closing under queue pressure completes its handshake with
   queue.close();
 });
 
+// Health request logs can overwrite all reconciliation evidence in the raw output tail.
+// Keep a small, numeric-only trace separately; each stream owns its partial-line buffer.
+class ReconciliationDiagnostics {
+  private lifecycle: Record<string, string | number>[] = [];
+  private slowUpdates: Record<string, string | number>[] = [];
+
+  capture(): (chunk: unknown) => void {
+    let partial = "";
+    return (chunk) => {
+      const lines = (partial + String(chunk)).split("\n");
+      partial = (lines.pop() ?? "").slice(-16_384);
+      for (const line of lines) {
+        if (!line.includes("runner_reconciliation_") && !line.includes("session_runtime_update_slow")) continue;
+        try {
+          let value = JSON.parse(line);
+          if (!value?.event && typeof value?.msg === "string") value = JSON.parse(value.msg);
+          if (!["runner_reconciliation_started", "runner_reconciliation_completed", "runner_reconciliation_cancelled",
+            "runner_reconciliation_failed", "session_runtime_update_slow"].includes(value?.event)) continue;
+          const item: Record<string, string | number> = { event: value.event };
+          for (const key of ["snapshotCount", "batches", "snapshotBatchLimit", "affectedCampaigns", "maxBatchMs", "durationMs"])
+            if (typeof value[key] === "number" && Number.isFinite(value[key])) item[key] = value[key];
+          const events = value.event === "session_runtime_update_slow" ? this.slowUpdates : this.lifecycle;
+          events.push(item);
+          if (events.length > 16) events.shift();
+        } catch { /* Ignore malformed or truncated log lines; they remain in the raw tail. */ }
+      }
+    };
+  }
+
+  summary(): string { return JSON.stringify({ reconciliation: this.lifecycle, slowUpdates: this.slowUpdates }); }
+}
+
+test("reconciliation diagnostics survive noisy split logs while remaining bounded and numeric-only", () => {
+  const trace = new ReconciliationDiagnostics();
+  const stdout = trace.capture();
+  const stderr = trace.capture();
+  const start = JSON.stringify({ msg: JSON.stringify({ event: "runner_reconciliation_started", snapshotCount: 1500,
+    hostname: "synthetic-private-host", token: "synthetic-private-token" }) }) + "\n";
+  stdout(start.slice(0, 37));
+  stderr("unrelated stderr line\n");
+  stdout(start.slice(37));
+  stdout((JSON.stringify({ msg: "request completed", durationMs: 1 }) + "\n").repeat(10_000));
+  for (let i = 0; i < 40; i++) stderr(JSON.stringify({ event: "session_runtime_update_slow", durationMs: i,
+    arbitrary: "must not be retained" }) + "\n");
+  stdout("{".repeat(20_000));
+  stdout("\n{invalid runner_reconciliation_started\n");
+  stderr(JSON.stringify({ msg: JSON.stringify({ event: "runner_reconciliation_completed", maxBatchMs: 75 }) }) + "\n");
+  const result = JSON.parse(trace.summary());
+  assert.deepEqual(result.reconciliation, [{ event: "runner_reconciliation_started", snapshotCount: 1500 },
+    { event: "runner_reconciliation_completed", maxBatchMs: 75 }]);
+  assert.equal(result.slowUpdates.length, 16);
+  assert.equal(result.slowUpdates[0].durationMs, 24);
+  assert.equal(result.slowUpdates.at(-1).durationMs, 39);
+  assert.doesNotMatch(trace.summary(), /synthetic-private|must not be retained/);
+});
+
 test("1500 retained campaign children reconcile while real HTTP and heartbeat pongs make progress", { timeout: 180_000 }, async (t) => {
   const port = await reservePort();
   const temp = mkdtempSync(join(tmpdir(), "wollipog-reconcile-responsive-"));
@@ -132,16 +189,23 @@ test("1500 retained campaign children reconcile while real HTTP and heartbeat po
   seed.close();
   let output = "";
   let reconciliationCompleted = false;
+  const trace = new ReconciliationDiagnostics();
+  const captureStdout = trace.capture();
+  const captureStderr = trace.capture();
+  const clientLoopDelay = monitorEventLoopDelay({ resolution: 20 });
+  clientLoopDelay.enable();
+  t.after(() => clientLoopDelay.disable());
   const child = spawn(process.execPath, ["--import", "tsx", "apps/control-plane/src/index.ts"], {
     cwd: REPO_ROOT, env: { ...process.env, CONTROL_PLANE_HOST: "127.0.0.1",
       CONTROL_PLANE_PORT: String(port), CONTROL_PLANE_DB: databasePath },
     stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
   });
   child.stdout?.on("data", (chunk) => {
+    captureStdout(chunk);
     output = (output + String(chunk)).slice(-128_000);
     reconciliationCompleted ||= output.includes("runner_reconciliation_completed");
   });
-  child.stderr?.on("data", (chunk) => { output = (output + String(chunk)).slice(-128_000); });
+  child.stderr?.on("data", (chunk) => { captureStderr(chunk); output = (output + String(chunk)).slice(-128_000); });
   const sockets: StrictSocket[] = [];
   let read: DatabaseSync | undefined;
   t.after(async () => {
@@ -155,7 +219,14 @@ test("1500 retained campaign children reconcile while real HTTP and heartbeat po
   read = new DatabaseSync(databasePath, { readOnly: true });
   let maxHealthMs = 0;
   let maxPongMs = 0;
+  let maxHandshakeMs = 0;
+  const failureContext = (pass: number, started: number) => JSON.stringify({
+    pass, elapsedMs: Math.round(performance.now() - started),
+    maxHandshakeMs: Math.round(maxHandshakeMs), maxHealthMs: Math.round(maxHealthMs), maxPongMs: Math.round(maxPongMs),
+    clientLoopDelayMs: Math.round(clientLoopDelay.max / 1_000_000), progress: JSON.parse(trace.summary()),
+  });
   for (let pass = 0; pass < 3; pass++) {
+    clientLoopDelay.reset();
     const socket = await openSocket(`ws://127.0.0.1:${port}/runner`);
     sockets.push(socket);
     // Behave like a real runner throughout the convergence wait, not just during probe samples.
@@ -188,8 +259,9 @@ test("1500 retained campaign children reconcile while real HTTP and heartbeat po
       socket.send(JSON.stringify({ type: "agent_control_credential", sessionId: "new-credential-session", tokenHash: "b".repeat(64) }));
       socket.send(JSON.stringify({ type: "policy_hook_credential", sessionId: "new-credential-session", tokenHash: "c".repeat(64) }));
     }
+    const handshakeStarted = performance.now();
     const credentialHandshake = new Promise<void>((resolvePromise, reject) => {
-      const timer = setTimeout(() => reject(new Error(`Agent Control handshake stalled during inventory\n${output}`)), 2000);
+      const timer = setTimeout(() => reject(new Error(`Agent Control handshake stalled during inventory\n${failureContext(pass, handshakeStarted)}\n${output}`)), 2000);
       socket.on("message", (raw) => {
         const message = JSON.parse(raw.toString());
         if (message.type !== "agent_control_credential_registered" || message.sessionId !== "child-1499") return;
@@ -200,6 +272,8 @@ test("1500 retained campaign children reconcile while real HTTP and heartbeat po
     });
     socket.send(JSON.stringify({ type: "agent_control_credential", sessionId: "child-1499", tokenHash: "a".repeat(64) }));
     await credentialHandshake;
+    maxHandshakeMs = Math.max(maxHandshakeMs, performance.now() - handshakeStarted);
+    assert.ok(maxHandshakeMs < 2000, `Agent Control handshake latency exceeded 2s\n${failureContext(pass, handshakeStarted)}`);
     // The real runner republishes negotiated metadata for every retained session immediately
     // after registration. Exercise that burst, not just one isolated live update.
     for (const snap of snapshots) socket.send(JSON.stringify({ type: "session_runtime_updated",
@@ -213,14 +287,14 @@ test("1500 retained campaign children reconcile while real HTTP and heartbeat po
     const probe = async () => {
       const start = performance.now();
       const pong = new Promise<void>((resolvePromise, reject) => {
-        const timer = setTimeout(() => reject(new Error(`pong exceeded 2s during reconciliation\n${output}`)), 2000);
+        const timer = setTimeout(() => reject(new Error(`pong exceeded 2s during reconciliation\n${failureContext(pass, start)}\n${output}`)), 2000);
         socket.once("pong", () => { clearTimeout(timer); maxPongMs = Math.max(maxPongMs, performance.now() - start); resolvePromise(); });
       });
       socket.ping();
       socket.send(JSON.stringify({ type: "heartbeat" }));
       const [response] = await Promise.all([
         fetch(`${url}/healthz`, { signal: AbortSignal.timeout(2000) }), pong,
-      ]);
+      ]).catch((error: unknown) => { throw new Error(`HTTP/pong probe failed during inventory\n${failureContext(pass, start)}\n${output}`, { cause: error }); });
       assert.equal(response.status, 200);
       maxHealthMs = Math.max(maxHealthMs, performance.now() - start);
     };
@@ -230,6 +304,7 @@ test("1500 retained campaign children reconcile while real HTTP and heartbeat po
     // intentionally preserved even when newer runner state is successfully applied. Allow slow
     // file-backed test hosts to converge under full-suite fsync contention. Probe throughout the
     // entire replay, not just its first few steps; HTTP/pong deadlines remain two seconds.
+    const convergenceStarted = performance.now();
     const deadline = Date.now() + 60_000;
     while (Date.now() < deadline) {
       if (read.prepare("SELECT runner_snapshot_fingerprint FROM sessions WHERE id='child-1499'").get()?.runner_snapshot_fingerprint === fingerprint) break;
@@ -237,7 +312,7 @@ test("1500 retained campaign children reconcile while real HTTP and heartbeat po
       await delay(50);
     }
     assert.equal(read.prepare("SELECT runner_snapshot_fingerprint FROM sessions WHERE id='child-1499'").get()?.runner_snapshot_fingerprint,
-      fingerprint, `newer snapshot did not converge\n${output}`);
+      fingerprint, `newer snapshot did not converge\n${failureContext(pass, convergenceStarted)}\n${output}`);
     if (newBindings) assert.deepEqual(await newBindings, [true, true], "new session bindings wait for materialization rather than being rejected");
   }
   // Shell output bypasses the runner outbox and legitimately exceeds the queue's byte ceiling
@@ -260,7 +335,7 @@ test("1500 retained campaign children reconcile while real HTTP and heartbeat po
     `the bounded shell tail did not reach the end of the burst\n${output}`);
   assert.ok(maxHealthMs < 2000, `health latency ${maxHealthMs}ms`);
   assert.ok(maxPongMs < 2000, `heartbeat latency ${maxPongMs}ms`);
-  t.diagnostic(`Three registrations: max HTTP ${Math.round(maxHealthMs)}ms, max pong ${Math.round(maxPongMs)}ms`);
+  t.diagnostic(`Three registrations: max handshake ${Math.round(maxHandshakeMs)}ms, max HTTP ${Math.round(maxHealthMs)}ms, max pong ${Math.round(maxPongMs)}ms`);
   assert.equal(reconciliationCompleted, true);
   t.diagnostic(`Reconciliation cancellation observed: ${/runner_reconciliation_cancelled/.test(output)}`);
   assert.doesNotMatch(output, /runner frame handler threw|runner_frame_queue_closed/);
