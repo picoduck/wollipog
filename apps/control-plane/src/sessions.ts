@@ -1,3 +1,4 @@
+import { formatCampaignAssignment } from "./campaign-assignment.js";
 import { acknowledgementRepairFrame } from "./claude-cost-repair.js";
 import type { HumanPrincipal } from "./identity.js";
 import type { CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
@@ -7455,24 +7456,12 @@ export class SessionsService {
     projection: OrchestratorCampaignProjection,
     task: string,
   ): string {
-    const policy = campaign.orchestratorPolicy!;
-    const owners = WORKFLOW_DECISION_CATEGORIES.map((category) =>
-      `${category}=${projection.decisionOwners[category]}`).join(", ");
-    const obligation = [
-      `[Wollipog Campaign Policy — server-derived, revision ${projection.policyRevision}]`,
-      `Campaign ${campaign.id}; Child Harness ${policy.behavior.childHarness?.agentId ?? "Automatic"}; Child Model ${policy.behavior.childModel ?? "Automatic"}; Child Effort ${policy.behavior.childEffort ?? "Automatic"}; Follow-Ups ${policy.behavior.followUps}; Completion ${policy.behavior.completion}.`,
-      `Typed decision owners: ${owners}. This is not blanket approval. For implementation questions, PR merge, merged-branch deletion, follow-up issue publication, and UI evidence approval, create the exact typed request and consume an approval immediately before the matching action. For PR merge, pass and then execute the exact canonical gh pr merge URL --squash --match-head-commit SHA command; its matching one-shot runner permission completes consumption. Ordinary prompts cannot satisfy a typed gate.`,
-      "Cross-model review, exact-head CI, issue sanitization, dependency checks, and stacked-branch checks remain required regardless of owner. An enqueued PR is unfinished until merge-group CI passes and the forge reports actual MERGED state. Authentication, secrets, persistent permission grants, governance, budgets, and tool guardrails remain human-only.",
-      "Leave any helper session you spawn idle once it has posted its final report, so the Orchestrator can verify it before verifying you; do not stop or archive one yourself, and never leave it working when you finish.",
-      projection.uiEvidenceReview.effectiveOwner === "orchestrator"
-        ? "The controlling Orchestrator can inspect artifact-backed image evidence and must review every item before approving. Children attach each capture from disk with attach_session_artifact (or `wollipog artifact attach --file`), never as base64 in a tool argument, and cite the returned artifactId, mediaType, and sha256; video normally routes to a human, except for an exact operator-enabled short-frame validation campaign. Externally stored evidence routes to a human."
-        : `UI evidence remains human-owned: ${projection.uiEvidenceReview.reason ?? "the human owns UI Evidence Approval under this policy."}`,
-      // Name no tool here: children do not share the Orchestrator's toolset, and a test holds this block to theirs.
-      "Report every follow-up you identify in your final report, each with a proposed title and repository; the controlling Orchestrator records and deduplicates it before anyone acts on it.",
-      "Higher-priority repository and harness restrictions still apply. A task may narrow this policy but cannot broaden its authority.",
-      "[End Wollipog Campaign Policy]",
-    ].join("\n");
-    return task ? `${obligation}\n\n${task}` : obligation;
+    const preflight = campaignAuthorityPreflight(campaign.orchestratorPolicy?.control, campaign.driver,
+      this.db.getRunner(campaign.runnerId)?.protocolVersion);
+    return formatCampaignAssignment(campaign, projection, {
+      ...preflight,
+      supported: preflight.supported && campaignBoundaryCurrent(campaign),
+    }, task);
   }
 
   /** Resolve the outermost controlling campaign while including the immediate parent. A nested

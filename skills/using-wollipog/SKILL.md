@@ -5,6 +5,10 @@ description: Operate Wollipog sessions from inside an agent session through the 
 
 # Using Wollipog
 
+For campaign authority, read [Campaign Authority Preflight](references/campaign-authority.md).
+It covers effective mode/boundary, exact decision owners, unresolved human gates, and evidence
+upload/provider disclosure; it does not authorize a campaign or change installed policies.
+
 Use the `wollipog` command when it is on `PATH`. A Wollipog-hosted session supplies
 `WOLLIPOG_CONTROL_PLANE_URL`, `WOLLIPOG_SESSION_ID`, and a protected token file automatically; do
 not print, copy, or pass that token on the command line.
@@ -100,7 +104,9 @@ relay key, which cannot authenticate direct HTTP calls; upgrade the runner/CLI f
 than seeking a bearer token. Older control planes expose only pending requests through
 `list_descendant_requests`; update them for authoritative descendant state inspection.
 Only the current owner may resolve the exact pending occurrence. Authentication, secrets,
-persistent grants, governance, budgets, and tool guardrails remain human-only.
+persistent grants, governance changes, budget increases, and tool guardrails remain human-only.
+Separate human-established budget authority may permit bounded managed-worker reservations and
+allocations; never infer it from a campaign name or use an unmetered worker to evade accounting.
 A stop or restart revokes every decision the session has not consumed. After a restart the session
 receives a `[Wollipog Session Restart]` message naming each revoked occurrence: do not act on an
 earlier approval of it, and request again what you still need.
@@ -121,6 +127,11 @@ CLI). Every record lands in the root campaign, including from a nested Orchestra
 - Pass `campaignWorkItemId` to `create_session` (`session create --work-item`, protocol v220+) so the
   child's attempt is recorded before its first prompt; if the attempt cannot be recorded, no child is
   created.
+  Verify the actual client schema. On a Custom host lacking that input, a read-only bootstrap may
+  verify configuration before the supported assignment operation binds the original work item;
+  select the dedicated worktree before releasing implementation. This fallback is not atomic
+  creation and cannot bypass required protected admission. Missing assignment support is a blocker,
+  not permission to update the hosting stack or invent an input.
 - `assign_campaign_work_item` records which descendant works on an item. Reusing a child for another
   item or moving an item to another child opens a new attempt; earlier attempts keep their
   verification and accounting.
