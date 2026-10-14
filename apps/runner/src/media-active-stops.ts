@@ -70,7 +70,13 @@ export class RunnerMediaActiveStops {
       // Recheck the same registered handle and authority at the irreversible boundary.
       if (this.ports.current(identity) !== handle || !this.ports.currentAuthority(identity) ||
         this.fences.stopOperation(dispatch) !== request.operationId) return receipt(request, "unknown");
-      try { handle.requestStop(); } catch { return receipt(request, "unknown"); }
+      try {
+        // A registry refresh can retain this object while replacing its worker coordinates.
+        // Recheck the complete identity after the final authority/fence callbacks. Malformed
+        // coordinates retain this committed operation as unknown, just like a failed signal.
+        if (json(mediaActiveStopIdentityBody(handle.identity)) !== json(identity)) return receipt(request, "unknown");
+        handle.requestStop();
+      } catch { return receipt(request, "unknown"); }
       this.db.prepare("UPDATE runner_media_active_stops SET outcome='stop_requested' WHERE session_id=? AND generation=? AND request=? AND sha256=?")
         .run(request.sessionId, request.generation, json(request), hash(request));
       return receipt(request, "stop_requested");

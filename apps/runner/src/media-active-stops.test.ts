@@ -82,3 +82,53 @@ test("missing Stop history cannot clear the original command's permanent operati
   assert.equal(f.fences.stopOperation(f.dispatch), request.operationId);
   assert.equal(f.stops(), 1);
 });
+
+for (const changed of ["control", "rootSessionId", "childSessionId", "sessionId", "runnerId", "generation",
+  "commandSha256", "dispatchSha256", "malformed-generation", "malformed-command"] as const) {
+  test("final Stop handle refresh preserves exact intent without signaling " + changed, (t) => {
+    const db = new DatabaseSync(":memory:"); t.after(() => db.close());
+    const fences = new RunnerMediaDispatchFences(db);
+    const { childSessionId: _child, ...dispatch } = identity;
+    assert.equal(fences.claim(dispatch), true);
+    let stops = 0, authorityChecks = 0;
+    const handle: OwnedMediaStopHandle = { identity: { ...identity }, requestStop() { stops++; } };
+    const ports = {
+      current: (i: MediaActiveStopIdentity) => JSON.stringify(handle.identity) === JSON.stringify(i) ? handle : null,
+      currentAuthority: (i: MediaActiveStopIdentity) => {
+        assert.deepEqual(i, identity);
+        if (++authorityChecks === 2) {
+          assert.equal(fences.stopOperation(dispatch), request.operationId, "replacement occurs after committed intent");
+          assert.equal(db.prepare("SELECT outcome FROM runner_media_active_stops").get()!.outcome, "unknown");
+          if (changed === "malformed-generation") handle.identity.generation = "";
+          else if (changed === "malformed-command") handle.identity.commandSha256 = "not-a-digest";
+          else if (changed !== "control") handle.identity[changed] = changed.endsWith("Sha256")
+            ? sha("replacement " + changed) : identity[changed] + "-replacement";
+        }
+        return true;
+      },
+    };
+    const worker = new RunnerMediaActiveStops(db, ports);
+    const ack = worker.request(request);
+    assert.ok(ack, "even malformed coordinates must return the known same-operation receipt");
+    const expectedOutcome = changed === "control" ? "stop_requested" : "unknown";
+    assert.equal(ack.outcome, expectedOutcome);
+    assert.equal(stops, changed === "control" ? 1 : 0, "a replaced handle must receive no signal");
+    const { outcome, stopFenceSha256, ...ackRequest } = ack;
+    assert.deepEqual(ackRequest, request);
+    assert.equal(stopFenceSha256, sha(JSON.stringify({ ...ackRequest, outcome })));
+    assert.deepEqual(worker.readback(request), ack);
+    assert.deepEqual(new RunnerMediaActiveStops(db, ports).readback(request), ack);
+    assert.equal(fences.stopOperation(dispatch), request.operationId);
+    assert.equal(fences.claimed(dispatch), true);
+    assert.equal(fences.cancelBeforeLaunch(dispatch), null, "unknown Stop cannot certify no launch");
+    handle.identity = { ...identity };
+    assert.deepEqual(worker.request(request), ack, "restoring the handle permits readback only");
+    assert.equal(worker.request({ ...request, operationId: "replacement-operation" }), null);
+    assert.equal(stops, changed === "control" ? 1 : 0, "no second or replacement operation signal");
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM runner_media_active_stops").get()!.n, 1);
+    const saved = db.prepare("SELECT request,sha256,outcome FROM runner_media_active_stops").get()!;
+    assert.equal(saved.request, JSON.stringify(request));
+    assert.equal(saved.sha256, sha(JSON.stringify(request)));
+    assert.equal(saved.outcome, expectedOutcome);
+  });
+}
