@@ -1,5 +1,5 @@
 import { devices, expect, test, type Locator, type Page } from "@playwright/test";
-import { SETTINGS_SECTIONS, type SettingsSection } from "../src/navigation.js";
+import { EXPERIMENT_OFF_EFFECT, SETTINGS_SECTIONS, type SettingsSection } from "../src/navigation.js";
 import { pinWidestFace } from "./font-geometry";
 import { expectTextFits } from "./text-fit";
 
@@ -193,4 +193,56 @@ test.describe("on a touch phone", () => {
       }
     });
   }
+});
+
+/** The sentences a section shows outside its rows: its head's description and its groups' intros. */
+async function visibleSectionSentences(page: Page): Promise<string[]> {
+  return page.locator(".settings-panel :is(.settings-panel-desc, .settings-group-desc)").filter({ visible: true }).allInnerTexts();
+}
+
+/**
+ * Experimental's head is the one place that says what turning a feature off does (#3022), and a
+ * phone hides the head's description under its detail bar (§4.2), so there the group says it (#3139).
+ */
+test.describe("what turning an experiment off does", () => {
+  for (const width of [1440, 900]) {
+    test(`is said once, in the panel head, at ${width}px`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 });
+      for (const theme of THEMES) {
+        await openSection(page, theme, "experimental");
+        expect(await visibleSectionSentences(page), `${theme}: only the head says it`)
+          .toEqual([`Early features. ${EXPERIMENT_OFF_EFFECT}`]);
+      }
+    });
+  }
+
+  test.describe("on a touch phone", () => {
+    const phone = devices["Pixel 7"];
+    test.use({ hasTouch: phone.hasTouch, isMobile: phone.isMobile, userAgent: phone.userAgent });
+
+    test("is said once, above the rows, at 390px", async ({ page }) => {
+      await page.setViewportSize({ width: 390, height: 900 });
+      for (const theme of THEMES) {
+        await openSection(page, theme, "experimental");
+        expect(await visibleSectionSentences(page), `${theme}: the group says it once`).toEqual([EXPERIMENT_OFF_EFFECT]);
+        const intro = await page.locator(".settings-panel .settings-group-desc").boundingBox();
+        const firstRow = await page.getByRole("switch").first().boundingBox();
+        expect(intro!.y + intro!.height, `${theme}: above the rows`).toBeLessThanOrEqual(firstRow!.y);
+      }
+    });
+
+    // No other section gains a sentence on a phone: each shows the same group intros as at 1440px,
+    // and no panel head description.
+    test("every other section shows the same sentences at 390px as its groups do at 1440px", async ({ page }) => {
+      for (const { id } of SETTINGS_SECTIONS) {
+        if (id === "experimental") continue;
+        await page.setViewportSize({ width: 1440, height: 900 });
+        await openSection(page, "dark", id);
+        const desktop = await page.locator(".settings-panel .settings-group-desc").filter({ visible: true }).allInnerTexts();
+        await page.setViewportSize({ width: 390, height: 900 });
+        await openSection(page, "dark", id);
+        expect(await visibleSectionSentences(page), `${id}: unchanged on a phone`).toEqual(desktop);
+      }
+    });
+  });
 });
