@@ -6649,7 +6649,10 @@ export class ControlPlaneDb {
       installToolCallCounter(db);
       db.exec("COMMIT");
     } catch (error) {
-      db.exec("ROLLBACK");
+      // No ControlPlaneDb owns this connection yet. Release it even if rollback fails,
+      // and keep the counter-installation error as the caller's startup diagnostic.
+      try { db.exec("ROLLBACK"); } catch { /* preserve the installation error */ }
+      try { db.close(); } catch { /* preserve the installation error */ }
       throw error;
     }
     // Per-child allowance charges. Add the columns, settle pre-existing children, and install the

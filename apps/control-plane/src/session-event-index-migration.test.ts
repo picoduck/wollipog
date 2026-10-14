@@ -116,46 +116,105 @@ for (const includeWider of [false, true]) {
   });
 }
 
-test("a failed counter installation rolls back the legacy DROP and permits a healthy retry", () => {
-  const root = mkdtempSync(join(tmpdir(), "wollipog-event-index-rollback-"));
-  const location = join(root, "synthetic.db");
-  try {
-    writeLegacy(location, false);
-    let raw = new DatabaseSync(location);
-    raw.exec("CREATE VIEW session_tool_call_counts AS SELECT 's0' AS session_id, 4 AS tool_calls");
-    raw.close();
-    // Retain the deliberately failed fixture connection so cleanup is deterministic even on
-    // builds whose pre-existing startup error path leaves that handle open until GC.
+for (const cleanupFailure of ["none", "rollback", "close-before", "close-after"] as const) {
+  test(`failed counter startup closes its connection and preserves recovery (${cleanupFailure})`, () => {
+    const root = mkdtempSync(join(tmpdir(), "wollipog-event-index-rollback-"));
+    const location = join(root, "synthetic.db");
     const originalExec = DatabaseSync.prototype.exec;
-    let failedHandle: DatabaseSync | undefined;
-    DatabaseSync.prototype.exec = function(sql: string): void {
-      if (sql.startsWith("CREATE TABLE session_tool_call_counts")) failedHandle = this;
-      return originalExec.call(this, sql);
-    };
-    try { assert.throws(() => ControlPlaneDb.open(location), /already exists/); }
-    finally {
+    const originalClose = DatabaseSync.prototype.close;
+    const failedHandles: DatabaseSync[] = [];
+    try {
+      writeLegacy(location, false);
+      const seed = new DatabaseSync(location);
+      let events: unknown;
+      try {
+        seed.exec("CREATE VIEW session_tool_call_counts AS SELECT 's0' AS session_id, 4 AS tool_calls");
+        events = seed.prepare("SELECT * FROM session_events ORDER BY id").all();
+      } finally { seed.close(); }
+      for (let attempt = 0; attempt < 3; attempt++) {
+        let failedHandle: DatabaseSync | undefined;
+        let installationError: unknown;
+        let closeAttempts = 0;
+        let rollbackAttempts = 0;
+        const cleanupError = new Error("synthetic cleanup failure");
+        DatabaseSync.prototype.exec = function(sql: string): void {
+          const installingCounter = sql.startsWith("CREATE TABLE session_tool_call_counts");
+          if (installingCounter) {
+            failedHandle = this;
+            failedHandles.push(this);
+          }
+          if (this === failedHandle && sql === "ROLLBACK") {
+            rollbackAttempts++;
+            if (cleanupFailure === "rollback") throw cleanupError;
+          }
+          try { return originalExec.call(this, sql); }
+          catch (error) {
+            if (installingCounter) installationError = error;
+            throw error;
+          }
+        };
+        DatabaseSync.prototype.close = function(): void {
+          if (this !== failedHandle) return originalClose.call(this);
+          closeAttempts++;
+          if (cleanupFailure === "close-before") throw cleanupError;
+          originalClose.call(this);
+          if (cleanupFailure === "close-after") throw cleanupError;
+        };
+        try {
+          assert.throws(() => ControlPlaneDb.open(location), error => {
+            assert.match(String(installationError), /view session_tool_call_counts already exists/);
+            assert.equal(error, installationError, "cleanup must preserve the original SQLite exception object");
+            return true;
+          });
+          assert.ok(failedHandle, "the real counter CREATE must fail");
+          assert.equal(rollbackAttempts, 1);
+          assert.equal(closeAttempts, 1, "failed startup must attempt close even if rollback throws");
+          if (cleanupFailure === "close-before") {
+            assert.equal(failedHandle.prepare("SELECT 1 AS n").get()!.n, 1,
+              "the injected close failure must occur before native cleanup");
+          } else {
+            assert.throws(() => failedHandle!.prepare("SELECT 1"), /database is not open/,
+              "failed startup must release the connection without GC");
+          }
+        } finally {
+          DatabaseSync.prototype.exec = originalExec;
+          DatabaseSync.prototype.close = originalClose;
+          if (failedHandle) {
+            try { originalClose.call(failedHandle); }
+            catch (error) { assert.match(String(error), /database is not open/); }
+          }
+        }
+        const persisted = new DatabaseSync(location);
+        try {
+          assert.ok(indexDefinitions(persisted)[PREFIX], "the failed transaction restored the prefix");
+          assert.ok(indexDefinitions(persisted)[WIDER], "schema created the replacement before attempting DROP");
+          assert.deepEqual(persisted.prepare("SELECT * FROM session_events ORDER BY id").all(), events);
+          assert.equal(persisted.prepare("SELECT type FROM sqlite_master WHERE name='session_tool_call_counts'").get()!.type, "view");
+        } finally { persisted.close(); }
+      }
+      const repair = new DatabaseSync(location);
+      try { repair.exec("DROP VIEW session_tool_call_counts"); }
+      finally { repair.close(); }
+      const recovered = ControlPlaneDb.open(location);
+      try {
+        assert.equal(indexDefinitions(recovered.raw())[PREFIX], undefined);
+        assert.equal(recovered.countToolCalls("s0"), 4);
+        assertCounts(recovered);
+        recovered.appendEvent("s0", { kind: "tool_call", toolCallId: "after-retry", title: "Synthetic", status: "pending" }, 2);
+        assert.equal(recovered.countToolCalls("s0"), 5, "healthy retry installs working counter triggers");
+        assertCounts(recovered);
+      } finally { recovered.close(); }
+    } finally {
       DatabaseSync.prototype.exec = originalExec;
-      if (failedHandle) {
-        try { failedHandle.close(); }
+      DatabaseSync.prototype.close = originalClose;
+      for (const handle of failedHandles) {
+        try { originalClose.call(handle); }
         catch (error) { assert.match(String(error), /database is not open/); }
       }
+      rmSync(root, { recursive: true, force: true });
     }
-    raw = new DatabaseSync(location);
-    try {
-      assert.ok(indexDefinitions(raw)[PREFIX], "the failed transaction restored the prefix");
-      assert.ok(indexDefinitions(raw)[WIDER], "schema created the replacement before attempting DROP");
-      assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM session_events").get()!.n, 9);
-      assert.equal(raw.prepare("SELECT type FROM sqlite_master WHERE name='session_tool_call_counts'").get()!.type, "view");
-      raw.exec("DROP VIEW session_tool_call_counts");
-    } finally { raw.close(); }
-    const recovered = ControlPlaneDb.open(location);
-    try {
-      assert.equal(indexDefinitions(recovered.raw())[PREFIX], undefined);
-      assert.equal(recovered.countToolCalls("s0"), 4);
-      assertCounts(recovered);
-    } finally { recovered.close(); }
-  } finally { rmSync(root, { recursive: true, force: true }); }
-});
+  });
+}
 
 
 test("migrated counters preserve distinct IDs through updates, deletes, rollback and session cascades", () => {
