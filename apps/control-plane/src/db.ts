@@ -20247,6 +20247,33 @@ export class ControlPlaneDb {
   }
 
   deleteSession(id: string): void {
+    this.deleteSessionRows(id);
+    this.collectWorkflowArtifactBlobs();
+  }
+
+  /** Delete a session whose creation failed before its launch was sent (#3183), returning what its
+   * creation reserved: the campaign allowance slot and member row, and the parent's spawn count and
+   * child charges. A child that was launched keeps them when deleted (#1496), so this refuses any
+   * session past `queued`. */
+  deleteUnlaunchedSession(id: string): void {
+    this.atomic(() => {
+      const row = this.stmt(`SELECT status, parent_session_id AS parentId,
+          parent_charged_cost_usd AS cost, parent_charged_tool_calls AS tools FROM sessions WHERE id=?`)
+        .get(id) as { status: string; parentId: string | null; cost: number; tools: number } | undefined;
+      if (!row) return;
+      if (row.status !== "queued") throw new Error("only a session whose launch was never sent can release its reservations");
+      if (row.parentId) {
+        this.stmt(`UPDATE sessions SET child_spawn_count=MAX(0, child_spawn_count-1),
+          child_cost_reserved_usd=child_cost_reserved_usd-?, child_tool_calls_reserved=child_tool_calls_reserved-?
+          WHERE id=?`).run(row.cost, row.tools, row.parentId);
+      }
+      this.campaignBudgets.releaseUnlaunched(id);
+      this.deleteSessionRows(id);
+    });
+    this.collectWorkflowArtifactBlobs();
+  }
+
+  private deleteSessionRows(id: string): void {
     // multi_agent_run_members has no FK to sessions, so clean its rows up too,
     // otherwise a run keeps a dangling member id. Same for the FTS index (virtual
     // tables have no FKs — stale hits would surface deleted sessions in search).
@@ -20259,7 +20286,6 @@ export class ControlPlaneDb {
     this.stmt("DELETE FROM artifacts WHERE session_id=? AND run_id IS NULL").run(id);
     this.stmt("DELETE FROM session_events_fts WHERE session_id=?").run(id);
     this.stmt("DELETE FROM sessions WHERE id=?").run(id);
-    this.collectWorkflowArtifactBlobs();
   }
 
   /** Replace the hash-only credential accepted for one exact session's policy-hook route. */
