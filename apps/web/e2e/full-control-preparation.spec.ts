@@ -9,13 +9,17 @@ for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: 
       test(`${surface} ${viewport.name} ${theme}: Full Control remains an unsupported preview`, async ({ page }) => {
         await page.setViewportSize(viewport);
         const writes: string[] = [];
+        let savedDefaults = structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS);
         await page.route("**/api/orchestrator-settings", async (route) => {
-          if (route.request().method() !== "GET") writes.push(route.request().postData() ?? "");
-          const defaults = structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS);
+          if (route.request().method() !== "GET") {
+            writes.push(route.request().postData() ?? "");
+            savedDefaults = route.request().postDataJSON().defaults;
+          }
+          const defaults = structuredClone(savedDefaults);
           defaults.behavior.childHarness = null;
           defaults.behavior.childModel = null;
           defaults.behavior.childEffort = null;
-          await route.fulfill({ json: { defaults, source: "system_default",
+          await route.fulfill({ json: { defaults, source: "system_default", controlModeSupported: true,
             capabilities: { harnesses: [], models: [], effortLevels: [], installations: 1, compatibleInstallations: 1, status: "available" } } });
         });
         if (surface === "defaults") {
@@ -38,9 +42,14 @@ for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: 
         await page.screenshot({ path: `${prefix}-custom.png` });
         await full.check();
         await expect(page.getByText("Activation Unavailable", { exact: true })).toBeVisible();
-        await expect(page.getByRole("button", { name: "Authorize Full Control", exact: true })).toBeDisabled();
+        await expect(page.getByRole("button", { name: surface === "launch" ? "Authorize and Create Session" : "Authorize Full Control", exact: true })).toBeDisabled();
         await expect(page.getByText(/Agent JSON, saved defaults, and this preview cannot grant authorization/)).toBeAttached();
-        if (surface === "defaults") await expect(page.getByRole("button", { name: "Save Defaults", exact: true })).toBeDisabled();
+        if (surface === "defaults") {
+          await page.getByRole("button", { name: "Save Defaults", exact: true }).click();
+          await expect(full).toBeChecked();
+          expect(JSON.parse(writes[0]!).defaults.controlMode).toBe("full_control");
+          expect(JSON.parse(writes[0]!).defaults.control).toBeUndefined();
+        }
         if (surface === "launch") {
           await expect(page.getByRole("button", { name: "Create Session", exact: true })).toBeDisabled();
           await page.locator("form").evaluate((form) => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
@@ -59,7 +68,7 @@ for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: 
         // Layout engines, rather than DOM mocks, prove labels/facts fit the phone and desktop.
         const overflow = await group.evaluate((node) => node.scrollWidth - node.clientWidth);
         expect(overflow).toBeLessThanOrEqual(1);
-        expect(writes).toEqual([]);
+        expect(writes.length).toBe(surface === "defaults" ? 1 : 0);
         await page.getByRole("radio", { name: "Custom", exact: true }).check();
         await expect(page.getByText("Activation Unavailable", { exact: true })).toHaveCount(0);
       });

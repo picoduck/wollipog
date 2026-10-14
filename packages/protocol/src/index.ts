@@ -684,6 +684,10 @@ export * from "./campaign-budget.js";
 export * from "./campaign-review-job.js";
 export * from "./rate-priced-usage.js";
 import type { CampaignControl, CampaignRequestSource, CampaignAuthorityEvaluation } from "./campaign-authority.js";
+export type {
+  CampaignLaunchProposal, FullControlLaunchRequest, PreparedCampaignLaunch,
+  CampaignLaunchInspectionMessage, CampaignLaunchInspectionResult, CampaignLaunchPreflight,
+} from "./campaign-control-launch.js";
 export const SESSION_SUMMARY_UI_PROTOCOL = 212;
 export const SKILL_REPORT_REQUEST_LIFETIME_MS = 30_000;
 export const MAX_SKILL_REPORT_REQUESTS = 64;
@@ -2546,6 +2550,8 @@ export interface UiEvidenceReviewDelivery {
 /** Credential-free, server-derived campaign state. The stored policy remains the source of truth;
  * this projection applies runtime compatibility fallbacks without mutating or broadening it. */
 export interface OrchestratorCampaignProjection {
+  /** Current authorized root control, paired with policyRevision; child snapshots may be stale. */
+  control?: CampaignControl;
   budget?: import("./campaign-budget.js").CampaignBudgetView;
   status: OrchestratorCampaignStatus;
   policyRevision: number;
@@ -3130,6 +3136,8 @@ export interface RunnerMetadata {
 export interface RunnerRuntimeInfo {
   /** Guarded capability, independent of numeric protocol support. Missing is unsupported. */
   campaignReview?: import("./campaign-review-job.js").ControlledReviewCapability;
+  /** Exact read-only workspace inspection path only; never Full Control readiness. */
+  campaignLaunchInspection?: { version: 1 };
   /** Native-host runner data root. WSL contexts use the same `.agent-manager` layout in-distro. */
   dataDir: string;
   worktreeRoot: string;
@@ -8729,6 +8737,7 @@ export interface SessionNamingCustomModelResultMessage {
 }
 
 export type RunnerToControlPlane =
+  | import("./campaign-control-launch.js").CampaignLaunchInspectionResult
   | import("./campaign-review-job.js").CampaignReviewJobUpdate
   | RegisterMessage
   | HeartbeatMessage
@@ -10504,6 +10513,7 @@ export interface GitActionResultMessage {
 }
 
 export type ControlPlaneToRunner =
+  | import("./campaign-control-launch.js").CampaignLaunchInspectionMessage
   | import("./campaign-review-job.js").CampaignReviewJobCommand
   | { type: "cancel_campaign_review_job"; jobId: string; nonce: string }
   | RegisteredMessage

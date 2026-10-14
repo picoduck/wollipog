@@ -51,3 +51,34 @@ Final integration remains required work under #2940:
 
 The deterministic browser fixtures test the real components and the unsupported state. Their
 captures prove layout and launch fencing, not unattended readiness or live provider media support.
+
+## Atomic Launch Source Contract
+
+The Human-only `/api/full-control-campaigns/preflight` route shares the normal session validator
+through an internal inspection seam which returns before any stage, insert or provider call.
+It binds the resolved model, effort, provider permissions, selected workspace/target, isolation,
+child behavior, completion and exact finite proposal into a digest. A distinct admission endpoint
+requires request identity and that exact digest. Neither endpoint permits agent authorization
+metadata or falls back to ordinary session creation.
+
+The optional negotiated `campaignLaunchInspection` descriptor means only that this runner can
+inspect its registered workspace's sanitized GitHub origin and bounded exact issues. Numeric
+protocol 220, a preset, image support or a native-review descriptor cannot prove Full readiness.
+The inspection returns no origin credentials, local path, issue body or provider environment.
+
+Production admission currently returns a blocked preflight: complete execution, native review,
+media, evidence and managed usage proof remain absent. This contract cannot enable Full Control
+from partial authority support or caller booleans. The source form has an exact proposal and an
+explicit authorization action, fenced by that complete preflight.
+
+Fixture Human admission exercises the internal transaction: root, Human issue-scope provenance,
+matching control/policy revision, original session ceilings, allowance, root reservation and request
+identity commit together. A provider command is sent only after commit. Duplicate identity reads
+the retained root without another send; changed identity or a late SQL failure cannot leave partial
+authority. A Hub send failure cannot prove zero escaped bytes, so the root and reservation remain
+retained with uncertain dispatch state and cannot replay automatically. These are temporary source
+fixture checks, never live authorization, native admission or media-readiness receipts.
+
+The `full_control_launch_preflight` structured event answers which entry point was used, whether
+preflight was blocked and which capability categories were missing. Its request ID, digest and
+duration support correlation; it excludes proposal text, scope contents, origin URLs and credentials.

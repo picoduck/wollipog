@@ -30,6 +30,7 @@ export interface FullControlPreparation {
 export interface PreflightFact { label: string; value: string }
 export interface FullControlPreflight {
   control: CampaignControl | undefined;
+  effectiveMode: "custom" | "full_control" | "unknown";
   supported: false;
   facts: PreflightFact[];
   blockers: string[];
@@ -40,7 +41,9 @@ const limit = (value: number | null | undefined) => value == null ? "No configur
 
 export function fullControlPreflight(input: FullControlPreparation): FullControlPreflight {
   const { defaults, session } = input;
-  const control = session?.orchestratorPolicy?.control;
+  const projected = session?.orchestratorCampaign;
+  const authoritative = projected?.control !== undefined && Number.isSafeInteger(projected.policyRevision);
+  const control = authoritative ? projected.control : session?.orchestratorPolicy?.control;
   const boundary = control?.mode === "full_control" ? control.boundary : undefined;
   const scope = session?.orchestratorPolicy?.issueScope;
   const root = input.root ?? session;
@@ -50,9 +53,11 @@ export function fullControlPreflight(input: FullControlPreparation): FullControl
   const issueAuthority = boundary?.issueAuthority;
   const stale = boundary !== undefined && (!scope || scope.repository.toLowerCase() !== boundary.repository.toLowerCase() ||
     scope.revision !== boundary.issueScopeRevision || scope.authorizedByUserId !== boundary.authorizedByUserId ||
-    scope.authorizedAt > boundary.authorizedAt || session?.parentControlPolicy?.revision !== boundary.revision);
+    scope.authorizedAt > boundary.authorizedAt ||
+    (authoritative ? projected.policyRevision : session?.parentSessionId ? undefined : session?.parentControlPolicy?.revision) !== boundary.revision);
   return {
     control,
+    effectiveMode: authoritative ? control!.mode : session?.parentSessionId ? "unknown" : control?.mode ?? "custom",
     // No fixture, five-owner preset, protocol version or prepared branch proves readiness.
     supported: false,
     facts: [
@@ -83,7 +88,8 @@ export function fullControlPreflight(input: FullControlPreparation): FullControl
       { label: "UI Evidence Approval", value: evidence ? `${titleCaseLabel(evidence.status)} · ${titleCaseLabel(evidence.effectiveOwner)}${evidence.reason ? `: ${evidence.reason}` : ""}. Each exact item still needs review.` : "Not verified; every exact evidence item uses the existing UI Evidence Approval gate" },
       { label: "Evidence Provider and Model", value: `${root?.driver ? agentHarnessDriverLabel(root.driver) : "Provider not selected"} · ${root?.model ?? "Model resolved at launch; not verified"}. Actual media delivery and quality are not verified. ${DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE}` },
       { label: "Native Reviewer Profile", value: budget?.requiredNativeReview ? `${budget.requiredNativeReview.supported ? "Reported Supported" : "Unsupported"}: ${budget.requiredNativeReview.reason}. Exact approved admission and live proof remain required.` : "No approved native reviewer profile verified for this campaign allowance" },
-      { label: "Policy Revision", value: session?.parentControlPolicy ? String(session.parentControlPolicy.revision) : "Established at authenticated launch" },
+      { label: "Policy Revision", value: authoritative ? String(projected.policyRevision) : session?.parentSessionId
+        ? "Current root revision not reported" : session?.parentControlPolicy ? String(session.parentControlPolicy.revision) : "Established at authenticated launch" },
       { label: "Authority Boundary", value: boundary ? `Revision ${boundary.revision} · ${stale ? "Stale; incompatible unused approvals cannot authorize actions" : "Current stored authority; complete launch readiness remains unverified"}` : "No Full Control authority established" },
     ],
     blockers: [

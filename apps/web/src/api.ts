@@ -344,6 +344,12 @@ export function createApiClient(transport: ApiTransport) {
     }),
 
   orchestratorSettings: () => req<OrchestratorSettingsView>("/api/orchestrator-settings"),
+  fullControlLaunchPreflight: (input: import("@wollipog/protocol").FullControlLaunchRequest) =>
+    req<{ preflight: import("@wollipog/protocol").CampaignLaunchPreflight }>("/api/full-control-campaigns/preflight", {
+      method: "POST", body: JSON.stringify(input),
+    }),
+  createFullControlCampaign: (input: import("@wollipog/protocol").FullControlLaunchRequest) =>
+    req<SessionView>("/api/full-control-campaigns", { method: "POST", body: JSON.stringify(input) }),
 
   updateOrchestratorSettings: (input: UpdateOrchestratorSettingsRequest) =>
     req<OrchestratorSettingsView>("/api/orchestrator-settings", {

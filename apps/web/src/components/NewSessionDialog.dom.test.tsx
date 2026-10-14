@@ -155,6 +155,7 @@ async function mountFixture(
       installations: 1, compatibleInstallations: 1, status: "available",
     },
   }),
+  additionalApi: Partial<ApiClient> = {},
 ): Promise<Fixture> {
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(mountPoint as never);
@@ -172,6 +173,7 @@ async function mountFixture(
   };
   const client = {
     ...api,
+    ...additionalApi,
     agentHarnessDefaults: defaults,
     orchestratorSettings: orchestratorDefaults,
     listDirectory: async (_runnerId: string, path: string) => ({
@@ -917,6 +919,50 @@ test("a saved Full Control preference initializes future launch review without g
     assert.equal(fixture.requests.length, 1);
     assert.equal(Object.hasOwn(fixture.requests[0]!.orchestrator ?? {}, "controlMode"), false);
     assert.equal(Object.hasOwn(fixture.requests[0]!.orchestrator ?? {}, "control"), false);
+  } finally { await unmountFixture(fixture); }
+});
+
+test("the exact launch preflight preserves configuration and a blocked server never falls back to ordinary creation", async () => {
+  const enabledRunner: RunnerView = { ...runner, protocolVersion: PROTOCOL_VERSION,
+    agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    } })) };
+  const preflights: import("@wollipog/protocol").FullControlLaunchRequest[] = [];
+  let admissions = 0;
+  const fixture = await mountFixture({ runners: [enabledRunner] }, undefined, undefined, undefined, undefined, undefined, {
+    fullControlLaunchPreflight: async (input) => {
+      preflights.push(structuredClone(input));
+      return { preflight: { supported: false, digest: "a".repeat(64), proposal: input.proposal,
+        plan: { config: { model: "gpt-6.1-sol", effort: "high", permissionMode: "orchestrator" } },
+        capabilities: [{ capability: "Complete Execution Enforcement", state: "unsupported", reason: "Complete enforcement is not proven." }], humanRequired: [],
+      } as unknown as import("@wollipog/protocol").CampaignLaunchPreflight };
+    },
+    createFullControlCampaign: async () => { admissions++; throw new Error("must stay blocked"); },
+  });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    await act(async () => fixture.container.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
+    const fields: Record<string, string> = { Repository: "owner/repo", "Issue Numbers": "12", Objective: "Deliver #12",
+      "Campaign Cost Limit (USD)": "20", "Campaign Tool Call Limit": "200", "Campaign Concurrency Limit": "2", "Maximum Authorized Issues": "10" };
+    for (const [label, value] of Object.entries(fields)) {
+      const input = [...fixture.container.querySelectorAll<HTMLLabelElement>("label")].find((node) => node.querySelector("span")?.textContent === label)!.querySelector("input")!;
+      await act(async () => fireDomEvent.change(input, { target: { value } }));
+    }
+    const check = [...fixture.container.querySelectorAll<HTMLButtonElement>("button")].find((node) => node.textContent === "Check Full Control Preflight")!;
+    assert.equal(check.disabled, false);
+    await act(async () => check.click());
+    assert.equal(preflights.length, 1);
+    assert.equal(preflights[0]!.session.config!.permissionMode, "orchestrator");
+    assert.equal(preflights[0]!.session.projectId, project.id);
+    assert.equal(preflights[0]!.proposal.budgetAuthority.acceptedFollowUps, 0);
+    assert.match(fixture.container.textContent ?? "", /Full Control Launch Blocked/);
+    const authorize = [...fixture.container.querySelectorAll<HTMLButtonElement>("button")].find((node) => node.textContent === "Authorize and Create Session")!;
+    assert.equal(authorize.disabled, true);
+    await act(async () => authorize.click());
+    assert.equal(admissions, 0);
+    assert.equal(fixture.requests.length, 0);
   } finally { await unmountFixture(fixture); }
 });
 

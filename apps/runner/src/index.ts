@@ -10,6 +10,7 @@ import { homedir, hostname } from "node:os";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { inspectCampaignLaunch } from "./campaign-launch-inspection.js";
 import WebSocket from "ws";
 import {
   parseMessage,
@@ -529,6 +530,7 @@ const metadata: RunnerMetadata = {
       : {}),
   })),
   runtime: {
+    campaignLaunchInspection: { version: 1 },
     dataDir: config.dataDir,
     worktreeRoot: resolve(config.dataDir, "worktrees"),
     worktreePorts: {
@@ -2134,6 +2136,10 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           ...(recorded.error ? { error: recorded.error } : {}),
         });
       }));
+      break;
+    }
+    case "campaign_launch_inspect": {
+      runCommandTask("campaign_launch_inspect", inspectCampaignLaunch(msg, config.workspaces).then(sendUp));
       break;
     }
     case "campaign_issue_scope": {

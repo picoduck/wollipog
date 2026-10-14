@@ -233,6 +233,44 @@ test("Orchestrator control preference migrates and persists without changing exi
   } finally { db.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
+test("descendant control projection follows current root enable and revoke without rewriting its snapshot", () => {
+  const db = withRunner();
+  try {
+    const userId = db.localIdentityContext().userId;
+    const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
+    policy.issueScope = { repository: "owner/repo", issueNumbers: [12], revision: 1, authorizedByUserId: userId, authorizedAt: 1 };
+    policy.issueNumbers = [12];
+    const input = { ...newSession({ id: "root", role: "orchestrator", orchestratorPolicy: policy,
+      parentControlPolicy: { decisions: { ...DEFAULT_ORCHESTRATOR_DEFAULTS.delegation.decisions } } }) };
+    db.createSession(input);
+    const control = { mode: "full_control" as const, boundary: { version: 1 as const, revision: 2, issueScopeRevision: 1,
+      repository: "owner/repo", objective: "Deliver #12", authorizedByUserId: userId, authorizedAt: 2,
+      operations: ["implementation_question" as const], delegatablePolicyIds: [] } };
+    assert.equal(db.updateSessionCampaignControl("root", control, 1, 2), true);
+    const inherited = db.sessionOrchestratorPolicy("root")!;
+    db.createSession(newSession({ id: "nested", parentSessionId: "root", role: "orchestrator", orchestratorPolicy: inherited,
+      parentControlPolicy: { decisions: { ...DEFAULT_ORCHESTRATOR_DEFAULTS.delegation.decisions } } }));
+    const snapshot = db.sessionOrchestratorPolicy("nested");
+    assert.equal(db.campaignProjection("nested")!.control!.mode, "full_control");
+    assert.equal(db.campaignProjection("nested")!.policyRevision, 2, "the child's own revision is not the root revision");
+    assert.equal(db.updateSessionCampaignControl("root", { mode: "custom" }, 2, 3), true);
+    assert.equal(db.campaignProjection("nested")!.control!.mode, "custom");
+    assert.equal(db.campaignProjection("nested")!.policyRevision, 3);
+    assert.deepEqual(db.sessionOrchestratorPolicy("nested"), snapshot);
+    // An audience broader than the root's cannot receive the root's authority payload.
+    db.setResourceScope({ resource: "session", resourceId: "root", scope: {
+      organizationId: db.localIdentityContext().organizationId, owner: { kind: "user", userId },
+    }, now: 4 });
+    db.setResourceScope({ resource: "session", resourceId: "nested", scope: {
+      organizationId: db.localIdentityContext().organizationId, owner: { kind: "organization", organizationId: db.localIdentityContext().organizationId },
+    }, now: 4 });
+    assert.equal(db.campaignProjection("nested")!.control, undefined);
+    assert.equal(db.campaignProjection("root")!.control!.mode, "custom");
+    db.raw().prepare("UPDATE sessions SET parent_session_id=? WHERE id=?").run("nested", "root");
+    assert.equal(db.campaignProjection("nested"), null, "refused ancestry cannot expose control");
+  } finally { db.close(); }
+});
+
 test("steering attempts preserve idempotency, reconcile late receipts, compact, and cascade", () => {
   const db = withRunner();
   db.createSession(newSession());

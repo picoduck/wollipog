@@ -197,7 +197,9 @@ export function OrchestratorControlsDialog({
 }) {
   const api = useApi();
   const ids = useId();
-  const [controlPreview, setControlPreview] = useState<"custom" | "full_control">(() => session.orchestratorPolicy?.control?.mode ?? "custom");
+  const [controlPreview, setControlPreview] = useState<"custom" | "full_control">(() =>
+    session.orchestratorCampaign?.control !== undefined && Number.isSafeInteger(session.orchestratorCampaign.policyRevision)
+      ? session.orchestratorCampaign.control.mode : session.parentSessionId ? "custom" : session.orchestratorPolicy?.control?.mode ?? "custom");
   // The choices still saving on this session, from this dialog or one closed before it.
   const pending = useSyncExternalStore(
     subscribePending,
@@ -268,7 +270,9 @@ export function OrchestratorControlsDialog({
 
   const parentControl = (pending.parentControl?.value as ParentControlMode | undefined) ?? session.parentControl ?? "off";
   const policy = session.parentControlPolicy;
-  const fullControl = session.orchestratorPolicy?.control?.mode === "full_control";
+  const projectedControl = session.orchestratorCampaign?.control !== undefined && Number.isSafeInteger(session.orchestratorCampaign.policyRevision)
+    ? session.orchestratorCampaign.control : undefined;
+  const fullControl = (projectedControl ?? (session.parentSessionId ? undefined : session.orchestratorPolicy?.control))?.mode === "full_control";
   const canRevoke = fullControl && !session.parentSessionId && policy !== undefined && refusal === null;
   const savedStatus = saved === null
     ? ""

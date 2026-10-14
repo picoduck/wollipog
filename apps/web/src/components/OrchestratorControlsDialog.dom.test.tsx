@@ -224,9 +224,21 @@ test("a conflicting Full Control revocation reloads without replay and descendan
   assert.equal(writes, 1);
   assert.equal(harness.changed[0]!.parentControlPolicy!.revision, 4);
   assert.match(harness.dialog().textContent ?? "", /These controls changed elsewhere/);
-  await harness.rerender({ ...fresh, parentSessionId: "root" });
+  await harness.rerender({ ...fresh, parentSessionId: "root", orchestratorCampaign: { ...CAMPAIGN, control: initial.orchestratorPolicy!.control!, policyRevision: 4 } });
   assert.equal(revoke().disabled, true);
   assert.match(harness.dialog().textContent ?? "", /Change control on the root campaign/);
+});
+
+test("a descendant displays the current root mode after revoke and does not treat its copied mode as effective", async () => {
+  const initial = fullCampaign();
+  const harness = await open({ ...initial, parentSessionId: "root",
+    orchestratorCampaign: { ...CAMPAIGN, control: { mode: "custom" }, policyRevision: 4 } }, {});
+  assert.match(harness.dialog().textContent ?? "", /Effective Mode: Custom/);
+  assert.equal(harness.dialog().querySelector<HTMLInputElement>('[data-control-mode="custom"]')!.checked, true);
+  assert.equal([...harness.dialog().querySelectorAll<HTMLButtonElement>("button")].some((button) => button.textContent?.trim() === "Revoke Full Control"), false);
+  await harness.unmount();
+  const legacy = await open({ ...initial, id: "legacy-nested", parentSessionId: "root", orchestratorCampaign: undefined }, {});
+  assert.match(legacy.dialog().textContent ?? "", /Effective Mode: Current Root State Not Reported/);
 });
 
 test("active Full Control preview exposes revision and human gates without changing campaign state", async () => {

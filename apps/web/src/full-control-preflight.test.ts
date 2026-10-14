@@ -96,3 +96,23 @@ test("current campaign projections disclose real issue bounds and budget without
   assert.match(result.blockers.join(" "), /current repository, human scope provenance, or policy revision/);
   assert.equal(result.supported, false);
 });
+
+test("descendant preflight uses the root control and revision together and keeps legacy authority unknown", () => {
+  const control = { mode: "full_control" as const, boundary: { version: 1 as const, revision: 2, issueScopeRevision: 1,
+    repository: "owner/repo", objective: "Deliver #12", authorizedByUserId: "human", authorizedAt: 2,
+    operations: ["pr_merge" as const], delegatablePolicyIds: [] } };
+  const session = { parentSessionId: "root", parentControlPolicy: { revision: 1 },
+    orchestratorPolicy: { ...DEFAULT_ORCHESTRATOR_DEFAULTS, control,
+      issueScope: { repository: "owner/repo", issueNumbers: [12], revision: 1, authorizedByUserId: "human", authorizedAt: 1 } },
+    orchestratorCampaign: { control, policyRevision: 2 },
+  } as unknown as SessionView;
+  const current = fullControlPreflight({ surface: "campaign", session, defaults: session.orchestratorPolicy! });
+  assert.equal(current.effectiveMode, "full_control");
+  assert.doesNotMatch(current.blockers.join(" "), /stored boundary does not match/);
+  const revoked = { ...session, orchestratorCampaign: { ...session.orchestratorCampaign!, control: { mode: "custom" as const }, policyRevision: 3 } };
+  assert.equal(fullControlPreflight({ surface: "campaign", session: revoked, defaults: revoked.orchestratorPolicy! }).effectiveMode, "custom");
+  const legacy = { ...session, orchestratorCampaign: undefined };
+  const unknown = fullControlPreflight({ surface: "campaign", session: legacy, defaults: legacy.orchestratorPolicy! });
+  assert.equal(unknown.effectiveMode, "unknown");
+  assert.match(unknown.blockers.join(" "), /stored boundary does not match/);
+});
