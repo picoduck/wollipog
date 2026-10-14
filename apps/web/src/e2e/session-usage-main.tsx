@@ -354,6 +354,22 @@ if (composerFixture) {
         followUps: { unique: 2, duplicates: 1 },
       };
     }
+    const fullFixture = params.get("fullControlFixture");
+    if (["1", "legacy"].includes(fullFixture ?? "") && session.orchestratorCampaign) {
+      // Opt-in source UI fixture only: no authenticated Human/account/profile is created.
+      const issueScope = { repository: "example/full-control-fixture", issueNumbers: [12], revision: 1,
+        authorizedByUserId: "fixture-human", authorizedAt: 1 };
+      session.orchestratorPolicy.issueScope = issueScope;
+      session.orchestratorPolicy.issueNumbers = [12];
+      session.orchestratorPolicy.control = { mode: "full_control", boundary: { version: 1, revision: 4, issueScopeRevision: 1,
+        repository: issueScope.repository, objective: "Review the source fixture", authorizedByUserId: "fixture-human", authorizedAt: 2,
+        operations: ["implementation_question", "pr_merge"], delegatablePolicyIds: [] } };
+      session.orchestratorCampaign.control = session.orchestratorPolicy.control;
+      if (fullFixture === "legacy") {
+        session.parentSessionId = "fixture-root-not-loaded";
+        delete session.orchestratorCampaign.control;
+      }
+    }
   }
   session.serviceTier = serviceTiers ? "fast" : null;
   session.contextWindow = 1_000_000;
@@ -552,6 +568,14 @@ let tailRequestCount = 0;
 const settledUsage = params.get("settled") !== "0";
 const client = {
   ...api,
+  revokeCampaignControl: async (id: string, expectedRevision: number) => {
+    if (params.get("fullControlFixture") !== "1") return api.revokeCampaignControl(id, expectedRevision);
+    if (expectedRevision !== session.parentControlPolicy!.revision) throw new ApiError("Fixture revision changed", 409);
+    session.orchestratorPolicy = { ...session.orchestratorPolicy!, control: { mode: "custom" } };
+    session.parentControlPolicy = { ...session.parentControlPolicy!, revision: expectedRevision + 1 };
+    session.orchestratorCampaign = { ...session.orchestratorCampaign!, control: { mode: "custom" }, policyRevision: expectedRevision + 1 };
+    return { ...session };
+  },
   // Orchestrator Controls (#2192): changes save at once against the policy revision. A conflict
   // leaves the stored gates as they were and moves the revision on, as a change elsewhere would.
   setParentControl: async (_id: string, mode: NonNullable<SessionView["parentControl"]>) => {
