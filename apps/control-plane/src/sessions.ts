@@ -1605,6 +1605,10 @@ export class SessionsService {
   /** Sessions that saw another gap WHILE a fetch was in flight — forces one more pass afterward so a
    * mid-fetch event (not in the in-flight reply) is never dropped. */
   private readonly rehydrate = new Set<string>();
+  /** The turn last interrupted for an estimate-only budget card, by session (#3112), so repeated
+   * queue reports of the same turn send one interruption. The durable card is the obligation; this
+   * only deduplicates, so a restart at worst repeats a request the runner already applied. */
+  private readonly estimateInterruptedTurns = new Map<string, string>();
   /** Bound v54 history/index work to one page chain per runner. */
   private readonly runnerHydrationTails = new Map<string, Promise<void>>();
   /** Carry an interrupted pass's before-views into its replacement so resolved-request wakeups
@@ -6309,6 +6313,13 @@ export class SessionsService {
       this.log.warn(`failed to record steering queue bookkeeping for ${sessionId}: ${(error as Error).message}`);
     }
     this.hub.setSessionQueue(sessionId, queue, held, activeTurnId);
+    // An unanswered estimate-only budget card stops the turn the runner reports, including one that
+    // parked before the turn was known or before a control-plane restart (#3112).
+    if (!activeTurnId) this.estimateInterruptedTurns.delete(sessionId);
+    else if (this.estimateInterruptedTurns.get(sessionId) !== activeTurnId) {
+      const session = this.db.getSession(sessionId);
+      if (session && this.estimateOnlyBudgetCard(session)) this.interruptTurnAtEstimate(session);
+    }
     return true;
   }
 
@@ -13378,15 +13389,23 @@ export class SessionsService {
 
   /** The runner-owned threshold that trips this ask on the runner itself, if any. A runner cancels
    * only on the settled cost, so a budget crossed by the live estimate alone is a control-plane card
-   * that holds the runner's queue (#3112). */
+   * that holds the runner's queue, and the control plane interrupts the running turn (#3112). */
   private runnerTrips(s: SessionView, ask: PolicyDecision): RunnerGuardrailKind | undefined {
     if (ask.rule.kind === "cost_budget" && s.costUsd < ask.rule.budgetUsd) return undefined;
     return runnerHoldFor(ask.rule.kind);
   }
 
-  /** A budget card the live estimate alone raised parked a turn no runner cancelled (#3112). Like
-   * a soft card, clearing it returns the session to idle only if the runner's idle arrived while
-   * parked. */
+  /** The unanswered budget card the live estimate alone raised: the runner never tripped it, and
+   * settled cost is still below the budget (#3112). */
+  private estimateOnlyBudgetCard(session: SessionView): PendingApproval | undefined {
+    if (session.costBudgetUsd == null || session.costUsd >= session.costBudgetUsd) return undefined;
+    return pendingRequests(session.pendingApproval).find((request) => request.kind === "cost_budget" && !request.runnerGuardrail);
+  }
+
+  /** A budget card the live estimate alone raised parked a turn that may still be running: the
+   * control plane's interruption is asynchronous, and an older runner may not apply it (#3112).
+   * Like a soft card, clearing it returns the session to idle only if the runner's idle arrived
+   * while parked. */
   private estimateOnlyBudgetCardStatus(session: SessionView, card: PendingApproval): "running" | "idle" {
     const uncancelled = card.kind === "cost_budget" && !card.runnerGuardrail && session.costBudgetUsd != null &&
       session.costUsd < session.costBudgetUsd && this.db.policyResumeStatus(session.id) !== "idle";
@@ -13460,7 +13479,52 @@ export class SessionsService {
     this.recordGovernanceAudit(s, approval, "policy_decision", "asked", { kind: "policy", id: ask.rule.kind }, now, {
       policyRule: ask.rule,
     });
+    // No runner cancels on the live estimate, so the control plane stops the turn it parked (#3112).
+    // A pending workflow decision shows the session as input_required while its turn still runs, so
+    // the runner's active-turn coordinate decides, not the status.
+    if (ask.rule.kind === "cost_budget" && !this.runnerTrips(s, ask) && s.status !== "idle" && !isTerminal(s.status)) {
+      this.interruptTurnAtEstimate(s);
+    }
     return true;
+  }
+
+  /** Stop the active turn of a session whose live estimate crossed its budget (#3112). This is the
+   * runner's ordinary turn interruption: it cancels only that turn and holds the queue until the
+   * turn settles, and the card's control-plane hold keeps the queue held after that. The estimate
+   * is compared once, here, against the control plane's own price; the runner compares nothing.
+   * The runner reports the interrupted turn and its idle as usual, and a turn that ended first is
+   * a harmless no-op. */
+  private interruptTurnAtEstimate(session: SessionView): void {
+    const protocolVersion = this.runnerProtocolVersion(session.runnerId);
+    if (!runnerSupportsProtocol(protocolVersion, "turnInterruption")) return;
+    const failed = (reason: string) => this.log.warn(JSON.stringify({
+      event: "live_budget_interrupt_not_applied", sessionId: session.id, runnerId: session.runnerId, reason,
+    }));
+    if (runnerSupportsProtocol(protocolVersion, "turnInterruptionAck")) {
+      // Without a coordinate yet (a reconnecting runner flushes usage before it reports its queue),
+      // the runner's next queue report names the turn, and the unanswered card stops it then.
+      const turnId = this.hub.activeTurnIdForSession(session.id);
+      if (!turnId || this.estimateInterruptedTurns.get(session.id) === turnId) return;
+      this.estimateInterruptedTurns.set(session.id, turnId);
+      // An interruption that did not take effect is retried at the runner's next report of the
+      // same turn, such as after a reconnect; an already-requested one did take effect.
+      const retry = (reason: string) => {
+        failed(reason);
+        if (this.estimateInterruptedTurns.get(session.id) === turnId) this.estimateInterruptedTurns.delete(session.id);
+      };
+      const requestId = `interrupt_${randomUUID().slice(0, 8)}`;
+      void this.hub.requestFromRunner(session.runnerId, requestId, {
+        type: "interrupt_turn", requestId, sessionId: session.id, turnId,
+      }, 5_000).then((result) => {
+        if (result.type !== "interrupt_turn_result") retry("invalid_response");
+        else if (!result.applied && result.reason !== "already_requested") retry(result.reason);
+      }, (error: unknown) => retry((error as Error).message));
+      return;
+    }
+    const turnId = this.db.latestTurnId(session.id);
+    if (!this.hub.sendToRunner(session.runnerId, { type: "interrupt_turn", sessionId: session.id, ...(turnId ? { turnId } : {}) })) {
+      failed("runner_offline");
+    }
   }
 
   /** A durable control-plane decision that restores a swallowed runner idle must replay the same

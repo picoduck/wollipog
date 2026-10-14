@@ -12764,6 +12764,178 @@ test("a running Claude turn parks at its cost budget on the live estimate, and s
   assert.deepEqual([session.status, session.costUsd], ["idle", 0.045], "the swallowed idle settles it");
 });
 
+test("a live estimate that crosses the budget interrupts the running turn, holds the queue, and settles to idle", () => {
+  const { db, hub, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.setSessionQueue(id, [], false, "turn-live");
+  hub.sentToRunner.length = 0;
+
+  live(10, 5);
+  assert.equal(hub.sentOfType("interrupt_turn").length, 0, "$0.02 estimated is below the budget");
+  live(20, 10);
+  const interrupt = hub.sentOfType("interrupt_turn");
+  assert.equal(interrupt.length, 1, "the control plane stops the turn it parked");
+  assert.deepEqual([interrupt[0]!.sessionId, interrupt[0]!.turnId], [id, "turn-live"]);
+  assert.equal(hub.sentOfType("rearm_governance").at(-1)?.holdFor, "control_plane", "the queue stays held after the turn settles");
+  assert.deepEqual(hub.sentOfType("priced_session_cost").at(-1), { type: "priced_session_cost", sessionId: id, costUsd: 0 },
+    "the runner's acknowledged price never includes the estimate");
+  let session = db.getSession(id)!;
+  assert.deepEqual([session.status, session.pendingApproval?.kind], ["input_required", "cost_budget"]);
+
+  live(5, 0);
+  assert.equal(hub.sentOfType("interrupt_turn").length, 1, "a parked session is not interrupted again");
+
+  // The interrupted turn settles; its idle is swallowed behind the card, so Continue settles to idle.
+  hub.setSessionQueue(id, [], false);
+  svc.onSessionStatus(id, "idle");
+  assert.equal(db.getSession(id)!.status, "input_required");
+  session = db.getSession(id)!;
+  assert.ok(svc.approve(id, session.pendingApproval!.requestId, "continue").ok);
+  assert.equal(db.getSession(id)!.status, "idle");
+  assert.equal(db.getSession(id)!.costUsd, 0, "the interrupted turn's requests stay open until the next process accounts them");
+});
+
+test("a live estimate crossing behind a pending workflow decision still interrupts the running turn", () => {
+  const { db, hub, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  hub.setSessionQueue(id, [], false, "turn-decision");
+  db.setPendingApproval(id, { requestId: "decision-1", kind: "workflow_decision", title: "PR Merge Approval Required",
+    options: [{ optionId: "approve", name: "Approve", kind: "allow_once" }] });
+  db.updateSessionStatus(id, "input_required", Date.now());
+  hub.sentToRunner.length = 0;
+  live(20, 20);
+  assert.ok(pendingRequests(db.getSession(id)!.pendingApproval).some((request) => request.kind === "cost_budget"));
+  assert.deepEqual(hub.sentOfType("interrupt_turn").map((message) => message.turnId), ["turn-decision"],
+    "the decision does not stop the provider turn, so the budget card does");
+});
+
+test("a live estimate crossing before a reconnecting runner reports its turn interrupts once the turn is known", () => {
+  const { db, hub, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.sentToRunner.length = 0;
+  live(20, 20);
+  assert.equal(db.getSession(id)!.pendingApproval?.kind, "cost_budget");
+  assert.equal(hub.sentOfType("interrupt_turn").length, 0, "no turn coordinate yet");
+  assert.ok(svc.onSessionQueue(RUNNER_ID, id, [], true, "turn-reconnected"));
+  assert.deepEqual(hub.sentOfType("interrupt_turn").map((message) => message.turnId), ["turn-reconnected"]);
+  assert.ok(svc.onSessionQueue(RUNNER_ID, id, [], true, "turn-reconnected"));
+  assert.equal(hub.sentOfType("interrupt_turn").length, 1, "the deferred interruption is sent once");
+});
+
+test("an unanswered estimate-only card stops whichever turn the runner reports next, and an answered one stops none", () => {
+  const { db, hub, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.sentToRunner.length = 0;
+  live(20, 20);
+  assert.ok(svc.onSessionQueue(RUNNER_ID, id, [], true));
+  assert.equal(hub.sentOfType("interrupt_turn").length, 0, "a queue with no active turn has nothing to stop");
+  assert.ok(svc.onSessionQueue(RUNNER_ID, id, [], true, "turn-provider"));
+  assert.deepEqual(hub.sentOfType("interrupt_turn").map((message) => message.turnId), ["turn-provider"],
+    "a turn that starts while the card is unanswered, such as a provider-initiated one, is stopped too");
+
+  const other = liveClaudeGuardrailHarness();
+  other.svc.setConfig(other.id, { costBudgetUsd: 0.05 });
+  other.db.updateSessionStatus(other.id, "running", Date.now());
+  other.live(20, 20);
+  const card = other.db.getSession(other.id)!.pendingApproval!;
+  assert.ok(other.svc.approve(other.id, card.requestId, "continue").ok);
+  other.hub.sentToRunner.length = 0;
+  assert.ok(other.svc.onSessionQueue(RUNNER_ID, other.id, [], false, "turn-admitted"));
+  assert.equal(other.hub.sentOfType("interrupt_turn").length, 0, "an answered card never stops a turn Continue admitted");
+});
+
+test("an estimate-only budget card left by a control-plane restart still stops the turn the runner reports", () => {
+  const { db, hub, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  db.updateSessionStatus(id, "running", Date.now());
+  live(20, 20);
+  assert.equal(db.getSession(id)!.pendingApproval?.kind, "cost_budget");
+  hub.sentToRunner.length = 0;
+
+  // A fresh service has no memory of the parked card; only the durable card remains.
+  const restarted = new SessionsService(db, hub as unknown as Hub, NOOP_LOG);
+  assert.ok(restarted.onSessionQueue(RUNNER_ID, id, [], true, "turn-after-restart"));
+  assert.deepEqual(hub.sentOfType("interrupt_turn").map((message) => message.turnId), ["turn-after-restart"]);
+  assert.ok(restarted.onSessionQueue(RUNNER_ID, id, [], true, "turn-after-restart"));
+  assert.equal(hub.sentOfType("interrupt_turn").length, 1);
+});
+
+test("an estimate interruption that fails to deliver is retried at the runner's next report of the turn", async () => {
+  const { db, hub, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.setSessionQueue(id, [], false, "turn-flaky");
+  let attempts = 0;
+  hub.requestHandler = (message) => {
+    if (message.type !== "interrupt_turn") throw new Error(`unexpected ${message.type}`);
+    if (++attempts === 1) throw new Error("runner is offline");
+    return { type: "interrupt_turn_result", requestId: message.requestId!, sessionId: message.sessionId, applied: true, reason: "applied" };
+  };
+  live(20, 20);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(attempts, 1);
+  assert.ok(svc.onSessionQueue(RUNNER_ID, id, [], true, "turn-flaky"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(attempts, 2, "the reconnected runner's report of the same turn retries the interruption");
+  assert.ok(svc.onSessionQueue(RUNNER_ID, id, [], true, "turn-flaky"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(attempts, 2, "an applied interruption is not repeated");
+});
+
+test("a budget crossed on settled cost is the runner's to cancel, so the control plane does not interrupt", () => {
+  const { db, hub, svc, id } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.setSessionQueue(id, [], false, "turn-settled");
+  hub.sentToRunner.length = 0;
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-test", inputTokens: 10, outputTokens: 30, costUsd: 0.07 });
+  assert.equal(db.getSession(id)!.pendingApproval?.kind, "cost_budget");
+  assert.equal(hub.sentOfType("interrupt_turn").length, 0);
+});
+
+test("an estimate-only budget card on an idle session holds the queue without interrupting", () => {
+  const { db, hub, svc, id, live } = liveClaudeGuardrailHarness();
+  db.updateSessionStatus(id, "running", Date.now());
+  live(20, 20);
+  svc.onSessionStatus(id, "idle");
+  hub.sentToRunner.length = 0;
+  assert.ok(svc.setConfig(id, { costBudgetUsd: 0.05 }).ok);
+  assert.equal(db.getSession(id)!.pendingApproval?.kind, "cost_budget", "a killed turn's open window still counts");
+  assert.equal(hub.sentOfType("interrupt_turn").length, 0, "there is no turn to stop");
+  assert.equal(hub.sentOfType("rearm_governance").at(-1)?.holdFor, "control_plane");
+});
+
+test("a cost checkpoint crossed by the live estimate parks without interrupting the turn", () => {
+  const { db, hub, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costCheckpointsUsd: [0.05] });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.setSessionQueue(id, [], false, "turn-checkpoint");
+  hub.sentToRunner.length = 0;
+  live(20, 20);
+  assert.equal(db.getSession(id)!.pendingApproval?.kind, "cost_checkpoint");
+  assert.equal(hub.sentOfType("interrupt_turn").length, 0, "a soft checkpoint never stopped the turn");
+});
+
+test("an interruption the runner refuses leaves the budget card and its queue hold in place", async () => {
+  const { db, hub, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.setSessionQueue(id, [], false, "turn-raced");
+  hub.requestHandler = (message) => {
+    if (message.type !== "interrupt_turn") throw new Error(`unexpected ${message.type}`);
+    return { type: "interrupt_turn_result", requestId: message.requestId!, sessionId: message.sessionId,
+      applied: false, reason: "turn_not_running" };
+  };
+  live(20, 20);
+  await new Promise((resolve) => setImmediate(resolve));
+  const session = db.getSession(id)!;
+  assert.deepEqual([session.status, session.pendingApproval?.kind], ["input_required", "cost_budget"]);
+  assert.equal(hub.sentOfType("rearm_governance").at(-1)?.holdFor, "control_plane");
+});
+
 test("Continue on an estimate-only budget card keeps the uncancelled turn running until its idle arrives", () => {
   const { db, svc, id, live } = liveClaudeGuardrailHarness();
   svc.setConfig(id, { costBudgetUsd: 0.05 });
