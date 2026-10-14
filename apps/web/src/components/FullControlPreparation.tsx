@@ -3,9 +3,22 @@ import type { CampaignControlMode, CampaignLaunchPreflight, CampaignLaunchPropos
 import { useApi } from "../api-context.js";
 import { titleCaseLabel } from "../format.js";
 import { fullControlPreflight, type FullControlPreparation as PreparationInput } from "../full-control-preflight.js";
-import { ChoiceRows } from "./ui/ChoiceControls.js";
-import { SegmentedRow } from "./ui/SettingsRows.js";
+import { ChoiceRows, SegmentedControl } from "./ui/ChoiceControls.js";
 import { Notice } from "./Notice.js";
+
+/** A future preference only; the selected option cannot authorize a campaign. */
+export function FullControlModeChoice({ mode, onChange, disabled = false, preferenceSupported = false }: {
+  mode: CampaignControlMode; onChange: (mode: CampaignControlMode) => void;
+  disabled?: boolean; preferenceSupported?: boolean;
+}) {
+  return <SegmentedControl<CampaignControlMode> label="Orchestrator Control" value={mode} onChange={onChange}
+    options={[
+      { value: "custom", label: "Custom", description: "Choose individual workflow owners. Defaults apply only to new campaigns.", disabled },
+      { value: "full_control", label: "Full Control", description: preferenceSupported
+        ? "Prefer Full Control for new campaigns; each needs authenticated human authorization."
+        : "Preview Full Control; this version cannot save the preference.", disabled },
+    ]} />;
+}
 
 /** Shared preference/preflight display. Launch uses only the exact Human endpoint, which refuses
  * production admission until complete enforcement is proven; ordinary creation stays fenced. */
@@ -18,16 +31,10 @@ export function FullControlPreparation({ mode, onChange, disabled = false, prefe
   const preflight = fullControlPreflight(input);
   const current = preflight.effectiveMode;
   const defaults = input.surface === "defaults";
+  if (defaults && mode === "custom") return null;
   return <section className="section" aria-labelledby={defaults ? undefined : `${id}-title`}
     aria-label={defaults ? "Orchestrator Control" : undefined}>
-    {defaults ? <SegmentedRow title="Orchestrator Control" value={mode}
-      onChange={(value) => onChange(value === "full_control" ? "full_control" : "custom")} disabled={disabled}
-      options={[
-        { value: "custom", label: "Custom", description: "Choose individual workflow owners. Defaults apply only to new campaigns." },
-        { value: "full_control", label: "Full Control", description: preferenceSupported
-          ? "Prefer Full Control for new campaigns; each needs authenticated human authorization."
-          : "Preview Full Control; this version cannot save the preference." },
-      ]} /> : <>
+    {!defaults && <>
       <h3 className="section-title" id={`${id}-title`}>Orchestrator Control</h3>
       <ChoiceRows<CampaignControlMode> label="Orchestrator Control" value={mode} onChange={onChange}
         options={[

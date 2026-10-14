@@ -30,7 +30,7 @@ import { SaveBar } from "./SaveBar.js";
 import { useSettingsPanelHead } from "./SettingsView.js";
 import type { SelectOption } from "./ui/ChoiceControls.js";
 import { NumberRow, SegmentedRow, SelectRow, SettingsGroup } from "./ui/SettingsRows.js";
-import { FullControlPreparation } from "./FullControlPreparation.js";
+import { FullControlModeChoice, FullControlPreparation } from "./FullControlPreparation.js";
 
 const AUTO = "__automatic__";
 const DECISION_LABELS: Record<DelegatableWorkflowDecisionCategory, string> = {
@@ -456,14 +456,18 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
   }
 
   const limit = draft.behavior.maximumConcurrentChildren;
+  const controlMode = view.controlModeSupported ? draft.controlMode ?? "custom" : controlPreview;
+  const changeControlMode = (mode: "custom" | "full_control") => {
+    if (view.controlModeSupported) setDraft((current) => current ? { ...current, controlMode: mode } : current);
+    else setControlPreview(mode);
+  };
   return <>
-    <FullControlPreparation surface="defaults" defaults={draft} mode={view.controlModeSupported ? draft.controlMode ?? "custom" : controlPreview}
-      onChange={(mode) => {
-        if (view.controlModeSupported) setDraft((current) => current ? { ...current, controlMode: mode } : current);
-        else setControlPreview(mode);
-      }} disabled={busy} preferenceSupported={view.controlModeSupported} />
+    <FullControlPreparation surface="defaults" defaults={draft} mode={controlMode}
+      onChange={changeControlMode} disabled={busy} preferenceSupported={view.controlModeSupported} />
     <SettingsGroup
       title="Children"
+      action={<FullControlModeChoice mode={controlMode} onChange={changeControlMode}
+        disabled={busy} preferenceSupported={view.controlModeSupported} />}
       notice={capabilityNotice && <Notice
         tone="warning"
         compact
