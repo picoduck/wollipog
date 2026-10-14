@@ -20256,6 +20256,7 @@ export class ControlPlaneDb {
    * child charges. A child that was launched keeps them when deleted (#1496), so this refuses any
    * session past `queued`. */
   deleteUnlaunchedSession(id: string): void {
+    const nested = Boolean((this.db as DatabaseSync & { isTransaction?: boolean }).isTransaction);
     this.atomic(() => {
       const row = this.stmt(`SELECT status, parent_session_id AS parentId,
           parent_charged_cost_usd AS cost, parent_charged_tool_calls AS tools FROM sessions WHERE id=?`)
@@ -20270,7 +20271,8 @@ export class ControlPlaneDb {
       this.campaignBudgets.releaseUnlaunched(id);
       this.deleteSessionRows(id);
     });
-    this.collectWorkflowArtifactBlobs();
+    // An outer transaction can still roll the rows back, so its blobs wait for a later pass.
+    if (!nested) this.collectWorkflowArtifactBlobs();
   }
 
   private deleteSessionRows(id: string): void {

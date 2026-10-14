@@ -190,6 +190,20 @@ test("deleting an unlaunched grandchild returns every ancestor's charge and refu
     assert.equal(h.db.getSession("grandchild"), null);
     assert.throws(() => h.db.deleteUnlaunchedSession("worker"), /launch was never sent/u);
     assert.ok(h.db.getSession("worker"), "a launched session is left in place");
+    // Inside an outer transaction that rolls back, the rows return and so must their blobs.
+    h.db.createSession({ id: "nested", parentSessionId: "worker", runnerId: "r", workspaceId: "w", agentId: "claude",
+      title: "nested", useWorktree: false, creationActor: "agent", driver: "claude-code",
+      config: { model: "claude-opus-5-5", maxToolCalls: 10 }, now: 6 });
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+    h.db.createWorkflowArtifactBytes({ artifactId: "art_nested", sessionId: "nested", kind: "screenshot", name: "nested-image",
+      mimeType: "image/png", encoding: "base64", sizeBytes: png.byteLength, sha256: createHash("sha256").update(png).digest("hex"),
+      createdBy: { kind: "system", id: "test" }, metadata: {}, createdAt: 6 }, png);
+    assert.throws(() => h.db.campaignBudgetTransaction(() => {
+      h.db.deleteUnlaunchedSession("nested");
+      throw new Error("outer rollback");
+    }), /outer rollback/u);
+    assert.ok(h.db.getSession("nested"));
+    assert.deepEqual(h.db.readWorkflowArtifactBytes("art_nested"), png);
   } finally { h.db.close(); }
 });
 
