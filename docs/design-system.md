@@ -1795,7 +1795,14 @@ Description, one line of --text-dim 12px.
 
 One grid for every setting row (`.setting-row`, `SettingRow` in `ui/SettingsRows.tsx`, #2947):
 `grid-template-columns: minmax(0, 1fr) var(--setting-control-w); gap: 8px 24px; min-height:
-var(--row-h-2); padding: 12px 16px`, with `--setting-control-w` declared once at 240px. There is no
+var(--row-h-2); padding: 8px 16px`, with `--setting-control-w` declared once at 240px. **Height
+(#3140):** a row with one line of title and one line of description is exactly `--row-h-2`: 56px at
+the default density, 60px comfortable and 64px on touch, including the hairline above it; so is a row
+with no description, whose 32px control (44px on touch) fits the same height. The token sets
+the height; the 8px padding is only the floor that a second line of description, or a reason under
+a control, grows the row from (8 + 20 + 2 + 16 + 8 = 54, under the token). Under the 560px container
+(Narrow, below) every row keeps 12px above and below, because a stacked row is taller than its token
+anyway. A list of one-line setting rows is a whole multiple of `--row-h-2`. There is no
 leading cell: the row is its text cell (`.setting-row-text`) and its control column
 (`.setting-row-control`), and an optional 16px icon sits inside the text cell, so every title in a
 group starts at one left edge. Title `--type-body-strong`; description `--type-small` in `--text-dim`
