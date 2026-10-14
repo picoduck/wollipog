@@ -76,6 +76,12 @@ export interface SettingsSectionEntry {
   scope?: SettingsScope;
 }
 
+/**
+ * What turning an experiment off does. Experimental's panel head says it, and so does its group on a
+ * phone, where the head's description is hidden (#3139).
+ */
+export const EXPERIMENT_OFF_EFFECT = "Turning one off hides it from navigation and search.";
+
 export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSectionEntry> = [
   { id: "appearance", title: "Appearance", description: "Theme, colors, density and navigation.", scope: "This Device" },
   {
@@ -95,7 +101,7 @@ export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSectionEntry> = [
     id: "experimental",
     title: "Experimental",
     description: "Features that are still being tested.",
-    panelDescription: "Early features. Turning one off hides it from navigation and search.",
+    panelDescription: `Early features. ${EXPERIMENT_OFF_EFFECT}`,
     scope: "This Device",
   },
   { id: "about", title: "About", description: "Versions and updates." },

@@ -47,7 +47,7 @@ import { useSessionsPreviewLayout } from "../use-sessions-preview-layout.js";
 import { setTerminalPlacement, useTerminalPlacement, type TerminalPlacement } from "../terminal-placement.js";
 import { setEnterKeyBehavior, useEnterKeyBehavior, type EnterKeyBehavior } from "../enter-key.js";
 import { setShowAgentLogs, useShowAgentLogs } from "../agent-logs.js";
-import { SETTINGS_SECTIONS, viewPath, type SettingsFocus, type SettingsSection, type SettingsSectionEntry, type View } from "../navigation.js";
+import { EXPERIMENT_OFF_EFFECT, SETTINGS_SECTIONS, viewPath, type SettingsFocus, type SettingsSection, type SettingsSectionEntry, type View } from "../navigation.js";
 import { SHOW_SHORTCUTS_ID, shortcutDisplay } from "../shortcuts.js";
 import type { ExperimentFlags, ExperimentId } from "../experiments.js";
 
@@ -669,7 +669,8 @@ export function BehaviorPanel({
  * plane keeps serving the underlying APIs, and turning a feature back on restores every
  * surface without a reload. The exception to "never hide a setting that could exist" is
  * deliberate here — hiding is the setting. The section's description says once what turning one
- * off does, so each row says only what its feature is.
+ * off does, so each row says only what its feature is. A phone hides that description under its
+ * detail bar (§4.2), so there the group says it instead, above the rows (#3139).
  */
 export function ExperimentalPanel({
   flags,
@@ -678,8 +679,9 @@ export function ExperimentalPanel({
   flags: ExperimentFlags;
   onToggle: (id: ExperimentId, enabled: boolean) => void;
 }) {
+  const phone = useIsMobile();
   return (
-    <SettingsGroup>
+    <SettingsGroup intro={phone ? EXPERIMENT_OFF_EFFECT : undefined}>
       <SwitchRow
         title={EXPERIMENT_COPY.multiAgent.name}
         description="Runs that coordinate several agents in a workflow graph."
