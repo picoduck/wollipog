@@ -448,6 +448,25 @@ export class CodexAppServerInitializationStalledError extends Error {
   }
 }
 
+/** `thread/fork` must settle within this bound (#3146). It copies the source thread's history, so
+ * it shares the launch handshake's allowance; an unanswered one would leave the fork pending with
+ * no error. */
+export const CODEX_THREAD_FORK_REQUEST_TIMEOUT_MS = 120_000;
+
+/** `thread/archive` is best-effort cleanup of a failed fork's provider thread (#3146). The fork
+ * failure is reported only after it settles, so its bound is kept short. */
+export const CODEX_THREAD_ARCHIVE_REQUEST_TIMEOUT_MS = 30_000;
+
+/** A request outside the launch handshake that did not settle within its bound. The message names
+ * only the method, never request or provider payload. */
+export class CodexAppServerRequestStalledError extends Error {
+  readonly name = "CodexAppServerRequestStalledError";
+
+  constructor(readonly method: string, timeoutMs: number) {
+    super(`Codex app-server did not answer ${method} within ${formatDuration(timeoutMs)}`);
+  }
+}
+
 function formatDuration(ms: number): string {
   return ms % 1_000 === 0 ? `${ms / 1_000} seconds` : `${ms} ms`;
 }
@@ -568,6 +587,8 @@ export class CodexAppServerDriver implements Driver {
   private readonly descendantOwner = {};
   private readonly deps: { permissionProfile: typeof decideCodexPermissionProfile };
   private readonly initializationRequestTimeoutMs: number;
+  private readonly forkRequestTimeoutMs: number;
+  private readonly archiveRequestTimeoutMs: number;
   /**
    * The permission-profile base the running app-server carries, or null when it carries none.
    * Bound at spawn, because a profile is selected by config and `turn/start` has no per-turn
@@ -603,6 +624,8 @@ export class CodexAppServerDriver implements Driver {
       readRolloutProof: typeof readCodexRolloutCompletedCommand;
       permissionProfile: typeof decideCodexPermissionProfile;
       initializationRequestTimeoutMs: number;
+      forkRequestTimeoutMs: number;
+      archiveRequestTimeoutMs: number;
     }> = {},
   ) {
     this.cwd = opts.cwd;
@@ -612,6 +635,8 @@ export class CodexAppServerDriver implements Driver {
     this.readRolloutProof = deps.readRolloutProof ?? readCodexRolloutCompletedCommand;
     this.deps = { permissionProfile: deps.permissionProfile ?? decideCodexPermissionProfile };
     this.initializationRequestTimeoutMs = deps.initializationRequestTimeoutMs ?? CODEX_INITIALIZATION_REQUEST_TIMEOUT_MS;
+    this.forkRequestTimeoutMs = deps.forkRequestTimeoutMs ?? CODEX_THREAD_FORK_REQUEST_TIMEOUT_MS;
+    this.archiveRequestTimeoutMs = deps.archiveRequestTimeoutMs ?? CODEX_THREAD_ARCHIVE_REQUEST_TIMEOUT_MS;
   }
 
   /** Send one launch handshake request under the initialization bound (#3099). This returns the
@@ -777,12 +802,12 @@ export class CodexAppServerDriver implements Driver {
 
   async forkSession(lastTurnId: string, cwd: string): Promise<string> {
     if (!this.peer || !this.threadId) throw new Error("Codex app-server thread is not ready to fork");
-    const res = await this.peer.request<Json>("thread/fork", {
+    const res = await this.boundedRequest<Json>("thread/fork", {
       threadId: this.threadId,
       lastTurnId,
       cwd,
       ...configuredServiceTier(this.config, this.opts.capabilities),
-    });
+    }, this.forkRequestTimeoutMs);
     const id = res?.thread?.id;
     if (typeof id !== "string" || !id) throw new Error("Codex fork did not return a thread id");
     return id;
@@ -790,7 +815,19 @@ export class CodexAppServerDriver implements Driver {
 
   async archiveSession(threadId: string): Promise<void> {
     if (!this.peer) throw new Error("Codex app-server is not running");
-    await this.peer.request("thread/archive", { threadId });
+    await this.boundedRequest("thread/archive", { threadId }, this.archiveRequestTimeoutMs);
+  }
+
+  /** Send a request that fails with a method-named error once its bound passes (#3146). A live
+   * session may stream large records meanwhile, so a discarded record does not fail it early.
+   * Provider errors pass through unchanged. */
+  private async boundedRequest<T>(method: string, params: Json, timeoutMs: number): Promise<T> {
+    try {
+      return await this.peer!.request<T>(method, params, { deadlineAt: Date.now() + timeoutMs });
+    } catch (error) {
+      if ((error as RpcError | undefined)?.requestTimeout) throw new CodexAppServerRequestStalledError(method, timeoutMs);
+      throw error;
+    }
   }
 
   setConfig(config: SessionConfig): void {

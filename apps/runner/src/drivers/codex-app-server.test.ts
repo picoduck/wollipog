@@ -14,8 +14,11 @@ import {
   codexAppServerArgs,
   buildCodexTurnParams,
   CODEX_INITIALIZATION_REQUEST_TIMEOUT_MS,
+  CODEX_THREAD_ARCHIVE_REQUEST_TIMEOUT_MS,
+  CODEX_THREAD_FORK_REQUEST_TIMEOUT_MS,
   CodexAppServerDriver,
   CodexAppServerInitializationStalledError,
+  CodexAppServerRequestStalledError,
   CodexAppServerResumeError,
   DEFAULT_MODE_QUESTION_FEATURE,
   diagnosticValue,
@@ -4902,6 +4905,80 @@ test("a successful launch handshake carries the bound without changing its reque
   } finally {
     driver.dispose();
   }
+});
+
+for (const method of ["thread/fork", "thread/archive"] as const) {
+  test(`a ${method} that is never answered rejects within its bound, naming only the method (#3146)`, async () => {
+    const timeoutMs = 40;
+    const server = silentAppServer(method);
+    const driver = new CodexAppServerDriver({
+      command: "codex", args: [], cwd: "/tmp/work", env: {}, config: {}, context: { kind: "native" },
+    }, { onEvent: () => {}, onStderr: () => {}, onExit: () => {} }, undefined, {
+      kill: () => {}, forkRequestTimeoutMs: timeoutMs, archiveRequestTimeoutMs: timeoutMs,
+    });
+    (driver as any).peer = new JsonRpcPeer(server.toServer, server.fromServer);
+    (driver as any).threadId = "thread-private-source";
+    const started = Date.now();
+    try {
+      await assert.rejects(
+        method === "thread/fork"
+          ? driver.forkSession("turn-private-7", "/tmp/private-fork")
+          : driver.archiveSession("thread-private-orphan"),
+        (error: unknown) => {
+          assert.ok(error instanceof CodexAppServerRequestStalledError);
+          assert.equal(error.method, method);
+          assert.equal(error.message, `Codex app-server did not answer ${method} within ${timeoutMs} ms`);
+          assert.doesNotMatch(error.message, /private/, "no request or provider payload reaches the error");
+          return true;
+        },
+      );
+      const elapsed = Date.now() - started;
+      assert.ok(elapsed >= timeoutMs - 5 && elapsed < 2_000, `failed after ${elapsed} ms`);
+      assert.deepEqual(server.methods, [method]);
+    } finally {
+      driver.dispose();
+    }
+  });
+}
+
+test("successful fork and archive requests carry their bounds without changing their results (#3146)", async () => {
+  const server = silentAppServer("none", "thread-forked");
+  const options: unknown[] = [];
+  const peer = new JsonRpcPeer(server.toServer, server.fromServer);
+  const request = peer.request.bind(peer);
+  peer.request = ((method: string, params?: unknown, requestOptions?: unknown) => {
+    options.push([method, params, requestOptions]);
+    return request(method, params, requestOptions as never);
+  }) as typeof peer.request;
+  const driver = new CodexAppServerDriver({
+    command: "codex", args: [], cwd: "/tmp/work", env: {}, config: {}, context: { kind: "native" },
+  }, { onEvent: () => {}, onStderr: () => {}, onExit: () => {} }, undefined, { kill: () => {} });
+  (driver as any).peer = peer;
+  (driver as any).threadId = "thread-source";
+  try {
+    const before = Date.now();
+    assert.equal(await driver.forkSession("turn-7", "/tmp/fork"), "thread-forked");
+    await driver.archiveSession("thread-forked");
+    const after = Date.now();
+    const [fork, archive] = options as Array<[string, unknown, { deadlineAt: number }]>;
+    assert.deepEqual(fork.slice(0, 2), ["thread/fork", { threadId: "thread-source", lastTurnId: "turn-7", cwd: "/tmp/fork" }]);
+    assert.deepEqual(Object.keys(fork[2]), ["deadlineAt"], "a fork may overlap other output, so it ignores discarded records");
+    assert.ok(fork[2].deadlineAt >= before + CODEX_THREAD_FORK_REQUEST_TIMEOUT_MS);
+    assert.ok(fork[2].deadlineAt <= after + CODEX_THREAD_FORK_REQUEST_TIMEOUT_MS);
+    assert.deepEqual(archive.slice(0, 2), ["thread/archive", { threadId: "thread-forked" }]);
+    assert.deepEqual(Object.keys(archive[2]), ["deadlineAt"]);
+    assert.ok(archive[2].deadlineAt >= before + CODEX_THREAD_ARCHIVE_REQUEST_TIMEOUT_MS);
+    assert.ok(archive[2].deadlineAt <= after + CODEX_THREAD_ARCHIVE_REQUEST_TIMEOUT_MS);
+  } finally {
+    driver.dispose();
+  }
+});
+
+test("fork and archive bounds default to two minutes and thirty seconds (#3146)", () => {
+  assert.equal(CODEX_THREAD_FORK_REQUEST_TIMEOUT_MS, 120_000);
+  assert.equal(CODEX_THREAD_ARCHIVE_REQUEST_TIMEOUT_MS, 30_000);
+  assert.equal(new CodexAppServerRequestStalledError("thread/archive", CODEX_THREAD_ARCHIVE_REQUEST_TIMEOUT_MS).message,
+    "Codex app-server did not answer thread/archive within 30 seconds");
 });
 
 for (const resumeId of [undefined, "thread-held"] as const) {
