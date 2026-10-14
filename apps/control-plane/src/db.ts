@@ -6679,7 +6679,10 @@ export class ControlPlaneDb {
       db.exec(CHILD_CHARGE_TRIGGERS_SQL);
       db.exec("COMMIT");
     } catch (error) {
-      db.exec("ROLLBACK");
+      // No ControlPlaneDb owns this connection yet. Attempt both cleanup steps without
+      // replacing the child-charge installation error if either cleanup operation fails.
+      try { db.exec("ROLLBACK"); } catch { /* preserve the installation error */ }
+      try { db.close(); } catch { /* preserve the installation error */ }
       throw error;
     }
     db.exec("UPDATE sessions SET title_source='user' WHERE title_source IS NULL");
