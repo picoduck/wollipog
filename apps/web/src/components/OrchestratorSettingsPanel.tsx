@@ -103,6 +103,7 @@ function saveFailure(caught: unknown): string {
 
 function cloneDefaults(defaults: OrchestratorDefaults): OrchestratorDefaults {
   return {
+    ...(defaults.controlMode === undefined ? {} : { controlMode: defaults.controlMode }),
     behavior: { ...defaults.behavior },
     delegation: { ...defaults.delegation, decisions: { ...defaults.delegation.decisions } },
     execution: { ...defaults.execution },
@@ -394,7 +395,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
   const noInstallationsReason = noInstallations ? "Unavailable until a machine advertises models and efforts." : undefined;
 
   const save = async () => {
-    if (!draft || busy || invalidCount > 0 || controlPreview === "full_control") return;
+    if (!draft || busy || invalidCount > 0 || (controlPreview === "full_control" && !view?.controlModeSupported)) return;
     generation.current += 1;
     busyRef.current = true;
     setBusy(true);
@@ -456,8 +457,11 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
 
   const limit = draft.behavior.maximumConcurrentChildren;
   return <>
-    <FullControlPreparation surface="defaults" defaults={draft} mode={controlPreview}
-      onChange={setControlPreview} disabled={busy} />
+    <FullControlPreparation surface="defaults" defaults={draft} mode={view.controlModeSupported ? draft.controlMode ?? "custom" : controlPreview}
+      onChange={(mode) => {
+        if (view.controlModeSupported) setDraft((current) => current ? { ...current, controlMode: mode } : current);
+        else setControlPreview(mode);
+      }} disabled={busy} preferenceSupported={view.controlModeSupported} />
     <SettingsGroup
       title="Children"
       notice={capabilityNotice && <Notice
@@ -658,7 +662,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
       busy={busy}
       error={saveError}
       saveLabel="Save Defaults"
-      blockedReason={controlPreview === "full_control" ? "Full Control activation is unavailable. Choose Custom to save defaults."
+      blockedReason={controlPreview === "full_control" && !view.controlModeSupported ? "Full Control activation is unavailable. Choose Custom to save defaults."
         : invalidCount > 0 ? `Fix ${invalidCount} setting${invalidCount === 1 ? "" : "s"} to save` : null}
       onDiscard={discard}
       onSave={() => void save()}

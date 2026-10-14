@@ -895,6 +895,31 @@ test("unsupported Full Control preview prevents button and Enter launch; Custom 
   } finally { await unmountFixture(fixture); }
 });
 
+test("a saved Full Control preference initializes future launch review without granting authority", async () => {
+  const enabledRunner: RunnerView = { ...runner, protocolVersion: PROTOCOL_VERSION,
+    agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    } })) };
+  const fixture = await mountFixture({ runners: [enabledRunner] }, undefined, undefined, undefined, undefined,
+    async () => ({ defaults: { ...structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS), controlMode: "full_control" },
+      source: "user_default", controlModeSupported: true,
+      capabilities: { models: [], effortLevels: [], installations: 1, compatibleInstallations: 1, status: "available" } }));
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    assert.equal(fixture.container.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.checked, true);
+    assert.equal(createButton(fixture.container).disabled, true);
+    await act(async () => submitWithEnter(fixture.container));
+    assert.equal(fixture.requests.length, 0);
+    await act(async () => fixture.container.querySelector<HTMLInputElement>('[data-control-mode="custom"]')!.click());
+    await act(async () => createButton(fixture.container).click());
+    assert.equal(fixture.requests.length, 1);
+    assert.equal(Object.hasOwn(fixture.requests[0]!.orchestrator ?? {}, "controlMode"), false);
+    assert.equal(Object.hasOwn(fixture.requests[0]!.orchestrator ?? {}, "control"), false);
+  } finally { await unmountFixture(fixture); }
+});
+
 test("new Orchestrator sessions send only explicit overrides after showing effective defaults", async () => {
   const enabledRunner: RunnerView = {
     ...runner,

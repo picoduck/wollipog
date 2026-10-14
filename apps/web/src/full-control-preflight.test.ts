@@ -74,3 +74,25 @@ test("legacy omitted isolation fields remain unknown instead of claiming they ar
   assert.equal(facts["Strict Project Isolation"], "Disabled");
   assert.equal(facts["Integration Isolation"], "Not reported by this campaign");
 });
+
+test("current campaign projections disclose real issue bounds and budget without claiming complete readiness", () => {
+  const session = { driver: "claude-code", model: "claude-opus-5-5", parentControlPolicy: { revision: 4 },
+    orchestratorPolicy: { ...DEFAULT_ORCHESTRATOR_DEFAULTS, control: { mode: "full_control", boundary: {
+      version: 1, revision: 3, repository: "owner/repo", issueScopeRevision: 1, objective: "Deliver #12",
+      authorizedByUserId: "human", authorizedAt: 2, operations: ["pr_merge"], delegatablePolicyIds: [],
+      issueAuthority: { epics: [12], relatedFollowUps: true, maxIssues: 10, closureReasons: ["completed"] },
+    } }, issueScope: { repository: "owner/repo", issueNumbers: [12], revision: 1, authorizedByUserId: "human", authorizedAt: 1 } },
+    orchestratorCampaign: { budget: { authority: { costUsd: 20, toolCalls: 200, concurrency: 2 },
+      actual: { costUsd: 1, toolCalls: 5 }, outstanding: { costUsd: 2, toolCalls: 10 },
+      sessionLimits: { costBudgetUsd: 4, maxToolCalls: 80 } } },
+  } as unknown as SessionView;
+  const result = fullControlPreflight({ surface: "campaign", session, defaults: session.orchestratorPolicy! });
+  const facts = Object.fromEntries(result.facts.map(({ label, value }) => [label, value]));
+  assert.match(facts["Related Follow-Ups"]!, /at most 10 issues; closure reasons: completed/);
+  assert.match(facts["Aggregate Allowance"]!, /cost 20; tool calls 200; concurrency 2/);
+  assert.match(facts["Artifact Destination"]!, /private control-plane storage/);
+  assert.match(facts["Evidence Provider and Model"]!, /claude-opus-5-5/);
+  assert.match(facts["Authority Boundary"]!, /Stale/);
+  assert.match(result.blockers.join(" "), /current repository, human scope provenance, or policy revision/);
+  assert.equal(result.supported, false);
+});

@@ -6,8 +6,8 @@ import { Notice } from "./Notice.js";
 
 /** Preparation-only mode selection. It cannot call a mutation, mint authorization, or mark a
  * campaign ready. Parent surfaces fence Save/Create while the unsupported mode is selected. */
-export function FullControlPreparation({ mode, onChange, disabled = false, ...input }: PreparationInput & {
-  mode: CampaignControlMode; onChange: (mode: CampaignControlMode) => void; disabled?: boolean;
+export function FullControlPreparation({ mode, onChange, disabled = false, preferenceSupported = false, ...input }: PreparationInput & {
+  mode: CampaignControlMode; onChange: (mode: CampaignControlMode) => void; disabled?: boolean; preferenceSupported?: boolean;
 }) {
   const id = useId();
   const preflight = fullControlPreflight(input);
@@ -20,7 +20,7 @@ export function FullControlPreparation({ mode, onChange, disabled = false, ...in
         { value: "full_control", title: "Full Control", description: "Review autonomous control within one human-established campaign boundary. Activation is unavailable here.", disabled, inputData: { "data-control-mode": "full_control" } },
       ]} />
     <p className="section-note">Selecting the Orchestrator role or assigning all five owners does not authorize Full Control.</p>
-    {input.surface === "defaults" && <p className="section-note">Defaults apply only to new campaigns. Each new campaign still needs its own exact scope and authenticated human authorization.</p>}
+    {input.surface === "defaults" && <p className="section-note">Defaults apply only to new campaigns. {preferenceSupported ? "Save Defaults records a preferred mode; it grants no campaign authority. " : "This version cannot save a control preference. "}Each new campaign still needs its own exact scope and authenticated human authorization.</p>}
     {input.surface === "campaign" && <p className="section-note">Effective Mode: {current === "full_control" ? "Full Control" : "Custom"}. Enabling or revoking control requires an explicit authenticated campaign operation against the current revision and revokes incompatible unused approvals. This preview does not change the mode.</p>}
     {mode === "full_control" && <>
       <h4 className="section-title">Full Control Preflight</h4>

@@ -2578,6 +2578,7 @@ CREATE TABLE IF NOT EXISTS agent_harness_defaults (
 -- default; existing sessions snapshot their own policy and never read through this table.
 CREATE TABLE IF NOT EXISTS orchestrator_settings (
   user_id                     TEXT PRIMARY KEY,
+  control_mode                TEXT CHECK (control_mode IN ('custom','full_control')),
   child_harness               TEXT,
   child_model                 TEXT,
   child_effort                TEXT,
@@ -6473,6 +6474,9 @@ export class ControlPlaneDb {
     } catch {
       /* column already present */
     }
+    if (!(db.prepare("PRAGMA table_info(orchestrator_settings)").all() as Array<{ name: string }>).some((column) => column.name === "control_mode")) {
+      db.exec("ALTER TABLE orchestrator_settings ADD COLUMN control_mode TEXT CHECK (control_mode IN ('custom','full_control'))");
+    }
     if (needsCreationActorBackfill) {
       // Parent attribution is durable CP-owned proof of agent creation. Existing top-level
       // Orchestrators qualify only when their already-persisted campaign snapshot establishes a
@@ -10362,10 +10366,11 @@ export class ControlPlaneDb {
 
   getOrchestratorDefaults(userId: string): OrchestratorDefaultsRecord | null {
     const row = this.stmt(
-      `SELECT child_harness, child_model, child_effort, maximum_concurrent_children, follow_ups, completion,
+      `SELECT control_mode, child_harness, child_model, child_effort, maximum_concurrent_children, follow_ups, completion,
               strict_project_isolation, integration_isolation, parent_control, decision_policy, updated_at
        FROM orchestrator_settings WHERE user_id=?`,
     ).get(userId) as {
+      control_mode: OrchestratorDefaults["controlMode"] | null;
       child_harness: string | null;
       child_model: string | null;
       child_effort: string | null;
@@ -10383,6 +10388,7 @@ export class ControlPlaneDb {
     if (!decisions) return null;
     return {
       defaults: {
+        ...(row.control_mode == null ? {} : { controlMode: row.control_mode }),
         behavior: {
           childHarness: normalizeAgentHarnessIdentity(parseJson<unknown>(row.child_harness)),
           childModel: row.child_model,
@@ -10404,10 +10410,11 @@ export class ControlPlaneDb {
   setOrchestratorDefaults(userId: string, defaults: OrchestratorDefaults, now = Date.now()): void {
     this.stmt(
       `INSERT INTO orchestrator_settings
-         (user_id, child_harness, child_model, child_effort, maximum_concurrent_children, follow_ups, completion,
+         (user_id, control_mode, child_harness, child_model, child_effort, maximum_concurrent_children, follow_ups, completion,
           strict_project_isolation, integration_isolation, parent_control, decision_policy, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(user_id) DO UPDATE SET
+         control_mode=COALESCE(excluded.control_mode, orchestrator_settings.control_mode),
          child_harness=excluded.child_harness, child_model=excluded.child_model, child_effort=excluded.child_effort,
          maximum_concurrent_children=excluded.maximum_concurrent_children,
          follow_ups=excluded.follow_ups, completion=excluded.completion,
@@ -10417,6 +10424,7 @@ export class ControlPlaneDb {
          updated_at=excluded.updated_at`,
     ).run(
       userId,
+      defaults.controlMode ?? null,
       defaults.behavior.childHarness ? JSON.stringify(defaults.behavior.childHarness) : null,
       defaults.behavior.childModel,
       defaults.behavior.childEffort,

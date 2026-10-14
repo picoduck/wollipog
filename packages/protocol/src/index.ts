@@ -2435,6 +2435,8 @@ export interface OrchestratorLaunchPolicy extends OrchestratorExecutionDefaults 
 }
 
 export interface OrchestratorDefaults {
+  /** Future-campaign UI preference only. Omission means Custom; never a human authority grant. */
+  controlMode?: import("./campaign-authority.js").CampaignControlMode;
   behavior: OrchestratorBehaviorDefaults;
   delegation: OrchestratorDelegationDefaults;
   execution: OrchestratorExecutionDefaults;
@@ -2721,6 +2723,8 @@ export interface OrchestratorSettingsView {
   defaults: OrchestratorDefaults;
   source: "system_default" | "user_default";
   capabilities: OrchestratorSettingsCapabilities;
+  /** Optional UI API feature, distinct from runner launch capability or readiness. */
+  controlModeSupported?: boolean;
 }
 
 export interface UpdateOrchestratorSettingsRequest {

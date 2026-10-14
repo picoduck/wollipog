@@ -1,17 +1,30 @@
 # Full Control Launch Preparation
 
-Issue #2940 prepares Custom and Full Control in Orchestrator defaults, New Session, and active
-Orchestrator Controls. Selecting Full Control opens a shared preflight. Activation is explicitly
-unavailable; Save Defaults and Create Session are fenced while this preview is selected. Returning
-to Custom preserves the existing controls. Previewing an active campaign never changes its mode.
+Issue #2940 offers Custom and Full Control in Orchestrator defaults, New Session, and active
+Orchestrator Controls. Full Control opens a shared preflight. A supported settings API can save
+the preferred mode for future campaigns. This preference grants no authority. Older settings APIs
+retain an unsupported preview and refuse saving it. New Session initializes from the saved mode
+and refuses Full Control launch while complete admission and execution support are unverified.
 
-This preparation is stacked on the immutable authority foundation from PR #3061. It does not
-advertise a protocol capability, create a grant, persist Full Control defaults, or expose an agent
-route for human admission. It retains the original server-owned control object, including evolving
-authority subobjects, rather than reconstructing authorization from display facts.
+The owned preparation delta from PR #3069 is integrated onto main's authority, issue-scope and
+budget contracts, preserving subsequent launch UI changes. It advertises no new runner capability
+and exposes no agent route for Human admission. The optional preference persists per signed-in
+user; legacy payload omission preserves it, and an explicit Custom choice resets it. Existing
+campaigns retain their stored control and all selected configuration.
+
+An existing Full Control root campaign has an explicit Revoke Full Control action. It calls the
+existing Human-only control endpoint with the displayed current revision. The server advances
+the revision and revokes unused decisions, resumes and evidence receipts. Descendants cannot
+revoke separately. A conflict reloads current state without replaying the change. The hosting
+campaign remains Custom; source fixture tests do not grant an agent Human authority.
 
 The preflight shows the stored repository, objective, issue scope and revisions when available,
-fixed root and child choices, isolation, completion, Session ceilings, and authorized operations.
+bounded follow-ups and closure reasons, fixed root and child choices, isolation, completion,
+Session ceilings and authorized operations. It reads the actual campaign budget projection and
+distinguishes its envelope, original ceilings, generated allocation, spend and reservations.
+Stale provenance or revisions are explicit blockers. Session artifacts use private storage;
+unmanaged external evidence retains Human review. Provider/model and retention disclosures do
+not constitute actual media-quality or native admission proof.
 Unestablished facts are explicit. Codex permission-profile approvals disclose the session lifetime
 and remain human-owned; command/file one-time approvals keep their existing semantics.
 
@@ -30,9 +43,10 @@ Final integration remains required work under #2940:
 - Disclose the actual artifact destination, retention, reviewer provider/model, media delivery and
   quality. Keep the sole UI Evidence Approval gate. No extra evidence opt-in or fabricated media
   readiness. Unsupported/external evidence continues to require a human.
-- Add the authenticated default/launch/active operations only after all prerequisites are integrated.
-  Defaults affect new campaigns; active enable/revoke checks the current revision and revokes
-  incompatible unused grants. Preserve harness, model, effort, isolation, and completion choices.
+- Add the atomic authenticated Human launch/enable composition only after all prerequisites are
+  integrated. A preferred mode is not admission. Active revocation already uses the current
+  revision and revokes incompatible unused grants. Preserve harness, model, effort, isolation,
+  and completion choices.
 - Verify the complete live flow on final main, including informational completion, through #2939.
 
 The deterministic browser fixtures test the real components and the unsupported state. Their

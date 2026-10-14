@@ -212,6 +212,21 @@ test("Full Control defaults preview blocks saving and never mutates authenticate
   } finally { await view.cleanup(); }
 });
 
+test("a supported Full Control default saves only the preference and preserves other defaults", async () => {
+  const initial = { ...settings(), controlModeSupported: true };
+  const { transport, writes } = server(initial);
+  const view = await mount(panel(transport));
+  try {
+    await act(async () => view.container.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
+    assert.match(view.container.textContent ?? "", /Save Defaults records a preferred mode; it grants no campaign authority/);
+    await act(async () => button(view.container, "Save Defaults")!.click());
+    await settle();
+    assert.equal(writes.length, 1);
+    assert.deepEqual(writes[0]!.defaults, { ...initial.defaults, controlMode: "full_control" });
+    assertNoDomNode(view.container.querySelector(".save-bar"));
+  } finally { await view.cleanup(); }
+});
+
 test("the editor has control preparation and three settings groups, and a change saves the whole default from the save bar", async () => {
   const { transport, writes } = server(settings());
   const view = await mount(panel(transport));

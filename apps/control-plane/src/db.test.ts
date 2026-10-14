@@ -203,6 +203,36 @@ function usageAmount<T extends { inputTokens: number; outputTokens: number; cost
   };
 }
 
+test("Orchestrator control preference migrates and persists without changing existing campaigns", () => {
+  const directory = mkdtempSync(join(tmpdir(), "wollipog-control-preference-"));
+  const path = join(directory, "preferences.db");
+  let db = ControlPlaneDb.open(path);
+  try {
+    const userId = db.localIdentityContext().userId;
+    db.registerRunner(meta(), 500);
+    db.createSession(newSession({ orchestratorPolicy: resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default") }));
+    const before = db.getSession("sess-1");
+    db.setOrchestratorDefaults(userId, DEFAULT_ORCHESTRATOR_DEFAULTS);
+    // A prior installation has this table and row but no optional preference column.
+    db.raw().exec("ALTER TABLE orchestrator_settings DROP COLUMN control_mode");
+    db.close();
+    db = ControlPlaneDb.open(path);
+    assert.equal(db.getOrchestratorDefaults(userId)!.defaults.controlMode, undefined);
+    const full = { ...DEFAULT_ORCHESTRATOR_DEFAULTS, controlMode: "full_control" as const };
+    db.setOrchestratorDefaults(userId, full);
+    db.close();
+    db = ControlPlaneDb.open(path);
+    assert.deepEqual(db.getOrchestratorDefaults(userId)!.defaults, full);
+    db.setOrchestratorDefaults(userId, DEFAULT_ORCHESTRATOR_DEFAULTS);
+    assert.equal(db.getOrchestratorDefaults(userId)!.defaults.controlMode, "full_control", "legacy omission preserves the human preference");
+    db.setOrchestratorDefaults(userId, { ...full, controlMode: "custom" });
+    assert.equal(db.getOrchestratorDefaults(userId)!.defaults.controlMode, "custom");
+    assert.equal(db.getOrchestratorDefaults("other-user"), null);
+    assert.deepEqual(db.getSession("sess-1"), before, "default edits never rewrite a campaign snapshot");
+    assert.throws(() => db.raw().prepare("UPDATE orchestrator_settings SET control_mode=? WHERE user_id=?").run("invalid", userId), /CHECK/);
+  } finally { db.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("steering attempts preserve idempotency, reconcile late receipts, compact, and cascade", () => {
   const db = withRunner();
   db.createSession(newSession());

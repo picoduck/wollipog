@@ -1089,6 +1089,12 @@ export function createApiClient(transport: ApiTransport) {
   /** Exact authorized lookup used by direct links, including archived sessions omitted from the
    * live dashboard snapshot. */
   session: (id: string) => req<{ session: SessionView }>(sessionLookupPath(id)),
+  /** Authenticated Human-only revocation; this does not admit a launch or mint Full authority. */
+  revokeCampaignControl: (id: string, expectedRevision: number) =>
+    req<SessionView>(`/api/sessions/${encodeURIComponent(id)}/orchestrator-campaign/control`, {
+      method: "POST",
+      body: JSON.stringify({ proposal: { mode: "custom" }, expectedRevision }),
+    }),
   setParentControl: (id: string, mode: ParentControlMode) =>
     req<SessionView>(`/api/sessions/${encodeURIComponent(id)}/parent-control`, {
       method: "POST",

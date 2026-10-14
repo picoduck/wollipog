@@ -99,6 +99,7 @@ const ORCHESTRATOR_DECISION_LABELS: Record<DelegatableWorkflowDecisionCategory, 
 
 function cloneOrchestratorDefaults(defaults: OrchestratorDefaults): OrchestratorDefaults {
   return {
+    ...(defaults.controlMode === undefined ? {} : { controlMode: defaults.controlMode }),
     behavior: { ...defaults.behavior },
     delegation: { ...defaults.delegation, decisions: { ...defaults.delegation.decisions } },
     execution: { ...defaults.execution },
@@ -289,6 +290,7 @@ export function NewSessionDialog({
         const defaults = cloneOrchestratorDefaults(view.defaults);
         setOrchestratorSettings({ api, scope: instanceScope, view, error: null });
         setOrchestratorDraft(defaults);
+        setControlPreview(defaults.controlMode ?? "custom");
         setLiveChildLimitDraft(String(defaults.behavior.maximumConcurrentChildren));
         setOrchestratorOverrides(new Set());
       },

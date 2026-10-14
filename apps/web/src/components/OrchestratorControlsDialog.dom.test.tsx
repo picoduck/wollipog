@@ -186,6 +186,49 @@ async function open(
 
 const flush = () => act(async () => { for (let i = 0; i < 5; i += 1) await Promise.resolve(); });
 
+function fullCampaign(): SessionView {
+  return orchestrator({ orchestratorPolicy: { ...POLICY, control: { mode: "full_control", boundary: {
+    version: 1, revision: 3, issueScopeRevision: 1, repository: "owner/repo", objective: "Deliver #12",
+    authorizedByUserId: "fixture-human", authorizedAt: 1, operations: ["pr_merge"], delegatablePolicyIds: [],
+  } } } });
+}
+
+test("explicit Full Control revocation uses the current revision and preserves campaign selections", async () => {
+  const initial = fullCampaign();
+  const writes: unknown[] = [];
+  const fresh = { ...initial, orchestratorPolicy: { ...initial.orchestratorPolicy!, control: { mode: "custom" as const } },
+    parentControlPolicy: { ...initial.parentControlPolicy!, revision: 4 } };
+  const harness = await open(initial, {
+    revokeCampaignControl: async (...args) => { writes.push(args); return fresh; },
+  });
+  await act(async () => [...harness.dialog().querySelectorAll<HTMLButtonElement>("button")]
+    .find((node) => node.textContent?.trim() === "Revoke Full Control")!.click());
+  assert.deepEqual(writes, [["orch", 3]]);
+  assert.equal(harness.changed[0]!.parentControlPolicy!.revision, 4);
+  assert.deepEqual(harness.changed[0]!.orchestratorPolicy!.behavior, initial.orchestratorPolicy!.behavior);
+  assert.deepEqual(harness.changed[0]!.orchestratorPolicy!.execution, initial.orchestratorPolicy!.execution);
+  assert.match(harness.dialog().textContent ?? "", /Effective Mode: Custom/);
+});
+
+test("a conflicting Full Control revocation reloads without replay and descendants cannot revoke", async () => {
+  const initial = fullCampaign();
+  let writes = 0;
+  const fresh = { ...initial, parentControlPolicy: { ...initial.parentControlPolicy!, revision: 4 } };
+  const harness = await open(initial, {
+    revokeCampaignControl: async () => { writes++; throw new ApiError("campaign authority revision changed", 409); },
+    session: async () => ({ session: fresh }),
+  });
+  const revoke = () => [...harness.dialog().querySelectorAll<HTMLButtonElement>("button")]
+    .find((node) => node.textContent?.trim() === "Revoke Full Control")!;
+  await act(async () => revoke().click());
+  assert.equal(writes, 1);
+  assert.equal(harness.changed[0]!.parentControlPolicy!.revision, 4);
+  assert.match(harness.dialog().textContent ?? "", /These controls changed elsewhere/);
+  await harness.rerender({ ...fresh, parentSessionId: "root" });
+  assert.equal(revoke().disabled, true);
+  assert.match(harness.dialog().textContent ?? "", /Change control on the root campaign/);
+});
+
 test("active Full Control preview exposes revision and human gates without changing campaign state", async () => {
   const writes: unknown[] = [];
   const harness = await open(orchestrator(), {
