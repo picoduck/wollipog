@@ -182,7 +182,7 @@ export function AutomationsView() {
   useEffect(() => { setAlternateWorkflowBindingEdits({}); }, [editingId]);
   const [showForm, setShowForm] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<{ source: "poll" | "mutation"; message: string } | null>(null);
+  const [error, setError] = useState<{ source: "poll" | "mutation" | "refresh"; message: string } | null>(null);
   // A user action owns its error even if an earlier poll settles later. Effect cleanup also
   // revokes that ownership so an obsolete API client cannot publish or clear a newer error.
   const errorRevision = useRef(0);
@@ -249,6 +249,18 @@ export function AutomationsView() {
     }
   }, [api]);
 
+  // Only call after a write explicitly resolves successfully. A failed authoritative read is
+  // recoverable by polling; a rejected/unknown-acceptance write still belongs to mutationFailed.
+  const refreshAfterMutation = async (revision: number) => {
+    if (revision !== errorRevision.current) return;
+    try {
+      await refresh(false, () => revision === errorRevision.current);
+    } catch (cause) {
+      setError((previous) => revision === errorRevision.current
+        ? { source: "refresh", message: (cause as Error).message } : previous);
+    }
+  };
+
   useEffect(() => {
     let active = true;
     let initialRefresh = true;
@@ -260,7 +272,8 @@ export function AutomationsView() {
       const revision = errorRevision.current;
       void refresh(true, () => active).then((recovered) => {
         if (!active || !recovered) return;
-        setError((previous) => revision === errorRevision.current && previous?.source === "poll"
+        setError((previous) => revision === errorRevision.current &&
+          (previous?.source === "poll" || previous?.source === "refresh")
           ? null : previous);
       }).catch((cause) => {
         if (!active) return;
@@ -480,7 +493,7 @@ export function AutomationsView() {
       setAlternateWorkflowBindingEdits({});
       setForm(defaults());
       setShowForm(false);
-      if (revision === errorRevision.current) await refresh(false, () => revision === errorRevision.current);
+      await refreshAfterMutation(revision);
     } catch (cause) {
       mutationFailed(revision, cause);
     } finally {
@@ -535,7 +548,7 @@ export function AutomationsView() {
     const revision = beginMutation();
     try {
       await work();
-      if (revision === errorRevision.current) await refresh(false, () => revision === errorRevision.current);
+      await refreshAfterMutation(revision);
     } catch (cause) {
       mutationFailed(revision, cause);
     } finally {
@@ -575,7 +588,7 @@ export function AutomationsView() {
       });
       setCredential(created);
       setTriggerDraft(null);
-      if (revision === errorRevision.current) await refresh(false, () => revision === errorRevision.current);
+      await refreshAfterMutation(revision);
     } catch (cause) {
       mutationFailed(revision, cause);
     } finally {
@@ -589,7 +602,7 @@ export function AutomationsView() {
     try {
       const rotated = await api.rotateAutomationTrigger(automationId, triggerId);
       setCredential(rotated);
-      if (revision === errorRevision.current) await refresh(false, () => revision === errorRevision.current);
+      await refreshAfterMutation(revision);
     } catch (cause) {
       mutationFailed(revision, cause);
     } finally {
@@ -603,7 +616,7 @@ export function AutomationsView() {
     try {
       await api.deleteAutomationTrigger(automationId, triggerId);
       if (credential?.trigger.triggerId === triggerId) setCredential(null);
-      if (revision === errorRevision.current) await refresh(false, () => revision === errorRevision.current);
+      await refreshAfterMutation(revision);
     } catch (cause) {
       mutationFailed(revision, cause);
     } finally {
