@@ -44,7 +44,7 @@ async function run() {
   healthy();
   let output = "";
   const current = spawn(process.execPath, [
-    "--import", "tsx", "--test", "--test-reporter=tap", "--test-timeout=30000",
+    "--import", "tsx", "--test", "--test-reporter=tap", "--test-timeout=35000",
     "--test-name-pattern=^the exclusive successor elects one winner across real runner processes$",
     "apps/runner/src/provider-home-lease.test.ts",
   ], { cwd: repo, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "inherit"] });
@@ -61,7 +61,7 @@ async function run() {
   current.stdout.on("data", (chunk) => { output += chunk; process.stdout.write(chunk); });
   // Let the current bounded fixture finish its owned-tree cleanup on cancellation.
   // Killing its test runner immediately would strand detached contenders.
-  try { await bounded(closed, 40_000, "focused validation exceeded its outer deadline"); }
+  try { await bounded(closed, 45_000, "focused validation exceeded its outer deadline"); }
   finally {
     if (child === current) {
       await killOwnedTree(current);

@@ -887,14 +887,14 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
         state.closed = true; state.code = code; state.signal = signal;
       });
     }
-    // The unchanged five-second reporting budget begins only after both loaded children
-    // and their native helpers are ready. Windows full-suite measurements exceeded the
-    // previous five-second startup bound; setup gets ten seconds, reporting stays five.
+    // Windows measurements exceeded five seconds during both setup and actual
+    // acquisition/verification. Each phase gets a separate finite ten-second bound;
+    // no production deadline changes.
     assert.ok(await waitUntil(() => states.every((state) => state.ready), options.readinessMs ?? 10_000, true), "contender readiness timed out");
     options.onReady?.();
     if (t.signal.aborted || options.signal?.aborted) throw new Error("successor election cancelled");
     writeFileSync(start, "go");
-    assert.ok(await waitUntil(() => states.every((state) => state.reported), 5_000, true), "both contenders report before the race deadline");
+    assert.ok(await waitUntil(() => states.every((state) => state.reported), 10_000, true), "both contenders report before the race deadline");
     outcomes = results.map((result) => readFileSync(result, "utf8"));
     assert.equal(outcomes.filter((outcome) => outcome === "won").length, 1, "exactly one winner");
     assert.equal(outcomes.filter((outcome) => outcome.startsWith("lost:")).length, 1, "exactly one refusal");
@@ -940,7 +940,7 @@ test("the exclusive successor elects one winner across real runner processes", a
 });
 
 test("successor election keeps slow startup out of the result deadline", async (t) => {
-  // Give the injected startup pause its own setup allowance; the race stays at five seconds.
+  // Give the injected startup pause its own finite setup allowance.
   await runSuccessorElectionRace(t, { startupDelayMs: 5_200, readinessMs: 15_000 });
 });
 
