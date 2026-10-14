@@ -139,6 +139,8 @@ impl RouteExclusionObservations {
 #[cfg(feature = "native-core")]
 pub mod native;
 
+pub mod host_contract;
+
 #[cfg(test)]
 mod tests {
     use super::*;

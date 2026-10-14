@@ -4,7 +4,7 @@ use codex_core::{StartThreadOptions, config::Config};
 use codex_extension_api::{ExtensionDataInit, SessionIsolation, ToolName, ToolPolicy};
 use codex_protocol::{dynamic_tools::DynamicToolSpec, openai_models::ReasoningEffort};
 
-pub fn restriction_data() -> ExtensionDataInit {
+fn restriction_data() -> ExtensionDataInit {
     let mut data = ExtensionDataInit::new();
     data.insert(SessionIsolation::Isolated);
     data.insert(ToolPolicy {
@@ -23,12 +23,58 @@ pub fn restriction_data() -> ExtensionDataInit {
     data
 }
 
-pub fn restricted_start_options(
+/// Sealed CODE preparation. There is deliberately no getter, execution method, Clone
+/// implementation or conversion exposing SDK options or a native control channel.
+pub struct RestrictedStartupPreparation {
+    _options: StartThreadOptions,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct StartupCodeSummary {
+    execution_identity: &'static str,
+    sdk_revision: &'static str,
+    scoped_tools: [&'static str; 2],
+    resume_supported: bool,
+    runtime_authorized: bool,
+}
+
+impl StartupCodeSummary {
+    pub fn execution_identity(&self) -> &'static str {
+        self.execution_identity
+    }
+    pub fn sdk_revision(&self) -> &'static str {
+        self.sdk_revision
+    }
+    pub fn scoped_tools(&self) -> [&'static str; 2] {
+        self.scoped_tools
+    }
+    pub fn resume_supported(&self) -> bool {
+        self.resume_supported
+    }
+    pub fn runtime_authorized(&self) -> bool {
+        self.runtime_authorized
+    }
+}
+
+impl RestrictedStartupPreparation {
+    pub fn code_summary(&self) -> StartupCodeSummary {
+        StartupCodeSummary {
+            execution_identity: crate::EXECUTION_IDENTITY,
+            sdk_revision: crate::SDK_REVISION,
+            scoped_tools: MEDIA_TOOLS,
+            resume_supported: false,
+            runtime_authorized: false,
+        }
+    }
+}
+
+pub fn prepare_restricted_start(
     config: Config,
     boundary: &MediaCodeBoundary,
     observations: &RouteExclusionObservations,
-) -> Result<StartThreadOptions, BoundaryError> {
-    observations.check()?; // Caller must independently authenticate actual observations before use.
+) -> Result<RestrictedStartupPreparation, BoundaryError> {
+    // This validates declared CODE facts, never authenticates runtime measurements or a grant.
+    observations.check()?;
     if config.model.as_deref() != Some(boundary.model_id())
         || config.model_reasoning_effort != Some(ReasoningEffort::High)
         || config.base_instructions.is_some()
@@ -53,7 +99,7 @@ pub fn restricted_start_options(
     options.dynamic_tools =
         serde_json::from_str::<Vec<DynamicToolSpec>>(include_str!("../scoped-tools.json"))
             .map_err(|_| BoundaryError::ConfigurationUnsupported)?;
-    Ok(options)
+    Ok(RestrictedStartupPreparation { _options: options })
 }
 
 #[cfg(test)]
