@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DurableCommandStore, isDurableSessionCommandMessage } from "../../runner/src/durable-command-store.js";
 
-function fixture(budgetAuthority?: CampaignBudgetAuthority) {
+function fixture(budgetAuthority?: CampaignBudgetAuthority, completion?: "retain" | "stop_and_archive") {
   const db = ControlPlaneDb.open(":memory:");
   const identity = db.localIdentityContext();
   const metadata: RunnerMetadata = { runnerId: "r", hostname: "test", os: "linux", version: "test",
@@ -28,6 +28,7 @@ function fixture(budgetAuthority?: CampaignBudgetAuthority) {
     db.registerRunner(metadata, 1, PROTOCOL_VERSION);
   }
   const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
+  if (completion) policy.behavior.completion = completion;
   policy.issueScope = { repository: "picoduck/wollipog", issueNumbers: [2938], revision: 1,
     authorizedByUserId: identity.userId, authorizedAt: 1 };
   policy.issueNumbers = [2938];
@@ -763,6 +764,122 @@ test("verified children with an unfinished original scoped PR admit exactly one 
     h.recovery.maintain(now + 33_000);
     assert.equal(h.db.campaignProjection("root")!.status, "verified_complete", "actual merged fact and existing verified cleanup finish the obligation");
     assert.equal(h.db.campaignRecovery.projection("root").records.length, 0);
+  } finally { h.db.close(); }
+});
+
+// Real service verification and ledger records; synthetic forge facts only, never native delivery proof.
+function mergedWorkVerificationFixture(outcome: "incomplete" | "delivered", completion: "retain" | "stop_and_archive" = "retain") {
+  const h = fixture(undefined, completion), now = Date.now();
+  const plan = h.svc.recordCampaignPlan("root", { planComplete: true,
+    items: [{ key: "original:2938", issue: { repository: "picoduck/wollipog", number: 2938 } }] });
+  assert.ok(plan.ok, plan.error ?? "plan refused");
+  const workItemId = plan.data!.items[0]!.workItemId;
+  assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId, childSessionId: "child" }).ok);
+  const ref = { repository: "picoduck/wollipog", number: 3068 };
+  assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId, stage: { stage: "merged", pullRequests: [ref] } }).ok);
+  const checks = { state: "passing" as const, failing: 0, passing: 1, pending: 0 };
+  const observation: CampaignForgePullRequestObservation = { state: "merged", draft: false,
+    headSha: "a".repeat(40), baseRef: "main", reviewDecision: "approved", checks, requiredChecks: checks,
+    mergeQueue: null, mergeCommitSha: "b".repeat(40) };
+  h.db.campaignForgeObservations.record("root", "r", [{ ref, observation }], now);
+  for (const id of ["child", "unaffected"]) {
+    // Already-terminal fixture children let the real archive service settle without any live stop.
+    h.db.updateSessionStatus(id, completion === "retain" ? "idle" : "completed", now);
+    const report = h.db.appendEvent(id, { kind: "agent_message", final: true,
+      text: "Source merged; the explicit work-item attestation determines delivery." }, now);
+    const verified = h.svc.verifyCampaignChild("root", { childSessionId: id, reportEventSeq: report.seq,
+      followUpsAccounted: true, ...(id === "child" ? { workItem: { id: workItemId, outcome } } : {}) });
+    assert.ok(verified.ok, verified.error ?? "verification refused");
+  }
+  h.db.updateSessionStatus("root", "idle", now);
+  return { ...h, now, workItemId, ref, observation };
+}
+
+for (const completion of ["retain", "stop_and_archive"] as const) {
+  test(`explicit incomplete original work stays held after source merge with ${completion}`, () => {
+    const h = mergedWorkVerificationFixture("incomplete", completion);
+    try {
+      assert.equal(h.db.campaignProjection("root")!.children.verified, 2);
+      if (completion === "stop_and_archive") {
+        for (const id of ["child", "unaffected"]) {
+          assert.equal(h.db.getSession(id)!.archived, true);
+          assert.equal(h.db.campaignWorktreeCleanup(id).length, 0);
+        }
+      }
+      assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "recovery_held");
+      assert.equal(h.db.campaignProjection("root")!.status, "blocked");
+      assert.equal(h.db.campaignContinuationAdmission("root").state, "lifecycle_held");
+      assert.equal(h.db.campaignRecovery.activeRecords("root").length, 0, "incomplete is not authority to invent a repair");
+    } finally { h.db.close(); }
+  });
+
+  test(`explicit delivered original work completes after source merge with ${completion}`, () => {
+    const h = mergedWorkVerificationFixture("delivered", completion);
+    try {
+      assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "complete");
+      assert.equal(h.db.campaignProjection("root")!.status, "verified_complete");
+    } finally { h.db.close(); }
+  });
+}
+
+test("incomplete original work survives replacement and a new head until current-attempt delivery", () => {
+  const h = mergedWorkVerificationFixture("incomplete");
+  try {
+    assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: h.workItemId, childSessionId: "unaffected" }).ok);
+    h.db.campaignForgeObservations.record("root", "r", [{ ref: h.ref,
+      observation: { ...h.observation, headSha: "c".repeat(40), mergeCommitSha: "d".repeat(40) } }], h.now);
+    assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "recovery_held");
+    const oldReport = h.db.durableFinalReportSeq("child")!;
+    const staleDelivery = h.svc.verifyCampaignChild("root", { childSessionId: "child", reportEventSeq: oldReport,
+      followUpsAccounted: true, workItem: { id: h.workItemId, outcome: "delivered" } });
+    assert.equal(staleDelivery.ok, false, "the superseded worker cannot resolve incomplete work");
+    assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "recovery_held");
+    const report = h.db.appendEvent("unaffected", { kind: "agent_message", final: true, text: "Current attempt delivered." }, h.now);
+    const delivered = h.svc.verifyCampaignChild("root", { childSessionId: "unaffected", reportEventSeq: report.seq,
+      followUpsAccounted: true, workItem: { id: h.workItemId, outcome: "delivered" } });
+    assert.ok(delivered.ok, delivered.error ?? "delivery refused");
+    assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "complete");
+    assert.equal(h.db.campaignProjection("root")!.status, "verified_complete");
+  } finally { h.db.close(); }
+});
+
+test("verification insertion chronology preserves incomplete work with equal timestamps and reversed UUID order", () => {
+  const h = mergedWorkVerificationFixture("delivered");
+  try {
+    assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: h.workItemId, childSessionId: "unaffected" }).ok);
+    const report = h.db.appendEvent("unaffected", { kind: "agent_message", final: true, text: "New attempt remains incomplete." }, h.now);
+    const verified = h.svc.verifyCampaignChild("root", { childSessionId: "unaffected", reportEventSeq: report.seq,
+      followUpsAccounted: true, workItem: { id: h.workItemId, outcome: "incomplete" } });
+    assert.ok(verified.ok, verified.error ?? "verification refused");
+    // Only test-row identifiers/timestamps change; exact service-validated campaign/attempt/report bindings remain.
+    h.db.raw().prepare("UPDATE campaign_work_verifications SET verified_at=?, id=CASE outcome WHEN 'delivered' THEN ? ELSE ? END WHERE work_item_id=?")
+      .run(h.now, "cver_zzzz_older_delivered", "cver_aaaa_newer_incomplete", h.workItemId);
+    assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "recovery_held");
+    assert.equal(h.db.campaignProjection("root")!.status, "blocked");
+  } finally { h.db.close(); }
+});
+
+test("explicit incomplete work still admits an independently eligible failed-check repair", () => {
+  const h = mergedWorkVerificationFixture("incomplete");
+  try {
+    const checks = { state: "failing" as const, failing: 1, passing: 0, pending: 0 };
+    h.db.campaignForgeObservations.record("root", "r", [{ ref: h.ref,
+      observation: { ...h.observation, state: "open", mergeCommitSha: null, checks, requiredChecks: checks } }], h.now);
+    h.recovery.maintain(h.now);
+    const completion = h.db.campaignRecoveryCompletion("root", h.now);
+    assert.equal(completion.state, "recovery_ready");
+    assert.equal(completion.recoveryIds.length, 1);
+    assert.equal(h.db.campaignRecovery.activeRecords("root").find(record => record.id === completion.recoveryIds[0])!.action, "repair_checks");
+  } finally { h.db.close(); }
+});
+
+test("Custom completion retains its existing report-based compatibility with explicit incomplete work", () => {
+  const h = mergedWorkVerificationFixture("incomplete");
+  try {
+    assert.ok(h.svc.setCampaignControl("root", { mode: "custom" }, 2,
+      { ...h.identity, kind: "human", actorId: h.identity.userId }).ok);
+    assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "complete");
+    assert.equal(h.db.campaignProjection("root")!.status, "verified_complete");
   } finally { h.db.close(); }
 });
 

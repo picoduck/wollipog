@@ -65,7 +65,13 @@ Verified child reports do not finish an original scoped PR. Projection, recovery
 scheduling and delivery share a fresh control-plane rule: only an exact current-scope original
 work item and a current owned forge fact can make a known repair eligible. Stale, unknown,
 unsupported, denied or exhausted obligations stay held; no attempt is spent on an undeliverable
-wake. Actual merged facts and verified cleanup restore completion. A fourth already-reserved
+wake. A source PR's merge does not resolve an explicit `incomplete` verification of its original
+work item. That trusted obligation survives changed heads and reassigned workers until a legitimate
+current-attempt `delivered` verification supersedes it. Equal verification timestamps do not make
+random identifier order a delivery proof. Existing report-based completion without an explicit
+incomplete attestation, and ordinary Custom behavior, retain their compatibility. Actual merged
+facts and verified cleanup restore completion only when no such incomplete obligation remains.
+A fourth already-reserved
 repair remains deliverable; another signal cannot reset its four-attempt ceiling.
 
 Recovery metadata grants no authority. Every effect still passes the existing exact typed decision,

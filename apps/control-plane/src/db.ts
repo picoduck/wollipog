@@ -5334,6 +5334,15 @@ export class ControlPlaneDb {
       for (const item of page.data.items) {
         if (item.commitment !== "committed" || !item.issue || item.issue.repository.toLowerCase() !== scope.repository.toLowerCase() ||
             !scope.issueNumbers.includes(item.issue.number) || !policy.issueNumbers?.includes(item.issue.number)) continue;
+        // These are trusted work-item attestations, not agent stage prose or session-report verification.
+        // Keep an unresolved incomplete attestation across new workers/heads. A legitimate later
+        // delivery supersedes it; insertion order, not tied timestamps or random UUIDs, is chronology.
+        const verification = this.stmt(`SELECT v.outcome FROM campaign_work_verifications v
+          JOIN campaign_work_attempts a ON a.id=v.attempt_id AND a.campaign_session_id=v.campaign_session_id
+            AND a.work_item_id=v.work_item_id AND a.session_id IS v.child_session_id
+          WHERE v.campaign_session_id=? AND v.work_item_id=? ORDER BY v.rowid DESC LIMIT 1`)
+          .get(campaignId, item.id) as { outcome: "delivered" | "incomplete" } | undefined;
+        if (verification?.outcome === "incomplete") unfinished = true;
         const refs = item.stage?.pullRequests.filter(ref => ref.repository.toLowerCase() === scope.repository.toLowerCase()) ?? [];
         if (refs.length === 0) { unfinished = true; continue; }
         for (const { ref, fact } of this.campaignForgeObservations.facts(campaignId, refs, now)) {
