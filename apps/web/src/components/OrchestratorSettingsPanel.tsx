@@ -169,9 +169,20 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
     return () => window.clearTimeout(timer);
   }, []);
 
-  useSettingsPanelHead({
+  const controlMode = view?.controlModeSupported ? draft?.controlMode ?? "custom" : controlPreview;
+  const changeControlMode = useCallback((mode: "custom" | "full_control") => {
+    if (view?.controlModeSupported) setDraft((current) => current ? { ...current, controlMode: mode } : current);
+    else setControlPreview(mode);
+  }, [view?.controlModeSupported]);
+  const controlLoaded = Boolean(view && draft);
+  const headControl = useMemo(() => controlLoaded
+    ? <FullControlModeChoice mode={controlMode} onChange={changeControlMode}
+      disabled={busy} preferenceSupported={view?.controlModeSupported} />
+    : null, [controlLoaded, controlMode, changeControlMode, busy, view?.controlModeSupported]);
+  const hasPanelHead = useSettingsPanelHead({
     description: PANEL_DESCRIPTION,
     meta: view ? (view.source === "user_default" ? "Your Defaults" : "Wollipog Defaults") : null,
+    action: headControl,
   });
 
   const askToLeave = (leave: () => void) => {
@@ -456,18 +467,13 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
   }
 
   const limit = draft.behavior.maximumConcurrentChildren;
-  const controlMode = view.controlModeSupported ? draft.controlMode ?? "custom" : controlPreview;
-  const changeControlMode = (mode: "custom" | "full_control") => {
-    if (view.controlModeSupported) setDraft((current) => current ? { ...current, controlMode: mode } : current);
-    else setControlPreview(mode);
-  };
   return <>
     <FullControlPreparation surface="defaults" defaults={draft} mode={controlMode}
       onChange={changeControlMode} disabled={busy} preferenceSupported={view.controlModeSupported} />
     <SettingsGroup
       title="Children"
-      action={<FullControlModeChoice mode={controlMode} onChange={changeControlMode}
-        disabled={busy} preferenceSupported={view.controlModeSupported} />}
+      action={!hasPanelHead ? <FullControlModeChoice mode={controlMode} onChange={changeControlMode}
+        disabled={busy} preferenceSupported={view.controlModeSupported} /> : undefined}
       notice={capabilityNotice && <Notice
         tone="warning"
         compact
