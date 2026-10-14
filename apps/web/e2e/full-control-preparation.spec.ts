@@ -43,17 +43,18 @@ for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: 
         const full = page.getByRole("radio", { name: "Full Control", exact: true });
         await expect(full).toBeVisible();
         const group = page.getByRole("radiogroup", { name: "Orchestrator Control", exact: true });
-        const controlHeading = page.getByRole("heading", { name: "Orchestrator Control", exact: true });
-        await controlHeading.evaluate((node) => node.scrollIntoView({ block: "start", behavior: "instant" }));
+        const controlAnchor = surface === "defaults" ? group : page.getByRole("heading", { name: "Orchestrator Control", exact: true });
+        await controlAnchor.evaluate((node) => node.scrollIntoView({ block: "start", behavior: "instant" }));
         await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished)));
         const prefix = `${captures}/${surface}-${viewport.name}-${theme}`;
         await page.screenshot({ path: `${prefix}-custom.png` });
-        await full.check();
+        await full.click();
+        await expect(full).toBeChecked();
         await expect(page.getByText("Activation Unavailable", { exact: true })).toBeVisible();
         await expect(page.getByRole("button", { name: surface === "launch" ? "Authorize and Create Session" : "Authorize Full Control", exact: true })).toBeDisabled();
         await expect(page.getByText(/Agent JSON, saved defaults, and this preview cannot grant authorization/)).toBeAttached();
         if (surface === "defaults") {
-          await controlHeading.evaluate((node) => node.scrollIntoView({ block: "start", behavior: "instant" }));
+          await controlAnchor.evaluate((node) => node.scrollIntoView({ block: "start", behavior: "instant" }));
           await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
           await page.screenshot({ path: `${prefix}-draft-preference.png` });
           await page.getByRole("button", { name: "Save Defaults", exact: true }).click();
@@ -87,7 +88,18 @@ for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: 
           await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
           await page.screenshot({ path: `${prefix}-blocked-proposal.png` });
         }
-        await controlHeading.evaluate((node) => node.scrollIntoView({ block: "start", behavior: "instant" }));
+        const preflightAnchor = surface === "launch"
+          ? page.getByText("Full Control Launch Blocked", { exact: true }) : controlAnchor;
+        await preflightAnchor.evaluate((node) => node.scrollIntoView({ block: "start", behavior: "instant" }));
+        if (surface === "launch") {
+          await expect(preflightAnchor).toBeInViewport();
+          await expect(page.getByText("source-fixture-model", { exact: true })).toBeInViewport();
+          for (const reason of ["Complete current enforcement is not proven.", "Native delivery and complete managed usage are not proven.",
+            "Actual media delivery and quality are not proven."]) await expect(page.getByText(reason, { exact: false })).toBeInViewport();
+          const authorizer = page.getByRole("button", { name: "Authorize and Create Session", exact: true });
+          await expect(authorizer).toBeDisabled();
+          await expect(authorizer).toBeInViewport();
+        }
         await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished)));
         await page.screenshot({ path: `${prefix}-preflight.png` });
         await page.getByRole("heading", { name: "Human Required and Unsupported Capabilities", exact: true })
@@ -100,7 +112,8 @@ for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: 
         const overflow = await group.evaluate((node) => node.scrollWidth - node.clientWidth);
         expect(overflow).toBeLessThanOrEqual(1);
         expect(writes.length).toBe(surface === "defaults" ? 1 : 0);
-        await page.getByRole("radio", { name: "Custom", exact: true }).check();
+        await page.getByRole("radio", { name: "Custom", exact: true }).click();
+        await expect(page.getByRole("radio", { name: "Custom", exact: true })).toBeChecked();
         await expect(page.getByText("Activation Unavailable", { exact: true })).toHaveCount(0);
       });
     }

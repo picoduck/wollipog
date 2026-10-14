@@ -4,6 +4,7 @@ import { useApi } from "../api-context.js";
 import { titleCaseLabel } from "../format.js";
 import { fullControlPreflight, type FullControlPreparation as PreparationInput } from "../full-control-preflight.js";
 import { ChoiceRows } from "./ui/ChoiceControls.js";
+import { SegmentedRow } from "./ui/SettingsRows.js";
 import { Notice } from "./Notice.js";
 
 /** Shared preference/preflight display. Launch uses only the exact Human endpoint, which refuses
@@ -16,17 +17,31 @@ export function FullControlPreparation({ mode, onChange, disabled = false, prefe
   const id = useId();
   const preflight = fullControlPreflight(input);
   const current = preflight.effectiveMode;
-  return <section className="section" aria-labelledby={`${id}-title`}>
-    <h3 className="section-title" id={`${id}-title`}>Orchestrator Control</h3>
-    <ChoiceRows<CampaignControlMode> label="Orchestrator Control" value={mode} onChange={onChange}
+  const defaults = input.surface === "defaults";
+  return <section className="section" aria-labelledby={defaults ? undefined : `${id}-title`}
+    aria-label={defaults ? "Orchestrator Control" : undefined}>
+    {defaults ? <SegmentedRow title="Orchestrator Control" value={mode}
+      onChange={(value) => onChange(value === "full_control" ? "full_control" : "custom")} disabled={disabled}
       options={[
-        { value: "custom", title: "Custom", description: "Choose individual request and workflow decision owners.", disabled, inputData: { "data-control-mode": "custom" } },
-        { value: "full_control", title: "Full Control", description: "Review autonomous control within one human-established campaign boundary. Activation is unavailable here.", disabled, inputData: { "data-control-mode": "full_control" } },
-      ]} />
-    <p className="section-note">Selecting the Orchestrator role or assigning all five owners does not authorize Full Control.</p>
-    {input.surface === "defaults" && <p className="section-note">Defaults apply only to new campaigns. {preferenceSupported ? "Save Defaults records a preferred mode; it grants no campaign authority. " : "This version cannot save a control preference. "}Each new campaign still needs its own exact scope and authenticated human authorization.</p>}
+        { value: "custom", label: "Custom", description: "Choose individual workflow owners. Defaults apply only to new campaigns." },
+        { value: "full_control", label: "Full Control", description: preferenceSupported
+          ? "Prefer Full Control for new campaigns; each needs authenticated human authorization."
+          : "Preview Full Control; this version cannot save the preference." },
+      ]} /> : <>
+      <h3 className="section-title" id={`${id}-title`}>Orchestrator Control</h3>
+      <ChoiceRows<CampaignControlMode> label="Orchestrator Control" value={mode} onChange={onChange}
+        options={[
+          { value: "custom", title: "Custom", description: "Choose individual request and workflow decision owners.", disabled, inputData: { "data-control-mode": "custom" } },
+          { value: "full_control", title: "Full Control", description: "Review autonomous control within one human-established campaign boundary. Activation is unavailable here.", disabled, inputData: { "data-control-mode": "full_control" } },
+        ]} />
+      <p className="section-note">Selecting the Orchestrator role or assigning all five owners does not authorize Full Control.</p>
+    </>}
     {input.surface === "campaign" && <p className="section-note">Effective Mode: {current === "full_control" ? "Full Control" : current === "custom" ? "Custom" : "Current Root State Not Reported"}. Enabling or revoking control requires an explicit authenticated campaign operation against the current revision and revokes incompatible unused approvals. This preview does not change the mode.</p>}
     {mode === "full_control" && <>
+      {defaults && <>
+        <p className="section-note">Selecting the Orchestrator role or assigning all five owners does not authorize Full Control.</p>
+        <p className="section-note">Defaults apply only to new campaigns. {preferenceSupported ? "Save Defaults records a preferred mode; it grants no campaign authority. " : "This version cannot save a control preference. "}Each new campaign still needs its own exact scope and authenticated human authorization.</p>
+      </>}
       <h4 className="section-title">Full Control Preflight</h4>
       <Notice tone="neutral" role="status">Activation Unavailable</Notice>
       <dl className="facts orchestrator-facts">

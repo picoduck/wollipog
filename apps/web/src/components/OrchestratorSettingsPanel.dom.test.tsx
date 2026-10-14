@@ -189,6 +189,15 @@ function fieldError(control: Element): Element | null {
   return node?.classList.contains("field-error") ? node : null;
 }
 
+function controlMode(container: Element, label: "Custom" | "Full Control"): HTMLElement {
+  const group = container.querySelector('[role="radiogroup"][aria-label="Orchestrator Control"]');
+  assert.ok(group, "the mode field is accessible by its visible title");
+  const radio = [...group.querySelectorAll<HTMLElement>('[role="radio"]')]
+    .find((node) => node.textContent?.trim() === label);
+  assert.ok(radio, `the ${label} choice is present`);
+  return radio;
+}
+
 test("Full Control defaults preview blocks saving and never mutates authenticated defaults", async () => {
   const { transport, writes } = server(settings());
   const view = await mount(panel(transport));
@@ -197,13 +206,13 @@ test("Full Control defaults preview blocks saving and never mutates authenticate
     const limit = container.querySelector<HTMLInputElement>("#orchestrator-max-children")!;
     await act(async () => fireDomEvent.change(limit, { target: { value: "8" } }));
     const save = button(container, "Save Defaults")!;
-    await act(async () => container.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
+    await act(async () => controlMode(container, "Full Control").click());
     assert.match(container.textContent ?? "", /Activation Unavailable/);
     assert.match(container.textContent ?? "", /Defaults apply only to new campaigns/);
     assert.equal(save.getAttribute("aria-disabled"), "true");
     await act(async () => save.click());
     assert.equal(writes.length, 0);
-    await act(async () => container.querySelector<HTMLInputElement>('[data-control-mode="custom"]')!.click());
+    await act(async () => controlMode(container, "Custom").click());
     assert.equal(save.getAttribute("aria-disabled"), null);
     await act(async () => save.click());
     await settle();
@@ -217,7 +226,7 @@ test("a supported Full Control default saves only the preference and preserves o
   const { transport, writes } = server(initial);
   const view = await mount(panel(transport));
   try {
-    await act(async () => view.container.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
+    await act(async () => controlMode(view.container, "Full Control").click());
     assert.match(view.container.textContent ?? "", /Save Defaults records a preferred mode; it grants no campaign authority/);
     await act(async () => button(view.container, "Save Defaults")!.click());
     await settle();
@@ -233,7 +242,8 @@ test("the editor has control preparation and three settings groups, and a change
   try {
     const { container } = view;
     assert.deepEqual([...container.querySelectorAll("h3")].map((node) => node.textContent),
-      ["Orchestrator Control", "Children", "Execution Permissions", "Decision Delegation"]);
+      ["Children", "Execution Permissions", "Decision Delegation"]);
+    assert.equal(controlMode(container, "Custom").getAttribute("aria-checked"), "true");
     assertNoDomNode(container.querySelector(".save-bar"), "with no changes, no save bar renders");
     assert.doesNotMatch(container.textContent ?? "", /Current Source|Human-Only Decisions|Effective Boundary|Effective Integrations/);
     assertNoDomNode(container.querySelector(".form-error"));
