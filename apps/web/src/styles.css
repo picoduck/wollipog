@@ -17225,7 +17225,7 @@ button.review-finding-location {
 button.setting-row { cursor: pointer; }
 .setting-row-link.is-disabled { cursor: not-allowed; }
 @media (hover: hover) and (pointer: fine) {
-  button.setting-row:hover:not(:disabled) { background: var(--bg-elev-2); }
+  button.setting-row:hover:not(:disabled, [aria-disabled="true"]) { background: var(--bg-elev-2); }
 }
 /* A row a policy link brought into view, until focus leaves it. */
 .setting-row[data-targeted],

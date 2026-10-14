@@ -87,10 +87,20 @@ type Topology = (typeof TOPOLOGIES)[number];
  */
 const TAILNET_STATES = [
   "browser", "off", "on", "restarting", "unavailable", "unmanaged", "checking", "read-failed", "write-failed",
+  "write-retry",
 ] as const;
 type TailnetState = (typeof TAILNET_STATES)[number];
 
-function tailnetFixture(state: TailnetState): TailnetAccessSetting {
+/**
+ * `write-retry`: a failed write whose Try Again saves as the shell's hook does, clearing the failure
+ * and staying busy, until the test settles it with `window.settleTailnetWrite(saved)` (#3190).
+ */
+type TailnetRetryPhase = "failed" | "saving" | "saved";
+declare global {
+  interface Window { settleTailnetWrite?: (saved: boolean) => void }
+}
+
+function tailnetFixture(state: Exclude<TailnetState, "write-retry">): TailnetAccessSetting {
   const base: TailnetAccessSetting = {
     status: { available: true, enabled: false, managed: true },
     loading: false,
@@ -401,6 +411,11 @@ function Harness() {
   const [scheme, setScheme] = React.useState<ColorScheme>("wollipog");
   const [previewScheme, setPreviewScheme] = React.useState<ColorScheme | null>(null);
   const [experimentFlags, setExperimentFlags] = React.useState(DEFAULT_EXPERIMENT_FLAGS);
+  const [tailnetRetry, setTailnetRetry] = React.useState<TailnetRetryPhase>("failed");
+  React.useEffect(() => {
+    window.settleTailnetWrite = (saved) => setTailnetRetry(saved ? "saved" : "failed");
+    return () => { delete window.settleTailnetWrite; };
+  }, []);
   React.useLayoutEffect(() => {
     applySchemeToDocument(document, previewScheme ?? scheme);
   }, [previewScheme, scheme]);
@@ -497,7 +512,11 @@ function Harness() {
               ),
               network: (
                 <NetworkPanel
-                  tailnet={tailnetState ? tailnetFixture(tailnetState) : {
+                  tailnet={tailnetState === "write-retry" ? {
+                    ...tailnetFixture(tailnetRetry === "failed" ? "write-failed" : tailnetRetry === "saved" ? "on" : "off"),
+                    busy: tailnetRetry === "saving",
+                    retry: () => setTailnetRetry("saving"),
+                  } : tailnetState ? tailnetFixture(tailnetState) : {
                     // `managed: false` is how production reaches a DISABLED tailnet switch: another
                     // Wollipog server is using the port, so the row renders and cannot be operated.
                     // `minimal` is Tailscale missing, the other disabled form.

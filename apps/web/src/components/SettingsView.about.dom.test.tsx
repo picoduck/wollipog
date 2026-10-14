@@ -294,21 +294,28 @@ test("Retry on a failed install or release page hands focus to the block before 
   }
 });
 
-test("Try Again on a failed switch keeps focus in Updates while the switch saves", async () => {
+test("Try Again on a failed switch keeps focus on that switch while it saves and once it settles", async () => {
+  const titles = { automatic: "Check for Updates Automatically", prerelease: "Pre-Release Updates" };
   for (const [action, saving] of [["automatic", "savingAutomatic"], ["prerelease", "savingPrerelease"]] as const) {
-    const failed = setting({ failure: { action, message: "denied" } });
-    const view = await renderLive(failed);
-    const tryAgain = view.button("Try Again")!;
-    tryAgain.focus();
-    await act(async () => tryAgain.click());
-    assert.deepEqual(failed.clicks, [action]);
-    // The hook clears the failure and saves: Try Again goes, and the switch is disabled until it lands.
-    await view.show(setting({ [saving]: true }));
-    assert.equal(tryAgain.isConnected, false);
-    const active = domWindow.document.activeElement as unknown as HTMLElement | null;
-    assert.notEqual(active, domWindow.document.body as never, `${action}: focus never falls to the page`);
-    assert.equal(active, view.container.querySelector(".update-block-title") as never, `${action}: the block's title holds it`);
-    await view.unmount();
+    for (const settled of [setting(), setting({ failure: { action, message: "denied again" } })]) {
+      const failed = setting({ failure: { action, message: "denied" } });
+      const view = await renderLive(failed);
+      const named = () => [...view.container.querySelectorAll<HTMLButtonElement>('[role="switch"]')]
+        .find((control) => domWindow.document.getElementById(control.getAttribute("aria-labelledby")!)?.textContent === titles[action]);
+      const tryAgain = view.button("Try Again")!;
+      tryAgain.focus();
+      await act(async () => tryAgain.click());
+      assert.deepEqual(failed.clicks, [action], "Try Again repeats the change itself");
+      // The hook clears the failure and saves: Try Again goes, and the switch is busy until it lands.
+      await view.show(setting({ [saving]: true }));
+      assert.equal(tryAgain.isConnected, false);
+      assert.equal(named()?.getAttribute("aria-busy"), "true");
+      assert.ok(domWindow.document.activeElement === (named() as never), `${action}: the busy switch holds focus, not the page`);
+      await view.show(settled);
+      assert.ok(domWindow.document.activeElement === (named() as never),
+        `${action}: focus stays on the switch after ${settled.failure ? "a second failure" : "the save lands"}`);
+      await view.unmount();
+    }
   }
 });
 
