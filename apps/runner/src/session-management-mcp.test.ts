@@ -2542,7 +2542,7 @@ test("delegated media resolution preserves actual worker references and refuses 
   const args = { sessionId: "child", occurrenceId: "original-gate", outcome: "approve", evidenceReviewed: ["direct-image"],
     delegatedVideoEvidence: [reference] };
   const { deps, calls } = makeDeps(() => ({ status: 200, body: {} })); deps.orchestrator = true;
-  for (const version of [216, 217, 218, 219]) {
+  for (const version of [216, 217, 218, 219, 220]) {
     deps.controlPlaneProtocolVersion = version;
     assert.equal((await callTool(deps, "resolve_descendant_workflow_decision", args)).isError, true);
     assert.equal(calls.length, 0);
@@ -2550,7 +2550,7 @@ test("delegated media resolution preserves actual worker references and refuses 
   deps.controlPlaneProtocolVersion = undefined;
   assert.equal((await callTool(deps, "resolve_descendant_workflow_decision", args)).isError, true);
   assert.equal(calls.at(-1)?.method, "GET"); assert.equal(calls.some((call) => call.method === "POST"), false);
-  deps.controlPlaneProtocolVersion = 220;
+  deps.controlPlaneProtocolVersion = 221;
   assert.equal((await callTool(deps, "resolve_descendant_workflow_decision", args)).isError, undefined);
   assert.deepEqual(calls.at(-1)?.body, { sessionId: "child", occurrenceId: "original-gate", resolution: {
     action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: ["direct-image"], delegatedVideoEvidence: [reference] } });

@@ -26,11 +26,11 @@ const record: VideoReviewRecord = {
 /** Credential/audit boundary test doubles only. Real derivation/provenance is tested separately
  * with all source frames; these values are never stored as an actual live proof or receipt. */
 function fixture() {
-  let invoked = 0, owner = true, protocol = 220;
+  let invoked = 0, owner = true, protocol = 221;
   const audit: EvidenceReviewAuditEvent[] = [];
   const pending: ResolvedVideoReviewRequest = {
     binding: record.binding, criteria: record.criteria, target: { agentId: "synthetic", driver: "codex-app-server",
-      modelId: "synthetic-model", providerId: "synthetic-provider", runnerId: "runner", runnerProtocolVersion: 220,
+      modelId: "synthetic-model", providerId: "synthetic-provider", runnerId: "runner", runnerProtocolVersion: 221,
       capabilitiesSha256: digest, auditedAllFrameDelivery: true, reviewerNamespaceSha256: digest, mediaOnlyNamespaceVerified: true },
     mediaType: "video/webm", mode: "full_control", sourceGrantVerified: true,
   };
@@ -68,7 +68,7 @@ test("implementer, ordinary Session and human request bodies cannot mint an agen
 test("Custom/mixed-peer/missing-live-proof preflight never invokes a decoder or worker", async () => {
   const f = fixture();
   assert.deepEqual(await f.service.prepare(agent("root", true), request), { ok: false, code: "live_validation" });
-  f.setProtocol(219);
+  f.setProtocol(220);
   assert.deepEqual(await f.service.prepare(agent("root", true), request), { ok: false, code: "mixed_peer" });
   f.pending.mode = "custom";
   assert.deepEqual(await f.service.prepare(agent("root", true), request), { ok: false, code: "custom_fallback" });

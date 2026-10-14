@@ -8,7 +8,7 @@ import { PACED_VIDEO_REVIEW_PROFILE } from "./video-evidence-runtime.js";
 const hash = (v: string) => createHash("sha256").update(v).digest("hex");
 const target: EvidenceReviewerTarget = {
   agentId: "synthetic-agent", driver: "codex-app-server", modelId: "synthetic-model", providerId: "synthetic-provider",
-  runnerId: "isolated-runner", runnerProtocolVersion: 220, capabilitiesSha256: hash("all-frame-attestation"),
+  runnerId: "isolated-runner", runnerProtocolVersion: 221, capabilitiesSha256: hash("all-frame-attestation"),
   auditedAllFrameDelivery: true, reviewerNamespaceSha256: hash("narrowed namespace"), mediaOnlyNamespaceVerified: true,
 };
 const evidence = {
@@ -27,7 +27,7 @@ const context: ReviewerAdmissionContext = {
     delegatablePolicyIds: [], evidenceAuthority: evidence },
   evidenceAuthority: evidence, uiEvidenceOwner: "orchestrator", taskEvidenceVerified: true,
   destinationConfigurationId: evidence.destination.configurationId, organizationId: evidence.destination.organizationId,
-  audienceSha256: hash("private audience"), controllerProtocolVersion: 220, childProtocolVersion: 220,
+  audienceSha256: hash("private audience"), controllerProtocolVersion: 221, childProtocolVersion: 221,
   boundaryCurrent: true, scopeCurrent: true, destinationPrivateVerified: true,
 };
 /** Test-only fake proof exercises admission guards. It is never written as a live validation record. */
@@ -87,14 +87,14 @@ function fixture() {
     setFound: (value: typeof found) => { found = value; },
     counts: () => ({ launches, reservations, releases }) };
 }
-test("accounting219 peers cannot borrow reserved media220 authority or reserve/dispatch a reviewer", async () => {
+test("work-item220 peers cannot borrow reserved media221 authority or reserve/dispatch a reviewer", async () => {
   for (const field of ["controllerProtocolVersion", "childProtocolVersion"] as const) {
-    const f = fixture(); f.setContext({ ...context, [field]: 219 });
+    const f = fixture(); f.setContext({ ...context, [field]: 220 });
     assert.deepEqual(await admitEvidenceReviewer("admission", target, f.deps), { ok: false, reason: "mixed_peer" });
     assert.deepEqual(f.counts(), { launches: 0, reservations: 0, releases: 0 });
   }
   const f = fixture();
-  assert.deepEqual(await admitEvidenceReviewer("admission", { ...target, runnerProtocolVersion: 219 }, f.deps),
+  assert.deepEqual(await admitEvidenceReviewer("admission", { ...target, runnerProtocolVersion: 220 }, f.deps),
     { ok: false, reason: "mixed_peer" });
   assert.deepEqual(f.counts(), { launches: 0, reservations: 0, releases: 0 });
 });

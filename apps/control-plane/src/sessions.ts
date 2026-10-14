@@ -3677,6 +3677,12 @@ export class SessionsService {
     ServiceResult<{ resolved: NonNullable<ReturnType<PreparedMediaSessionRuntime["resolve"]>>; childAudience: ResourceScope }> {
     if (!this.preparedMediaRuntime) return fail("Prepared media Session admission is unavailable.", 409);
     const resolved = this.preparedMediaRuntime.resolve(identity, subject);
+    // Media review origin is pinned by its trusted purpose/lineage, never by replacing an
+    // implementer's work-item assignment. The public child-at-creation transaction publishes
+    // after its own commit and cannot be nested inside private media materialization.
+    if (resolved?.request.campaignWorkItemId !== undefined) {
+      return fail("Prepared media reviewers cannot name a campaign work item.", 409);
+    }
     const root = this.db.getSession(identity.rootSessionId), child = this.db.getSession(identity.childSessionId);
     const decision = this.db.workflowDecisionByOccurrence(subject.occurrenceId);
     const control = root?.orchestratorPolicy?.control;
@@ -13920,6 +13926,29 @@ export class SessionsService {
       : this.db.getRunner(runnerId)?.protocolVersion;
   }
 
+  /** Accounting synchronization does not authorize status, continuation or policy mutations. */
+  private acknowledgePricedSessionCost(sessionId: string, runnerId: string): void {
+    // v106 runners enforce this authoritative cumulative price during the live turn. Older
+    // runners retain provider-reported local pricing; correction provenance must stay bound.
+    if (!runnerSupportsProtocol(this.runnerProtocolVersion(runnerId), "pricedSessionCost")) return;
+    let frame: import("@wollipog/protocol").PricedSessionCostMessage | undefined;
+    if (reconciliationRevision(this.db, sessionId) > 0 || latestReconciliationRepair(this.db, sessionId)) {
+      const supportsIdentity = runnerSupportsProtocol(this.runnerProtocolVersion(runnerId), "costReconciliationIdentity");
+      if (supportsIdentity) {
+        try { frame = correctionFrame(this.db, sessionId); }
+        catch { /* Missing correction provenance defers price synchronization. */ }
+      }
+      if (!frame) {
+        // Never strip the coordinate and fall back to an unbound cumulative price.
+        this.log.warn(JSON.stringify({ event: "cost_reconciliation_price_deferred", entryPoint: "runner",
+          runnerId, sessionId, reason: supportsIdentity ? "correction_prefix_unavailable" : "runner_upgrade_required" }));
+      }
+    } else {
+      frame = { type: "priced_session_cost", sessionId, costUsd: this.db.sessionCostUsd(sessionId) };
+    }
+    if (frame) this.hub.sendToRunner(runnerId, frame);
+  }
+
   /** Ingest one live runner event. The runner socket passes a staged large payload from
    * awaitStagedLiveSessionEvent; without one, a large payload is written on the calling thread. */
   onSessionEvent(
@@ -14136,6 +14165,11 @@ export class SessionsService {
     // no generic prompt/question/permission lifecycle; such events cannot overwrite its queue
     // identity, mint a generic continuation, or launch auxiliary title-generation work.
     if (this.mediaSessionPurposes.owns(sessionId) && this.pendingMediaLifecycle(session())) {
+      // Possible usage still needs the existing authoritative price ACK for the owning runner's
+      // cost ceiling. Quarantine continues to fence every generic policy/lifecycle side effect.
+      if (payload.kind === "token_usage" && (!payload.parentToolUseId || payload.independentUsage === true)) {
+        this.acknowledgePricedSessionCost(sessionId, head.runnerId);
+      }
       this.hub.sessionChangedById(sessionId);
       return;
     }
@@ -14169,31 +14203,7 @@ export class SessionsService {
     // Claude's parented breakdown is already included in root totals. Codex child requests are
     // independent: acknowledge their price and apply live budget gates before the root settles.
     if (payload.kind === "token_usage" && (!payload.parentToolUseId || payload.independentUsage === true)) {
-      // v106 runners enforce this authoritative cumulative price during the live turn. The frame
-      // carries no provider credential or transcript content, and older runners retain their
-      // provider-reported local-cost behavior.
-      if (runnerSupportsProtocol(
-        this.runnerProtocolVersion(head.runnerId),
-        "pricedSessionCost",
-      )) {
-        let frame: import("@wollipog/protocol").PricedSessionCostMessage | undefined;
-        if (reconciliationRevision(this.db, sessionId) > 0 || latestReconciliationRepair(this.db, sessionId)) {
-          const supportsIdentity = runnerSupportsProtocol(this.runnerProtocolVersion(head.runnerId), "costReconciliationIdentity");
-          if (supportsIdentity) {
-            try { frame = correctionFrame(this.db, sessionId); }
-            catch { /* Missing correction provenance defers price synchronization. */ }
-          }
-          if (!frame) {
-            // Retain accepted usage and budget enforcement while missing provenance fences price sync.
-            // Never strip the coordinate and fall back to an unbound cumulative price.
-            this.log.warn(JSON.stringify({ event: "cost_reconciliation_price_deferred", entryPoint: "runner",
-              runnerId: head.runnerId, sessionId, reason: supportsIdentity ? "correction_prefix_unavailable" : "runner_upgrade_required" }));
-          }
-        } else {
-          frame = { type: "priced_session_cost", sessionId, costUsd: this.db.sessionCostUsd(sessionId) };
-        }
-        if (frame) this.hub.sendToRunner(head.runnerId, frame);
-      }
+      this.acknowledgePricedSessionCost(sessionId, head.runnerId);
       // Guardrail card gate: pause + ask once a policy rule trips. A v47 runner independently
       // cancels the active turn at the normalized usage threshold; v106 also applies that gate to
       // the acknowledged control-plane price. Re-applied at turn-settle (onSessionStatus) so a

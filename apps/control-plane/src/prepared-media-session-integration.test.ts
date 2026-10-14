@@ -28,6 +28,7 @@ import { OperatorVideoValidationPermits, type OperatorVideoValidationScope } fro
 import { PreparedMediaReservationRelease } from "./prepared-media-reservation-release.js";
 import { RunnerMediaDispatchFences } from "../../runner/src/media-dispatch-fences.js";
 import { DatabaseSync } from "node:sqlite";
+import { applyClaudeReconciliation, previewClaudeReconciliation, correctionFrame } from "./claude-cost-reconciliation.js";
 const sha = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 
 /** In-memory concrete DB/service integration with explicitly synthetic proof/rates/source.
@@ -42,7 +43,7 @@ function harness(sourceBytes?: Buffer, validation = false) {
       capabilities: { models: [{ id: "claude-opus-5-5", displayName: "Synthetic Image Model", default: true, inputModalities: ["text", "image"] }],
         effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true, imageToolResults: true,
         permissionModes: ["default"] } }] };
-  db.registerRunner(metadata, 1, 220);
+  db.registerRunner(metadata, 1, 221);
   db.setUsageRateTable(new Map([["claude-opus-5-5", { inputCostPerToken: 0.000001, outputCostPerToken: 0.000001,
     cacheReadCostPerToken: 0.000001, cacheCreationCostPerToken: 0.000001 }]]));
   const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
@@ -95,13 +96,13 @@ function harness(sourceBytes?: Buffer, validation = false) {
     controllingSessionId: "root", category: "ui_evidence_approval", resourceKey: "synthetic", resourceSnapshot: snapshot,
     resourceDigest: sha(JSON.stringify(snapshot)), policyRevision: boundary.revision, authority: validation ? "human" : "orchestrator", createdAt: 7 }));
   const target: EvidenceReviewerTarget = { agentId: "claude", driver: "claude-code", modelId: "claude-opus-5-5",
-    providerId: "synthetic-provider", runnerId: "r", runnerProtocolVersion: 220, capabilitiesSha256: sha("synthetic capability"),
+    providerId: "synthetic-provider", runnerId: "r", runnerProtocolVersion: 221, capabilitiesSha256: sha("synthetic capability"),
     auditedAllFrameDelivery: true, reviewerNamespaceSha256: sha("synthetic namespace"), mediaOnlyNamespaceVerified: true };
   const context: ReviewerAdmissionContext = { mode: "full_control", rootSessionId: "root", childSessionId: "child",
     repository: "picoduck/wollipog", issue: 1321, issueScopeRevision: 1, policyRevision: boundary.revision,
     boundary, evidenceAuthority: evidence, uiEvidenceOwner: validation ? "human" : "orchestrator", taskEvidenceVerified: true,
     destinationConfigurationId: "synthetic-private", organizationId: human.organizationId, audienceSha256: sha("synthetic audience"),
-    controllerProtocolVersion: 220, childProtocolVersion: 220, boundaryCurrent: true, scopeCurrent: true, destinationPrivateVerified: true };
+    controllerProtocolVersion: 221, childProtocolVersion: 221, boundaryCurrent: true, scopeCurrent: true, destinationPrivateVerified: true };
   let proof: VideoProfileLiveProof | null = { proofId: "synthetic-not-live", driver: target.driver, modelId: target.modelId,
     providerId: target.providerId, capabilitiesSha256: target.capabilitiesSha256, reviewerNamespaceSha256: target.reviewerNamespaceSha256,
     oracleIsolationEvidenceSha256: sha("synthetic probe"), profile: "paced-silent-complete-frames-v1",
@@ -239,6 +240,57 @@ test("rolled-back media preparation emits no phantom Session or creation audit",
   assert.equal(broadcasts, 0, "a rolled-back actual Session must never be announced");
   assert.equal(createdLogs, 0, "creation audit must wait for the owning commit");
 });
+test("nested work-item assignment cannot publish a rolled-back prepared media Session", (t) => {
+  const h = harness(); t.after(() => h.db.close());
+  const plan = h.service.recordCampaignPlan("root", { items: [{ key: "synthetic-owned-work" }], planComplete: true });
+  assert.ok(plan.ok && plan.data, plan.error ?? "Synthetic work-item plan must be recorded");
+  const resolve = h.runtime.resolve;
+  h.runtime.resolve = (...args) => {
+    const resolved = resolve(...args)!;
+    return { ...resolved, request: { ...resolved.request, campaignWorkItemId: plan.data!.items[0]!.workItemId } };
+  };
+  const published: Array<{ id: string; beforeCommit: boolean }> = [];
+  h.hub.sessionChangedById = (id) => { published.push({ id, beforeCommit: h.db.raw().isTransaction }); };
+  const materialize = h.ports.materialize;
+  h.ports.materialize = (identity) => { materialize(identity); throw new Error("Synthetic failure after nested work-item assignment"); };
+  assert.throws(() => h.prepared.prepare(h.identity));
+  assert.equal(h.db.raw().prepare("SELECT COUNT(*) AS n FROM sessions").get()!.n, 2);
+  assert.deepEqual(published, [], "no campaign or child membership may publish from the outer preparation transaction");
+  assert.equal(h.db.raw().prepare("SELECT COUNT(*) AS n FROM campaign_work_attempts").get()!.n, 0);
+});
+for (const phase of ["preflight", "materialize"] as const) {
+  test("private media " + phase + " refuses work-item assignment before all effects", (t) => {
+    const h = harness(); t.after(() => h.db.close());
+    const plan = h.service.recordCampaignPlan("root", { items: [{ key: "synthetic-implementation" }], planComplete: true });
+    assert.ok(plan.ok && plan.data, plan.error ?? "Synthetic work-item plan must be recorded");
+    const resolve = h.runtime.resolve;
+    h.runtime.resolve = (...args) => {
+      const resolved = resolve(...args)!;
+      return { ...resolved, request: { ...resolved.request, campaignWorkItemId: plan.data!.items[0]!.workItemId } };
+    };
+    const budget = h.db.campaignBudgets.view("root");
+    const events = h.db.listEvents("root"), root = h.db.getSession("root");
+    h.messages.length = 0;
+    let publications = 0;
+    h.hub.sessionChanged = () => { publications++; };
+    h.hub.sessionChangedById = () => { publications++; };
+    if (phase === "materialize") h.db.raw().exec("BEGIN");
+    try {
+      const result = phase === "preflight"
+        ? h.service.preflightPreparedMediaSession(h.identity, h.subject)
+        : h.service.materializePreparedMediaSession(h.identity, h.subject);
+      assert.equal(result.ok, false); assert.equal(result.status, 409);
+      assert.match(result.error ?? "", /media reviewers cannot name a campaign work item/u);
+      assert.deepEqual(h.db.campaignBudgets.view("root"), budget);
+      assert.deepEqual(h.db.getSession("root"), root);
+      assert.deepEqual(h.db.listEvents("root"), events);
+      assert.equal(h.db.raw().prepare("SELECT COUNT(*) AS n FROM sessions").get()!.n, 2);
+      assert.equal(h.db.raw().prepare("SELECT COUNT(*) AS n FROM campaign_work_attempts").get()!.n, 0);
+      assert.equal(h.db.raw().prepare("SELECT COUNT(*) AS n FROM prepared_media_sessions").get()!.n, 0);
+      assert.equal(publications, 0); assert.deepEqual(h.messages, []);
+    } finally { if (phase === "materialize") h.db.raw().exec("ROLLBACK"); }
+  });
+}
 test("media preparation announces its actual committed record once and refuses an external commit boundary", (t) => {
   const h = harness(); t.after(() => h.db.close());
   let broadcasts = 0, createdLogs = 0;
@@ -1088,6 +1140,77 @@ test("verified current active command permits authenticated status, but generic 
   assert.equal(h.db.getSession(h.actual.sessionId)?.status, "running", "replaced generation stays quarantined without resurrecting status");
 });
 
+test("ordinary rate-priced usage sends exactly one authoritative accounting acknowledgement", (t) => {
+  const h = releaseHarness(t); h.messages.length = 0;
+  h.hub.runnerProtocolVersion = () => 221; // Synthetic negotiated connection; no actual runner.
+  h.db.createSession({ id: "ordinary-control", runnerId: "r", workspaceId: "w", agentId: "claude",
+    title: "Synthetic Ordinary Control", useWorktree: false, driver: "claude-code",
+    config: { model: "claude-opus-5-5" }, scope: { organizationId: h.human.organizationId,
+      owner: { kind: "user", userId: h.human.userId } }, now: 8 });
+  h.service.onSessionEvent("ordinary-control", { kind: "token_usage", model: "claude-opus-5-5", inputTokens: 3_000_000 },
+    1, Date.now(), "r");
+  assert.equal(h.db.sessionCostUsd("ordinary-control"), 3);
+  assert.deepEqual(h.messages.filter((m) => (m as { type?: string }).type === "priced_session_cost"),
+    [{ type: "priced_session_cost", sessionId: "ordinary-control", costUsd: 3 }]);
+});
+
+for (const outcome of ["unknown", "accepted"] as const) {
+  test("queued " + outcome + " media synchronizes rate-priced usage without granting lifecycle authority", async (t) => {
+    const h = releaseHarness(t); h.ports.send = async () => outcome;
+    h.hub.runnerProtocolVersion = () => 221; // Synthetic negotiated connection; no actual runner.
+    await h.prepared.bind(h.identity, h.binding); await h.prepared.dispatch(h.identity);
+    const before = h.prepared.get(h.identity)!;
+    h.messages.length = 0;
+    h.service.onSessionEvent(h.actual.sessionId, { kind: "token_usage", model: "claude-opus-5-5", inputTokens: 3_000_000 },
+      1, Date.now(), "r");
+    assert.equal(h.db.sessionCostUsd(h.actual.sessionId), 3, "actual test rate table prices input without supplied USD");
+    assert.deepEqual(h.prepared.get(h.identity), before, "command, reservation generation and dispatch state are unchanged");
+    assert.equal(h.db.getSession(h.actual.sessionId)?.status, "queued");
+    assert.equal(h.db.getSession(h.actual.sessionId)?.pendingApproval, null);
+    assert.equal(h.db.campaignBudgets.active(h.actual.sessionId), true);
+    assert.equal(h.db.campaignBudgets.completedAttestation(h.actual.sessionId), null);
+    assert.ok(h.db.campaignBudgets.view("root")!.actual.costUsd >= 3);
+    assert.ok(h.db.listEvents(h.actual.sessionId).some((e) => e.payload.kind === "token_usage"));
+    assert.deepEqual(h.messages.filter((m) => (m as { sessionId?: string }).sessionId === h.actual.sessionId),
+      [{ type: "priced_session_cost", sessionId: h.actual.sessionId, costUsd: 3 }], "only accounting ACK, no Stop or policy action");
+  });
+}
+
+test("quarantined media price synchronization retains correction coordinates and refuses a missing prefix", async (t) => {
+  const h = releaseHarness(t); h.ports.send = async () => "unknown";
+  h.hub.runnerProtocolVersion = () => 221;
+  await h.prepared.bind(h.identity, h.binding); await h.prepared.dispatch(h.identity);
+  const sessionId = h.actual.sessionId, now = Date.now();
+  // Actual reconciliation code over disclosed synthetic accounting evidence. Both queries are
+  // independent, so normalization preserves USD3 rather than manufacturing a refund or zero.
+  const first = h.db.appendEvent(sessionId, { kind: "token_usage", model: "claude-opus-5-5", costUsd: 1 }, now,
+    { accrueUsage: true, runnerSeq: 1, historyEpoch: 1 });
+  const second = h.db.appendEvent(sessionId, { kind: "token_usage", model: "claude-opus-5-5", costUsd: 2 }, now + 1,
+    { accrueUsage: true, runnerSeq: 2, historyEpoch: 1 });
+  const evidence = { sessionId, eventEpoch: 0, historyEpoch: 1, importAuthorized: true, sourceSha256: sha("synthetic accounting source"),
+    records: [
+      { eventId: first.id, conversation: sha("first query"), process: sha("first process"), boundary: "origin", startUsd: 0, endUsd: 1, model: "claude-opus-5-5", scope: "query-tree" },
+      { eventId: second.id, conversation: sha("second query"), process: sha("second process"), boundary: "reset", startUsd: 0, endUsd: 2, model: "claude-opus-5-5", scope: "query-tree" },
+    ] };
+  const preview = previewClaudeReconciliation(h.db, h.human, evidence);
+  assert.equal(preview.originalUsd, 3); assert.equal(preview.proposedUsd, 3);
+  applyClaudeReconciliation(h.db, h.human, evidence, preview.digest);
+  h.messages.length = 0;
+  h.service.onSessionEvent(sessionId, { kind: "token_usage", model: "claude-opus-5-5", inputTokens: 1_000_000 }, 3, now + 2, "r");
+  assert.deepEqual(h.messages.filter((m) => (m as { sessionId?: string }).sessionId === sessionId), [correctionFrame(h.db, sessionId)]);
+  assert.equal(h.db.sessionCostUsd(sessionId), 4);
+  // Deliberately corrupt synthetic provenance: a bare price must never replace a missing chain.
+  h.db.raw().prepare("UPDATE usage_cost_reconciliations SET revision=2 WHERE session_id=?").run(sessionId);
+  h.messages.length = 0;
+  h.service.onSessionEvent(sessionId, { kind: "token_usage", model: "claude-opus-5-5", inputTokens: 1_000_000 }, 4, now + 3, "r");
+  assert.equal(h.db.sessionCostUsd(sessionId), 5);
+  assert.deepEqual(h.messages.filter((m) => (m as { sessionId?: string }).sessionId === sessionId), []);
+  assert.equal(h.db.getSession(sessionId)?.status, "queued");
+  assert.equal(h.prepared.get(h.identity)?.state, "uncertain");
+  assert.equal(h.db.campaignBudgets.active(sessionId), true);
+  assert.equal(h.db.campaignBudgets.completedAttestation(sessionId), null);
+});
+
 test("unresolved media event ingestion retains usage/history while generic questions cannot acquire lifecycle authority", async (t) => {
   const h = releaseHarness(t); h.ports.authorize = async () => true; h.ports.send = async () => "unknown";
   await h.prepared.bind(h.identity, h.binding); await h.prepared.dispatch(h.identity);
@@ -1102,5 +1225,6 @@ test("unresolved media event ingestion retains usage/history while generic quest
   assert.ok(h.db.listEvents(h.actual.sessionId).some((e) => e.payload.kind === "token_usage"));
   assert.equal(h.db.campaignBudgets.active(h.actual.sessionId), true);
   assert.equal(h.db.campaignBudgets.completedAttestation(h.actual.sessionId), null);
-  assert.deepEqual(h.messages.filter((m) => (m as { sessionId?: string }).sessionId === h.actual.sessionId), []);
+  assert.deepEqual(h.messages.filter((m) => (m as { sessionId?: string }).sessionId === h.actual.sessionId),
+    [{ type: "priced_session_cost", sessionId: h.actual.sessionId, costUsd: 0.2 }], "accounting synchronization grants no generic question or lifecycle action");
 });
