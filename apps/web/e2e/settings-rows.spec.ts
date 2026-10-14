@@ -1494,6 +1494,124 @@ test.describe("the appearance controls", () => {
       .toHaveText(["Theme", "Color Scheme", "Density", "Sessions Layout", "Terminal Placement"]);
   });
 
+  test("Appearance names its scope once, and Display's foot says motion follows the system (#3020)", async ({ page }) => {
+    await useHarness(page, "dark", { section: "appearance" });
+    await expect(page.locator(".settings-panel-head .settings-panel-scope")).toHaveText("This Device");
+    await expect(display(page).locator(".settings-group-foot"))
+      .toHaveText("Motion follows your system's reduce-motion setting.");
+  });
+
+  /** The Display controls in row order, each with its row. */
+  const displayControls = (page: Page) => display(page).locator(".setting-row").evaluateAll((rows) => rows.map((row) => {
+    const control = row.querySelector<HTMLElement>(":scope > .setting-row-control > :is(.seg, .ui-select)")!;
+    // A Select's root holds its trigger; the trigger is what is drawn.
+    const drawn = control.querySelector<HTMLElement>(":scope > .ui-select-trigger") ?? control;
+    const box = drawn.getBoundingClientRect();
+    const rowBox = row.getBoundingClientRect();
+    const rowStyle = getComputedStyle(row);
+    return {
+      title: row.querySelector(".setting-row-title")!.textContent,
+      left: box.left,
+      right: box.right,
+      height: box.height,
+      titleLeft: row.querySelector(".setting-row-title")!.getBoundingClientRect().left,
+      rowContentRight: rowBox.right - Number.parseFloat(rowStyle.paddingRight) - Number.parseFloat(rowStyle.borderRightWidth),
+    };
+  }));
+
+  test("at 1440px Theme, Color Scheme, Density and Sessions Layout share one 32px control column (#3020)", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await useHarness(page, "dark", { section: "appearance" });
+    const controls = await displayControls(page);
+    expect(controls.map((control) => control.title))
+      .toEqual(["Theme", "Color Scheme", "Density", "Sessions Layout", "Terminal Placement"]);
+    for (const control of controls) {
+      expect(Math.abs(control.left - controls[0]!.left), `"${control.title}" starts on the control column`).toBeLessThanOrEqual(0.5);
+      expect(Math.abs(control.right - controls[0]!.right), `"${control.title}" ends on the control column`).toBeLessThanOrEqual(0.5);
+      expect(control.height, `"${control.title}" is 32px tall`).toBe(32);
+    }
+  });
+
+  test.describe("on a 390px touch phone", () => {
+    test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+    test("every Display control is 44px and full width, Sessions Layout is absent and Terminal Placement stays (#3020)", async ({ page }) => {
+      await useHarness(page, "dark", { section: "appearance" });
+      expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
+      const controls = await displayControls(page);
+      expect(controls.map((control) => control.title), "a phone shows no preview, so it has no Sessions Layout")
+        .toEqual(["Theme", "Color Scheme", "Density", "Terminal Placement"]);
+      for (const control of controls) {
+        expect(control.height, `"${control.title}" is 44px on touch`).toBe(44);
+        expect(Math.abs(control.left - control.titleLeft), `"${control.title}" starts where its title does`).toBeLessThanOrEqual(0.5);
+        expect(Math.abs(control.right - control.rowContentRight), `"${control.title}" fills the row`).toBeLessThanOrEqual(0.5);
+      }
+    });
+  });
+
+  test("a change shows the row's Saved check for 2s (#3020)", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await useHarness(page, "dark", { section: "appearance" });
+    const row = display(page).locator(".setting-row", { has: seg(page, "Sessions Layout") });
+    await expect(row.locator(".setting-row-saved")).toHaveCount(0);
+    await pill(page, "Sessions Layout", "Preview Right").click();
+    await expect(row.locator(".setting-row-desc"))
+      .toHaveText("The session list on the left, with the preview beside it, in windows 1100px and wider.");
+    await expect(row.locator(".setting-row-saved")).toHaveText("Saved");
+    await expect(row.locator(".setting-row-saved")).toHaveCount(0, { timeout: 4000 });
+  });
+
+  for (const theme of THEMES) {
+    test(`opened from the keyboard, the scheme list draws no ring of its own and fills its active option in ${theme} (#3020)`, async ({ page }) => {
+      await useHarness(page, theme, { section: "appearance" });
+      await trigger(page).focus();
+      await page.keyboard.press("Enter");
+      const list = page.getByRole("listbox", { name: "Color Scheme" });
+      await expect(list).toBeFocused();
+      const state = () => list.evaluate((element) => {
+        const active = element.querySelector<HTMLElement>(".ui-select-option.is-active");
+        return {
+          focusVisible: element.matches(":focus-visible"),
+          outline: getComputedStyle(element).outlineStyle,
+          activeLabel: active?.querySelector(".ui-select-option-body > span")?.textContent ?? null,
+          activeFill: active ? getComputedStyle(active).backgroundColor : null,
+        };
+      });
+      const opened = await state();
+      expect(opened.focusVisible, "the keyboard-opened list is where the keyboard is").toBe(true);
+      expect(opened.outline, "and it draws no ring around every option").toBe("none");
+      expect(opened.activeLabel).toBe("Wollipog");
+      expect(parseColor(opened.activeFill!).a, "the active option is filled").toBeGreaterThan(0);
+
+      await page.keyboard.press("ArrowDown");
+      const browsed = await state();
+      expect(browsed.outline).toBe("none");
+      expect(browsed.activeLabel).toBe("GitHub");
+      // Polled: an option's background eases in, so the first frame after the key is still clear.
+      await expect.poll(async () => parseColor((await state()).activeFill!).a,
+        { message: "and so is each option the keyboard moves to" }).toBeGreaterThan(0);
+      await page.keyboard.press("Escape");
+    });
+  }
+
+  test("in forced colors, which drop the fill, the highlighted scheme option carries the ring (#3020)", async ({ page }) => {
+    await page.emulateMedia({ forcedColors: "active" });
+    await useHarness(page, "dark", { section: "appearance" });
+    await trigger(page).focus();
+    await page.keyboard.press("Enter");
+    const list = page.getByRole("listbox", { name: "Color Scheme" });
+    await expect(list).toBeFocused();
+    await page.keyboard.press("ArrowDown");
+    const active = list.locator(".ui-select-option.is-active");
+    await expect(active).toContainText("GitHub");
+    const ring = await active.evaluate((element) => {
+      const computed = getComputedStyle(element);
+      return { style: computed.outlineStyle, width: Number.parseFloat(computed.outlineWidth) };
+    });
+    expect(ring, "the highlighted option is outlined where its fill is gone").toEqual({ style: "solid", width: 2 });
+    await page.keyboard.press("Escape");
+  });
+
   test("the closed controls share an edge and the open scheme list fits readable content", async ({ page }) => {
     await useHarness(page, "dark", { section: "appearance", copy: "long" });
     const controls = [seg(page, "Theme"), trigger(page), seg(page, "Density")];
@@ -1530,7 +1648,8 @@ test.describe("the appearance controls", () => {
           .map((body) => Math.round(body.getBoundingClientRect().left)),
       };
     });
-    expect(geometry.width).toBeGreaterThanOrEqual(398);
+    // The described list's default width (§8.3, #3020), not a width of its own.
+    expect(geometry.width).toBeGreaterThanOrEqual(358);
     expect(Math.abs(geometry.leftDelta)).toBeLessThanOrEqual(1);
     expect(geometry.scrollHeight).toBeLessThanOrEqual(geometry.clientHeight + 1);
     expect(Math.max(...geometry.lines), "localized-length descriptions remain at most two lines").toBeLessThanOrEqual(2);
@@ -1612,6 +1731,45 @@ test.describe("the appearance controls", () => {
     expect(geometry.left).toBeGreaterThanOrEqual(8);
     expect(geometry.right).toBeLessThanOrEqual(geometry.viewportWidth - 8);
     expect(geometry.scrollHeight).toBeGreaterThan(geometry.clientHeight);
+  });
+
+  test("in a list that scrolls, the keyboard keeps the highlighted option in view, since its fill is the only focus cue (#3020)", async ({ page }) => {
+    await page.setViewportSize({ width: 360, height: 240 });
+    await useHarness(page, "dark", { section: "appearance", copy: "long" });
+    await trigger(page).focus();
+    await page.keyboard.press("Enter");
+    const list = page.getByRole("listbox", { name: "Color Scheme" });
+    await expect(list).toBeFocused();
+    const inView = () => list.evaluate((element) => {
+      const active = element.querySelector<HTMLElement>(".ui-select-option.is-active")!;
+      const box = element.getBoundingClientRect();
+      const option = active.getBoundingClientRect();
+      return {
+        scrolls: element.scrollHeight > element.clientHeight,
+        label: active.querySelector(".ui-select-option-body > span")?.textContent,
+        visible: option.top >= box.top - 0.5 && option.bottom <= box.bottom + 0.5,
+      };
+    });
+    expect(await inView()).toEqual({ scrolls: true, label: "Wollipog", visible: true });
+    await page.keyboard.press("End");
+    await expect.poll(inView, { message: "End highlights the last palette below the fold and scrolls to it" })
+      .toEqual({ scrolls: true, label: "Monokai", visible: true });
+    await page.keyboard.press("Home");
+    await expect.poll(inView).toEqual({ scrolls: true, label: "Wollipog", visible: true });
+    await page.keyboard.press("Escape");
+
+    // A highlight the POINTER chose is not scrolled to while the pointer moves, but a shorter window
+    // that turns the list into a scroller still brings it into view.
+    await page.setViewportSize({ width: 360, height: 640 });
+    await trigger(page).focus();
+    await page.keyboard.press("Enter");
+    await expect(list).toBeFocused();
+    await list.getByRole("option", { name: "Monokai" }).hover();
+    await expect.poll(async () => (await inView()).label).toBe("Monokai");
+    await page.setViewportSize({ width: 360, height: 240 });
+    await expect.poll(inView, { message: "the hovered highlight is brought back into view when the list starts to scroll" })
+      .toEqual({ scrolls: true, label: "Monokai", visible: true });
+    await page.keyboard.press("Escape");
   });
 
   for (const theme of THEMES) {

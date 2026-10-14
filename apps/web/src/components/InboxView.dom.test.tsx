@@ -20,6 +20,8 @@ import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { filterInboxSplitsForReminderMode, InboxView } from "./InboxView.js";
+import { AppearancePanel } from "./SettingsView.js";
+import { COLOR_SCHEMES, DENSITY_OPTIONS, THEME_OPTIONS } from "../theme.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
 import { INBOX_COLLAPSED_THREADS_KEY, type InboxSplit } from "../inbox.js";
 import { loadKeySet, saveKeySet, SESSION_PIN_KEY } from "../pins.js";
@@ -1793,6 +1795,75 @@ test("the Preview Layout control after List / Board switches the list to Preview
   assertNoDomNode(control(), "a phone has no Preview Layout control");
   assert.equal(view().dataset["layout"], undefined);
   assertNoDomNode(container.querySelector('[role="separator"]'));
+
+  setSessionsPreviewLayout("below");
+  await act(async () => root.unmount());
+});
+
+test("Settings' Sessions Layout and the Sessions header's Preview Layout follow each other live, and a phone has no Sessions Layout row (#3020)", async () => {
+  mobileViewport = false;
+  resetSessionsPreviewLayoutForTest();
+  domWindow.localStorage.clear();
+  setWindowFocused(true);
+  setVisibility("visible");
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "sessions-layout-settings",
+    runtimeKey: "sessions-layout-settings:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  const navigation: ViewNavigation = { current: () => ({ name: "inbox" }), push: () => {}, listen: () => () => {} };
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={navigation}>
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
+        <AppearancePanel
+          options={THEME_OPTIONS}
+          value="system"
+          onChange={() => undefined}
+          schemes={COLOR_SCHEMES}
+          scheme="wollipog"
+          onSchemeChange={() => undefined}
+          onSchemePreview={() => undefined}
+          resolvedTheme="dark"
+          densities={DENSITY_OPTIONS}
+          density="compact"
+          onDensityChange={() => undefined}
+        />
+      </StoreProvider>,
+    );
+  });
+  await act(async () => { socket.push(snapshot([session("A", 30), session("B", 20)])); });
+
+  const radios = (label: string) =>
+    [...container.querySelectorAll<HTMLButtonElement>(`[role="radiogroup"][aria-label="${label}"] [role="radio"]`)];
+  const checked = (label: string) => radios(label).map((radio) => radio.getAttribute("aria-checked"));
+  const settingsRow = () => container.querySelector('[role="radiogroup"][aria-label="Sessions Layout"]')?.closest(".setting-row");
+  assert.deepEqual(checked("Preview Layout"), ["true", "false"]);
+  assert.deepEqual(checked("Sessions Layout"), ["true", "false"]);
+
+  // Preview Right in Settings: the row says what it does, and the Sessions header follows at once.
+  await act(async () => { radios("Sessions Layout")[1]!.click(); });
+  assert.equal(settingsRow()?.querySelector(".setting-row-desc")?.textContent,
+    "The session list on the left, with the preview beside it, in windows 1100px and wider.");
+  assert.deepEqual(checked("Preview Layout"), ["false", "true"], "the Sessions header follows without a reload");
+  assert.equal(container.querySelector<HTMLElement>(".inbox-view")!.dataset["layout"], "right");
+
+  // And the other way round.
+  await act(async () => { radios("Preview Layout")[0]!.click(); });
+  assert.deepEqual(checked("Sessions Layout"), ["true", "false"]);
+  assert.equal(settingsRow()?.querySelector(".setting-row-desc")?.textContent,
+    "The session list across the top, with the preview under it.");
+
+  // A phone never shows the preview beside or below the list, so the row does nothing there.
+  mobileViewport = true;
+  await act(async () => { domWindow.dispatchEvent(new domWindow.Event("resize")); });
+  assertNoDomNode(container.querySelector('[role="radiogroup"][aria-label="Sessions Layout"]'),
+    "a phone has no Sessions Layout row");
+  assert.ok(container.querySelector('[role="radiogroup"][aria-label="Terminal Placement"]'),
+    "Terminal Placement stays on phones");
 
   setSessionsPreviewLayout("below");
   await act(async () => root.unmount());

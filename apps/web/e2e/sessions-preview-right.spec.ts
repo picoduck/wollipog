@@ -262,9 +262,12 @@ test.describe("at 1440×900", () => {
     const row = page.getByRole("radiogroup", { name: "Sessions Layout" });
     await expect(row).toBeVisible();
     await expect(row.getByRole("radio", { name: "Preview Right" })).toHaveAttribute("aria-checked", "true");
-    await expect(page.getByText("Preview Right applies in windows 1100px and wider.")).toBeVisible();
+    // The row's sentence, which follows the value (#3020). Each pill carries its own as well.
+    const description = page.locator(".setting-row", { has: row }).locator(".setting-row-desc");
+    await expect(description).toHaveText("The session list on the left, with the preview beside it, in windows 1100px and wider.");
     await row.getByRole("radio", { name: "Preview Below" }).click();
     await expect(row.getByRole("radio", { name: "Preview Below" })).toHaveAttribute("aria-checked", "true");
+    await expect(description).toHaveText("The session list across the top, with the preview under it.");
 
     await page.goBack();
     await expect(view(page)).toHaveAttribute("data-layout", "below");
