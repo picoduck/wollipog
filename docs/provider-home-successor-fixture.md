@@ -2,9 +2,12 @@
 
 `provider-home-lease.test.ts` runs two real Node children against the same temporary HOME and
 released legacy lease. It still requires exactly one winner, one competing-owner refusal, and
-successful exits. Structured fail-closed lease refusals count as losing outcomes. Before publishing its result, the
-loser also verifies that the winner's completed canonical lease is readable and refuses another
-owner. Unexpected runtime errors and genuine ownership violations still fail.
+successful exits. Structured fail-closed lease refusals and the explicit checkpoint-in-progress refusal count as
+losing outcomes. Before publishing its result, the
+loser also verifies that the winner's completed canonical lease is readable and excludes a competing
+process. Errors outside those recognized refusal paths fail. Invalid stable lease evidence or a
+second successful acquirer also fails; the registry may wrap errors during chain verification as
+structured refusals, so this fixture does not classify the original cause of every refusal.
 
 Each child loads the registry, proves native helper availability with the fixture HOME, and sends
 a flushed readiness message before waiting for the shared start barrier. The parent opens that
@@ -17,11 +20,17 @@ barrier only after both children are ready. No production lease deadline or owne
 | Graceful exit after release | 5 seconds |
 | Forced cleanup of fixture-owned trees | 5 seconds |
 
-The controlled regression injects 2.6 seconds of startup delay and 2.6 seconds of result-publication
-delay. With the original barrier, it repeatedly failed the five-second reporting assertion in about
-5.6 seconds; removing either delay passed in about 3 seconds. With readiness coordination it passes
-while retaining the five-second reporting bound. Its startup-only allowance is ten seconds to
-accommodate the deliberately injected pause in addition to ordinary bounded initialization.
+The first controlled probe injected 2.6 seconds of startup and 2.6 seconds of publication delay.
+It reproduced the original reporting assertion twice; removing either delay passed. Native Windows
+measurements then showed an acquisition taking 2.887 seconds plus a 0.492-second losing-contender
+verification, so the artificial publication pause left too little of the five-second reporting
+window. That was a defect in the initial regression, not grounds to expand reporting limits.
+
+The permanent regression instead injects 5.2 seconds of startup and no publication pause. The
+original barrier always expires its reporting budget before startup finishes; the coordinated
+barrier retains the complete five seconds for real acquisition/publication/verification work.
+Its finite ten-second readiness allowance accommodates the injected pause plus measured native
+initialization (about 1.1 seconds on the observed Windows run). Normal readiness remains five seconds.
 
 These measurements establish a defect in the fixture's combined phase budget. Historical Windows
 failure logs do not identify their stalled phase, so they do not prove a production lease defect or

@@ -760,7 +760,7 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
     writeFileSync(helper, `
       import { existsSync, writeFileSync } from "node:fs";
       import { ProviderHomeLeaseRegistry } from ${JSON.stringify(moduleUrl)};
-      import { ensureLeaseIoAvailable, withLeaseIoOptions } from ${JSON.stringify(ioUrl)};
+      import { ensureLeaseIoAvailable, withLeaseIoOptions, LeaseIoError } from ${JSON.stringify(ioUrl)};
       const [home, result, start, release, fault, peerResult] = process.argv.slice(2);
       const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
       const phase = (name, timings = {}) => new Promise((resolve, reject) => {
@@ -798,7 +798,8 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
           outcome = "won";
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          const refusal = error instanceof Error && typeof error.reason === "string";
+          const refusal = (error instanceof Error && typeof error.reason === "string") ||
+            (error instanceof LeaseIoError && error.kind === "busy");
           if (!refusal && !/already in use by process|lease changed during recovery/.test(message)) throw error;
           outcome = "lost:" + message;
         }
@@ -821,7 +822,7 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
             if (!(error instanceof Error) || !/already in use by process/.test(error.message)) throw error;
             excluded = true;
           } finally { verifier.releaseAll(); }
-          if (!excluded) throw new Error("a live winning contender must exclude another owner");
+          if (!excluded) throw new Error("a live winning process must exclude a competing process");
           verificationMs = performance.now() - verificationAt;
         }
         writeFileSync(result, outcome);
@@ -903,13 +904,25 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
   t.diagnostic(`successor election phases: ${JSON.stringify(states.map((state) => ({ contender: state.name, ...state.timings })))}`);
 }
 
+function assertSuccessorFailureClosed(error: unknown, expected: RegExp): boolean {
+  assert.ok(error instanceof Error);
+  assert.match(error.message, expected);
+  assert.doesNotMatch(error.message, /cleanup incomplete|temporary fixture cleanup failed/);
+  const marker = error.message.indexOf("; [");
+  assert.ok(marker >= 0, "contender diagnostics are present");
+  const contenders = JSON.parse(error.message.slice(marker + 2)) as Array<{ closed: boolean }>;
+  assert.equal(contenders.length, 2);
+  assert.ok(contenders.every((contender) => contender.closed === true), "both owned contenders closed");
+  return true;
+}
+
 test("the exclusive successor elects one winner across real runner processes", async (t) => {
   await runSuccessorElectionRace(t);
 });
 
 test("successor election keeps slow startup out of the result deadline", async (t) => {
   // Give the injected startup pause its own setup allowance; the race stays at five seconds.
-  await runSuccessorElectionRace(t, { startupDelayMs: 2_600, publicationDelayMs: 2_600, readinessMs: 10_000 });
+  await runSuccessorElectionRace(t, { startupDelayMs: 5_200, readinessMs: 10_000 });
 });
 
 test("successor election diagnoses startup failure without exposing fixture paths", async (t) => {
@@ -917,27 +930,26 @@ test("successor election diagnoses startup failure without exposing fixture path
     assert.match(error.message, /contender failed before publishing/);
     assert.match(error.message, /synthetic failure at <fixture-home>/);
     assert.doesNotMatch(error.message, /wollipog-provider-home-process-race-/);
-    assert.match(error.message, /"closed":true/);
-    return true;
+    return assertSuccessorFailureClosed(error, /contender failed before publishing/);
   });
 });
 
 test("successor election bounds a hung readiness phase and reaps owned contenders", async (t) => {
   await assert.rejects(runSuccessorElectionRace(t, {
     fault: "hang-before-ready", readinessMs: 1_000, cleanupGraceMs: 50,
-  }), /contender readiness timed out;.*"closed":true/);
+  }), (error) => assertSuccessorFailureClosed(error, /contender readiness timed out/));
 });
 
 test("successor election keeps its result deadline and reaps a stalled publisher", { timeout: 30_000 }, async (t) => {
   await assert.rejects(runSuccessorElectionRace(t, {
     fault: "hang-in-publication", cleanupGraceMs: 50,
-  }), /both contenders report before the race deadline;.*"phase":"publishing".*"closed":true/);
+  }), (error) => assertSuccessorFailureClosed(error, /both contenders report before the race deadline;.*"phase":"publishing"/));
 });
 
 test("successor election rejects a contender that reports but cannot exit", async (t) => {
   await assert.rejects(runSuccessorElectionRace(t, {
     fault: "hang-after-report", cleanupGraceMs: 50,
-  }), /contenders required forced cleanup;.*"closed":true/);
+  }), (error) => assertSuccessorFailureClosed(error, /contenders required forced cleanup/));
 });
 
 test("successor election cancellation cleans its contenders and preserves an unrelated child", async (t) => {
@@ -947,7 +959,7 @@ test("successor election cancellation cleans its contenders and preserves an unr
   const controller = new AbortController();
   await assert.rejects(runSuccessorElectionRace(t, {
     signal: controller.signal, onReady: () => controller.abort(), cleanupGraceMs: 50,
-  }), /successor election cancelled;.*"closed":true/);
+  }), (error) => assertSuccessorFailureClosed(error, /successor election cancelled/));
   assert.equal(unrelated.exitCode, null);
   assert.equal(unrelated.signalCode, null);
 });
