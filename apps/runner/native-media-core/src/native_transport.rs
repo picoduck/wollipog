@@ -126,9 +126,17 @@ struct PendingWindow {
     end_time: u64,
     decoded_bytes: usize,
 }
+/// Validated metadata progress only. This is not an authenticated delivery or SDK submit receipt.
+#[derive(Clone, PartialEq, Eq)]
+struct ProfileSourceProgress {
+    next: usize,
+    end_time: u64,
+    derived_bytes: usize,
+}
 pub struct WindowTransportSource {
     binding: HostCodeBindings,
     commitments: Option<crate::host_bridge::SourceAdmissionCommitments>,
+    profile_source_progress: Option<ProfileSourceProgress>,
     source_sha256: String,
     manifest_sha256: String,
     frame_count: usize,
@@ -180,6 +188,7 @@ impl WindowTransportSource {
         Ok(Self {
             binding,
             commitments: None,
+            profile_source_progress: None,
             source_sha256,
             manifest_sha256,
             frame_count,
@@ -205,6 +214,20 @@ impl WindowTransportSource {
         if self.pending.is_some() {
             return Err(TransportError::Backpressure);
         }
+        let pending = self.validate_source_window(current, &call, window)?;
+        self.pending = Some(pending);
+        Ok(())
+    }
+    /// Dry validation shared by prepare and final ACK. No source state is changed on refusal.
+    fn validate_source_window(
+        &self,
+        current: &HostCodeBindings,
+        call: &SourceCallCoordinates,
+        window: &SourceWindow,
+    ) -> Result<PendingWindow, TransportError> {
+        if current != &self.binding {
+            return Err(TransportError::Binding);
+        }
         if !id(&call.call_id)
             || !id(&call.turn_id)
             || call.namespace.is_some()
@@ -220,7 +243,10 @@ impl WindowTransportSource {
             || !digest(&window.window_sha256)
             || window.images.is_empty()
             || window.images.len() > 32
-            || self.next + window.images.len() > self.frame_count
+            || self
+                .next
+                .checked_add(window.images.len())
+                .is_none_or(|end| end > self.frame_count)
         {
             return Err(TransportError::InvalidWindow);
         }
@@ -265,22 +291,28 @@ impl WindowTransportSource {
         }
         // URL syntax is not PNG decoding or digest authentication. The production issuer and
         // trusted verified-content retrieval are absent; these are explicitly source claims.
-        if self
+        let prospective_bytes = self
             .derived_bytes
             .checked_add(decoded_bytes)
-            .ok_or(TransportError::InvalidWindow)?
-            > 128 * 1024 * 1024
-        {
+            .ok_or(TransportError::InvalidWindow)?;
+        if prospective_bytes > 128 * 1024 * 1024 {
             return Err(TransportError::InvalidWindow);
         }
-        self.pending = Some(PendingWindow {
-            call,
+        if let Some(source) = &self.commitments {
+            self.require_source_commitments(current, source)?;
+            self.require_matching_profile_source_progress()?;
+            require_source_image_profile_total(self, window, source.envelope(), prospective_bytes)?;
+        }
+        Ok(PendingWindow {
+            call: call.clone(),
             window: window.clone(),
-            end: self.next + window.images.len(),
+            end: self
+                .next
+                .checked_add(window.images.len())
+                .ok_or(TransportError::InvalidWindow)?,
             end_time: previous_end.ok_or(TransportError::InvalidWindow)?,
             decoded_bytes,
-        });
-        Ok(())
+        })
     }
     // Freeze metadata only on a pristine SOURCE transport; never a runtime permit.
     fn bind_source_commitments(
@@ -291,7 +323,11 @@ impl WindowTransportSource {
             .validate_source(&self.binding)
             .map_err(|_| TransportError::Binding)?;
         if self.commitments.is_some()
+            || self.profile_source_progress.is_some()
             || self.next != 0
+            || self.next_time != 0
+            || self.derived_bytes != 0
+            || !self.completed_calls.is_empty()
             || self.pending.is_some()
             || self.last_ack.is_some()
             || source.frame_count() != self.frame_count
@@ -299,7 +335,25 @@ impl WindowTransportSource {
             return Err(TransportError::Binding);
         }
         self.commitments = Some(source.clone());
+        self.profile_source_progress = Some(ProfileSourceProgress {
+            next: 0,
+            end_time: 0,
+            derived_bytes: 0,
+        });
         Ok(self)
+    }
+    fn require_matching_profile_source_progress(&self) -> Result<(), TransportError> {
+        let validated = self
+            .profile_source_progress
+            .as_ref()
+            .ok_or(TransportError::Binding)?;
+        if validated.next != self.next
+            || validated.end_time != self.next_time
+            || validated.derived_bytes != self.derived_bytes
+        {
+            return Err(TransportError::InvalidWindow);
+        }
+        Ok(())
     }
     fn require_source_commitments(
         &self,
@@ -325,14 +379,34 @@ impl WindowTransportSource {
         if &pending.call != call || pending.window.window_sha256 != window_sha256 {
             return Err(TransportError::WrongAck);
         }
+        let validated = self.validate_source_window(current, &pending.call, &pending.window)?;
+        if validated.end != pending.end
+            || validated.end_time != pending.end_time
+            || validated.decoded_bytes != pending.decoded_bytes
+        {
+            return Err(TransportError::InvalidWindow);
+        }
+        let next_bytes = self
+            .derived_bytes
+            .checked_add(validated.decoded_bytes)
+            .ok_or(TransportError::InvalidWindow)?;
+        // All potentially refusing checks precede take/progress/history mutation.
         let pending = self.pending.take().ok_or(TransportError::WrongAck)?;
         self.next = pending.end;
         self.next_time = pending.end_time;
-        self.derived_bytes += pending.decoded_bytes;
+        self.derived_bytes = next_bytes;
+        if self.commitments.is_some() {
+            self.profile_source_progress = Some(ProfileSourceProgress {
+                next: self.next,
+                end_time: self.next_time,
+                derived_bytes: next_bytes,
+            });
+        }
         self.completed_calls.insert(pending.call.call_id.clone());
         self.last_ack = Some((pending.call, pending.window));
         Ok(())
     }
+    /// Generic invented SOURCE count only; never use this as profile coverage or delivery proof.
     pub fn require_complete_source_coverage(
         &self,
         current: &HostCodeBindings,
@@ -344,6 +418,23 @@ impl WindowTransportSource {
             return Err(TransportError::Incomplete);
         }
         Ok(())
+    }
+    /// Complete bound PROFILE-SOURCE validity only, not pixels, authentic ACKs, SDK submission,
+    /// model delivery, temporal/perceptual quality, owner approval or pricing/settlement authority.
+    fn require_complete_profile_source_coverage(
+        &self,
+        current: &HostCodeBindings,
+    ) -> Result<(), TransportError> {
+        self.require_complete_source_coverage(current)?;
+        let source = self.commitments.as_ref().ok_or(TransportError::Binding)?;
+        self.require_source_commitments(current, source)?;
+        self.require_matching_profile_source_progress()?;
+        if self.next_time != source.envelope().duration_us {
+            return Err(TransportError::InvalidWindow);
+        }
+        // Recheck aggregate source bounds; each recorded frame was checked before its source ACK.
+        // There is no invented window, authenticated receipt or real delivery here.
+        require_source_profile_totals(self, source.envelope(), self.derived_bytes).map(|_| ())
     }
     pub fn next_source_index(&self) -> usize {
         self.next
@@ -371,17 +462,15 @@ fn require_source_image_profile(
     window: &SourceWindow,
     envelope: &NativeEnvelopeSource,
 ) -> Result<(), TransportError> {
-    envelope.validate_source_bounds()?;
-    if transport.frame_count != envelope.frames.len() {
-        return Err(TransportError::InvalidWindow);
-    }
-    let (frame_cap, total_cap) = match envelope.profile {
-        NativeProfileSource::Candidate => (1024 * 1024, 8 * 1024 * 1024),
-        NativeProfileSource::PacedComplete => (2 * 1024 * 1024, 128 * 1024 * 1024),
-    };
-    if transport.derived_bytes > total_cap {
-        return Err(TransportError::InvalidWindow);
-    }
+    require_source_image_profile_total(transport, window, envelope, transport.derived_bytes)
+}
+fn require_source_image_profile_total(
+    transport: &WindowTransportSource,
+    window: &SourceWindow,
+    envelope: &NativeEnvelopeSource,
+    cumulative_bytes: usize,
+) -> Result<(), TransportError> {
+    let frame_cap = require_source_profile_totals(transport, envelope, cumulative_bytes)?;
     for image in &window.images {
         if !image_url(&image.data_url) {
             return Err(TransportError::InvalidWindow);
@@ -405,6 +494,24 @@ fn require_source_image_profile(
         }
     }
     Ok(())
+}
+fn require_source_profile_totals(
+    transport: &WindowTransportSource,
+    envelope: &NativeEnvelopeSource,
+    cumulative_bytes: usize,
+) -> Result<usize, TransportError> {
+    envelope.validate_source_bounds()?;
+    if transport.frame_count != envelope.frames.len() {
+        return Err(TransportError::InvalidWindow);
+    }
+    let (frame_cap, total_cap) = match envelope.profile {
+        NativeProfileSource::Candidate => (1024 * 1024, 8 * 1024 * 1024),
+        NativeProfileSource::PacedComplete => (2 * 1024 * 1024, 128 * 1024 * 1024),
+    };
+    if cumulative_bytes > total_cap {
+        return Err(TransportError::InvalidWindow);
+    }
+    Ok(frame_cap)
 }
 
 #[cfg(feature = "native-core")]
@@ -630,7 +737,7 @@ pub(crate) mod sdk {
         if call.tool != crate::MEDIA_TOOLS[1] {
             return Err(TransportError::InvalidCall);
         }
-        transport.require_complete_source_coverage(binding)?;
+        transport.require_complete_profile_source_coverage(binding)?;
         if transport.source_verdict.is_some() {
             return Err(TransportError::Replay);
         }
@@ -723,6 +830,286 @@ pub(crate) mod sdk {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[derive(PartialEq, Eq)]
+    struct SourceStateSnapshot {
+        binding: HostCodeBindings,
+        commitments: Option<crate::host_bridge::SourceAdmissionCommitments>,
+        profile_source_progress: Option<ProfileSourceProgress>,
+        source_sha256: String,
+        manifest_sha256: String,
+        frame_count: usize,
+        next: usize,
+        next_time: u64,
+        derived_bytes: usize,
+        pending: Option<(SourceCallCoordinates, SourceWindow, usize, u64, usize)>,
+        completed_calls: std::collections::BTreeSet<String>,
+        last_ack: Option<(SourceCallCoordinates, SourceWindow)>,
+        #[cfg(feature = "native-core")]
+        source_verdict: Option<serde_json::Value>,
+    }
+    fn snapshot(t: &WindowTransportSource) -> SourceStateSnapshot {
+        SourceStateSnapshot {
+            binding: t.binding.clone(),
+            commitments: t.commitments.clone(),
+            profile_source_progress: t.profile_source_progress.clone(),
+            source_sha256: t.source_sha256.clone(),
+            manifest_sha256: t.manifest_sha256.clone(),
+            frame_count: t.frame_count,
+            next: t.next,
+            next_time: t.next_time,
+            derived_bytes: t.derived_bytes,
+            pending: t.pending.as_ref().map(|p| {
+                (
+                    p.call.clone(),
+                    p.window.clone(),
+                    p.end,
+                    p.end_time,
+                    p.decoded_bytes,
+                )
+            }),
+            completed_calls: t.completed_calls.clone(),
+            last_ack: t.last_ack.clone(),
+            #[cfg(feature = "native-core")]
+            source_verdict: t.source_verdict.clone(),
+        }
+    }
+    fn bound_transport(profile: NativeProfileSource) -> WindowTransportSource {
+        let b = binding();
+        let source = crate::host_bridge::tests::source_commitments(sixteen_frame_envelope(profile));
+        WindowTransportSource::new(b, "1".repeat(64), "2".repeat(64), 16)
+            .unwrap()
+            .bind_source_commitments(&source)
+            .unwrap()
+    }
+    #[test]
+    fn bound_candidate_oversize_refuses_before_pending_and_preserves_entire_state() {
+        let b = binding();
+        let mut t = bound_transport(NativeProfileSource::Candidate);
+        let before = snapshot(&t);
+        let w = candidate_timing_window(0, 1, 2 * 1024 * 1024); //1.5MiB fake SOURCE size claim
+        assert_eq!(
+            t.prepare_source_window(&b, call(0), &w),
+            Err(TransportError::InvalidWindow)
+        );
+        assert!(snapshot(&t) == before);
+    }
+    #[test]
+    fn bound_candidate_prospective_cap_refuses_before_second_pending() {
+        let b = binding();
+        let mut t = bound_transport(NativeProfileSource::Candidate);
+        let first = candidate_timing_window(0, 8, 800 * 1024);
+        let c = call(0);
+        t.prepare_source_window(&b, c.clone(), &first).unwrap();
+        t.acknowledge_source_window(&b, &c, &first.window_sha256)
+            .unwrap();
+        let before = snapshot(&t);
+        let second = candidate_timing_window(8, 8, 800 * 1024);
+        assert_eq!(
+            t.prepare_source_window(&b, call(8), &second),
+            Err(TransportError::InvalidWindow)
+        );
+        assert!(snapshot(&t) == before);
+        assert_eq!(t.next_source_index(), 8);
+    }
+    #[test]
+    fn bound_canonical_mismatch_refuses_before_pending() {
+        let b = binding();
+        let mut t = bound_transport(NativeProfileSource::Candidate);
+        let before = snapshot(&t);
+        // Contiguous generic timing, but does not match frozen250000us Candidate coordinates.
+        let w = window(0, 1);
+        assert_eq!(
+            t.prepare_source_window(&b, call(0), &w),
+            Err(TransportError::InvalidWindow)
+        );
+        assert!(snapshot(&t) == before);
+    }
+    #[test]
+    fn malformed_source_pending_cached_end_refuses_before_ack_take() {
+        let b = binding();
+        let mut t = bound_transport(NativeProfileSource::Candidate);
+        let w = candidate_timing_window(0, 1, 4);
+        let c = call(0);
+        t.prepare_source_window(&b, c.clone(), &w).unwrap();
+        // Test-internal SOURCE corruption, not an external mutation API or live escape.
+        t.pending.as_mut().unwrap().end += 1;
+        let before = snapshot(&t);
+        assert_eq!(
+            t.acknowledge_source_window(&b, &c, &w.window_sha256),
+            Err(TransportError::InvalidWindow)
+        );
+        assert!(snapshot(&t) == before);
+    }
+    #[test]
+    fn wrong_and_malformed_source_acks_preserve_known_pending_and_all_history() {
+        let b = binding();
+        let w = candidate_timing_window(0, 1, 4);
+        let c = call(0);
+        for field in 0..8 {
+            let mut t = bound_transport(NativeProfileSource::Candidate);
+            t.prepare_source_window(&b, c.clone(), &w).unwrap();
+            let mut current = b.clone();
+            let mut received = c.clone();
+            let mut digest = w.window_sha256.clone();
+            match field {
+                0 => current.media.generation.push('x'),
+                1 => received.call_id.push('x'),
+                2 => digest = "f".repeat(64),
+                3 => t.pending.as_mut().unwrap().end_time += 1,
+                4 => t.pending.as_mut().unwrap().decoded_bytes += 1,
+                5 => t.pending.as_mut().unwrap().window.images[0].duration_us += 1,
+                6 => {
+                    t.pending.as_mut().unwrap().window.images[0].data_url =
+                        format!("data:image/png;base64,{}", "A".repeat(2 * 1024 * 1024))
+                }
+                _ => t.pending.as_mut().unwrap().window.images[0].sha256 = "g".repeat(64),
+            }
+            let before = snapshot(&t);
+            assert!(
+                t.acknowledge_source_window(&current, &received, &digest)
+                    .is_err()
+            );
+            assert!(snapshot(&t) == before);
+        }
+    }
+    #[test]
+    fn exact_candidate_cap_has_profile_source_coverage_not_authenticated_delivery() {
+        let b = binding();
+        let mut t = bound_transport(NativeProfileSource::Candidate);
+        for start in [0, 8] {
+            let mut w = candidate_timing_window(start, 8, 4);
+            for image in &mut w.images {
+                // Valid SOURCE padding for a512KiB size claim, not actual decoded PNG pixels.
+                let bytes = 512 * 1024usize;
+                let encoded = ((bytes + 2) / 3) * 4;
+                let padding = (3 - bytes % 3) % 3;
+                image.data_url = format!(
+                    "data:image/png;base64,{}{}",
+                    "A".repeat(encoded - padding),
+                    "=".repeat(padding)
+                );
+            }
+            let c = call(start);
+            t.prepare_source_window(&b, c.clone(), &w).unwrap();
+            assert!(t.require_complete_profile_source_coverage(&b).is_err());
+            t.acknowledge_source_window(&b, &c, &w.window_sha256)
+                .unwrap();
+        }
+        assert_eq!(t.derived_bytes, 8 * 1024 * 1024);
+        assert_eq!(t.next_time, 4_000_000);
+        t.require_complete_profile_source_coverage(&b).unwrap();
+        assert_eq!(
+            crate::host_bridge::production_issuer_status(),
+            Err(crate::host_bridge::BridgeError::RuntimeIssuerUnavailable)
+        );
+        let before = snapshot(&t);
+        assert_eq!(
+            t.prepare_source_window(&b, call(0), &candidate_timing_window(0, 1, 4)),
+            Err(TransportError::Replay)
+        );
+        assert!(snapshot(&t) == before);
+    }
+    #[test]
+    fn all_bound_profile_frames_are_validated_before_source_ack_coverage() {
+        let b = binding();
+        for (profile, count, interval) in [
+            (NativeProfileSource::Candidate, 16, 250_000),
+            (NativeProfileSource::PacedComplete, 360, 33_333),
+            (NativeProfileSource::PacedComplete, 900, 33_000),
+        ] {
+            let (width, height) = match profile {
+                NativeProfileSource::Candidate => (640, 360),
+                NativeProfileSource::PacedComplete => (960, 540),
+            };
+            let mut envelope = profile_envelope(profile, width, height, interval);
+            envelope.duration_us = count as u64 * interval;
+            envelope.frames = (0..count)
+                .map(|ordinal| CanonicalFrameTimeSource {
+                    ordinal,
+                    presentation_us: ordinal as u64 * interval,
+                    duration_us: interval,
+                })
+                .collect();
+            let source = crate::host_bridge::tests::source_commitments(envelope);
+            let mut t =
+                WindowTransportSource::new(b.clone(), "1".repeat(64), "2".repeat(64), count)
+                    .unwrap()
+                    .bind_source_commitments(&source)
+                    .unwrap();
+            for start in (0..count).step_by(32) {
+                let mut w = window(start, (count - start).min(32));
+                for image in &mut w.images {
+                    image.presentation_us = image.ordinal as u64 * interval;
+                    image.duration_us = interval;
+                }
+                let c = call(start);
+                t.prepare_source_window(&b, c.clone(), &w).unwrap();
+                assert_eq!(t.next_source_index(), start);
+                assert!(t.require_complete_profile_source_coverage(&b).is_err());
+                let before = snapshot(&t);
+                assert_eq!(
+                    t.prepare_source_window(&b, call(start + 1), &w),
+                    Err(TransportError::Backpressure)
+                );
+                assert!(snapshot(&t) == before);
+                t.acknowledge_source_window(&b, &c, &w.window_sha256)
+                    .unwrap();
+            }
+            assert_eq!(t.next_source_index(), count);
+            assert_eq!(t.next_time, count as u64 * interval);
+            t.require_complete_profile_source_coverage(&b).unwrap(); //SOURCE bounds/coverage, not model delivery
+        }
+        assert_eq!(
+            crate::host_bridge::production_issuer_status(),
+            Err(crate::host_bridge::BridgeError::RuntimeIssuerUnavailable)
+        );
+    }
+    #[test]
+    fn unbound_counts_and_corrupted_profile_progress_cannot_be_profile_source_coverage() {
+        let b = binding();
+        let mut generic =
+            WindowTransportSource::new(b.clone(), "1".repeat(64), "2".repeat(64), 1).unwrap();
+        let w = window(0, 1);
+        let c = call(0);
+        generic.prepare_source_window(&b, c.clone(), &w).unwrap();
+        generic
+            .acknowledge_source_window(&b, &c, &w.window_sha256)
+            .unwrap();
+        generic.require_complete_source_coverage(&b).unwrap(); // deliberately loose SOURCE counts only
+        let before = snapshot(&generic);
+        assert_eq!(
+            generic.require_complete_profile_source_coverage(&b),
+            Err(TransportError::Binding)
+        );
+        assert!(snapshot(&generic) == before);
+        assert!(
+            generic
+                .bind_source_commitments(&crate::host_bridge::tests::source_commitments(
+                    profile_envelope(NativeProfileSource::PacedComplete, 960, 540, 33_333)
+                ))
+                .is_err()
+        );
+        for field in 0..3 {
+            let mut bound = bound_transport(NativeProfileSource::Candidate);
+            match field {
+                0 => bound.profile_source_progress.as_mut().unwrap().next = 1,
+                1 => bound.profile_source_progress.as_mut().unwrap().end_time = 1,
+                _ => {
+                    bound
+                        .profile_source_progress
+                        .as_mut()
+                        .unwrap()
+                        .derived_bytes = 1
+                }
+            }
+            let before = snapshot(&bound);
+            assert_eq!(
+                bound.prepare_source_window(&b, call(0), &candidate_timing_window(0, 1, 4)),
+                Err(TransportError::InvalidWindow)
+            );
+            assert!(snapshot(&bound) == before);
+        }
+    }
     fn profile_envelope(
         profile: NativeProfileSource,
         width: u32,
@@ -785,19 +1172,29 @@ mod tests {
             .unwrap();
         let w = candidate_timing_window(0, 1, 2 * 1024 * 1024); // exactly1.5MiB fake decoded-size claim
         let c = call(0);
-        t.prepare_source_window(&b, c.clone(), &w).unwrap();
-        t.acknowledge_source_window(&b, &c, &w.window_sha256)
-            .unwrap();
+        let before = snapshot(&t);
+        assert_eq!(
+            t.prepare_source_window(&b, c.clone(), &w),
+            Err(TransportError::InvalidWindow)
+        );
+        assert!(snapshot(&t) == before);
         assert_eq!(
             require_source_image_profile(&t, &w, &candidate),
             Err(TransportError::InvalidWindow)
         );
-        require_source_image_profile(&t, &w, &paced).unwrap(); // independent SOURCE cap control only
+        let mut paced_frame = bound_transport(NativeProfileSource::PacedComplete);
+        paced_frame
+            .prepare_source_window(&b, c.clone(), &w)
+            .unwrap();
+        paced_frame
+            .acknowledge_source_window(&b, &c, &w.window_sha256)
+            .unwrap();
+        require_source_image_profile(&paced_frame, &w, &paced).unwrap(); // independent SOURCE cap control only
         assert_eq!(
             t.require_source_commitments(&b, &paced_source),
             Err(TransportError::Binding)
         );
-        assert_eq!(t.next_source_index(), 1);
+        assert_eq!(t.next_source_index(), 0);
         assert!(t.commitments.as_ref() == Some(&candidate_source));
 
         let mut total = WindowTransportSource::new(b.clone(), "1".repeat(64), "2".repeat(64), 16)
@@ -807,25 +1204,45 @@ mod tests {
         for start in [0, 8] {
             let w = candidate_timing_window(start, 8, 800 * 1024); //600KiB/frame; each serialized window<8MiB
             let c = call(start);
-            total.prepare_source_window(&b, c.clone(), &w).unwrap();
-            total
-                .acknowledge_source_window(&b, &c, &w.window_sha256)
-                .unwrap();
             if start == 0 {
+                total.prepare_source_window(&b, c.clone(), &w).unwrap();
+                total
+                    .acknowledge_source_window(&b, &c, &w.window_sha256)
+                    .unwrap();
                 require_source_image_profile(&total, &w, &candidate).unwrap();
             } else {
-                assert!(total.derived_bytes > 8 * 1024 * 1024);
+                let before = snapshot(&total);
                 assert_eq!(
-                    require_source_image_profile(&total, &w, &candidate),
+                    total.prepare_source_window(&b, c, &w),
                     Err(TransportError::InvalidWindow)
                 );
-                require_source_image_profile(&total, &w, &paced).unwrap();
+                assert!(snapshot(&total) == before);
+                assert_eq!(total.next_source_index(), 8);
+                assert_eq!(
+                    total.require_complete_profile_source_coverage(&b),
+                    Err(TransportError::Incomplete)
+                );
                 assert_eq!(
                     total.require_source_commitments(&b, &paced_source),
                     Err(TransportError::Binding)
                 );
             }
         }
+        let mut paced_total = bound_transport(NativeProfileSource::PacedComplete);
+        for start in [0, 8] {
+            let w = candidate_timing_window(start, 8, 800 * 1024);
+            let c = call(start);
+            paced_total
+                .prepare_source_window(&b, c.clone(), &w)
+                .unwrap();
+            paced_total
+                .acknowledge_source_window(&b, &c, &w.window_sha256)
+                .unwrap();
+        }
+        assert!(paced_total.derived_bytes > 8 * 1024 * 1024);
+        paced_total
+            .require_complete_profile_source_coverage(&b)
+            .unwrap(); // SOURCE only, no real delivery
         assert_eq!(
             crate::host_bridge::production_issuer_status(),
             Err(crate::host_bridge::BridgeError::RuntimeIssuerUnavailable)
@@ -1069,6 +1486,60 @@ mod tests {
     }
     #[cfg(feature = "native-core")]
     #[test]
+    fn source_verdict_cannot_record_legacy_overcap_or_unbound_count_coverage() {
+        let b = binding();
+        let source = crate::host_bridge::tests::source_commitments(sixteen_frame_envelope(
+            NativeProfileSource::Candidate,
+        ));
+        let verdict = codex_protocol::dynamic_tools::DynamicToolCallRequest {
+            call_id: "fake-source-verdict".into(),
+            turn_id: "fake-turn".into(),
+            started_at_ms: 0,
+            namespace: None,
+            tool: crate::MEDIA_TOOLS[1].into(),
+            arguments: serde_json::json!({"report":{"outcome":"reject","rationale":"Invented source claim.","criteria":[{"criterionId":"fake-criterion","outcome":"fail","observedFrameIndices":[0],"observation":"Invented source limitation."}]}}),
+        };
+        let mut legacy = bound_transport(NativeProfileSource::Candidate);
+        // Reconstructed legacy SOURCE counters only, never authenticated delivery or admission.
+        legacy.next = 16;
+        legacy.next_time = 4_000_000;
+        legacy.derived_bytes = 16 * 600 * 1024;
+        legacy.profile_source_progress = Some(ProfileSourceProgress {
+            next: legacy.next,
+            end_time: legacy.next_time,
+            derived_bytes: legacy.derived_bytes,
+        });
+        legacy.require_complete_source_coverage(&b).unwrap();
+        let before = snapshot(&legacy);
+        assert!(matches!(
+            sdk::prepare_source_verdict_response(&b, &verdict, &mut legacy, &source),
+            Err(TransportError::InvalidWindow)
+        ));
+        assert!(snapshot(&legacy) == before && legacy.source_verdict.is_none());
+        let mut unbound =
+            WindowTransportSource::new(b.clone(), "1".repeat(64), "2".repeat(64), 16).unwrap();
+        for start in [0, 8] {
+            let w = candidate_timing_window(start, 8, 4);
+            let c = call(start);
+            unbound.prepare_source_window(&b, c.clone(), &w).unwrap();
+            unbound
+                .acknowledge_source_window(&b, &c, &w.window_sha256)
+                .unwrap();
+        }
+        unbound.require_complete_source_coverage(&b).unwrap();
+        let before = snapshot(&unbound);
+        assert!(matches!(
+            sdk::prepare_source_verdict_response(&b, &verdict, &mut unbound, &source),
+            Err(TransportError::Binding)
+        ));
+        assert!(snapshot(&unbound) == before && unbound.source_verdict.is_none());
+        assert_eq!(
+            crate::host_bridge::production_issuer_status(),
+            Err(crate::host_bridge::BridgeError::RuntimeIssuerUnavailable)
+        );
+    }
+    #[cfg(feature = "native-core")]
+    #[test]
     fn sdk_source_converter_uses_frozen_profile_and_final_response_provenance() {
         let b = binding();
         let candidate = crate::host_bridge::tests::source_commitments(sixteen_frame_envelope(
@@ -1092,21 +1563,21 @@ mod tests {
                 .unwrap()
                 .bind_source_commitments(&candidate)
                 .unwrap();
-        candidate_t
-            .prepare_source_window(&b, c.clone(), &w)
-            .unwrap();
-        candidate_t
-            .acknowledge_source_window(&b, &c, &w.window_sha256)
-            .unwrap();
+        let before = snapshot(&candidate_t);
+        assert_eq!(
+            candidate_t.prepare_source_window(&b, c.clone(), &w),
+            Err(TransportError::InvalidWindow)
+        );
+        assert!(snapshot(&candidate_t) == before);
         assert!(matches!(
             sdk::prepare_source_image_response(&b, &sdk_call, &w, &candidate_t, &candidate),
-            Err(TransportError::InvalidWindow)
+            Err(TransportError::WrongAck)
         ));
         assert!(matches!(
             sdk::prepare_source_image_response(&b, &sdk_call, &w, &candidate_t, &paced),
             Err(TransportError::Binding)
         ));
-        assert_eq!(candidate_t.next_source_index(), 1);
+        assert_eq!(candidate_t.next_source_index(), 0);
         assert!(candidate_t.pending.is_none());
 
         let mut paced_t = WindowTransportSource::new(b.clone(), "1".repeat(64), "2".repeat(64), 16)
