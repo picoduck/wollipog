@@ -17,6 +17,7 @@ import "../styles.css";
  * on a dialog body's surface.
  * `?scenario=guardrails-viewer` and `?scenario=guardrails-editable`: the real Guardrails dialog for a
  * Viewer and for someone who may save. Its save never settles, so a spec can hold it mid-save.
+ * `&live=1` adds a running Claude turn's live estimate to the spend it states (#3112).
  * `?scenario=rename`: the real Rename Session dialog, whose rename never settles.
  * `?theme=light` switches theme.
  */
@@ -128,7 +129,7 @@ function Harness() {
   if (scenario === "guardrails-viewer" || scenario === "guardrails-editable") {
     return (
       <GuardrailsDialog
-        session={SESSION}
+        session={params.get("live") === "1" ? { ...SESSION, liveUsage: { tokensIn: 48_000, tokensOut: 6_200, costUsd: 0.62 } } : SESSION}
         configRefusal={scenario === "guardrails-viewer" ? VIEWER_REFUSAL : null}
         onSave={never}
         onClose={() => {}}

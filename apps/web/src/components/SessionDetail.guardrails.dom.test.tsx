@@ -422,6 +422,18 @@ test("the Guardrails dialog shows four labeled fields with their help visible an
   }
 });
 
+test("while a Claude turn runs, the spend the threshold compares says it includes the turn's estimate (#3112)", async () => {
+  const fixture = await mountGuardrails();
+  try {
+    await fixture.render({ liveUsage: { tokensIn: 4_000, tokensOut: 1_000, costUsd: 0.5 } });
+    await openGuardrails();
+    assert.equal(describedText(fieldInput("Recurring Cost Threshold")),
+      "Pauses when spend reaches this amount. Continue allows another equal amount. $1.75 spent so far, including an estimate for the running turn.");
+  } finally {
+    await unmountGuardrails(fixture);
+  }
+});
+
 for (const label of ["Recurring Cost Threshold", "Cost Checkpoints", "Tool-Call Threshold"]) {
   for (const typo of ["1e", "-3", "abc"]) {
     test(`"${typo}" in ${label} blocks Save with an error in place of its helper, and fixing it clears the error`, async () => {

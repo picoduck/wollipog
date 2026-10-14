@@ -2670,6 +2670,20 @@ test("a page-first replacement epoch covers the whole replay page before usage a
   assert.equal(db.getSession("usage-page-first-reset")!.costUsd, 1);
 });
 
+test("a page-first replacement epoch closes a live Claude window it never charges (#3112)", () => {
+  const db = withRunner();
+  db.createSessionFromSnapshot(snapshot({ id: "live-page-reset", historyEpoch: 7, seq: 0 }), "runner-1", 1_000);
+  db.appendEvent("live-page-reset", { kind: "token_usage", model: "claude-unrated", inputTokens: 10, outputTokens: 5,
+    liveUsage: "provisional" }, 1_500, { accrueUsage: true });
+  assert.equal(db.sessionLiveUsageUnpriced("live-page-reset"), true);
+  assert.equal(db.getSession("live-page-reset")!.liveUsage?.tokensIn, 10);
+  db.reconcileRunnerHistory("live-page-reset", 8, 1);
+  db.appendHydratedPage("live-page-reset", { afterSeq: 0, historyEpoch: 8, eventEpoch: 1 },
+    [{ seq: 1, ts: 2_000, payload: { kind: "token_usage", liveUsage: "settled" } }]);
+  assert.equal(db.sessionLiveUsageUnpriced("live-page-reset"), false, "a stale unpriced mark would keep tripping cost_unpriced");
+  assert.equal(db.getSession("live-page-reset")!.liveUsage, undefined);
+});
+
 test("retention rolls hourly usage into UTC days before deletion and late rows remain idempotent", () => {
   const db = withRunner();
   assert.throws(() => db.setUsageRetentionPolicy("org_personal", { hourlyDays: 7.5, dailyDays: 30 }), /hourlyDays/);

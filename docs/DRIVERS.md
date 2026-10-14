@@ -544,9 +544,9 @@ The lifetime policy is quiescence-aware and fail-safe:
   restore cumulative conversation totals on resume and fork; older CLIs scope them to the process.
   The driver subtracts raw per-model checkpoints and reconciles the prefix a replacement process
   will restore with a zero-inference local `/context` probe. Against a v216+ control plane each
-  completed top-level request is also published live as a display-only `provisional` record, closed by
+  completed top-level request is also published live as an unaccrued `provisional` record, closed by
   the next checkpoint or republished when none can cover it, so a running or interrupted turn is not
-  invisible until a result. See `usage-cost-aggregation.md`.
+  invisible until a result, and cost guardrails count its estimate. See `usage-cost-aggregation.md`.
 - All three lifetime controls are runner-only and are scrubbed from native, WSL, and standalone
   TUI child environments.
 

@@ -13,6 +13,7 @@ import {
   parseCount,
   parseUsd,
   parseUsdList,
+  spentSoFar,
   type GuardrailSession,
 } from "./guardrail-values.js";
 
@@ -140,4 +141,12 @@ test("the + menu summary names what pauses the session and the child limit", () 
   assert.equal(guardrailSummary({ ...none, maxToolCalls: 1 }), "Pauses at 1 tool call.");
   assert.equal(guardrailSummary({ ...none, maxChildSessions: 1 }), "Up to 1 live child.");
   assert.equal(guardrailSummary({ ...none, maxChildSessions: 0 }), "New children paused.");
+});
+
+test("spend so far says when it includes a running turn's estimate (#3112)", () => {
+  assert.equal(spentSoFar({ costUsd: 1.25 }), "$1.25 spent so far.");
+  assert.equal(spentSoFar({ costUsd: 1.25, liveUsage: { tokensIn: 10, tokensOut: 5, costUsd: 0.5 } }),
+    "$1.75 spent so far, including an estimate for the running turn.");
+  assert.equal(spentSoFar({ costUsd: 1.25, liveUsage: { tokensIn: 10, tokensOut: 5, costUsd: 0 } }), "$1.25 spent so far.",
+    "an unpriced running turn adds no estimate; its card says the cost cannot be priced");
 });

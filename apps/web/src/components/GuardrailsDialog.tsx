@@ -7,6 +7,7 @@ import {
   guardrailDraft,
   guardrailFieldError,
   guardrailPatch,
+  spentSoFar,
   type GuardrailDraft,
   type GuardrailField,
 } from "../guardrail-values.js";
@@ -19,7 +20,7 @@ import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
 
 export type GuardrailsDialogSession = Pick<SessionView,
-  | "id" | "costBudgetUsd" | "costCheckpointsUsd" | "costCheckpointApprovedUsd" | "costUsd"
+  | "id" | "costBudgetUsd" | "costCheckpointsUsd" | "costCheckpointApprovedUsd" | "costUsd" | "liveUsage"
   | "maxToolCalls" | "toolCallCount" | "maxChildSessions" | "liveChildCapacity">;
 
 const CHECKPOINT_WARNING = "This checkpoint won't pause separately, because the recurring threshold is lower.";
@@ -193,7 +194,7 @@ export function GuardrailsDialog({
         }}
       >
         {field("costBudgetUsd", "Recurring Cost Threshold", <CostIcon size={14} />, "decimal",
-          `Pauses when spend reaches this amount. Continue allows another equal amount. ${formatUsd(session.costUsd ?? 0)} spent so far.`)}
+          `Pauses when spend reaches this amount. Continue allows another equal amount. ${spentSoFar(session)}`)}
         {field("costCheckpointsUsd", "Cost Checkpoints", <CostIcon size={14} />, "decimal",
           "One-time pauses at these totals, separated by commas." +
             (approved != null ? ` Approved through ${formatUsd(approved)}.` : ""),
