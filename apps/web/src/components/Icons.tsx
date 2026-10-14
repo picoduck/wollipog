@@ -117,6 +117,7 @@ import {
   Plus as LucidePlus,
   RefreshCw as LucideRefreshCw,
   Reply as LucideReply,
+  RotateCcw as LucideRotateCcw,
   ScrollText as LucideScrollText,
   Search as LucideSearch,
   SearchX as LucideSearchX,
@@ -381,6 +382,10 @@ export function DownloadIcon(props: IconProps) {
 
 export function RefreshIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideRefreshCw} {...props} />;
+}
+
+export function ResetIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideRotateCcw} {...props} />;
 }
 
 export function UpdateIcon(props: IconProps) {

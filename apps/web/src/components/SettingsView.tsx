@@ -1,5 +1,5 @@
 import { setHideAccountEmails, useAccountEmailPrivacy } from "../account-email-privacy.js";
-import React, { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { ArtifactUploadSettings } from "./ArtifactUploadSettings.js";
 import { Notice } from "./Notice.js";
 import { State } from "./State.js";
@@ -17,6 +17,7 @@ import {
   NetworkIcon,
   NotificationsIcon,
   OrchestratorControlsIcon,
+  ResetIcon,
   ShieldCheckIcon,
   TuningIcon,
 } from "./Icons.js";
@@ -26,6 +27,7 @@ import { TabList } from "./Tabs.js";
 import {
   REQUIRED_RAIL_VIEWS,
   moveRailView,
+  phoneBarViews,
   railDigits,
   railPreferencesAreDefault,
   resetRailPreferences,
@@ -39,8 +41,8 @@ import { instancePublicOrigin, useInstances } from "../instances-context.js";
 import { useIsCompact, useIsMobile, useIsTouchOnly } from "./useIsMobile.js";
 import { EXPERIMENT_COPY, experimentForViewName } from "../experiments.js";
 import { useExperiments } from "../use-experiments.js";
-import { destination } from "../navigation.js";
-import { ActionRow, LinkRow, SAVED_MS, SegmentedRow, SelectRow, SettingRow, SettingsGroup, StaticRow, SwitchRow, ValueRow } from "./ui/SettingsRows.js";
+import { destination, type GlobalViewName } from "../navigation.js";
+import { ActionRow, LinkRow, SAVED_MS, SegmentedRow, SelectRow, SettingRow, SettingsGroup, StaticRow, Switch, SwitchRow, ValueRow } from "./ui/SettingsRows.js";
 import { SCHEME_SWATCHES, type ColorScheme, type ResolvedTheme } from "../theme.js";
 import type { SessionsPreviewLayout } from "../sessions-preview-layout.js";
 import { useSessionsPreviewLayout } from "../use-sessions-preview-layout.js";
@@ -519,15 +521,25 @@ function TerminalPlacementRow({ disabled, disabledReason, saved, onSaved }: Devi
   );
 }
 
+/** How long a moved destination's row is lit, so the eye can follow it to its new place. */
+export const RAIL_MOVE_FLASH_MS = 600;
+
 /**
- * Settings → Appearance → Navigation (#385): visibility and order for the rail's destinations.
+ * Settings → Appearance → Navigation (#385, #3021): visibility and order for the rail's destinations.
  *
- * The read-only digit chips are the derived bindings — position IS the shortcut, so there is no
- * digit editor to drift from the rail. Sessions is required (hiding it would leave the rail with
- * no home destination), and Settings is absent on purpose: it is not a rail destination, and on
- * a phone it is the only Settings entry point, pinned as the More sheet's trailing row (#458).
- * Reordering uses Move buttons rather than drag-and-drop: one interaction that works for
- * pointer, touch, and keyboard alike, with the effect announced by the updated digit chips.
+ * The read-only digits are the derived bindings — position IS the shortcut, so there is no digit
+ * editor to drift from the rail. Sessions is required (hiding it would leave the rail with no home
+ * destination), and Settings is absent on purpose: it is not a rail destination, and on a phone it is
+ * the only Settings entry point, pinned as the More sheet's trailing row (#458). Reordering uses Move
+ * buttons rather than drag-and-drop: one interaction that works for pointer, touch, and keyboard
+ * alike, with the effect announced by the updated digits. Drag-and-drop (#541) layers onto these rows.
+ *
+ * Every destination row is one fixed grid — icon, name, digit, moves, switch — so the arrows, the
+ * digit and the switch sit at the same x on a normal, hidden, required and experiment-off row. Why a
+ * row's switch cannot be used is visible text in its name cell, never a tooltip.
+ *
+ * A phone binds no digits (the shortcuts are desktop-only), so it has no digit column; the order
+ * there is the More sheet's, and the destinations on the tab bar say so.
  *
  * Show Labels in Rail is the desktop rail's 208px labelled form (#1968). It is not offered on a
  * phone, whose tab bar is always labelled and never takes the rail's width.
@@ -538,10 +550,36 @@ export function NavigationRailPanel() {
   const { flags } = useExperiments();
   const isMobile = useIsMobile();
   const digits = railDigits(visibleRailViews(preferences, flags));
+  const tabBar = isMobile ? new Set(phoneBarViews(preferences, flags)) : null;
+  const id = useId();
+  const listRef = useRef<HTMLUListElement>(null);
+  /** The Move button pressed last, to hand focus back to once the list has re-rendered. */
+  const moved = useRef<{ name: GlobalViewName; direction: "up" | "down" } | null>(null);
+  const [flashed, setFlashed] = useState<GlobalViewName | null>(null);
+  const flashTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(flashTimer.current), []);
+  // Reordering moves the row's element, which takes focus with it. Focus returns to the button that
+  // was pressed, or to its sibling once that one is disabled at the end of the list.
+  useLayoutEffect(() => {
+    const last = moved.current;
+    moved.current = null;
+    if (last === null) return;
+    const row = listRef.current?.querySelector<HTMLElement>(`[data-destination="${last.name}"]`);
+    const pressed = row?.querySelector<HTMLButtonElement>(`[data-move="${last.direction}"]`);
+    const sibling = row?.querySelector<HTMLButtonElement>(`[data-move="${last.direction === "up" ? "down" : "up"}"]`);
+    (pressed && !pressed.disabled ? pressed : sibling)?.focus();
+  }, [preferences.order]);
+  const move = (name: GlobalViewName, direction: "up" | "down") => {
+    moved.current = { name, direction };
+    moveRailView(name, direction, instanceScope);
+    clearTimeout(flashTimer.current);
+    setFlashed(name);
+    flashTimer.current = setTimeout(() => setFlashed(null), RAIL_MOVE_FLASH_MS);
+  };
   return (
     <SettingsGroup
       title="Navigation"
-      // The group's one action and its foot line (§8.2): every child of its surface is a row.
+      // The group's one action (§8.2): every child of its surface is a row.
       action={(
         <button
           type="button"
@@ -549,10 +587,13 @@ export function NavigationRailPanel() {
           disabled={railPreferencesAreDefault(preferences)}
           onClick={() => resetRailPreferences(instanceScope)}
         >
+          <ResetIcon size={14} />
           Reset to Default
         </button>
       )}
-      foot="The visible order assigns the digit shortcuts. Hidden destinations stay reachable from search and direct links, and keep their place here for when they return."
+      intro={isMobile
+        ? "Order sets the More sheet. Tab Bar marks the four pages in the bar."
+        : "Order sets the number shortcuts. Hidden pages stay reachable from search."}
     >
       {!isMobile && (
         <SwitchRow
@@ -562,7 +603,7 @@ export function NavigationRailPanel() {
           onClick={() => setRailLabels(!preferences.labels, instanceScope)}
         />
       )}
-      <ul className="rail-order-list" aria-label="Navigation Destinations">
+      <ul ref={listRef} className={`rail-nav-list${isMobile ? " no-digits" : ""}`} aria-label="Navigation Destinations">
         {preferences.order.map((name, index) => {
           const item = destination(name);
           const Icon = VIEW_ICONS[name];
@@ -571,54 +612,57 @@ export function NavigationRailPanel() {
           const experiment = experimentForViewName(name);
           const experimentOff = experiment !== null && !flags[experiment];
           const digit = digits.get(name);
-          const state = hidden
-            ? "Hidden"
-            : experimentOff
-              ? "Off in Experimental"
-              : digit === undefined
-                ? "No Digit"
-                : null;
+          // Why the switch cannot be used, said beside the name rather than in a tooltip.
+          const reason = required ? "Always Shown" : experimentOff ? "Off in Experimental" : null;
+          const noteId = `${id}-${name}-note`;
           return (
-            <li className={`rail-order-row${hidden || experimentOff ? " is-inactive" : ""}`} key={name}>
-              <span className="rail-order-icon" aria-hidden="true"><Icon size={16} /></span>
-              <span className="rail-order-title">{item.name}</span>
-              <span className="rail-order-state">
-                {digit !== undefined && <kbd aria-label={`Shortcut ${digit}`}>{digit}</kbd>}
-                {state !== null && <span className="rail-order-note">{state}</span>}
+            <li
+              className={`rail-nav-row${hidden || experimentOff ? " is-inactive" : ""}${flashed === name ? " is-moved" : ""}`}
+              key={name}
+              data-destination={name}
+            >
+              <span className="rail-nav-icon" aria-hidden="true"><Icon size={16} /></span>
+              <span className="rail-nav-name">
+                <span className="rail-nav-title">{item.name}</span>
+                {reason !== null && <span className="rail-nav-note" id={noteId}>{reason}</span>}
+                {tabBar?.has(name) && <span className="rail-nav-note">Tab Bar</span>}
               </span>
-              <span className="rail-order-controls">
+              {!isMobile && (
+                <span className="rail-nav-digit">
+                  {digit !== undefined
+                    ? <><span className="sr-only">Shortcut </span><kbd>{digit}</kbd></>
+                    : <span aria-hidden="true">–</span>}
+                </span>
+              )}
+              <span className="rail-nav-moves">
                 <button
                   type="button"
                   className="icon-btn"
+                  data-move="up"
                   disabled={index === 0}
                   aria-label={`Move ${item.name} Up`}
-                  onClick={() => moveRailView(name, "up", instanceScope)}
+                  onClick={() => move(name, "up")}
                 >
-                  <ArrowUpIcon size={14} />
+                  <ArrowUpIcon size={16} />
                 </button>
                 <button
                   type="button"
                   className="icon-btn"
+                  data-move="down"
                   disabled={index === preferences.order.length - 1}
                   aria-label={`Move ${item.name} Down`}
-                  onClick={() => moveRailView(name, "down", instanceScope)}
+                  onClick={() => move(name, "down")}
                 >
-                  <ArrowDownIcon size={14} />
+                  <ArrowDownIcon size={16} />
                 </button>
-                {required ? (
-                  <span className="rail-order-required" title="Sessions is the rail's home destination and cannot be hidden.">
-                    Required
-                  </span>
-                ) : (
-                  <button
-                    type="button"
-                    className="btn ghost sm"
-                    onClick={() => setRailViewHidden(name, !hidden, instanceScope)}
-                  >
-                    {hidden ? "Show" : "Hide"}
-                  </button>
-                )}
               </span>
+              <Switch
+                label={`Show ${item.name} in Navigation`}
+                checked={required || !hidden}
+                disabled={reason !== null}
+                describedBy={reason !== null ? noteId : undefined}
+                onChange={(checked) => setRailViewHidden(name, !checked, instanceScope)}
+              />
             </li>
           );
         })}
