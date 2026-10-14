@@ -13378,15 +13378,16 @@ export class SessionsService {
 
   /** The runner-owned threshold that trips this ask on the runner itself, if any. A runner cancels
    * only on the settled cost, so a budget crossed by the live estimate alone is a control-plane card
-   * that holds the runner's queue (#3112). */
+   * that holds the runner's queue, and the control plane interrupts the running turn (#3112). */
   private runnerTrips(s: SessionView, ask: PolicyDecision): RunnerGuardrailKind | undefined {
     if (ask.rule.kind === "cost_budget" && s.costUsd < ask.rule.budgetUsd) return undefined;
     return runnerHoldFor(ask.rule.kind);
   }
 
-  /** A budget card the live estimate alone raised parked a turn no runner cancelled (#3112). Like
-   * a soft card, clearing it returns the session to idle only if the runner's idle arrived while
-   * parked. */
+  /** A budget card the live estimate alone raised parked a turn that may still be running: the
+   * control plane's interruption is asynchronous, and an older runner may not apply it (#3112).
+   * Like a soft card, clearing it returns the session to idle only if the runner's idle arrived
+   * while parked. */
   private estimateOnlyBudgetCardStatus(session: SessionView, card: PendingApproval): "running" | "idle" {
     const uncancelled = card.kind === "cost_budget" && !card.runnerGuardrail && session.costBudgetUsd != null &&
       session.costUsd < session.costBudgetUsd && this.db.policyResumeStatus(session.id) !== "idle";
@@ -13460,7 +13461,41 @@ export class SessionsService {
     this.recordGovernanceAudit(s, approval, "policy_decision", "asked", { kind: "policy", id: ask.rule.kind }, now, {
       policyRule: ask.rule,
     });
+    // No runner cancels on the live estimate, so the control plane stops the turn it parked (#3112).
+    if (ask.rule.kind === "cost_budget" && !this.runnerTrips(s, ask) && s.status === "running") {
+      this.interruptTurnAtEstimate(s);
+    }
     return true;
+  }
+
+  /** Stop the active turn of a session whose live estimate crossed its budget (#3112). This is the
+   * runner's ordinary turn interruption: it cancels only that turn and holds the queue until the
+   * turn settles, and the card's control-plane hold keeps the queue held after that. The estimate
+   * is compared once, here, against the control plane's own price; the runner compares nothing.
+   * The runner reports the interrupted turn and its idle as usual, and a turn that ended first is
+   * a harmless no-op. */
+  private interruptTurnAtEstimate(session: SessionView): void {
+    const protocolVersion = this.runnerProtocolVersion(session.runnerId);
+    if (!runnerSupportsProtocol(protocolVersion, "turnInterruption")) return;
+    const failed = (reason: string) => this.log.warn(JSON.stringify({
+      event: "live_budget_interrupt_not_applied", sessionId: session.id, runnerId: session.runnerId, reason,
+    }));
+    if (runnerSupportsProtocol(protocolVersion, "turnInterruptionAck")) {
+      const turnId = this.hub.activeTurnIdForSession(session.id);
+      if (!turnId) return failed("no_active_turn");
+      const requestId = `interrupt_${randomUUID().slice(0, 8)}`;
+      void this.hub.requestFromRunner(session.runnerId, requestId, {
+        type: "interrupt_turn", requestId, sessionId: session.id, turnId,
+      }, 5_000).then((result) => {
+        if (result.type !== "interrupt_turn_result") failed("invalid_response");
+        else if (!result.applied) failed(result.reason);
+      }, (error: unknown) => failed((error as Error).message));
+      return;
+    }
+    const turnId = this.db.latestTurnId(session.id);
+    if (!this.hub.sendToRunner(session.runnerId, { type: "interrupt_turn", sessionId: session.id, ...(turnId ? { turnId } : {}) })) {
+      failed("runner_offline");
+    }
   }
 
   /** A durable control-plane decision that restores a swallowed runner idle must replay the same
