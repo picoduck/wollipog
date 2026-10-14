@@ -236,6 +236,14 @@ export class CampaignBudgetLedger {
       "AND generation=? AND active=1 AND cost=0 AND tools=0").run(sessionId, expected.rootSessionId, expected.generation).changes) === 1;
   }
 
+  /** Only for a child whose creation failed before its launch was sent (#3183): it never ran, so
+   * its reservation is returned rather than retained like a deleted child's (#1496). */
+  releaseUnlaunched(sessionId: string): void {
+    for (const table of ["campaign_budget_members", "campaign_budget_tool_calls", "campaign_budget_checkpoints", "campaign_budget_settlements"]) {
+      this.sql.prepare(`DELETE FROM ${table} WHERE session_id=?`).run(sessionId);
+    }
+  }
+
   membersForRunner(runnerId:string):string[] {
     return (this.sql.prepare(`SELECT m.session_id FROM campaign_budget_members m JOIN sessions s ON s.id=m.session_id
       WHERE s.runner_id=? AND m.active=1`).all(runnerId) as Array<{session_id:string}>).map((r)=>r.session_id);

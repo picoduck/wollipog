@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -106,6 +107,103 @@ test("a child creation refused or failing while recording its work item leaves n
     const retried = create();
     assert.ok(retried.ok && retried.data, retried.error ?? "retry refused");
     assert.equal(retried.data.campaignMembership?.currentWorkItemId, workItemId);
+  } finally { h.db.close(); }
+});
+
+test("a child creation refused while storing its prompt images releases its reservation and parent charge (#3183)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ toolCalls: 120, concurrency: 1 })).ok);
+    h.db.updateSessionMaxToolCalls("root", 60, 4);
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+    const valid = { mimeType: "image/png", data: png.toString("base64") };
+    const sha256 = createHash("sha256").update(png).digest("hex");
+    h.db.createWorkflowArtifactBytes({ artifactId: "art_root", sessionId: "root", kind: "screenshot", name: "root-image",
+      mimeType: "image/png", encoding: "base64", sizeBytes: png.byteLength, sha256, createdBy: { kind: "system", id: "test" },
+      metadata: {}, createdAt: 4 }, png);
+    const create = (images: Array<Record<string, unknown>>) => h.svc.createSession({ runnerId: "r", workspaceId: "w", agentId: "claude",
+      config: { model: "claude-opus-5-5" }, prompt: "Implement authorized #2936", images: images as never },
+    undefined, undefined, false, false, false, { parentSessionId: "root" });
+    const sql = (h.db as unknown as { db: { prepare(query: string): { get(): unknown } } }).db;
+    const state = () => ({
+      occupied: h.db.campaignBudgets.view("root")!.occupied,
+      members: h.db.campaignBudgets.members("root").filter((id) => id !== "root"),
+      children: sql.prepare("SELECT COUNT(*) AS n FROM sessions WHERE parent_session_id='root'").get(),
+      parent: sql.prepare(`SELECT child_spawn_count AS spawned, child_cost_reserved_usd AS cost,
+        child_tool_calls_reserved AS tools FROM sessions WHERE id='root'`).get(),
+      artifacts: sql.prepare("SELECT COUNT(*) AS n FROM artifacts").get(),
+      launches: h.sent.length,
+    });
+    const before = JSON.stringify(state());
+    const store = h.db.createWorkflowArtifactBytes;
+    for (const [label, images, status, error, failStorage] of [
+      ["invalid bytes after a stored image", [valid, { mimeType: "image/png", data: Buffer.from("not a png").toString("base64") }],
+        400, /do not match the declared MIME type/u, false],
+      ["unsupported image for the driver", [{ mimeType: "image/bmp", data: png.toString("base64") }], 400, /./u, false],
+      ["missing prompt-image artifact", [valid, { artifactId: "art_missing", mimeType: "image/png", sizeBytes: png.byteLength, sha256 }],
+        404, /prompt image artifact not found/u, false],
+      ["artifact owned by another session", [{ artifactId: "art_root", mimeType: "image/png", sizeBytes: png.byteLength, sha256 }],
+        404, /prompt image artifact not found/u, false],
+      ["artifact storage failure", [valid], 500, /could not be stored/u, true],
+    ] as const) {
+      if (failStorage) h.db.createWorkflowArtifactBytes = () => { throw new Error("SQLITE_FULL: artifact write failed"); };
+      const refused = create([...images]);
+      h.db.createWorkflowArtifactBytes = store;
+      assert.equal(refused.status, status, `${label}: ${refused.error}`);
+      assert.match(refused.error ?? "", error, label);
+      assert.equal(JSON.stringify(state()), before, `${label}: creation released everything it reserved`);
+    }
+    const retried = create([valid]);
+    assert.ok(retried.ok && retried.data, retried.error ?? "retry refused");
+    assert.ok(h.sent.slice(JSON.parse(before).launches).some((item) => (item as { type?: string; spec?: { sessionId?: string } }).type === "start_session" &&
+      (item as { spec: { sessionId: string } }).spec.sessionId === retried.data!.id), "the retry's launch is sent");
+    // A launched child keeps its reservation when deleted (#1496).
+    const reservation = () => { const { occupied, members, parent } = state(); return JSON.stringify({ occupied, members, parent }); };
+    const launched = reservation();
+    assert.notEqual(launched, JSON.stringify({ occupied: 0, members: [], parent: JSON.parse(before).parent }));
+    assert.ok(h.svc.delete(retried.data.id).ok);
+    assert.equal(reservation(), launched, "deleting a launched child keeps its reservation");
+  } finally { h.db.close(); }
+});
+
+test("deleting an unlaunched grandchild returns every ancestor's charge and refuses a launched session (#3183)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ toolCalls: 120, concurrency: 2 })).ok);
+    h.make("worker", "root", { maxToolCalls: 4 });
+    const sql = (h.db as unknown as { db: { prepare(query: string): { get(): unknown } } }).db;
+    const state = () => JSON.stringify({
+      members: h.db.campaignBudgets.members("root").sort(),
+      root: sql.prepare(`SELECT child_spawn_count AS spawned, child_cost_reserved_usd AS cost,
+        child_tool_calls_reserved AS tools FROM sessions WHERE id='root'`).get(),
+      worker: sql.prepare(`SELECT child_spawn_count AS spawned, child_cost_reserved_usd AS cost,
+        child_tool_calls_reserved AS tools, parent_charged_tool_calls AS charged FROM sessions WHERE id='worker'`).get(),
+    });
+    const before = state();
+    h.db.createSession({ id: "grandchild", parentSessionId: "worker", runnerId: "r", workspaceId: "w", agentId: "claude",
+      title: "grandchild", useWorktree: false, creationActor: "agent", driver: "claude-code",
+      config: { model: "claude-opus-5-5", maxToolCalls: 10 }, now: 5 });
+    // The grandchild's charge exceeds the worker's own reservation, so it reaches the root too.
+    assert.equal((JSON.parse(state()).root as { tools: number }).tools, (JSON.parse(before).root as { tools: number }).tools + 6);
+    h.db.deleteUnlaunchedSession("grandchild");
+    assert.equal(state(), before);
+    assert.equal(h.db.getSession("grandchild"), null);
+    assert.throws(() => h.db.deleteUnlaunchedSession("worker"), /launch was never sent/u);
+    assert.ok(h.db.getSession("worker"), "a launched session is left in place");
+    // Inside an outer transaction that rolls back, the rows return and so must their blobs.
+    h.db.createSession({ id: "nested", parentSessionId: "worker", runnerId: "r", workspaceId: "w", agentId: "claude",
+      title: "nested", useWorktree: false, creationActor: "agent", driver: "claude-code",
+      config: { model: "claude-opus-5-5", maxToolCalls: 10 }, now: 6 });
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+    h.db.createWorkflowArtifactBytes({ artifactId: "art_nested", sessionId: "nested", kind: "screenshot", name: "nested-image",
+      mimeType: "image/png", encoding: "base64", sizeBytes: png.byteLength, sha256: createHash("sha256").update(png).digest("hex"),
+      createdBy: { kind: "system", id: "test" }, metadata: {}, createdAt: 6 }, png);
+    assert.throws(() => h.db.campaignBudgetTransaction(() => {
+      h.db.deleteUnlaunchedSession("nested");
+      throw new Error("outer rollback");
+    }), /outer rollback/u);
+    assert.ok(h.db.getSession("nested"));
+    assert.deepEqual(h.db.readWorkflowArtifactBytes("art_nested"), png);
   } finally { h.db.close(); }
 });
 

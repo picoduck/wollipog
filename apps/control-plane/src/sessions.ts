@@ -4558,7 +4558,10 @@ export class SessionsService {
     if (!snapshotCommand && images.length) {
       const externalized = this.externalizePromptImages(id, images);
       if (!externalized.ok || !externalized.data) {
-        this.db.deleteSession(id);
+        // The launch was never sent, so the row created here returns its campaign reservation and
+        // parent charges (#3183). A re-entered pre-staged row keeps the plain deletion.
+        if (existing) this.db.deleteSession(id);
+        else this.db.deleteUnlaunchedSession(id);
         if (session.projectId) this.hub.projectChangedById(session.projectId);
         return failAs(externalized, "prompt images could not be stored");
       }
