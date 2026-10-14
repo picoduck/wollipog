@@ -14,7 +14,7 @@ for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: 
         await page.setViewportSize(viewport);
         const writes: string[] = [];
         let savedDefaults = structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS);
-        await page.route("**/api/orchestrator-settings", async (route) => {
+        if (surface !== "defaults") await page.route("**/api/orchestrator-settings", async (route) => {
           if (route.request().method() !== "GET") {
             writes.push(route.request().postData() ?? "");
             savedDefaults = route.request().postDataJSON().defaults;
@@ -24,10 +24,14 @@ for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: 
           defaults.behavior.childModel = null;
           defaults.behavior.childEffort = null;
           await route.fulfill({ json: { defaults, source: "system_default", controlModeSupported: true,
-            capabilities: { harnesses: [], models: [], effortLevels: [], installations: 1, compatibleInstallations: 1, status: "available" } } });
+            capabilities: { harnesses: [{ agentId: "claude", driver: "claude-code", context: { kind: "native" },
+              name: "Source Fixture Harness", models: [{ id: "source-fixture-model", efforts: ["high"] }], effortLevels: ["high"],
+              supportedPairs: [{ modelId: "source-fixture-model", effortLevels: ["high"] }], installations: 1 }],
+              models: [{ id: "source-fixture-model", efforts: ["high"] }], effortLevels: ["high"],
+              installations: 1, compatibleInstallations: 1, status: "available" } } });
         });
         if (surface === "defaults") {
-          await page.goto(`/settings-rows-e2e.html?section=orchestrator&theme=${theme}`);
+          await page.goto(`/settings-rows-e2e.html?section=orchestrator&fullControlFixture=1&theme=${theme}`);
         } else if (surface === "launch") {
           await page.goto(`/new-session-choices-e2e.html?defaults=orchestrator&theme=${theme}`);
         } else {
@@ -54,6 +58,8 @@ for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: 
           await page.screenshot({ path: `${prefix}-draft-preference.png` });
           await page.getByRole("button", { name: "Save Defaults", exact: true }).click();
           await expect(full).toBeChecked();
+          await expect.poll(() => page.evaluate(() => JSON.parse(document.documentElement.dataset.fullControlFixtureWrites ?? "[]").length)).toBe(1);
+          writes.push(...await page.evaluate(() => JSON.parse(document.documentElement.dataset.fullControlFixtureWrites ?? "[]") as string[]));
           expect(JSON.parse(writes[0]!).defaults.controlMode).toBe("full_control");
           expect(JSON.parse(writes[0]!).defaults.control).toBeUndefined();
         }
