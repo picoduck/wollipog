@@ -75,6 +75,16 @@ A pinned version may be deliberate. Check for comments, `resolutions`, `override
 explaining the pin before reporting it as outdated. Peer-dependency warnings are frequently
 unactionable and should not be reported as findings on their own.
 
+Tauri release notes can embed Cargo Audit and PNPM Audit logs in collapsible details blocks.
+A "security" or "vulnerability" match inside that audit boilerplate is a lead, not evidence that
+the release fixes an advisory. Read the substantive release notes and the upstream advisory's
+affected/patched ranges before classifying the update; keep real security-release notes in scope.
+
+For a Tauri version-mismatch finding, verify which packages the target CLI actually compares.
+The API and plugin npm packages pair with their Rust counterparts; the CLI is not one of those
+pairs. Do not hold a CLI-only update merely because its minor version differs from the `tauri`
+crate. An API update still needs the matching Rust-crate minor version.
+
 ## Report
 
 Group by the ranking above. Lead with anything carrying a reachable advisory. For each: current
