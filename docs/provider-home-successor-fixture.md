@@ -16,7 +16,7 @@ barrier only after both children are ready. No production lease deadline or owne
 
 | Fixture Phase | Bound |
 | --- | ---: |
-| Both children ready, including loader and native-helper initialization | 5 seconds |
+| Both children ready, including loader and native-helper initialization | 10 seconds |
 | Both results published after the start barrier | 5 seconds |
 | Graceful exit after release | 5 seconds |
 | Forced cleanup of fixture-owned trees | 5 seconds |
@@ -30,8 +30,12 @@ window. That was a defect in the initial regression, not grounds to expand repor
 The permanent regression instead injects 5.2 seconds of startup and no publication pause. The
 original barrier always expires its reporting budget before startup finishes; the coordinated
 barrier retains the complete five seconds for real acquisition/publication/verification work.
-Its finite ten-second readiness allowance accommodates the injected pause plus measured native
-initialization (about 1.1 seconds on the observed Windows run). Normal readiness remains five seconds.
+Its finite fifteen-second readiness allowance adds setup margin for the injected pause. Normal
+readiness is ten seconds: final-head Windows PR validation failed a post-report fault regression
+before reaching that fault, with both contenders still initializing when the prior five-second
+readiness deadline expired. Other measured Windows runs reached readiness around 0.8–1.1 seconds;
+this full-suite outlier supports a separate bounded setup allowance. Reporting and cleanup remain
+five seconds each; this adjustment changes no production timeout.
 
 These measurements establish a defect in the fixture's combined phase budget. Historical Windows
 failure logs do not identify their stalled phase, so they do not prove a production lease defect or

@@ -888,8 +888,9 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
       });
     }
     // The unchanged five-second reporting budget begins only after both loaded children
-    // and their native helpers are ready. Startup has its own finite five-second bound.
-    assert.ok(await waitUntil(() => states.every((state) => state.ready), options.readinessMs ?? 5_000, true), "contender readiness timed out");
+    // and their native helpers are ready. Windows full-suite measurements exceeded the
+    // previous five-second startup bound; setup gets ten seconds, reporting stays five.
+    assert.ok(await waitUntil(() => states.every((state) => state.ready), options.readinessMs ?? 10_000, true), "contender readiness timed out");
     options.onReady?.();
     if (t.signal.aborted || options.signal?.aborted) throw new Error("successor election cancelled");
     writeFileSync(start, "go");
@@ -940,7 +941,7 @@ test("the exclusive successor elects one winner across real runner processes", a
 
 test("successor election keeps slow startup out of the result deadline", async (t) => {
   // Give the injected startup pause its own setup allowance; the race stays at five seconds.
-  await runSuccessorElectionRace(t, { startupDelayMs: 5_200, readinessMs: 10_000 });
+  await runSuccessorElectionRace(t, { startupDelayMs: 5_200, readinessMs: 15_000 });
 });
 
 test("successor election diagnoses startup failure without exposing fixture paths", async (t) => {
