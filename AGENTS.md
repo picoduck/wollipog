@@ -36,8 +36,12 @@
 
 - When asked to draft, report, log, file, or create a GitHub issue, read and follow
   `.agents/skills/log-github-issue/SKILL.md` and `.github/ISSUE_REPORTING.md`.
-- Do not publish an issue until the user approves the exact sanitized repository, title, body, and
-  labels. After publication, read the issue back and return its verified link.
+- Publication requires approval of the exact sanitized repository, title, body, and labels. Custom
+  retains user approval. Full Control permits delegated review only when the server-established
+  human boundary, exact typed occurrence owner, and `.github/ISSUE_REPORTING.md` all permit it.
+  After publication, read the issue back and return its verified link.
+- Read `docs/agent-workflow.md` for campaign preflight and contributor gates. Full Control does not
+  waive external or user-authored mandatory human rules; name unresolved rules during preflight.
 
 ## Merge Queue and CI
 

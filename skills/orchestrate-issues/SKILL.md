@@ -46,15 +46,30 @@ Use `create_session` with `useWorktree: true`, the resolved harness, an advertis
 
 Read the effective pair back from the creation result or `get_session` and confirm it matches the resolved combination. If it does not, stop that child before it does work, record the mismatch, and report it; do not accept an unverified default. A client and server that do not support explicit effort fail closed; report that blocker rather than retrying without effort.
 
+Inspect the actual creation schema: a runner protocol number alone does not expose an input.
+If a Custom host lacks `campaignWorkItemId`, use only a read-only bootstrap assignment at creation,
+verify the effective configuration, record the original work-item assignment with the supported
+assignment tool, and select a dedicated worktree before releasing implementation. Do not claim
+atomic work-item binding on that host or bypass required protected admission. If those operations
+are unavailable, report the compatibility blocker; never update the stack hosting the campaign.
+
 Recheck configuration before reusing a child. For an Automatic assignment, reconsider the combination if evidence shows the previous choice was inadequate and record why; apply changes only through a supported configuration operation while idle and verify them before release, or create a replacement with a clear ownership handoff. A normal `prompt_session` message does not change session configuration. Never change a policy-fixed value.
 
 ## Authority and Gates
+
+Read the Campaign Authority Preflight reference shipped with `using-wollipog`. Before dispatch,
+record effective Custom/Full Control mode, the human-established boundary and revision, allowed
+operations, current owners, compatibility, evidence destination/provider disclosure and Human
+Required exceptions. Identify unresolved mandatory human rules by their exact instruction source;
+never silently rewrite external or user-authored instructions. Full Control applies only to eligible
+server-established authority permitted by repository policy. Custom preserves existing approval
+requirements. A changed policy must pass its own explicitly authorized contribution workflow.
 
 Carry forward the user's actual campaign authorization and repository rules. Routine claims, isolated worktrees, testing, pushing, opening PRs, and required reviews need no repeated permission. Existing rules may still require per-PR merge authorization, UI evidence review, remote-branch deletion authorization, and approval of each exact sanitized issue payload. Do not silently convert a request for this workflow into a waiver of those gates.
 
 Read the authoritative current campaign state and server-derived policy with `get_campaign` before dispatch and again before resolving a workflow decision; do not rely on a prompt copy when the server state is available. For typed decisions such as `implementation_question`, `pr_merge`, `merged_branch_deletion`, `follow_up_issue_publication`, and `ui_evidence_approval`, the child must use `request_workflow_decision`, `get_workflow_decision`, and `consume_workflow_decision` for the exact occurrence immediately before the matching action. The parent must not create or consume a child's gate on its behalf. Discover pending occurrences with `list_descendant_requests` and resolve only a currently Orchestrator-owned exact occurrence with `resolve_descendant_workflow_decision`. Use `answer_descendant_question` and `resolve_descendant_approval` only for applicable non-workflow requests; they never substitute for a typed workflow gate. An ordinary prompt, a stale approval, or Parent Control availability is not authorization for a typed gate.
 
-Never change Parent Control, approve the parent's own requests, impersonate a human, or bypass a pending approval with a plain prompt. UI evidence remains human-owned when the active policy says the Orchestrator cannot inspect the evidence bytes. For any human-owned or otherwise undelegated gate, relay the concrete decision through the harness's supported typed question mechanism and keep unrelated children progressing. Identify the exact policy requiring the gate. Do not imply that campaign ownership authorizes external effects beyond the active policy.
+Never change campaign control settings, approve a human-owned request, impersonate a human, or bypass a pending approval with a plain prompt. An eligible root Full Control occurrence may use server-recorded standing authorization through its exact typed resolution route; it cannot mint a new grant. UI evidence remains human-owned when the active policy says the Orchestrator cannot inspect the evidence bytes. For any human-owned or otherwise undelegated gate, relay the concrete decision through the harness's supported typed question mechanism and keep unrelated children progressing. Identify the exact policy requiring the gate. Do not imply that campaign ownership authorizes external effects beyond the active policy.
 
 For unattended campaigns, explain up front which gates still need the user. A user may explicitly delegate eligible decisions for a campaign, subject to higher-priority and platform restrictions; record the exact scope and exceptions. Do not modify standing policies as part of execution.
 
@@ -73,7 +88,7 @@ For publication, retain the exact sanitized payload and approval, the child/conv
 
 ## Dispatch and Supervise
 
-Use [the child assignment](references/child-assignment.md) when releasing each verified child. Pass the work item to `create_session` so the child's attempt is recorded before its first prompt; if creation refuses the item, fix the plan rather than creating the child without it. Use `assign_campaign_work_item` whenever a child is reused for another item or an item moves to another child; earlier attempts keep their verification and accounting. Reuse a suitable idle child for related follow-ups when possible; give it a fresh issue worktree based on the current default branch. Create another verified child if the old selected worktree has been retired or the session cannot resume safely. Count all campaign children for final verification and, under Stop and Archive, archival.
+Use [the child assignment](references/child-assignment.md) when releasing each verified child. On hosts exposing work-item binding at creation, pass the work item to `create_session` so the child's attempt is recorded before its first prompt; if creation refuses the item, fix the plan rather than creating the child without it. A Custom host without that input uses only the read-only bootstrap compatibility sequence above, with recorded assignment before implementation. Use `assign_campaign_work_item` whenever a child is reused for another item or an item moves to another child; earlier attempts keep their verification and accounting. Reuse a suitable idle child for related follow-ups when possible; give it a fresh issue worktree based on the current default branch. Create another verified child if the old selected worktree has been retired or the session cannot resume safely. Count all campaign children for final verification and, under Stop and Archive, archival.
 
 Never assign a child to update or restart the Wollipog installation (control plane, runner, or development stack) that hosts the campaign, and never
 approve or prompt such an action as post-merge cleanup. A detached helper is not an exception: it
