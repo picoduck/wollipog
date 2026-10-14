@@ -18502,40 +18502,63 @@ a.tab { text-decoration: none; }
   .update-block-actions > .btn { max-width: none; }
 }
 
-/* Settings -> Appearance -> Navigation: the rail's visibility and order editor (#385). The list is a
-   child of the group's surface, so it draws no box of its own and its rows start on the group's text
-   edge, as setting rows do. #3021 rebuilds these rows on the setting-row grid. */
-.rail-order-list {
+/* Settings -> Appearance -> Navigation: the rail's visibility and order editor (#385, #3021). The list
+   is a child of the group's surface, so it draws no box of its own and its rows start on the group's
+   text edge, as setting rows do.
+
+   Every row is ONE fixed grid — icon, name, digit, moves, switch — and every cell but the name is a
+   fixed size, so the arrows, the digit and the switch sit at one x on a normal, hidden, required and
+   experiment-off row alike. What differs between them (Always Shown, Off in Experimental, Tab Bar) is
+   a note in the name cell, which wraps there rather than pushing a control. The vertical padding is
+   what is left of --row-h around a control, so a row is --row-h tall on any pointer. */
+.rail-nav-list {
   margin: 0;
   padding: 0;
   list-style: none;
   display: flex;
   flex-direction: column;
 }
-.rail-order-row {
-  display: flex;
+.rail-nav-row {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) 24px auto auto;
   align-items: center;
   gap: var(--space-3);
   min-height: var(--row-h);
-  padding: var(--space-1) var(--space-4);
+  padding: calc((var(--row-h) - var(--control-h)) / 2) var(--space-4);
+  transition: background-color var(--dur-base) var(--ease-out);
 }
-.rail-order-row + .rail-order-row { border-top: 1px solid var(--border); }
-.rail-order-row.is-inactive .rail-order-icon,
-.rail-order-row.is-inactive .rail-order-title { color: var(--text-dim); }
-.rail-order-icon { display: inline-flex; color: var(--text-dim); }
-/* A name that cannot fit wraps rather than drawing into the status beside it. */
-.rail-order-title { flex: 1; min-width: 0; font-size: var(--text-sm); overflow-wrap: anywhere; }
-.rail-order-state { display: inline-flex; align-items: center; gap: 8px; }
-.rail-order-note { font-size: var(--text-xs); color: var(--text-faint); }
-.rail-order-controls { display: inline-flex; align-items: center; gap: 4px; }
-/* Required and Show/Hide share one last column, so every row's controls end on one edge. */
-.rail-order-controls > :last-child { display: inline-flex; justify-content: center; min-width: 64px; }
-.rail-order-required { font-size: var(--text-xs); color: var(--text-faint); }
-/* In a narrow group the name needs the room more than the controls need one column: on a phone with
-   44px buttons a hidden destination's name otherwise ran into its status. */
+/* A phone binds no digits, so it has no digit column. */
+.rail-nav-list.no-digits > .rail-nav-row { grid-template-columns: 16px minmax(0, 1fr) auto auto; }
+.rail-nav-row + .rail-nav-row { border-top: 1px solid var(--border); }
+/* The row a Move button just moved, lit for RAIL_MOVE_FLASH_MS so the eye can follow it. */
+.rail-nav-row.is-moved { background: var(--bg-elev-2); transition: none; }
+.rail-nav-row.is-inactive .rail-nav-icon,
+.rail-nav-row.is-inactive .rail-nav-title { color: var(--text-dim); }
+.rail-nav-icon { display: inline-flex; color: var(--text-dim); }
+/* The name, then any note after it; a pair that cannot fit wraps rather than drawing into the digit. */
+.rail-nav-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--space-3);
+  min-width: 0;
+}
+.rail-nav-title { font: var(--type-body); color: var(--text); overflow-wrap: anywhere; }
+.rail-nav-note { font: var(--type-small); color: var(--text-dim); }
+.rail-nav-digit { display: inline-flex; justify-content: center; color: var(--text-faint); }
+.rail-nav-moves { display: inline-flex; align-items: center; gap: var(--space-1); }
+@media (prefers-reduced-motion: reduce) {
+  .rail-nav-row.is-moved { background: none; }
+}
+/* Keycaps are for a keyboard (§11.5): a touch pointer hides them, so it hides the dash beside them
+   too, and the column stays to keep the rows aligned. */
+@media (pointer: coarse) {
+  .rail-nav-digit { visibility: hidden; }
+}
+/* In a narrow group the name needs the room more than the controls need air. The switch borrows 3px
+   on each side for its 44px touch target, which the 8px gap still leaves clear. */
 @container (max-width: 559px) {
-  .rail-order-row { gap: var(--space-2); }
-  .rail-order-controls > :last-child { min-width: 0; }
+  .rail-nav-row { gap: var(--space-2); }
 }
 
 /* Agent Defaults' dialog (#3024): Model, Reasoning Effort and Permission Mode share one row, and stack

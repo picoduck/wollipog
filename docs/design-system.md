@@ -1853,6 +1853,24 @@ in place of its group, never an empty surface; a setting the browser refuses is 
 saying so, with a compact warning `Notice` above the surface saying how to allow it (Settings ›
 Notifications, #3022).
 
+**Navigation editor.** Settings › Appearance › Navigation (`NavigationRailPanel`, #3021) is the one
+group whose rows are a list rather than settings: under Show Labels in Rail (desktop only), one
+`--row-h` row per destination on a fixed grid, `16px minmax(0, 1fr) 24px auto auto` (icon, name,
+digit, moves, switch), so the arrows, the digit and the switch sit at one x on a normal, hidden,
+required and experiment-off row. The digit is a §11.5 `kbd` from `railDigits()`, or "–" for a
+hidden or turned-off destination; a coarse pointer hides both and keeps the column. The moves are two
+`.icon-btn` arrows, "Move {Name} Up" and "Move {Name} Down", disabled at the ends; after a move focus
+stays on the pressed button, or its sibling once that one is disabled, and the row is lit
+`--bg-elev-2` for 600ms (not under reduced motion). Visibility is a standalone `Switch`, "Show {Name}
+in Navigation". Why a switch cannot be used is a visible note after the name, never a tooltip:
+Sessions is checked and disabled with "Always Shown", and an experiment that is off shows "Off in
+Experimental". Reset to Default is the head action (`.btn.sm.ghost` with `ResetIcon`), disabled while
+the list is as shipped. The description reads "Order sets the number shortcuts. Hidden pages stay
+reachable from search." A phone binds no digits, so it has no digit column; the destinations
+`phoneBarViews()` puts on the tab bar carry a "Tab Bar" note, and the description reads "Order sets
+the More sheet. Tab Bar marks the four pages in the bar." Drag-and-drop (#541) layers onto these rows,
+with the Move buttons as the accessible baseline.
+
 ### 8.3 Field Widths
 
 | Class | Width | Use |
@@ -3423,7 +3441,7 @@ Never use CSS `text-transform` to achieve either. Enum values pass through `stat
 | `ui/ChoiceControls` `Checkbox` (native 13px) | `.checkbox` + `.switch` |
 | `ChoiceCards` (`.ui-choice-cards`, `.ui-choice-card*`, trailing `.ui-choice-mark`), `.workflow-preset`, `.agent-pick`, `.pod-member-pick`, `.access-choice`, the People member checklist | `ChoiceRows` (`.choice-row`, leading `.radio-mark` / `.checkbox-mark`) or `ChoiceList` (`.choice-list`) (#1952) |
 | `.field` / `.access-form` (two systems) | `.field` (label, control, helper/error) |
-| `.ui-row`, `.ui-row-choice`, `.orchestrator-number-row`, `.orchestrator-policy-control`, `.rail-order-row`, `.agent-defaults-editor` grids | `.setting-row` (the row components moved with #2947 and Settings' hand-built rows with #3019; `.rail-order-row` moves with #3021, `.agent-defaults-editor` with #3024, and New Session's `.orchestrator-policy-control` with its own unit) |
+| `.ui-row`, `.ui-row-choice`, `.orchestrator-number-row`, `.orchestrator-policy-control`, `.rail-order-row`, `.agent-defaults-editor` grids | `.setting-row` (the row components moved with #2947 and Settings' hand-built rows with #3019; `.agent-defaults-editor` moves with #3024, and New Session's `.orchestrator-policy-control` with its own unit). `.rail-order-row` became the Navigation editor's fixed-column `.rail-nav-row` (#3021, §8.2) |
 | `.archive-table`, `.usage-table`, `.skills-table`, assignment matrix | `.table` (fixed layout) with phone row fallback |
 | `.shortcut-row kbd`, `.shortcut-hint kbd` (9px) | `kbd` (one recipe) |
 | `code` global chip | `:not(pre) > code` chip only |

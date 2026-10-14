@@ -75,6 +75,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `LinkIcon` | Lucide | `Link` | Copy a link to a page. |
 | `DownloadIcon` | Lucide | `Download` | Export or download a file. |
 | `RefreshIcon` | Lucide | `RefreshCw` | Generic refresh action. |
+| `ResetIcon` | Lucide | `RotateCcw` | Reset to Default: return settings to what shipped (#3021). |
 | `UpdateIcon` | Lucide | `Upload` | Install or upload an update. |
 | `SearchIcon` | Lucide | `Search` | Generic search action. |
 | `SearchOffIcon` | Lucide | `SearchX` | A search with no matches: the Sessions No Matches state. |
