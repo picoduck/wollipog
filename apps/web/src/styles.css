@@ -17301,6 +17301,11 @@ button.setting-row { cursor: pointer; }
   white-space: nowrap;
 }
 .setting-row-value-text.is-mono { font-family: var(--font-mono); font-size: var(--text-sm); }
+/* A value that is only useful whole, an address, wraps between its pieces instead (#3159), on lines
+   of even length, so a phone never leaves `net` alone on the last one. A piece is atomic, so a line
+   never breaks at its hyphen; only a piece wider than the column breaks inside itself. */
+.setting-row-value-text.is-wrapping { white-space: normal; text-wrap: balance; }
+.setting-row-value-part { display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
 .setting-row-link-word { color: var(--text-dim); font: var(--type-small); white-space: nowrap; }
 .setting-row-chevron { display: inline-flex; color: var(--text-dim); }
 /* The switch row is the Switch button itself, so its track and Saved check are the row's own

@@ -839,6 +839,58 @@ test("Manage Instances opens Connections › Instances, and is absent on a phone
   await expect(page.getByRole("button", { name: /^Manage Instances/ })).toHaveCount(0);
 });
 
+test("Connected To shows a whole tailnet address at 1440px and 390px, and Copy Address copies it", async ({ page, context }) => {
+  // The value column cut the address off after about 26 characters at desktop widths (#3159), so
+  // someone on a remote server saw only `https://studio.example.ts.n…` of their own address.
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  const address = "https://home-studio-01.tail4a3b2c.ts.net";
+  expect(address).toHaveLength(40);
+  for (const [width, height] of [[1440, 900], [390, 844]] as const) {
+    for (const theme of THEMES) {
+      await page.setViewportSize({ width, height });
+      await useHarness(page, theme, { section: "network", tailnet: "off", instances: "multi" });
+      const row = page.locator(".setting-row", { has: page.locator(".setting-row-title").getByText("Connected To", { exact: true }) });
+      const value = row.locator(".setting-row-value-text");
+      await expect(value).toHaveText(address);
+      // As rendered, too: the pieces are inline-blocks, and nothing may come between them when the
+      // address is read aloud or selected by hand.
+      await expect(value).toHaveText(address, { useInnerText: true });
+      const fit = await value.evaluate((element) => {
+        // Every line the address is laid out on, against the row's control column.
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        const control = element.closest(".setting-row-control")!.getBoundingClientRect();
+        return {
+          scrollWidth: element.scrollWidth,
+          clientWidth: element.clientWidth,
+          scrollHeight: element.scrollHeight,
+          clientHeight: element.clientHeight,
+          outside: [...range.getClientRects()].filter((line) => line.left < control.left - 0.5 || line.right > control.right + 0.5).length,
+          // Lines break only after `.`, `/` and `:`: no piece between them, `home-studio-01.` among
+          // them, is split at its hyphen.
+          split: [...element.querySelectorAll(".setting-row-value-part")]
+            .filter((part) => part.getClientRects().length !== 1 || part.getBoundingClientRect().height > parseFloat(getComputedStyle(element).lineHeight) + 1)
+            .map((part) => part.textContent),
+          pieces: element.querySelectorAll(".setting-row-value-part").length,
+        };
+      });
+      const at = `at ${width}px in ${theme}`;
+      expect(fit.scrollWidth, `no part of the address is clipped sideways ${at}`).toBeLessThanOrEqual(fit.clientWidth);
+      expect(fit.scrollHeight, `no line of the address is clipped ${at}`).toBeLessThanOrEqual(fit.clientHeight);
+      expect(fit.outside, `every line of the address stays in the control column ${at}`).toBe(0);
+      expect(fit.pieces, `the address is in its pieces ${at}`).toBe(5);
+      expect(fit.split, `no piece of the address breaks inside itself ${at}`).toEqual([]);
+      // Copy stays beside the value, after it, on the value's row.
+      const [valueBox, copyBox] = await Promise.all([value.boundingBox(), row.getByRole("button", { name: "Copy Address" }).boundingBox()]);
+      expect(copyBox!.x, `Copy Address follows the address ${at}`).toBeGreaterThanOrEqual(valueBox!.x + valueBox!.width);
+    }
+  }
+  const copy = page.getByRole("button", { name: "Copy Address" });
+  await copy.click();
+  await expect(copy.locator(".copy-status-icon-copied"), "Copy Address confirms with its icon").toBeVisible();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(address);
+});
+
 test("a fresh load leaves the tab order at the top of the page", async ({ page }) => {
   // The focus rescue fired on MOUNT, so the first Tab started after the panel heading and skipped
   // all the section links. Nothing was dropped on a fresh load; there was nothing to rescue.
