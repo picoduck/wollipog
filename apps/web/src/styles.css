@@ -18431,7 +18431,66 @@ a.tab { text-decoration: none; }
 @media (min-width: 761px) and (max-width: 1099px) {
   .settings-panel-heading > h2 { display: none; }
 }
+/* A section that draws its own head (About, #3028) keeps the heading in the tree, hidden. */
+.settings-panel-head[hidden] { display: none; }
 .settings-group { display: flex; flex-direction: column; gap: var(--space-2); }
+
+/* Settings › About opens with what you are running (#3028): the 48px app icon, Wollipog in the
+   title type, and its version under it. */
+.about-identity { display: flex; align-items: center; gap: var(--space-4); min-width: 0; }
+.about-identity-icon { flex: none; width: var(--space-12); height: var(--space-12); border-radius: var(--radius-md); }
+.about-identity-text { display: flex; flex-direction: column; gap: var(--space-0-5); min-width: 0; }
+.about-identity-name { margin: 0; color: var(--text); font: var(--type-title); }
+.about-identity-version { margin: 0; color: var(--text-dim); font: var(--type-body); }
+
+/* The desktop app's update status, one child of the Updates group's surface (§8.2, #3028): a 32px
+   tone tile, the title over one sentence, then the actions with the primary last (§3.2). */
+.update-block {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--row-h-2);
+  padding: var(--space-3) var(--space-4);
+}
+.update-block-tile {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--space-8);
+  height: var(--space-8);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--tone) 14%, transparent);
+  color: var(--tone-text);
+}
+/* At least the tile's height and centred in it, so a title with no sentence under it sits on the
+   tile's middle at every width, including under 560px where the row aligns to the top. */
+.update-block-text {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--space-0-5);
+  min-width: 0;
+  min-height: var(--space-8);
+}
+.update-block-title { margin: 0; font: var(--type-body-strong); overflow-wrap: anywhere; }
+.update-block-desc,
+.update-block-details { margin: 0; color: var(--text-dim); font: var(--type-small); overflow-wrap: anywhere; }
+.update-block-details { padding-top: var(--space-1); }
+.update-block-actions { display: flex; align-items: center; gap: var(--space-2); }
+/* Under 560px of group the actions drop under the text at full width, one per line with the primary
+   last, and 44px tall even under a mouse, as a sheet's footer is (§7.5, §15.1). */
+@container (max-width: 559px) {
+  .update-block { grid-template-columns: auto minmax(0, 1fr); align-items: start; }
+  .update-block-actions {
+    --control-h: 44px;
+    grid-column: 1 / -1;
+    flex-direction: column;
+    align-items: stretch;
+  }
+  /* The phone exception to "buttons never stretch" (§3.1), as in the session notice slot. */
+  .update-block-actions > .btn { max-width: none; }
+}
 
 /* Settings -> Appearance -> Navigation: the rail's visibility and order editor (#385). The list is a
    child of the group's surface, so it draws no box of its own and its rows start on the group's text

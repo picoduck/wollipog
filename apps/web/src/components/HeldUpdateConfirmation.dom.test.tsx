@@ -272,7 +272,10 @@ test("the held-update body counts one session, and never invents a count", () =>
 });
 
 test("Settings › About no longer draws its own held state", () => {
-  const settings = readFileSync(fileURLToPath(new URL("./SettingsView.tsx", import.meta.url)), "utf8");
-  assert.doesNotMatch(settings, /Install Anyway/u);
-  assert.doesNotMatch(settings, /Not Now/u);
+  // About moved into its own file (#3028); both are read so the move cannot hide a regression.
+  for (const file of ["./SettingsView.tsx", "./AboutSettingsPanel.tsx"]) {
+    const settings = readFileSync(fileURLToPath(new URL(file, import.meta.url)), "utf8");
+    assert.doesNotMatch(settings, /Install Anyway/u, file);
+    assert.doesNotMatch(settings, /Not Now/u, file);
+  }
 });

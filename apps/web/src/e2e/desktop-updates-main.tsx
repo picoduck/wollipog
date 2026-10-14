@@ -4,8 +4,11 @@ import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { DesktopUpdateNotifier } from "../components/DesktopUpdateNotifier.js";
 import { DesktopExternalLinkRouter, EXTERNAL_URL_POLICY_ERROR_PREFIX, type ExternalLinkDesktop } from "../components/DesktopExternalLinkRouter.js";
 import { createCloseGuardLinks, type CloseGuardSession } from "../desktop-close-guard.js";
-import { DESKTOP_UPDATE_CHANNEL_CHANGED, DESKTOP_UPDATE_CHECKED, useDesktopUpdateSetting, type DesktopUpdateOutcome, type DesktopUpdateRuntime, type DesktopUpdateStatus } from "../desktop-updates.js";
+import { DESKTOP_UPDATE_CHANNEL_CHANGED, DESKTOP_UPDATE_CHECKED, useDesktopUpdateSetting, type DesktopUpdateOutcome, type DesktopUpdateRuntime, type DesktopUpdateSetting, type DesktopUpdateStatus } from "../desktop-updates.js";
 import { AboutPanel } from "../components/SettingsView.js";
+import { aboutUpdateFixture, isAboutUpdateState } from "./about-update-fixtures.js";
+import { browserInstanceManager, InstancesContextProvider } from "../instances-context.js";
+import type { InstanceRuntime } from "../instance-runtime.js";
 import { ApiProvider } from "../api-context.js";
 import { createApiClient } from "../api.js";
 import "../styles.css";
@@ -20,7 +23,10 @@ import "../styles.css";
  * finishes, as a restart would not. `?state=release-page` is a package-manager install, pointed at
  * the release page. `?state=link-failure` clicks a link the system browser refuses, and
  * `?state=link-policy` a `file:` link the shell's policy blocks, and `?state=link-long` refuses a link
- * several kilobytes long. `?theme=light` switches theme.
+ * several kilobytes long. `?state=about&update=<state>` is Settings › About in one of its update states
+ * (#3028, `about-update-fixtures.ts`), or as a browser shows it without `update`; `?state=about-held`
+ * is About on the real hook, whose Install and Restart is held for the same two sessions.
+ * `?theme=light` switches theme.
  * Chosen by query string so every state is a clean reload; the page records what reached the fake.
  */
 
@@ -37,8 +43,58 @@ const SESSIONS: Record<string, CloseGuardSession> = {
 /** A refused link several kilobytes long: its detail scrolls inside the toast. */
 const LONG_LINK = `https://example.com/report?filters=${Array.from({ length: 200 }, (_, index) => `session-${index}`).join(",")}`;
 
-type State = "in-place" | "release-page" | "link-failure" | "link-policy" | "link-long" | "channels";
-const STATES: readonly State[] = ["in-place", "release-page", "link-failure", "link-policy", "link-long", "channels"];
+type State = "in-place" | "release-page" | "link-failure" | "link-policy" | "link-long" | "channels" | "about" | "about-held";
+const STATES: readonly State[] = ["in-place", "release-page", "link-failure", "link-policy", "link-long", "channels", "about", "about-held"];
+const ABOUT_STATES: readonly State[] = ["about", "about-held"];
+
+/** The server version every About state reads from its instance probe. */
+const SERVER_VERSION = "0.26.0";
+/** The server's API origin, apart from the page's: About names the server, not the dashboard. */
+const SERVER_ORIGIN = "https://wollipog-server.example.test:4317";
+const SPLIT_ORIGIN_INSTANCES = {
+  ...browserInstanceManager,
+  runtime: { instanceId: "local", publicOrigin: SERVER_ORIGIN } as InstanceRuntime,
+};
+
+function serverApi() {
+  return createApiClient({
+    instanceId: "about-fixture", publicOrigin: window.location.origin, close() {},
+    request: async () => new Response(JSON.stringify({ appVersion: SERVER_VERSION }), { headers: { "content-type": "application/json" } }),
+  });
+}
+
+/** Settings › About in the frame's panel column, so its groups have the panel's width. */
+function AboutFrame({ update }: { update: DesktopUpdateSetting | undefined }) {
+  const [api] = useState(serverApi);
+  return (
+    <InstancesContextProvider value={SPLIT_ORIGIN_INSTANCES}>
+      <ApiProvider client={api}>
+        <main className="settings-panel" style={{ margin: "24px auto", padding: 16 }}>
+          <AboutPanel update={update} />
+        </main>
+      </ApiProvider>
+    </InstancesContextProvider>
+  );
+}
+
+/** A fixture state; its actions are recorded rather than performed. */
+function AboutStatesHarness({ record }: { record: (action: string) => void }) {
+  const requested = new URLSearchParams(window.location.search).get("update");
+  const update = isAboutUpdateState(requested)
+    ? aboutUpdateFixture(requested, {
+      check: () => record("check"),
+      install: () => record("install"),
+      openRelease: () => record("open"),
+    })
+    : undefined;
+  return <AboutFrame update={update} />;
+}
+
+/** The real hook over the harness's fake shell: Install and Restart is held for running work. */
+function AboutHeldHarness({ desktop, links }: { desktop: DesktopUpdateRuntime; links: ReturnType<typeof createCloseGuardLinks> }) {
+  const update = useDesktopUpdateSetting(desktop, links);
+  return <AboutFrame update={update} />;
+}
 const LINK_STATES: readonly State[] = ["link-failure", "link-policy", "link-long"];
 
 /** Real Settings panel and hook; only the native command boundary is simulated. */
@@ -90,6 +146,7 @@ function Harness() {
   const [installs, setInstalls] = useState<string[]>([]);
   const [opened, setOpened] = useState<string[]>([]);
   const [copied, setCopied] = useState<string[]>([]);
+  const [actions, setActions] = useState<string[]>([]);
 
   const [updates] = useState<DesktopUpdateRuntime>(() => {
     const status: DesktopUpdateStatus = {
@@ -103,7 +160,7 @@ function Harness() {
       lastCheck: { state: "available", version: VERSION, releaseUrl: RELEASE_URL, checkedAt: Date.UTC(2026, 8, 29, 16, 5) },
     };
     return {
-      isTauri: () => state === "in-place" || state === "release-page",
+      isTauri: () => state === "in-place" || state === "release-page" || state === "about-held",
       invoke: async <T,>(command: string, args?: Record<string, unknown>): Promise<T> => {
         if (command === "check_for_desktop_update") return status.lastCheck as T;
         if (command === "desktop_update_status") return status as T;
@@ -162,19 +219,25 @@ function Harness() {
   return (
     <FeedbackProvider>
       {state === "channels" && <ChannelSettingsHarness />}
+      {state === "about" && <AboutStatesHarness record={(action) => setActions((list) => [...list, action])} />}
+      {state === "about-held" && <AboutHeldHarness desktop={updates} links={sessions} />}
       <DesktopExternalLinkRouter desktop={links} />
-      <DesktopUpdateNotifier
-        desktop={updates}
-        firstCheckDelayMs={0}
-        recheckIntervalMs={60 * 60 * 1000}
-        links={sessions}
-      />
+      {/* About's states leave the toast out, so its buttons are the only ones on the page. */}
+      {!ABOUT_STATES.includes(state) && (
+        <DesktopUpdateNotifier
+          desktop={updates}
+          firstCheckDelayMs={0}
+          recheckIntervalMs={60 * 60 * 1000}
+          links={sessions}
+        />
+      )}
       {/* Clicked by the page, never shown; the records are read by the spec. */}
       <div className="sr-only">
         <a ref={anchor} href={state === "link-policy" ? BLOCKED_LINK : state === "link-long" ? LONG_LINK : FAILED_LINK} tabIndex={-1}>Link</a>
         <output data-testid="installs">{installs.join(",")}</output>
         <output data-testid="opened">{opened.join(",")}</output>
         <output data-testid="copied">{copied.join(",")}</output>
+        <output data-testid="actions">{actions.join(",")}</output>
       </div>
     </FeedbackProvider>
   );

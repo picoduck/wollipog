@@ -218,11 +218,15 @@ test("at 900px the sections are link tabs in the page header, with About's tab i
   // The tab names the section, so the panel does not repeat it.
   await expect(page.locator("#settings-panel-heading")).toBeHidden();
   await expect(page.getByRole("heading", { name: "About", exact: true })).toHaveCount(0);
-  await expect(page.locator(".settings-panel-desc")).toBeVisible();
+  // About opens with Wollipog's name and version in place of its head (#3028).
+  await expect(page.locator(".about-identity")).toBeVisible();
+  await expect(page.locator(".settings-panel-desc")).toBeHidden();
   // A tab is a link: following one changes the route.
   await tabs.getByRole("link", { name: "Network" }).click();
   await expect(current).toHaveText("Network");
   expect(new URL(page.url()).searchParams.get("route")).toBe("/settings/network");
+  // Any other section keeps its one line under the tabs.
+  await expect(page.locator(".settings-panel-desc")).toBeVisible();
 });
 
 for (const width of [1440, 900]) {

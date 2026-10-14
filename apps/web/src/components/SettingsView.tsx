@@ -3,10 +3,8 @@ import React, { createContext, useContext, useEffect, useLayoutEffect, useRef, u
 import { ArtifactUploadSettings } from "./ArtifactUploadSettings.js";
 import { Notice } from "./Notice.js";
 import { State } from "./State.js";
-import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { tailnetAccessDescription, type TailnetAccessSetting } from "../tailnet-access.js";
-import { availableUpdateMessage, type DesktopUpdateSetting } from "../desktop-updates.js";
 import { type PushSetting } from "../push.js";
 import {
   AppearanceIcon,
@@ -294,7 +292,10 @@ export function SettingsView({ section, onNavigate, panels }: SettingsViewProps)
           </nav>
         )}
         <section className="settings-panel" aria-labelledby="settings-panel-heading">
-          <div className="settings-panel-head">
+          {/* About opens with Wollipog's name and version in place of its head (#3028). The heading
+              stays in the tree, hidden, so it still names the section and the focus rescue above
+              falls through to the page title. */}
+          <div className="settings-panel-head" hidden={current.id === "about"}>
             <div className="settings-panel-heading">
               <h2 id="settings-panel-heading" ref={headingRef} tabIndex={-1}>{current.title}</h2>
               <p className="settings-panel-desc">{panelHead?.description ?? current.panelDescription ?? current.description}</p>
@@ -567,22 +568,6 @@ export function NavigationRailPanel() {
 }
 
 /**
- * A setting that exists but cannot be changed here yet.
- *
- * §11.3: never hide a setting that could exist, and every disabled control carries a reason. A
- * missing section teaches a user it is not possible; a disabled one with a sentence teaches them
- * where it lives.
- */
-export function PendingSetting({ title, description, reason }: { title: string; description: string; reason: string }) {
-  return (
-    <StaticRow
-      title={title}
-      description={<>{description} <Notice tone="neutral" compact>{reason}</Notice></>}
-    />
-  );
-}
-
-/**
  * Settings › Behavior (#3023): six groups, each naming once where its settings are kept (§11.3), so
  * no row repeats "Stored on this device." Keyboard is not a section of its own: its one row is here,
  * under Input, and `/settings/keyboard` lands on it (`focus`).
@@ -833,150 +818,7 @@ function TailnetAccessRow({ tailnet }: { tailnet: TailnetAccessSetting }) {
   );
 }
 
-/** `update` is the shell's state (see `useDesktopUpdateSetting`); absent, this is a browser. */
-export function AboutPanel({ update }: { update?: DesktopUpdateSetting } = {}) {
-  const controlPlaneVersion = useControlPlaneVersion();
-  return (
-    <SettingsGroup>
-      <dl className="facts">
-        {update?.status && <><dt>Desktop App</dt><dd>{update.status.currentVersion}</dd></>}
-        <dt>Control Plane</dt>
-        <dd>{controlPlaneVersion === undefined ? "Reading…" : controlPlaneVersion ?? "Not reported"}</dd>
-        <dt>Protocol</dt><dd>{PROTOCOL_VERSION}</dd>
-      </dl>
-      {update?.desktop ? (
-        <DesktopUpdateRows update={update} />
-      ) : (
-        <PendingSetting
-          title="Updates"
-          description="Whether this build is current."
-          reason="This dashboard is served by its control plane and updates when that control plane is upgraded."
-        />
-      )}
-      <PendingSetting
-        title="Open-Source Licenses"
-        description="What Wollipog is built on."
-        reason="Not compiled into the app yet; see THIRD-PARTY-NOTICES in the repository."
-      />
-    </SettingsGroup>
-  );
-}
-
-/**
- * The version of the control plane this window talks to, from its authenticated instance probe.
- *
- * `undefined` while reading and `null` when it did not say — an older control plane without the
- * probe, or a failed read. The desktop app and the control plane can differ: a desktop window may be
- * connected to a remote server, and updating the app never updates that server.
- */
-function useControlPlaneVersion(): string | null | undefined {
-  const api = useApi();
-  const [version, setVersion] = useState<string | null | undefined>(undefined);
-  useEffect(() => {
-    let disposed = false;
-    setVersion(undefined);
-    api.instanceInfo()
-      .then((info) => { if (!disposed) setVersion(typeof info?.appVersion === "string" && info.appVersion ? info.appVersion : null); })
-      .catch(() => { if (!disposed) setVersion(null); });
-    return () => { disposed = true; };
-  }, [api]);
-  return version;
-}
-
-function formatCheckedAt(checkedAt: number): string {
-  return new Date(checkedAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
-}
-
-/**
- * #1646. What the shell last learned about published releases, and the one action that fits it.
- *
- * Installing restarts the app, so a first attempt while work is in flight is held by the shell and
- * becomes the Restart to Install Update confirmation the update toast opens too (#1975). Nothing
- * here shows the hold: Install Later leaves this row offering Install and Restart as it was.
- */
-function DesktopUpdateRows({ update }: { update: DesktopUpdateSetting }) {
-  const { status } = update;
-  if (!status) {
-    return (
-      <StaticRow
-        title="Updates"
-        description={update.loading
-          ? "Reading the update status…"
-          : `Could not read the update status: ${update.error ?? "the desktop app did not answer."}`}
-      />
-    );
-  }
-  const busy = update.checking || update.installing || update.savingPrerelease;
-  const check = (label: string) => (
-    <button type="button" className="btn ghost sm" disabled={busy} onClick={update.check}>
-      {update.checking ? "Checking…" : label}
-    </button>
-  );
-  const lastCheck = status.lastCheck;
-  let description: ReactNode;
-  if (!status.checksAllowed) {
-    description = "Update checks are turned off for this installation by WOLLIPOG_DISABLE_UPDATE_CHECK.";
-  } else if (update.installing) {
-    description = "Downloading and verifying the update. Wollipog restarts when it is installed.";
-  } else if (lastCheck?.state === "available") {
-    description = status.install.mode === "inPlace" ? (
-      <>
-        {availableUpdateMessage(lastCheck.version)} Installing restarts Wollipog, which stops its local
-        control plane and runner.{" "}
-        <button type="button" className="btn sm" onClick={update.install}>Install and Restart</button>{" "}
-        {check("Check Again")}
-      </>
-    ) : (
-      <>
-        {availableUpdateMessage(lastCheck.version)} {status.install.reason}{" "}
-        <button type="button" className="btn sm" onClick={update.openRelease}>Open Release Page</button>{" "}
-        {check("Check Again")}
-      </>
-    );
-  } else if (lastCheck?.state === "current") {
-    description = (
-      <>
-        {status.currentVersion.includes("-") || status.prereleaseUpdates
-          ? `No newer release is available on the ${status.prereleaseUpdates ? "pre-release" : "stable"} channel.`
-          : `Wollipog ${status.currentVersion} is the latest release.`} Checked {formatCheckedAt(lastCheck.checkedAt)}.{" "}
-        {check("Check Again")}
-      </>
-    );
-  } else {
-    description = <>Not checked yet. {check("Check for Updates")}</>;
-  }
-  return (
-    <>
-      <StaticRow
-        title="Updates"
-        description={
-          <>
-            {description}
-            {update.error && <Notice tone="danger" compact role="alert">{update.error}</Notice>}
-          </>
-        }
-      />
-      <SwitchRow
-        title="Check for Updates Automatically"
-        description={status.checksAllowed
-          ? "Look for a newer published release while Wollipog is open."
-          : "Turned off for this installation."}
-        checked={status.automaticChecks && status.checksAllowed}
-        busy={update.savingAutomatic}
-        disabled={!status.checksAllowed}
-        onClick={update.toggleAutomatic}
-      />
-      {status.prereleaseUpdates !== undefined && <SwitchRow
-        title="Pre-Release Updates"
-        description="Include early versions that may be less reliable. Turning this off waits for a newer stable release; it does not downgrade Wollipog."
-        checked={status.prereleaseUpdates}
-        busy={update.savingPrerelease}
-        disabled={update.checking || update.installing}
-        onClick={update.togglePrerelease}
-      />}
-    </>
-  );
-}
+export { AboutPanel } from "./AboutSettingsPanel.js";
 
 /**
  * Desktop alerts (the Notification API, while a tab is open) as injected state.

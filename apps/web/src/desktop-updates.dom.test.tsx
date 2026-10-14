@@ -134,3 +134,98 @@ test("switching channels clears the offer and ignores an old-channel check arriv
   await act(async () => root.unmount());
   container.remove();
 });
+
+test("each failure names the request that failed, and a failed check stays up until a retry succeeds", async () => {
+  const current = { state: "current" as const, checkedAt: 9 };
+  let checkAnswer: () => Promise<unknown> = () => Promise.reject(new Error("Could not check for updates: offline"));
+  let finishRetry: (value: typeof current) => void = () => undefined;
+  const desktop: DesktopUpdateRuntime = {
+    isTauri: () => true,
+    invoke: async <T,>(command: string) => {
+      if (command === "desktop_update_status") return status as T;
+      if (command === "check_for_desktop_update") return checkAnswer() as Promise<T>;
+      if (command === "set_automatic_update_checks") throw new Error("Saving the update setting failed: denied");
+      throw new Error(command);
+    },
+  };
+  let latest: DesktopUpdateSetting | undefined;
+  function Probe() { latest = useDesktopUpdateSetting(desktop); return null; }
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => root.render(<Probe />));
+  await act(async () => latest!.check());
+  assert.deepEqual(latest!.failure, { action: "check", message: "Could not check for updates: offline" });
+  // Retrying keeps the failed state on screen, with its Retry busy, rather than flashing back to
+  // whatever the block showed before the first attempt.
+  checkAnswer = () => new Promise((resolve) => { finishRetry = resolve; });
+  await act(async () => latest!.check());
+  assert.equal(latest!.checking, true);
+  assert.equal(latest!.failure?.action, "check");
+  await act(async () => finishRetry(current));
+  assert.equal(latest!.failure, null);
+  assert.deepEqual(latest!.status!.lastCheck, current);
+  await act(async () => latest!.toggleAutomatic());
+  assert.deepEqual(latest!.failure, { action: "automatic", message: "Saving the update setting failed: denied" });
+  // A check after an unrelated failure starts clean.
+  checkAnswer = () => Promise.resolve(current);
+  await act(async () => latest!.check());
+  assert.equal(latest!.failure, null);
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("a newer background check replaces a failed manual check", async () => {
+  const handlers = new Map<string, (payload: unknown) => void>();
+  const desktop: DesktopUpdateRuntime = {
+    isTauri: () => true,
+    invoke: async <T,>(command: string) => {
+      if (command === "desktop_update_status") return status as T;
+      throw new Error("Could not check for updates: offline");
+    },
+    listen: async (event, handler) => { handlers.set(event, handler); return () => undefined; },
+  };
+  let latest: DesktopUpdateSetting | undefined;
+  function Probe() { latest = useDesktopUpdateSetting(desktop); return null; }
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => root.render(<Probe />));
+  await act(async () => latest!.check());
+  assert.equal(latest!.failure?.action, "check");
+  // The background notifier found an update after the manual check failed: Install and Restart must
+  // come back rather than the block staying on Couldn't Check for Updates.
+  const available = { state: "available" as const, version: "0.28.0", releaseUrl: "https://example.test", checkedAt: 20 };
+  await act(async () => handlers.get(DESKTOP_UPDATE_CHECKED)!(available));
+  assert.deepEqual(latest!.status!.lastCheck, available);
+  assert.equal(latest!.failure, null);
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("a check that succeeds leaves a switch's failure from while it ran", async () => {
+  let finishCheck: (value: unknown) => void = () => undefined;
+  const desktop: DesktopUpdateRuntime = {
+    isTauri: () => true,
+    invoke: async <T,>(command: string) => {
+      if (command === "desktop_update_status") return status as T;
+      if (command === "check_for_desktop_update") return new Promise<T>((resolve) => { finishCheck = resolve as typeof finishCheck; });
+      if (command === "set_automatic_update_checks") throw new Error("Saving the update setting failed: denied");
+      throw new Error(command);
+    },
+  };
+  let latest: DesktopUpdateSetting | undefined;
+  function Probe() { latest = useDesktopUpdateSetting(desktop); return null; }
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => root.render(<Probe />));
+  await act(async () => latest!.check());
+  await act(async () => latest!.toggleAutomatic());
+  assert.equal(latest!.failure?.action, "automatic");
+  await act(async () => finishCheck({ state: "current", checkedAt: 30 }));
+  assert.equal(latest!.status!.lastCheck?.state, "current");
+  assert.equal(latest!.failure?.action, "automatic", "the switch keeps its Try Again");
+  await act(async () => root.unmount());
+  container.remove();
+});
