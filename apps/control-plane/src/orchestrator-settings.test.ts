@@ -110,11 +110,11 @@ test("Orchestrator defaults persist per authenticated user and preserve capabili
     assert.equal(drifted.capabilities.status, "unavailable");
     assert.equal(drifted.capabilities.supportedPairs?.some((pair) => pair.modelId === "luna" && pair.effortLevels.includes("high")), true);
     assert.deepEqual(drifted.defaults, saved, "discovery drift must not silently rewrite saved values");
-    assert.match(drifted.capabilities.reason ?? "", /not supported together/);
+    assert.match(drifted.capabilities.reason ?? "", /supports this Child Harness, Child Model and Child Effort together/);
 
     assert.throws(() => settings.update(firstDevice, {
       defaults: defaults({ childModel: "sol", childEffort: "high" }),
-    }), /not supported together/,
+    }), /supports this Child Harness, Child Model and Child Effort together/,
     "aggregate choices from different installations are not treated as one supported combination");
 
     db.markOffline("runner-a", now + 21);
@@ -122,7 +122,7 @@ test("Orchestrator defaults persist per authenticated user and preserve capabili
     const disconnected = settings.view(firstDevice);
     assert.equal(disconnected.capabilities.installations, 0,
       "stale catalogs from disconnected runners are not presented as current discovery");
-    assert.match(disconnected.capabilities.reason ?? "", /Connect or update a runner/);
+    assert.match(disconnected.capabilities.reason ?? "", /Connect a machine or update Wollipog on it in Connections/);
   } finally {
     db.close();
   }
@@ -155,7 +155,7 @@ test("Orchestrator capabilities keep identical model ids scoped to stable harnes
       childHarness: fixedPi.behavior.childHarness,
       childModel: "shared-model",
       childEffort: "high",
-    }) }), /not supported together/,
+    }) }), /supports this Child Harness, Child Model and Child Effort together/,
     "Codex effort metadata must not leak into Pi merely because the model id matches");
 
     db.markOffline("runner-pi", now + 3);
@@ -238,6 +238,53 @@ test("Orchestrator settings routes reject agents and persist human updates", asy
     assert.equal((await app.inject({
       method: "PUT", url: "/api/orchestrator-settings", headers: { authorization: "Bearer human" }, payload: { defaults: {} },
     })).statusCode, 400);
+  } finally {
+    await app.close();
+    db.close();
+  }
+});
+
+test("Orchestrator settings reasons name machines and Connections, never installations or runners", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const owner = human(db);
+  const settings = new OrchestratorSettings(db);
+  const app = Fastify();
+  registerOrchestratorSettingsRoutes(app, settings, () => owner);
+  const systemWords = /runner|installation|advertise/i;
+  const reasons: string[] = [];
+  const read = async () => {
+    const response = await app.inject({ method: "GET", url: "/api/orchestrator-settings" });
+    assert.equal(response.statusCode, 200);
+    return response.json().capabilities.reason as string | undefined;
+  };
+  const write = async (behavior: Partial<OrchestratorDefaults["behavior"]>) => {
+    const response = await app.inject({
+      method: "PUT", url: "/api/orchestrator-settings", payload: { defaults: defaults(behavior) },
+    });
+    assert.equal(response.statusCode, 409);
+    return response.json().error as string;
+  };
+  try {
+    const none = await read();
+    assert.equal(none, "No connected machine reports which models and efforts child agents can use. " +
+      "Connect a machine or update Wollipog on it in Connections, then try again.");
+    reasons.push(none, await write({ childModel: "sol" }));
+    reasons.push(settings.compatibilityError(owner, defaults({ childModel: "sol" }))!);
+
+    const now = Date.now();
+    db.registerRunner(runner("runner-a", "sol", ["low"]), now, PROTOCOL_VERSION);
+    const unsupported = await write({ childModel: "sol", childEffort: "high" });
+    assert.equal(unsupported, "No connected machine supports this Child Harness, Child Model and Child Effort " +
+      "together. Choose Automatic or another combination.");
+    reasons.push(unsupported, settings.compatibilityError(owner, defaults({ childModel: "luna" }))!);
+
+    db.setOrchestratorDefaults(owner.userId, defaults({ childModel: "sol", childEffort: "low" }), now + 1);
+    db.updateRunnerAgents("runner-a", runner("runner-a", "luna", ["low"]).agents, now + 2);
+    const drifted = await read();
+    assert.equal(drifted, unsupported, "a saved combination that drifted out of support reads the same");
+    reasons.push(drifted!);
+
+    for (const reason of reasons) assert.doesNotMatch(reason, systemWords);
   } finally {
     await app.close();
     db.close();

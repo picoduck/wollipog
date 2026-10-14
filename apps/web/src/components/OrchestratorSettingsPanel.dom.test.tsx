@@ -311,7 +311,7 @@ test("a rejected save turns the bar into its error state with Try Again and keep
 
 test("with no installation, a warning notice leads Children and the model and effort selects say why they are disabled", async () => {
   const current = settings();
-  const reason = "No current Agent Harness installation advertises child model and effort capabilities. Connect or update a runner, then retry.";
+  const reason = "No connected machine reports which models and efforts child agents can use. Connect a machine or update Wollipog on it in Connections, then try again.";
   current.capabilities = {
     harnesses: [], models: [], effortLevels: [], supportedPairs: [],
     installations: 0, compatibleInstallations: 0, status: "unavailable", reason,
@@ -333,7 +333,7 @@ test("with no installation, a warning notice leads Children and the model and ef
       const trigger = container.querySelector(`[aria-label^="${select}:"]`)!;
       assert.equal(trigger.getAttribute("aria-disabled"), "true", `${select} is disabled`);
       const described = (trigger.getAttribute("aria-describedby") ?? "").split(" ").map((id) => document.getElementById(id)?.textContent);
-      assert.ok(described.includes("Unavailable until a machine advertises models and efforts."), `${select} says why it is disabled`);
+      assert.ok(described.includes("Unavailable until a connected machine reports models and efforts."), `${select} says why it is disabled`);
     }
     assertNoDomNode(container.querySelector(".form-error"), "no red paragraph after the groups");
     assertNoDomNode(container.querySelector('[role="alert"]'));

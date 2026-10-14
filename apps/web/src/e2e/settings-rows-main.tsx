@@ -242,7 +242,7 @@ const harnessDefaultsTransport: ApiTransport = {
     if (path === "/api/orchestrator-settings") {
       const params = new URLSearchParams(window.location.search);
       const drifted = params.get("defaults") === "agent-repair";
-      // `orchestrator=unavailable`: no machine advertises child capabilities (#3026's warning);
+      // `orchestrator=unavailable`: no connected machine reports child capabilities (#3026's warning);
       // `orchestrator=save-fails`: every save is refused, for the save bar's error state.
       const mode = params.get("orchestrator");
       if (init?.method === "PUT") {
@@ -261,7 +261,7 @@ const harnessDefaultsTransport: ApiTransport = {
           capabilities: {
             harnesses: [], models: [], effortLevels: [], supportedPairs: [],
             installations: 0, compatibleInstallations: 0, status: "unavailable",
-            reason: "No current Agent Harness installation advertises child model and effort capabilities. Connect or update a runner, then retry.",
+            reason: "No connected machine reports which models and efforts child agents can use. Connect a machine or update Wollipog on it in Connections, then try again.",
           },
         }), { status: 200, headers: { "content-type": "application/json" } });
       }

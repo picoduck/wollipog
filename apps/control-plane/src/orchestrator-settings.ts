@@ -133,6 +133,12 @@ export function parseOrchestratorOverrides(value: unknown): OrchestratorCampaign
   };
 }
 
+// Reasons speak of machines and Connections, the words Settings uses, never of installations or runners.
+const NO_MACHINE_REASON = "No connected machine reports which models and efforts child agents can use. " +
+  "Connect a machine or update Wollipog on it in Connections, then try again.";
+const UNSUPPORTED_COMBINATION_REASON = "No connected machine supports this Child Harness, Child Model and " +
+  "Child Effort together. Choose Automatic or another combination.";
+
 function sameHarness(left: AgentHarnessIdentity, right: AgentHarnessIdentity): boolean {
   return agentHarnessIdentityKey(left) === agentHarnessIdentityKey(right);
 }
@@ -325,9 +331,7 @@ export class OrchestratorSettings {
       compatibleInstallations,
       status,
       ...(status === "unavailable" ? {
-        reason: installations.length === 0
-          ? "No current Agent Harness installation advertises child model and effort capabilities. Connect or update a runner, then retry."
-          : "The saved Child Harness, Child Model, and Child Effort are not supported together by a current installation. Choose Automatic or another advertised combination.",
+        reason: installations.length === 0 ? NO_MACHINE_REASON : UNSUPPORTED_COMBINATION_REASON,
       } : {}),
     };
   }
@@ -345,7 +349,7 @@ export class OrchestratorSettings {
   compatibilityError(principal: HumanPrincipal, defaults: OrchestratorDefaults): string | null {
     const capabilities = this.capabilities(principal, defaults);
     return capabilities.status === "unavailable"
-      ? capabilities.reason ?? "No current installation supports this campaign policy."
+      ? capabilities.reason ?? UNSUPPORTED_COMBINATION_REASON
       : null;
   }
 
@@ -356,7 +360,7 @@ export class OrchestratorSettings {
     if ((defaults.behavior.childHarness !== null || defaults.behavior.childModel !== null ||
         defaults.behavior.childEffort !== null) &&
         capabilities.compatibleInstallations === 0) {
-      throw new OrchestratorSettingsUnavailableError(capabilities.reason ?? "The fixed child model and effort are unavailable.");
+      throw new OrchestratorSettingsUnavailableError(capabilities.reason ?? UNSUPPORTED_COMBINATION_REASON);
     }
     this.db.setOrchestratorDefaults(principal.userId, defaults, now);
     return this.view(principal);

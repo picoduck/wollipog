@@ -380,16 +380,16 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
   const limitError = limitValid ? null : LIMIT_ERROR;
   const invalidCount = [harnessError ?? pairFallbackError, modelError, effortError, limitError].filter(Boolean).length;
 
-  // No installation advertises child capabilities at all: the group says so once, at its top, and
+  // No connected machine reports child capabilities at all: the group says so once, at its top, and
   // a model or effort left on Automatic has nothing else to offer until one does.
   const capabilities = view?.capabilities;
   const capabilityNotice = !capabilities ? null
     : capabilities.status === "unavailable" && capabilities.installations === 0
-      ? capabilities.reason ?? "No machine advertises child models and efforts yet."
+      ? capabilities.reason ?? "No connected machine reports which models and efforts child agents can use."
       : !harnessPolicySupported ? HARNESS_UNSUPPORTED : null;
   const noInstallations = capabilities?.status === "unavailable" && capabilities.installations === 0;
   // Under each disabled select, pointing at the notice rather than repeating its sentences.
-  const noInstallationsReason = noInstallations ? "Unavailable until a machine advertises models and efforts." : undefined;
+  const noInstallationsReason = noInstallations ? "Unavailable until a connected machine reports models and efforts." : undefined;
 
   const save = async () => {
     if (!draft || busy || invalidCount > 0) return;
