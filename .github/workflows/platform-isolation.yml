@@ -19,6 +19,10 @@ on:
         description: Run ten focused lock-result publication tests under CPU and filesystem load on Windows.
         type: boolean
         default: false
+      successor_election_load:
+        description: Run five focused successor-election tests under CPU and filesystem load on Windows.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -91,6 +95,11 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && inputs.lock_result_publication_load && startsWith(matrix.os, 'windows-')
         timeout-minutes: 10
         run: node apps/runner/scripts/verify-lock-result-publication-load.mjs
+
+      - name: Verify Successor Election Five Times Under Windows Load
+        if: github.event_name == 'workflow_dispatch' && inputs.successor_election_load && startsWith(matrix.os, 'windows-')
+        timeout-minutes: 5
+        run: node apps/runner/scripts/verify-successor-election-load.mjs
 
       - name: Verify Source Provider-HOME Worker
         run: node apps/runner/scripts/verify-provider-home-worker-binary.mjs --source
