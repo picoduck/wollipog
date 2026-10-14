@@ -852,6 +852,9 @@ test("Connected To shows a whole tailnet address at 1440px and 390px, and Copy A
       const row = page.locator(".setting-row", { has: page.locator(".setting-row-title").getByText("Connected To", { exact: true }) });
       const value = row.locator(".setting-row-value-text");
       await expect(value).toHaveText(address);
+      // As rendered, too: the pieces are inline-blocks, and nothing may come between them when the
+      // address is read aloud or selected by hand.
+      await expect(value).toHaveText(address, { useInnerText: true });
       const fit = await value.evaluate((element) => {
         // Every line the address is laid out on, against the row's control column.
         const range = document.createRange();

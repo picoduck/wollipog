@@ -152,6 +152,17 @@ export const CSS_FEATURES: readonly CssFeature[] = [
       + "(composer-autogrow.ts), which runs only where the engine reports no support. The card grows "
       + "the same way; nothing moves or becomes unreachable.",
   },
+  {
+    kind: "degrades",
+    id: "text-wrap",
+    detect: /\btext-wrap\s*:/i,
+    support: { chrome: [114, 0], edge: [114, 0], firefox: [121, 0], safari: [17, 5] },
+    source: "caniuse.com/css-text-wrap-balance, retrieved 2026-10-13",
+    fallback:
+      "Connected To's address (#3159) wraps greedily instead of on lines of even length: it still "
+      + "breaks only after `.`, `/` and `:` and every character stays on screen, but a phone may "
+      + "leave a short last piece such as `net` on a line of its own.",
+  },
 ];
 
 /**
@@ -208,7 +219,7 @@ export const CSS_SURFACE = {
   "place-items", "pointer-events", "position", "resize", "right", "row-gap",
   "scroll-behavior", "scroll-margin-bottom", "scroll-margin-inline-end", "scroll-padding-inline",
   "scrollbar-color", "scrollbar-width", "src", "stroke", "stroke-linecap", "stroke-width",
-  "table-layout", "text-align", "text-decoration", "text-overflow", "text-transform", "top",
+  "table-layout", "text-align", "text-decoration", "text-overflow", "text-transform", "text-wrap", "top",
   "touch-action", "transform", "transform-origin", "transition", "transition-duration", "transition-property",
   "user-select", "vertical-align", "visibility", "white-space", "width", "word-break", "writing-mode", "z-index",
   ],
