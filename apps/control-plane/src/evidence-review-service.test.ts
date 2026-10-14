@@ -48,10 +48,20 @@ function fixture() {
     acknowledge: () => { invoked++; }, recordVerdict: () => { invoked++; return verdict; },
     approvalProvenance: () => { invoked++; return verdict; },
   } as unknown as VideoEvidenceRuntime;
-  const store = {
+  const store: VideoReviewStore = {
+    saveDerived: () => { throw new Error("Unexpected store.saveDerived access."); },
     getReview: (id: string) => id === "review" ? record : null,
+    findPending: () => { throw new Error("Unexpected store.findPending access."); },
+    readFrame: () => { throw new Error("Unexpected store.readFrame access."); },
+    latestReceipts: () => { throw new Error("Unexpected store.latestReceipts access."); },
+    recordDelivery: () => { throw new Error("Unexpected store.recordDelivery access."); },
+    recordBatch: () => { throw new Error("Unexpected store.recordBatch access."); },
+    acknowledgeBatch: () => { throw new Error("Unexpected store.acknowledgeBatch access."); },
+    acknowledge: () => { throw new Error("Unexpected store.acknowledge access."); },
+    saveVerdict: () => { throw new Error("Unexpected store.saveVerdict access."); },
+    getVerdict: () => { throw new Error("Unexpected store.getVerdict access."); },
     settle: () => { settled++; },
-  } as VideoReviewStore;
+  };
   const adapter = {
     resolvePending: () => pending, currentOwner: () => owner, liveProof: () => proof,
     reviewerProtocol: () => protocol, peerContract: (_sessionId: string) => contract,
@@ -111,7 +121,8 @@ test("current peer revocation after synthetic derive prevents retries/recovery o
       verifiedByUserId: "synthetic-human" });
     let derives = 0;
     f.runtime.derive = async () => { derives++; f.setContract(undefined);
-      return outcome === "success" ? { ok: true, review: record } : { ok: false, code: "decoder_busy" }; };
+      return outcome === "success" ? { ok: true, review: record }
+        : { ok: false, code: "decoder_busy", reason: "Synthetic decoder queue is busy.", retryable: true }; };
     assert.deepEqual(await f.service.prepare(agent("root", true), request), { ok: false, code: "not_authorized" });
     assert.equal(derives, 1); assert.equal(f.settled(), outcome === "success" ? 1 : 0);
     assert.deepEqual(f.audit, []); assert.equal(f.count(), 0);
