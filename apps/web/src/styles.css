@@ -3406,8 +3406,8 @@ textarea {
 /* -------------------------------- Cards ---------------------------------
    A Board card (#2222; docs/design-system.md §5.3): an `<article>` whose title button is stretched
    over the whole card. Line 1 is the agent icon and "Agent · Project", the time and ⋯; then the title
-   (2 lines), one status line, and either the request or a one-line preview. Every card in a column
-   has this anatomy, so heights differ only by title lines and whether a request shows. Hover steps
+   (2 lines), one status line, and the request when there is one; no transcript excerpt (#3175). Every
+   card in a column has this anatomy, so heights differ only by title lines and whether a request shows. Hover steps
    the fill up as a row does; nothing moves (§2.9). */
 .card {
   position: relative;
@@ -3528,14 +3528,6 @@ textarea {
   height: 1px;
   overflow: hidden;
   clip-path: inset(50%);
-}
-.card-preview {
-  min-height: 16px;
-  overflow: hidden;
-  color: var(--text-dim);
-  font: var(--type-small);
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 /* ⋯ ends line 1: on hover and focus on fine pointers, always on touch, where it is 36px with a
    44px target. Hidden by opacity rather than display, so it stays in the tab order. */
@@ -13072,7 +13064,8 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .inbox-row-shell.stacked.thread-child::after { top: calc(-1 * var(--space-1)); bottom: calc(-1 * var(--space-1)); }
 .inbox-row-shell.thread-child.thread-last::after { bottom: 50%; }
 .inbox-row-shell.thread-child .inbox-row-primary-cell::before { top: 50%; left: -15px; width: 11px; height: 2px; }
-/* The family chip, directly after a parent's title (#2215): dots first, then the rollup. It is sized
+/* The family chip on a parent's title line (#2215): dots first, then the rollup. A list 880px or wider
+   sets it under the status badge instead of after the title (#3175, below). It is sized
    to the pills it shares a card with, and it never grows the card. Below a 600px list (a narrow
    column, Preview Right, a phone) it keeps its dots and working count; its name and tooltip keep the rollup.
    The list protects its working count at every width, letting the summary and dots yield first. */
@@ -13312,14 +13305,15 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   .inbox-row-shell .inbox-row { padding-right: var(--control-h); }
   .inbox-row-shell.stacked .inbox-row { padding-right: calc(var(--control-h) + var(--space-2)); }
 }
-/* What the session wants, after the title (#2218): only a list wide enough for it shows it. */
-.inbox-row-snippet { display: none; }
 /* A wide list's rows (#2218, docs/design-system.md §6.3 "Rows use the width"). At 880px and wider the
-   two lines keep their height. The title line adds the snippet, and the title keeps at most 60% of
-   it. The status line's trailing cluster becomes fixed columns, the same on every row, so the badges
-   start and the times end at one x down the list: status (the badge and "+N"), activity, flags and
-   time; an empty cell keeps its width. The actions get a column of their own after the time, so a
-   hover never covers the status or the time; a coarse pointer's ⋯ sits in the same column. */
+   two lines keep their height. The status line's trailing cluster becomes fixed columns, the same on
+   every row, so the badges start and the times end at one x down the list: status (the badge and
+   "+N"), activity, flags and time; an empty cell keeps its width. The title line repeats those
+   columns, so a parent's family chip starts in the status column under its badge, at one x down the
+   list (#3175), and a long rollup runs on over the empty cells after it; the title takes the whole
+   line, or the line up to the chip. The actions get a column
+   of their own after the time, so a hover never covers the status or the time; a coarse pointer's ⋯
+   sits in the same column. */
 @container list (min-width: 880px) {
   .inbox-row-shell:not(.stacked) .inbox-row { padding-right: var(--inbox-row-col-actions); }
   .inbox-row-shell:not(.stacked) .inbox-row-trail {
@@ -13334,17 +13328,17 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   .inbox-row-trail > .inbox-row-activity { grid-column: 2; }
   .inbox-row-trail > .inbox-row-flags { grid-column: 3; }
   .inbox-row-trail > .inbox-row-time { grid-column: 4; justify-self: end; }
-  .inbox-row-shell:not(.stacked) .inbox-row-copy:has(> .inbox-row-snippet) > .inbox-row-title { max-width: 60%; }
-  .inbox-row-shell:not(.stacked) .inbox-row-snippet {
-    display: block;
-    min-width: 0;
-    flex: 1 1 0;
-    overflow: hidden;
-    color: var(--text-dim);
-    font: var(--type-body);
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  .inbox-row-shell:not(.stacked) .inbox-row-copy {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr)
+      var(--inbox-row-col-status) var(--inbox-row-col-activity) var(--inbox-row-col-flags) var(--inbox-row-col-time);
+    gap: var(--space-3);
   }
+  .inbox-row-shell:not(.stacked) .inbox-row-copy > .inbox-row-title { grid-column: 1 / -1; }
+  .inbox-row-shell:not(.stacked) .inbox-row-copy:has(> .inbox-thread-family) > .inbox-row-title { grid-column: 1; }
+  .inbox-row-shell:not(.stacked) .inbox-row-copy > .inbox-thread-family { grid-column: 2 / -1; justify-self: start; max-width: 100%; }
+  /* The chip's cells end at the time column, so a large family's dots give way before its rollup. */
+  .inbox-row-shell:not(.stacked) .inbox-row-copy .inbox-thread-dots { flex-shrink: 100000; }
   .inbox-row-shell:not(.stacked) .inbox-row-actions {
     top: 50%;
     bottom: auto;

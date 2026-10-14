@@ -39,7 +39,6 @@ type Columns = {
   /** Rows wholly inside the list's scroll box. */
   whole: number;
   rowHeight: number;
-  snippetsShown: number;
 };
 
 async function columns(page: Page): Promise<Columns> {
@@ -59,8 +58,6 @@ async function columns(page: Page): Promise<Columns> {
       previewBottom: preview.bottom,
       whole: rows.filter((row) => row.top >= list.top - 0.5 && row.bottom <= list.bottom + 0.5).length,
       rowHeight: Number.parseFloat(getComputedStyle(element).getPropertyValue("--row-h-2")),
-      snippetsShown: [...element.querySelectorAll<HTMLElement>(".inbox-row-snippet")]
-        .filter((snippet) => getComputedStyle(snippet).display !== "none").length,
     };
   });
 }
@@ -125,8 +122,6 @@ test.describe("at 1440×900", () => {
     expect(measured.previewTop, "side by side, not stacked").toBe(measured.listTop);
     expect(measured.previewBottom, "both fill the height under the header").toBe(measured.listBottom);
     expect(measured.whole).toBeGreaterThanOrEqual(12);
-    // The column is under 880px, so rows keep the two-line anatomy without a snippet (#2209, #2218).
-    expect(measured.snippetsShown).toBe(0);
     const rowHeight = await page.locator(".inbox-list .inbox-row-shell").first().evaluate((row) => row.getBoundingClientRect().height);
     expect(rowHeight).toBe(measured.rowHeight);
     await expect(divider(page)).toHaveAttribute("aria-orientation", "vertical");

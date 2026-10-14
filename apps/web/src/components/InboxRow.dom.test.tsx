@@ -411,25 +411,23 @@ test("the relative time renders once, trailing the status line on both shapes", 
   }
 });
 
-test("a two-line row carries its snippet after the title for a wide list; a phone card never does (#2218)", async () => {
+test("no row shape repeats the last message or the top request after the title (#3175)", async () => {
   const idle = baseSession({ preview: "**Done.** The first line of the `last` message." });
-  await withRow(idle, (container) => {
-    const copy = container.querySelector<HTMLElement>(".inbox-row-copy")!;
-    assert.deepEqual([...copy.children].map((child) => child.className), ["inbox-row-title", "inbox-row-snippet"]);
-    assert.equal(copy.querySelector(".inbox-row-snippet")!.textContent, "Done. The first line of the last message.");
-  });
   const blocked = baseSession({
     status: "input_required",
     preview: "I need to run the migration.",
     pendingApproval: { requestId: "a", options: [], title: "Run the Migration Script" },
   } as unknown as Partial<SessionView>);
-  await withRow(blocked, (container) => {
-    assert.equal(container.querySelector(".inbox-row-snippet")!.textContent, "Run the Migration Script");
-  });
-  await withRow(idle, (container) => {
-    assert.doesNotMatch(container.textContent ?? "", /first line of the last message/);
-    assertNoDomNode(container.querySelector(".inbox-row-snippet"));
-  }, { threeRow: true });
+  for (const threeRow of [false, true]) {
+    for (const session of [idle, blocked]) {
+      await withRow(session, (container) => {
+        const copy = container.querySelector<HTMLElement>(".inbox-row-copy")!;
+        assert.deepEqual([...copy.children].map((child) => child.className), ["inbox-row-title"]);
+        assert.doesNotMatch(copy.textContent ?? "", /first line of the last message|Run the Migration Script/);
+        assertNoDomNode(container.querySelector(".inbox-row-snippet"));
+      }, { threeRow });
+    }
+  }
 });
 
 test("a parent row carries the chevron and family chip, and a child row its thread position", async () => {

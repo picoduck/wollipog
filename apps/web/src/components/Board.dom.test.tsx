@@ -278,8 +278,6 @@ test("no card renders markdown, a tag, an emoji or more than one status badge", 
       assert.ok(card.querySelectorAll(".status").length <= 1, `${id} renders at most one status badge`);
       assert.equal(card.tagName, "ARTICLE");
     }
-    assert.equal(board.card("idle").querySelector(".card-preview")?.textContent,
-      "(27/27) Visual review… design tokens doc done", "the preview is plain text");
     assertNoDomNode(board.card("idle").querySelector(".status"), "an idle card shows no badge");
     assert.equal(board.card("running").querySelectorAll(".status").length, 1);
   } finally {
@@ -301,22 +299,23 @@ test("a returned result keeps one review badge and meaningful time despite newer
     assert.equal(card.querySelector("time.card-time")?.getAttribute("datetime"), new Date(meaningfulAt).toISOString());
     assert.equal(card.querySelector("time.card-time")?.textContent, "15m ago");
     assert.equal(card.querySelector(".card-sender-text")?.textContent, "Codex App Server · Wollipog");
-    assert.equal(card.querySelector(".card-preview")?.textContent, "Preview for result");
   } finally {
     await board.unmount();
   }
 });
 
-test("every card says Agent · Project, and a request replaces the preview", async () => {
+test("every card says Agent · Project and never shows a transcript preview (#3175)", async () => {
   const board = await mount();
   try {
     for (const card of board.cards()) {
       const source = SESSIONS.find((candidate) => candidate.id === card.dataset["sessionId"])!;
       const agent = sessionAgentLabel(source.agentName, source.driver, source.agentId);
       assert.equal(card.querySelector(".card-sender-text")?.textContent, `${agent} · Wollipog`);
-      const request = card.querySelector(".card-request");
-      assert.equal(Boolean(card.querySelector(".card-preview")), !request,
-        `${card.dataset["sessionId"]} shows the preview exactly when no request shows`);
+      assertNoDomNode(card.querySelector(".card-preview"), `${card.dataset["sessionId"]} shows no preview`);
+      if (source.preview) {
+        assert.doesNotMatch(card.textContent ?? "", /Preview for|Visual review|Ran npm test/,
+          `${card.dataset["sessionId"]} does not repeat its last message`);
+      }
       assert.equal(card.querySelectorAll(".card-open").length, 1, "one stretched open button");
     }
     // One machine: it is not repeated on every card.
