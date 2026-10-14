@@ -1785,6 +1785,42 @@ test("a value row shows its value in the control column, mono when asked, with a
   }
 });
 
+test("a wrapping value breaks only after `.`, `/` and `:`, and still reads and copies whole", async () => {
+  // #3159: Connected To's address is only useful whole, so it wraps between these pieces rather
+  // than being cut off; every other value row keeps one unbroken line.
+  const writes: string[] = [];
+  const priorClipboard = Object.getOwnPropertyDescriptor(domWindow.navigator, "clipboard");
+  Object.defineProperty(domWindow.navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: async (text: string) => { writes.push(text); } },
+  });
+  const address = "https://home-studio-01.tail4a3b2c.ts.net:4417";
+  const { container, cleanup } = await render(
+    <>
+      <ValueRow title="Connected To" value={address} mono copy copyLabel="Copy Address" wrap />
+      <ValueRow title="Server" value="0.30.0" mono />
+    </>,
+  );
+  try {
+    const [wrapping, plain] = [...container.querySelectorAll(".setting-row-value-text")];
+    assert.ok(wrapping!.classList.contains("is-wrapping"));
+    assert.deepEqual([...wrapping!.querySelectorAll(".setting-row-value-part")].map((part) => part.textContent),
+      ["https://", "home-studio-01.", "tail4a3b2c.", "ts.", "net:", "4417"], "`://` stays whole, and a hyphen is no break");
+    assert.equal(wrapping!.textContent, address, "the pieces read as the address, with nothing between them");
+    assert.equal(wrapping!.getAttribute("title"), address);
+    await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Copy Address"]')!.click(); });
+    await act(async () => { await Promise.resolve(); });
+    assert.deepEqual(writes, [address]);
+
+    assert.ok(!plain!.classList.contains("is-wrapping"), "a value row wraps only when asked");
+    assertNoDomNode(plain!.querySelector(".setting-row-value-part"), "and keeps its value as plain text");
+  } finally {
+    await cleanup();
+    if (priorClipboard) Object.defineProperty(domWindow.navigator, "clipboard", priorClipboard);
+    else delete (domWindow.navigator as unknown as Record<string, unknown>).clipboard;
+  }
+});
+
 test("a link row is one button with a trailing chevron and an optional trailing word", async () => {
   let clicks = 0;
   const { container, cleanup } = await render(

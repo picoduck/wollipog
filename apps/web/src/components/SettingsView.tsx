@@ -784,6 +784,7 @@ export function NetworkPanel({ tailnet, onNavigate }: { tailnet: TailnetAccessSe
           mono={address !== null}
           copy={address ?? undefined}
           copyLabel="Copy Address"
+          wrap
         />
         {/* Where Connections › Instances exists: the desktop app with more than one instance
             allowed, and not on a phone, whose Connections has no Instances tab (#2984). */}

@@ -125,7 +125,8 @@ const desktopInstances: InstanceManager = {
     serverInstanceId: "studio",
     kind: "remote",
     label: "Home Studio",
-    origin: "https://studio.example.ts.net",
+    // 40 characters, as a MagicDNS address usually is: Connected To must show all of it (#3159).
+    origin: "https://home-studio-01.tail4a3b2c.ts.net",
     createdAt: "",
   },
 };

@@ -451,7 +451,8 @@ export function NumberRow({
  * A read-only value in the control column: an address, a version, a count. `mono` for addresses,
  * versions and ids (§11.3). `copy` adds Copy, an `.icon-btn.sm` named "Copy <Title>", or `copyLabel`
  * where the title does not name the value ("Copy Address" for Connected To): `true` copies `value`
- * itself, a string copies that text instead. It confirms with its icon.
+ * itself, a string copies that text instead. It confirms with its icon. `wrap` is for a value that is
+ * only useful whole, an address: it breaks after `.`, `/` and `:` rather than being cut off (#3159).
  */
 export function ValueRow({
   title,
@@ -461,6 +462,7 @@ export function ValueRow({
   mono,
   copy,
   copyLabel,
+  wrap,
 }: {
   title: string;
   description?: ReactNode;
@@ -470,6 +472,7 @@ export function ValueRow({
   copy?: boolean | string;
   /** The Copy button's name, in Title Case. */
   copyLabel?: string;
+  wrap?: boolean;
 }) {
   const copyText = typeof copy === "string" ? copy : copy && typeof value === "string" ? value : undefined;
   return (
@@ -477,10 +480,10 @@ export function ValueRow({
       <RowText title={title} icon={icon} description={description} />
       <span className="setting-row-control">
         <span
-          className={`setting-row-value-text${mono ? " is-mono" : ""}`}
+          className={`setting-row-value-text${mono ? " is-mono" : ""}${wrap ? " is-wrapping" : ""}`}
           title={typeof value === "string" ? value : undefined}
         >
-          {value}
+          {wrap && typeof value === "string" ? withBreaks(value) : value}
         </span>
         {copyText !== undefined && (
           <CopyButton text={copyText} iconOnly className="icon-btn sm" ariaLabel={copyLabel ?? `Copy ${title}`} />
@@ -488,6 +491,16 @@ export function ValueRow({
       </span>
     </div>
   );
+}
+
+/**
+ * `value` in pieces that each end after a run of `.`, `/` and `:`, so `https://` stays whole. A line
+ * breaks only between pieces, never at a hyphen inside one (`home-studio-01`).
+ */
+function withBreaks(value: string): ReactNode[] {
+  return value.split(/(?<=[.:/])(?![.:/])/).map((part, index) => (
+    <span key={index} className="setting-row-value-part">{part}</span>
+  ));
 }
 
 /**
