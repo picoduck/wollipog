@@ -1851,7 +1851,8 @@ Agent Defaults, #3024). Rows
 inside a surface never turn into cards: hover is a `--bg-elev-2` fill without a border, only on rows
 that are one link or button, on fine pointers. A switch row with `saved` or `failure` is one framed
 child of the surface (`.setting-row-frame`), its status region inside the frame, and so is any other
-row with something to say under it about its last change. Every child of a surface is a row or such a
+row with something to say under it about its last change. The frame passes its hairline to the row
+inside it, so a framed row is exactly as tall as an unframed one. Every child of a surface is a row or such a
 frame: a sentence about the whole group is its description or its foot, never a paragraph between
 rows. A Settings section with one group leaves out the group's title, because the section's own
 heading already names it; a section with several heads each one. A section none of whose settings

@@ -17370,7 +17370,11 @@ button.setting-row { cursor: pointer; }
 /* In a surface a setting row is a row of it: a hairline between rows (above anything that follows
    another child of a group's surface), and its corners follow the surface's where they meet. */
 .settings-group-surface > * + *,
-.surface > * + :is(.setting-row, .setting-row-frame) { border-top: 1px solid var(--border); }
+.surface > * + .setting-row,
+.surface > * + .setting-row-frame > .setting-row:first-child { border-top: 1px solid var(--border); }
+/* A frame passes its hairline to the row inside it, so the line sits inside the row's --row-h-2
+   and a framed row is exactly as tall as an unframed one (#3140). */
+.settings-group-surface > * + .setting-row-frame { border-top: 0; }
 .surface > .setting-row:first-child,
 .surface > .setting-row-frame:first-child > .setting-row {
   border-top-left-radius: var(--radius-md);

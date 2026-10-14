@@ -2212,6 +2212,8 @@ test.describe("the setting-row grid", () => {
    * taller than --control-h, with its height and the --row-h-2 it should equal. Rows with more to
    * show (a second description line, a reason under the control) grow past the token by design and
    * are left out, but counted, so a layout that broke every row into two lines cannot pass vacuously.
+   * The height is the surface's child: a row's frame (a switch with Saved or Try Again, Tailnet
+   * Access) when it has one, because that is what a list of rows adds up.
    */
   const oneLineRows = (page: Page) => page.evaluate(() => {
     const linesOf = (element: Element) =>
@@ -2222,13 +2224,15 @@ test.describe("the setting-row grid", () => {
       const descriptions = [...row.querySelectorAll(".setting-row-desc")]
         .filter((element) => element.checkVisibility({ visibilityProperty: true }));
       const control = row.querySelector(":scope > .setting-row-control");
+      const frame = row.parentElement?.classList.contains("setting-row-frame") ? row.parentElement : null;
       return {
         title: row.querySelector(".setting-row-title")?.textContent ?? "",
         described: descriptions.length > 0,
+        framedAfterSibling: Boolean(frame?.previousElementSibling),
         oneLine: linesOf(row.querySelector(".setting-row-title")!) === 1
           && descriptions.every((element) => linesOf(element) === 1)
           && (control?.getBoundingClientRect().height ?? 0) <= Number.parseFloat(root.getPropertyValue("--control-h")),
-        height: row.getBoundingClientRect().height,
+        height: (frame ?? row).getBoundingClientRect().height,
         token: Number.parseFloat(root.getPropertyValue("--row-h-2")),
       };
     });
@@ -2239,8 +2243,11 @@ test.describe("the setting-row grid", () => {
     await page.setViewportSize({ width: 1440, height: 900 });
     for (const [density, height] of [["compact", 56], ["comfortable", 60]] as const) {
       let described = 0;
-      for (const id of [...SETTINGS_SECTIONS.map((section) => section.id), "kinds"] as const) {
+      let framed = 0;
+      // Network with Tailnet Access unread adds a framed row after another row of its group.
+      for (const id of [...SETTINGS_SECTIONS.map((section) => section.id), "kinds", "framed"] as const) {
         if (id === "kinds") await useKinds(page, "dark");
+        else if (id === "framed") await useHarness(page, "dark", { section: "network", tailnet: "read-failed" });
         else await useHarness(page, "dark", { section: id });
         if (density === "comfortable") await page.evaluate(() => { document.documentElement.dataset.density = "comfortable"; });
         const { total, rows } = await oneLineRows(page);
@@ -2252,8 +2259,11 @@ test.describe("the setting-row grid", () => {
           expect(row.height, `${id} › "${row.title}" is --row-h-2 tall at ${density} density`).toBe(height);
         }
         described += rows.filter((row) => row.described).length;
+        framed += rows.filter((row) => row.framedAfterSibling).length;
       }
       expect(described, "the described one-line rows across Settings and the gallery were measured").toBeGreaterThan(40);
+      // Its hairline is the frame's to pass on: on the frame itself it sat outside the row's height.
+      expect(framed, "a framed row after another child of its surface was measured").toBeGreaterThan(0);
     }
   });
 

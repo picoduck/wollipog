@@ -149,7 +149,14 @@ test("every Settings group is one surface with hairlines between its rows, and a
           title: title?.textContent ?? null,
           transform: title ? getComputedStyle(title).textTransform : null,
           surfaces: surfaces.length,
-          tops: children.map((child) => getComputedStyle(child).borderTopWidth),
+          // A frame passes its hairline to the row inside it (#3140), so read the edge that draws it,
+          // and require the frame itself to draw none, or a row would show two.
+          tops: children.map((child) => {
+            if (!child.classList.contains("setting-row-frame")) return getComputedStyle(child).borderTopWidth;
+            return getComputedStyle(child).borderTopWidth === "0px"
+              ? getComputedStyle(child.firstElementChild!).borderTopWidth
+              : "frame draws its own hairline";
+          }),
         };
       }));
       expect(groups.length, `${id}: the section renders its groups`).toBeGreaterThan(0);
