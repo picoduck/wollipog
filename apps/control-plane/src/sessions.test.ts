@@ -12863,6 +12863,28 @@ test("an estimate-only budget card left by a control-plane restart still stops t
   assert.equal(hub.sentOfType("interrupt_turn").length, 1);
 });
 
+test("an estimate interruption that fails to deliver is retried at the runner's next report of the turn", async () => {
+  const { db, hub, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.setSessionQueue(id, [], false, "turn-flaky");
+  let attempts = 0;
+  hub.requestHandler = (message) => {
+    if (message.type !== "interrupt_turn") throw new Error(`unexpected ${message.type}`);
+    if (++attempts === 1) throw new Error("runner is offline");
+    return { type: "interrupt_turn_result", requestId: message.requestId!, sessionId: message.sessionId, applied: true, reason: "applied" };
+  };
+  live(20, 20);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(attempts, 1);
+  assert.ok(svc.onSessionQueue(RUNNER_ID, id, [], true, "turn-flaky"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(attempts, 2, "the reconnected runner's report of the same turn retries the interruption");
+  assert.ok(svc.onSessionQueue(RUNNER_ID, id, [], true, "turn-flaky"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(attempts, 2, "an applied interruption is not repeated");
+});
+
 test("a budget crossed on settled cost is the runner's to cancel, so the control plane does not interrupt", () => {
   const { db, hub, svc, id } = liveClaudeGuardrailHarness();
   svc.setConfig(id, { costBudgetUsd: 0.05 });

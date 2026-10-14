@@ -13506,13 +13506,19 @@ export class SessionsService {
       const turnId = this.hub.activeTurnIdForSession(session.id);
       if (!turnId || this.estimateInterruptedTurns.get(session.id) === turnId) return;
       this.estimateInterruptedTurns.set(session.id, turnId);
+      // An interruption that did not take effect is retried at the runner's next report of the
+      // same turn, such as after a reconnect; an already-requested one did take effect.
+      const retry = (reason: string) => {
+        failed(reason);
+        if (this.estimateInterruptedTurns.get(session.id) === turnId) this.estimateInterruptedTurns.delete(session.id);
+      };
       const requestId = `interrupt_${randomUUID().slice(0, 8)}`;
       void this.hub.requestFromRunner(session.runnerId, requestId, {
         type: "interrupt_turn", requestId, sessionId: session.id, turnId,
       }, 5_000).then((result) => {
-        if (result.type !== "interrupt_turn_result") failed("invalid_response");
-        else if (!result.applied) failed(result.reason);
-      }, (error: unknown) => failed((error as Error).message));
+        if (result.type !== "interrupt_turn_result") retry("invalid_response");
+        else if (!result.applied && result.reason !== "already_requested") retry(result.reason);
+      }, (error: unknown) => retry((error as Error).message));
       return;
     }
     const turnId = this.db.latestTurnId(session.id);
