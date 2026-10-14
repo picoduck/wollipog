@@ -1410,9 +1410,11 @@ test("a busy switch keeps its confirmed value and says it is working", async () 
     assert.equal(row.getAttribute("aria-checked"), "true",
       "the confirmed value must survive the pending request, not flip early");
     assert.equal(row.getAttribute("aria-busy"), "true", "and the transition must be announced");
-    assert.equal(row.disabled, true, "a second toggle mid-request would race the first");
+    // Refused, but still focusable: `disabled` would drop the focus it was pressed with (#3190).
+    assert.equal(row.getAttribute("aria-disabled"), "true", "it says it cannot be pressed");
+    assert.equal(row.disabled, false, "and keeps the focus it holds");
     await act(async () => { row.click(); });
-    assert.deepEqual(clicks, []);
+    assert.deepEqual(clicks, [], "a second toggle mid-request would race the first");
   } finally {
     await cleanup();
   }
@@ -1492,12 +1494,14 @@ test("a standalone switch that is busy or disabled refuses activation and says w
   try {
     const busySwitch = busy.container.querySelector('[role="switch"]') as unknown as HTMLButtonElement;
     assert.equal(busySwitch.getAttribute("aria-busy"), "true");
-    assert.equal(busySwitch.disabled, true, "a second toggle mid-request would race the first");
+    assert.equal(busySwitch.getAttribute("aria-disabled"), "true", "a second toggle mid-request would race the first");
+    assert.equal(busySwitch.disabled, false, "busy keeps focus; only disabled drops it");
     assert.ok(busySwitch.classList.contains("is-busy"));
     assert.ok(!busySwitch.classList.contains("is-disabled"), "busy keeps the live look, not the disabled one");
     const disabledSwitch = disabled.container.querySelector('[role="switch"]') as unknown as HTMLButtonElement;
     assert.equal(disabledSwitch.disabled, true);
     assert.equal(disabledSwitch.getAttribute("aria-busy"), null);
+    assert.equal(disabledSwitch.getAttribute("aria-disabled"), null, "native disabled already says it");
     assert.ok(disabledSwitch.classList.contains("is-disabled"));
     await act(async () => { busySwitch.click(); disabledSwitch.click(); });
     assert.deepEqual(toggles, []);
@@ -1631,12 +1635,12 @@ test("a switch remounted mid-request still reports its confirmed value", async (
     assert.equal(row()!.getAttribute("aria-checked"), "true",
       "a ref living inside the row would have re-initialised from \"busy\" and reported off here");
     assert.equal(row()!.getAttribute("aria-busy"), "true");
-    assert.equal(row()!.disabled, true);
+    assert.equal(row()!.getAttribute("aria-disabled"), "true");
 
     await show(true, "off");                       // request resolves
     assert.equal(row()!.getAttribute("aria-checked"), "false");
     assert.equal(row()!.getAttribute("aria-busy"), null);
-    assert.equal(row()!.disabled, false);
+    assert.equal(row()!.getAttribute("aria-disabled"), null);
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();
@@ -2105,5 +2109,51 @@ test("a switch row with saved or failure state is one framed child of its group,
     assert.match(failed!.querySelector(':scope > [role="status"]')?.textContent ?? "", /^Release Notes not saved\./);
   } finally {
     await cleanup();
+  }
+});
+
+/**
+ * Try Again goes away as the retry starts, and the switch it hands focus to is busy until the save
+ * lands (#3190). A busy switch that was `disabled` could not take that focus, so keyboard and screen
+ * reader users were left on <body> for the whole save.
+ */
+test("Try Again keeps focus on the switch while the retry saves, and after it succeeds or fails again", async () => {
+  for (const outcome of ["succeeds", "fails again"] as const) {
+    const toggles: string[] = [];
+    let settle: (saved: boolean) => void = () => undefined;
+    function Owner() {
+      const [state, setState] = React.useState<"failed" | "saving" | "saved">("failed");
+      settle = (saved) => setState(saved ? "saved" : "failed");
+      return (
+        <SwitchRow
+          title="Release Notes"
+          checked={false}
+          busy={state === "saving"}
+          saved={state === "saved"}
+          failure={state === "failed" ? { message: "Couldn't save this change.", onRetry: () => setState("saving") } : null}
+          onClick={() => toggles.push("toggled")}
+        />
+      );
+    }
+    const { container, cleanup } = await render(<Owner />);
+    try {
+      const tryAgain = [...container.querySelectorAll("button")].find((button) => button.textContent === "Try Again")!;
+      tryAgain.focus();
+      await act(async () => { tryAgain.click(); });
+      assert.equal(tryAgain.isConnected, false, "the retry removes Try Again");
+      const saving = container.querySelector<HTMLButtonElement>('[role="switch"]')!;
+      assert.equal(saving.getAttribute("aria-busy"), "true");
+      assert.ok(domWindow.document.activeElement === (saving as never), `${outcome}: the busy switch holds focus, not <body>`);
+      assert.equal(saving.getAttribute("aria-disabled"), "true", "it says it cannot be pressed");
+      await act(async () => { saving.click(); });
+      assert.deepEqual(toggles, [], "and a second press mid-save does nothing");
+
+      await act(async () => { settle(outcome === "succeeds"); });
+      const settled = container.querySelector<HTMLButtonElement>('[role="switch"]')!;
+      assert.equal(settled.getAttribute("aria-busy"), null);
+      assert.ok(domWindow.document.activeElement === (settled as never), `${outcome}: focus stays on the switch once it settles`);
+    } finally {
+      await cleanup();
+    }
   }
 });

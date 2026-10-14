@@ -41,7 +41,7 @@ interface HarnessOptions {
   /** Notifications where the browser blocks alerts, or where neither kind can work (#3022). */
   alerts?: "available" | "blocked" | "unavailable";
   /** Settings › Network's Tailnet Access in one reported state, or `browser` (#3027). */
-  tailnet?: "browser" | "off" | "on" | "restarting" | "unavailable" | "unmanaged" | "checking" | "read-failed" | "write-failed";
+  tailnet?: "browser" | "off" | "on" | "restarting" | "unavailable" | "unmanaged" | "checking" | "read-failed" | "write-failed" | "write-retry";
   /** `multi`: the desktop app with Connections › Instances. */
   instances?: "single" | "multi";
 }
@@ -804,6 +804,31 @@ test("the tailnet switch says it is busy, not merely unavailable", async ({ page
   await expect(row).toHaveAttribute("aria-checked", "true");
   await expectInk(page, row.locator(".ui-switch"), "the busy tailnet track", INK.track);
   await expectKnob(page, row.locator(".ui-switch"), "the busy tailnet knob");
+});
+
+test("Try Again on a failed tailnet write keeps keyboard focus on the switch while it saves (#3190)", async ({ page }) => {
+  // The browser, not happy-dom, decides what a busy switch can hold: a `disabled` button drops the
+  // focus it has and refuses focus handed to it, so the retry used to leave focus on <body>.
+  for (const saved of [true, false]) {
+    await useHarness(page, "dark", { section: "network", tailnet: "write-retry" });
+    const tryAgain = page.getByRole("button", { name: "Try Again" });
+    await tryAgain.focus();
+    await page.keyboard.press("Enter");
+    const row = page.getByRole("switch", { name: /^Tailnet Access/ });
+    await expect(row).toHaveAttribute("aria-busy", "true");
+    await expect(row, "the busy switch holds focus while the write runs").toBeFocused();
+    await expect(row, "and refuses a second press").toBeDisabled();
+    await page.evaluate((outcome) => {
+      (window as unknown as { settleTailnetWrite(saved: boolean): void }).settleTailnetWrite(outcome);
+    }, saved);
+    if (saved) {
+      await expect(row).toHaveAttribute("aria-checked", "true");
+    } else {
+      await expect(page.locator(".setting-row-failure")).toHaveText("Couldn't change Tailnet Access. Try Again");
+    }
+    await expect(page.getByRole("switch", { name: /^Tailnet Access/ }),
+      `focus stays on the switch after ${saved ? "the write lands" : "a second failure"}`).toBeFocused();
+  }
 });
 
 test("an unavailable tailnet does not take the rest of Network with it", async ({ page }) => {

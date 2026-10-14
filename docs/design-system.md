@@ -1826,8 +1826,11 @@ Only a disabled row dims, and only its title (`--text-faint`, never opacity, §3
 
 **States.** A busy row (`busy`) keeps its control's confirmed value and leads its description with a
 12px spinner, or replaces it with `busyLabel` (the description stays underneath, hidden, so the row
-keeps its height). `saved` shows the §8.6 check: before the track on a switch row, at the end of the
-text cell otherwise, announced by a polite region beside the control. A failed instant save that is
+keeps its height). A busy switch refuses presses and is `aria-disabled`, not `disabled`, as a busy
+button is (§3.1), so it keeps keyboard focus: a failed switch row's Try Again hands focus to the
+switch, which holds it while the retry saves and after it settles (#3190). `saved` shows the §8.6
+check: before the track on a switch row, at the end of the text cell otherwise, announced by a
+polite region beside the control. A failed instant save that is
 not a switch is the group's failure notice (below). A `SettingRow` with no value to show until a read
 succeeds (Settings › Network's Tailnet Access before its status is known) takes `failure` too, in
 place of its description with Try Again, so an unknown value is never drawn as a control.

@@ -154,9 +154,10 @@ const UNREADABLE_REASON = "The desktop app didn't answer. Restart Wollipog if th
 function DesktopUpdates({ update }: { update: DesktopUpdateSetting }) {
   const { status, failure } = update;
   const blockTitle = useRef<HTMLParagraphElement>(null);
-  // Retrying clears the failure, which removes the Retry or Try Again that was pressed: the group's
-  // notice goes, and a switch's row turns back into a switch that is disabled while it saves, so it
-  // cannot take focus either. Focus goes to the block's title first, so it stays in Updates.
+  // Retrying an install or a release page clears the failure, which removes the group's notice and
+  // the Retry that was pressed. Focus goes to the block's title first, so it stays in Updates. A
+  // switch's Try Again needs none of this: its row hands focus to the switch, which keeps it while
+  // it saves (#3190).
   const retry = (action: () => void) => () => {
     blockTitle.current?.focus();
     action();
@@ -180,7 +181,7 @@ function DesktopUpdates({ update }: { update: DesktopUpdateSetting }) {
           busy={update.savingAutomatic}
           disabled={!status.checksAllowed}
           failure={failure?.action === "automatic"
-            ? { message: "Couldn't change automatic checks.", detail: failure.message, onRetry: retry(update.toggleAutomatic) }
+            ? { message: "Couldn't change automatic checks.", detail: failure.message, onRetry: update.toggleAutomatic }
             : null}
           onClick={update.toggleAutomatic}
         />
@@ -193,7 +194,7 @@ function DesktopUpdates({ update }: { update: DesktopUpdateSetting }) {
           busy={update.savingPrerelease}
           disabled={update.checking || update.installing}
           failure={failure?.action === "prerelease"
-            ? { message: "Couldn't change the update channel.", detail: failure.message, onRetry: retry(update.togglePrerelease) }
+            ? { message: "Couldn't change the update channel.", detail: failure.message, onRetry: update.togglePrerelease }
             : null}
           onClick={update.togglePrerelease}
         />

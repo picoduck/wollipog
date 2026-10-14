@@ -668,7 +668,9 @@ export type SwitchProps = SwitchName & {
  * `busy` is for a toggle whose backing request is in flight. Callers must keep passing the last
  * CONFIRMED value as `checked` — reporting the pending value instead announces aria-checked="false"
  * while the thing being switched off is still live, and a slow or failed request leaves that lie
- * on screen until it snaps back.
+ * on screen until it snaps back. A busy switch refuses presses and is `aria-disabled` rather than
+ * `disabled`, as a busy button is (§3.1): `disabled` would drop the focus it was pressed with, or
+ * refuse the focus a failed row's Try Again hands it (#3190).
  */
 export function Switch({ checked, onChange, label, labelledBy, describedBy, disabled, busy, className, children, switchRef }: SwitchProps) {
   return (
@@ -681,9 +683,10 @@ export function Switch({ checked, onChange, label, labelledBy, describedBy, disa
       aria-labelledby={labelledBy}
       aria-describedby={describedBy}
       aria-busy={busy || undefined}
-      disabled={disabled || busy}
+      aria-disabled={(busy && !disabled) || undefined}
+      disabled={disabled}
       className={`ui-switch-control ${className ?? "ui-switch-standalone"}${busy ? " is-busy" : ""}${disabled ? " is-disabled" : ""}`}
-      onClick={() => onChange(!checked)}
+      onClick={() => { if (!busy) onChange(!checked); }}
     >
       {children}
       <span className="ui-switch" aria-hidden="true" />
@@ -710,7 +713,8 @@ export interface RowFailure {
  * sentence then takes the description's place with **Try Again** after it, and the switch keeps the
  * confirmed value. A button cannot hold another button, so while the failure shows the row is a
  * plain row around a standalone switch in the same column. Focus the change of shape drops is
- * handed to the switch; focus that has moved elsewhere is left alone.
+ * handed to the switch, which holds it while Try Again's retry saves because a busy switch stays
+ * focusable; focus that has moved elsewhere is left alone.
  *
  * A row with either is wrapped in `.setting-row-frame` with its status region, so a group's surface
  * sees one child per setting.
