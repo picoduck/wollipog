@@ -138,6 +138,7 @@ jobs:
       - name: Verify Isolated Video Decoder for Unit Tests
         timeout-minutes: 1
         run: |
+          bash scripts/configure-ci-bubblewrap.sh
           bwrap --version
           ffmpeg -hide_banner -version
       # Only the archives the key was computed from, so a hit restores exactly that set.

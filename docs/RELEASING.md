@@ -50,6 +50,14 @@ GitHub's [Ubuntu 22.04 hosted-image retirement notice](https://github.com/action
 and [supported runner labels](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
 are the migration references. No queue-causation or speed improvement is inferred from this change.
 
+The Ubuntu 24.04 unit/video and platform-isolation CI jobs also require real unprivileged
+bubblewrap execution. When the initial namespace smoke fails under Noble's AppArmor policy,
+`scripts/configure-ci-bubblewrap.sh` loads a CI-only `userns` profile for `/usr/bin/bwrap`
+on the disposable GitHub VM, following [Ubuntu's per-executable profile guidance](https://documentation.ubuntu.com/release-notes/24.04/#unprivileged-user-namespace-restrictions).
+It requires the global namespace restriction to remain enabled and repeats the real smoke;
+the platform enforcement tests still require zero skips. This script is not a local or product
+setup command and does not change the release containers or product sandbox implementation.
+
 Each desktop bundle contains the matching local-runner sidecar for one-click setup. Each matrix job
 also builds a **standalone runner binary** as `wollipog-runner-<triple>[.exe]` (a Node SEA via
 [`apps/runner/scripts/build-binary.mjs`](../apps/runner/scripts/build-binary.mjs)), then copies those

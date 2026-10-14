@@ -125,6 +125,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          bash scripts/configure-ci-bubblewrap.sh
           bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --unshare-pid -- /bin/true
           output=$(node --import tsx --test --test-reporter=tap apps/runner/src/managed-worktree-sandbox.integration.test.ts apps/runner/src/managed-worktree-guard-sandbox.integration.test.ts < /dev/null)
           printf '%s\n' "$output"

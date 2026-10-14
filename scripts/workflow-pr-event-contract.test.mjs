@@ -605,6 +605,7 @@ test("the unit-test job's video decoder install is cached, retries once, and eve
     names[4],
     `        timeout-minutes: ${verifyBound}`,
     "        run: |",
+    "          bash scripts/configure-ci-bubblewrap.sh",
     "          bwrap --version",
     "          ffmpeg -hide_banner -version",
   ].join("\n"), `${names[4]}: bubblewrap and FFmpeg must be executable before Unit Tests, whichever path installed them`);

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -67,6 +68,28 @@ test("minimal native Linux containers install pinned Node and npm before pnpm wh
     assert.doesNotMatch(step, /^\s+cache: pnpm/m, "pnpm cache cannot resolve before pnpm exists");
     assert.match(workflow.slice(cachedNode).split(/\n      - /)[0], /cache: pnpm/);
   }
+});
+
+test("Ubuntu CI retains real bubblewrap enforcement with the exact narrowly scoped userns profile", () => {
+  const profile = readFileSync(new URL("./configure-ci-bubblewrap.sh", import.meta.url), "utf8");
+  assert.equal(createHash("sha256").update(profile).digest("hex"),
+    "81e3e8d94123715116955b746af48bf1629856453687731ebd4230c488df6389",
+    "changing the approved security exception needs a new exact review");
+  assert.match(profile, /test "\$\{GITHUB_ACTIONS:-\}" = true/);
+  assert.match(profile, /test "\$\{RUNNER_OS:-\}" = Linux/);
+  assert.match(profile, /test "\$VERSION_ID" = 24\.04/);
+  assert.match(profile, /profile wollipog-ci-bwrap \/usr\/bin\/bwrap flags=\(unconfined\) \{\n  userns,\n\}/);
+  assert.equal([...profile.matchAll(/apparmor_restrict_unprivileged_userns\)" = 1/g)].length, 2,
+    "the global restriction must remain enabled before and after the exception");
+  assert.doesNotMatch(profile, /sysctl|--privileged|chmod|systemctl|service /);
+  assert.match(profile, /if smoke; then exit 0; fi/);
+  assert.match(profile, /test ! -e \/etc\/apparmor\.d\/wollipog-ci-bwrap/);
+  assert.match(profile, /\nsmoke\n$/);
+  const ci = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+  const isolation = readFileSync(new URL("../.github/workflows/platform-isolation.yml", import.meta.url), "utf8");
+  assert.match(ci, /Verify Isolated Video Decoder for Unit Tests[\s\S]*bash scripts\/configure-ci-bubblewrap\.sh\n          bwrap --version/);
+  assert.match(isolation, /bash scripts\/configure-ci-bubblewrap\.sh\n          bwrap --ro-bind \/ \/ --dev \/dev --proc \/proc --tmpfs \/tmp --unshare-pid -- \/bin\/true/);
+  assert.match(isolation, /\^# skipped 0\$/);
 });
 
 function fixture() {
