@@ -12824,15 +12824,17 @@ test("a live estimate crossing before a reconnecting runner reports its turn int
   assert.equal(hub.sentOfType("interrupt_turn").length, 1, "the deferred interruption is sent once");
 });
 
-test("a deferred estimate interruption is dropped when the turn ended or the card was answered", () => {
+test("an unanswered estimate-only card stops whichever turn the runner reports next, and an answered one stops none", () => {
   const { db, hub, svc, id, live } = liveClaudeGuardrailHarness();
   svc.setConfig(id, { costBudgetUsd: 0.05 });
   db.updateSessionStatus(id, "running", Date.now());
   hub.sentToRunner.length = 0;
   live(20, 20);
   assert.ok(svc.onSessionQueue(RUNNER_ID, id, [], true));
-  assert.ok(svc.onSessionQueue(RUNNER_ID, id, [], true, "turn-next"));
-  assert.equal(hub.sentOfType("interrupt_turn").length, 0, "a queue with no active turn had nothing to stop");
+  assert.equal(hub.sentOfType("interrupt_turn").length, 0, "a queue with no active turn has nothing to stop");
+  assert.ok(svc.onSessionQueue(RUNNER_ID, id, [], true, "turn-provider"));
+  assert.deepEqual(hub.sentOfType("interrupt_turn").map((message) => message.turnId), ["turn-provider"],
+    "a turn that starts while the card is unanswered, such as a provider-initiated one, is stopped too");
 
   const other = liveClaudeGuardrailHarness();
   other.svc.setConfig(other.id, { costBudgetUsd: 0.05 });
@@ -12843,6 +12845,22 @@ test("a deferred estimate interruption is dropped when the turn ended or the car
   other.hub.sentToRunner.length = 0;
   assert.ok(other.svc.onSessionQueue(RUNNER_ID, other.id, [], false, "turn-admitted"));
   assert.equal(other.hub.sentOfType("interrupt_turn").length, 0, "an answered card never stops a turn Continue admitted");
+});
+
+test("an estimate-only budget card left by a control-plane restart still stops the turn the runner reports", () => {
+  const { db, hub, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  db.updateSessionStatus(id, "running", Date.now());
+  live(20, 20);
+  assert.equal(db.getSession(id)!.pendingApproval?.kind, "cost_budget");
+  hub.sentToRunner.length = 0;
+
+  // A fresh service has no memory of the parked card; only the durable card remains.
+  const restarted = new SessionsService(db, hub as unknown as Hub, NOOP_LOG);
+  assert.ok(restarted.onSessionQueue(RUNNER_ID, id, [], true, "turn-after-restart"));
+  assert.deepEqual(hub.sentOfType("interrupt_turn").map((message) => message.turnId), ["turn-after-restart"]);
+  assert.ok(restarted.onSessionQueue(RUNNER_ID, id, [], true, "turn-after-restart"));
+  assert.equal(hub.sentOfType("interrupt_turn").length, 1);
 });
 
 test("a budget crossed on settled cost is the runner's to cancel, so the control plane does not interrupt", () => {

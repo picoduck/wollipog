@@ -1605,10 +1605,10 @@ export class SessionsService {
   /** Sessions that saw another gap WHILE a fetch was in flight — forces one more pass afterward so a
    * mid-fetch event (not in the in-flight reply) is never dropped. */
   private readonly rehydrate = new Set<string>();
-  /** Estimate-only budget cards whose turn interruption waits for the runner's active-turn
-   * coordinate, by session (#3112). A reconnecting runner flushes buffered usage before it reports
-   * its queue, so a card can park before the turn it should stop is known. */
-  private readonly deferredEstimateInterrupts = new Map<string, string>();
+  /** The turn last interrupted for an estimate-only budget card, by session (#3112), so repeated
+   * queue reports of the same turn send one interruption. The durable card is the obligation; this
+   * only deduplicates, so a restart at worst repeats a request the runner already applied. */
+  private readonly estimateInterruptedTurns = new Map<string, string>();
   /** Bound v54 history/index work to one page chain per runner. */
   private readonly runnerHydrationTails = new Map<string, Promise<void>>();
   /** Carry an interrupted pass's before-views into its replacement so resolved-request wakeups
@@ -6313,15 +6313,12 @@ export class SessionsService {
       this.log.warn(`failed to record steering queue bookkeeping for ${sessionId}: ${(error as Error).message}`);
     }
     this.hub.setSessionQueue(sessionId, queue, held, activeTurnId);
-    const deferredCard = this.deferredEstimateInterrupts.get(sessionId);
-    if (deferredCard !== undefined) {
-      this.deferredEstimateInterrupts.delete(sessionId);
+    // An unanswered estimate-only budget card stops the turn the runner reports, including one that
+    // parked before the turn was known or before a control-plane restart (#3112).
+    if (!activeTurnId) this.estimateInterruptedTurns.delete(sessionId);
+    else if (this.estimateInterruptedTurns.get(sessionId) !== activeTurnId) {
       const session = this.db.getSession(sessionId);
-      // Only while the same estimate-only budget card is unanswered; a queue without an active
-      // turn has nothing left to stop.
-      if (activeTurnId && session && pendingRequests(session.pendingApproval).some((request) => request.requestId === deferredCard)) {
-        this.interruptTurnAtEstimate(session, deferredCard);
-      }
+      if (session && this.estimateOnlyBudgetCard(session)) this.interruptTurnAtEstimate(session);
     }
     return true;
   }
@@ -13398,6 +13395,13 @@ export class SessionsService {
     return runnerHoldFor(ask.rule.kind);
   }
 
+  /** The unanswered budget card the live estimate alone raised: the runner never tripped it, and
+   * settled cost is still below the budget (#3112). */
+  private estimateOnlyBudgetCard(session: SessionView): PendingApproval | undefined {
+    if (session.costBudgetUsd == null || session.costUsd >= session.costBudgetUsd) return undefined;
+    return pendingRequests(session.pendingApproval).find((request) => request.kind === "cost_budget" && !request.runnerGuardrail);
+  }
+
   /** A budget card the live estimate alone raised parked a turn that may still be running: the
    * control plane's interruption is asynchronous, and an older runner may not apply it (#3112).
    * Like a soft card, clearing it returns the session to idle only if the runner's idle arrived
@@ -13479,7 +13483,7 @@ export class SessionsService {
     // A pending workflow decision shows the session as input_required while its turn still runs, so
     // the runner's active-turn coordinate decides, not the status.
     if (ask.rule.kind === "cost_budget" && !this.runnerTrips(s, ask) && s.status !== "idle" && !isTerminal(s.status)) {
-      this.interruptTurnAtEstimate(s, approval.requestId);
+      this.interruptTurnAtEstimate(s);
     }
     return true;
   }
@@ -13490,20 +13494,18 @@ export class SessionsService {
    * is compared once, here, against the control plane's own price; the runner compares nothing.
    * The runner reports the interrupted turn and its idle as usual, and a turn that ended first is
    * a harmless no-op. */
-  private interruptTurnAtEstimate(session: SessionView, cardRequestId: string): void {
-    this.deferredEstimateInterrupts.delete(session.id);
+  private interruptTurnAtEstimate(session: SessionView): void {
     const protocolVersion = this.runnerProtocolVersion(session.runnerId);
     if (!runnerSupportsProtocol(protocolVersion, "turnInterruption")) return;
     const failed = (reason: string) => this.log.warn(JSON.stringify({
       event: "live_budget_interrupt_not_applied", sessionId: session.id, runnerId: session.runnerId, reason,
     }));
     if (runnerSupportsProtocol(protocolVersion, "turnInterruptionAck")) {
+      // Without a coordinate yet (a reconnecting runner flushes usage before it reports its queue),
+      // the runner's next queue report names the turn, and the unanswered card stops it then.
       const turnId = this.hub.activeTurnIdForSession(session.id);
-      if (!turnId) {
-        // The runner's next queue report names the turn, or says there is none.
-        this.deferredEstimateInterrupts.set(session.id, cardRequestId);
-        return;
-      }
+      if (!turnId || this.estimateInterruptedTurns.get(session.id) === turnId) return;
+      this.estimateInterruptedTurns.set(session.id, turnId);
       const requestId = `interrupt_${randomUUID().slice(0, 8)}`;
       void this.hub.requestFromRunner(session.runnerId, requestId, {
         type: "interrupt_turn", requestId, sessionId: session.id, turnId,
