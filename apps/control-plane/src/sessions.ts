@@ -3,6 +3,7 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL } from "@wollipog/protocol";
 import type { WorkflowVideoEvidenceApprovals } from "./workflow-video-evidence-approvals.js";
 import { MediaSessionPurposes } from "./media-session-purposes.js";
 import { PreparedMediaReservationRelease } from "./prepared-media-reservation-release.js";
+import type { PreparedMediaActiveStops } from "./prepared-media-active-stops.js";
 import { MEDIA_SESSION_PURPOSE_ERROR, type PreparedMediaSessionRuntime, type PreparedMediaSubject } from "./prepared-media-session-runtime.js";
 import type { PreparedMediaIdentity, MaterializedMediaSession, PreparedMediaRecord } from "./prepared-media-sessions.js";
 import { reviewerAdmissionReadiness } from "./evidence-review-worker.js";
@@ -1662,9 +1663,11 @@ export class SessionsService {
     private readonly workflowVideoApprovals?: WorkflowVideoEvidenceApprovals,
     private readonly evidenceAuthorityDisclosures?: EvidenceAuthorityDisclosures,
     private readonly operatorValidationPermits?: OperatorVideoValidationPermits,
+    private readonly preparedMediaActiveStops?: PreparedMediaActiveStops,
   ) {
     if (workflowVideoApprovals && workflowVideoApprovals.database !== db) throw new Error("Media approvals require the same durable database.");
     if (operatorValidationPermits && operatorValidationPermits.database !== db.raw()) throw new Error("Validation permits require the same durable database.");
+    if (preparedMediaActiveStops && preparedMediaActiveStops.database !== db.raw()) throw new Error("Dedicated media Stop requires the same durable database.");
     this.mediaSessionPurposes = new MediaSessionPurposes(this.db.raw());
     this.promptOutbox = new SessionPromptOutbox(this.db, this.hub, this.log);
     // Replayed events took new sequence numbers after a crash: the upsert's new epoch makes open
@@ -6611,6 +6614,11 @@ export class SessionsService {
   }
 
   private requestStop(session: SessionView, now: number, archiveAfterStop = false, refreshProject = true): SessionView {
+    if (this.mediaSessionPurposes.owns(session.id) && session.status !== "queued" &&
+      this.mediaSessionPurposes.lifecycleState(session.id) !== "cancelled") {
+      this.requestDedicatedMediaStop(session);
+      return this.db.getSession(session.id)!; // No generic kill, optimistic terminal state or archive.
+    }
     if (session.status === "stopped" && this.mediaSessionPurposes.owns(session.id) &&
       this.db.raw().prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='prepared_media_sessions'").get() &&
       this.db.raw().prepare("SELECT 1 FROM prepared_media_sessions WHERE state='cancelled' AND json_extract(payload,'$.sessionId')=?").get(session.id)) {
@@ -6657,6 +6665,7 @@ export class SessionsService {
    * independent of usage/history ingestion and grants no new dispatch or quality authority. */
   private pendingMediaLifecycle(session: SessionView | null): boolean {
     if (!session || !this.mediaSessionPurposes.owns(session.id)) return false;
+    if (this.preparedMediaActiveStops?.owns(session.id)) return true; // ACK is not terminal usage/fence proof.
     const state = this.mediaSessionPurposes.lifecycleState(session.id);
     return state !== "active" && state !== "cancelled";
   }
@@ -6665,10 +6674,10 @@ export class SessionsService {
    * touching the socket, or a lost frame leaves nothing to resend and the runner's next live
    * snapshot restores the session the user stopped. */
   private stopAtGuardrail(session: SessionView, now: number): void {
-    if ((session.status === "queued" && this.mediaSessionPurposes.owns(session.id)) || this.pendingMediaLifecycle(session)) {
+    if (this.mediaSessionPurposes.owns(session.id) || this.pendingMediaLifecycle(session)) {
       // Reuse only the exact same-DB locally unsent cancellation. Unknown delivery is not a
       // generic Stop authorization or terminal proof, even when the root budget is stopped.
-      if (session.status === "queued") this.requestStop(session, now);
+      if (!this.requestDedicatedMediaStop(session) && session.status === "queued") this.requestStop(session, now);
       return;
     }
     this.abortPolicyHookApprovals(session, now, "guardrail-stopped");
@@ -6695,9 +6704,20 @@ export class SessionsService {
     if (settled.archived) this.queueCampaignWorktreeRetirement(sessionId);
   }
 
+  private requestDedicatedMediaStop(session: SessionView): boolean {
+    if (!this.mediaSessionPurposes.owns(session.id) ||
+      (this.runnerProtocolVersion(session.runnerId) ?? 0) < PACED_VIDEO_REVIEW_MIN_PROTOCOL) return false;
+    return Boolean(this.preparedMediaActiveStops?.request(session.id));
+  }
+
   stop(sessionId: string): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    if (this.requestDedicatedMediaStop(session)) return ok(this.db.getSession(sessionId)!, 202);
+    if (this.mediaSessionPurposes.owns(session.id) && session.status !== "queued" &&
+      this.mediaSessionPurposes.lifecycleState(session.id) !== "cancelled") {
+      return fail("Dedicated media Stop requires an exact registered owning worker handle; capacity is retained.", 409);
+    }
     const stopped = this.requestStop(session, Date.now());
     if (stopped.status === "queued" && this.mediaSessionPurposes.owns(session.id)) {
       return fail("Prepared media Stop requires exact never-enqueued proof or authenticated reconciliation; capacity is retained.", 409);
@@ -8110,6 +8130,11 @@ export class SessionsService {
   }
 
   /** Owning authenticated runner WebSocket ingress only; never an agent or HTTP body. */
+  onMediaReviewStopAcknowledged(runnerId: string, receipt: import("@wollipog/protocol").MediaActiveStopAcknowledgement): boolean {
+    if ((this.runnerProtocolVersion(runnerId) ?? 0) < PACED_VIDEO_REVIEW_MIN_PROTOCOL) return false;
+    return this.preparedMediaActiveStops?.acknowledge(runnerId, receipt) ?? false;
+  }
+
   onMediaReviewNeverDispatched(runnerId: string, receipt: import("@wollipog/protocol").MediaNeverDispatchedFence): boolean {
     if ((this.db.getRunner(runnerId)?.protocolVersion ?? 0) < PACED_VIDEO_REVIEW_MIN_PROTOCOL ||
       !this.db.raw().prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='prepared_media_sessions'").get()) return false;

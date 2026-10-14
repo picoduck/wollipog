@@ -8732,6 +8732,7 @@ export interface SessionNamingCustomModelResultMessage {
 }
 
 export type RunnerToControlPlane =
+  | { type: "media_review_stop_acknowledged"; receipt: import("./media-active-stop.js").MediaActiveStopAcknowledgement }
   | { type: "media_review_never_dispatched"; receipt: import("./media-dispatch-fence.js").MediaNeverDispatchedFence }
   | import("./campaign-review-job.js").CampaignReviewJobUpdate
   | RegisterMessage
@@ -10513,6 +10514,7 @@ export interface GitActionResultMessage {
 }
 
 export type ControlPlaneToRunner =
+  | { type: "media_review_stop"; request: import("./media-active-stop.js").MediaActiveStopRequest }
   | import("./campaign-review-job.js").CampaignReviewJobCommand
   | { type: "cancel_campaign_review_job"; jobId: string; nonce: string }
   | RegisteredMessage
@@ -11331,4 +11333,6 @@ export type { PacedVideoReviewReceipt, PacedVideoReviewDelivery, PacedVideoRevie
 
 export { PACED_VIDEO_REVIEW_BATCH_LIMITS, PACED_VIDEO_REVIEW_MIN_PROTOCOL } from "./paced-video-review.js";
 export type { MediaDispatchFenceIdentity, MediaNeverDispatchedFence } from "./media-dispatch-fence.js";
+export type { MediaActiveStopIdentity, MediaActiveStopRequest, MediaActiveStopAcknowledgement } from "./media-active-stop.js";
+export { mediaActiveStopIdentityBody, mediaActiveStopRequestBody, mediaActiveStopAcknowledgementBody } from "./media-active-stop.js";
 export { validMediaDispatchFenceIdentity, mediaDispatchFenceBody, validMediaNeverDispatchedFence } from "./media-dispatch-fence.js";

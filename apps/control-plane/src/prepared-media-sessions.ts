@@ -130,7 +130,7 @@ export class PreparedMediaSessions {
   private save(record: PreparedMediaRecord): void {
     const payload = JSON.stringify(record);
     if (payload.length > 512 * 1024) throw new Error("Prepared media command exceeds its metadata bound.");
-    this.db.prepare("INSERT INTO prepared_media_sessions VALUES (?,?,?,?,?,?) ON CONFLICT(root_id,admission_id)" +
+    this.db.prepare("INSERT INTO prepared_media_sessions(root_id,admission_id,request_sha256,state,payload,payload_sha256) VALUES (?,?,?,?,?,?) ON CONFLICT(root_id,admission_id)" +
       " DO UPDATE SET state=excluded.state,payload=excluded.payload,payload_sha256=excluded.payload_sha256")
       .run(record.rootSessionId, record.admissionId, record.requestSha256, record.state, payload, sha(record));
   }

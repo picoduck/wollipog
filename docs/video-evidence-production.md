@@ -402,3 +402,23 @@ Possible priced usage also sends the existing authoritative accounting acknowled
 lifecycle remains quarantined. Correction coordinates stay bound; a missing correction prefix
 defers synchronization rather than sending an unbound price. Neither acknowledgement nor the
 immutable active dispatch identity supplies terminal Stop, settlement or privacy-cleanup proof.
+
+Dedicated active Stop preparation uses `PreparedMediaActiveStops` and `RunnerMediaActiveStops`.
+The private ports require both the actual current prepared/purpose/member generation and the
+owning runner's exact durable launch claim plus registered worker handle. No hosting adapter is
+registered. Missing, revoked, corrupt, replaced or unknown ownership refuses; generic SessionManager
+or PID kills are never a fallback. With those trusted ports, a Stop can return 202 while retaining
+the queued identity, reservation and history. Request and ACK cannot settle cost, capacity or quality.
+The operation is committed before the first send/signal and anchored on the original command as
+well as the Stop record. Duplicate requests and restarts use exact readback; missing Stop history
+cannot reset the command fence. A separate authenticated same-command terminal fence and actual
+final same-generation usage/ledger proof are still required before terminal projection or cleanup.
+
+The optional source library in `apps/runner/native-media-core` has the distinct execution identity
+`wollipog-native-media-core-v1`. It is not the installed App Server and cannot borrow its disclosure,
+capability, account, fixed child-harness identity or native proof. It constructs release-pinned core
+startup restrictions through `ThreadManager`'s public startup options; it never starts a Session or
+loads an account. The installed App Server's unsupported refusal remains unchanged. Pure source
+tests, declared route-observation booleans and successful compilation cannot establish real namespace
+exclusion, complete native model delivery, price/usage, privacy cleanup or Human authority.
+Actual selection/registration requires a separately audited execution contract and Human gate.

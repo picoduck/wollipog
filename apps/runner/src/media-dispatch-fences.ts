@@ -21,6 +21,9 @@ export class RunnerMediaDispatchFences {
     db.exec("CREATE TABLE IF NOT EXISTS runner_media_dispatch_fences (session_id TEXT NOT NULL," +
       "generation TEXT NOT NULL,identity TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('claimed','cancelled'))," +
       "PRIMARY KEY(session_id,generation));");
+    if (!(db.prepare("PRAGMA table_info(runner_media_dispatch_fences)").all() as Array<{ name: string }>).some((c) => c.name === "stop_operation_id")) {
+      db.exec("ALTER TABLE runner_media_dispatch_fences ADD COLUMN stop_operation_id TEXT");
+    }
   }
   private atomic<T>(action: () => T): T {
     this.db.exec("SAVEPOINT runner_media_fence");
@@ -35,10 +38,27 @@ export class RunnerMediaDispatchFences {
     if (!validMediaDispatchFenceIdentity(identity)) return false;
     return this.atomic(() => {
       if (this.existing(identity)) return false; // includes same-command replay and a changed command
-      this.db.prepare("INSERT INTO runner_media_dispatch_fences VALUES (?,?,?,'claimed')")
+      this.db.prepare("INSERT INTO runner_media_dispatch_fences(session_id,generation,identity,state) VALUES (?,?,?,'claimed')")
         .run(identity.sessionId, identity.generation, canonicalIdentity(identity));
       return true;
     });
+  }
+  /** Read-only exact durable ownership; status or process inventory cannot stand in for it. */
+  claimed(identity: MediaDispatchFenceIdentity): boolean {
+    if (!validMediaDispatchFenceIdentity(identity)) return false;
+    const prior = this.existing(identity);
+    return prior?.state === "claimed" && prior.identity === canonicalIdentity(identity);
+  }
+  stopOperation(identity: MediaDispatchFenceIdentity): string | null {
+    if (!this.claimed(identity)) return null;
+    const row = this.db.prepare("SELECT stop_operation_id FROM runner_media_dispatch_fences WHERE session_id=? AND generation=?")
+      .get(identity.sessionId, identity.generation);
+    return typeof row?.stop_operation_id === "string" ? row.stop_operation_id : null;
+  }
+  claimStop(identity: MediaDispatchFenceIdentity, operationId: string): boolean {
+    if (!this.claimed(identity) || typeof operationId !== "string" || !operationId || operationId.length > 256 || /[\x00-\x1f\x7f]/u.test(operationId)) return false;
+    return this.db.prepare("UPDATE runner_media_dispatch_fences SET stop_operation_id=? WHERE session_id=? AND generation=? AND identity=? AND state='claimed' AND stop_operation_id IS NULL")
+      .run(operationId, identity.sessionId, identity.generation, canonicalIdentity(identity)).changes === 1;
   }
   cancelBeforeLaunch(identity: MediaDispatchFenceIdentity): MediaNeverDispatchedFence | null {
     if (!validMediaDispatchFenceIdentity(identity)) return null;
@@ -46,7 +66,7 @@ export class RunnerMediaDispatchFences {
       const prior = this.existing(identity);
       const receipt = receiptFor(identity);
       if (prior) return prior.state === "cancelled" && prior.identity === canonicalIdentity(identity) ? receipt : null;
-      this.db.prepare("INSERT INTO runner_media_dispatch_fences VALUES (?,?,?,'cancelled')")
+      this.db.prepare("INSERT INTO runner_media_dispatch_fences(session_id,generation,identity,state) VALUES (?,?,?,'cancelled')")
         .run(identity.sessionId, identity.generation, canonicalIdentity(identity));
       return receipt;
     });

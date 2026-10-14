@@ -1382,6 +1382,9 @@ app.register(async (instance) => {
       case "media_review_never_dispatched":
         if (runnerId) svc.onMediaReviewNeverDispatched(runnerId, msg.receipt);
         break;
+      case "media_review_stop_acknowledged":
+        if (runnerId) svc.onMediaReviewStopAcknowledged(runnerId, msg.receipt);
+        break;
       case "policy_hook_credential":
         {
           if (deferNewCredentialBinding(msg)) break;

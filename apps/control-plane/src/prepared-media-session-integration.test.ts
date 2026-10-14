@@ -29,6 +29,9 @@ import { PreparedMediaReservationRelease } from "./prepared-media-reservation-re
 import { RunnerMediaDispatchFences } from "../../runner/src/media-dispatch-fences.js";
 import { DatabaseSync } from "node:sqlite";
 import { applyClaudeReconciliation, previewClaudeReconciliation, correctionFrame } from "./claude-cost-reconciliation.js";
+import { mediaActiveStopIdentityBody, type MediaActiveStopIdentity, type MediaActiveStopRequest, type MediaActiveStopAcknowledgement } from "@wollipog/protocol";
+import { PreparedMediaActiveStops } from "./prepared-media-active-stops.js";
+import { RunnerMediaActiveStops, type OwnedMediaStopHandle } from "../../runner/src/media-active-stops.js";
 const sha = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 
 /** In-memory concrete DB/service integration with explicitly synthetic proof/rates/source.
@@ -1138,6 +1141,113 @@ test("verified current active command permits authenticated status, but generic 
   assert.equal(h.service.mediaSessionPurposes.lifecycleState(h.actual.sessionId), null);
   h.service.onSessionStatus(h.actual.sessionId, "stopped", undefined, undefined, "r");
   assert.equal(h.db.getSession(h.actual.sessionId)?.status, "running", "replaced generation stays quarantined without resurrecting status");
+});
+
+async function activeStopHarness(t: { after(fn: () => void): void }, unknownDispatch = false) {
+  const h = releaseHarness(t); h.ports.send = async () => unknownDispatch ? "unknown" : "accepted";
+  await h.prepared.bind(h.identity, h.binding); const record = await h.prepared.dispatch(h.identity);
+  const identity: MediaActiveStopIdentity = { ...h.fenceIdentity(record), childSessionId: record.childSessionId };
+  const canonical = mediaActiveStopIdentityBody(identity);
+  const runnerDb = new DatabaseSync(":memory:"); t.after(() => runnerDb.close());
+  const fences = new RunnerMediaDispatchFences(runnerDb);
+  const { childSessionId: _child, ...dispatch } = canonical;
+  assert.ok(fences.claim(dispatch));
+  let registered = true, allowed = true, stops = 0, sends = 0, ambiguous = false;
+  let handle: OwnedMediaStopHandle = { identity: canonical, requestStop() { stops++; if (ambiguous) throw new Error("Synthetic ambiguous owned signal"); } };
+  const matches = (i: MediaActiveStopIdentity) => JSON.stringify(mediaActiveStopIdentityBody(i)) === JSON.stringify(canonical);
+  const runnerPorts = { current: (i: MediaActiveStopIdentity) => registered && matches(i) ? handle : null, currentAuthority: () => allowed };
+  const worker = new RunnerMediaActiveStops(runnerDb, runnerPorts);
+  let ack: MediaActiveStopAcknowledgement | null = null, sent: MediaActiveStopRequest | null = null;
+  const stopPorts = { current: (i: MediaActiveStopIdentity) => registered && allowed && matches(i) && fences.claimed(dispatch),
+    send: (request: MediaActiveStopRequest) => { sends++; sent = request; h.hub.sendToRunner("r", { type: "media_review_stop", request }); ack = worker.request(request); } };
+  const coordinator = new PreparedMediaActiveStops(h.db.raw(), stopPorts);
+  h.hub.runnerProtocolVersion = () => 221;
+  const service = new SessionsService(h.db, h.hub, h.log, undefined, undefined, undefined, undefined, undefined, undefined,
+    false, undefined, h.runtime, undefined, h.disclosures, h.permits, coordinator);
+  h.messages.length = 0;
+  return { ...h, service, coordinator, worker, runnerDb, stopPorts, runnerPorts, identity: canonical, stops: () => stops, sends: () => sends,
+    ack: () => ack, sent: () => sent, register: (value: boolean) => { registered = value; }, allow: (value: boolean) => { allowed = value; },
+    unknown: () => { ambiguous = true; }, replaceHandle: () => { handle = { ...handle, identity: { ...canonical, generation: "replacement" } }; } };
+}
+
+test("accepted queued media Stop uses only an exact owned handle and never settles lifecycle or capacity from its ACK", async (t) => {
+  const h = await activeStopHarness(t);
+  const before = h.prepared.get({ rootSessionId: "root", childSessionId: "child", admissionId: "synthetic-media", requestSha256: sha("exact source and criteria") })!;
+  const result = h.service.stop(h.actual.sessionId);
+  assert.equal(result.ok, true); assert.equal(result.status, 202);
+  assert.equal(h.stops(), 1); assert.equal(h.sends(), 1);
+  const ack = h.ack()!; assert.equal(ack.outcome, "stop_requested");
+  assert.equal(h.service.onMediaReviewStopAcknowledged("wrong-runner", ack), false);
+  assert.equal(h.service.onMediaReviewStopAcknowledged("r", { ...ack, generation: "replacement" }), false);
+  assert.equal(h.service.onMediaReviewStopAcknowledged("r", ack), true);
+  assert.equal(h.service.onMediaReviewStopAcknowledged("r", ack), true);
+  assert.equal(h.service.onMediaReviewStopAcknowledged("r", { ...ack, operationId: "late-other-operation" }), false);
+  assert.equal(h.service.stop(h.actual.sessionId).status, 202);
+  assert.equal(h.stops(), 1); assert.equal(h.sends(), 1);
+  assert.deepEqual(new PreparedMediaActiveStops(h.db.raw(), h.stopPorts).request(h.actual.sessionId), h.sent());
+  assert.deepEqual(new RunnerMediaActiveStops(h.runnerDb, h.runnerPorts).request(h.sent()!), ack);
+  assert.equal(h.stops(), 1); assert.equal(h.sends(), 1);
+  h.service.onSessionEvent(h.actual.sessionId, { kind: "token_usage", model: "claude-opus-5-5", inputTokens: 200_000 }, 1, Date.now(), "r");
+  h.service.onSessionStatus(h.actual.sessionId, "stopped", undefined, undefined, "r");
+  assert.equal(h.db.getSession(h.actual.sessionId)?.status, "queued", "generic terminal status is not exact fenced final usage");
+  assert.equal(h.db.sessionCostUsd(h.actual.sessionId), 0.2);
+  assert.equal(h.db.campaignBudgets.active(h.actual.sessionId), true);
+  assert.equal(h.db.campaignBudgets.completedAttestation(h.actual.sessionId), null);
+  assert.equal(h.db.hasSessionStopIntent(h.actual.sessionId), false, "no generic Stop intent");
+  assert.deepEqual(h.prepared.get(before), before);
+  assert.deepEqual(h.messages.map((m) => (m as { type: string }).type), ["media_review_stop", "priced_session_cost"]);
+});
+test("unknown owned Stop signal is retained across both coordinators' restart without a second effect", async (t) => {
+  const h = await activeStopHarness(t); h.unknown();
+  assert.equal(h.service.stop(h.actual.sessionId).status, 202);
+  assert.equal(h.ack()?.outcome, "unknown"); assert.equal(h.stops(), 1);
+  assert.deepEqual(new PreparedMediaActiveStops(h.db.raw(), h.stopPorts).request(h.actual.sessionId), h.sent());
+  assert.equal(new RunnerMediaActiveStops(h.runnerDb, h.runnerPorts).request(h.sent()!)?.outcome, "unknown");
+  assert.equal(h.stops(), 1); assert.equal(h.sends(), 1);
+  assert.equal(h.db.campaignBudgets.active(h.actual.sessionId), true);
+  assert.equal(h.db.getSession(h.actual.sessionId)?.status, "queued");
+});
+test("missing dedicated Stop history retains the original command fence and quarantines terminal frames", async (t) => {
+  const h = await activeStopHarness(t);
+  assert.equal(h.service.stop(h.actual.sessionId).status, 202);
+  assert.equal(h.stops(), 1); assert.equal(h.sends(), 1);
+  h.db.raw().exec("DELETE FROM prepared_media_active_stops");
+  const restarted = new PreparedMediaActiveStops(h.db.raw(), h.stopPorts);
+  assert.equal(restarted.request(h.actual.sessionId), null);
+  assert.equal(h.service.stop(h.actual.sessionId).status, 409);
+  h.service.onSessionStatus(h.actual.sessionId, "stopped", undefined, undefined, "r");
+  assert.equal(h.db.getSession(h.actual.sessionId)?.status, "queued");
+  assert.equal(h.db.campaignBudgets.active(h.actual.sessionId), true);
+  assert.equal(h.db.campaignBudgets.completedAttestation(h.actual.sessionId), null);
+  assert.equal(h.stops(), 1); assert.equal(h.sends(), 1);
+});
+for (const mode of ["unknown-dispatch", "unregistered", "revoked", "replacement", "corrupt", "mixed-peer"] as const) {
+  test("queued media Stop refuses " + mode + " and retains identity without an intent or generic kill", async (t) => {
+    const h = await activeStopHarness(t, mode === "unknown-dispatch");
+    if (mode === "unregistered") h.register(false);
+    if (mode === "revoked") h.allow(false);
+    if (mode === "replacement") h.db.campaignBudgets.replaceDispatch(h.actual.sessionId);
+    if (mode === "corrupt") h.db.raw().prepare("UPDATE media_session_purposes SET sha256='corrupt'").run();
+    if (mode === "mixed-peer") h.hub.runnerProtocolVersion = () => 220;
+    assert.equal(h.service.stop(h.actual.sessionId).status, 409);
+    assert.equal(h.stops(), 0); assert.equal(h.sends(), 0);
+    assert.equal(h.coordinator.owns(h.actual.sessionId), false);
+    assert.equal(h.db.getSession(h.actual.sessionId)?.status, "queued");
+    assert.equal(h.db.campaignBudgets.active(h.actual.sessionId), true);
+    assert.deepEqual(h.messages, []);
+  });
+}
+test("dedicated Stop registration is required even after an authentic running status", async (t) => {
+  const h = await activeStopHarness(t); h.register(false);
+  h.service.onSessionStatus(h.actual.sessionId, "running", undefined, undefined, "r");
+  assert.equal(h.service.stop(h.actual.sessionId).status, 409);
+  h.db.campaignBudgets.stop("root", "accounting_unavailable", "Synthetic stopped allowance");
+  h.service.recoverCampaignBudgetAllocations("r");
+  assert.equal(h.db.getSession(h.actual.sessionId)?.status, "running");
+  assert.equal(h.stops(), 0); assert.equal(h.sends(), 0);
+  assert.deepEqual(h.messages.filter((m) => (m as { sessionId?: string }).sessionId === h.actual.sessionId), []);
+  assert.ok(h.messages.some((m) => (m as { sessionId?: string; type?: string }).sessionId === "root" &&
+    (m as { type?: string }).type === "stop_session"), "ordinary campaign budget Stop remains effective");
 });
 
 test("ordinary rate-priced usage sends exactly one authoritative accounting acknowledgement", (t) => {
