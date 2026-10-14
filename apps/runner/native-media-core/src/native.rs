@@ -27,6 +27,7 @@ fn restriction_data() -> ExtensionDataInit {
 /// implementation or conversion exposing SDK options or a native control channel.
 pub struct RestrictedStartupPreparation {
     _options: StartThreadOptions,
+    binding: crate::MediaCodeBindings,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -57,6 +58,18 @@ impl StartupCodeSummary {
 }
 
 impl RestrictedStartupPreparation {
+    // Only the audited crate-owned host adapter can consume SDK options. External callers
+    // receive no raw options or native channel. The production admission issuer is absent.
+    pub(crate) fn into_host_start_options(
+        self,
+        current: &crate::MediaCodeBindings,
+    ) -> Result<StartThreadOptions, BoundaryError> {
+        if &self.binding != current {
+            return Err(BoundaryError::ReplacementBinding);
+        }
+        Ok(self._options)
+    }
+
     pub fn code_summary(&self) -> StartupCodeSummary {
         StartupCodeSummary {
             execution_identity: crate::EXECUTION_IDENTITY,
@@ -99,7 +112,10 @@ pub fn prepare_restricted_start(
     options.dynamic_tools =
         serde_json::from_str::<Vec<DynamicToolSpec>>(include_str!("../scoped-tools.json"))
             .map_err(|_| BoundaryError::ConfigurationUnsupported)?;
-    Ok(RestrictedStartupPreparation { _options: options })
+    Ok(RestrictedStartupPreparation {
+        _options: options,
+        binding: boundary.binding.clone(),
+    })
 }
 
 #[cfg(test)]

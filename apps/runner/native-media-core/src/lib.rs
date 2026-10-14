@@ -139,7 +139,11 @@ impl RouteExclusionObservations {
 #[cfg(feature = "native-core")]
 pub mod native;
 
+pub mod host_bridge;
 pub mod host_contract;
+pub mod native_cleanup;
+pub mod native_transport;
+pub mod native_usage;
 
 #[cfg(test)]
 mod tests {
