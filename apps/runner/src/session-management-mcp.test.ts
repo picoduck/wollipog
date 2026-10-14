@@ -1132,16 +1132,14 @@ test("get_session redacts pendingApproval to its title and caps the preview (no 
   assert.deepEqual(s.liveUsage, { tokensIn: 3, tokensOut: 2, costUsd: 0.01 });
 });
 
-/** A control plane that serves `GET /api/sessions/:id` and the bounded and unbounded events routes
+/** A control plane that serves `GET /api/sessions/:id` and the bounded events route
  * over `total` events, with a forward-hydrated cache holding the first `cached` of them. */
 function eventsCp(
   total: number,
   options: {
-    cached?: number;
+    cached?: number | (() => number);
     eventEpoch?: number;
     text?: (seq: number) => string;
-    runnerOffline?: boolean;
-    replaceDuringFallback?: boolean;
   } = {},
 ) {
   const events = Array.from({ length: total }, (_, i) => ({
@@ -1149,24 +1147,19 @@ function eventsCp(
     ts: 1000 + i,
     payload: { kind: "agent_message", text: options.text?.(i + 1) ?? `line ${i + 1}` },
   }));
-  let cached = options.cached ?? total;
-  let eventEpoch = options.eventEpoch ?? 2;
+  const eventEpoch = options.eventEpoch ?? 2;
   return makeDeps((call) => {
     const url = new URL(call.url);
     if (url.pathname === "/api/sessions/s_1") return { status: 200, body: { session: { id: "s_1", eventEpoch } } };
     assert.equal(url.pathname, "/api/sessions/s_1/events");
     const q = url.searchParams;
     const after = Number(q.get("after") ?? 0);
-    if (!q.has("limit")) {
-      // The unbounded read awaits hydration, which completes the cache unless the runner is offline.
-      if (!options.runnerOffline) cached = total;
-      if (options.replaceDuringFallback) eventEpoch += 1;
-      return { status: 200, body: { events: events.slice(0, cached).filter((e) => e.seq > after) } };
-    }
+    assert.ok(q.has("limit"), "every events request stays bounded, including an incomplete cache");
     if (Number(q.get("eventEpoch")) !== eventEpoch) {
       return { status: 409, body: { error: "session event history was replaced", code: "stale_event_epoch", eventEpoch } };
     }
     const limit = Number(q.get("limit"));
+    const cached = typeof options.cached === "function" ? options.cached() : options.cached ?? total;
     const cache = events.slice(0, cached);
     const cacheComplete = cached >= total;
     if (q.get("direction") === "backward") {
@@ -1234,7 +1227,7 @@ test("get_session_events without after reads the newest events through a bounded
   assert.deepEqual(none, { lines: [], lastSeq: 0, eventEpoch: 2 });
 });
 
-test("get_session_events falls back to the hydrating read only when the cache cannot answer", async () => {
+test("get_session_events returns bounded incomplete pages without a whole-history fallback", async () => {
   // The cache holds seq 1-12 of 30. A full forward page inside it is exact and stays bounded.
   const full = eventsCp(30, { cached: 12 });
   const inside = resultJson(await callTool(full.deps, "get_session_events", { sessionId: "s_1", after: 2, limit: 5 }));
@@ -1243,24 +1236,26 @@ test("get_session_events falls back to the hydrating read only when the cache ca
   assert.equal(inside.historyIncomplete, true, "a full page from an incomplete cache still says so");
   assert.equal(full.calls.length, 2);
 
-  // A short page at the cache edge is not the end of the log; the unbounded read waits for hydration.
+  // A short page at the cache edge is not the end of the log and returns without waiting.
   const edge = eventsCp(30, { cached: 12 });
   const past = resultJson(await callTool(edge.deps, "get_session_events", { sessionId: "s_1", after: 10, limit: 5 }));
-  assert.equal(edge.calls[2]!.url, `${CP_URL}/api/sessions/s_1/events?after=10`);
-  assert.deepEqual(past.lines.map(seqOf), [11, 12, 13, 14, 15], "still the first events after the cursor");
-  assert.equal(past.lastSeq, 15);
+  assert.equal(edge.calls.length, 2, "no unbounded fallback or hydration wait");
+  assert.deepEqual(past.lines.map(seqOf), [11, 12], "the available events after the cursor");
+  assert.equal(past.lastSeq, 12);
   assert.equal(past.hasMore, true);
+  assert.equal(past.historyIncomplete, true);
 
   // The cached tail of an incomplete cache is an old prefix, never the newest events.
   const tail = eventsCp(30, { cached: 12 });
   const newest = resultJson(await callTool(tail.deps, "get_session_events", { sessionId: "s_1", limit: 3 }));
-  assert.equal(tail.calls[2]!.url, `${CP_URL}/api/sessions/s_1/events?after=0`);
-  assert.deepEqual(newest.lines.map(seqOf), [28, 29, 30]);
+  assert.equal(tail.calls.length, 2);
+  assert.deepEqual(newest.lines.map(seqOf), [10, 11, 12]);
+  assert.equal(newest.historyIncomplete, true, "cached tail is explicitly incomplete");
 });
 
 test("get_session_events never reports the end of the log while hydration cannot finish", async () => {
   // The runner is offline: the cache holds seq 1-12 of 30 and the hydrating read cannot add more.
-  const offline = eventsCp(30, { cached: 12, runnerOffline: true });
+  const offline = eventsCp(30, { cached: 12 });
   const page = resultJson(await callTool(offline.deps, "get_session_events", { sessionId: "s_1", after: 10, limit: 5 }));
   assert.deepEqual(page.lines.map(seqOf), [11, 12]);
   assert.equal(page.lastSeq, 12);
@@ -1271,11 +1266,18 @@ test("get_session_events never reports the end of the log while hydration cannot
   const newest = resultJson(await callTool(offline.deps, "get_session_events", { sessionId: "s_1", limit: 3 }));
   assert.equal(newest.historyIncomplete, true, "a stale cached tail is flagged");
 
-  // Hydration completes during the fallback read: the short page is the true end of the log.
-  const online = eventsCp(14, { cached: 12 });
-  const end = resultJson(await callTool(online.deps, "get_session_events", { sessionId: "s_1", after: 10, limit: 5 }));
+  // Hydration completes between pages. The previous cursor resumes without losing or duplicating rows.
+  let cached = 12;
+  const online = eventsCp(14, { cached: () => cached });
+  const start = resultJson(await callTool(online.deps, "get_session_events", { sessionId: "s_1", after: 10, limit: 5 }));
+  assert.deepEqual(start.lines.map(seqOf), [11, 12]);
+  assert.equal(start.historyIncomplete, true);
+  cached = 14;
+  const end = resultJson(await callTool(online.deps, "get_session_events", {
+    sessionId: "s_1", after: start.lastSeq, eventEpoch: start.eventEpoch, limit: 5,
+  }));
   assert.deepEqual(end, {
-    lines: ["(11) agent_message: line 11", "(12) agent_message: line 12", "(13) agent_message: line 13", "(14) agent_message: line 14"],
+    lines: ["(13) agent_message: line 13", "(14) agent_message: line 14"],
     lastSeq: 14,
     hasMore: false,
     eventEpoch: 2,
@@ -1320,34 +1322,13 @@ test("get_session_events fails instead of applying a cursor to a replaced histor
   assert.equal(invalid.isError, true);
 });
 
-test("get_session_events rejects a fallback page read across a history replacement", async () => {
-  // The history is replaced while the unbounded fallback runs; its rows belong to the new log.
-  const pinned = eventsCp(30, { cached: 12, replaceDuringFallback: true });
-  const result = await callTool(pinned.deps, "get_session_events", { sessionId: "s_1", after: 10, limit: 5, eventEpoch: 2 });
-  assert.equal(result.isError, true, "the old cursor is never applied to the new log");
-  assert.match(resultText(result), /history was replaced/);
-
-  // Without a pinned epoch the read restarts once at the new epoch.
-  const unpinned = eventsCp(30, { cached: 12, replaceDuringFallback: true });
-  const data = resultJson(await callTool(unpinned.deps, "get_session_events", { sessionId: "s_1", after: 10, limit: 5 }));
-  assert.equal(data.eventEpoch, 3);
-  assert.deepEqual(data.lines.map(seqOf), [11, 12, 13, 14, 15]);
-
-  // The same-epoch proof itself fails: the unverified fallback page is never returned.
-  let fallbackRead = false;
-  const events = Array.from({ length: 12 }, (_, i) => ({ seq: i + 1, ts: i, payload: { kind: "agent_message", text: "t" } }));
-  const failing = makeDeps((call) => {
-    const q = new URL(call.url).searchParams;
-    if (!q.has("limit")) {
-      fallbackRead = true;
-      return { status: 200, body: { events: events.filter((e) => e.seq > Number(q.get("after"))) } };
-    }
-    if (fallbackRead) return { status: 500, body: { error: "database unavailable" } };
-    return { status: 200, body: { events: events.slice(10), eventEpoch: 2, nextAfter: 12, hasMoreCached: false, cacheComplete: false } };
-  });
+test("get_session_events reports a bounded page failure without an unpaged retry", async () => {
+  const failing = makeDeps(() => ({ status: 500, body: { error: "database unavailable" } }));
   const unverified = await callTool(failing.deps, "get_session_events", { sessionId: "s_1", after: 10, limit: 5, eventEpoch: 2 });
   assert.equal(unverified.isError, true);
   assert.match(resultText(unverified), /database unavailable/);
+  assert.equal(failing.calls.length, 1);
+  assert.equal(failing.calls[0]!.url, `${CP_URL}/api/sessions/s_1/events?after=10&limit=5&eventEpoch=2`);
 });
 
 test("get_session_events pages forward against a control plane without bounded pages", async () => {

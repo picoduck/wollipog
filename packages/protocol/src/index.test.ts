@@ -233,10 +233,15 @@ test("older peers never receive display-only live Claude usage, but still accoun
   assert.equal(projectSessionEventPayloadForProtocol(provisional, 216), provisional);
 });
 
-test("PROTOCOL_VERSION is 221", () => {
-  assert.equal(PROTOCOL_VERSION, 221);
+test("PROTOCOL_VERSION is 222", () => {
+  assert.equal(PROTOCOL_VERSION, 222);
   assert.equal(runnerSupportsProtocol(218, "ratePricedSnapshotUsage"), false);
   assert.equal(runnerSupportsProtocol(219, "ratePricedSnapshotUsage"), true);
+  assert.equal(runnerSupportsProtocol(218, "boundedSessionEventReads"), false);
+  assert.equal(runnerSupportsProtocol(219, "boundedSessionEventReads"), false);
+  assert.equal(runnerSupportsProtocol(220, "boundedSessionEventReads"), false);
+  assert.equal(runnerSupportsProtocol(221, "boundedSessionEventReads"), false);
+  assert.equal(runnerSupportsProtocol(222, "boundedSessionEventReads"), true);
   assert.equal(runnerSupportsProtocol(219, "campaignWorkItemAtCreation"), false);
   assert.equal(runnerSupportsProtocol(220, "campaignWorkItemAtCreation"), true);
   assert.equal(runnerSupportsProtocol(220, "backgroundRetryExhaustion"), false);

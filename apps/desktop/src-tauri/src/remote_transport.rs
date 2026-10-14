@@ -1625,7 +1625,6 @@ mod tests {
                 "/api/runners/r_1/orphaned-skill-copies/discard",
             ),
             (Method::GET, "/api/sessions/s_1/child-sessions?limit=50"),
-            (Method::GET, "/api/sessions/s_1/events?after=0"),
         ] {
             assert_eq!(
                 budget(method.clone(), path),
@@ -1666,6 +1665,8 @@ mod tests {
             (Method::POST, "/api/sessions//fork"),
             (Method::POST, "/api/sessions/s_1/parent-control-policy"),
             (Method::GET, "/api/sessions/s_1/events?after=0&limit=200"),
+            (Method::GET, "/api/sessions/s_1/events"),
+            (Method::GET, "/api/sessions/s_1/events?after=0"),
             (Method::GET, "/api/sessions/s_1/events?after=0&li%6Dit=200"),
             (
                 Method::POST,

@@ -8,6 +8,7 @@ import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import type { SessionEventsResponse, SessionView } from "@wollipog/protocol";
+import { readSessionEventHistory } from "../src/e2e/read-session-event-history.js";
 import {
   defaultLocalDeviceTokenPath,
   loadOrCreateLocalDeviceToken,
@@ -98,11 +99,7 @@ async function fetchSession(stack: Pick<LiveStack, "httpBase" | "ownerToken" | "
 async function fetchEvents(
   stack: Pick<LiveStack, "httpBase" | "ownerToken" | "sessionId">,
 ): Promise<SessionEventsResponse> {
-  const response = await fetch(`${stack.httpBase}/api/sessions/${stack.sessionId}/events`, {
-    headers: { authorization: `Bearer ${stack.ownerToken}` },
-  });
-  if (!response.ok) throw new Error(`event lookup failed: ${response.status} ${await response.text()}`);
-  return response.json() as Promise<SessionEventsResponse>;
+  return readSessionEventHistory(stack.httpBase, stack.ownerToken, stack.sessionId);
 }
 
 async function queuePrompt(
@@ -381,13 +378,13 @@ async function startLiveStack(
       )) return stack;
       if (session.status === "failed") {
         throw new Error(`session failed before asking a question: ${JSON.stringify(session)}\n` +
-          `events: ${JSON.stringify(await fetchEvents(stack))}\n${logs()}`);
+          `events: ${JSON.stringify(await fetchEvents(stack).catch(String))}\n${logs()}`);
       }
       await delay(100);
     }
     throw new Error(`${provider === "codex" ? "Codex" : "Claude"} question never reached the control plane` +
       `${awaitIdle ? " with the session idle" : ""}\n` +
-      `session: ${JSON.stringify(lastSession)}\nevents: ${JSON.stringify(await fetchEvents(stack))}\n${logs()}`);
+      `session: ${JSON.stringify(lastSession)}\nevents: ${JSON.stringify(await fetchEvents(stack).catch(String))}\n${logs()}`);
   } catch (error) {
     await stop();
     throw error;
@@ -621,7 +618,7 @@ for (const viewport of [
   } catch (error) {
     throw new Error(`${error instanceof Error ? error.stack : String(error)}\n` +
       `session: ${JSON.stringify(await fetchSession(stack))}\n` +
-      `events: ${JSON.stringify((await fetchEvents(stack)).events.map((event) => event.payload))}\n${stack.logs()}`);
+      `events: ${JSON.stringify(await fetchEvents(stack).then(result => result.events.map(event => event.payload)).catch(String))}\n${stack.logs()}`);
   } finally {
     if (recording) {
       const video = page.video();

@@ -677,7 +677,8 @@
 //      ignore the field and leave the child unattributed, so the runner's tool and CLI refuse it
 //      against a pre-v220 control plane instead of sending it.
 // 221: pre-acceptance background capacity retry exhaustion, separate from accepted missing results.
-export const PROTOCOL_VERSION = 221;
+// 222: CLI/MCP event readers never use the legacy unpaged hydration fallback.
+export const PROTOCOL_VERSION = 222;
 
 export * from "./campaign-authority.js";
 export * from "./campaign-issue-publication.js";
@@ -893,6 +894,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   automationCommandReceipts: 53,
   runnerLocalAgentEnv: 54,
   indexedHistory: 55,
+  /** CLI/MCP event reader keeps incomplete-cache reads paged. Older readers assume the unpaged
+   * hydration fallback returns the whole log and can mislabel a bounded prefix as its newest tail. */
+  boundedSessionEventReads: 222,
   authoritativeHistoryWindow: 213,
   promptImageReferences: 56,
   durableSessionShells: 57,

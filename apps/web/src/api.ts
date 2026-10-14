@@ -719,9 +719,6 @@ export function createApiClient(transport: ApiTransport) {
         : ((payload as ReportedSkillsState | null) ?? {}),
     ),
 
-  getSessionEvents: (id: string, after = 0) =>
-    req<SessionEventsResponse>(`/api/sessions/${encodeURIComponent(id)}/events?after=${after}`),
-
   sideChat: (id: string) =>
     req<SideChatResponse>(`/api/sessions/${encodeURIComponent(id)}/side-chat`),
 
