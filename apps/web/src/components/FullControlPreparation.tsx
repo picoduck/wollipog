@@ -5,6 +5,7 @@ import { titleCaseLabel } from "../format.js";
 import { fullControlPreflight, type FullControlPreparation as PreparationInput } from "../full-control-preflight.js";
 import { ChoiceRows, SegmentedControl } from "./ui/ChoiceControls.js";
 import { Notice } from "./Notice.js";
+import { Switch } from "./ui/SettingsRows.js";
 
 /** A future preference only; the selected option cannot authorize a campaign. */
 export function FullControlModeChoice({ mode, onChange, disabled = false, preferenceSupported = false }: {
@@ -144,7 +145,10 @@ function CampaignLaunchForm({ request, selectionValid, disabled, onCreated }: {
     {field("Campaign Concurrency Limit", concurrency, setConcurrency, true)}
     {field("Accepted Follow-Up Limit", followUps, setFollowUps, true)}
     {field("Maximum Authorized Issues", maximumIssues, setMaximumIssues, true)}
-    <label className="field"><span>Related Follow-Ups</span><input type="checkbox" checked={relatedFollowUps} disabled={disabled || busy} onChange={(event) => setRelatedFollowUps(event.target.checked)} /></label>
+    <div className="field"><span id={`${id}-related-follow-ups`}>Related Follow-Ups</span>
+      <Switch labelledBy={`${id}-related-follow-ups`} checked={relatedFollowUps}
+        disabled={disabled || busy} onChange={setRelatedFollowUps} />
+    </div>
     <p className="section-note">Requested effects: implementation questions, eligible one-time repository approvals, exact PR merge and merged branch deletion, bounded follow-up publication and issue scope, completed issue closure, and compatible UI evidence review. Secrets, sign-in, persistent permissions, governance, budgets and guardrails stay Human Required.</p>
     <button type="button" className="btn" disabled={!valid || disabled || busy} onClick={() => void check()}>Check Full Control Preflight</button>
     {fresh && <>

@@ -950,6 +950,13 @@ test("the exact launch preflight preserves configuration and a blocked server ne
       const input = [...fixture.container.querySelectorAll<HTMLLabelElement>("label")].find((node) => node.querySelector("span")?.textContent === label)!.querySelector("input")!;
       await act(async () => fireDomEvent.change(input, { target: { value } }));
     }
+    const related = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="switch"]')].find((node) =>
+      node.getAttribute("aria-labelledby")?.split(/\s+/).map((id) => document.getElementById(id)?.textContent).join(" ") === "Related Follow-Ups")!;
+    assert.ok(related, "the bounded proposal uses the shared switch with its visible accessible name");
+    assert.equal(related.type, "button", "a local scope toggle cannot submit ordinary creation");
+    assert.equal(related.getAttribute("aria-checked"), "false");
+    await act(async () => related.click());
+    assert.equal(related.getAttribute("aria-checked"), "true");
     const check = [...fixture.container.querySelectorAll<HTMLButtonElement>("button")].find((node) => node.textContent === "Check Full Control Preflight")!;
     assert.equal(check.disabled, false);
     await act(async () => check.click());
@@ -957,10 +964,20 @@ test("the exact launch preflight preserves configuration and a blocked server ne
     assert.equal(preflights[0]!.session.config!.permissionMode, "orchestrator");
     assert.equal(preflights[0]!.session.projectId, project.id);
     assert.equal(preflights[0]!.proposal.budgetAuthority.acceptedFollowUps, 0);
+    assert.equal(preflights[0]!.proposal.issueAuthority.relatedFollowUps, true);
     assert.match(fixture.container.textContent ?? "", /Full Control Launch Blocked/);
     const authorize = [...fixture.container.querySelectorAll<HTMLButtonElement>("button")].find((node) => node.textContent === "Authorize and Create Session")!;
     assert.equal(authorize.disabled, true);
     await act(async () => authorize.click());
+    assert.equal(admissions, 0);
+    assert.equal(fixture.requests.length, 0);
+    await act(async () => related.click());
+    assert.equal(related.getAttribute("aria-checked"), "false");
+    assert.equal(authorize.disabled, true, "changing the proposal cannot authorize a stale preflight");
+    await act(async () => check.click());
+    assert.equal(preflights.length, 2);
+    assert.equal(preflights[1]!.proposal.issueAuthority.relatedFollowUps, false);
+    assert.equal(authorize.disabled, true);
     assert.equal(admissions, 0);
     assert.equal(fixture.requests.length, 0);
   } finally { await unmountFixture(fixture); }
