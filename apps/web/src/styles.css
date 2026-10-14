@@ -17200,6 +17200,9 @@ button.review-finding-location {
    their control at the column's right edge and keep it there in a narrow container; select,
    segmented and number controls fill the column and drop under the text below 560px. The container
    is the group's surface (`.settings-group-surface`), never the viewport.
+   A row with one line of title and one of description, or with neither, is exactly --row-h-2
+   (56px, 60 comfortable, 64 on touch), hairline included (#3140): the 8px padding is only the floor
+   that text taller than that keeps, so the token, not the padding, sets the row's height.
    ======================================================================================== */
 .setting-row {
   display: grid;
@@ -17209,7 +17212,7 @@ button.review-finding-location {
   width: 100%;
   min-width: 0;
   min-height: var(--row-h-2);
-  padding: var(--space-3) var(--space-4);
+  padding: var(--space-2) var(--space-4);
   color: var(--text);
   text-align: left;
   transition: background-color var(--dur-fast) var(--ease-out);
@@ -17320,9 +17323,10 @@ button.setting-row { cursor: pointer; }
 .setting-row-switch > .setting-row-saved { margin-right: calc(var(--switch-w) + var(--space-3)); }
 
 /* Below 560px of group surface the control drops under its text at full width; a switch, a link or
-   an action stays trailing beside it. */
+   an action stays trailing beside it. A stacked row is taller than its token anyway, so every row
+   here keeps 12px above and below and a narrow group reads as one rhythm (#3140). */
 @container (max-width: 559px) {
-  .setting-row { grid-template-columns: minmax(0, 1fr); }
+  .setting-row { grid-template-columns: minmax(0, 1fr); padding-block: var(--space-3); }
   .setting-row-trailing { grid-template-columns: minmax(0, 1fr) auto; }
   .setting-row-number .w-xs { width: 100%; }
   .setting-row-value > .setting-row-control { justify-content: flex-start; }
@@ -17366,7 +17370,11 @@ button.setting-row { cursor: pointer; }
 /* In a surface a setting row is a row of it: a hairline between rows (above anything that follows
    another child of a group's surface), and its corners follow the surface's where they meet. */
 .settings-group-surface > * + *,
-.surface > * + :is(.setting-row, .setting-row-frame) { border-top: 1px solid var(--border); }
+.surface > * + .setting-row,
+.surface > * + .setting-row-frame > .setting-row:first-child { border-top: 1px solid var(--border); }
+/* A frame passes its hairline to the row inside it, so the line sits inside the row's --row-h-2
+   and a framed row is exactly as tall as an unframed one (#3140). */
+.settings-group-surface > * + .setting-row-frame { border-top: 0; }
 .surface > .setting-row:first-child,
 .surface > .setting-row-frame:first-child > .setting-row {
   border-top-left-radius: var(--radius-md);

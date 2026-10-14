@@ -1795,7 +1795,14 @@ Description, one line of --text-dim 12px.
 
 One grid for every setting row (`.setting-row`, `SettingRow` in `ui/SettingsRows.tsx`, #2947):
 `grid-template-columns: minmax(0, 1fr) var(--setting-control-w); gap: 8px 24px; min-height:
-var(--row-h-2); padding: 12px 16px`, with `--setting-control-w` declared once at 240px. There is no
+var(--row-h-2); padding: 8px 16px`, with `--setting-control-w` declared once at 240px. **Height
+(#3140):** a row with one line of title and one line of description is exactly `--row-h-2`: 56px at
+the default density, 60px comfortable and 64px on touch, including the hairline above it; so is a row
+with no description, whose 32px control (44px on touch) fits the same height. The token sets
+the height; the 8px padding is only the floor that a second line of description, or a reason under
+a control, grows the row from (8 + 20 + 2 + 16 + 8 = 54, under the token). Under the 560px container
+(Narrow, below) every row keeps 12px above and below, because a stacked row is taller than its token
+anyway. A list of one-line setting rows is a whole multiple of `--row-h-2`. There is no
 leading cell: the row is its text cell (`.setting-row-text`) and its control column
 (`.setting-row-control`), and an optional 16px icon sits inside the text cell, so every title in a
 group starts at one left edge. Title `--type-body-strong`; description `--type-small` in `--text-dim`
@@ -1844,7 +1851,8 @@ Agent Defaults, #3024). Rows
 inside a surface never turn into cards: hover is a `--bg-elev-2` fill without a border, only on rows
 that are one link or button, on fine pointers. A switch row with `saved` or `failure` is one framed
 child of the surface (`.setting-row-frame`), its status region inside the frame, and so is any other
-row with something to say under it about its last change. Every child of a surface is a row or such a
+row with something to say under it about its last change. The frame passes its hairline to the row
+inside it, so a framed row is exactly as tall as an unframed one. Every child of a surface is a row or such a
 frame: a sentence about the whole group is its description or its foot, never a paragraph between
 rows. A Settings section with one group leaves out the group's title, because the section's own
 heading already names it; a section with several heads each one. A section none of whose settings

@@ -773,7 +773,7 @@ test("Notifications says where alerts come from when none can work, and how to a
 test("both Experimental rows are one line at 1440px", async ({ page }) => {
   // The section description says once what turning a feature off does, so each row's own
   // description is short enough for one line (#3022): one line of title and one of description,
-  // the shortest a described row on the shared grid can be (§8.2).
+  // which is exactly --row-h-2 on the shared grid (§8.2, #3140).
   await page.setViewportSize({ width: 1440, height: 900 });
   await useHarness(page, "dark", { section: "experimental" });
   const rows = page.locator(".settings-panel .setting-row");
@@ -783,9 +783,9 @@ test("both Experimental rows are one line at 1440px", async ({ page }) => {
       const element = row.querySelector(selector)!;
       return element.getBoundingClientRect().height / Number.parseFloat(getComputedStyle(element).lineHeight);
     };
-    return { title: lines(".setting-row-title"), description: lines(".setting-row-desc") };
+    return { title: lines(".setting-row-title"), description: lines(".setting-row-desc"), height: row.getBoundingClientRect().height };
   }));
-  for (const row of measured) expect(row).toEqual({ title: 1, description: 1 });
+  for (const row of measured) expect(row).toEqual({ title: 1, description: 1, height: 56 });
 });
 
 /** Every section renders, and each one names itself. A route that 404s inside the app is worse
@@ -2205,6 +2205,80 @@ test.describe("the setting-row grid", () => {
     expect(listBottom.y + listBottom.height, "the list reaches over the next group, or this proves nothing")
       .toBeGreaterThan(nextSurface.y);
     expect(reach, "every option is on top and can be clicked").toEqual(reach.map(() => true));
+  });
+
+  /**
+   * Every row on the page with one line of title, at most one line of description and a control no
+   * taller than --control-h, with its height and the --row-h-2 it should equal. Rows with more to
+   * show (a second description line, a reason under the control) grow past the token by design and
+   * are left out, but counted, so a layout that broke every row into two lines cannot pass vacuously.
+   * The height is the surface's child: a row's frame (a switch with Saved or Try Again, Tailnet
+   * Access) when it has one, because that is what a list of rows adds up.
+   */
+  const oneLineRows = (page: Page) => page.evaluate(() => {
+    const linesOf = (element: Element) =>
+      Math.round(element.getBoundingClientRect().height / Number.parseFloat(getComputedStyle(element).lineHeight));
+    const rows = [...document.querySelectorAll<HTMLElement>(".setting-row")].filter((row) => row.checkVisibility());
+    const measured = rows.map((row) => {
+      const root = getComputedStyle(row);
+      const descriptions = [...row.querySelectorAll(".setting-row-desc")]
+        .filter((element) => element.checkVisibility({ visibilityProperty: true }));
+      const control = row.querySelector(":scope > .setting-row-control");
+      const frame = row.parentElement?.classList.contains("setting-row-frame") ? row.parentElement : null;
+      return {
+        title: row.querySelector(".setting-row-title")?.textContent ?? "",
+        described: descriptions.length > 0,
+        framedAfterSibling: Boolean(frame?.previousElementSibling),
+        oneLine: linesOf(row.querySelector(".setting-row-title")!) === 1
+          && descriptions.every((element) => linesOf(element) === 1)
+          && (control?.getBoundingClientRect().height ?? 0) <= Number.parseFloat(root.getPropertyValue("--control-h")),
+        height: (frame ?? row).getBoundingClientRect().height,
+        token: Number.parseFloat(root.getPropertyValue("--row-h-2")),
+      };
+    });
+    return { total: measured.length, rows: measured.filter((row) => row.oneLine) };
+  });
+
+  test("at 1440px a row with one line of title and one of description is exactly --row-h-2, at either density (#3140)", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    for (const [density, height] of [["compact", 56], ["comfortable", 60]] as const) {
+      let described = 0;
+      let framed = 0;
+      // Network with Tailnet Access unread adds a framed row after another row of its group.
+      for (const id of [...SETTINGS_SECTIONS.map((section) => section.id), "kinds", "framed"] as const) {
+        if (id === "kinds") await useKinds(page, "dark");
+        else if (id === "framed") await useHarness(page, "dark", { section: "network", tailnet: "read-failed" });
+        else await useHarness(page, "dark", { section: id });
+        if (density === "comfortable") await page.evaluate(() => { document.documentElement.dataset.density = "comfortable"; });
+        const { total, rows } = await oneLineRows(page);
+        expect(total, `${id}: rows were measured`).toBeGreaterThan(0);
+        for (const row of rows) {
+          expect(row.token, `--row-h-2 is ${height}px at ${density} density`).toBe(height);
+          // A hairline above the row is inside its height, so a list of these rows is a whole
+          // multiple of the token, the same as every other two-line row (§5.2).
+          expect(row.height, `${id} › "${row.title}" is --row-h-2 tall at ${density} density`).toBe(height);
+        }
+        described += rows.filter((row) => row.described).length;
+        framed += rows.filter((row) => row.framedAfterSibling).length;
+      }
+      expect(described, "the described one-line rows across Settings and the gallery were measured").toBeGreaterThan(40);
+      // Its hairline is the frame's to pass on: on the frame itself it sat outside the row's height.
+      expect(framed, "a framed row after another child of its surface was measured").toBeGreaterThan(0);
+    }
+  });
+
+  test.describe("with a coarse pointer on a wide group", () => {
+    test.use({ viewport: { width: 1024, height: 768 }, hasTouch: true, isMobile: true });
+
+    test("a row with one line of title and one of description is exactly the 64px --row-h-2 (#3140)", async ({ page }) => {
+      await useKinds(page, "dark");
+      expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
+      expect((await group(page, "Row Kinds").locator(".settings-group-surface").boundingBox())!.width,
+        "the group is wide enough to keep its controls beside the text").toBeGreaterThanOrEqual(560);
+      const { rows } = await oneLineRows(page);
+      expect(rows.filter((row) => row.described).length).toBeGreaterThan(5);
+      for (const row of rows) expect(row.height, `"${row.title}" is --row-h-2 tall on touch`).toBe(64);
+    });
   });
 
   test.describe("with a coarse pointer", () => {

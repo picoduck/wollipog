@@ -124,6 +124,9 @@ test("the rhythm is driven by tokens, not by literals", () => {
   // A setting row (§8.2) is at least --row-h-2 tall, which density moves.
   const row = css.slice(css.indexOf("\n.setting-row {"), css.indexOf(".setting-row-static {"));
   assert.match(row, /min-height: var\(--row-h-2\)/);
+  // And its padding leaves the token to set that height: 8 + 20 + 2 + 16 + 8 is under 56, so a
+  // title over one line of description is exactly --row-h-2 at every density (#3140).
+  assert.match(row, /padding: var\(--space-2\) var\(--space-4\)/);
   // A two-line Sessions row is --row-h-2 tall, which density moves, and pads only its sides; the
   // phone's three-line card adds --inbox-row-pad-y above and below (#2209).
   const inbox = css.slice(css.indexOf("\n.inbox-row {"), css.indexOf(".inbox-row:hover"));

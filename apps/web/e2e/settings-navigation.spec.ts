@@ -182,13 +182,14 @@ test("in forced colors the current section keeps a visible bar", async ({ page }
 });
 
 test("at 1440px the section nav stays in view after Behavior scrolls 600px", async ({ page }) => {
-  await page.setViewportSize({ width: 1440, height: 600 });
+  await page.setViewportSize({ width: 1440, height: 560 });
   await page.goto(`${frame("/settings/behavior")}&defaults=agent`);
   const scroller = page.locator(".main-body");
   const nav = page.getByRole("navigation", { name: "Settings Sections" });
   await expect(nav.locator('a[aria-current="page"]')).toHaveText("Behavior");
   // Behavior's agent rows, listed without expanding (#3024), and About Artifact Uploads, open, make
-  // it tall enough to scroll 600px in a 600px window.
+  // it tall enough to scroll 600px in a 560px window. One-line rows are 56px (#3140), so a 600px
+  // window left the section 8px short.
   await expect(page.getByRole("button", { name: /^Edit… Codex App Server/ })).toBeVisible();
   await page.getByText("About Artifact Uploads", { exact: true }).click();
   await expect.poll(() => scroller.evaluate((element) => element.scrollHeight - element.clientHeight)).toBeGreaterThan(600);
@@ -199,7 +200,7 @@ test("at 1440px the section nav stays in view after Behavior scrolls 600px", asy
   expect(scrolled, "Behavior is tall enough to scroll 600px here").toBe(600);
   await expect.poll(() => nav.evaluate((element) => Math.round(element.getBoundingClientRect().top))).toBeGreaterThanOrEqual(0);
   const top = await nav.evaluate((element) => element.getBoundingClientRect().top);
-  expect(top, "the nav's top edge is inside the viewport").toBeLessThan(600);
+  expect(top, "the nav's top edge is inside the viewport").toBeLessThan(560);
   await expect(nav.locator('a[aria-current="page"]')).toBeInViewport();
 });
 
