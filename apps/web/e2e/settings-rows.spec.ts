@@ -32,6 +32,50 @@ type Theme = (typeof THEMES)[number];
  */
 test.use({ reducedMotion: "reduce" });
 
+/**
+ * What each test's page did, for a harness that never set its theme (#3216).
+ *
+ * On Windows a test occasionally found `<html>` without `data-theme` for the whole timeout, which
+ * means the harness module never ran, and the bare assertion could not say why. Navigations,
+ * failed requests, error responses, page errors and console output are recorded from the start of
+ * every test so `expectTheme` can put them in its failure.
+ */
+const pageEvents = new WeakMap<Page, string[]>();
+
+test.beforeEach(({ page }) => {
+  const started = Date.now();
+  const events: string[] = [];
+  const record = (event: string) => events.push(`+${Date.now() - started}ms ${event}`);
+  pageEvents.set(page, events);
+  page.on("framenavigated", (frame) => {
+    if (frame === page.mainFrame()) record(`navigated to ${frame.url()}`);
+  });
+  page.on("console", (message) => record(`console.${message.type()}: ${message.text()}`));
+  page.on("pageerror", (error) => record(`page error: ${error.stack ?? error.message}`));
+  page.on("requestfailed", (request) => record(`request failed (${request.failure()?.errorText}): ${request.url()}`));
+  page.on("response", (response) => {
+    if (response.status() >= 400) record(`HTTP ${response.status()}: ${response.url()}`);
+  });
+});
+
+/** Asserts the harness applied `theme`; when it did not, the failure carries what the page did. */
+async function expectTheme(page: Page, theme: Theme) {
+  try {
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  } catch (error) {
+    const state = await page.evaluate(() => ({
+      url: location.href,
+      readyState: document.readyState,
+      rootChildren: document.getElementById("root")?.childElementCount ?? null,
+    })).catch((reason: unknown) => `unreadable: ${reason}`);
+    const events = pageEvents.get(page) ?? [];
+    throw new Error(
+      `${(error as Error).message}\n\nThe harness never set data-theme="${theme}". The document: ${JSON.stringify(state)}\n` +
+        `What the page did since the test started:\n${events.join("\n") || "(nothing recorded)"}`,
+    );
+  }
+}
+
 interface HarnessOptions {
   state?: "rest" | "busy-on" | "busy-off" | "disabled";
   topology?: "full" | "minimal";
@@ -61,7 +105,7 @@ async function useHarness(
   await page.goto(
     `/settings-rows-e2e.html?theme=${theme}&state=${state}&topology=${topology}&section=${section}&copy=${copy}&defaults=${defaults}&alerts=${alerts}&instances=${instances}${tailnet ? `&tailnet=${tailnet}` : ""}`,
   );
-  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  await expectTheme(page, theme);
   // The SECTION's own heading, not a fixed control: asserting a radio here would silently pass on
   // the wrong page for five of the six sections, since an absent locator is simply never visible.
   await expect(page.locator("#settings-panel-heading"))
@@ -81,7 +125,7 @@ async function useRow(page: Page, theme: Theme, key: RowKey, options: Omit<Harne
  */
 async function useDisabledNavRow(page: Page, theme: Theme) {
   await page.goto(`/settings-rows-e2e.html?theme=${theme}&view=kinds`);
-  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  await expectTheme(page, theme);
   return page.getByRole("button", { name: /^Manage Instances/ });
 }
 
@@ -2012,7 +2056,7 @@ test.describe("the appearance controls", () => {
 test.describe("the setting-row grid", () => {
   async function useKinds(page: Page, theme: Theme, groupWidth?: number) {
     await page.goto(`/settings-rows-e2e.html?theme=${theme}&view=kinds${groupWidth ? `&group-width=${groupWidth}` : ""}`);
-    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    await expectTheme(page, theme);
     await expect(page.locator(".settings-group").first()).toBeVisible();
   }
   const group = (page: Page, title: string) =>

@@ -84,6 +84,20 @@ test("a failed comparison regenerates only the changed win32 images and still fa
   }
 });
 
+test("a failed comparison keeps its Playwright traces from before regeneration empties them", () => {
+  const compare = job("compare");
+  const results = step(compare, "Upload the win32 Comparison Test Results");
+  assert.match(results, /^        if: failure\(\) && steps\.compare\.outcome == 'failure'$/m,
+    "a run that only flaked also fails the comparison step, and its traces are the diagnosis (#3216)");
+  assert.match(results, /^        uses: actions\/upload-artifact@[0-9a-f]{40} # v\S+$/m);
+  assert.match(results, /^          name: settings-rows-win32-test-results$/m);
+  assert.match(results, /^          path: test-results$/m);
+  assert.match(results, /^          overwrite: true$/m);
+  assert.doesNotMatch(results, /continue-on-error/);
+  assert.ok(compare.indexOf(results) < compare.indexOf("      - name: Regenerate the Changed win32 Baselines\n"),
+    "the regeneration's own Playwright run deletes test-results, so the upload must come first");
+});
+
 /** Runs the scope step's script in `cwd` and returns what it wrote to GITHUB_OUTPUT. */
 function runScope(cwd, env) {
   const script = step(job("scope"), "Compare the Diff Against the Settings-Rows Paths")
