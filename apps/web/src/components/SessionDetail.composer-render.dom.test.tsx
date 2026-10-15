@@ -181,6 +181,12 @@ async function mount(client: Partial<ApiClient> = {}) {
   const apiClient = {
     ...api,
     session: () => new Promise<never>(() => {}),
+    // Git facts are independent of typing too; do not let a real request settle mid-count.
+    git: async () => ({ status: { branch: "main", files: [], hasChanges: false, ahead: 0, remoteUrl: null } }),
+    gitSummary: async () => ({ summary: {
+      branch: "main", hasChanges: false, ahead: 0, behind: 0, addedLines: 0, deletedLines: 0,
+      remoteUrl: null, pr: null, checks: null,
+    } }),
     // History recovery must finish in the fixture. Leaving the real API here lets its late
     // rejection change anchorRecoveryPending while the typing probes are counting (#3202).
     getSessionEventTailPage: async (sessionId: string) => ({
