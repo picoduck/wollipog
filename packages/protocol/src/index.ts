@@ -2696,6 +2696,16 @@ export interface OrchestratorCampaignProjection {
    * Machines uses for it, or `null` where none can run it (#3247). Pass that `agentId` to
    * `create_session`; the policy's own `childHarness.agentId` is not a row on any Machine. */
   childHarnessAgents?: OrchestratorChildHarnessAgent[];
+  /** Present when the campaign fixes its Child Model or Child Effort: whether each of the owner's
+   * online Machines can run children with that combination (#3248). Do not start a child on a
+   * Machine marked unsupported; creation would refuse it. */
+  childModelMachines?: OrchestratorChildModelMachine[];
+}
+
+export interface OrchestratorChildModelMachine {
+  runnerId: string;
+  machineName: string;
+  supported: boolean;
 }
 
 export interface OrchestratorChildHarnessAgent {
@@ -2792,6 +2802,63 @@ export interface OrchestratorSettingsCapabilities {
   compatibleInstallations: number;
   status: "available" | "unavailable";
   reason?: string;
+  /** Present while any of Child Harness, Model or Effort is fixed: how many connected Machines can
+   * run children with the saved combination, and the names of those that can't (#3248). */
+  machineSupport?: { supported: number; total: number; unsupportedMachines: string[] };
+  /** Present when the saved Child Model resolves to different models on different Machines. */
+  childModelDrift?: ModelResolutionDrift;
+}
+
+/** One model id that resolves to different models on different Machines, as an alias such as
+ * `opus` does when the Machines run different harness versions (#3248). */
+export interface ModelResolutionDrift {
+  modelId: string;
+  /** What the id resolves to on each Machine offering it, by the display name that Machine reports. */
+  machines: Array<{ machineName: string; displayName: string }>;
+  /** Other ids naming one of those resolutions exactly; saving one keeps every child on one model. */
+  pinned: Array<{ modelId: string; displayName: string }>;
+}
+
+/**
+ * Whether a model id means different models on different Machines. Machines report what an id
+ * resolves to through its display name, so differing display names for the same id are the signal.
+ */
+export function modelResolutionDrift(
+  installations: ReadonlyArray<{ machineName: string; models: readonly AgentModel[] }>,
+  modelId: string,
+): ModelResolutionDrift | null {
+  const machines: ModelResolutionDrift["machines"] = [];
+  for (const installation of installations) {
+    const model = installation.models.find((candidate) => candidate.id === modelId);
+    if (!model) continue;
+    const displayName = model.displayName ?? model.id;
+    if (!machines.some((entry) => entry.machineName === installation.machineName && entry.displayName === displayName)) {
+      machines.push({ machineName: installation.machineName, displayName });
+    }
+  }
+  const resolutions = new Set(machines.map((entry) => entry.displayName));
+  if (resolutions.size < 2) return null;
+  // A candidate is pinned only if it resolves to one model wherever it appears; another alias that
+  // also drifts would leave children on different models.
+  const candidates = new Map<string, Set<string>>();
+  for (const installation of installations) {
+    for (const model of installation.models) {
+      if (model.id === modelId || model.hidden) continue;
+      candidates.set(model.id, (candidates.get(model.id) ?? new Set()).add(model.displayName ?? model.id));
+    }
+  }
+  const pinned = new Map<string, string>();
+  for (const [id, names] of candidates) {
+    const [displayName] = [...names];
+    if (names.size === 1 && resolutions.has(displayName!)) pinned.set(id, displayName!);
+  }
+  const order = (left: string, right: string) => left < right ? -1 : left > right ? 1 : 0;
+  return {
+    modelId,
+    machines: machines.sort((left, right) => order(left.machineName, right.machineName) || order(left.displayName, right.displayName)),
+    pinned: [...pinned].map(([id, displayName]) => ({ modelId: id, displayName }))
+      .sort((left, right) => order(left.displayName, right.displayName) || order(left.modelId, right.modelId)),
+  };
 }
 
 export interface OrchestratorHarnessCapability extends AgentHarnessIdentity {

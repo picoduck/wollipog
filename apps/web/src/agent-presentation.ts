@@ -3,8 +3,14 @@ import {
   type AgentDefinition,
   type AgentDriverKind,
   type AgentHarnessIdentity,
+  type ModelResolutionDrift,
   type OrchestratorHarnessCapability,
 } from "@wollipog/protocol";
+
+/** "A", "A and B", or "A, B and C". */
+function listText(items: readonly string[]): string {
+  return items.length <= 1 ? items[0] ?? "" : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
 
 export function driverKindLabel(driver: AgentDriverKind, registry = false): string {
   if (driver === "codex-app-server") return "Codex App Server";
@@ -46,6 +52,22 @@ export function agentHarnessMachinesDescription(
 ): string {
   const machines = harness.machines ?? harness.installations;
   return `Available on ${machines} connected machine${machines === 1 ? "" : "s"}.`;
+}
+
+/** "“opus” is Opus 5.5 on Laptop and Opus 5 on Desktop." — Machines grouped by what the id resolves to. */
+export function modelDriftText(drift: ModelResolutionDrift): string {
+  const byResolution = new Map<string, string[]>();
+  for (const { machineName, displayName } of drift.machines) {
+    byResolution.set(displayName, [...(byResolution.get(displayName) ?? []), machineName]);
+  }
+  const clauses = [...byResolution].map(([displayName, machines]) => `${displayName} on ${listText(machines)}`);
+  return `“${drift.modelId}” is ${listText(clauses)}.`;
+}
+
+/** One pinned choice per resolution, so two ids for the same model never show as two equal buttons. */
+export function pinnedModelChoices(drift: ModelResolutionDrift): ModelResolutionDrift["pinned"] {
+  const seen = new Set<string>();
+  return drift.pinned.filter((choice) => !seen.has(choice.displayName) && Boolean(seen.add(choice.displayName)));
 }
 
 /** Normalize only names emitted by earlier Wollipog onboarding, preserving custom agent names. */

@@ -4,6 +4,7 @@ import Fastify from "fastify";
 import {
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   PROTOCOL_VERSION,
+  modelResolutionDrift,
   resolveAgentHarnessRow,
   type AgentDefinition,
   type OrchestratorDefaults,
@@ -15,6 +16,7 @@ import {
   OrchestratorSettings,
   childHarnessAdmits,
   childHarnessAgents,
+  childModelMachines,
   parseOrchestratorDefaults,
   parseOrchestratorOverrides,
   resolveOrchestratorCampaignPolicy,
@@ -267,6 +269,158 @@ test("a Machine with several rows of one harness resolves them deterministically
   rows[1]!.harnessSelectionBlocked = false;
   assert.equal(resolveAgentHarnessRow(rows, identity)?.id, "alpha", "an unavailable row is never chosen");
   assert.equal(resolveAgentHarnessRow(rows, { ...identity, context: { kind: "wsl", distro: "Ubuntu" } }), undefined);
+});
+
+function claudeMachine(runnerId: string, models: Array<{ id: string; displayName: string }>): RunnerMetadata {
+  const metadata = runner(runnerId, "unused", ["high"]);
+  const agent = claudeAgent("claude-code", "claude-code");
+  agent.capabilities!.models = models.map((model) => ({ ...model, efforts: ["high"] }));
+  metadata.agents = [agent];
+  return metadata;
+}
+
+test("Settings name the Machines that can't run the saved Child Model, and only those (#3248)", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    const now = Date.now();
+    db.registerRunner(claudeMachine("laptop", [{ id: "opus", displayName: "Opus 5.5" }, { id: "fable", displayName: "Fable" }]), now, PROTOCOL_VERSION);
+    db.registerRunner(claudeMachine("desktop", [{ id: "opus", displayName: "Opus 5.5" }]), now + 1, PROTOCOL_VERSION);
+    const settings = new OrchestratorSettings(db);
+    const principal = human(db);
+    const harness = { agentId: "claude-code", driver: "claude-code" as const, context: { kind: "native" as const } };
+
+    const fable = settings.update(principal, { defaults: defaults({ childHarness: harness, childModel: "fable" }) }, now + 2);
+    assert.deepEqual(fable.capabilities.machineSupport, { supported: 1, total: 2, unsupportedMachines: ["desktop"] });
+    assert.equal(fable.capabilities.status, "available", "one Machine is enough to save");
+
+    const opus = settings.update(principal, { defaults: defaults({ childHarness: harness, childModel: "opus" }) }, now + 3);
+    assert.deepEqual(opus.capabilities.machineSupport, { supported: 2, total: 2, unsupportedMachines: [] });
+    assert.equal(opus.capabilities.childModelDrift, undefined, "identical catalogs report no drift");
+
+    const automatic = settings.update(principal, { defaults: defaults() }, now + 4);
+    assert.equal(automatic.capabilities.machineSupport, undefined, "nothing to report while everything is Automatic");
+
+    const policy = resolveOrchestratorCampaignPolicy(fable.defaults, "user_default");
+    assert.deepEqual(childModelMachines(policy, db.listRunnersForPrincipal(principal)), [
+      { runnerId: "desktop", machineName: "desktop", supported: false },
+      { runnerId: "laptop", machineName: "laptop", supported: true },
+    ]);
+    const laptop = db.listRunnersForPrincipal(principal).filter((machine) => machine.runnerId === "laptop");
+    laptop[0]!.agents[0]!.installation = { id: "system", path: "/usr/bin/claude", via: "path", selection: "other" };
+    assert.deepEqual(childModelMachines(policy, laptop)?.map((machine) => machine.supported), [false],
+      "a row the Machine's installation choice excludes cannot run children");
+    assert.equal(childModelMachines(resolveOrchestratorCampaignPolicy(defaults({ childHarness: harness }), "user_default"),
+      db.listRunnersForPrincipal(principal)), undefined, "an Automatic model and effort list no Machines");
+  } finally {
+    db.close();
+  }
+});
+
+test("a row the Machine's installation choice excludes never counts toward Machine support (#3248)", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    const now = Date.now();
+    const laptop = claudeMachine("laptop", [{ id: "fable", displayName: "Fable" }]);
+    const other = claudeAgent("claude-local", "claude-code");
+    agentWithInstallation(laptop.agents[0]!, "system");
+    agentWithInstallation(other, "user-local");
+    laptop.agents.push(other);
+    db.registerRunner(laptop, now, PROTOCOL_VERSION);
+    db.registerRunner(claudeMachine("desktop", [{ id: "fable", displayName: "Fable" }]), now + 1, PROTOCOL_VERSION);
+    const settings = new OrchestratorSettings(db);
+    const principal = human(db);
+    const fixed = defaults({ childModel: "fable" });
+    assert.deepEqual(settings.update(principal, { defaults: fixed }, now + 2).capabilities.machineSupport?.unsupportedMachines, []);
+    // Choosing the user-local installation, whose catalog lacks Fable, excludes the system row.
+    assert.ok(db.selectHarnessInstallation("laptop", "claude-local", "user-local"));
+    assert.deepEqual(settings.view(principal).capabilities.machineSupport, { supported: 1, total: 2, unsupportedMachines: ["laptop"] });
+  } finally {
+    db.close();
+  }
+});
+
+test("a connected Machine with no usable row counts as unable to run children (#3248 review)", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    const now = Date.now();
+    db.registerRunner(claudeMachine("laptop", [{ id: "fable", displayName: "Fable" }]), now, PROTOCOL_VERSION);
+    const empty = claudeMachine("desktop", []);
+    empty.agents = [];
+    db.registerRunner(empty, now + 1, PROTOCOL_VERSION);
+    const settings = new OrchestratorSettings(db);
+    assert.deepEqual(settings.update(human(db), { defaults: defaults({ childModel: "fable" }) }, now + 2).capabilities.machineSupport,
+      { supported: 1, total: 2, unsupportedMachines: ["desktop"] });
+  } finally {
+    db.close();
+  }
+});
+
+test("an excluded installation's catalog never produces model drift (#3248 review)", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    const now = Date.now();
+    const laptop = claudeMachine("laptop", [{ id: "opus", displayName: "Opus 5.5" }]);
+    const stale = claudeAgent("claude-local", "claude-code");
+    stale.capabilities!.models = [{ id: "opus", displayName: "Opus 5", efforts: ["high"] }];
+    laptop.agents[0]!.installation = { id: "system", path: "/opt/system/claude", via: "path" };
+    stale.installation = { id: "user-local", path: "/opt/user-local/claude", via: "path" };
+    laptop.agents.push(stale);
+    db.registerRunner(laptop, now, PROTOCOL_VERSION);
+    db.registerRunner(claudeMachine("desktop", [{ id: "opus", displayName: "Opus 5.5" }]), now + 1, PROTOCOL_VERSION);
+    assert.ok(db.selectHarnessInstallation("laptop", "claude-code", "system"));
+    const view = new OrchestratorSettings(db).update(human(db), { defaults: defaults({ childModel: "opus" }) }, now + 2);
+    assert.equal(view.capabilities.childModelDrift, undefined);
+  } finally {
+    db.close();
+  }
+});
+
+function agentWithInstallation(agent: AgentDefinition, id: string): void {
+  agent.installation = { id, path: `/opt/${id}/claude`, via: "path" };
+  if (id === "user-local") agent.capabilities!.models = [{ id: "opus", displayName: "Opus", efforts: ["high"] }];
+}
+
+test("Settings warn when the saved Child Model resolves to different models on different Machines (#3248)", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    const now = Date.now();
+    db.registerRunner(claudeMachine("laptop", [
+      { id: "opus", displayName: "Opus 5.5" }, { id: "claude-opus-5-5", displayName: "Opus 5.5" },
+      { id: "claude-opus-5", displayName: "Opus 5" },
+    ]), now, PROTOCOL_VERSION);
+    db.registerRunner(claudeMachine("desktop", [
+      { id: "opus", displayName: "Opus 5" }, { id: "claude-opus-5", displayName: "Opus 5" },
+    ]), now + 1, PROTOCOL_VERSION);
+    const settings = new OrchestratorSettings(db);
+    const view = settings.update(human(db), { defaults: defaults({
+      childHarness: { agentId: "claude-code", driver: "claude-code", context: { kind: "native" } }, childModel: "opus",
+    }) }, now + 2);
+    assert.deepEqual(view.capabilities.childModelDrift, {
+      modelId: "opus",
+      machines: [{ machineName: "desktop", displayName: "Opus 5" }, { machineName: "laptop", displayName: "Opus 5.5" }],
+      pinned: [{ modelId: "claude-opus-5", displayName: "Opus 5" }, { modelId: "claude-opus-5-5", displayName: "Opus 5.5" }],
+    });
+  } finally {
+    db.close();
+  }
+});
+
+test("model drift needs two resolutions of one id and offers only visible ids naming one of them", () => {
+  const laptop = { machineName: "laptop", models: [{ id: "opus", displayName: "Opus 5.5" }, { id: "x", displayName: "Opus 5.5", hidden: true }] };
+  assert.equal(modelResolutionDrift([laptop, { ...laptop, machineName: "desktop" }], "opus"), null);
+  assert.equal(modelResolutionDrift([laptop], "missing"), null);
+  const drift = modelResolutionDrift([laptop, { machineName: "desktop", models: [{ id: "opus" }] }], "opus");
+  assert.deepEqual(drift?.machines.map((entry) => entry.displayName), ["opus", "Opus 5.5"],
+    "a Machine without a display name reports the id itself");
+  assert.deepEqual(drift?.pinned, [], "a hidden model is never offered");
+  const aliases = modelResolutionDrift([
+    { machineName: "laptop", models: [{ id: "opus", displayName: "Opus 5.5" }, { id: "latest-opus", displayName: "Opus 5.5" },
+      { id: "claude-opus-5", displayName: "Opus 5" }] },
+    { machineName: "desktop", models: [{ id: "opus", displayName: "Opus 5" }, { id: "latest-opus", displayName: "Opus 5" },
+      { id: "claude-opus-5", displayName: "Opus 5" }] },
+  ], "opus");
+  assert.deepEqual(aliases?.pinned, [{ modelId: "claude-opus-5", displayName: "Opus 5" }],
+    "another alias that also drifts is not a pinned choice");
 });
 
 test("Orchestrator child harnesses exclude discovery's restart-only Codex exec row (#3224)", () => {
