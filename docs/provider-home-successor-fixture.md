@@ -63,6 +63,27 @@ executions of the exact focused election test. The harness verifies each test ac
 that both load workers advanced during every run, and prints platform, Node, CPU, and phase data.
 Cancellation allows the current bounded fixture to finish cleanup before stopping the load workers.
 
+Each focused invocation creates its own fixture parent before launching Node and passes it through
+`WOLLIPOG_SUCCESSOR_FIXTURE_PARENT`. The real election puts its HOME, helper staging, and advisory
+`contenders.json` there. Ordinary fixture cleanup removes that root after observing both contenders
+close, and the load harness removes the now-empty parent.
+
+An outer timeout can kill the test runner before it cleans up detached POSIX contenders. Runner
+closure does not establish their closure. If the parent is nonempty, or runner closure cannot be
+observed within five seconds, validation fails and reports the retained absolute parent path,
+possibly live detached contenders, and unproved cleanup. The parent remains separate from the load
+workers' directory, so stopping the workers cannot erase fixture evidence. A successful runner exit
+with retained fixture evidence fails validation too. This deliberately uses the explicit-retention
+fallback: the outer harness does not automatically reclaim escaped detached contenders, scan global
+temporary directories, or signal PIDs recovered from files. Such PIDs are advisory historical
+evidence and may have been reused; inspect actual process identity before any manual recovery.
+
+Primary validation failures, tree-termination failures, close-wait failures, worker cleanup, and
+directory-removal failures are preserved together rather than replacing one another in `finally`.
+The lifecycle regression exercises a real outer timeout with a detached child, verifies retained
+evidence and an unrelated process/file, and injects termination, close-wait, and removal failures.
+Its synthetic detached child exits itself after eight seconds; the tests never signal stored PIDs.
+
 For native Windows evidence, dispatch the Platform Isolation workflow on the tested branch with
 `successor_election_load=true`. Both Windows images run the five focused loaded tests alongside the
 complete normal platform job. Linux validation does not substitute for these Windows results.
