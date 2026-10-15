@@ -10,6 +10,8 @@ import { instanceViewPath } from "./instance-navigation.js";
 import type { InstanceRuntime } from "./instance-runtime.js";
 import type { InstanceRegistrySnapshot } from "./desktop-instances.js";
 import { createCloseGuardLinks } from "./desktop-close-guard.js";
+import { pushPositionedEntry } from "./history-position.js";
+import { registerLeaveGuard } from "./leave-guard.js";
 
 const domWindow = new Window({ url: "https://tauri.localhost/" });
 for (const [name, value] of Object.entries({
@@ -731,6 +733,95 @@ test("an instance's old Keyboard address opens Behavior with its focus target, a
     assert.equal(domWindow.location.pathname, instanceViewPath(profiles[1]!.id, behavior));
     assert.deepEqual(manager.navigation!.current(), keyboard);
   } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+    domWindow.history.replaceState(null, "", "/");
+  }
+});
+
+test("Back to another instance's entry asks the open instance's editor before closing it (#3218)", async () => {
+  let manager!: InstanceManager;
+  const closes: string[] = [];
+  const desktop = {
+    isTauri: () => true,
+    async invoke<T>(command: string, args?: Record<string, unknown> | Uint8Array): Promise<T> {
+      if (command === "instance_registry") return registry("local") as T;
+      if (command === "set_active_instance") return registry((args as Record<string, string>).profileId) as T;
+      throw new Error(`unexpected ${command}`);
+    },
+    channel<T>() { return { onmessage: (_event: T) => {} }; },
+  };
+  function Probe() {
+    manager = useInstances();
+    return null;
+  }
+  const remote = profiles[1]!.id;
+  const remotePath = instanceViewPath(remote, { name: "runs" });
+  const localPath = instanceViewPath("local", { name: "settings", section: "orchestrator" });
+  // Two recorded entries: the remote instance's, then the local one's editor.
+  domWindow.history.replaceState({ wollipogEntry: { run: "run-3218", index: 0 } }, "", remotePath);
+  pushPositionedEntry(domWindow.history, localPath);
+  const local = domWindow.history.state;
+  const moves: number[] = [];
+  const go = domWindow.history.go;
+  domWindow.history.go = (delta?: number) => { moves.push(delta ?? 0); };
+  // A move the browser made: the entry it lands on becomes current, then `popstate` fires.
+  const land = async (state: unknown, path: string) => {
+    domWindow.history.replaceState(state, "", path);
+    await act(async () => {
+      domWindow.dispatchEvent(new domWindow.PopStateEvent("popstate"));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  };
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <InstanceProvider
+        desktop={desktop}
+        createLocalRuntime={() => runtime("local", closes)}
+        createRemoteRuntime={async (profileId) => runtime(profileId, closes)}
+      >
+        <Probe />
+      </InstanceProvider>,
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  const asked: Array<() => void> = [];
+  const release = registerLeaveGuard((leave) => asked.push(leave));
+  let unlisten = () => {};
+  try {
+    assert.equal(manager.phase, "ready");
+    // What the open instance's store does when it mounts: read the address, then follow Back and
+    // Forward within the instance, which is where the return to the editor's entry arrives.
+    manager.navigation!.current();
+    const seen: unknown[] = [];
+    unlisten = manager.navigation!.listen((view) => seen.push(view));
+
+    await land({ wollipogEntry: { run: "run-3218", index: 0 } }, remotePath);
+    assert.equal(manager.activeProfile.id, "local", "the open instance stays while its editor asks");
+    assert.deepEqual(closes, []);
+    assert.deepEqual(moves, [1], "the move is undone");
+
+    await land(local, localPath);
+    assert.equal(asked.length, 1, "asked once the editor's entry is current again");
+    assert.deepEqual(seen, [], "the return is not a move for the store");
+    assert.equal(manager.activeProfile.id, "local");
+
+    asked[0]!();
+    assert.deepEqual(moves, [1, -1], "Discard redoes the move");
+    await land({ wollipogEntry: { run: "run-3218", index: 0 } }, remotePath);
+    assert.equal(manager.activeProfile.id, remote, "and the other instance opens");
+    assert.deepEqual(closes, ["local"]);
+    assert.equal(asked.length, 1);
+  } finally {
+    unlisten();
+    release();
+    domWindow.history.go = go;
     await act(async () => { root.unmount(); });
     container.remove();
     domWindow.history.replaceState(null, "", "/");

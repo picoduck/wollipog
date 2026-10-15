@@ -194,6 +194,70 @@ test("leaving with unsaved changes asks first, and Keep Editing keeps the draft"
   await expect(page.locator("#settings-panel-heading")).toHaveText("Appearance");
 });
 
+test("browser Back and Forward with unsaved changes ask first, and Keep Editing loses no entry (#3218)", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto("/settings-rows-e2e.html?theme=dark&route=/settings/appearance");
+  const nav = page.locator(".settings-nav");
+  const heading = page.locator("#settings-panel-heading");
+  const limit = page.getByRole("spinbutton", { name: "Maximum Concurrent Children" });
+  const dialog = page.getByRole("dialog", { name: "Discard Changes" });
+  const route = () => new URL(page.url()).searchParams.get("route");
+  const entries = () => page.evaluate(() => window.history.length);
+  // Same-document moves: wait for the address, not for a load that never comes.
+  const back = () => page.goBack({ waitUntil: "commit" });
+  const forward = () => page.goForward({ waitUntil: "commit" });
+
+  // Appearance, Orchestrator, Behavior; then Back to Orchestrator, so it has an entry on each side.
+  await nav.getByRole("link", { name: "Orchestrator" }).click();
+  await expect(heading).toHaveText("Orchestrator");
+  await nav.getByRole("link", { name: "Behavior" }).click();
+  await expect(heading).toHaveText("Behavior");
+  await back();
+  await expect(heading).toHaveText("Orchestrator", { timeout: 5_000 });
+  await expect(limit).toHaveValue("4");
+  const length = await entries();
+  await makeDirty(page);
+
+  for (const [direction, move] of [["back", back], ["forward", forward]] as const) {
+    await move();
+    await expect(dialog, `${direction} asks first`).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "Keep Editing" })).toBeFocused();
+    await expect.poll(route, { message: "the editor's entry is current while it asks" }).toBe("/settings/orchestrator");
+    await page.screenshot({ path: testInfo.outputPath(`orchestrator-${direction}-asks.png`) });
+    await dialog.getByRole("button", { name: "Keep Editing" }).click();
+    await expect(dialog).toBeHidden();
+    await expect(heading).toHaveText("Orchestrator");
+    await expect(limit, "the draft is kept").toHaveValue("8");
+    expect(route()).toBe("/settings/orchestrator");
+    expect(await entries(), "no entry is added or dropped").toBe(length);
+  }
+
+  // Discard Changes completes Back, exactly once.
+  await back();
+  await dialog.getByRole("button", { name: "Discard Changes" }).click();
+  await expect(heading).toHaveText("Appearance");
+  await expect.poll(route).toBe("/settings/appearance");
+  // Every forward entry is still there: Orchestrator with its saved defaults, then Behavior.
+  await forward();
+  await expect(heading).toHaveText("Orchestrator");
+  await expect(limit).toHaveValue("4");
+  await forward();
+  await expect(heading).toHaveText("Behavior");
+  expect(await entries()).toBe(length);
+
+  // Discard Changes completes Forward, exactly once: one Back from Behavior reaches the editor again.
+  await back();
+  await expect(heading).toHaveText("Orchestrator");
+  await makeDirty(page);
+  await forward();
+  await dialog.getByRole("button", { name: "Discard Changes" }).click();
+  await expect(heading).toHaveText("Behavior");
+  await back();
+  await expect(heading).toHaveText("Orchestrator");
+  await expect(limit).toHaveValue("4");
+  await expect(dialog).toBeHidden();
+});
+
 // #2413: as three equal pills in the panel's 260px value column, "Questions and Approvals" drew over
 // its neighbour at every width. Each option is measured in the listbox and, once chosen, in the trigger.
 for (const theme of ["dark", "light"]) {

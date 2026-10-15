@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { pushPositionedEntry, type HistoryTraversal } from "./history-position.js";
+import { TestBrowserHistory } from "./test-browser-history.js";
+import { registerLeaveGuard } from "./leave-guard.js";
 import {
   DesktopInstanceNavigation,
   instanceRouteFromPath,
@@ -30,6 +33,8 @@ test("desktop navigation wraps legacy routes and ignores another profile's histo
   const location = { pathname: "/runs", search: "", hash: "" };
   const writes: Array<["push" | "replace", string]> = [];
   const write = (kind: "push" | "replace", path: string | URL | null | undefined) => {
+    // A replace without a URL records only the entry's position (#3218) and keeps its address.
+    if (path == null) return;
     const url = new URL(String(path), "https://tauri.localhost");
     location.pathname = url.pathname;
     location.search = url.search;
@@ -115,6 +120,7 @@ test("an instance's old Settings address opens its new view and replaces its own
       state: null,
       pushState() {},
       replaceState(_state: unknown, _unused: string, path?: string | URL | null) {
+        if (path == null) return;
         const url = new URL(String(path), "https://app.local");
         location.pathname = url.pathname;
         location.search = url.search;
@@ -135,4 +141,68 @@ test("an instance's old Settings address opens its new view and replaces its own
   for (const listener of listeners) listener();
   assert.deepEqual(seen, [keyboard]);
   assert.deepEqual(writes, [instanceViewPath("remote-a", behavior), instanceViewPath("remote-a", behavior)]);
+});
+
+test("an instance's own Back is offered for holding, and its return to the editor is not delivered (#3218)", () => {
+  const browser = new TestBrowserHistory(instanceViewPath("remote-a", { name: "usage" }));
+  const navigation = new DesktopInstanceNavigation("remote-a", browser.window);
+  navigation.current();
+  navigation.push({ name: "settings", section: "orchestrator" });
+  const seen: Array<{ view: unknown; traversal?: HistoryTraversal }> = [];
+  navigation.listen((view, traversal) => seen.push({ view, traversal }));
+
+  browser.back();
+  assert.deepEqual(seen.map((move) => move.view), [{ name: "usage" }]);
+  const traversal = seen[0]!.traversal!;
+  assert.ok(traversal, "a move within the instance's recorded entries can be held");
+  let returned = 0;
+  traversal.undo(() => { returned += 1; });
+  browser.flush();
+  assert.equal(returned, 1);
+  assert.equal(browser.path, instanceViewPath("remote-a", { name: "settings", section: "orchestrator" }));
+  assert.equal(seen.length, 1, "the return to the editor's entry is not a move to show");
+
+  traversal.redo();
+  browser.flush();
+  assert.deepEqual(seen.map((move) => move.view), [{ name: "usage" }, { name: "usage" }]);
+  assert.equal(browser.index, 0);
+});
+
+test("a Back to another instance's entry is held by the open instance's editor before it opens (#3218)", () => {
+  const browser = new TestBrowserHistory(instanceViewPath("remote-a", { name: "usage" }));
+  const first = new DesktopInstanceNavigation("remote-a", browser.window);
+  first.current();
+  first.push({ name: "runs" });
+  const navigation = new DesktopInstanceNavigation("remote-b", browser.window);
+  pushPositionedEntry(browser.window.history, instanceViewPath("remote-b", { name: "settings", section: "orchestrator" }));
+  navigation.current();
+  // Positions written by the first instance continue: the second's entry sits one past them.
+  assert.equal((browser.window.history.state as { wollipogEntry: { index: number } }).wollipogEntry.index, 2);
+  const seen: unknown[] = [];
+  navigation.listen((view) => seen.push(view));
+  const asked: Array<() => void> = [];
+  const release = registerLeaveGuard((leave) => asked.push(leave));
+  // What InstanceProvider's popstate listener does: open the other instance unless this one holds.
+  const opened: string[] = [];
+  const onPopState = () => {
+    const route = instanceRouteFromPath(browser.window.location.pathname);
+    if (route && route.instanceId !== "remote-b" && !navigation.holdDeparture()) opened.push(route.instanceId);
+  };
+  browser.window.addEventListener("popstate", onPopState);
+  try {
+    browser.back();
+    assert.deepEqual(opened, [], "not opened while the editor asks");
+    browser.flush();
+    assert.equal(asked.length, 1);
+    assert.equal(browser.path, instanceViewPath("remote-b", { name: "settings", section: "orchestrator" }));
+    assert.deepEqual(seen, [], "the return is not a move for this instance's store");
+
+    asked[0]!();
+    browser.flush();
+    assert.deepEqual(opened, ["remote-a"], "Discard opens the other instance's entry once");
+    assert.equal(browser.path, instanceViewPath("remote-a", { name: "runs" }));
+  } finally {
+    release();
+    browser.window.removeEventListener("popstate", onPopState);
+  }
 });

@@ -1,3 +1,4 @@
+import { HistoryPositions, type HistoryTraversal, type PositionedHistory } from "./history-position.js";
 import {
   parseSourceLocation,
   SOURCE_LOCATION_MAX_PATH_LENGTH,
@@ -568,7 +569,7 @@ export function adoptLegacyNavigationFragment(): boolean {
 
 export interface NavigationWindow {
   location: Pick<Location, "pathname" | "search" | "hash">;
-  history: Pick<History, "state" | "pushState" | "replaceState">;
+  history: PositionedHistory;
   addEventListener(type: "popstate", listener: () => void): void;
   removeEventListener(type: "popstate", listener: () => void): void;
 }
@@ -576,14 +577,25 @@ export interface NavigationWindow {
 export interface ViewNavigation {
   current(): View;
   push(view: View): void;
-  listen(onView: (view: View) => void): () => void;
+  /** Browser Back and Forward. A move that can be held comes with its traversal (#3218). */
+  listen(onView: (view: View, traversal?: HistoryTraversal) => void): () => void;
   activate?(view: View): void;
 }
 
 export class BrowserNavigation implements ViewNavigation {
-  constructor(private readonly target: NavigationWindow = window) {}
+  private readonly positions: HistoryPositions;
+
+  constructor(private readonly target: NavigationWindow = window) {
+    this.positions = new HistoryPositions(target.history);
+  }
 
   current(): View {
+    const view = this.read();
+    this.positions.adopt();
+    return view;
+  }
+
+  private read(): View {
     const parsed = viewFromPath(this.target.location.pathname, this.target.location.search);
     const view = parsed ?? { name: "inbox" as const };
     const canonical = viewPath(view);
@@ -596,11 +608,15 @@ export class BrowserNavigation implements ViewNavigation {
   push(view: View): void {
     const path = viewPath(view);
     if (`${this.target.location.pathname}${this.target.location.search}` === path && !this.target.location.hash) return;
-    this.target.history.pushState(this.target.history.state, "", path);
+    this.positions.push(path);
   }
 
-  listen(onView: (view: View) => void): () => void {
-    const onPopState = () => onView(this.current());
+  listen(onView: (view: View, traversal?: HistoryTraversal) => void): () => void {
+    const onPopState = () => {
+      const view = this.read();
+      const move = this.positions.arrive();
+      if (move) onView(view, move.traversal);
+    };
     this.target.addEventListener("popstate", onPopState);
     return () => this.target.removeEventListener("popstate", onPopState);
   }

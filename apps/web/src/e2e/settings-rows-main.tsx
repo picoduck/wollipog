@@ -14,7 +14,8 @@ import { DEFAULT_ORCHESTRATOR_DEFAULTS, type AgentHarnessDefaultConfig, type Age
 import { AgentDefaultsPanel } from "../components/AgentDefaultsPanel.js";
 import { OrchestratorSettingsPanel } from "../components/OrchestratorSettingsPanel.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
-import { interceptLeave } from "../leave-guard.js";
+import { interceptLeave, interceptTraversal } from "../leave-guard.js";
+import { HistoryPositions } from "../history-position.js";
 import { SettingsGroup, StaticRow } from "../components/ui/SettingsRows.js";
 import { NumberFields } from "./setting-number-fields.js";
 import { RowKinds } from "./setting-row-kinds.js";
@@ -355,18 +356,33 @@ function Harness() {
   // Back pushing the next one, so a phone's index and its section pages are real routes. Without
   // it, `section` picks a section directly.
   const [route, setRoute] = React.useState(() => params.get("route"));
+  const routeRef = React.useRef(route);
+  routeRef.current = route;
+  // Entries carry their positions as the app's own navigation writes them, so Back and Forward are
+  // held exactly as the store holds them (#3218).
+  const [positions] = React.useState(() => {
+    const recorded = new HistoryPositions(window.history);
+    recorded.adopt();
+    return recorded;
+  });
   React.useEffect(() => {
-    const onPop = () => setRoute(new URLSearchParams(window.location.search).get("route"));
+    const onPop = () => {
+      const move = positions.arrive();
+      if (!move) return;
+      const next = new URLSearchParams(window.location.search).get("route");
+      if (next !== routeRef.current && move.traversal && interceptTraversal(move.traversal)) return;
+      setRoute(next);
+    };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
-  }, []);
+  }, [positions]);
   const routed = route === null ? null : viewFromPath(route);
   const navigate = (view: View) => {
     // As the store's navigate does: an editor with unsaved changes asks first (#3026).
     if (interceptLeave(() => navigate(view))) return;
     const next = new URLSearchParams(window.location.search);
     next.set("route", viewPath(view));
-    window.history.pushState(null, "", `?${next}`);
+    positions.push(`?${next}`);
     setRoute(viewPath(view));
   };
   const section: SettingsSection | undefined = routed?.name === "settings"
