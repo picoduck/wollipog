@@ -3156,7 +3156,9 @@ follows these rules so it never crowds out the conversation it asks about:
   composer card's edge is its focus, and an invalid answer turns that edge `--red` with one field
   error under the field (§8.5); a failed submission is a compact danger notice above it. The footer
   is Back from question 2 and Next or **Submit Answers** as a BusyButton. Escape exits; no sentence
-  names a key.
+  names a key. A question taller than the available session pane scrolls with the composer as
+  a whole (#3256), so focusing the answer field never makes the beginning unreachable. The answer
+  panel is keyboard focusable for reading with the scrolling keys.
 - **Answer Mode has Show Context.** Show Context shrinks the panel to its head: the question on one
   line, a summary of the answer so far ("Nothing chosen yet" when empty, a polite live line) and
   Show Answer (`ChevronsUp`). Nothing resets: selections, draft and step are kept in the

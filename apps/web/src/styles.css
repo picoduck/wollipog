@@ -7080,6 +7080,15 @@ body.shell-dock-dragging * {
 .composer-box.answer-mode:has(.composer-answer-input[aria-invalid="true"]) {
   border-color: var(--red);
 }
+/* A long question belongs to the session's visible pane (#3256). Let the composer shrink and
+   scroll as a whole rather than overflowing the shell that clips it. Its question, choices and
+   actions then share a reachable surface, including when focus reveals the answer field. */
+.composer:has(.composer-answer) {
+  min-height: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 .composer-answer {
   display: flex;
   flex-direction: column;

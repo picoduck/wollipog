@@ -456,6 +456,7 @@ export function ComposerQuestionResponse({
     <section
       ref={sectionRef}
       className="composer-answer"
+      tabIndex={0}
       aria-labelledby={titleId}
       aria-busy={busy}
       data-collapsed={collapsed ? "" : undefined}
