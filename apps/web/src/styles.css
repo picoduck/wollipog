@@ -3292,6 +3292,12 @@ input {
 }
 /* A number field with a unit has no spin buttons: the engine keeps their room (about 15px) beside
    the value even at rest, which is a digit and a half of a 96px field. The arrow keys still step. */
+.input-affix:has(> .input-affix-text:last-child) > input[type="number"] { appearance: textfield; }
+.input-affix:has(> .input-affix-text:last-child) > input[type="number"]::-webkit-inner-spin-button,
+.input-affix:has(> .input-affix-text:last-child) > input[type="number"]::-webkit-outer-spin-button {
+  appearance: none;
+  margin: 0;
+}
 /* Field widths (§8.3): `.w-xs` for numbers, ports and counts, with the unit inside the field. Field
    text is 16px on phones and coarse pointers (the iOS focus-zoom guard at the end of this file), and
    five digits of it beside a unit need 120px. It weighs one class, as `.w-xs` does, so a layout that
