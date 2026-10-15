@@ -940,6 +940,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   delegatedParentControl: 136,
   typedWorkflowDecisionDelegation: 139,
   fullControlAuthority: 215,
+  /** Bounded Full Control issue lineage, publication admission and verified closure. */
+  fullControlIssueAuthority: 217,
   campaignBudgetAdmission: 218,
   workflowDecisionActionAdmission: 151,
   workflowDecisionActionReconciliation: 153,
@@ -1454,6 +1456,48 @@ export function runnerCapabilityRequirementError(
     error: runnerCapabilityRequirement(protocolVersion, capability, label),
     ...runnerCapabilityRequirementDetails(protocolVersion, capability),
   };
+}
+
+/** A refusal the person can get past now by changing one setting: the shared sentence, then
+ * `alternative`, a sentence naming that setting ("To start now, …"). */
+export function runnerCapabilityRequirementWithAlternative(
+  protocolVersion: number | null | undefined,
+  capability: RunnerProtocolCapability,
+  label: string,
+  alternative: string,
+): { error: string } & RunnerCapabilityRequirementDetails {
+  const requirement = runnerCapabilityRequirementError(protocolVersion, capability, label);
+  return { ...requirement, error: `${requirement.error} ${alternative}` };
+}
+
+/* Orchestrator settings that New Session checks before the control plane would refuse them. Both
+ * build their sentence here, so the inline error and the 409 cannot drift apart (#3219). */
+
+export function orchestratorChildHarnessRequirement(protocolVersion: number | null | undefined) {
+  return runnerCapabilityRequirementWithAlternative(
+    protocolVersion,
+    "orchestratorChildHarnessPolicy",
+    "a fixed child harness",
+    "To start now, choose Automatic for Child Harness.",
+  );
+}
+
+export function orchestratorExecutionPolicyRequirement(protocolVersion: number | null | undefined) {
+  return runnerCapabilityRequirementWithAlternative(
+    protocolVersion,
+    "orchestratorExecutionPolicy",
+    "an Orchestrator without strict project isolation",
+    "To start now, turn on Strict Project Isolation.",
+  );
+}
+
+export function orchestratorIntegrationIsolationRequirement(protocolVersion: number | null | undefined) {
+  return runnerCapabilityRequirementWithAlternative(
+    protocolVersion,
+    "orchestratorIntegrationIsolation",
+    "integration isolation",
+    "To start now, turn off Integration Isolation.",
+  );
 }
 
 export type OS = "windows" | "linux" | "macos";
