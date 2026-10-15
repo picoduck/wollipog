@@ -206,8 +206,8 @@ test("the required CI check aggregates parallel jobs that each own a time budget
     match[1],
     jobsText.slice(match.index, index + 1 < starts.length ? starts[index + 1].index : undefined),
   ]));
-  assert.deepEqual(Object.keys(byId), ["checks", "browser", "win32", "check"], "CI jobs drifted");
-  for (const id of ["checks", "browser"]) {
+  assert.deepEqual(Object.keys(byId), ["checks", "browser", "win32", "webkit", "check"], "CI jobs drifted");
+  for (const id of ["checks", "browser", "webkit"]) {
     assert.match(byId[id], /^    timeout-minutes: (\d+)$/m, `${id}: needs its own time budget`);
     assert.doesNotMatch(byId[id], /^    needs:/m, `${id}: the work jobs run in parallel, not chained`);
   }
@@ -288,7 +288,7 @@ test("the required CI check aggregates parallel jobs that each own a time budget
     "the browser suites must not share the unit-test job's budget");
   assert.match(byId.checks, /^      - name: Unit Tests$/m);
   assert.match(byId.check, /^    name: Typecheck, Test & Sidecar Bundle$/m, "the required context is the aggregator");
-  assert.match(byId.check, /^    needs: \[checks, browser, win32\]$/m, "the aggregator must wait for every work job");
+  assert.match(byId.check, /^    needs: \[checks, browser, win32, webkit\]$/m, "the aggregator must wait for every work job");
   assert.match(byId.check, /^    if: \$\{\{ \(github\.event_name != 'pull_request' \|\| !cancelled\(\)\) && \(/m,
     "active dependency failures must report; cancellation admission changes only for PR runs");
   assert.match(byId.check, /needs\.checks\.result/, "the aggregator must inspect the checks job result");
@@ -306,6 +306,17 @@ test("the required CI check aggregates parallel jobs that each own a time budget
   assert.match(byId.check, /needs\.win32\.result/,"the aggregator must inspect the win32 baselines result");
   assert.match(byId.check, /^          report "Settings-Rows win32 Baselines" "\$WIN32_RESULT"$/m,
     "the aggregator must fail when the win32 baselines job did not succeed");
+  // WebKit gates the required check (#3214): it runs only the specs that opted into it, and a
+  // result nobody is required to read would let a Safari regression land on a green check.
+  assert.match(byId.webkit, /^    name: WebKit End-to-End Tests$/m);
+  assert.match(byId.webkit, /^      - name: WebKit Browser End-to-End Tests\n        run: pnpm test:e2e:webkit\n/m,
+    "webkit: the suite step must be unconditional, or a skipped step reports the job green");
+  assert.doesNotMatch(byId.webkit, /continue-on-error: true\n(?:        timeout-minutes: \d+\n)?        run: pnpm test:e2e/,
+    "webkit: the suite step's failure must fail the job");
+  assert.doesNotMatch(byId.webkit, /^    (?:strategy|continue-on-error):/m,
+    "webkit: the job runs once and its failure must reach the aggregator");
+  assert.match(byId.check, /^          report "WebKit End-to-End Tests" "\$WEBKIT_RESULT"$/m,
+    "the aggregator must fail when the WebKit job did not succeed");
   assert.match(byId.check, /cancelled\) .*timeout-minutes budget/, "a cancelled job is reported as a budget hit, not a flaky test");
 });
 
@@ -463,6 +474,12 @@ test("CI validates production builds and caches the pinned Playwright browser", 
     /^      - name: Cache Playwright Browser\r?\n        id: playwright-cache\r?\n        uses: actions\/cache@[0-9a-f]{40}[^\r\n]*\r?\n        with:\r?\n          path: ~\/\.cache\/ms-playwright\r?\n          key: \$\{\{ runner\.os \}\}-playwright-\$\{\{ steps\.playwright-version\.outputs\.version \}\}$/m,
     "CI must cache Playwright's browser directory by OS and exact version",
   );
+  // A key shared with the Chromium cache would restore a directory without WebKit and skip its install.
+  assert.match(
+    ci,
+    /^      - name: Cache Playwright WebKit\r?\n        id: playwright-webkit-cache\r?\n        uses: actions\/cache@[0-9a-f]{40}[^\r\n]*\r?\n        with:\r?\n          path: ~\/\.cache\/ms-playwright\r?\n          key: \$\{\{ runner\.os \}\}-playwright-webkit-\$\{\{ steps\.playwright-version\.outputs\.version \}\}$/m,
+    "the WebKit job must cache its browser under its own key by OS and exact version",
+  );
 });
 
 test("both Playwright installs time out and retry once after clearing the stalled attempt", () => {
@@ -477,15 +494,18 @@ test("both Playwright installs time out and retry once after clearing the stalle
   const installs = [
     ["Install Playwright Browser", "playwright-browser", "!=", "pnpm exec playwright install --with-deps chromium"],
     ["Install Playwright System Dependencies", "playwright-system-dependencies", "==", "pnpm exec playwright install-deps chromium"],
+    // The WebKit job installs only WebKit, with the same handling (#3214).
+    ["Install Playwright WebKit", "playwright-webkit", "!=", "pnpm exec playwright install --with-deps webkit", "playwright-webkit-cache"],
+    ["Install Playwright WebKit System Dependencies", "playwright-webkit-system-dependencies", "==", "pnpm exec playwright install-deps webkit", "playwright-webkit-cache"],
   ];
 
-  for (const [name, id, cacheHit, command] of installs) {
+  for (const [name, id, cacheHit, command, cache = "playwright-cache"] of installs) {
     const index = steps.findIndex((step) => step.startsWith(`${name}\n`));
     assert.notEqual(index, -1, `${name}: step is missing`);
     assert.equal(steps[index], [
       name,
       `        id: ${id}`,
-      `        if: steps.playwright-cache.outputs.cache-hit ${cacheHit} 'true'`,
+      `        if: steps.${cache}.outputs.cache-hit ${cacheHit} 'true'`,
       "        continue-on-error: true",
       "        timeout-minutes: 6",
       `        run: ${command}`,
@@ -671,7 +691,7 @@ test("every CI Node setup retries once with the same pinned action and version",
   const ci = readFileSync(resolve(process.cwd(), WORKFLOWS[0]), "utf8");
   const steps = ci.split(/^      - name: /m).slice(1);
   const setupSteps = steps.filter((step) => /^        uses: actions\/setup-node@/m.test(step));
-  assert.equal(setupSteps.length, 12, "six Node setups each need one retry");
+  assert.equal(setupSteps.length, 14, "seven Node setups each need one retry");
 
   const versions = [];
   for (const [index, step] of steps.entries()) {
@@ -704,6 +724,7 @@ test("every CI Node setup retries once with the same pinned action and version",
     "node-version: 23.2.0",
     "node-version: 23.4.0",
     "node-version-file: .nvmrc",
+    "node-version-file: .nvmrc\n          cache: pnpm",
     "node-version-file: .nvmrc\n          cache: pnpm",
   ]);
 });

@@ -2,8 +2,8 @@
 
 `Typecheck, Test & Sidecar Bundle` is the protected required context in
 `.github/workflows/ci.yml`. Its `check` job waits for `checks`, all five `browser`
-shards, and the `win32` reusable workflow. It succeeds only when all three
-dependency results are `success`; failure, cancellation, unexpected skipping,
+shards, the `win32` reusable workflow, and the `webkit` job. It succeeds only when
+all four dependency results are `success`; failure, cancellation, unexpected skipping,
 and unknown results produce a failing shell exit with a named diagnostic.
 
 For PR runs, the job condition uses `!cancelled()` with the existing draft guard.

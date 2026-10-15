@@ -9,7 +9,7 @@ const check = workflow.slice(workflow.indexOf("\n  check:\n"));
 const condition = check.match(/^    if: \$\{\{ (.+) \}\}$/m)?.[1];
 assert.ok(condition, "required aggregator condition must be inspectable");
 const dependencies = check.match(/^    needs: \[([^\]]+)\]$/m)?.[1].split(", ");
-assert.deepEqual(dependencies, ["checks", "browser", "win32"]);
+assert.deepEqual(dependencies, ["checks", "browser", "win32", "webkit"]);
 const resultEnv = [...check.matchAll(/^          ([A-Z_0-9]+): \$\{\{ needs\.([a-z0-9_]+)\.result \}\}$/gm)];
 assert.deepEqual(resultEnv.map((match) => match[2]).sort(), [...dependencies].sort());
 const shell = check.match(/^        run: \|\n((?:          .*\n?)+)/m)?.[1]
@@ -17,7 +17,8 @@ const shell = check.match(/^        run: \|\n((?:          .*\n?)+)/m)?.[1]
 assert.ok(shell, "execute the actual aggregator shell, not a copied implementation");
 
 const results = ["success", "failure", "cancelled", "skipped", "unexpected"];
-const combinations = results.flatMap((checks) => results.flatMap((browser) => results.map((win32) => ({ checks, browser, win32 }))));
+const combinations = results.flatMap((checks) => results.flatMap((browser) => results.flatMap((win32) =>
+  results.map((webkit) => ({ checks, browser, win32, webkit })))));
 const events = [
   ...["opened", "synchronize", "reopened"].flatMap((action) => [
     { name: `ready/${action}`, event_name: "pull_request", action, draft: false, expected: true },
@@ -70,8 +71,9 @@ test("PR workflow cancellation stops aggregation while non-PR cancellation retai
 });
 
 test("the actual aggregator shell succeeds only for all-success and names every non-success", () => {
-  const labels = { checks: "Typecheck, Unit Tests & Bundles", browser: "Browser End-to-End Tests", win32: "Settings-Rows win32 Baselines" };
-  for (const outcomes of [...combinations, { checks: "", browser: "success", win32: "success" }]) {
+  const labels = { checks: "Typecheck, Unit Tests & Bundles", browser: "Browser End-to-End Tests",
+    win32: "Settings-Rows win32 Baselines", webkit: "WebKit End-to-End Tests" };
+  for (const outcomes of [...combinations, { checks: "", browser: "success", win32: "success", webkit: "success" }]) {
     const env = Object.fromEntries(resultEnv.map((match) => [match[1], outcomes[match[2]]]));
     const run = spawnSync("bash", ["-c", shell], { env, encoding: "utf8", timeout: 1_000 });
     assert.ifError(run.error);
@@ -92,7 +94,7 @@ test("the actual aggregator shell succeeds only for all-success and names every 
 
 test("cancellation regression rejects unconditional aggregation and failure-hiding guards", () => {
   const ready = events[0];
-  const success = { checks: "success", browser: "success", win32: "success" };
+  const success = { checks: "success", browser: "success", win32: "success", webkit: "success" };
   assert.equal(eligible(condition.replace("!cancelled()", "always()"), ready, success, true), true,
     "the old condition remains true under cancellation in the documented model");
   for (const result of ["failure", "cancelled", "skipped"]) {
