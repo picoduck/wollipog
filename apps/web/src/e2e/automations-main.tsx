@@ -11,6 +11,7 @@ import type {
   UiSnapshotMessage,
   WorkflowDefinition,
 } from "@wollipog/protocol";
+import { AUTOMATION_TARGET_UNAVAILABLE } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { AutomationsView } from "../components/AutomationsView.js";
@@ -108,7 +109,7 @@ if (params.has("waiting-target")) {
   items[0]!.targetHealth = {
     scheduledFor: Date.now() - 60_000,
     firstSeenAt: Date.now() - 59_000,
-    error: "No configured automation target is available. Check that its Machine is online.",
+    error: AUTOMATION_TARGET_UNAVAILABLE,
   };
 }
 

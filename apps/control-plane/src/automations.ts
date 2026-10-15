@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { runnerSupportsProtocol } from "@wollipog/protocol";
+import { AUTOMATION_TARGET_INSTALLATION_UNAVAILABLE, AUTOMATION_TARGET_UNAVAILABLE, runnerSupportsProtocol } from "@wollipog/protocol";
 import type {
   AutomationAction,
   AutomationAuditEvent,
@@ -1428,9 +1428,7 @@ export class AutomationsService {
       if (automation.action.kind === "workflow_run" && !this.workflowTargetCompatible(automation, resolved)) continue;
       return ok({ target: resolved });
     }
-    return fail(installationUnavailable
-      ? "No configured automation target is available. Check its saved Agent Harness installation in Machine Settings, then edit the automation to select an available target."
-      : "No configured automation target is available. Check that its Machine is online, supports automations, and has an available Workspace and Project.", 409);
+    return fail(installationUnavailable ? AUTOMATION_TARGET_INSTALLATION_UNAVAILABLE : AUTOMATION_TARGET_UNAVAILABLE, 409);
   }
 
   private resolveSavedTarget(

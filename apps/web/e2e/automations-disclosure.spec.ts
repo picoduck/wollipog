@@ -174,7 +174,7 @@ for (const { label, viewport } of [
         await page.getByRole("option", { name: "Codex App Server" }).click();
         await expect(page.getByRole("button", { name: "Alternate Agent-1 Agent: Codex App Server" })).toBeVisible();
         await expect(page.getByRole("button", { name: "Alternate Orchestrator Agent: Codex App Server" })).toBeVisible();
-        await expect(page.getByText(/This saved alternate (role|orchestrator) installation is unavailable or unbound/)).toHaveCount(0);
+        await expect(page.getByText(/The saved installation of (this role's|the Orchestrator's) agent isn't available on the other machine\./)).toHaveCount(0);
         if (evidenceDir) await page.screenshot({
           path: join(evidenceDir, `automation-inherited-pins-after-${label}-${theme}.png`), fullPage: true,
         });
@@ -188,13 +188,13 @@ for (const { label, viewport } of [
         const card = page.getByRole("button", { name: /Nightly Dependency Sweep/ });
         await page.goto(`/automations-e2e.html?theme=${theme}&workflow-machine-switch&orchestrator-bound`);
         await card.click();
-        await expect(page.getByText(/Saved Agent Harness installation unavailable or unbound/)).toHaveCount(0);
+        await expect(page.getByText(/This automation's agent installation isn't available\. Edit the automation to choose another installation\./)).toHaveCount(0);
         if (evidenceDir) await page.screenshot({
           path: join(evidenceDir, `automation-orchestrator-before-${label}-${theme}.png`), fullPage: true,
         });
         await page.goto(`/automations-e2e.html?theme=${theme}&workflow-machine-switch&orchestrator-unbound`);
         await card.click();
-        await expect(page.getByText(/Saved Agent Harness installation unavailable or unbound/)).toBeVisible();
+        await expect(page.getByText(/This automation's agent installation isn't available\. Edit the automation to choose another installation\./)).toBeVisible();
         if (evidenceDir) await page.screenshot({
           path: join(evidenceDir, `automation-orchestrator-after-${label}-${theme}.png`), fullPage: true,
         });
@@ -208,13 +208,13 @@ for (const { label, viewport } of [
         const card = page.getByRole("button", { name: /Nightly Dependency Sweep/ });
         await page.goto(`/automations-e2e.html?theme=${theme}&alternate-installation=available`);
         await card.click();
-        await expect(page.getByText(/Saved Agent Harness installation unavailable or unbound/)).toHaveCount(0);
+        await expect(page.getByText(/This automation's agent installation isn't available\. Edit the automation to choose another installation\./)).toHaveCount(0);
         if (evidenceDir) await page.screenshot({
           path: join(evidenceDir, `automation-alternate-before-${label}-${theme}.png`), fullPage: true,
         });
         await page.goto(`/automations-e2e.html?theme=${theme}&alternate-installation=unavailable`);
         await card.click();
-        await expect(page.getByText(/Saved Agent Harness installation unavailable or unbound/)).toBeVisible();
+        await expect(page.getByText(/This automation's agent installation isn't available\. Edit the automation to choose another installation\./)).toBeVisible();
         if (evidenceDir) await page.screenshot({
           path: join(evidenceDir, `automation-alternate-after-${label}-${theme}.png`), fullPage: true,
         });
@@ -240,7 +240,7 @@ for (const { label, viewport } of [
         });
         await page.getByRole("combobox", { name: "Machine", exact: true }).selectOption("runner-2");
         await expect(page.getByRole("button", { name: "Agent-1 Agent: Configured Agent" })).toBeVisible();
-        await expect(page.getByText(/This saved role installation is unavailable or unbound/)).toHaveCount(0);
+        await expect(page.getByText(/The saved installation of this role's agent isn't available\./)).toHaveCount(0);
         if (evidenceDir) await page.screenshot({
           path: join(evidenceDir, `automation-machine-after-${label}-${theme}.png`), fullPage: true,
         });
@@ -307,7 +307,7 @@ for (const { label, viewport } of [
         const evidenceDir = process.env.WOLLIPOG_EVIDENCE_DIR;
         if (evidenceDir) await page.screenshot({ path: join(evidenceDir, `automation-before-${label}-${theme}.png`), fullPage: true });
         await openEditor(true);
-        await expect(page.getByText(/saved Agent Harness installation is unavailable or unbound/i)).toBeVisible();
+        await expect(page.getByText(/The saved installation of this agent isn't available\. This automation waits until you choose an available installation\./)).toBeVisible();
         await expect(page.getByRole("button", { name: "Use Current Installation" })).toBeEnabled();
         if (evidenceDir) await page.screenshot({ path: join(evidenceDir, `automation-after-${label}-${theme}.png`), fullPage: true });
       });
