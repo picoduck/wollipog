@@ -97,6 +97,15 @@ const FLAG_FEATURES: Readonly<Record<string, RegexSyntaxId>> = {
   v: "regex v flag",
 };
 
+/**
+ * A group name as the engine compares it: `(?<a>)` and `(?<a>)` name the same group. A pair of
+ * `\u` surrogate escapes decodes to the pair, which is the one code point it spells.
+ */
+function decodeGroupName(raw: string): string {
+  return raw.replace(/\\u\{([0-9a-f]+)\}|\\u([0-9a-f]{4})/gi,
+    (_, codePoint: string | undefined, unit: string | undefined) => String.fromCodePoint(parseInt(codePoint ?? unit!, 16)));
+}
+
 export interface RegexSyntaxReport {
   readonly features: ReadonlySet<RegexSyntaxId>;
   /** Syntax the scanner cannot classify. Each one fails the check rather than passing as unseen. */
@@ -147,8 +156,9 @@ export function regexSyntax(pattern: string, flags: string): RegexSyntaxReport {
     const named = /^<([^>]+)>/.exec(rest);
     if (named) {
       features.add("regex named groups");
-      if (groupNames.has(named[1]!)) features.add("regex duplicate named groups");
-      groupNames.add(named[1]!);
+      const name = decodeGroupName(named[1]!);
+      if (groupNames.has(name)) features.add("regex duplicate named groups");
+      groupNames.add(name);
       continue;
     }
     if (/^[a-z]*(?:-[a-z]*)?:/i.test(rest)) {

@@ -39,6 +39,11 @@ test("lookbehind is syntax only outside classes and escapes", () => {
 test("named groups, duplicates, modifiers and flags are each named", () => {
   assert.deepEqual(features("(?<year>\\d+)"), ["regex named groups"]);
   assert.deepEqual(features("(?<y>a)|(?<y>b)"), ["regex duplicate named groups", "regex named groups"]);
+  // The engine compares decoded names, so a different spelling of the same name is still a duplicate.
+  assert.deepEqual(features("(?<a>x)|(?<\\u0061>y)"), ["regex duplicate named groups", "regex named groups"]);
+  assert.deepEqual(features("(?<\\u{1d4b3}>x)|(?<\\ud835\\udcb3>y)", "u"),
+    ["regex duplicate named groups", "regex named groups"], "a code-point escape equals its surrogate pair");
+  assert.deepEqual(features("(?<a>x)|(?<\\u0062>y)"), ["regex named groups"], "distinct names stay distinct");
   assert.deepEqual(features("(?i:a)(?-m:b)(?s-i:c)"), ["regex modifiers"]);
   assert.deepEqual(features("a", "gimuy"), [], "ES2015 flags need nothing");
   assert.deepEqual(features("a", "dsv"), ["regex d flag", "regex s flag", "regex v flag"]);
@@ -120,6 +125,19 @@ test("files copied from public/ are held to the floor as well", { timeout: 120_0
   } finally {
     rmSync(publicDir, { recursive: true, force: true });
   }
+});
+
+test("a JavaScript asset held as bytes is decoded, not scanned as a list of numbers", async () => {
+  // Rolldown hands emitFile sources over as strings, but the bundle type allows Uint8Array and a
+  // plugin may put bytes there; `String()` of those is "115,101,…", which parses and passes.
+  const hook = jsFloorGuard().generateBundle as { handler: (this: unknown, ...args: unknown[]) => Promise<void> };
+  const source = new TextEncoder().encode("self.r = /(?<x>a)|(?<x>b)/;\n");
+  await assert.rejects(hook.handler.call(
+    { error(message: string) { throw new Error(message); } },
+    {},
+    { "unsafe.js": { type: "asset", fileName: "unsafe.js", source } },
+    false,
+  ), /unsafe\.js:1:\d+: .* uses regex duplicate named groups/);
 });
 
 /**

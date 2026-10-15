@@ -165,7 +165,9 @@ export function jsFloorGuard(floor: SupportMatrix = requiredFloor()): Plugin {
       for (const item of Object.values(bundle)) {
         if (item.type === "chunk") violations.push(...scanForFloor(item.fileName, item.code, floor).violations);
         else if (/\.m?js$/.test(item.fileName)) {
-          violations.push(...scanForFloor(item.fileName, String(item.source), floor).violations);
+          // An asset's source may be bytes, and `String()` of bytes is a list of numbers, not code.
+          const code = typeof item.source === "string" ? item.source : new TextDecoder().decode(item.source);
+          violations.push(...scanForFloor(item.fileName, code, floor).violations);
         }
       }
       // `public/` is copied around the bundle, so sw.js would otherwise never be read.
