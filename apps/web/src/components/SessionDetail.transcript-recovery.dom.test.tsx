@@ -30,6 +30,35 @@ Object.defineProperty(domWindow.Element.prototype, "getBoundingClientRect", {
     return { x: 0, y: 0, top: 0, left: 0, right: 800, bottom: 72, width: 800, height: 72, toJSON: () => ({}) };
   },
 });
+// Product code queues frames two ways: a bare `requestAnimationFrame` reaches the timer shim below,
+// while `window.requestAnimationFrame` reaches happy-dom's own, which is a `setImmediate`. A loaded
+// event loop can run a 1ms timer before an immediate queued earlier, so one timer turn proves
+// nothing about either queue. Every frame is tracked here so `settleFrames` can wait for them all.
+const pendingFrames = new Set<unknown>();
+const happyDomFrame = domWindow.requestAnimationFrame.bind(domWindow);
+const happyDomCancelFrame = domWindow.cancelAnimationFrame.bind(domWindow);
+Object.defineProperties(domWindow, {
+  requestAnimationFrame: {
+    configurable: true,
+    writable: true,
+    value: (callback: FrameRequestCallback) => {
+      const handle = happyDomFrame((time) => {
+        pendingFrames.delete(handle);
+        callback(time);
+      });
+      pendingFrames.add(handle);
+      return handle;
+    },
+  },
+  cancelAnimationFrame: {
+    configurable: true,
+    writable: true,
+    value: (handle: ReturnType<typeof happyDomFrame>) => {
+      pendingFrames.delete(handle);
+      happyDomCancelFrame(handle);
+    },
+  },
+});
 for (const [name, value] of Object.entries({
   window: domWindow,
   document: domWindow.document,
@@ -46,9 +75,18 @@ for (const [name, value] of Object.entries({
   React,
   IS_REACT_ACT_ENVIRONMENT: true,
   ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
-  requestAnimationFrame: (callback: FrameRequestCallback) =>
-    setTimeout(() => callback(0), 0) as unknown as number,
-  cancelAnimationFrame: (id: number) => clearTimeout(id as unknown as NodeJS.Timeout),
+  requestAnimationFrame: (callback: FrameRequestCallback) => {
+    const handle = setTimeout(() => {
+      pendingFrames.delete(handle);
+      callback(0);
+    }, 0);
+    pendingFrames.add(handle);
+    return handle as unknown as number;
+  },
+  cancelAnimationFrame: (id: number) => {
+    pendingFrames.delete(id);
+    clearTimeout(id as unknown as NodeJS.Timeout);
+  },
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 
 const runner = {
@@ -797,7 +835,7 @@ async function mountFixture(
 }
 
 async function unmountFixture(fixture: Fixture) {
-  // Absorb queued frame callbacks (requestAnimationFrame is timer-backed here) inside act.
+  // Absorb queued frame callbacks inside act.
   await flushAsyncWork(1);
   await act(async () => fixture.root.unmount());
   fixture.container.remove();
@@ -877,6 +915,18 @@ async function flushAsyncWork(delay = 0) {
     await new Promise((resolve) => setTimeout(resolve, delay));
     await Promise.resolve();
   });
+}
+
+/** Runs every queued animation frame, and the frames those queue. Each turn waits behind both frame
+ * queues, so it runs at least one generation of frames however loaded the event loop is. */
+async function settleFrames(turns = 50) {
+  for (let turn = 0; pendingFrames.size > 0; turn += 1) {
+    assert.ok(turn < turns, `${pendingFrames.size} animation frames are still queued after ${turns} turns`);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setImmediate(resolve));
+    });
+  }
 }
 
 /** The zero-height anchor is PERMANENTLY mounted between the reader and the status strip; only its
@@ -2576,6 +2626,13 @@ function touchHistoryGesture(scroller: HTMLElement, kind: "native" | "pointer") 
   }
 }
 
+/** Names the variant, where its reader sits, and every page it requested, for a failure message. */
+function describeOneScreenReader(variant: string, fixture: Fixture, pages: ReturnType<typeof pageController>) {
+  const requests = pages.tailCalls.map(({ before }) => before === undefined ? "tail" : `before ${before}`);
+  return `${variant} at scrollTop ${fixture.scroller.scrollTop}, ${followState(fixture)}; ` +
+    `page requests: ${requests.join(", ")}`;
+}
+
 for (const input of ["wheel", "ArrowUp", "k", "touch", "touch-pointer"] as const) {
   for (const scrollHeight of [500, 501]) {
     test(`one-screen history: ${input} starts paging with a ${scrollHeight - 500}px scroll range (#3156)`, async () => {
@@ -2583,7 +2640,14 @@ for (const input of ["wheel", "ArrowUp", "k", "touch", "touch-pointer"] as const
       const fixture = await mountFixture(pages);
       try {
         const openingWindow = await openBoundedWindow(pages, fixture);
+        // Opening converges on the tail for several frames, each pinning `scrollTo(scrollHeight)`,
+        // and these fake metrics do not clamp that the way a browser does. A pin that lands after
+        // the geometry below parks the reader at scrollTop 500 rather than at its head, so the
+        // upward input no longer counts as head navigation (#3249). Let opening finish first.
+        await settleFrames();
         setScrollerMetrics(fixture.scroller, { clientHeight: 500, scrollHeight, scrollTop: 0 });
+        const reader = () =>
+          describeOneScreenReader(`${input} with a ${scrollHeight - 500}px scroll range`, fixture, pages);
         await act(async () => {
           fixture.scroller.focus();
           fixture.scroller.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never);
@@ -2591,8 +2655,8 @@ for (const input of ["wheel", "ArrowUp", "k", "touch", "touch-pointer"] as const
           fixture.scroller.dispatchEvent(new domWindow.CustomEvent(VIRTUAL_VIEWPORT_INTENT_EVENT,
             { detail: { direction: "down" } }) as never);
         });
-        await flushAsyncWork();
-        assert.equal(pages.tailCalls.length, 1, "layout and downward input cannot start paging");
+        await settleFrames();
+        assert.equal(pages.tailCalls.length, 1, `layout and downward input cannot start paging: ${reader()}`);
         const navigateUp = () => {
           if (input === "wheel") fireDomEvent.wheel(fixture.scroller, { deltaY: -40 });
           else if (input === "ArrowUp") fireDomEvent.keyDown(fixture.scroller, { key: "ArrowUp" });
@@ -2601,19 +2665,20 @@ for (const input of ["wheel", "ArrowUp", "k", "touch", "touch-pointer"] as const
         };
         await act(async () => navigateUp());
         await flushAsyncWork();
-        assert.equal(pages.tailCalls.length, 2, "explicit upward input loads history without a button or scroll event");
-        assert.equal(pages.tailCalls[1]!.before, openingWindow[0]!.seq);
-        assert.equal(followState(fixture), "paused", "history input stays paused while the page is pending (#3188)");
+        assert.equal(pages.tailCalls.length, 2,
+          `explicit upward input loads history without a button or scroll event: ${reader()}`);
+        assert.equal(pages.tailCalls[1]!.before, openingWindow[0]!.seq, reader());
+        assert.equal(followState(fixture), "paused", `history input stays paused while the page is pending (#3188): ${reader()}`);
         await act(async () => { navigateUp(); navigateUp(); });
         await flushAsyncWork();
-        assert.equal(pages.tailCalls.length, 2, "repeated input cannot duplicate the in-flight page");
+        assert.equal(pages.tailCalls.length, 2, `repeated input cannot duplicate the in-flight page: ${reader()}`);
         setScrollerMetrics(fixture.scroller, { clientHeight: 500, scrollHeight: 1_200, scrollTop: 700 });
         const earlier = fixture.events.slice(-16, -8);
         await act(async () => pages.releaseTail({ events: earlier, eventEpoch: 0,
           nextBefore: earlier[0]!.seq, hasMoreOlder: true, cacheComplete: true }));
         await flushAsyncWork(10);
-        assert.equal(pages.tailCalls.length, 2, "a scrollable prepend waits for fresh navigation");
-        assert.equal(followState(fixture), "paused", "history input retains its pause through the prepend (#3188)");
+        assert.equal(pages.tailCalls.length, 2, `a scrollable prepend waits for fresh navigation: ${reader()}`);
+        assert.equal(followState(fixture), "paused", `history input retains its pause through the prepend (#3188): ${reader()}`);
         assert.equal(domWindow.document.activeElement, fixture.scroller, "focus stays in the reader");
       } finally { await unmountFixture(fixture); }
     });
@@ -2635,7 +2700,8 @@ for (const kind of ["native", "pointer"] as const) {
         assert.equal(followState(fixture), "paused", "the reader was paused before the touch");
         await act(async () => touchHistoryGesture(fixture.scroller, kind));
         await flushAsyncWork();
-        assert.equal(pages.tailCalls.length, 2, "the touch requests one earlier page");
+        assert.equal(pages.tailCalls.length, 2, "the touch requests one earlier page: " +
+          describeOneScreenReader(`${kind} touch with a ${scrollHeight - 500}px scroll range`, fixture, pages));
         assert.equal(followState(fixture), "paused", "lifting preserves an existing pause while loading");
         setScrollerMetrics(fixture.scroller, { clientHeight: 500, scrollHeight: 1_200, scrollTop: 700 });
         const earlier = fixture.events.slice(-16, -8);
