@@ -61,7 +61,7 @@ test("an auth probe reports each status command's tree proof only after the comm
   void proofs[0]!.then((value) => { proven = value; });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(proven, undefined, "no proof while the command is still running");
-  child.stdout.write(JSON.stringify({ loggedIn: true, email: "account@example.test" }));
+  (child.stdout as PassThrough).write(JSON.stringify({ loggedIn: true, email: "account@example.test" }));
   child.emit("close", 0, null);
   assert.equal((await observation).status, "authenticated");
   assert.equal(await proofs[0], true);
@@ -226,7 +226,7 @@ test("the naming executor passes every provider process it started to the author
     authorize: async () => ({ cleanup: async (children) => { cleaned.push(children); } }),
     spawn: () => {
       setImmediate(() => {
-        child.stdout.write("Session Naming Fix");
+        (child.stdout as PassThrough).write("Session Naming Fix");
         child.emit("close", 0, null);
       });
       return child;
