@@ -15,6 +15,7 @@ import type { TimelineItem } from "../timeline.js";
 import { QuestionRowGallery } from "./question-row-gallery.js";
 import { ResolverGallery, SignInResolverGallery } from "./resolver-gallery.js";
 import { setQuestionResponseStyle, useQuestionResponseStyle } from "../question-response-style.js";
+import { useSessionReadingKeys } from "../useSessionReadingKeys.js";
 import { useFollowTail } from "../useFollowTail.js";
 import "../styles.css";
 
@@ -179,6 +180,30 @@ const longChoiceQuestions: AgentQuestion[] = [{
   options: ["Proceed", "Hold", "Split the Plan", "Ask Again Later", "Escalate", "Close It"].map((label) => ({ label })),
 }];
 
+// Complete Markdown drafts taller than the composer viewport (#3256).
+const issueDraftQuestions: AgentQuestion[] = [{
+  id: "review", header: "Review",
+  question: "Review these proposed issues before answering.\n\n" +
+    Array.from({ length: 3 }, (_, index) => `## Proposed Issue ${index + 1}\n\n` +
+      "### Problem\n\nLong questions must remain readable before answering.\n\n" +
+      "### Proposed Behavior\n\nKeep the complete review available.\n\n" +
+      "### Acceptance Criteria\n\n" +
+      Array.from({ length: 8 }, (_, item) => `- Check ${index + 1}.${item + 1}: preserve the answer and keep every part of the draft reachable.`).join("\n") +
+      "\n\n### Security and Compatibility\n\nNone. Presentation only.").join("\n\n") +
+    "\n\nEnd of proposed issues.",
+  options: [{ label: "Publish These Three Issues" }, { label: "Keep as Drafts" }],
+}, { id: "note", question: "Add an optional review note.", options: [], required: false, allowOther: true }];
+
+// The production session shell clips page overflow. Document scrolling must not mask a missing
+// scroll region in the composer (#3256).
+function SessionShell({ children }: { children: React.ReactNode }) {
+  return params.get("shell") === "1" ? (
+    <div className="main" data-focus-zone="main" style={{ height: "100%" }}>
+      <div className="main-body inbox-main-body">{children}</div>
+    </div>
+  ) : <>{children}</>;
+}
+
 // A paragraph-long question with a header and an inline code span: a few lines more than the docked
 // card shows before Show Full Question (#2683).
 const paragraphQuestions: AgentQuestion[] = [{
@@ -283,7 +308,9 @@ function Fixture() {
   const responseStyle = useQuestionResponseStyle();
   const [requestId, setRequestId] = useState("ask-1");
   const [questions, setQuestions] = useState(
-    params.get("set") === "long"
+    params.get("set") === "issue-drafts"
+      ? issueDraftQuestions
+      : params.get("set") === "long"
       ? longQuestions
       : params.get("set") === "long-text"
         ? longTextQuestions
@@ -387,6 +414,14 @@ function Fixture() {
   // Reading back and Show Where Asked work as in a session: the reader follows its tail, and a reveal
   // pauses it, so the dock takes its strip.
   const followTail = useFollowTail({ scrollRef, contentRevision: items, sessionId: SESSION_ID, persistenceScope: "agent-questions-e2e" });
+  // The real desktop session listens in capture phase; keep that owner in the shell regression.
+  const readingActions = useMemo(() => {
+    const noop = () => {};
+    return { nextSession: noop, previousSession: noop, approve: noop, deny: noop, archive: noop,
+      snooze: noop, fork: noop, reply: noop, pauseFollow: followTail.pause, resumeFollow: followTail.follow };
+  }, [followTail.pause, followTail.follow]);
+  useSessionReadingKeys({ enabled: params.get("shell") === "1", sessionId: SESSION_ID, scrollRef, actions: readingActions });
+
   const [revealRequest, setRevealRequest] = useState<TimelineRevealRequest | null>(null);
   const revealSerial = useRef(0);
   const reveal = useCallback((eventId: number) => {
@@ -441,6 +476,7 @@ function Fixture() {
   return (
     <ApiProvider client={client}>
       <main id="question-frame" className="app" style={{ display: "block", height: "100dvh" }}>
+        <SessionShell>
         <section className="session-detail expanded" style={{ height: "100%" }}>
           <div className="detail-columns">
             <div className="detail-chat">
@@ -533,6 +569,7 @@ function Fixture() {
             </div>
           </div>
         </section>
+        </SessionShell>
       </main>
     </ApiProvider>
   );

@@ -425,3 +425,45 @@ test("composition, repeat, mismatch, and session changes reset the gg sequence",
   await act(async () => { fixture.root.unmount(); });
   fixture.container.remove();
 });
+
+test("Composer Answer Mode owns reading keys without moving the transcript (#3256)", async () => {
+  const fixture = await renderHarness();
+  const panel = document.createElement("section");
+  panel.className = "composer-answer";
+  panel.tabIndex = 0;
+  fixture.container.querySelector("[data-focus-zone=main]")!.append(panel);
+  panel.focus();
+  try {
+    for (const key of ["End", " ", "j", "k"]) {
+      const event = dispatchKey(key);
+      assert.equal(event.defaultPrevented, false, `${key} stays with the answer surface`);
+    }
+    assert.deepEqual(fixture.scrollCalls, []);
+    assert.deepEqual(fixture.calls, []);
+  } finally {
+    await act(async () => fixture.root.unmount());
+    fixture.container.remove();
+  }
+});
+
+for (const focus of ["panel", "field"] as const) {
+  test(`Answer Mode keeps modified session navigation from its ${focus} (#3256)`, async () => {
+    const fixture = await renderHarness();
+    const panel = document.createElement("section");
+    panel.className = "composer-answer";
+    panel.tabIndex = 0;
+    const input = document.createElement("input");
+    panel.append(input);
+    fixture.container.querySelector("[data-focus-zone=main]")!.append(panel);
+    (focus === "panel" ? panel : input).focus();
+    try {
+      dispatchKey("ArrowDown", { altKey: true });
+      dispatchKey("ArrowUp", { altKey: true });
+      assert.deepEqual(fixture.calls, ["nextSession", "previousSession"]);
+      assert.deepEqual(fixture.scrollCalls, []);
+    } finally {
+      await act(async () => fixture.root.unmount());
+      fixture.container.remove();
+    }
+  });
+}
