@@ -13,6 +13,7 @@ import {
 } from "./store.js";
 import { BrowserNavigation, encodeResourceId, viewFromPath, viewPath, type View } from "./navigation.js";
 import { TestBrowserHistory } from "./test-browser-history.js";
+import { MAX_CORRECTIONS } from "./history-position.js";
 import { registerLeaveGuard } from "./leave-guard.js";
 import { uiStreamSubscriptions } from "./ui-subscriptions.js";
 import { saveInstanceStorageValue, type KeyValueStorage } from "./instance-storage.js";
@@ -251,6 +252,62 @@ test("a second Back while the first is undone still returns to the editor's entr
     asked[0]!();
     browser.flush();
     assert.deepEqual(store.getState().view, { name: "runs" }, "Discard completes the first move");
+  } finally {
+    release();
+  }
+});
+
+test("two Backs before the undo lands, with entries beyond the editor, return to it once (#3218 review)", () => {
+  const { browser, store } = storeOnHistory("/usage", "/runs", "/settings/orchestrator", "/settings/appearance", "/settings/behavior");
+  browser.traverse(-2);
+  assert.deepEqual(store.getState().view, ORCHESTRATOR);
+  const asked: Array<() => void> = [];
+  const release = registerLeaveGuard((leave) => asked.push(leave));
+  try {
+    browser.back();
+    browser.back();
+    // Bounded, unlike `flush`: a return that never settles must fail here rather than hang.
+    for (let step = 0; step < 24 && browser.pending.length > 0; step += 1) browser.traverse(browser.pending.shift()!);
+    assert.deepEqual(browser.pending, [], "the return settles");
+    assert.equal(browser.path, "/settings/orchestrator");
+    assert.equal(asked.length, 1);
+    assert.equal(browser.entries.length, 5, "no entry is dropped");
+    asked[0]!();
+    browser.flush();
+    assert.deepEqual(store.getState().view, { name: "runs" }, "Discard completes the first move");
+  } finally {
+    release();
+  }
+});
+
+test("twelve Backs before the return lands still settle on the editor's entry, asked once (#3218)", () => {
+  const paths = Array.from({ length: 20 }, (_, index) => `/runs/~${encodeResourceId(`run-${index}`)}`);
+  const { browser, store } = storeOnHistory(...paths, "/settings/orchestrator");
+  const asked: Array<() => void> = [];
+  const release = registerLeaveGuard((leave) => asked.push(leave));
+  try {
+    // Twelve Backs before any of the app's own moves lands: each one calls for another correction.
+    for (let press = 0; press < 12; press += 1) browser.back();
+    for (let step = 0; step < 100 && browser.pending.length > 0; step += 1) browser.traverse(browser.pending.shift()!);
+    assert.deepEqual(browser.pending, [], "the moves settle");
+    assert.equal(browser.path, "/settings/orchestrator");
+    assert.deepEqual(store.getState().view, ORCHESTRATOR);
+    assert.equal(asked.length, 1);
+  } finally {
+    release();
+  }
+});
+
+test("a return that needs more than its bound of corrections gives up and shows where the history is (#3218)", () => {
+  const paths = Array.from({ length: MAX_CORRECTIONS + 10 }, (_, index) => `/runs/~${encodeResourceId(`run-${index}`)}`);
+  const { browser, store } = storeOnHistory(...paths, "/settings/orchestrator");
+  const asked: Array<() => void> = [];
+  const release = registerLeaveGuard((leave) => asked.push(leave));
+  try {
+    for (let press = 0; press < MAX_CORRECTIONS + 5; press += 1) browser.back();
+    for (let step = 0; step < 1000 && browser.pending.length > 0; step += 1) browser.traverse(browser.pending.shift()!);
+    assert.deepEqual(browser.pending, [], "the moves settle");
+    assert.equal(viewPath(store.getState().view), browser.path, "what is on screen is where the history is");
   } finally {
     release();
   }

@@ -10,7 +10,7 @@ export class TestBrowserHistory {
   index = 0;
   readonly window: NavigationWindow;
   private readonly listeners = new Set<() => void>();
-  private readonly pending: number[] = [];
+  readonly pending: number[] = [];
 
   constructor(path: string) {
     this.entries = [{ path, state: null }];

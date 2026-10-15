@@ -72,11 +72,28 @@ export function pushPositionedEntry(history: PositionedHistory, path: string): v
   history.pushState(withPosition(history.state, here ? { run: here.run, index: here.index + 1 } : newRun()), "", path);
 }
 
+/**
+ * Corrections one return may make before it gives up and shows where the history is. Each is needed
+ * only when the person moves again before the return lands, so this is far more than a hand makes;
+ * the bound guarantees that a browser behaving unlike the model below cannot keep the history moving
+ * forever.
+ */
+export const MAX_CORRECTIONS = 32;
+
+/** A return to the entry on screen that is under way. */
+interface Return {
+  then: () => void;
+  /** Where the last `popstate` left the history. */
+  at: EntryPosition;
+  /** This class's own moves not yet arrived, in the order asked for. */
+  moves: number[];
+  corrections: number;
+}
+
 /** The positions of one navigation's entries: the one on screen, and the move a `popstate` made. */
 export class HistoryPositions {
   private shown: EntryPosition | null = null;
-  /** Called when the entry on screen is reached again after an undo. */
-  private restoring: (() => void) | null = null;
+  private restoring: Return | null = null;
 
   constructor(private readonly history: PositionedHistory) {}
 
@@ -91,22 +108,35 @@ export class HistoryPositions {
   }
 
   /**
-   * After a `popstate`: `null` when the move was this class's own return to the entry on screen,
-   * which the app must not see; otherwise the move to show, with a traversal when it can be held.
+   * After a `popstate`: `null` when the move was part of this class's own return to the entry on
+   * screen, which the app must not see; otherwise the move to show, with a traversal when it can be
+   * held.
    */
   arrive(): { traversal?: HistoryTraversal } | null {
     const from = this.shown;
     const to = stamp(this.history);
     const go = this.history.go?.bind(this.history);
-    if (this.restoring && from && to.run === from.run) {
-      if (to.index === from.index) {
-        const then = this.restoring;
+    const restoring = this.restoring;
+    if (restoring && go && from && to.run === from.run) {
+      // Browsers run history moves in the order they were asked for, so an arrival that is the next
+      // of this class's own moves is that move; any other is the person's, made before it landed.
+      if (restoring.moves.length > 0 && restoring.at.index + restoring.moves[0]! === to.index) restoring.moves.shift();
+      restoring.at = to;
+      const landing = restoring.moves.reduce((index, delta) => index + delta, to.index);
+      if (landing !== from.index) {
+        if (++restoring.corrections <= MAX_CORRECTIONS) {
+          restoring.moves.push(from.index - landing);
+          go(from.index - landing);
+          return null;
+        }
+        // Give up holding: show where the history is.
         this.restoring = null;
-        then();
-        return null;
+        this.shown = to;
+        return {};
       }
-      // Moved again before the return landed: keep heading back to the entry on screen.
-      go?.(from.index - to.index);
+      if (restoring.moves.length > 0) return null;
+      this.restoring = null;
+      restoring.then();
       return null;
     }
     this.restoring = null;
@@ -117,7 +147,7 @@ export class HistoryPositions {
       traversal: {
         undo: (then) => {
           this.shown = from;
-          this.restoring = then;
+          this.restoring = { then, at: to, moves: [-delta], corrections: 0 };
           go(-delta);
         },
         redo: () => go(delta),

@@ -376,9 +376,14 @@ export function InstanceProvider({
     };
   }, [closeRuntime, desktop, enqueueRegistryMutation, openProfile]);
 
+  // The open instance's navigation, which holds a Back or Forward that would close it (#3218).
+  const navigationRef = useRef<DesktopInstanceNavigation | null>(null);
   useEffect(() => {
     const onPopState = () => {
       const route = instanceRouteFromPath(window.location.pathname, window.location.search);
+      const leaving = route ? route.instanceId !== stateRef.current.activeProfile.id : isInstanceScopedPath(window.location.pathname);
+      // An editor with unsaved changes in the open instance asks first, as a move within it does.
+      if (leaving && navigationRef.current?.holdDeparture()) return;
       if (!route) {
         if (isInstanceScopedPath(window.location.pathname)) {
           generationRef.current += 1;
@@ -537,6 +542,7 @@ export function InstanceProvider({
     ),
     [activateProfileRoute, state.activeProfile.id],
   );
+  navigationRef.current = navigation;
 
   const reportActiveStatus = useCallback((status: InstanceStatus) => {
     const profileId = stateRef.current.activeProfile.id;
