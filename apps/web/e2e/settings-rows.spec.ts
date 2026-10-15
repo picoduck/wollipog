@@ -92,10 +92,13 @@ function describeLoad(record: PageRecord, state: Awaited<ReturnType<typeof docum
  * Asserts the harness applied `theme`; when it did not, the failure carries what the page did.
  *
  * One reload is allowed, for exactly one cause: the harness mounted nothing AND a script request of
- * that load failed, which is the dev server failing to deliver a module, not the harness failing to
- * apply its theme. The reload is reported as a CI warning with the same diagnostics, so it cannot
- * pass silently. Anything else fails at once — the harness throwing, mounting without its theme, or
- * a load that fails again after the reload.
+ * that load failed, which is a module not being delivered, not the harness failing to apply its
+ * theme. That is what happened on win32 (#3216): a trace caught one static import of the harness
+ * entry failing with `net::ERR_NO_BUFFER_SPACE`, Winsock's WSAENOBUFS — the Windows host briefly
+ * out of socket resources — which aborts the whole module graph while `load` still fires. The
+ * reload is reported as a CI warning with the same diagnostics, so it cannot pass silently.
+ * Anything else fails at once — the harness throwing, mounting without its theme, or a load that
+ * fails again after the reload.
  */
 async function expectTheme(page: Page, theme: Theme) {
   const record = pageRecords.get(page)!;
