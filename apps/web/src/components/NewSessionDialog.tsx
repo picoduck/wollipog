@@ -14,6 +14,9 @@ import {
   WORKFLOW_DECISION_CATEGORIES,
   advertisesOrchestratorAdditiveRole,
   agentHarnessIdentityKey,
+  orchestratorChildHarnessRequirement,
+  orchestratorExecutionPolicyRequirement,
+  orchestratorIntegrationIsolationRequirement,
   type ProjectLocationView,
   type ProjectView,
   runnerCapabilityRequirement,
@@ -547,6 +550,7 @@ export function NewSessionDialog({
   const orchestratorCapabilities = orchestratorSettings?.view?.capabilities;
   const harnessPolicyAvailable = orchestratorCapabilities?.harnesses !== undefined;
   const childHarnessPolicySupported = runnerSupportsProtocol(runner?.protocolVersion, "orchestratorChildHarnessPolicy");
+  const childHarnessPolicyUnavailable = orchestratorChildHarnessRequirement(runner?.protocolVersion).error;
   const childHarnesses = orchestratorCapabilities?.harnesses ?? [];
   const fixedChildHarness = orchestratorDraft.behavior.childHarness;
   const fixedChildHarnessCapability = fixedChildHarness
@@ -622,7 +626,7 @@ export function NewSessionDialog({
   const orchestratorCapabilitiesValid = !!fixedPairAvailable && fixedHarnessAvailable && fixedHarnessSupported &&
     fixedModelAvailable && fixedEffortAvailable;
   const orchestratorCapabilitiesError = fixedChildHarness && !fixedHarnessSupported
-    ? "Fixed Child Harness policy requires a protocol-v157 Orchestrator runner. Update the selected runner or choose Automatic."
+    ? childHarnessPolicyUnavailable
     : orchestratorCapabilities?.reason ??
       "A saved Child Harness, Child Model, or Child Effort is no longer advertised. Choose an available value.";
   const orchestratorDelegationValid =
@@ -721,11 +725,7 @@ export function NewSessionDialog({
   const integrationIsolationCopy = integrationIsolationDisclosure(agent?.driver);
   const integrationIsolationUnavailable = !integrationIsolationControlPlane
     ? INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED
-    : runnerCapabilityRequirement(
-      runner?.protocolVersion,
-      "orchestratorIntegrationIsolation",
-      "integration isolation",
-    );
+    : orchestratorIntegrationIsolationRequirement(runner?.protocolVersion).error;
   const orchestratorExecutionValid = (orchestratorDraft.execution.strictProjectIsolation
     ? strictProjectBoundaryAvailable
     : providerExecutionAvailable) &&
@@ -735,7 +735,7 @@ export function NewSessionDialog({
       ? "Strict Project Isolation needs an audited Codex sandbox, Direct WSL bubblewrap, or runner bubblewrap/Seatbelt isolation with the required Claude mode."
       : "Strict Project Isolation is delivered by the Orchestrator preset, which this agent installation cannot launch here. Disable it to run this Orchestrator with ordinary provider permissions.")
     : !executionPolicySupported
-      ? "Delegate Implementation without Strict Project Isolation requires a protocol-v144 runner. Update the runner or enable Strict Project Isolation."
+      ? orchestratorExecutionPolicyRequirement(runner?.protocolVersion).error
       : "Provider-mode orchestration requires a native Codex, approval-capable Claude Code, or bridge-verified Pi harness.";
   const childModelOptions = [
     { value: AUTOMATIC_ORCHESTRATOR_VALUE, label: "Automatic", description: "Resolve from live child capabilities." },
@@ -1719,7 +1719,7 @@ export function NewSessionDialog({
                   />
                   {!harnessPolicyAvailable && <small className="muted">Update or restart Wollipog to configure fixed Child Harness policy.</small>}
                   {fixedChildHarness && !childHarnessPolicySupported && <small className="form-error">
-                    Fixed Child Harness policy requires a protocol-v157 Orchestrator runner. Update the selected runner or choose Automatic.
+                    {childHarnessPolicyUnavailable}
                   </small>}
                 </div>
                 <div className="orchestrator-policy-control">

@@ -1006,7 +1006,7 @@ test("new Orchestrator sessions send only explicit overrides after showing effec
   }
 });
 
-test("a fixed Child Harness on an older runner shows the protocol-v157 recovery message", async () => {
+test("a fixed Child Harness on an older runner shows the server's refusal sentence", async () => {
   const olderRunner: RunnerView = {
     ...runner,
     protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorChildHarnessPolicy - 1,
@@ -1036,7 +1036,10 @@ test("a fixed Child Harness on an older runner shows the protocol-v157 recovery 
     await choosePermissionPreset(fixture.container, "Orchestrator");
     const alerts = [...fixture.container.querySelectorAll('[role="alert"]')]
       .map((node) => node.textContent ?? "").join(" ");
-    assert.match(alerts, /requires a protocol-v157 Orchestrator runner.*choose Automatic/i);
+    assert.ok(alerts.includes(
+      "This machine needs a newer runner for a fixed child harness. Update and restart the runner. To start now, choose Automatic for Child Harness.",
+    ), alerts);
+    assert.doesNotMatch(fixture.container.textContent!, /protocol-v/);
     assert.doesNotMatch(alerts, /saved Child Model or Child Effort is no longer advertised/i);
     assert.equal(createButton(fixture.container).disabled, true);
   } finally {
@@ -1082,6 +1085,12 @@ test("Orchestrator defaults without Child Harness policy name Wollipog as the th
   } finally {
     await unmountFixture(fixture);
   }
+});
+
+test("New Session copy names no runner protocol numbers", () => {
+  // docs/design-system.md §17.2: refusals use the shared runner sentence; versions travel as fields.
+  const source = readFileSync(new URL("./NewSessionDialog.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /protocol-v\d|protocol v\d/i);
 });
 
 test("unsupported control-plane combinations explain the upgrade and block Orchestrator creation", async () => {
@@ -2699,11 +2708,39 @@ test("an older runner blocks Integration Isolation rather than letting it be sub
     await act(async () => { await selectProject(fixture.container, project.id); });
     await choosePermissionPreset(fixture.container, "Orchestrator");
     await chooseSelectOption(fixture.container, "Integration Isolation", "Enabled");
-    assert.match(fixture.container.textContent!, /Integration Isolation/);
+    const alerts = [...fixture.container.querySelectorAll('[role="alert"]')]
+      .map((node) => node.textContent ?? "").join(" ");
+    assert.ok(alerts.includes(
+      "This machine needs a newer runner for integration isolation. Update and restart the runner. To start now, turn off Integration Isolation.",
+    ), alerts);
+    assert.doesNotMatch(fixture.container.textContent!, /protocol-v/);
     assert.equal(createButton(fixture.container).disabled, true,
       "the dialog never advertises a shape the control plane refuses");
     await act(async () => { createButton(fixture.container).click(); });
     assert.equal(fixture.requests.length, 0);
+  } finally { await unmountFixture(fixture); }
+});
+
+test("an Orchestrator without Strict Project Isolation on an older runner shows the server's refusal sentence", async () => {
+  const oldRunner: RunnerView = {
+    ...runner,
+    protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorExecutionPolicy - 1,
+    agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "dontAsk", "orchestrator"],
+    } })),
+  };
+  const fixture = await mountFixture({ runners: [oldRunner] });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    const alerts = [...fixture.container.querySelectorAll('[role="alert"]')]
+      .map((node) => node.textContent ?? "").join(" ");
+    assert.ok(alerts.includes(
+      "This machine needs a newer runner for an Orchestrator without strict project isolation. Update and restart the runner. To start now, turn on Strict Project Isolation.",
+    ), alerts);
+    assert.doesNotMatch(fixture.container.textContent!, /protocol-v/);
+    assert.equal(createButton(fixture.container).disabled, true);
   } finally { await unmountFixture(fixture); }
 });
 

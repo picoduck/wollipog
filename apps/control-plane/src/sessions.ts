@@ -38,7 +38,12 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   isOrchestratorOnlyCapabilities,
   mergeSessionCapabilities,
   nativeTuiHasTrackedGuardrails,
+  orchestratorChildHarnessRequirement,
+  orchestratorExecutionPolicyRequirement,
+  orchestratorIntegrationIsolationRequirement,
   runnerCapabilityRequirement,
+  runnerCapabilityRequirementError,
+  runnerCapabilityRequirementWithAlternative,
   type RunnerCapabilityRequirementDetails,
   runnerSupportsProtocol,
   validatePromptImageInputs,
@@ -195,7 +200,6 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   sessionRole,
   advertisesOrchestratorAdditiveRole,
   orchestratorAdditiveCapability,
-  RUNNER_CAPABILITY_MIN_PROTOCOL,
   usesOrchestratorPresetPermissions,
   type SessionRole,
 } from "@wollipog/protocol";
@@ -587,6 +591,13 @@ function ok<T>(data: T, status = 200): ServiceResult<T> {
 }
 function fail<T>(error: string, status = 400): ServiceResult<T> {
   return { ok: false, status, error };
+}
+/** A refused runner capability gate: a 409 with the shared sentence as `error` and the versions
+ * beside it, never inside it (docs/design-system.md §17.2). */
+function capabilityFail<T>(
+  { error, ...capabilityRequirement }: { error: string } & RunnerCapabilityRequirementDetails,
+): ServiceResult<T> {
+  return { ok: false, status: 409, error, capabilityRequirement };
 }
 
 /** Rolls back a campaign child's creation when its work-item attempt cannot be recorded (#3106). */
@@ -3854,10 +3865,7 @@ export class SessionsService {
     const usesRunnerProviderAccount = executionTarget.adapter === "host";
     if (usesRunnerProviderAccount && req.providerAccountId &&
         !runnerSupportsProtocol(runner.protocolVersion, "providerAccounts")) {
-      return fail(
-        `Provider account selection requires a protocol-v${RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccounts} runner; update the runner and retry.`,
-        409,
-      );
+      return capabilityFail(runnerCapabilityRequirementError(runner.protocolVersion, "providerAccounts", "choosing an account"));
     }
     const launchProvider = launch.driver === "claude-code" ? "claude"
       : launch.driver === "codex" || launch.driver === "codex-app-server" ? "codex" : null;
@@ -4156,14 +4164,11 @@ export class SessionsService {
       if (compatibilityError) return fail(compatibilityError, 409);
       if (orchestratorPolicy.behavior.childHarness &&
           !runnerSupportsProtocol(runner.protocolVersion, "orchestratorChildHarnessPolicy")) {
-        return fail(
-          "A fixed Child Harness requires a protocol-v157 Orchestrator runner. Update the runner or choose Automatic Harness.",
-          409,
-        );
+        return capabilityFail(orchestratorChildHarnessRequirement(runner.protocolVersion));
       }
       if (!orchestratorPolicy.execution.strictProjectIsolation &&
           !runnerSupportsProtocol(runner.protocolVersion, "orchestratorExecutionPolicy")) {
-        return fail("Delegate Implementation without Strict Project Isolation requires a protocol-v144 runner; update the runner or enable Strict Project Isolation.", 409);
+        return capabilityFail(orchestratorExecutionPolicyRequirement(runner.protocolVersion));
       }
       // Every coupled-preset launch — Native TUI, ACP, legacy, and the Claude/Codex non-strict
       // preset shapes — replaces the provider surface with the runner-owned planning surface and so
@@ -4186,9 +4191,7 @@ export class SessionsService {
       // closed for a saved user default exactly as it does for an explicit per-session override.
       if (!presetPermissions && orchestratorPolicy.execution.integrationIsolation &&
           !runnerSupportsProtocol(runner.protocolVersion, "orchestratorIntegrationIsolation")) {
-        return fail(`Integration Isolation requires a protocol-v${
-          RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIntegrationIsolation
-        } runner; update the runner or disable Integration Isolation.`, 409);
+        return capabilityFail(orchestratorIntegrationIsolationRequirement(runner.protocolVersion));
       }
       requestedConfig.maxChildSessions = orchestratorPolicy.behavior.maximumConcurrentChildren;
       parentControl = orchestratorPolicy.delegation.parentControl;
@@ -4221,8 +4224,12 @@ export class SessionsService {
             : "Independent provider permissions for an Orchestrator are supported only by a native Claude Code, Codex, or Pi harness on the host; other harnesses still use the Orchestrator preset permission mode.", 409);
         }
         if (!runnerSupportsProtocol(runner.protocolVersion, additiveCapability)) {
-          return fail(`An Orchestrator with independent provider permissions requires a protocol-v${
-            RUNNER_CAPABILITY_MIN_PROTOCOL[additiveCapability]} runner for this harness; update the runner or choose the Orchestrator preset permission mode.`, 409);
+          return capabilityFail(runnerCapabilityRequirementWithAlternative(
+            runner.protocolVersion,
+            additiveCapability,
+            "an Orchestrator with independent provider permissions",
+            "To start now, choose the Orchestrator preset permission mode.",
+          ));
         }
         // The runner attests the additive role separately from the coupled preset, because the
         // preset advertisement also encodes the strict filesystem boundary that the additive role
@@ -4342,7 +4349,7 @@ export class SessionsService {
     }
     const inheritedIssueScope = campaignController?.orchestratorPolicy?.issueScope ?? snapshotSpec?.orchestrator?.issueScope;
     if (orchestratorPolicy && inheritedIssueScope && !runnerSupportsProtocol(runner.protocolVersion, "campaignIssueScopeChanges")) {
-      return fail("Revisioned campaign issue scope requires a protocol-v208 runner; update and reconnect before creating an Orchestrator participant.", 409);
+      return capabilityFail(runnerCapabilityRequirementError(runner.protocolVersion, "campaignIssueScopeChanges", "campaign issue scope changes"));
     }
     if (orchestratorPolicy && inheritedIssueScope && campaignController && !campaignIssueNumbers) return fail("A scoped Orchestrator participant must use the campaign's runner and repository workspace. Select that workspace or start an independent campaign.", 409);
     if (orchestratorPolicy && inheritedIssueScope) orchestratorPolicy.issueScope = inheritedIssueScope;
@@ -4353,7 +4360,7 @@ export class SessionsService {
         : []);
     if (orchestratorPolicy && orchestratorIssueNumbers.length &&
         !runnerSupportsProtocol(runner.protocolVersion, "orchestratorIssueScope")) {
-      return fail("Campaign issue coordination requires a protocol-v158 Orchestrator runner; update the runner and retry.", 409);
+      return capabilityFail(runnerCapabilityRequirementError(runner.protocolVersion, "orchestratorIssueScope", "campaign issue coordination"));
     }
     if (orchestratorPolicy && (orchestratorIssueNumbers.length || inheritedIssueScope)) {
       orchestratorPolicy.issueNumbers = [...orchestratorIssueNumbers];
@@ -6751,17 +6758,22 @@ export class SessionsService {
         return fail("An Orchestrator with independent provider permissions requires a native Claude Code, Codex, or Pi harness on the host that advertises the Orchestrator role; the agent definition no longer matches. Start a new session or choose the Orchestrator preset permission mode.", 409);
       }
       if (!runnerSupportsProtocol(runner?.protocolVersion, additiveCapability)) {
-        return fail(`An Orchestrator with independent provider permissions requires a protocol-v${
-          RUNNER_CAPABILITY_MIN_PROTOCOL[additiveCapability]} runner for this harness; update the runner and retry.`, 409);
+        return capabilityFail(runnerCapabilityRequirementError(
+          runner?.protocolVersion,
+          additiveCapability,
+          "an Orchestrator with independent provider permissions",
+        ));
       }
       // Mirror creation exactly. The stored policy is fixed, so a runner that was downgraded or
       // re-registered without this capability would relaunch the campaign WITH the integrations the
       // human removed, while the session still advertises them as absent.
       if (session.orchestratorPolicy?.execution.integrationIsolation &&
           !runnerSupportsProtocol(runner?.protocolVersion, "orchestratorIntegrationIsolation")) {
-        return fail(`Integration Isolation requires a protocol-v${
-          RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIntegrationIsolation
-        } runner; update the runner and retry.`, 409);
+        return capabilityFail(runnerCapabilityRequirementError(
+          runner?.protocolVersion,
+          "orchestratorIntegrationIsolation",
+          "integration isolation",
+        ));
       }
       // Codex's audited Linux or macOS sandbox is NOT checked here, and creation no longer checks it
       // for this shape either (#1308). That platform rule belongs to the coupled preset, whose
@@ -6775,8 +6787,9 @@ export class SessionsService {
       // the final exact-bridge check before launch.
     }
     const agentId = session.agentId;
-    if (session.orchestratorPolicy?.issueScope && !runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "campaignIssueScopeChanges")) {
-      return fail("Revisioned campaign scope requires a protocol-v208 runner; update and reconnect before restarting.", 409);
+    const restartProtocolVersion = this.db.getRunner(session.runnerId)?.protocolVersion;
+    if (session.orchestratorPolicy?.issueScope && !runnerSupportsProtocol(restartProtocolVersion, "campaignIssueScopeChanges")) {
+      return capabilityFail(runnerCapabilityRequirementError(restartProtocolVersion, "campaignIssueScopeChanges", "campaign issue scope changes"));
     }
     if (session.orchestratorPolicy?.issueScope) {
       const campaignId = this.db.campaignRootForMember(sessionId);
@@ -6785,16 +6798,18 @@ export class SessionsService {
         return fail("A scoped Orchestrator must restart in the campaign's runner and repository workspace. Restore its campaign workspace or start an independent campaign.", 409);
       }
     }
-    const supportsIssueScope = runnerSupportsProtocol(
-      this.db.getRunner(session.runnerId)?.protocolVersion,
+    const supportsIssueScope = runnerSupportsProtocol(restartProtocolVersion, "orchestratorIssueScope");
+    const issueScopeRefusal = () => capabilityFail<SessionView>(runnerCapabilityRequirementError(
+      restartProtocolVersion,
       "orchestratorIssueScope",
-    );
+      "campaign issue coordination",
+    ));
     if (session.orchestratorPolicy && !session.orchestratorPolicy.issueScope && !session.orchestratorPolicy.issueNumbers?.length &&
         this.db.sessionWasHumanCreatedOrchestrator(sessionId)) {
       const initialPrompt = this.db.initialUserMessageText(sessionId);
       const recovered = initialPrompt ? orchestratorIssueNumbersFromInitialPrompt(initialPrompt) : [];
       if (recovered.length && !supportsIssueScope) {
-        return fail("Campaign issue coordination requires a protocol-v158 Orchestrator runner; update the runner and retry.", 409);
+        return issueScopeRefusal();
       }
       if (recovered.length &&
           this.db.backfillSessionOrchestratorIssueNumbers(sessionId, recovered, Date.now())) {
@@ -6802,7 +6817,7 @@ export class SessionsService {
       }
     }
     if (session.orchestratorPolicy?.issueNumbers?.length && !supportsIssueScope) {
-      return fail("Campaign issue coordination requires a protocol-v158 Orchestrator runner; update the runner and retry.", 409);
+      return issueScopeRefusal();
     }
     const hasStopIntent = this.db.hasSessionStopIntent(sessionId);
     if (hasStopIntent) {
@@ -7708,8 +7723,20 @@ export class SessionsService {
       authorizeFullControl(principal, scope, proposal, expectedRevision + 1, now);
     if (!control) return fail("Full Control requires authenticated repository scope and a valid boundary", 400);
     if (control.mode === "full_control") {
-      if (control.boundary.issueAuthority && (scope!.issueNumbers.length + reservedPublicationSlots(this.db, session, undefined, undefined, true) > control.boundary.issueAuthority.maxIssues ||
-          scopeCompatibility(this.db, { ...session, orchestratorPolicy: { ...session.orchestratorPolicy!, control } }))) return fail("The issue boundary exceeds its human-set scope limit or requires protocol-v217 participants", 409);
+      if (control.boundary.issueAuthority) {
+        if (scope!.issueNumbers.length + reservedPublicationSlots(this.db, session, undefined, undefined, true) > control.boundary.issueAuthority.maxIssues) {
+          return fail("The issue boundary exceeds its human-set scope limit.", 409);
+        }
+        const outdated = scopeParticipants(this.db, session).find((participant) =>
+          !runnerSupportsProtocol(this.db.getRunner(participant.runnerId)?.protocolVersion, "fullControlIssueAuthority"));
+        if (outdated) {
+          return capabilityFail(runnerCapabilityRequirementError(
+            this.db.getRunner(outdated.runnerId)?.protocolVersion,
+            "fullControlIssueAuthority",
+            "campaign issue limits",
+          ));
+        }
+      }
       if (!session.workspaceId) return fail("Full Control requires a repository workspace binding", 409);
       if(control.boundary.budgetAuthority?.controlledReview) {
         if(this.db.sessionScope(sessionId)?.owner.kind!=="user") return fail("Controlled native review requires a user-owned campaign charge scope.",409);
