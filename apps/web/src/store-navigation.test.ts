@@ -300,6 +300,35 @@ test("a Forward that lands before the return makes the return's move land nowher
   }
 });
 
+test("after a reload the entries ahead are unseen, and a return still waits for its own move (#3218 review)", () => {
+  const browser = new TestBrowserHistory("/usage");
+  const before = new BrowserNavigation(browser.window);
+  const first = new Store(before.current(), (view) => before.push(view));
+  for (const path of ["/runs", "/settings/orchestrator", "/settings/appearance", "/settings/behavior"]) first.navigate(viewFromPath(path)!);
+  browser.traverse(-2);
+  // The reloaded page: the same entries and positions, and a new navigation that cannot see past its own.
+  const navigation = new BrowserNavigation(browser.window);
+  const store = new Store(navigation.current(), (view) => navigation.push(view));
+  navigation.listen((view, traversal) => store.navigateFromHistory(view, traversal));
+  const asked: Array<() => void> = [];
+  const release = registerLeaveGuard((leave) => asked.push(leave));
+  try {
+    browser.traverse(-2);
+    browser.forward();
+    browser.back();
+    browser.flush();
+    assert.equal(browser.index, 2);
+    assert.deepEqual(store.getState().view, ORCHESTRATOR);
+    assert.equal(asked.length, 1);
+    asked[0]!();
+    browser.flush();
+    assert.equal(browser.index, 0, "Discard completes the Back of two entries");
+    assert.deepEqual(store.getState().view, { name: "usage" });
+  } finally {
+    release();
+  }
+});
+
 test("twelve Backs before the return lands still settle on the editor's entry, asked once (#3218)", () => {
   const paths = Array.from({ length: 20 }, (_, index) => `/runs/~${encodeResourceId(`run-${index}`)}`);
   const { browser, store } = storeOnHistory(...paths, "/settings/orchestrator");
@@ -356,16 +385,22 @@ test("a return's move that lands nowhere is given up after a quiet spell, and th
   }
 });
 
-test("a Forward then a Back before the return lands, near the first entry, still settles (#3218)", () => {
+test("a Forward then a Back before the return lands, near the first entry, still settles (#3218)", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const { browser, store } = storeOnHistory("/settings/orchestrator", "/runs", "/usage");
   browser.traverse(-2);
   const asked: Array<() => void> = [];
   const release = registerLeaveGuard((leave) => asked.push(leave));
   try {
     browser.traverse(2);
-    // Before the return's -2 lands: from Runs it would pass the first entry, so it lands nowhere.
+    // Before the return's -2 lands: from Runs it would pass the first entry, so it lands nowhere,
+    // and the return waits a quiet spell for it before settling from where the history is.
     browser.back();
-    for (let step = 0; step < 100 && browser.pending.length > 0; step += 1) browser.traverse(browser.pending.shift()!);
+    browser.flush();
+    assert.equal(asked.length, 0);
+    assert.deepEqual(store.getState().view, ORCHESTRATOR);
+    t.mock.timers.tick(RETURN_QUIET_MS);
+    browser.flush();
     assert.equal(browser.path, "/settings/orchestrator");
     assert.deepEqual(store.getState().view, ORCHESTRATOR);
     assert.equal(asked.length, 1);
