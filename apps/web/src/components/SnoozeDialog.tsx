@@ -56,7 +56,8 @@ const FINE_POINTER_MEDIA = "(pointer: fine)";
  * reveals one Snooze Until field that takes phrases and named dates alike, with its error under it
  * (§8.5). One checkbox maps to the wake policy, and one line says when the session returns. The
  * primary stays enabled while the schedule is incomplete and moves focus to what is missing; it is
- * refused only during a reminder conflict, whose reason sits in the footer (§7.3).
+ * refused only during a reminder conflict, whose reason sits in the footer (§7.3). From the keyboard,
+ * Enter on a preset snoozes and typing on the tiles goes to Custom… with what was typed.
  */
 export function SnoozeDialog({
   sessionTitle,
@@ -221,6 +222,9 @@ export function SnoozeDialog({
     if (!focusDraftRef.current) return;
     focusDraftRef.current = false;
     focusDraftControl(true);
+    // After typing on the tiles, the next keystroke follows the one that opened the field.
+    const input = expressionRef.current;
+    if (input && document.activeElement === input) input.setSelectionRange(input.value.length, input.value.length);
   });
 
   useEffect(() => {
@@ -258,6 +262,39 @@ export function SnoozeDialog({
     setScheduleTouched(true);
     setChoice(next);
     setSuggestionsOpen(false);
+  };
+
+  // Enter on a tile answers as Enter on a native radio does, submitting its form; on Custom… it goes
+  // on to the field, which is what that tile asks for next.
+  const enterChoice = (next: SnoozeChoice) => {
+    if (next === "custom") {
+      choose(next, true);
+      return;
+    }
+    if (next === choice) {
+      void submit();
+      return;
+    }
+    choose(next, false);
+    const schedule = parseReminderExpression(next, new Date());
+    if (schedule) void submit(schedule);
+  };
+
+  const editExpression = (value: string) => {
+    setScheduleTouched(true);
+    setExpressionEdited(true);
+    setSelectedSuggestion(null);
+    setExpression(value);
+    setActiveSuggestion(-1);
+    setSuggestionsOpen(Boolean(value.trim()));
+  };
+
+  // Typing on the tiles means a time of one's own: Custom…, with the character in its field. An open
+  // Custom… keeps its words and the character follows them; otherwise it starts afresh.
+  const typeOnTiles = (character: string) => {
+    focusDraftRef.current = true;
+    setChoice("custom");
+    editExpression(custom ? expression + character : character);
   };
 
   const reload = () => {
@@ -448,6 +485,8 @@ export function SnoozeDialog({
             options={tiles}
             value={choice}
             onChange={choose}
+            onEnter={enterChoice}
+            onType={typeOnTiles}
             groupRef={tilesRef}
             invalid={Boolean(choiceError)}
             describedBy={choiceError ? CHOICE_ERROR_ID : undefined}
@@ -473,14 +512,7 @@ export function SnoozeDialog({
                 aria-invalid={fieldError ? true : undefined}
                 aria-describedby={fieldError ? EXPRESSION_ERROR_ID : EXPRESSION_HELPER_ID}
                 value={expression}
-                onChange={(event) => {
-                  setScheduleTouched(true);
-                  setExpressionEdited(true);
-                  setSelectedSuggestion(null);
-                  setExpression(event.target.value);
-                  setActiveSuggestion(-1);
-                  setSuggestionsOpen(Boolean(event.target.value.trim()));
-                }}
+                onChange={(event) => editExpression(event.target.value)}
                 onBlur={() => {
                   setSuggestionsOpen(false);
                   if (expressionEdited && !submittingRef.current) setShowFieldError(true);
