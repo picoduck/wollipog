@@ -6,11 +6,15 @@ import { Worker } from "node:worker_threads";
 import { providerHomeLeaseTarget, type ProviderHomeLeaseOptions, type ProviderHomeLeaseRequest } from "./provider-home-lease.js";
 import { boundedLeaseWorkerFrame, isLeaseWorkerAcquisition, leaseWorkerFrameKeys, LEASE_WORKER_ASSET, LEASE_WORKER_ERRORS, LEASE_WORKER_LIMITS, ProviderHomeLeaseError, validLeaseWorkerOperation, type LeaseWorkerOperation, type LeaseWorkerReply } from "./provider-home-lease-worker-protocol.js";
 
-/** One acquired provider-HOME reference. `release` drops exactly it, at most once. */
+/** One acquired provider-HOME reference. Settle it exactly once: `release` drops exactly this
+ * reference; `retain` keeps the reference until shutdown and frees only the worker-side handle.
+ * Unsettled handles share a bounded pool, so every acquisition must settle. */
 export interface ProviderHomeReference {
   /** True when this acquisition created the registry entry. */
   first: boolean;
+  /** True when this reference was dropped (other references to the HOME may remain). */
   release(): Promise<boolean>;
+  retain(): Promise<void>;
 }
 
 type Diagnostic = Parameters<NonNullable<ProviderHomeLeaseOptions["onDiagnostic"]>>[0];
@@ -100,12 +104,15 @@ export class AsyncProviderHomeLeaseRegistry {
   async acquireHomeReference(home: string, provider = "skills", cancellation: LeaseCancellation = {}): Promise<ProviderHomeReference> {
     if (this.closing) throw unavailable("shutdown admission closed");
     const { value, id } = await this.enqueue({ method: "acquire_reference", home, provider }, cancellation);
-    let released: Promise<boolean> | undefined;
+    // The first of release() and retain() settles the handle; later calls share its outcome.
+    let settled: Promise<boolean> | undefined;
+    const settle = (method: "release_reference" | "retain_reference") => settled ??= this.closePromise || this.closed
+      ? Promise.reject(unavailable("shutdown release already queued"))
+      : this.enqueue({ method, home, referenceId: id }).then((result) => result.value);
     return {
       first: value,
-      release: () => released ??= this.closePromise || this.closed
-        ? Promise.reject(unavailable("shutdown release already queued"))
-        : this.enqueue({ method: "release_reference", home, referenceId: id }).then((result) => result.value),
+      release: () => settle("release_reference"),
+      retain: async () => { await settle("retain_reference"); },
     };
   }
 

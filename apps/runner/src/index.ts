@@ -896,7 +896,7 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
       const accountHome = pluginProvider === "claude" ? meta.env.CLAUDE_CONFIG_DIR : meta.env.CODEX_HOME;
       if (meta.context.kind === "native" && accountHome &&
           (!meta.executionTarget || meta.executionTarget.adapter === "host")) {
-        await sessions.acquireSkillReconciliationProviderHome(accountHome, cancellation);
+        await sessions.acquireLaunchProviderHome(accountHome, cancellation);
       }
       assertPreparationCurrent();
       if (pluginProvider === "claude") {
@@ -1682,6 +1682,7 @@ function queueSkillAdoption(msg: SkillAdoptionMessage): void {
       settled = result.status !== "recovery_required";
     } finally {
       if (settled) await providerHomes.release();
+      else await providerHomes.retain();
     }
     sendUp(result);
     // A completed or interrupted transaction may have changed the source path. Reconcile and
@@ -1738,6 +1739,7 @@ function queueSkillAdoptionRecovery(msg: SkillAdoptionRecoveryMessage): void {
       settled = result.status !== "recovery_required";
     } finally {
       if (settled) await providerHomes.release();
+      else await providerHomes.retain();
     }
     sendUp(recoveryResult(config.runnerId, msg.requestId, result));
     // A restore attempt can move a managed link or source directory. Publish converged inventory

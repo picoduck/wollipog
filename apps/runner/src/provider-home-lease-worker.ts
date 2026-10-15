@@ -48,11 +48,11 @@ export function runProviderHomeLeaseWorker(): void {
             const acquisition = registry.acquireHomeWithReceipt(op.home, op.provider);
             reply.value = acquisition.first; prepared.cancel = acquisition.cancel;
           }
-        } else if (op.method === "release_reference") {
+        } else if (op.method === "release_reference" || op.method === "retain_reference") {
           const reference = references.get(op.referenceId);
           if (!reference || reference.home !== op.home) throw new Error("unproved reference release");
           references.delete(op.referenceId);
-          reply.value = reference.release();
+          reply.value = op.method === "release_reference" ? reference.release() : true;
         } else if (op.method === "release") reply.value = registry.releaseHome(op.home);
         else {
           reply.value = registry.releaseAll();

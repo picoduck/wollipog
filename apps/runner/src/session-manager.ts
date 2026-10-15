@@ -289,10 +289,12 @@ export interface SessionNamingExecutionAuthorization {
 
 type Send = (msg: RunnerToControlPlane) => void;
 type Logger = (msg: string) => void;
-/** Provider-HOME references held by one skill transaction; see `skillProviderHomeScope()`. */
+/** Provider-HOME references held by one skill transaction; see `skillProviderHomeScope()`.
+ * Settle with `release` once the work finished, or `retain` to keep the references until shutdown. */
 export interface SkillProviderHomeScope {
   acquire(home: string): Promise<void>;
   release(): Promise<void>;
+  retain(): Promise<void>;
 }
 
 export type AcpContextResolver = (spec: SessionLaunchSpec) => SessionLaunchSpec["acpSessionContext"];
@@ -4338,6 +4340,14 @@ export class SessionManager {
       throw new Error("Agent TUI launch changed while waiting for provider-home ownership");
     }
     // A launched TUI keeps its reference until runner shutdown, as provider processes do.
+    if (reference) await this.retainProviderHomeReference(reference);
+  }
+
+  /** Launch preparation's account-HOME reference: same post-grant cancellation as skill
+   * acquisition, but a successful launch keeps the reference until shutdown. */
+  async acquireLaunchProviderHome(home: string, cancellation: LeaseCancellation = {}): Promise<void> {
+    const reference = await this.acquireSkillReconciliationProviderHome(home, cancellation);
+    if (reference) await this.retainProviderHomeReference(reference);
   }
 
   /** Skill links mutate the same native provider HOME as Claude and Codex launches. Acquire one
@@ -4378,6 +4388,10 @@ export class SessionManager {
         released = true;
         for (const reference of held.splice(0)) await this.releaseProviderHomeReference(reference);
       },
+      retain: async () => {
+        released = true;
+        for (const reference of held.splice(0)) await this.retainProviderHomeReference(reference);
+      },
     };
   }
 
@@ -4388,6 +4402,16 @@ export class SessionManager {
       await reference.release();
     } catch (error) {
       this.log(`provider-home reference release deferred to shutdown: ${errText(error)}`);
+    }
+  }
+
+  /** Keep one reference until shutdown and free its worker-side handle. A failure leaves only the
+   * handle occupied; the reference is held either way. */
+  private async retainProviderHomeReference(reference: ProviderHomeReference): Promise<void> {
+    try {
+      await reference.retain();
+    } catch (error) {
+      this.log(`provider-home reference handle retention failed: ${errText(error)}`);
     }
   }
 

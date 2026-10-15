@@ -24,10 +24,15 @@ class CountingRegistry {
     return count === 0;
   }
 
+  /** Worker-side handles not yet released or retained (the bounded pool's occupancy). */
+  openHandles = 0;
+
   async acquireHomeReference(home: string, provider: string, cancellation: LeaseCancellation = {}) {
     const first = await this.acquireHome(home, provider, cancellation);
-    let released: Promise<boolean> | undefined;
-    return { first, release: () => released ??= this.releaseHome(home) };
+    this.openHandles++;
+    let settled: Promise<boolean> | undefined;
+    const settle = (release: boolean) => settled ??= (this.openHandles--, release ? this.releaseHome(home) : Promise.resolve(true));
+    return { first, release: () => settle(true), retain: async () => { await settle(false); } };
   }
 
   async acquireReference(request: { env?: Record<string, string> }, cancellation: LeaseCancellation = {}) {
@@ -124,6 +129,24 @@ test("a scope that never acquired does not release a reference it does not hold"
     const scope = h.manager.skillProviderHomeScope();
     await scope.release();
     assert.equal(h.registry.references.get(h.home), 1, "only the cancelled grant was dropped");
+  } finally { h.cleanup(); }
+});
+
+test("process-lifetime acquisitions keep their reference but settle their worker handle", async () => {
+  const h = fixture();
+  try {
+    for (let i = 0; i < 3; i++) {
+      await h.manager.acquireLaunchProviderHome(h.home);
+      await h.manager.acquireAgentTuiProviderHome(h.meta);
+    }
+    assert.equal(h.registry.references.get(h.home), 6, "every launch and TUI keeps its reference");
+    assert.equal(h.registry.releases.length, 0);
+    assert.equal(h.registry.openHandles, 0, "no handle stays occupied, so repeated launches cannot exhaust the pool");
+    const scope = h.manager.skillProviderHomeScope();
+    await scope.acquire(h.home);
+    await scope.retain();
+    assert.equal(h.registry.references.get(h.home), 7, "an unfinished skill transaction keeps its reference");
+    assert.equal(h.registry.openHandles, 0);
   } finally { h.cleanup(); }
 });
 

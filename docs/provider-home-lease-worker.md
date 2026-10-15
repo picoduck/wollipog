@@ -62,7 +62,10 @@ safe options, instead of the generic "could not be proved" refusal.
 Callers that release before shutdown (skill transactions, and a launch or skill acquisition that
 became stale after its grant) use `acquire_reference`. The worker keeps the receipt's exact-entry
 release for that completed acquisition, at most 1024 at once, and `release_reference` names the
-acquisition by its id. Releasing by path would re-resolve the HOME, so a symlink retargeted in
+acquisition by its id. Every handle is settled: a consumer that keeps its reference until shutdown
+(a launched TUI or account launch, or an unfinished adoption or restore) sends `retain_reference`,
+which frees only the handle. Only in-flight transactions occupy the pool, however many launches a
+runner performs. Releasing by path would re-resolve the HOME, so a symlink retargeted in
 between could drop another HOME's reference. The handle cannot be redirected: it drops only the
 entry it joined, at most once. Path-based `release` remains only for the provider sign-in supervisor
 (sign-in and removed-account cleanup), which is unchanged here.

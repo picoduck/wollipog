@@ -9,7 +9,7 @@ import { Worker } from "node:worker_threads";
 import fc from "fast-check";
 import { AsyncProviderHomeLeaseRegistry } from "./provider-home-lease-async.js";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
-import { LEASE_WORKER_ERRORS, ProviderHomeLeaseError } from "./provider-home-lease-worker-protocol.js";
+import { LEASE_WORKER_ERRORS, LEASE_WORKER_REFERENCE_LIMIT, ProviderHomeLeaseError } from "./provider-home-lease-worker-protocol.js";
 
 function worker(data: Record<string, unknown>): Worker {
   return new Worker(`require(${JSON.stringify(createRequire(import.meta.url).resolve("tsx/cjs"))});require(${JSON.stringify(fileURLToPath(new URL("./provider-home-lease-worker.ts", import.meta.url)))});`,
@@ -148,6 +148,24 @@ test("a reference handle releases the entry it joined even after its HOME alias 
   assert.equal(await registry.acquireHome(homeA), true, "A has no reference left");
   assert.equal(await registry.releaseHome(homeA), true);
   assert.equal(await registry.releaseHome(homeB), true, "B's session reference was never touched");
+});
+
+test("retained references free their handles while unsettled handles are bounded", async t => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-async-handles-")), home = join(root, "home");
+  mkdirSync(home);
+  const registry = new AsyncProviderHomeLeaseRegistry("a".repeat(64));
+  t.after(async () => { await registry.close(); rmSync(root, { recursive: true, force: true }); });
+  const total = LEASE_WORKER_REFERENCE_LIMIT + 8;
+  for (let i = 0; i < total; i++) await (await registry.acquireHomeReference(home)).retain();
+  const open = [];
+  for (let i = 0; i < LEASE_WORKER_REFERENCE_LIMIT; i++) open.push(await registry.acquireHomeReference(home));
+  await assert.rejects(registry.acquireHomeReference(home), (error: unknown) =>
+    error instanceof ProviderHomeLeaseError && error.code === "busy");
+  for (const reference of open) assert.equal(await reference.release(), true, "each handle drops its own reference");
+  for (let i = 0; i < total - 1; i++) assert.equal(await registry.releaseHome(home), false, "retained references keep the HOME held");
+  assert.equal(await registry.releaseHome(home), true, "every retained reference was exactly counted");
+  assert.equal(await registry.acquireHome(home), true);
+  assert.equal(await registry.releaseHome(home), true);
 });
 
 test("foreign-owner and foreign-host refusals keep their typed code across the worker boundary", async t => {
