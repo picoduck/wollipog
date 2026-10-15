@@ -213,10 +213,12 @@ jobs:
             if [[ -n "$COUNT" && "$COUNT" != "0" ]]; then
               echo "## The win32 Settings-Rows Baselines Are Stale"
               echo
-              echo "Windows no longer renders what the committed \`*-win32.png\` baselines show. This run regenerated the $COUNT that differ and uploaded them as the \`settings-rows-win32-baselines\` artifact. From the repository root, on this branch:"
+              echo "Windows no longer renders what the committed \`*-win32.png\` baselines show. This run regenerated the $COUNT that differ and uploaded them as the \`settings-rows-win32-baselines\` artifact. \`gh run download\` refuses to overwrite the stale images, so download them to a temporary directory and copy that over the checkout. From the repository root, on this branch:"
               echo
               echo '```sh'
-              echo "gh run download $RUN_ID --repo $REPOSITORY --name settings-rows-win32-baselines --dir ."
+              echo 'dir="$(mktemp -d)"'
+              echo "gh run download $RUN_ID --repo $REPOSITORY --name settings-rows-win32-baselines --dir \"\$dir\""
+              echo 'cp -R "$dir"/. . && rm -rf "$dir"'
               echo "git add apps/web/e2e/settings-rows.spec.ts-snapshots"
               echo "git commit -m \"Regenerate the win32 settings-rows baselines\""
               echo '```'

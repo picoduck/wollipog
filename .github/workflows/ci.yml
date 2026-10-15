@@ -486,10 +486,12 @@ jobs:
             else
               echo "## The linux Settings-Rows Baselines Are Stale"
               echo
-              echo "CI no longer renders what the committed \`*-linux.png\` baselines show. This run regenerated the $COUNT that differ and uploaded them as the \`settings-rows-linux-baselines\` artifact. From the repository root, on this branch:"
+              echo "CI no longer renders what the committed \`*-linux.png\` baselines show. This run regenerated the $COUNT that differ and uploaded them as the \`settings-rows-linux-baselines\` artifact. \`gh run download\` refuses to overwrite the stale images, so download them to a temporary directory and copy that over the checkout. From the repository root, on this branch:"
               echo
               echo '```sh'
-              echo "gh run download $RUN_ID --repo $REPOSITORY --name settings-rows-linux-baselines --dir ."
+              echo 'dir="$(mktemp -d)"'
+              echo "gh run download $RUN_ID --repo $REPOSITORY --name settings-rows-linux-baselines --dir \"\$dir\""
+              echo 'cp -R "$dir"/. . && rm -rf "$dir"'
               echo "git add apps/web/e2e/settings-rows.spec.ts-snapshots"
               echo "git commit -m \"Regenerate the linux settings-rows baselines\""
               echo '```'

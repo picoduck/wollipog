@@ -264,8 +264,9 @@ function summarise(t, env) {
 test("the job summary gives the download command only when the images were uploaded", (t) => {
   const stale = summarise(t, {});
   assert.match(stale.summary, /^## The linux Settings-Rows Baselines Are Stale$/m);
-  assert.match(stale.summary,
-    /^gh run download 123 --repo owner\/repo --name settings-rows-linux-baselines --dir \.$/m);
+  // gh run download refuses to overwrite an existing file, and a stale baseline always exists, so
+  // the commands download beside the checkout and copy over it.
+  assert.match(stale.summary, /^dir="\$\(mktemp -d\)"\ngh run download 123 --repo owner\/repo --name settings-rows-linux-baselines --dir "\$dir"\ncp -R "\$dir"\/\. \. && rm -rf "\$dir"$/m);
   assert.match(stale.summary, /^git add apps\/web\/e2e\/settings-rows\.spec\.ts-snapshots$/m);
   for (const file of EXPECTED) assert.ok(stale.summary.includes(`- \`${file}\``));
   assert.match(stale.stdout, /^::error title=Stale linux Baselines::2 linux settings-rows baselines differ/m);

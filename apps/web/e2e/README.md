@@ -175,11 +175,14 @@ CI's comparison.
 
 Push the change instead and let the comparison fail. The browser shard that ran the spec re-runs it
 with `--update-snapshots=changed`, uploads only the regenerated `*-linux.png` files as the
-`settings-rows-linux-baselines` artifact, and its job summary gives the command that downloads them
-into place:
+`settings-rows-linux-baselines` artifact, and its job summary gives the commands that put them in
+place. `gh run download` refuses to overwrite an existing file, and a stale baseline always exists,
+so they download into a temporary directory and copy it over the checkout:
 
 ```bash
-gh run download <run-id> --repo <owner>/<repo> --name settings-rows-linux-baselines --dir .
+dir="$(mktemp -d)"
+gh run download <run-id> --repo <owner>/<repo> --name settings-rows-linux-baselines --dir "$dir"
+cp -R "$dir"/. . && rm -rf "$dir"
 git add apps/web/e2e/settings-rows.spec.ts-snapshots
 ```
 
@@ -193,10 +196,12 @@ is not baseline drift.
 When a change regenerates the linux set, expect the win32 comparison to fail on the same images.
 The failed job re-runs with `--update-snapshots=changed`, uploads only the regenerated
 `*-win32.png` files as the `settings-rows-win32-baselines` artifact, and its job summary gives the
-command that downloads them into place:
+same commands for that artifact:
 
 ```bash
-gh run download <run-id> --repo <owner>/<repo> --name settings-rows-win32-baselines --dir .
+dir="$(mktemp -d)"
+gh run download <run-id> --repo <owner>/<repo> --name settings-rows-win32-baselines --dir "$dir"
+cp -R "$dir"/. . && rm -rf "$dir"
 git add apps/web/e2e/settings-rows.spec.ts-snapshots
 ```
 
