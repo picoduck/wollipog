@@ -9,10 +9,14 @@
  * - `legacy`: a campaign on a server without the ledger (no `work` on its projection);
  * - `unrelated`: a session outside any campaign.
  * `theme=light` switches the palette; `open=launcher` starts on the launcher instead of the mode.
+ * `scope=outdated-runner` or `scope=issue-limits` makes issue scope unavailable because a participating
+ * Orchestrator's runner is older than the scope-change or Full Control issue-limit floor.
  */
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
+  campaignIssueLimitsRequirement,
+  campaignIssueScopeChangesRequirement,
   PROTOCOL_VERSION,
   type CampaignWorkItemDetail,
   type CampaignWorkItemSummary,
@@ -276,10 +280,17 @@ let selectedRequestKey: string | null = null;
 
 const visibleItems = scenario === "planless" ? items.filter((item) => item.id === "cwi_2" || item.id === "cwi_3") : items;
 
+// The same sentence and versions the control plane returns (campaign-issue-scope.ts).
+const scopeRequirement = params.get("scope") === "outdated-runner" ? campaignIssueScopeChangesRequirement(207)
+  : params.get("scope") === "issue-limits" ? campaignIssueLimitsRequirement(216) : null;
+const scopeCompatibility = scopeRequirement ? (({ error, ...versions }) =>
+  ({ supported: false, canPropose: false, compatibilityMessage: error, ...versions }))(scopeRequirement)
+  : { supported: true, canPropose: true };
+
 const client = {
   ...api,
   campaignIssueScope: async (id: string) => ({ campaignSessionId: id, repository: "team/repo", issueNumbers: [], revision: 0,
-    supported: true, canPropose: true, outsideScope: [{ workItemId: "scope-fixture", title: "Member work", issue: { repository: "team/repo", number: 124 }, sessionId: "s_child" }],
+    ...scopeCompatibility, outsideScope: [{ workItemId: "scope-fixture", title: "Member work", issue: { repository: "team/repo", number: 124 }, sessionId: "s_child" }],
     candidates: [{ issue: { repository: "team/repo", number: 123 }, title: "Composer Epic", source: "umbrella" as const },
       { issue: { repository: "team/repo", number: 124 }, title: "Member Work", source: "member_checklist" as const }] }),
   proposeCampaignIssueScope: async (_id: string, proposal: import("@wollipog/protocol").CampaignIssueScopeRequest) => {

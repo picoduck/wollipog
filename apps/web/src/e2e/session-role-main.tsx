@@ -2,7 +2,7 @@
  * credential fences, and role authority are exercised by the control-plane and runner tests. */
 import { createRoot } from "react-dom/client";
 import {
-  DEFAULT_ORCHESTRATOR_DEFAULTS, PROTOCOL_VERSION, sessionRole,
+  DEFAULT_ORCHESTRATOR_DEFAULTS, PROTOCOL_VERSION, sessionRole, sessionRoleConversionRequirement,
   type ControlPlaneToUi, type OrchestratorCampaignPolicy, type OrchestratorSettingsCapabilities, type SessionView,
 } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
@@ -65,7 +65,7 @@ const navigation: ViewNavigation = { current: () => ({ name: "inbox" }), push() 
 const reasons: Record<string, string> = {
   busy: "Resume this session and wait until it is idle before changing its role. Finish or stop active work first.",
   children: "Finish or stop the live child sessions before changing this role. Completed children keep their links and remain accessible to you.",
-  "older-runner": "Update this Machine's runner to protocol v203 or later before changing the session role.",
+  "older-runner": sessionRoleConversionRequirement(202).error,
   strict: "Strict Project Isolation requires the coupled preset. Disable it here to preserve these provider permissions.",
   viewer: "Your Viewer role is read-only.",
 };

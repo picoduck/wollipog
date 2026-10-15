@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { campaignIssueLimitsRequirement, campaignIssueScopeChangesRequirement } from "@wollipog/protocol";
 
 for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844 }]) {
   test(`human scope recovery and epic selection at ${viewport.width}px`, async ({ page }) => {
@@ -21,6 +22,19 @@ for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844
   });
 }
 
+for (const [scope, requirement] of [
+  ["outdated-runner", campaignIssueScopeChangesRequirement(207)],
+  ["issue-limits", campaignIssueLimitsRequirement(216)],
+] as const) {
+  test(`an ${scope} refusal names the runner update without a protocol number`, async ({ page }) => {
+    await page.goto(`/campaign-status-e2e.html?scenario=campaign&scope=${scope}`);
+    const panel = page.getByRole("region", { name: "Authorized Issue Scope" });
+    const notice = panel.locator(".notice").filter({ hasText: "Scope Changes Unavailable" });
+    await expect(notice).toContainText(requirement.error);
+    await expect(notice).not.toContainText(/protocol|v\d/u);
+    await expect(panel.getByRole("button", { name: "Request Scope Approval", exact: true })).toHaveCount(0);
+  });
+}
 
 test("scope approval request shows exact changes and affected assignments",async({page})=>{
   await page.goto("/request-surfaces-e2e.html?scenario=issue-scope");

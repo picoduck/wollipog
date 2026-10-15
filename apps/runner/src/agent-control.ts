@@ -24,6 +24,7 @@ import {
   type AcpMcpStdioServer,
   type AgentContext,
   type AgentDefinition,
+  type RunnerProtocolCapability,
   type SessionLaunchSpec,
 } from "@wollipog/protocol";
 import { deriveControlPlaneHttpUrl } from "./control-plane-transport.js";
@@ -454,6 +455,26 @@ function runnerOwnedClaudeSettings(value: string): boolean {
   return describeManagedSettings(value) != null;
 }
 
+/* Launch refusals when Wollipog (the control plane) is older than this runner. The sentence names what
+ * to update; the versions go to the runner log, never into the sentence (#3254). */
+export const ORCHESTRATOR_PERMISSIONS_NEED_NEWER_WOLLIPOG =
+  "An Orchestrator with independent provider permissions on this harness needs a newer version of Wollipog. " +
+  "Update Wollipog and try again.";
+export const INTEGRATION_ISOLATION_NEEDS_NEWER_WOLLIPOG =
+  "Integration Isolation needs a newer version of Wollipog. Update Wollipog and try again.";
+
+function controlPlaneUpdateRequired(
+  sessionId: string,
+  controlPlaneProtocolVersion: number | null,
+  capability: RunnerProtocolCapability,
+  sentence: string,
+  log: (line: string) => void,
+): Error {
+  log(`agent control ${sessionId}: refused ${capability}; control plane protocol ${
+    controlPlaneProtocolVersion ?? "unknown"}, requires ${RUNNER_CAPABILITY_MIN_PROTOCOL[capability]}`);
+  return new Error(sentence);
+}
+
 /** Mutates only ephemeral runner-side launch state. The credential bytes never cross the runner
  * socket and are scrubbed from durable session metadata by the existing env policy. */
 export function provisionAgentControl(
@@ -511,8 +532,8 @@ export function provisionAgentControl(
       throw new Error("independent provider permissions are supported only for the native Claude Code, Codex, and Pi Orchestrators on the host");
     }
     if (!runnerSupportsProtocol(config.controlPlaneProtocolVersion, additiveCapability)) {
-      throw new Error(`an Orchestrator with independent provider permissions requires a protocol-v${
-        RUNNER_CAPABILITY_MIN_PROTOCOL[additiveCapability]} control plane for this harness`);
+      throw controlPlaneUpdateRequired(spec.sessionId, config.controlPlaneProtocolVersion, additiveCapability,
+        ORCHESTRATOR_PERMISSIONS_NEED_NEWER_WOLLIPOG, log);
     }
     if (strictProjectIsolation) {
       throw new Error("Strict Project Isolation requires the Orchestrator preset permission mode");
@@ -525,8 +546,8 @@ export function provisionAgentControl(
   }
   if (integrationIsolation &&
       !runnerSupportsProtocol(config.controlPlaneProtocolVersion, "orchestratorIntegrationIsolation")) {
-    throw new Error(`Integration Isolation requires a protocol-v${
-      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIntegrationIsolation} control plane`);
+    throw controlPlaneUpdateRequired(spec.sessionId, config.controlPlaneProtocolVersion, "orchestratorIntegrationIsolation",
+      INTEGRATION_ISOLATION_NEEDS_NEWER_WOLLIPOG, log);
   }
   const orchestratorProjectPaths = [...new Set([
     ...(config.orchestratorProjectPaths ?? []),

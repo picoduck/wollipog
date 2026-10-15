@@ -214,6 +214,10 @@ export const MAX_UI_BACKGROUND_OBSERVATIONS_PER_CONNECTION = 1_024;
 export const MAX_UI_BACKGROUND_OBSERVATIONS_PER_WINDOW = 128;
 export const UI_BACKGROUND_OBSERVATION_RATE_WINDOW_MS = 10_000;
 export const INDEFINITE_SESSION_REMINDER_UI_PROTOCOL = 174;
+/** The refusal a client older than that protocol receives when it reads a Someday reminder. The
+ * versions travel beside it as `requiredClientProtocolVersion` and `clientProtocolVersion` (#3254). */
+export const SOMEDAY_REMINDER_CLIENT_UPDATE_REQUIRED =
+  "This reminder uses Someday, which this version of Wollipog can't show. Update Wollipog and try again.";
 /** Minimum spacing of a session's streaming-only upserts, so a dashboard receives at most four per
  * second per session while an agent streams (#2760). Any other change is sent at once. */
 export const SESSION_STREAMING_UPSERT_INTERVAL_MS = 250;

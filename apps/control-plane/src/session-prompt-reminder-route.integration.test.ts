@@ -523,7 +523,13 @@ test("prompt route acknowledges fired reminders only for accepted human principa
   );
   const legacyReadBody = await legacyRead.json() as Record<string, unknown>;
   assert.equal(legacyRead.status, 409);
-  assert.match(String(legacyReadBody.error), /protocol v174.*update/i);
+  assert.deepEqual(
+    { error: legacyReadBody.error, requiredClientProtocolVersion: legacyReadBody.requiredClientProtocolVersion,
+      clientProtocolVersion: legacyReadBody.clientProtocolVersion },
+    { error: "This reminder uses Someday, which this version of Wollipog can't show. Update Wollipog and try again.",
+      requiredClientProtocolVersion: 174, clientProtocolVersion: 172 },
+    "the client floor moves to structured fields; the sentence names no protocol number",
+  );
   assert.equal(legacyReadBody.reminder, undefined,
     "legacy reconciliation must never receive a Someday payload it cannot parse");
 

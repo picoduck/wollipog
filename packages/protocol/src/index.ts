@@ -1501,6 +1501,24 @@ export function orchestratorIntegrationIsolationRequirement(protocolVersion: num
   );
 }
 
+/* Refusals the control plane returns and the web app shows unchanged (Campaign Status, Change
+ * Role). The sentence is built only here, so the e2e fixtures and the server cannot drift (#3254). */
+
+/** Changing a session's role, both before it starts and while finishing a started change. */
+export function sessionRoleConversionRequirement(protocolVersion: number | null | undefined) {
+  return runnerCapabilityRequirementError(protocolVersion, "sessionRoleConversion", "changing session roles");
+}
+
+/** Changing a campaign's authorized issue scope; every participating Orchestrator's runner needs it. */
+export function campaignIssueScopeChangesRequirement(protocolVersion: number | null | undefined) {
+  return runnerCapabilityRequirementError(protocolVersion, "campaignIssueScopeChanges", "campaign issue scope changes");
+}
+
+/** Full Control issue writes within a human-set issue limit. */
+export function campaignIssueLimitsRequirement(protocolVersion: number | null | undefined) {
+  return runnerCapabilityRequirementError(protocolVersion, "fullControlIssueAuthority", "campaign issue limits");
+}
+
 export type OS = "windows" | "linux" | "macos";
 
 /* ========================================================================== */
@@ -2295,6 +2313,9 @@ export interface SessionRoleConversionPreview {
   available: boolean;
   canRetry?: boolean;
   reason?: string;
+  /** Present when an outdated runner causes `reason`; the sentence never names them. */
+  requiredRunnerProtocolVersion?: number;
+  runnerProtocolVersion?: number | null;
   permissionMode: string | null;
   orchestratorPolicy?: OrchestratorCampaignPolicy;
   orchestratorCapabilities?: OrchestratorSettingsCapabilities;
@@ -4296,6 +4317,9 @@ export interface CampaignIssueScopeView {
   authorization?: CampaignIssueScope;
   supported: boolean;
   compatibilityMessage?: string;
+  /** Present when an outdated runner causes `compatibilityMessage`; the sentence never names them. */
+  requiredRunnerProtocolVersion?: number;
+  runnerProtocolVersion?: number | null;
   canPropose: boolean;
   candidateMessage?: string;
   outsideScope: Array<{ workItemId: string; title: string; issue: CampaignIssueRef; sessionId: string | null }>;

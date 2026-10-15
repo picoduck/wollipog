@@ -451,3 +451,35 @@ test("a scoped Orchestrator refuses an older runner with the shared sentence on 
     assert.deepEqual(restart.capabilityRequirement, versions);
   } finally { h.db.close(); }
 });
+
+test("campaign issue scope refuses each runner floor with the shared sentence and returns the versions beside it", async () => {
+  const {default:Fastify}=await import("fastify");
+  const {registerCampaignIssueScopeRoutes}=await import("./campaign-issue-scope-routes.js");
+  for (const [full, capability, label] of [
+    [true, "fullControlIssueAuthority", "campaign issue limits"],
+    [false, "campaignIssueScopeChanges", "campaign issue scope changes"],
+  ] as const) {
+    const h = harness(full);
+    const app = Fastify();
+    try {
+      registerCampaignIssueScopeRoutes(app, { db: h.db, svc: h.svc, requestPrincipal: () => h.principal });
+      const floor = RUNNER_CAPABILITY_MIN_PROTOCOL[capability];
+      const refusal = `This machine needs a newer runner for ${label}. Update and restart the runner.`;
+      const versions = { requiredRunnerProtocolVersion: floor, runnerProtocolVersion: floor - 1 };
+      assert.doesNotMatch(refusal, /protocol|v\d/u);
+      h.db.registerRunner(h.metadata, 3, floor - 1);
+      const view = await app.inject({ method: "GET", url: "/api/sessions/root/campaign/issue-scope" });
+      assert.equal(view.statusCode, 200, view.body);
+      assert.deepEqual(
+        (({ supported, compatibilityMessage, requiredRunnerProtocolVersion, runnerProtocolVersion }) =>
+          ({ supported, compatibilityMessage, requiredRunnerProtocolVersion, runnerProtocolVersion }))(view.json()),
+        { supported: false, compatibilityMessage: refusal, ...versions },
+      );
+      const proposed = await app.inject({ method: "POST", url: "/api/sessions/root/campaign/issue-scope/proposals",
+        payload: { requestId: `old-runner-${capability}`, expectedRevision: 1, additions: [{ repository: "team/repo", number: 101 }],
+          removals: [], explanation: "Verified intended member", lineage: { kind: "epic", epic: 100 } } });
+      assert.equal(proposed.statusCode, 409);
+      assert.deepEqual(proposed.json(), { error: refusal, ...versions }, "the HTTP refusal keeps the versions beside the sentence");
+    } finally { await app.close(); h.db.close(); }
+  }
+});

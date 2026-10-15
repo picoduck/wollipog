@@ -2,7 +2,8 @@ import { isDeepStrictEqual } from "node:util";
 import { randomUUID } from "node:crypto";
 import {
   advertisesOrchestratorAdditiveRole, isTerminal, pendingRequests,
-  runnerSupportsProtocol, sessionRole, usesOrchestratorPresetPermissions,
+  runnerSupportsProtocol, sessionRole, sessionRoleConversionRequirement, usesOrchestratorPresetPermissions,
+  type RunnerCapabilityRequirementDetails,
   type OrchestratorCampaignOverrides, type OrchestratorCampaignPolicy, type OrchestratorSettingsView, type PrepareSessionRoleMessage,
   type SessionRole, type SessionRoleConversionPreview, type SessionSnapshot,
 } from "@wollipog/protocol";
@@ -13,6 +14,17 @@ import { parseOrchestratorOverrides, resolveOrchestratorCampaignPolicy } from ".
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { HumanPrincipal } from "./identity.js";
 import { withSessionCommandPermissions } from "./session-command-permissions.js";
+import { failureBody } from "./capability-refusal.js";
+
+/** A role change refused by the runner floor: the shared sentence as the message, and the versions
+ * the route returns beside it. */
+class RoleConversionCapabilityError extends Error {
+  readonly capabilityRequirement: RunnerCapabilityRequirementDetails;
+  constructor({ error, ...capabilityRequirement }: { error: string } & RunnerCapabilityRequirementDetails) {
+    super(error);
+    this.capabilityRequirement = capabilityRequirement;
+  }
+}
 
 export function registerSessionRoleRoutes(app: FastifyInstance, deps: {
   db: ControlPlaneDb;
@@ -29,7 +41,8 @@ export function registerSessionRoleRoutes(app: FastifyInstance, deps: {
     const role = (req.query as { role?: unknown }).role;
     if (role !== "normal" && role !== "orchestrator") return reply.code(400).send({ error: "role must be normal or orchestrator" });
     const preview = deps.conversions.preview(id, role, deps.defaultsFor(human), (policy) => deps.validatePolicy(human, policy));
-    return human.role === "viewer" ? { ...preview, available: false, canRetry: false, policyError: undefined, reason: "Your Viewer role is read-only." } : preview;
+    return human.role === "viewer" ? { ...preview, available: false, canRetry: false, policyError: undefined, reason: "Your Viewer role is read-only.",
+      requiredRunnerProtocolVersion: undefined, runnerProtocolVersion: undefined } : preview;
   });
   app.post("/api/sessions/:id/role", async (req, reply) => {
     const id = (req.params as { id: string }).id;
@@ -52,7 +65,10 @@ export function registerSessionRoleRoutes(app: FastifyInstance, deps: {
       await deps.conversions.change(id, body.role, body.expectedRole, deps.defaultsFor(human), (policy) => deps.validatePolicy(human, policy), overrides);
       return withSessionCommandPermissions(deps.db, human, deps.db.getSession(id)!);
     } catch (error) {
-      return reply.code(409).send({ error: (error as Error).message });
+      return reply.code(409).send(failureBody({
+        error: (error as Error).message,
+        ...(error instanceof RoleConversionCapabilityError ? { capabilityRequirement: error.capabilityRequirement } : {}),
+      }));
     }
   });
 }
@@ -79,7 +95,8 @@ export class SessionRoleConversions {
     const runner = this.db.getRunner(session.runnerId);
     if (!this.hub.isRunnerOnline(session.runnerId)) return refuse("Connect this session's Machine before changing its role.");
     if (!runnerSupportsProtocol(runner?.protocolVersion, "sessionRoleConversion")) {
-      return refuse("Update this Machine's runner to protocol v203 or later before changing the session role.");
+      const { error, ...versions } = sessionRoleConversionRequirement(runner?.protocolVersion);
+      return { ...refuse(error), ...versions };
     }
     const pending = this.db.sessionRoleConversion(id);
     if (pending && pending.state !== "applied") return {
@@ -165,7 +182,11 @@ export class SessionRoleConversions {
     }
     const preview = this.preview(id, role, defaults, validate, overrides);
     if (preview.currentRole !== expectedRole) throw new Error("The session role changed. Reload it before trying again.");
-    if (!preview.available) throw new Error(preview.reason);
+    if (!preview.available) {
+      throw preview.requiredRunnerProtocolVersion === undefined ? new Error(preview.reason)
+        : new RoleConversionCapabilityError({ error: preview.reason!, requiredRunnerProtocolVersion: preview.requiredRunnerProtocolVersion,
+          runnerProtocolVersion: preview.runnerProtocolVersion ?? null });
+    }
     const session = this.db.getSession(id)!;
     const launch = launchForRestart(this.db, session)!;
     const conversionId = randomUUID();
@@ -198,8 +219,9 @@ export class SessionRoleConversions {
     const intent = this.db.sessionRoleConversion(id);
     const session = this.db.getSession(id);
     if (!intent || !session || intent.state === "applied") return;
-    if (!runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "sessionRoleConversion")) {
-      throw new Error("Update this Machine's runner to protocol v203 or later to finish the role change.");
+    const protocolVersion = this.db.getRunner(session.runnerId)?.protocolVersion;
+    if (!runnerSupportsProtocol(protocolVersion, "sessionRoleConversion")) {
+      throw new RoleConversionCapabilityError(sessionRoleConversionRequirement(protocolVersion));
     }
     const command = intent.state === "preparing" ? { ...intent.command, requestId: randomUUID() }
       : { type: "commit_session_role" as const, requestId: randomUUID(), sessionId: id, conversionId: intent.command.conversionId };

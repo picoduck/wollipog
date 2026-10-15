@@ -27219,7 +27219,8 @@ test("human campaign scope recovery, additions, denial, removal and closure use 
     db.registerRunner(meta, Date.now(),207);
     const unsupported = await svc.proposeCampaignIssueScope(id,{...proposal,requestId:"old-runner",expectedRevision:2,additions:[{repository:"team/repo",number:126}]});
     assert.equal(unsupported.ok,false);
-    assert.match(unsupported.error!,/protocol-v208/);
+    assert.equal(unsupported.error,"This machine needs a newer runner for campaign issue scope changes. Update and restart the runner.");
+    assert.deepEqual(unsupported.capabilityRequirement,{requiredRunnerProtocolVersion:208,runnerProtocolVersion:207});
     assert.equal(db.getSession(id)!.orchestratorPolicy!.issueScope!.revision,2);
     await new Promise((resolve) => setTimeout(resolve,0));
   } finally { db.close(); }

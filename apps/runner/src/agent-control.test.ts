@@ -23,6 +23,8 @@ import {
   agentControlRegistrationsToResend,
   agentControlTokenPath,
   agentControlReadyPath,
+  INTEGRATION_ISOLATION_NEEDS_NEWER_WOLLIPOG,
+  ORCHESTRATOR_PERMISSIONS_NEED_NEWER_WOLLIPOG,
   forgetAgentControlRegistrationAnswers,
   isCurrentAgentControlCredential,
   isStaleAgentControlAnswer,
@@ -405,14 +407,20 @@ test("a non-strict Pi Orchestrator launches as a normal session plus only the Or
     }), { ...control, orchestratorAgent: piAgent }, () => {}, host),
       /Strict Project Isolation requires the Orchestrator preset/);
 
-    // An older control plane cannot request the additive Pi shape.
+    // An older control plane cannot request the additive Pi shape. The sentence names what to update;
+    // the versions go only to the runner log.
+    const piRefusalLog: string[] = [];
     assert.throws(() => provisionAgentControl(build("s_pi_old", {
       config: { permissionMode: "default" }, orchestrator: { strictProjectIsolation: false },
     }), {
       ...control,
       controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditivePi - 1,
       orchestratorAgent: piAgent,
-    }, () => {}, host), /protocol-v163 control plane/);
+    }, (line) => piRefusalLog.push(line), host), (error: Error) => error.message === ORCHESTRATOR_PERMISSIONS_NEED_NEWER_WOLLIPOG);
+    assert.equal(ORCHESTRATOR_PERMISSIONS_NEED_NEWER_WOLLIPOG,
+      "An Orchestrator with independent provider permissions on this harness needs a newer version of Wollipog. Update Wollipog and try again.");
+    assert.deepEqual(piRefusalLog, [`agent control s_pi_old: refused orchestratorAdditivePi; control plane protocol ${
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditivePi - 1}, requires ${RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditivePi}`]);
 
     // The verified bridge is still required for the additive shape.
     assert.throws(() => provisionAgentControl(build("s_pi_nobridge", {
@@ -1149,20 +1157,26 @@ test("an Orchestrator with independent provider permissions keeps the ordinary C
     acp.orchestrator = { strictProjectIsolation: false };
     assert.throws(() => provisionAgentControl(acp, control, () => {}, host),
       /native Claude Code, Codex, and Pi Orchestrators/);
+    const outdatedLog: string[] = [];
+    const outdatedCodexLog: string[] = [];
     const outdated = spec("claude-code");
     outdated.sessionId = "s_outdated_control_plane";
     outdated.config = { permissionMode: "acceptEdits" };
     outdated.orchestrator = { strictProjectIsolation: false };
     assert.throws(() => provisionAgentControl(outdated, {
       ...control, controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole - 1,
-    }, () => {}, host), /protocol-v160/);
+    }, (line) => outdatedLog.push(line), host), (error: Error) => error.message === ORCHESTRATOR_PERMISSIONS_NEED_NEWER_WOLLIPOG);
+    assert.match(outdatedLog.join("\n"), new RegExp(`refused orchestratorAdditiveRole; control plane protocol ${
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole - 1}, requires ${RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole}$`, "u"));
     const outdatedCodex = spec("codex");
     outdatedCodex.sessionId = "s_codex_outdated_control_plane";
     outdatedCodex.config = { permissionMode: "on-request" };
     outdatedCodex.orchestrator = { strictProjectIsolation: false };
     assert.throws(() => provisionAgentControl(outdatedCodex, {
       ...control, controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex - 1,
-    }, () => {}, host), /protocol-v162/);
+    }, (line) => outdatedCodexLog.push(line), host), (error: Error) => error.message === ORCHESTRATOR_PERMISSIONS_NEED_NEWER_WOLLIPOG);
+    assert.match(outdatedCodexLog.join("\n"), new RegExp(`refused orchestratorAdditiveCodex; control plane protocol ${
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex - 1}, requires ${RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex}$`, "u"));
     for (const refused of [strict, pi, acp, outdated, outdatedCodex]) {
       assert.equal(existsSync(agentControlTokenPath(root, refused.sessionId)), false, "refusal precedes credential minting");
     }
@@ -1421,7 +1435,9 @@ test("Integration Isolation removes only integrations from an additive launch, a
     assert.throws(() => provisionAgentControl(outdated, {
       ...control,
       controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIntegrationIsolation - 1,
-    }, () => {}, host), /Integration Isolation requires a protocol-v164 control plane/);
+    }, () => {}, host), (error: Error) => error.message === INTEGRATION_ISOLATION_NEEDS_NEWER_WOLLIPOG);
+    assert.equal(INTEGRATION_ISOLATION_NEEDS_NEWER_WOLLIPOG,
+      "Integration Isolation needs a newer version of Wollipog. Update Wollipog and try again.");
     assert.equal(existsSync(agentControlTokenPath(root, outdated.sessionId)), false);
 
     // A harness with no additive shape cannot enforce it either, and says so before minting.
