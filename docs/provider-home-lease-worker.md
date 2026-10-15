@@ -130,5 +130,11 @@ temporary provider is constructed; existing plugin argument assertions remain in
 The Platform Isolation matrix runs Linux, macOS and both Windows images. It runs the focused source
 tests and `verify-provider-home-worker-binary.mjs --source`, then builds the real native SEA and runs
 the same daemon fixture with `--packaged`. The daemon fixture launches no live provider and uses
-private temporary HOME, configuration and data roots. Linux can additionally use `--maximal` with a
+private temporary HOME, configuration and data roots. It runs these steps:
+
+1. An idle runner releases the HOME after its skill transaction.
+2. A second live runner then acquires the same HOME.
+3. A separate holder process with the runners' owner and its own live PID takes the HOME; the
+   second runner's sync is refused, and the journal is unchanged.
+4. After the holder is killed, that runner recovers, then releases on graceful shutdown. Linux can additionally use `--maximal` with a
 packaged binary to measure normal heartbeat delivery through the entire shipped path.
