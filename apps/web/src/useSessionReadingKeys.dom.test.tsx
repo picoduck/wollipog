@@ -445,3 +445,25 @@ test("Composer Answer Mode owns reading keys without moving the transcript (#325
     fixture.container.remove();
   }
 });
+
+for (const focus of ["panel", "field"] as const) {
+  test(`Answer Mode keeps modified session navigation from its ${focus} (#3256)`, async () => {
+    const fixture = await renderHarness();
+    const panel = document.createElement("section");
+    panel.className = "composer-answer";
+    panel.tabIndex = 0;
+    const input = document.createElement("input");
+    panel.append(input);
+    fixture.container.querySelector("[data-focus-zone=main]")!.append(panel);
+    (focus === "panel" ? panel : input).focus();
+    try {
+      dispatchKey("ArrowDown", { altKey: true });
+      dispatchKey("ArrowUp", { altKey: true });
+      assert.deepEqual(fixture.calls, ["nextSession", "previousSession"]);
+      assert.deepEqual(fixture.scrollCalls, []);
+    } finally {
+      await act(async () => fixture.root.unmount());
+      fixture.container.remove();
+    }
+  });
+}
