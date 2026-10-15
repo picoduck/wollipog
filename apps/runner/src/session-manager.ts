@@ -164,7 +164,7 @@ import {
 import { assertExecutionIsolationContextSupported } from "./execution-isolation-policy.js";
 import { wslBwrapSessionRoot } from "./wsl-bwrap-launcher.js";
 import { supportsNativeOrchestratorBoundary } from "./orchestrator-preset.js";
-import type { SpawnIsolation } from "./spawn.js";
+import { provenProcessTreeExit, type AgentProcess, type SpawnIsolation } from "./spawn.js";
 import type { GuardStateMask } from "./managed-worktree-guard-socket.js";
 
 /** Runner-local wiring for the hook state directory at the sandbox boundary (#1336). */
@@ -285,7 +285,9 @@ import { writeStarterWorktreeSetupConfig } from "./worktree-setup-generator.js";
 
 export interface SessionNamingExecutionAuthorization {
   isolation?: SpawnIsolation;
-  cleanup(): Promise<void>;
+  /** Ends the naming task. Pass every process it started so its provider-HOME reference is
+   * released only after each process tree is proven gone. */
+  cleanup(children?: readonly AgentProcess[]): Promise<void>;
 }
 
 type Send = (msg: RunnerToControlPlane) => void;
@@ -4416,6 +4418,23 @@ export class SessionManager {
     }
   }
 
+  /** Settle a reference that covered short-lived provider processes. It is released only when every
+   * process the work started has a proven complete tree exit (no process at all also qualifies);
+   * an unproven, failed, or unprobeable tree keeps the reference until runner shutdown. */
+  private async settleProviderProcessReference(
+    reference: ProviderHomeReference | null | undefined,
+    proofs: readonly Promise<boolean>[],
+  ): Promise<void> {
+    if (!reference) return;
+    const proven = (await Promise.all(proofs.map((proof) => proof.catch(() => false)))).every(Boolean);
+    if (proven) {
+      await this.releaseProviderHomeReference(reference);
+      return;
+    }
+    this.log("provider-home reference kept until shutdown: a provider process tree was not proven gone");
+    await this.retainProviderHomeReference(reference);
+  }
+
   /** Capture identity before launch preparation refreshes its mutable argument object. */
   private providerPreparationCurrent(meta: SessionMeta): () => boolean {
     const identity = (candidate: SessionMeta) => JSON.stringify([
@@ -4502,10 +4521,15 @@ export class SessionManager {
     } satisfies SessionMeta;
     const scope = controller.describe(meta);
     if (!scope) return "unknown";
-    await this.providerHomeLeases?.acquire({ driver, command: agent.command, context, env: meta.env },
+    const reference = await this.providerHomeLeases?.acquireReference({ driver, command: agent.command, context, env: meta.env },
       { isCurrent: () => !this.shuttingDown });
-    if (this.shuttingDown) return "unknown";
-    return (await controller.revalidate(meta)).status;
+    const processes: Promise<boolean>[] = [];
+    try {
+      if (this.shuttingDown) return "unknown";
+      return (await controller.revalidate(meta, { onProcess: (proof) => processes.push(proof) })).status;
+    } finally {
+      await this.settleProviderProcessReference(reference, processes);
+    }
   }
 
   /** Account probes are no-turn provider launches, but the provider may still mutate its effective
@@ -4531,15 +4555,27 @@ export class SessionManager {
       cwd,
       ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}),
     });
-    await this.providerHomeLeases?.acquire({
+    const reference = await this.providerHomeLeases?.acquireReference({
       driver: agent.driver ?? "acp",
       command: agent.command,
       context,
       env,
       isolation,
     }, { isCurrent: () => !this.shuttingDown });
-    if (this.shuttingDown) throw new Error("subscription probe was cancelled by shutdown");
-    return { cwd, ...(isolation ? { isolation } : {}) };
+    if (this.shuttingDown) {
+      if (reference) await this.releaseProviderHomeReference(reference);
+      throw new Error("subscription probe was cancelled by shutdown");
+    }
+    let settled = false;
+    return {
+      cwd,
+      ...(isolation ? { isolation } : {}),
+      settle: async (children) => {
+        if (settled) return;
+        settled = true;
+        await this.settleProviderProcessReference(reference, children.map((child) => provenProcessTreeExit(child)));
+      },
+    };
   }
 
   /** Put metadata-only naming helpers behind the same runner-owned process and provider-HOME
@@ -4580,7 +4616,11 @@ export class SessionManager {
         ? "codex"
         : null;
     let seatbeltAdmitted = false;
-    const cleanup = async () => {
+    let reference: ProviderHomeReference | null | undefined;
+    const cleanup = async (children: readonly AgentProcess[] = []) => {
+      // Start the tree proofs first: they kill any survivors, and the reference may be released
+      // only once every naming process is proven gone.
+      const proofs = children.map((child) => provenProcessTreeExit(child));
       try {
         await this.removeIsolationState(
           this.executionIsolation,
@@ -4593,6 +4633,9 @@ export class SessionManager {
         );
       } finally {
         if (seatbeltAdmitted) this.boxAdmission.release(taskId);
+        const settling = reference;
+        reference = undefined;
+        await this.settleProviderProcessReference(settling, proofs);
       }
     };
     try {
@@ -4619,7 +4662,7 @@ export class SessionManager {
         cwd,
         ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}),
       });
-      await this.providerHomeLeases?.acquire({ driver, command: agent.command, context, env, isolation },
+      reference = await this.providerHomeLeases?.acquireReference({ driver, command: agent.command, context, env, isolation },
         { isCurrent: () => !this.shuttingDown });
       if (this.shuttingDown) throw new Error("session naming was cancelled by shutdown");
       return { ...(isolation ? { isolation } : {}), cleanup };
@@ -12034,17 +12077,24 @@ export class SessionManager {
         targetScopeId = targetScope.id;
         this.providerAuthOperations.add(targetScopeId);
       }
-      await this.providerHomeLeases?.acquire({
+      const probeHome = await this.providerHomeLeases?.acquireReference({
         driver: probe.driver,
         command: probe.command,
         context: probe.context,
         env: probe.env,
       }, { isCurrent: () => !this.shuttingDown &&
         this.openProviderAuthenticationCard(this.store.readMeta(sessionId), recoveryRequestId)?.recoveryId === block.recoveryId });
-      if (this.shuttingDown || this.openProviderAuthenticationCard(this.store.readMeta(sessionId), recoveryRequestId)?.recoveryId !== block.recoveryId) {
-        return refuse("recovery_changed", "This Authentication Required card changed while ownership was checked. Review the latest card.");
+      // The probe's reference covers only its status command; later steps take their own.
+      const probeProcesses: Promise<boolean>[] = [];
+      let observation: ProviderAuthObservation;
+      try {
+        if (this.shuttingDown || this.openProviderAuthenticationCard(this.store.readMeta(sessionId), recoveryRequestId)?.recoveryId !== block.recoveryId) {
+          return refuse("recovery_changed", "This Authentication Required card changed while ownership was checked. Review the latest card.");
+        }
+        observation = await controller.revalidate(probe, { onProcess: (proof) => probeProcesses.push(proof) });
+      } finally {
+        await this.settleProviderProcessReference(probeHome, probeProcesses);
       }
-      const observation = await controller.revalidate(probe);
       if (observation.status === "unauthenticated") {
         return refuse("sign_in_required", "The provider reports that this account is signed out. Sign in to it, then choose it again.");
       }

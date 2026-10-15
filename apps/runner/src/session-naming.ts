@@ -464,7 +464,7 @@ export interface SessionNamingExecutorOptions {
     agent: AgentDefinition,
     env: Record<string, string>,
     cwd: string,
-  ) => Promise<{ isolation?: SpawnIsolation; cleanup(): Promise<void> }>;
+  ) => Promise<{ isolation?: SpawnIsolation; cleanup(children?: readonly AgentProcess[]): Promise<void> }>;
   generate?: (
     account: SessionNamingAccount,
     agent: AgentDefinition,
@@ -562,6 +562,14 @@ export class SessionNamingExecutor {
     let neutral: NeutralDirectory | undefined;
     let authorization: Awaited<ReturnType<NonNullable<SessionNamingExecutorOptions["authorize"]>>> | undefined;
     let failurePhase: SessionNamingRunnerFailurePhase = "isolation";
+    // Every provider process this request starts, so its cleanup can prove each tree gone before
+    // releasing the provider-HOME reference.
+    const children: AgentProcess[] = [];
+    const spawn = (options: SpawnAgentOptions): AgentProcess => {
+      const child = this.spawn(options);
+      children.push(child);
+      return child;
+    };
     try {
       const totalTimeoutMs = validatedTimeout(message.timeoutMs);
       const startedAt = this.now();
@@ -591,8 +599,8 @@ export class SessionNamingExecutor {
       const generated = this.generateOverride
         ? await this.generateOverride(account, agent, neutral.cwd, env, prompt, timeoutMs, authorization?.isolation)
         : account.provider === "claude"
-          ? await collectClaudeTitle(agent, neutral.cwd, env, prompt, timeoutMs, authorization?.isolation, message.target, this.spawn)
-          : await collectCodexTitle(agent, neutral.cwd, env, prompt, timeoutMs, authorization?.isolation, message.target, this.spawn);
+          ? await collectClaudeTitle(agent, neutral.cwd, env, prompt, timeoutMs, authorization?.isolation, message.target, spawn)
+          : await collectCodexTitle(agent, neutral.cwd, env, prompt, timeoutMs, authorization?.isolation, message.target, spawn);
       const title = normalizeRunnerSessionTitle(generated);
       if (!title) return fail("invalid_result", "output_validation");
       return {
@@ -613,7 +621,7 @@ export class SessionNamingExecutor {
       // cleanup keep the neutral directory's cleanup from ever being invoked — and now that the
       // wait is bounded, that would leak the directory silently instead of hanging visibly.
       await withinCleanupBudget(Promise.allSettled([
-        (async () => authorization?.cleanup())(),
+        (async () => authorization?.cleanup(children))(),
         (async () => neutral?.cleanup())(),
       ]), this.cleanupBudgetMs);
     }

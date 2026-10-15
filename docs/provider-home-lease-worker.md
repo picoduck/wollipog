@@ -70,6 +70,18 @@ between could drop another HOME's reference. The handle cannot be redirected: it
 entry it joined, at most once. Path-based `release` remains only for the provider sign-in supervisor
 (sign-in and removed-account cleanup), which is unchanged here.
 
+Short-lived provider processes release their reference once their process tree is proven gone (#3238). This covers:
+
+- account-authentication and account-switch status commands;
+- Codex subscription-usage probes;
+- session-naming helpers.
+
+Each process reports a proof when it finishes. The proof is true only when the process's POSIX boundary terminated every process it tracks and found no survivor. The boundary tracks processes through parent links and the inherited environment marker. The consumer releases its reference only if every proof is true. A run that started no process also releases.
+
+This is the same proof runner shutdown already relies on before releasing every lease, so early release is exactly as strong as shutdown release. It shares one known limit. A helper that detaches with a scrubbed environment before its parent link is observed, or whose environment cannot be read, is invisible to the boundary. Closing that gap needs kernel containment, such as a Linux subreaper or cgroup.
+
+A surviving, unknown or unprobeable descendant keeps the reference until shutdown. So does a spawn without a POSIX boundary, where only the root's exit is observable: native Windows (whose kill-on-close Job is not verified), WSL, and remote spawns. Session providers, temporary fork providers, Agent TUIs and launch preparation still keep their references until shutdown.
+
 A missing, late, malformed, duplicate or mismatched completion, failed cancellation unwind, worker
 error or unexpected exit poisons the lane. It rejects further work, retains canonical evidence and
 never transparently creates another registry to reconstruct private authority. Terminating a worker
