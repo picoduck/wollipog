@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { HistoryTraversal } from "./history-position.js";
+import { TestBrowserHistory } from "./test-browser-history.js";
 import {
   DesktopInstanceNavigation,
   instanceRouteFromPath,
@@ -138,4 +140,29 @@ test("an instance's old Settings address opens its new view and replaces its own
   for (const listener of listeners) listener();
   assert.deepEqual(seen, [keyboard]);
   assert.deepEqual(writes, [instanceViewPath("remote-a", behavior), instanceViewPath("remote-a", behavior)]);
+});
+
+test("an instance's own Back is offered for holding, and its return to the editor is not delivered (#3218)", () => {
+  const browser = new TestBrowserHistory(instanceViewPath("remote-a", { name: "usage" }));
+  const navigation = new DesktopInstanceNavigation("remote-a", browser.window);
+  navigation.current();
+  navigation.push({ name: "settings", section: "orchestrator" });
+  const seen: Array<{ view: unknown; traversal?: HistoryTraversal }> = [];
+  navigation.listen((view, traversal) => seen.push({ view, traversal }));
+
+  browser.back();
+  assert.deepEqual(seen.map((move) => move.view), [{ name: "usage" }]);
+  const traversal = seen[0]!.traversal!;
+  assert.ok(traversal, "a move within the instance's recorded entries can be held");
+  let returned = 0;
+  traversal.undo(() => { returned += 1; });
+  browser.flush();
+  assert.equal(returned, 1);
+  assert.equal(browser.path, instanceViewPath("remote-a", { name: "settings", section: "orchestrator" }));
+  assert.equal(seen.length, 1, "the return to the editor's entry is not a move to show");
+
+  traversal.redo();
+  browser.flush();
+  assert.deepEqual(seen.map((move) => move.view), [{ name: "usage" }, { name: "usage" }]);
+  assert.equal(browser.index, 0);
 });
