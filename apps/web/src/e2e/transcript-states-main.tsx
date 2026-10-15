@@ -31,6 +31,7 @@ import "../styles.css";
  *   earlier-page request in flight, `?older=fail` rejects it, `?older=unsupported` answers it as a
  *   server without backward reads does, and the default resolves it.
  *   `?opening=one-turn` opens just the complete latest turn, which fits without scrolling (#3156).
+ *   A held older response can be released with `window.__releaseEarlierHistory()` (#3188).
  * - `unpaired`: the server refuses this device before anything is cached (#2579).
  * - `incomplete`: every read answers with a cache still filling from the machine, holding only a
  *   hidden Agent Log (#2773). `?runner=offline` shows that machine as offline.
@@ -225,10 +226,12 @@ const racingEvents: SessionEvent[] = racingPayloads.map((payload, index) => ({ i
   ts: 1_760_000_000_000 + index * 1000, payload }));
 declare global {
   interface Window {
+    __releaseEarlierHistory?: () => void;
     __emptyOpeningRace: { emit: (seqs: number[]) => void; release: () => void; sequences: () => number[] };
   }
 }
 let tailRequestCount = 0;
+let earlierRequestCount = 0;
 const pendingPromptActions: string[] = [];
 const client = {
   ...api,
@@ -275,7 +278,7 @@ const client = {
         const window = events.slice(-24);
         return Promise.resolve({ events: window, eventEpoch, nextBefore: window[0]!.seq, hasMoreOlder: true, turnAligned: true, cacheComplete: true });
       }
-      if (older === "hold") return never();
+      document.body.dataset.earlierRequestCount = String(++earlierRequestCount);
       if (older === "fail") return new Promise((_, reject) => window.setTimeout(() => reject(new Error("fixture rejected")), 80));
       // No `hasMoreOlder`: an older server answers a backward read with a forward page.
       if (older === "unsupported") {
@@ -283,6 +286,12 @@ const client = {
       }
       const end = events.findIndex((event) => event.seq === before);
       const page = events.slice(Math.max(0, end - 12), end);
+      if (older === "hold") return new Promise((resolve) => {
+        window.__releaseEarlierHistory = () => resolve({
+          events: page, eventEpoch, nextBefore: page[0]?.seq ?? 0,
+          hasMoreOlder: end - 12 > 0, cacheComplete: true,
+        });
+      });
       return new Promise((resolve) => window.setTimeout(() => resolve({
         events: page, eventEpoch, nextBefore: page[0]?.seq ?? 0, hasMoreOlder: end - 12 > 0, cacheComplete: true,
       }), 80));

@@ -3323,8 +3323,9 @@ function SessionDetailLoaded({
     if (clientY === null || state.touchStartY === null) return;
     if (clientY - state.touchStartY < EARLIER_ACTIVITY_HEAD_DRAG_PX) return;
     const scroll = scrollRef.current;
-    if (!scroll || nestedScrollerConsumesUpwardInput(target, scroll)) return;
+    if (!scroll || scroll.scrollTop >= 1 || nestedScrollerConsumesUpwardInput(target, scroll)) return;
     requestEarlierFromInputAtHead();
+    return true;
   }, [requestEarlierFromInputAtHead]);
 
   const loadEarlierFromControl = useCallback((): boolean => {
@@ -7166,7 +7167,7 @@ function SessionDetailLoaded({
                 if (!isReaderInput(event)) return;
                 if (event.pointerType === "touch") {
                   markTouchEarlierActivityMovement(event.clientY);
-                  requestEarlierFromTouchAtHead(event.clientY, event.target);
+                  if (requestEarlierFromTouchAtHead(event.clientY, event.target)) followTail.onTouchHistoryGesture();
                   // The press already paused; a drag that reaches the tail must be able to resume.
                   return;
                 }
@@ -7181,7 +7182,7 @@ function SessionDetailLoaded({
                 if (!isReaderInput(event)) return;
                 const clientY = event.touches[0]?.clientY ?? null;
                 markTouchEarlierActivityMovement(clientY);
-                requestEarlierFromTouchAtHead(clientY, event.target);
+                if (requestEarlierFromTouchAtHead(clientY, event.target)) followTail.onTouchHistoryGesture();
               }}
               onKeyDown={(event) => {
                 if (event.defaultPrevented || !isReaderInput(event)) return;
