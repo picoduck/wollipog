@@ -238,10 +238,14 @@ lacks. Without sudo, run the same command in Playwright's image, matching its ta
 
 ```bash
 docker run --rm --network host --ipc host --user "$(id -u):$(id -g)" -e HOME=/tmp/home \
-  -e COREPACK_HOME=/tmp/corepack -e CHOKIDAR_USEPOLLING=1 -v "$PWD:$PWD" -w "$PWD" \
+  -e COREPACK_HOME=/tmp/corepack -e npm_config_store_dir=/tmp/pnpm-store -e CHOKIDAR_USEPOLLING=1 \
+  -v "$PWD:$PWD" -w "$PWD" \
   mcr.microsoft.com/playwright:v<version>-jammy bash -c \
-  'mkdir -p /tmp/home /tmp/bin && corepack enable --install-directory /tmp/bin && PATH=/tmp/bin:$PATH pnpm test:e2e:webkit'
+  'mkdir -p /tmp/home /tmp/bin && corepack enable --install-directory /tmp/bin &&
+   PATH=/tmp/bin:$PATH pnpm exec playwright test --config playwright.webkit.config.ts'
 ```
+
+The store directory keeps the container's pnpm from creating a `.pnpm-store` in the checkout.
 
 The WebKit config reuses the development server's port, so it cannot run at the same time as
 `pnpm test:e2e` in the same worktree.

@@ -10,5 +10,7 @@ export const WEBKIT_SPECS = ["number-fields.spec.ts"];
 export default defineConfig({
   ...base,
   testMatch: WEBKIT_SPECS,
+  // CI's `github` reporter prints only a count; the list names each test that ran in WebKit.
+  reporter: process.env.CI ? [["list"], ["github"]] : "list",
   use: { ...base.use, browserName: "webkit" },
 });
