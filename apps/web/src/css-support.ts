@@ -15,7 +15,12 @@
  * non-downlevelable ones require. The declaration cannot drift from reality again, because the
  * declaration IS reality — adopting a newer feature raises the floor by construction, and
  * `css-support.test.ts` fails when the stylesheet uses something this file does not account for.
+ *
+ * JavaScript the compiler cannot lower is accounted for here as well (`JS_FEATURES`, #3213), and
+ * `js-floor.ts` holds the emitted bundle to the result.
  */
+
+import { REGEX_SYNTAX, type RegexSyntaxId } from "./regex-syntax.js";
 
 /** The engines the production bundle is compiled for. Also the key order used in output. */
 export const ENGINES = ["chrome", "edge", "firefox", "safari"] as const;
@@ -39,9 +44,11 @@ interface FeatureBase {
   readonly detect: RegExp;
 }
 
-/** A feature no compiler can rewrite for an older engine, so it sets the floor. */
-export interface RequiresFloor extends FeatureBase {
+/** What every floor-setting entry carries, whether the stylesheet or the JavaScript needs it. */
+export interface FloorRequirement {
   readonly kind: "requires-floor";
+  /** Stable id, also the name used in failure messages. */
+  readonly id: string;
   /** First version of each engine with full support. */
   readonly support: SupportMatrix;
   /** Where the support data came from, so a reviewer can re-check it rather than trust it. */
@@ -49,6 +56,9 @@ export interface RequiresFloor extends FeatureBase {
   /** Why this cannot simply be compiled away. A downlevelable feature belongs in `Downlevelled`. */
   readonly whyNotDownlevelable: string;
 }
+
+/** A CSS feature no compiler can rewrite for an older engine, so it sets the floor. */
+export interface RequiresFloor extends FeatureBase, FloorRequirement {}
 
 /**
  * A construct the build compiles away before it reaches a browser.
@@ -164,6 +174,44 @@ export const CSS_FEATURES: readonly CssFeature[] = [
       + "leave a short last piece such as `net` on a line of its own.",
   },
 ];
+
+/**
+ * A JavaScript construct no compiler can rewrite for an older engine (#3213).
+ *
+ * Found in the BUILD OUTPUT by `js-floor.ts`, not in source, because dependencies ship them too.
+ * The support data is the scanner's own (`REGEX_SYNTAX`), so the floor and the check cannot
+ * disagree about what a construct needs.
+ */
+export interface JsRequiresFloor extends FloorRequirement {
+  readonly id: RegexSyntaxId;
+}
+
+/**
+ * The JavaScript the bundle is allowed to need above what the stylesheet already requires.
+ *
+ * Regex lookbehind raised the Safari floor from 16.2 to 16.4. Below 16.4 the build turned every
+ * lookbehind literal into a `RegExp(...)` call without a warning, and one of them ran at module
+ * scope in the shared entry chunk, so the app could not start at all on the engines the floor
+ * promised. Removing it was weighed and declined: `remark-gfm`'s email autolinking needs it, so the
+ * floor would have rested on a maintained dependency patch, and installed iOS push already needed
+ * 16.4.
+ */
+export const JS_FEATURES: readonly JsRequiresFloor[] = [
+  {
+    kind: "requires-floor",
+    id: "regex lookbehind",
+    support: REGEX_SYNTAX["regex lookbehind"].support,
+    source: REGEX_SYNTAX["regex lookbehind"].source,
+    whyNotDownlevelable:
+      "A lookbehind assertion matches on text before the current position without consuming it; "
+      + "no regex an older engine accepts expresses that, so the build can only defer the "
+      + "SyntaxError to run time. First-party previews, SKILL.md quoting and Markdown table code "
+      + "use it, and so does remark-gfm's email autolinking (mdast-util-gfm-autolink-literal).",
+  },
+];
+
+/** Everything the floor is computed from: the stylesheet's requirements and the JavaScript's. */
+export const FLOOR_FEATURES: readonly (CssFeature | JsRequiresFloor)[] = [...CSS_FEATURES, ...JS_FEATURES];
 
 /**
  * The CSS surface the stylesheet is allowed to use.
@@ -333,22 +381,25 @@ export function stylesheetSurface(root: {
   };
 }
 
-function compare(a: readonly [number, number], b: readonly [number, number]): number {
+/** Orders two `[major, minor]` versions. */
+export function compareVersions(a: readonly [number, number], b: readonly [number, number]): number {
   return a[0] !== b[0] ? a[0] - b[0] : a[1] - b[1];
 }
 
+type FloorFeature = CssFeature | JsRequiresFloor;
+
 /** Only the entries that constrain the browser floor. */
-export function floorSetting(features: readonly CssFeature[] = CSS_FEATURES): RequiresFloor[] {
-  return features.filter((feature): feature is RequiresFloor => feature.kind === "requires-floor");
+export function floorSetting(features: readonly FloorFeature[] = FLOOR_FEATURES): FloorRequirement[] {
+  return features.filter((feature): feature is RequiresFloor | JsRequiresFloor => feature.kind === "requires-floor");
 }
 
 /** The highest version any floor-setting feature requires, per engine. */
-export function requiredFloor(features: readonly CssFeature[] = CSS_FEATURES): SupportMatrix {
+export function requiredFloor(features: readonly FloorFeature[] = FLOOR_FEATURES): SupportMatrix {
   const floor = Object.fromEntries(ENGINES.map((engine) => [engine, [0, 0] as const])) as
     Record<Engine, readonly [number, number]>;
   for (const feature of floorSetting(features)) {
     for (const engine of ENGINES) {
-      if (compare(feature.support[engine], floor[engine]) > 0) floor[engine] = feature.support[engine];
+      if (compareVersions(feature.support[engine], floor[engine]) > 0) floor[engine] = feature.support[engine];
     }
   }
   return floor;
@@ -362,13 +413,12 @@ export function formatTarget(engine: Engine, [major, minor]: readonly [number, n
 /**
  * The build target for both JavaScript and CSS.
  *
- * It is computed from CSS requirements alone, and the JS output shares it. That is deliberate and
- * safe in one direction only: an engine new enough to parse the CSS is by construction new enough
- * for the JS this floor permits, so deriving from CSS can only ever be conservative for JS. If the
- * app ever needs a JS feature NEWER than every CSS feature here, that requirement belongs in this
- * registry too rather than in a second, separately drifting constant.
+ * One floor for both, computed from `FLOOR_FEATURES`. The compiler lowers most JavaScript to
+ * whatever floor this returns, so most JS needs no entry; what it cannot lower — regex syntax above
+ * all, #3213 — is registered in `JS_FEATURES` and raises the floor like any CSS requirement, and
+ * `js-floor.ts` fails the build when the emitted JavaScript needs anything the floor does not cover.
  */
-export function webviewTargets(features: readonly CssFeature[] = CSS_FEATURES): string[] {
+export function webviewTargets(features: readonly FloorFeature[] = FLOOR_FEATURES): string[] {
   const floor = requiredFloor(features);
   return ENGINES.map((engine) => formatTarget(engine, floor[engine]));
 }

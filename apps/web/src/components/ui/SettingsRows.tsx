@@ -499,7 +499,8 @@ export function ValueRow({
  * breaks only between pieces, never at a hyphen inside one (`home-studio-01`).
  */
 function withBreaks(value: string): ReactNode[] {
-  // A match rather than a lookbehind split: lookbehind needs Safari 16.4, and the floor is 16.2.
+  // A match rather than a lookbehind split, written when the floor was Safari 16.2. The floor is now
+  // 16.4 (#3213), which parses lookbehind, so either form is safe; this one is simply older syntax.
   return (value.match(/[^.:/]*[.:/]*/g) ?? []).filter(Boolean).map((part, index) => (
     <span key={index} className="setting-row-value-part">{part}</span>
   ));
