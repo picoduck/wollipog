@@ -309,6 +309,7 @@ export class OrchestratorSettings {
         .map((agent) => ({
           runnerId: runner.runnerId,
           machineName: machineName(runner),
+          launchable: agent.installation?.selection !== "other" && agent.harnessSelectionBlocked !== true,
           identity: agentHarnessIdentityFor(agent),
           name: agent.name,
           capabilities: agent.capabilities!,
@@ -345,7 +346,8 @@ export class OrchestratorSettings {
     const machines = new Map<string, { name: string; supported: boolean }>();
     for (const installation of installations) {
       const machine = machines.get(installation.runnerId) ?? { name: installation.machineName, supported: false };
-      machine.supported ||= installationSupportsBehavior(installation, defaults.behavior);
+      // A row the Machine's installation choice excludes cannot launch, so it supports nothing.
+      machine.supported ||= installation.launchable && installationSupportsBehavior(installation, defaults.behavior);
       machines.set(installation.runnerId, machine);
     }
     const unsupported = [...machines.values()].filter((machine) => !machine.supported).map((machine) => machine.name).sort();

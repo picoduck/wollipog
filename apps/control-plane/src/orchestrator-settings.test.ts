@@ -316,6 +316,34 @@ test("Settings name the Machines that can't run the saved Child Model, and only 
   }
 });
 
+test("a row the Machine's installation choice excludes never counts toward Machine support (#3248)", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    const now = Date.now();
+    const laptop = claudeMachine("laptop", [{ id: "fable", displayName: "Fable" }]);
+    const other = claudeAgent("claude-local", "claude-code");
+    agentWithInstallation(laptop.agents[0]!, "system");
+    agentWithInstallation(other, "user-local");
+    laptop.agents.push(other);
+    db.registerRunner(laptop, now, PROTOCOL_VERSION);
+    db.registerRunner(claudeMachine("desktop", [{ id: "fable", displayName: "Fable" }]), now + 1, PROTOCOL_VERSION);
+    const settings = new OrchestratorSettings(db);
+    const principal = human(db);
+    const fixed = defaults({ childModel: "fable" });
+    assert.deepEqual(settings.update(principal, { defaults: fixed }, now + 2).capabilities.machineSupport?.unsupportedMachines, []);
+    // Choosing the user-local installation, whose catalog lacks Fable, excludes the system row.
+    assert.ok(db.selectHarnessInstallation("laptop", "claude-local", "user-local"));
+    assert.deepEqual(settings.view(principal).capabilities.machineSupport, { supported: 1, total: 2, unsupportedMachines: ["laptop"] });
+  } finally {
+    db.close();
+  }
+});
+
+function agentWithInstallation(agent: AgentDefinition, id: string): void {
+  agent.installation = { id, path: `/opt/${id}/claude`, via: "path" };
+  if (id === "user-local") agent.capabilities!.models = [{ id: "opus", displayName: "Opus", efforts: ["high"] }];
+}
+
 test("Settings warn when the saved Child Model resolves to different models on different Machines (#3248)", () => {
   const db = ControlPlaneDb.open(":memory:");
   try {
