@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
+import { JS_FEATURES } from "./css-support.js";
 import { DESKTOP_BUILD_ENV, DESKTOP_EXCLUDED_ASSETS, isDesktopBuild, stripManifestLink } from "./desktop-bundle.js";
+import { scanBuildOutput } from "./js-floor.js";
 
 /**
  * §23.6 and §24's "add a check that the desktop bundle excludes sw.js / manifest.webmanifest".
@@ -48,6 +50,18 @@ function assertInboxEntryBudget(out: string): void {
     assert.equal(chunk.rawBytes, bytes);
     return sum + bytes;
   }, 0));
+}
+
+/**
+ * #3213: what each mode actually wrote, read from disk, needs nothing above the floor, and still
+ * contains every JS feature holding that floor up.
+ */
+async function assertJsFloor(out: string): Promise<void> {
+  const scan = await scanBuildOutput(out);
+  assert.deepEqual(scan.violations, []);
+  for (const feature of JS_FEATURES) {
+    assert.ok(scan.features.has(feature.id), `${feature.id} no longer ships; remove it from JS_FEATURES`);
+  }
 }
 
 /**
@@ -156,7 +170,7 @@ test("stripping the manifest link leaves the rest of the head alone", () => {
   assert.equal(stripManifestLink("<p>no link here</p>"), "<p>no link here</p>");
 });
 
-test("a desktop build ships neither the service worker nor the manifest", { timeout: 300_000 }, () => {
+test("a desktop build ships neither the service worker nor the manifest", { timeout: 300_000 }, async () => {
   // A real build, because the failure this guards against is a build step that stops running.
   execFileSync("npx", ["vite", "build", "--outDir", "dist-desktop-check", "--emptyOutDir"], {
     cwd: WEB,
@@ -177,9 +191,10 @@ test("a desktop build ships neither the service worker nor the manifest", { time
   assertInboxEntryBudget(out);
   // The app ships this directory as its `web/` resource, which the sidecar serves to phones.
   assertPrecompressedAssets(out);
+  await assertJsFloor(out);
 });
 
-test("an ordinary web build keeps both, because the PWA is the point there", { timeout: 300_000 }, () => {
+test("an ordinary web build keeps both, because the PWA is the point there", { timeout: 300_000 }, async () => {
   // The other half. A plugin that deleted these unconditionally would pass the test above while
   // breaking installability everywhere, which is the failure that would not be noticed.
   const env = { ...process.env };
@@ -195,4 +210,5 @@ test("an ordinary web build keeps both, because the PWA is the point there", { t
   assertBundledTerminalFont(out);
   assertInboxEntryBudget(out);
   assertPrecompressedAssets(out);
+  await assertJsFloor(out);
 });

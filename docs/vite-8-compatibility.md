@@ -11,11 +11,12 @@ are included as well.
 ## Dependency and Platform Contract
 
 - Vite is 8.2.2 and the `@vitejs/plugin-react` 6.1 line resolves to 6.1.1.
-- Production JavaScript and CSS target Chrome 111, Edge 111, Firefox 121, and Safari 16.2.
+- Production JavaScript and CSS target Chrome 111, Edge 111, Firefox 121, and Safari 16.4.
   These versions are **computed, not chosen** (#914): `apps/web/src/css-support.ts` records the
-  non-downlevelable CSS features the stylesheet uses along with the first browser version that
-  supports each, and `WOLLIPOG_WEBVIEW_TARGETS` is their maximum. Adopting a newer feature therefore
-  raises the floor in the same commit.
+  non-downlevelable CSS features the stylesheet uses, and the JavaScript the compiler cannot lower
+  (`JS_FEATURES`, #3213), along with the first browser version that supports each, and
+  `WOLLIPOG_WEBVIEW_TARGETS` is their maximum. Adopting a newer feature therefore raises the floor
+  in the same commit.
 
   What keeps that registry complete is an allowlist, not a watchlist. `CSS_SURFACE` names every
   at-rule, property, pseudo, and function the stylesheet is allowed to contain, and a unit test
@@ -29,15 +30,39 @@ are included as well.
   it needs Chrome 121 and Safari 18.2, and treating it like the others would have pushed the whole
   app's floor to Safari 18.2 in exchange for scrollbar cosmetics.
 
-  The binding constraint differs per engine: `color-mix()` sets Chrome, Edge, and Safari; `:has()`
-  sets Firefox, from a version well above what anything else needs. Safari's `.2` is load-bearing —
-  16.0 and 16.1 cannot parse `color-mix()`.
+  The binding constraint differs per engine: `color-mix()` sets Chrome and Edge; `:has()` sets
+  Firefox, from a version well above what anything else needs; regex lookbehind sets Safari. The
+  stylesheet alone would allow Safari 16.2 (16.0 and 16.1 cannot parse `color-mix()`).
+
+  Safari 16.4 is where Safari first parses regex lookbehind (`(?<=…)`, `(?<!…)`), and the bundle
+  ships it: plain-text previews, SKILL.md quoting, inline code in Markdown tables, and `remark-gfm`'s
+  email autolinking (`mdast-util-gfm-autolink-literal`). At the old 16.2 floor the compiler could not
+  lower it and did not warn; it rewrote each literal into a `RegExp("…")` call, so the build passed
+  and the `SyntaxError` moved to run time. One such call ran at module scope in the shared entry
+  chunk, so on Safari and iOS 16.2–16.3 the app was expected not to start at all. Removing
+  lookbehind instead was weighed and declined (#3213): the dependency path would have rested on a
+  maintained patch, and the next dependency to adopt lookbehind would have broken the floor again.
+
+  Who the move to 16.4 drops: Safari and iOS 16.2–16.3, whose devices can all update past them and
+  which already lacked installed push (16.4). Desktop builds are unaffected in practice. Windows uses
+  evergreen WebView2. macOS `WKWebView` is the system WebKit, which Safari updates replace, so it
+  reaches 16.4 on every macOS that can run Safari 16.4 (Big Sur and later); an older macOS never
+  reached the 16.2 floor either. Linux uses WebKitGTK 4.1 from the Jammy baseline
+  (`docs/RELEASING.md`): by WebKit's release timeline, lookbehind and `color-mix()` both first reach
+  WebKitGTK in its 2.40 line, so the old floor already needed it, and Jammy's security updates ship
+  WebKitGTK releases past it. These desktop minimums are inferred from release data; neither was
+  exercised on a device for this change.
+
+  `apps/web/src/js-floor.ts` holds the emitted JavaScript to the computed floor. On every build it
+  reads each regex literal and literal `RegExp(...)` argument in the output (chunks, dependencies,
+  and files copied from `public/`) and fails the build when one needs more than the floor or uses
+  syntax it cannot classify. `js-floor.test.ts` also evaluates the shared entry chunks with a
+  `RegExp` that rejects syntax above the floor, and proves both checks catch the old 16.2 build.
 
   This still avoids Vite 8's moving `baseline-widely-available` default, whose floor changes between
   builds. It covers the WebView2/WebKit families used by the supported Windows, macOS, and Linux
-  desktop builds. The same artifact powers the browser/PWA client, so Safari 16.2 is also its
-  explicit iOS compilation floor; installed iOS push notifications already require Safari 16.4 or
-  newer, which is the higher bar of the two.
+  desktop builds. The same artifact powers the browser/PWA client, so Safari 16.4 is also its
+  explicit iOS compilation floor, the same version installed iOS push notifications require.
 
   The previous floor — Chrome 107, Edge 107, Firefox 104, Safari 16 — was a hand-maintained list and
   was below what the bundle shipped on **every** engine, not just Firefox. It went stale silently
