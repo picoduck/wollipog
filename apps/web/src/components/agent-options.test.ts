@@ -197,6 +197,15 @@ test("discovery's restart-only exec row is never an option; a configured exec ag
   assert.deepEqual(runnableAgentIds(agents), ["codex", "my-exec"]);
 });
 
+test("the restart-only exec row does not hide a working Codex ACP adapter", () => {
+  const agents = [
+    agent({ id: "codex", name: "Codex", driver: "codex-app-server", source: "discovered", available: false }),
+    agent({ id: "codex-exec", name: "Codex (Non-Interactive)", driver: "codex", source: "discovered" }),
+    agent({ id: "codex-acp", name: "Codex ACP", driver: "acp", source: "config" }),
+  ];
+  assert.deepEqual(agentOptions(agents).filter((option) => !option.disabled).map((option) => option.agent.id), ["codex-acp"]);
+});
+
 test("App Server failing its check leaves no selectable Codex instead of falling back to exec", () => {
   const appServer = agent({
     id: "codex", name: "Codex", driver: "codex-app-server", source: "discovered", available: false,

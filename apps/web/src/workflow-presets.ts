@@ -18,10 +18,12 @@ export function defaultWorkflowBindings(
   const available = agents.filter((agent) => agent.available === true && !isRestartOnlyCodexExec(agent));
   const bindings: Record<string, string> = {};
   for (const role of workflowAgentRoles(definition)) {
-    const exact = available.find((agent) => agent.id === role);
+    const codexRole = /codex/i.test(role);
+    // Even an exact id match: a configured exec agent may carry the old stable `codex` id.
+    const exact = available.find((agent) => agent.id === role && (!codexRole || agent.driver === "codex-app-server"));
     const family = /claude/i.test(role)
       ? available.find((agent) => agent.driver === "claude-code")
-      : /codex/i.test(role)
+      : codexRole
         ? available.find((agent) => agent.driver === "codex-app-server")
         : undefined;
     const selected = exact ?? family;

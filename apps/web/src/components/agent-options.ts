@@ -64,9 +64,10 @@ export function agentOptions(
   // Hide the generic ACP path for a provider once a USABLE native harness for it exists — it's a
   // weaker duplicate (no model picker / slash commands). ACP stays for providers with no native
   // driver, and an unavailable or unverified native entry must not hide a working ACP fallback.
+  // Nor may discovery's restart-only exec row, which is never offered itself.
   const nativeProviders = new Set(
     agents
-      .filter((a) => a.driver && a.driver !== "acp" && a.available === true)
+      .filter((a) => a.driver && a.driver !== "acp" && a.available === true && !isRestartOnlyCodexExec(a))
       .map((a) => agentProvider(a.driver!, a.name)),
   );
   const visible = agents.filter((a) => {

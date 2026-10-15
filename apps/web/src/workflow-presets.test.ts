@@ -38,6 +38,14 @@ test("a Codex role stays unbound rather than falling back to discovery's restart
   assert.equal(workflowBindingsComplete(definition, defaultWorkflowBindings(definition, agents)), false);
 });
 
+test("a Codex role binds only to App Server even when a configured exec agent has its exact id", () => {
+  const exec = agent({ id: "codex", name: "My Codex exec", driver: "codex", source: "config" });
+  const app = agent({ id: "codex-app-server", name: "Codex", driver: "codex-app-server", source: "discovered" });
+  const claude = agent({ id: "claude-code", name: "Claude", driver: "claude-code" });
+  assert.deepEqual(defaultWorkflowBindings(definition, [claude, exec, app]), { claude: "claude-code", codex: "codex-app-server" });
+  assert.deepEqual(defaultWorkflowBindings(definition, [claude, exec, { ...app, available: false }]), { claude: "claude-code" });
+});
+
 test("workflow preset binding fails closed when a required provider is unavailable", () => {
   const agents = [
     agent({ id: "claude-code", name: "Claude", driver: "claude-code", available: false }),

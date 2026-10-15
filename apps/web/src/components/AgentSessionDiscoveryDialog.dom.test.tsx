@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import { PROTOCOL_VERSION, type ExternalSessionDescriptor, type RunnerView } from "@wollipog/protocol";
 import { api } from "../api.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import {
   AgentSessionDiscoveryDialog,
   agentSupportsSessionDiscovery,
@@ -168,7 +169,7 @@ test("an old runner explains why Codex App Server discovery requires an update",
     assert.doesNotMatch(copy, /Codex(?: —)? Interactive session discovery/);
     assert.doesNotMatch(copy, /protocol|v6[23]/);
     // Discovery's exec row restarts existing sessions only; it is not an adoption fallback.
-    assert.equal(container.querySelector('input[value="codex-exec"]'), null);
+    assertNoDomNode(container.querySelector('input[value="codex-exec"]'));
   } finally {
     await act(async () => { root.unmount(); });
     mountPoint.remove();
