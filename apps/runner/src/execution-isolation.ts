@@ -1,9 +1,9 @@
 import type { AgentContext } from "@wollipog/protocol";
 import type { AgentDriverKind } from "@wollipog/protocol";
 import { createHash } from "node:crypto";
-import { cp, lstat, mkdir, opendir, realpath, rm, stat } from "node:fs/promises";
+import { cp, lstat, mkdir, open, opendir, realpath, rm, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join, posix } from "node:path";
+import { dirname, join, posix } from "node:path";
 import type { RunnerExecutionIsolation } from "./config.js";
 import { assertExecutionIsolationContextSupported, WSL_BWRAP_UNAVAILABLE_ERROR } from "./execution-isolation-policy.js";
 import { runContextCommand } from "./context-command.js";
@@ -28,6 +28,7 @@ interface IsolationDeps {
   resolveWsl: (context: Extract<AgentContext, { kind: "wsl" }>) => Promise<{ command: string; uid: number; home: string } | null>;
   resolveWslHome: (context: Extract<AgentContext, { kind: "wsl" }>) => Promise<string | null>;
   nativeHome: () => string;
+  nativeEnvironment: () => NodeJS.ProcessEnv;
   nativeTmp: () => string;
   realpathNative: (path: string) => Promise<string>;
   mkdirNative: (paths: string[]) => Promise<void>;
@@ -78,6 +79,7 @@ const defaultDeps: IsolationDeps = {
     }
   },
   nativeHome: homedir,
+  nativeEnvironment: () => process.env,
   nativeTmp: tmpdir,
   realpathNative: realpath,
   mkdirNative: async (paths) => { for (const path of paths) await mkdir(path, { recursive: true }); },
@@ -139,6 +141,11 @@ export interface IsolationStateOptions {
   env: Record<string, string>;
   sessionId: string;
   cwd: string;
+  /** Native Linux runner-created worktree selected for a filesystem-protected launch. */
+  protectedWorktree?: { path: string; gitWritableRoots: string[]; requiredReadOnlyPaths: string[] };
+  /** Preserve the installed provider's real transcript and credential directory when a managed
+   * Linux worktree forces bwrap over a runner configured for provider isolation. */
+  preserveProviderHome?: boolean;
   /** Session-private roots that may be populated after launch (for example an agent-requested
    * worktree). They are materialized before sandbox construction and never shared across sessions. */
   additionalWritableRoots?: string[];
@@ -199,6 +206,126 @@ function providerTranscriptPath(state: IsolationStateOptions, fallbackHome: stri
     return posix.join(absoluteHome(state.env.CODEX_HOME, `${label} CODEX_HOME`), "sessions");
   }
   return posix.join(absoluteHome(state.env.HOME ?? fallbackHome, `${label} HOME`), ...mapping.relative.split("/"));
+}
+
+function providerCredentialRoot(state: IsolationStateOptions, inherited: NodeJS.ProcessEnv, fallbackHome: string): string | null {
+  const home = absoluteHome(state.env.HOME ?? inherited.HOME ?? fallbackHome, "HOME on Linux");
+  if (state.driver === "claude-code") {
+    return absoluteHome(state.env.CLAUDE_CONFIG_DIR ?? inherited.CLAUDE_CONFIG_DIR ?? posix.join(home, ".claude"),
+      "CLAUDE_CONFIG_DIR on Linux");
+  }
+  if (state.driver === "codex" || state.driver === "codex-app-server") {
+    return absoluteHome(state.env.CODEX_HOME ?? inherited.CODEX_HOME ?? posix.join(home, ".codex"),
+      "CODEX_HOME on Linux");
+  }
+  if (state.driver === "pi") return posix.join(home, ".pi", "agent");
+  return null;
+}
+
+/** Common build caches whose writes previously worked in provider mode. Each is a directory below
+ * HOME, never HOME itself; custom tool cache paths remain outside this intentionally small list. */
+const MANAGED_LINUX_CACHE_PATHS = [
+  ".cache", ".npm", ".cargo/registry", ".cargo/git", ".local/share/pnpm/store", "go/pkg/mod",
+] as const;
+
+function pathWithinOrEqual(parent: string, path: string): boolean {
+  const relative = posix.relative(parent, path);
+  return relative === "" || relative !== ".." && !relative.startsWith("../") && !posix.isAbsolute(relative);
+}
+
+function pathsOverlap(left: string, right: string): boolean {
+  return pathWithinOrEqual(left, right) || pathWithinOrEqual(right, left);
+}
+
+async function managedLinuxCacheRoot(
+  requested: string,
+  protectedParent: string,
+  protectedChild: string,
+  commonGitDir: string,
+  runtime: IsolationDeps,
+): Promise<string> {
+  return canonicalManagedWritableRoot(requested, "cache directory", protectedParent, protectedChild,
+    commonGitDir, runtime);
+}
+
+/** Resolve both existing symlinks and the path a recursive mkdir would create. Check before the
+ * mkdir so an alias cannot create entries in protected state, then check again after it. Every
+ * managed Linux writable bind goes through this policy, regardless of its original purpose. */
+async function canonicalManagedWritableRoot(
+  requested: string,
+  role: string,
+  protectedParent: string,
+  protectedChild: string,
+  commonGitDir: string,
+  runtime: IsolationDeps,
+  requestedWorktree = false,
+): Promise<string> {
+  if (!posix.isAbsolute(requested)) throw new Error(`managed worktree ${role} writable mount is not absolute`);
+  let ancestor = requested;
+  while (!await runtime.existsNative(ancestor)) {
+    const parent = dirname(ancestor);
+    if (parent === ancestor) throw new Error(`managed worktree ${role} writable mount has no existing ancestor`);
+    ancestor = parent;
+  }
+  const planned = posix.join(await runtime.realpathNative(ancestor), posix.relative(ancestor, requested));
+  const validate = (path: string) => {
+    const exactRequestedBoundary = requestedWorktree && requested === protectedParent && path === protectedParent;
+    const separateSibling = path === requested &&
+      pathWithinOrEqual(protectedParent, path) && !pathsOverlap(path, protectedChild);
+    if (pathsOverlap(path, commonGitDir) ||
+        (pathsOverlap(path, protectedParent) && !exactRequestedBoundary && !separateSibling)) {
+      throw new Error(`managed worktree ${role} writable mount overlaps protected worktree roots or Git administration`);
+    }
+  };
+  validate(planned);
+  await runtime.mkdirNative([requested]);
+  const canonical = await runtime.realpathNative(requested);
+  validate(canonical);
+  return canonical;
+}
+
+async function managedGitBoundary(roots: readonly string[], protectedChild: string, runtime: IsolationDeps): Promise<string> {
+  const [worktreeAdmin, objects, refs, logs] = roots;
+  if (!worktreeAdmin || !objects || !refs || !logs || roots.length !== 4) {
+    throw new Error("managed worktree writable Git administration roots are incomplete");
+  }
+  const commonGitDir = dirname(dirname(worktreeAdmin));
+  if (dirname(worktreeAdmin) !== posix.join(commonGitDir, "worktrees") ||
+      objects !== posix.join(commonGitDir, "objects") ||
+      refs !== posix.join(commonGitDir, "refs") || logs !== posix.join(commonGitDir, "logs") ||
+      pathsOverlap(commonGitDir, protectedChild) ||
+      await runtime.realpathNative(commonGitDir) !== commonGitDir) {
+    throw new Error("managed worktree writable Git administration roots are ambiguous");
+  }
+  for (const root of roots) {
+    if (await runtime.realpathNative(root) !== root) {
+      throw new Error("managed worktree writable Git administration root is an alias");
+    }
+  }
+  return commonGitDir;
+}
+
+async function reserveManagedWorktreeConfig(
+  worktreeAdmin: string,
+  requiredReadOnlyPaths: readonly string[],
+  readOnlyPaths: readonly string[],
+  runtime: IsolationDeps,
+): Promise<void> {
+  const path = posix.join(worktreeAdmin, "config.worktree");
+  if (!requiredReadOnlyPaths.includes(path) || !readOnlyPaths.includes(path) ||
+      await runtime.realpathNative(worktreeAdmin) !== worktreeAdmin) {
+    throw new Error("managed worktree config cannot be protected before provider launch");
+  }
+  try {
+    const file = await open(path, "wx", 0o600);
+    await file.close();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+  const entry = await lstat(path);
+  if (!entry.isFile() || entry.nlink !== 1 || await runtime.realpathNative(path) !== path) {
+    throw new Error("managed worktree config is not a canonical regular file");
+  }
 }
 
 /** Session ids cross a trust boundary from the control plane. Hashing keeps them out of host and
@@ -570,6 +697,12 @@ export async function resolveExecutionIsolation(
   state?: IsolationStateOptions,
 ): Promise<SpawnIsolation | undefined> {
   const runtime = { ...defaultDeps, ...deps };
+  if (state?.preserveProviderHome && !state.protectedWorktree) {
+    throw new Error("provider home preservation requires a protected managed worktree");
+  }
+  if (state?.protectedWorktree && (policy.mode !== "bwrap" || context.kind !== "native" || runtime.platform !== "linux")) {
+    throw new Error("managed worktree protection requires native Linux bubblewrap isolation");
+  }
   if (policy.mode === "provider") return undefined;
   if (policy.mode === "bwrap" && context.kind === "wsl" && state) {
     const bridge = wslAgentControlLaunch(state.sessionId);
@@ -703,20 +836,82 @@ export async function resolveExecutionIsolation(
   if (runtime.uid() === 0) throw new Error("bubblewrap isolation refuses a root runner");
   const binary = await runtime.resolveNative("bwrap");
   if (!binary) throw new Error("bubblewrap is required by runner policy but bwrap was not found on PATH");
+  const protectedWorktree = state?.protectedWorktree ? await (async () => {
+    const path = state.protectedWorktree!.path;
+    const parent = dirname(path);
+    if (state.cwd !== path || parent === path || parent === runtime.nativeTmp() ||
+        await runtime.realpathNative(path) !== path ||
+        await runtime.realpathNative(parent) !== parent) {
+      throw new Error("managed worktree protection requires a canonical existing child and private parent");
+    }
+    return { parent, path, gitWritableRoots: state.protectedWorktree!.gitWritableRoots };
+  })() : undefined;
+  const commonGitDir = protectedWorktree
+    ? await managedGitBoundary(protectedWorktree.gitWritableRoots, protectedWorktree.path, runtime)
+    : undefined;
+  if (protectedWorktree) {
+    await reserveManagedWorktreeConfig(protectedWorktree.gitWritableRoots[0]!,
+      state!.protectedWorktree!.requiredReadOnlyPaths, state!.readOnlyPaths ?? [], runtime);
+  }
   const mapping = state && statePath(state.driver);
-  const writableBinds = mapping ? (() => {
+  let writableBinds: Array<{ source: string; target: string }> = [];
+  if (state?.preserveProviderHome) {
+    if (!protectedWorktree || !commonGitDir) throw new Error("preserved provider home requires a protected worktree");
+    const inherited = runtime.nativeEnvironment();
+    const root = providerCredentialRoot(state, inherited, runtime.nativeHome());
+    if (!root) throw new Error("managed worktree provider state cannot be preserved for this driver");
+    const canonical = await canonicalManagedWritableRoot(root, "provider credential directory",
+      protectedWorktree.parent, protectedWorktree.path, commonGitDir, runtime);
+    // Credentials are replaced via temp-file rename, so their exact containing directory must
+    // remain writable. Mount only that provider directory, never HOME or the worktree parent.
+    writableBinds = [{ source: canonical, target: canonical }];
+    const transcript = posix.join(root, mapping!.relative.split("/").at(-1)!);
+    const canonicalTranscript = await canonicalManagedWritableRoot(transcript, "provider transcript directory",
+      protectedWorktree.parent, protectedWorktree.path, commonGitDir, runtime);
+    if (!pathWithinOrEqual(canonical, canonicalTranscript)) {
+      writableBinds.push({ source: canonicalTranscript, target: canonicalTranscript });
+    }
+    const home = absoluteHome(state.env.HOME ?? inherited.HOME ?? runtime.nativeHome(), "HOME on Linux");
+    for (const relativePath of MANAGED_LINUX_CACHE_PATHS) {
+      const cache = await managedLinuxCacheRoot(posix.join(home, relativePath),
+        protectedWorktree.parent, protectedWorktree.path, commonGitDir, runtime);
+      if (!writableBinds.some((bind) => bind.target === cache)) {
+        writableBinds.push({ source: cache, target: cache });
+      }
+    }
+  } else if (mapping) {
     const targetHome = absoluteHome(state?.env.HOME ?? runtime.nativeHome(), "HOME on Linux");
-    const location = providerStateLocation(state.dataDir, state.driver, state.sessionId)!;
-    return [{
+    const location = providerStateLocation(state!.dataDir, state!.driver, state!.sessionId)!;
+    writableBinds = [{
       source: location.leaf,
       target: providerTranscriptPath(state!, targetHome, "on Linux")!,
     }];
-  })() : [];
-  for (const root of state?.additionalWritableRoots ?? []) writableBinds.push({ source: root, target: root });
-  if (writableBinds.length) await runtime.mkdirNative(writableBinds.flatMap((bind) => [bind.source, bind.target]));
+  }
+  for (const root of state?.additionalWritableRoots ?? []) {
+    if (protectedWorktree && root === protectedWorktree.path) continue; // already bound as the selected cwd
+    writableBinds.push({ source: root, target: root });
+  }
+  if (protectedWorktree && commonGitDir) {
+    const additional = new Set(state?.additionalWritableRoots ?? []);
+    const checked: typeof writableBinds = [];
+    for (const bind of writableBinds) {
+      const requested = additional.has(bind.source);
+      const source = await canonicalManagedWritableRoot(bind.source, "source", protectedWorktree.parent,
+        protectedWorktree.path, commonGitDir, runtime, requested);
+      const target = await canonicalManagedWritableRoot(bind.target, "target", protectedWorktree.parent,
+        protectedWorktree.path, commonGitDir, runtime, requested);
+      checked.push({ source, target });
+    }
+    writableBinds = checked;
+  } else if (writableBinds.length) {
+    await runtime.mkdirNative(writableBinds.flatMap((bind) => [bind.source, bind.target]));
+  }
   // Resolved after the writable binds are materialized: the entries live inside those roots, and
   // the launcher renders them last so the narrower read-only rule wins over the containing mount.
   const readOnlyBinds = await bwrapReadOnlyBinds(state?.readOnlyPaths, runtime.isRunnerOwnedEntryNative);
+  if (state?.protectedWorktree?.requiredReadOnlyPaths.some((path) => !readOnlyBinds.includes(path))) {
+    throw new Error("managed worktree Git registration changed before bubblewrap isolation");
+  }
   // bwrap renders the directory read-only as a whole, so the manager transport's writes cannot be
   // granted there; its entries are not carried (docs/agent-control.md, "Known limits").
   const resolvedMask = await resolveGuardStateMask(state?.guardStateMask, runtime);
@@ -728,7 +923,10 @@ export async function resolveExecutionIsolation(
     command: binary.launch.command,
     args: binary.launch.args,
     network: policy.network,
+    ...(state?.dataDir ? { claudePipeHelperDataDir: state.dataDir } : {}),
+    ...(state?.preserveProviderHome ? { preservesProviderHome: true } : {}),
     ...(writableBinds.length ? { writableBinds } : {}),
+    ...(protectedWorktree ? { protectedWorktree } : {}),
     ...(readOnlyBinds.length ? { readOnlyBinds } : {}),
     ...(guardStateMask ? { guardStateMask } : {}),
   };

@@ -459,6 +459,26 @@ test("container and cloud launches never lease the host provider HOME", () => {
   );
 });
 
+test("protected bwrap with preserved provider state retains the shared-home lease", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-preserved-provider-home-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const isolated: SpawnIsolation = { backend: "bwrap", command: "bwrap", args: [], network: "inherit" };
+  const preserved: SpawnIsolation = { ...isolated, preservesProviderHome: true };
+  assert.equal(providerLaunchNeedsSharedHomeLease(isolated), false);
+  assert.equal(providerLaunchNeedsSharedHomeLease(preserved), true);
+  const first = new ProviderHomeLeaseRegistry(OWNER_A, {
+    pid: 101, hostname: "host-a", isProcessAlive: (pid) => pid === 101,
+  });
+  const second = new ProviderHomeLeaseRegistry(OWNER_B, {
+    pid: 202, hostname: "host-a", isProcessAlive: (pid) => pid === 101,
+  });
+  first.acquire({ ...request(home), isolation: preserved });
+  assert.throws(() => second.acquire({ ...request(home), isolation: preserved }), /already in use by process 101/);
+  first.releaseAll();
+  second.acquire({ ...request(home), isolation: preserved });
+  second.releaseAll();
+});
+
 test("a configured credential home is created before its first lease", (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-provider-home-create-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));

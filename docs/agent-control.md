@@ -349,16 +349,20 @@ contract is recorded in [ADR 0007](adr/0007-separate-orchestrator-role-from-proj
 
 ## Managed Worktree Administrative Paths
 
-A runner-owned session worktree is protected against provider commands that remove or unregister it,
-but that protection lives at the command-approval boundary and cannot see a write a script or tool
-performs at runtime. The worktree's `.git` link file is the one path inside an otherwise writable
-worktree where a single stray write is unrecoverable: Git reads it to locate the real administrative
-directory, so a damaged link breaks every later Git operation and the session's pre-launch
-verification while the worktree root and its repository registration both survive.
+A runner-owned session worktree has command-approval protection against removal and unregistration,
+but approval cannot see a write a script or tool performs at runtime. Native Linux provider launches
+whose cwd is a selected runner-owned worktree therefore require runner-owned `bwrap` isolation,
+including when the runner is configured for `provider` mode. Native Agent TUI shell processes use
+a separate launch path and do not receive this provider boundary. The worktree's `.git` link file
+is the one path inside an otherwise writable worktree where a single stray write is unrecoverable: Git
+reads it to locate the real administrative directory, so a damaged link breaks every later Git
+operation and the session's pre-launch verification while the worktree root and its repository
+registration both survive.
 
 Sandbox modes that can express a per-path rule therefore present that link read-only to the provider
-and leave the rest of the worktree writable. Git never rewrites the link, so ordinary edits, staging,
-commits, branch switches, and test runs are unaffected. The repository's own `.git` directory is
+and leave the rest of the worktree writable. For a launch that reaches this boundary, Git never
+rewrites the link, so ordinary edits, staging, commits, branch switches, and test runs are unaffected.
+The repository's own `.git` directory is
 deliberately **not** covered — every worktree's real administrative directory lives inside it, and
 freezing it would break the commits this rule exists to keep working. Attached operator worktrees
 contribute no rule at all: only runner-created identities are managed.
@@ -371,27 +375,58 @@ contribute no rule at all: only runner-created identities are managed.
 | `windows-job` | No | Job Objects manage a process tree. They do not restrict filesystem access at all. |
 | `container` execution targets | No | The workspace is one read-write bind into the image; the rule is not expressed per path today. |
 | `cloud` execution targets | No | The filesystem boundary belongs to the remote adapter, not to this runner. |
-| `provider` | No | There is no runner-owned boundary; the provider's own sandbox decides, and none of the supported providers expose a per-path exclusion inside a writable root. |
+| `provider` | Native Linux selected runner-owned worktrees only | Those launches require `bwrap` and fail before provider start if it is unavailable. Other provider-mode launches keep their existing provider-owned boundary. |
 
-On a non-enforcing mode the behavior is exactly what it was before this rule existed. Nothing is
-newly permitted anywhere: the rule only ever removes provider write access to one runner-owned path.
+The native Linux managed-worktree boundary mounts the immediate parent read-only, then rebinds the
+selected child writable. It also protects the `.git` link, Git registration files, and the
+per-worktree Git config file, creating that config file empty if it is absent. It preserves
+the root and registration, not the contents of the writable child. Attached worktrees, other OSes,
+and sessions outside that selected managed cwd retain their existing boundaries.
+
+Provider-mode managed Linux Claude background work runs inside a namespace tied to the runner.
+If the runner dies or restarts, unfinished work is killed and its result cannot be recovered.
+
+When a `provider`-mode managed Linux launch is forced into `bwrap`, its existing provider transcript
+and credential directory remains writable, together with these default HOME cache directories:
+`.cache`, `.npm`, `.cargo/registry`, `.cargo/git`, `.local/share/pnpm/store`, and `go/pkg/mod`.
+Every writable mount is canonicalized and refused if it aliases a protected worktree root or shared
+Git administration; a cache symlink to separate safe storage is allowed. The whole HOME is never
+writable. The runner creates these cache directories before mounting them; an unusable path (for
+example, a file in place of `~/go`) prevents launch until the operator fixes it. Custom caches and
+other HOME writes, including top-level provider config files, can still fail with a read-only
+filesystem error; configure those
+builds to write inside the worktree or another authorized scratch path.
+
+An ACP provider in a selected managed Linux worktree cannot launch under `provider` mode because
+the runner does not know which provider state root to preserve. Git commands that write shared
+administration outside `objects`, `refs`, and `logs` can also fail inside this boundary. These
+include repository config changes, setting an upstream with `git push -u`, and creating a worktree
+directly with Git; use the runner's managed worktree operation for the latter. Git layouts that
+cannot supply canonical linked-worktree administration and all four narrow writable Git roots fail
+before provider launch, including a linked-worktree Project Location, missing Git logs, and
+symlinked Git object storage.
 
 **The rule is bound at launch, like every other filesystem boundary here.** A `bwrap` or Seatbelt
 sandbox is constructed when the provider starts, so the read-only entries are the ones that exist
-then. A worktree the provider requests *during* a turn is created inside the session's
-requested-worktree boundary, which is already writable, and a worktree switch schedules a relaunch
-rather than rebinding a live sandbox — so that new worktree's link is writable until the relaunch,
-exactly as the **Attach** notice already reports for the worktree root itself. This is the same
-same-turn window the command-approval boundary has, tracked separately; closing it means retiring
-the provider at creation time, not changing the sandbox rule.
+then. When launched in the original worktree, a worktree the provider requests *during* a turn is
+created inside the session's requested-worktree boundary, which is already writable, and a switch
+schedules a relaunch rather than rebinding a live sandbox — so that new worktree's link is writable
+until the relaunch, exactly as the **Attach** notice already reports for the worktree root itself.
+This is the same-turn window the command-approval boundary has, tracked separately; closing it
+means retiring the provider at creation time, not changing the sandbox rule.
+
+For a native Linux provider already launched in a *selected requested worktree*, its requested-
+worktree boundary is the read-only parent of that selected child. A newly requested sibling is
+therefore not writable during the current turn. Select it and relaunch before editing it. This
+keeps the selected root and Git registration intact; it does not preserve writable file contents.
 
 ## Runner Hook State at the Sandbox Boundary
 
 > **Two separate rules, by execution isolation mode.** Where the runner sandboxes its providers
 > (`executionIsolation.mode` of `bwrap` or `seatbelt`), the runner's own sandbox hides the directory
-> from every provider. In the default `provider` mode the runner sandboxes nothing, and **no
-> provider has an OS boundary there today**: the directory stays readable and writable to anything
-> running as the runner's user. Codex's own permission profile can deny it — the machinery to do so
+> from every provider. In `provider` mode outside a selected managed Linux worktree, the runner
+> sandboxes nothing, and **no provider has an OS boundary there today**: the directory stays readable
+> and writable to anything running as the runner's user. Codex's own permission profile can deny it — the machinery to do so
 > ships and is proven per launch — but on codex-cli 0.155.1 a `deny` entry also disables every
 > APPROVED network escalation, so no launch selects one (#1464). See "Codex in `provider` Mode". What changed there (#1336 slice 3, native Linux only) is that **nothing in
 > the directory decides the guard's verdict any more** — see "The Guard's Verdict in `provider`
@@ -685,7 +720,7 @@ a policy is also present.
   reopens ordinary staging, commits, status, and branch operations beneath that carveout while the
   pointer stays protected. The common `.git` root, the primary checkout, and unrelated host paths
   are never granted. Runner-owned filesystem isolation re-applies read-only mounts to the static
-  linked-worktree registration files `gitdir`, `commondir`, and an existing `config.worktree`
+  linked-worktree registration files `gitdir`, `commondir`, and `config.worktree` (created empty if absent)
   beneath that writable admin directory. Without the outer filesystem boundary, the managed
   `PreToolUse` guard refuses direct command-text writes, removals, renames, and replacements under
   the repository's worktree registry. That has the guard's existing same-user, command-text

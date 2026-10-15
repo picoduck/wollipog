@@ -113,6 +113,7 @@ import {
   type SessionQueueHoldView,
 } from "@wollipog/protocol";
 import { createHash, randomUUID } from "node:crypto";
+import { lstatSync, realpathSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -120,7 +121,7 @@ import { isDeepStrictEqual } from "node:util";
 import { makeDriver, type Driver } from "./drivers/factory.js";
 import type { ManagedWorktreeProtection } from "./managed-worktree-protection.js";
 import type { ClaudeGuardRefreshOutcome as ManagedWorktreeGuardRefreshOutcome } from "./hook-settings.js";
-import { managedWorktreeReadOnlyPaths } from "./managed-worktree-sandbox.js";
+import { managedWorktreeGitWritableRoots, managedWorktreeReadOnlyPaths } from "./managed-worktree-sandbox.js";
 import type {
   CompletedCommandReconciliationProof,
   DriverBackgroundJobStopResult,
@@ -2529,7 +2530,7 @@ export class SessionManager {
         prepareExecution: async () => {
           // Cloud isolation preparation snapshots the source worktree. Delaying this boundary until
           // runWorktreeSetup has copied all declared files makes the snapshot and remote cwd exact.
-          const resolvedIsolation = await this.resolveLaunchIsolation(meta, worktree.path);
+          const resolvedIsolation = await this.resolveLaunchIsolation(meta, worktree.path, undefined, undefined, "approved_worktree_hook");
           setupEnvironment = this.worktreeSetupRuntimeEnvironment(resolvedIsolation, hostSetupEnvironment);
           return {
             environment: setupEnvironment,
@@ -3480,7 +3481,7 @@ export class SessionManager {
     record: WorktreeCleanupRecord,
     meta?: SessionMeta,
   ): Promise<SpawnIsolation | undefined> {
-    if (meta) return this.resolveLaunchIsolation(meta, record.worktreePath);
+    if (meta) return this.resolveLaunchIsolation(meta, record.worktreePath, undefined, undefined, "approved_worktree_hook");
     const execution = record.execution;
     // Compatibility for cleanup records written before durable execution identity existed. Such
     // records cannot name a remote target and retain the former host-only replay behavior.
@@ -8382,6 +8383,7 @@ export class SessionManager {
     cwd: string,
     launchGeneration?: number,
     projectMemoryDirectory?: string,
+    purpose: "provider" | "approved_worktree_hook" = "provider",
   ): SpawnIsolation | undefined | Promise<SpawnIsolation | undefined> {
     if (meta.executionTarget?.adapter === "container") {
       if (!this.containerTargets || !meta.agentId) throw new Error("container execution target is not configured for this agent");
@@ -8390,6 +8392,17 @@ export class SessionManager {
     if (meta.executionTarget?.adapter === "cloud") {
       return this.prepareCloudIsolation(meta, cwd, launchGeneration);
     }
+    // Only providers are forced into the managed-worktree boundary. Setup and teardown commands
+    // come from a frozen, explicitly approved configuration and retain the configured execution
+    // isolation. Reusing the provider boundary for hooks hides host paths under its private /tmp,
+    // where a hook can report success after writing a file that vanishes at sandbox exit.
+    // A strict Orchestrator launches providers in runner scratch, not its selected worktree.
+    const protectedWorktree = purpose === "provider" && cwd === meta.worktreePath && this.requiresManagedWorktreeBwrap(meta)
+      ? meta.worktreePath!
+      : undefined;
+    const isolationPolicy = protectedWorktree
+      ? { mode: "bwrap" as const, network: this.executionIsolation.network }
+      : this.executionIsolation;
     this.assertHostIsolationContextSupported(meta);
     // The provider may write anywhere in its managed worktree except the entries the runner owns.
     // Ordinary command approval cannot see a write a script performs at runtime, so the same set of
@@ -8399,21 +8412,40 @@ export class SessionManager {
     const readOnlyPaths = meta.context.kind === "native"
       ? managedWorktreeReadOnlyPaths(this.managedWorktreeProtections(meta))
       : [];
+    let gitWritableRoots: string[] = [];
+    let requiredReadOnlyPaths: string[] = [];
+    if (protectedWorktree) {
+      requiredReadOnlyPaths = managedWorktreeReadOnlyPaths([{ worktreePath: protectedWorktree, repoPath: meta.repoPath }], true);
+      for (const path of requiredReadOnlyPaths) {
+        if (!readOnlyPaths.includes(path)) readOnlyPaths.push(path);
+      }
+      const gitLink = join(protectedWorktree, ".git");
+      gitWritableRoots = managedWorktreeGitWritableRoots(protectedWorktree, [{
+        worktreePath: protectedWorktree, repoPath: meta.repoPath,
+      }]);
+      if (requiredReadOnlyPaths.length < 4 || gitWritableRoots.length !== 4 ||
+          !lstatSync(gitLink).isFile() || realpathSync.native(gitLink) !== gitLink ||
+          !requiredReadOnlyPaths.every((path) => readOnlyPaths.includes(path))) {
+        throw new Error("managed worktree Git registration could not be protected before provider launch");
+      }
+    }
     // The runner's hook state directory is hidden from every native sandboxed launch (#1336),
     // whatever the driver: nothing a provider runs has a use for it, and only the guard's own
     // re-entry needed it, which now asks the runner instead. Native only for the same reason as
     // above; the modes that cannot express it are documented in docs/agent-control.md.
     const guardStateMask = meta.context.kind === "native" &&
-        (this.executionIsolation.mode === "bwrap" || this.executionIsolation.mode === "seatbelt")
+        (isolationPolicy.mode === "bwrap" || isolationPolicy.mode === "seatbelt")
       ? this.guardStateSandbox?.mask(meta)
       : undefined;
-    return this.requestedWorktreeIsolation(meta).then((additionalWritableRoots) => this.resolveIsolation(this.executionIsolation, meta.context, {}, {
+    return this.requestedWorktreeIsolation(meta, isolationPolicy.mode).then((additionalWritableRoots) => this.resolveIsolation(isolationPolicy, meta.context, {}, {
       driver: meta.driver,
       dataDir: this.stateDir,
       env: meta.env,
       sessionId: meta.sessionId,
       cwd,
       ...(projectMemoryDirectory ? { projectMemoryDirectory } : {}),
+      ...(protectedWorktree ? { protectedWorktree: { path: protectedWorktree, gitWritableRoots, requiredReadOnlyPaths } } : {}),
+      ...(protectedWorktree && this.executionIsolation.mode === "provider" ? { preserveProviderHome: true } : {}),
       ...(readOnlyPaths.length ? { readOnlyPaths } : {}),
       ...(guardStateMask ? { guardStateMask } : {}),
       ...(this.strictProjectIsolation(meta) ? { orchestratorScratchOnly: true } : {}),
@@ -8426,6 +8458,13 @@ export class SessionManager {
         : {}),
       ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}),
     }));
+  }
+
+  private requiresManagedWorktreeBwrap(meta: SessionMeta): boolean {
+    if (process.platform !== "linux" || meta.context.kind !== "native" || !meta.worktreePath ||
+        meta.executionTarget?.adapter === "container" || meta.executionTarget?.adapter === "cloud") return false;
+    const selected = this.attributedWorktreeForPath(meta, meta.worktreePath);
+    return !!selected && selected.source !== "attached";
   }
 
   /**
@@ -8461,9 +8500,10 @@ export class SessionManager {
 
   private async requestedWorktreeIsolation(
     meta: Pick<SessionMeta, "config" | "orchestrator" | "context" | "repoPath" | "sessionId" | "worktreePath">,
+    mode = this.executionIsolation.mode,
   ): Promise<string[]> {
     if (this.strictProjectIsolation(meta)) return [];
-    if (this.executionIsolation.mode !== "bwrap" && this.executionIsolation.mode !== "seatbelt") return [];
+    if (mode !== "bwrap" && mode !== "seatbelt") return [];
     // Direct WSL orchestration creates child worktrees through the runner; the provider never
     // needs the future requested-worktree boundary writable. Computing that legacy boundary would
     // itself reopen a mutable WSL HOME pathname before the target-local launcher can hold it.
@@ -14053,6 +14093,24 @@ export class SessionManager {
       let providerStatePrecloned = false;
       let forkIsolation: SpawnIsolation | undefined;
       const targetDescendantMarker = this.worktreeProcessMarker(targetSessionId, worktree.path);
+      // Pi forks from a precloned target provider partition. Claude's CLI forks into the source
+      // partition first, which is verified and cloned only after its child transcript is durable.
+      // Both bootstrap processes run in the new worktree, so their filesystem boundary must use
+      // the target path even while Claude still uses the source provider-state identity.
+      const forkMeta: SessionMeta = {
+        ...source,
+        sessionId: source.driver === "pi" ? targetSessionId : sourceSessionId,
+        worktreePath: worktree.path,
+        worktreeBranch: worktree.branch,
+        worktrees: [{
+          id: "legacy",
+          path: worktree.path,
+          branch: worktree.branch,
+          baseRef,
+          baseCommit: baseRef,
+          source: "legacy",
+        }],
+      };
       if (source.driver === "pi") {
         const priorCapabilities = source.capabilities;
         const priorSessionSlashCommands = source.sessionSlashCommands;
@@ -14094,20 +14152,6 @@ export class SessionManager {
         );
         providerStatePrecloned = this.executionIsolation.mode === "bwrap";
         if (providerStatePrecloned) forkStateOwner = targetSessionId;
-        const forkMeta: SessionMeta = {
-          ...source,
-          sessionId: targetSessionId,
-          worktreePath: worktree.path,
-          worktreeBranch: worktree.branch,
-          worktrees: [{
-            id: "legacy",
-            path: worktree.path,
-            branch: worktree.branch,
-            baseRef,
-            baseCommit: baseRef,
-            source: "legacy",
-          }],
-        };
         forkIsolation = await this.resolveLaunchIsolation(forkMeta, worktree.path);
         await this.providerHomeLeases?.acquire({
           driver: source.driver,
@@ -14142,6 +14186,17 @@ export class SessionManager {
         // --fork startup path directly from the target partition, avoiding concurrent writers to
         // the copied JSONL while preserving the source process and source partition untouched.
         client = temporary;
+      } else if (source.driver === "claude-code") {
+        forkIsolation = await this.resolveLaunchIsolation(forkMeta, worktree.path);
+        await this.proveGuardInsideSandbox(forkMeta, forkIsolation, worktree.path);
+        await this.providerHomeLeases?.acquire({
+          driver: source.driver,
+          command: source.command,
+          context: source.context,
+          env: source.env,
+          isolation: forkIsolation,
+        }, { isCurrent: forkIsCurrent });
+        if (!forkIsCurrent()) throw new Error("source session changed during provider-home acquisition");
       }
       if (!client?.forkSession) throw new Error("this driver build does not support provider forks");
       forkedThreadId = await client.forkSession(point.agentTurnId, worktree.path, {

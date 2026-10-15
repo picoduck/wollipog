@@ -48,6 +48,7 @@ function linkedWorktreeGitLayout(
  */
 export function managedWorktreeReadOnlyPaths(
   protections: readonly ManagedWorktreeProtection[],
+  reserveMissingConfig = false,
 ): string[] {
   const paths = new Set<string>();
   for (const { worktreePath, repoPath } of protections) {
@@ -61,10 +62,14 @@ export function managedWorktreeReadOnlyPaths(
     // The provider needs the admin directory writable for Git's index/HEAD lock-and-rename
     // protocol, but these registration files are inputs to later unsandboxed runner Git calls and
     // are never mutated by staging, commits, status, or branch switches. Reopen them read-only
-    // beneath that writable directory. Include per-worktree config when it already exists: Git may
-    // read it during runner-side status, and a provider must not turn that read into code execution.
+    // beneath that writable directory. A protected bwrap launch reserves per-worktree config even
+    // when absent: otherwise a provider can create it and make a later host Git call run a hook.
     for (const name of ["gitdir", "commondir", "config.worktree"] as const) {
       const path = join(layout.worktreeGitDir, name);
+      if (name === "config.worktree" && reserveMissingConfig && !existsSync(path)) {
+        paths.add(path);
+        continue;
+      }
       if (!existsSync(path)) continue;
       try {
         if (!lstatSync(path).isFile() || !samePath(realpathSync.native(path), path)) continue;

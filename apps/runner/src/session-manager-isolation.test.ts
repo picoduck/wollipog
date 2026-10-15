@@ -101,6 +101,114 @@ test("session launch passes one resolved isolation boundary to every driver", as
   }
 });
 
+test("a Linux managed worktree launch selects bwrap from provider mode and fails before driver construction without it", async () => {
+  if (process.platform !== "linux") return;
+  const root = mkdtempSync(join(tmpdir(), "wollipog-managed-launch-isolation-"));
+  const home = mkdtempSync(join(tmpdir(), "wollipog-managed-launch-home-"));
+  let manager: SessionManager | undefined;
+  try {
+    const { repoPath, worktreePath } = hostWorktree(root, "s1");
+    const store = new SessionStore(join(root, "sessions"));
+    store.create({
+      ...meta(), repoPath, worktreePath, worktreeBranch: "agent/s1", env: { HOME: home },
+      worktrees: [{ id: "legacy", path: worktreePath, branch: "agent/s1", source: "legacy" }],
+    });
+    let constructed = 0;
+    let selectedMode: string | undefined;
+    let migrationMode: string | undefined;
+    let available = false;
+    let spawnedIsolation: DriverOptions["isolation"] | undefined;
+    let preservedProviderHome = false;
+    const factory = (_driver: unknown, options: DriverOptions) => {
+      constructed++;
+      spawnedIsolation = options.isolation;
+      return {
+        pid: 1, initialize: async () => {}, newSession: async () => "provider-1",
+        prompt: async () => "end_turn" as const, cancel: () => {}, dispose: () => {},
+        setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => "provider-1",
+      };
+    };
+    manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, factory as never, join(root, "state"), 1,
+      undefined, undefined, { agentLimits: {}, agentWeights: {} },
+      { mode: "provider", network: "inherit" }, async (policy, context, _deps, state) => {
+        selectedMode = policy.mode;
+        preservedProviderHome = state?.preserveProviderHome === true;
+        return resolveExecutionIsolation(policy, context, {
+          platform: "linux", uid: () => 1000, nativeEnvironment: () => ({ HOME: home }),
+          resolveNative: async () => available ? {
+            path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] },
+          } : null,
+        }, state);
+      },
+      async () => {}, async () => {}, async (policy) => { migrationMode = policy.mode; },
+    );
+    // The fixture is a disposable, registered Git worktree. Keep the launch test focused on the
+    // isolation selection after the separate worktree identity proof.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    internals.verifySelectedWorktreeBeforeLaunch = async () => true;
+    assert.equal(await internals.resolveCleanupIsolation({ worktreePath }, store.readMeta("s1")), undefined,
+      "frozen approved teardown retains configured provider-mode hook isolation");
+    assert.equal(selectedMode, "provider", "trusted hooks must not inherit the provider-only forced bwrap policy");
+    assert.equal(preservedProviderHome, false);
+    assert.equal(await internals.acquireAdmission("s1"), true);
+    assert.equal(await internals.launch(store.readMeta("s1")), false);
+    assert.equal(selectedMode, "bwrap");
+    assert.equal(migrationMode, undefined, "provider-mode history must remain in its existing provider directory");
+    assert.equal(preservedProviderHome, true);
+    assert.equal(constructed, 0);
+    assert.equal(store.readMeta("s1")?.status, "failed");
+    available = true;
+    assert.equal(await internals.launch(store.readMeta("s1")), true);
+    assert.equal(constructed, 1);
+    assert.equal(spawnedIsolation?.backend, "bwrap");
+    assert.equal(spawnedIsolation?.backend === "bwrap" && spawnedIsolation.preservesProviderHome, true);
+    assert.ok(spawnedIsolation?.backend === "bwrap" && spawnedIsolation.writableBinds?.some((bind) =>
+      bind.source === join(home, ".claude") && bind.target === bind.source));
+    assert.equal(spawnedIsolation?.backend === "bwrap" && spawnedIsolation.writableBinds?.some((bind) =>
+      bind.target === home), false, "the whole HOME is never made writable");
+    assert.deepEqual(spawnedIsolation?.backend === "bwrap" ? spawnedIsolation.protectedWorktree?.path : undefined,
+      worktreePath);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("strict Orchestrator scratch does not make its selected managed worktree writable", async () => {
+  if (process.platform !== "linux") return;
+  const root = mkdtempSync(join(tmpdir(), "wollipog-orchestrator-selected-worktree-"));
+  let manager: SessionManager | undefined;
+  try {
+    const { repoPath, worktreePath } = hostWorktree(root, "s1");
+    const store = new SessionStore(join(root, "sessions"));
+    const selected = {
+      ...meta(), repoPath, worktreePath, worktreeBranch: "agent/s1",
+      worktrees: [{ id: "legacy", path: worktreePath, branch: "agent/s1", source: "legacy" as const }],
+      config: { permissionMode: "orchestrator" as const },
+      orchestrator: { strictProjectIsolation: true },
+    };
+    store.create(selected);
+    let observed: { mode: string; protectedWorktree: unknown } | undefined;
+    manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, undefined, join(root, "state"), 1,
+      undefined, undefined, { agentLimits: {}, agentWeights: {} },
+      { mode: "bwrap", network: "inherit" }, async (policy, _context, _deps, state) => {
+        observed = { mode: policy.mode, protectedWorktree: state?.protectedWorktree };
+        return undefined;
+      },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (manager as any).resolveLaunchIsolation(store.readMeta("s1"), join(root, "scratch"));
+    assert.deepEqual(observed, { mode: "bwrap", protectedWorktree: undefined });
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("an adopted Pi transcript directory is writable inside the session isolation boundary", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-pi-adoption-isolation-"));
   let manager: SessionManager | undefined;

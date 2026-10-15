@@ -28,6 +28,7 @@ import { approvalScopeContext } from "../approval-scope.js";
 import { campaignOperationEvidence } from "../campaign-operation-evidence.js";
 import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
 import { inspectClaudeBackgroundWork, inspectClaudeBackgroundWorkInContext, type ClaudeBackgroundWorkInspection } from "../claude-background-work.js";
+import { claudeNamespaceHostTaskPath, claudeNamespaceTempRoot } from "../claude-namespace-session.js";
 import { effectiveClaudePermissionMode } from "../claude-permission.js";
 import { NativeProjectMemorySettings, withClaudeProjectMemory } from "../project-memory.js";
 import { prepareClaudeHookArgs } from "../hook-settings.js";
@@ -40,7 +41,7 @@ import {
   type ManagedWorktreeProtection,
 } from "../managed-worktree-protection.js";
 import { classifyRoutineClaudeOrchestratorPermission } from "../orchestrator-provider-permissions.js";
-import { killTree, spawnAgent, terminateDescendantBoundaries, trackPendingKill, type AgentProcess, type SpawnAgentOptions } from "../spawn.js";
+import { killTree, spawnAgent, terminateDescendantBoundaries, trackPendingKill, type AgentProcess, type SpawnAgentOptions, type SpawnIsolation } from "../spawn.js";
 import type {
   Driver,
   DriverBackgroundJob,
@@ -909,7 +910,7 @@ export class ClaudeCodeDriver implements Driver {
     return this.sessionId;
   }
 
-  async forkSession(lastTurnId: string, cwd: string): Promise<string> {
+  async forkSession(lastTurnId: string, cwd: string, options?: { isolation?: SpawnIsolation; descendantMarker?: string }): Promise<string> {
     if (this.disposed) throw new Error("Claude driver is disposed");
     if (this.opts.capabilities?.supportsConversationFork !== true) {
       throw new Error("Claude conversation fork was not verified for this installation");
@@ -919,11 +920,16 @@ export class ClaudeCodeDriver implements Driver {
     }
 
     const targetSessionId = randomUUID();
-    await this.readConversationUsage(cwd, targetSessionId);
+    await this.readConversationUsage(cwd, targetSessionId, undefined, options);
     return targetSessionId;
   }
 
-  private async readConversationUsage(cwd: string, targetSessionId: string, signal?: AbortSignal): Promise<Json> {
+  private async readConversationUsage(
+    cwd: string,
+    targetSessionId: string,
+    signal?: AbortSignal,
+    options?: { isolation?: SpawnIsolation; descendantMarker?: string },
+  ): Promise<Json> {
     const isFork = targetSessionId !== this.sessionId;
     // /context is a local zero-cost command. It makes Claude persist the fork immediately so the
     // target app session can safely store a real resumable id without running a hidden model turn.
@@ -963,10 +969,10 @@ export class ClaudeCodeDriver implements Driver {
           LEGACY_CLAUDE_PENDING_MAX_MS,
           ...(this.opts.orchestrator ? ORCHESTRATOR_REPOSITORY_OVERRIDE_ENV : []),
         ],
-        isolation: this.opts.isolation,
+        isolation: options?.isolation ?? this.opts.isolation,
         containerAgentLaunch: true,
         cloudAgentLaunch: true,
-        descendantMarker: this.opts.descendantMarker,
+        descendantMarker: options?.descendantMarker ?? this.opts.descendantMarker,
       });
     } catch (err) {
       throw new Error(`Claude fork failed to spawn: ${(err as Error).message}`);
@@ -1286,6 +1292,8 @@ export class ClaudeCodeDriver implements Driver {
           containerAgentLaunch: true,
           cloudAgentLaunch: true,
           descendantOwner: this.descendantOwner,
+          claudeNamespaceProvider: true,
+          claudeNamespaceSessionId: this.sessionId,
           descendantMarker: this.opts.descendantMarker,
         });
       } catch (err) {
@@ -1580,6 +1588,8 @@ export class ClaudeCodeDriver implements Driver {
           containerAgentLaunch: true,
           cloudAgentLaunch: true,
           descendantOwner: this.descendantOwner,
+          claudeNamespaceProvider: true,
+          claudeNamespaceSessionId: this.sessionId,
           descendantMarker: this.opts.descendantMarker,
         });
       } catch (err) {
@@ -1938,6 +1948,7 @@ export class ClaudeCodeDriver implements Driver {
     launchType?: DriverBackgroundLaunchType,
     parentPersistentTurnId?: number,
   ): void {
+    if (outputFile) outputFile = claudeNamespaceHostTaskPath(this.descendantOwner, outputFile);
     // A task this driver ended stays ended (#1778, #1780). Claude may still report it afterwards:
     // its trailing `stopped` notification, or an async-launch tool result that trails a stop made
     // while the task was being launched.
@@ -2199,7 +2210,8 @@ export class ClaudeCodeDriver implements Driver {
 
   private nativeDiscoveryRoots() {
     return {
-      tempRoot: this.opts.env.TMPDIR ?? this.opts.env.TEMP ?? this.opts.env.TMP,
+      tempRoot: claudeNamespaceTempRoot(this.descendantOwner) ??
+        this.opts.env.TMPDIR ?? this.opts.env.TEMP ?? this.opts.env.TMP,
       claudeHome: this.opts.env.HOME ? join(this.opts.env.HOME, ".claude") : undefined,
       projectsRoot: this.providerProjectsRoot(),
     };
@@ -2220,7 +2232,11 @@ export class ClaudeCodeDriver implements Driver {
       this.cwd,
       this.sessionId,
       this.pendingBackgroundTasks.keys(),
-      { env: this.opts.env, projectsRoot: this.providerProjectsRoot() },
+      { env: {
+        ...this.opts.env,
+        ...(claudeNamespaceTempRoot(this.descendantOwner)
+          ? { TMPDIR: claudeNamespaceTempRoot(this.descendantOwner) } : {}),
+      }, projectsRoot: this.providerProjectsRoot() },
     ), continuationRequired);
   }
 

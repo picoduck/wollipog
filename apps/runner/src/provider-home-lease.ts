@@ -173,9 +173,11 @@ function providerKey(driver: AgentDriverKind, command: string): string {
   return `acp-${createHash("sha256").update(command).digest("hex").slice(0, 16)}`;
 }
 
-/** bwrap redirects mutable transcripts; container/cloud providers do not mutate the host home. */
+/** Ordinary bwrap redirects mutable transcripts; a protected managed worktree can instead keep
+ * the real provider home writable, which still needs the same cross-runner lease as provider mode. */
 export function providerLaunchNeedsSharedHomeLease(isolation?: SpawnIsolation): boolean {
-  return isolation?.backend !== "bwrap" && isolation?.backend !== "wsl-bwrap" && isolation?.backend !== "container" &&
+  return (isolation?.backend !== "bwrap" || isolation.preservesProviderHome === true) &&
+    isolation?.backend !== "wsl-bwrap" && isolation?.backend !== "container" &&
     isolation?.backend !== "cloud";
 }
 
