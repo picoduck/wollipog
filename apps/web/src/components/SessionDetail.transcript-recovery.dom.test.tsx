@@ -23,7 +23,6 @@ import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { staticPinnedSummary } from "./pinned-summary-state.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
-installDomTestCleanup(domWindow);
 Object.defineProperty(domWindow.Element.prototype, "getBoundingClientRect", {
   configurable: true,
   value() {
@@ -59,6 +58,8 @@ Object.defineProperties(domWindow, {
     },
   },
 });
+// Each test's cleanup aborts the window, which drops its queued frames without cancelling them here.
+installDomTestCleanup(domWindow, { reset: () => pendingFrames.clear() });
 for (const [name, value] of Object.entries({
   window: domWindow,
   document: domWindow.document,
