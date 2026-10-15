@@ -5892,14 +5892,16 @@ export function builtInAgentHarnessName(driver: AgentDriverKind): string | null 
 /**
  * The agent row one Machine uses for a harness identity: an available row of the same harness, the
  * Machine's selected installation first, then the lowest agent id, so the same inputs always pick
- * the same row. Restart-only Codex exec rows are never chosen for new work.
+ * the same row. Rows the Machine's installation choice excludes cannot launch, and restart-only
+ * Codex exec rows are never used for new work, so neither is chosen.
  */
 export function resolveAgentHarnessRow<T extends Pick<AgentDefinition, "id" | "driver" | "context" |
-  "available" | "source" | "installation">>(agents: readonly T[], identity: AgentHarnessIdentity): T | undefined {
+  "available" | "source" | "installation" | "harnessSelectionBlocked">>(agents: readonly T[], identity: AgentHarnessIdentity): T | undefined {
   const key = agentHarnessIdentityKey(identity);
   const rank = (agent: T) => agent.installation?.selection === "selected" ? 0 : 1;
   return agents
     .filter((agent) => agent.available === true && !isRestartOnlyCodexExec(agent) &&
+      agent.installation?.selection !== "other" && agent.harnessSelectionBlocked !== true &&
       agentHarnessIdentityKey({
         agentId: agent.id,
         driver: agent.driver ?? "acp",

@@ -256,7 +256,15 @@ test("a Machine with several rows of one harness resolves them deterministically
   assert.equal(resolveAgentHarnessRow([...rows].reverse(), identity)?.id, "alpha", "independent of row order");
   rows[0]!.installation = { id: "user-local", path: "/opt/claude", via: "path", selection: "selected" };
   assert.equal(resolveAgentHarnessRow(rows, identity)?.id, "zeta", "the Machine's selected installation wins");
+  rows[1]!.installation = { id: "system", path: "/usr/bin/claude", via: "path", selection: "other" };
+  assert.equal(resolveAgentHarnessRow(rows, identity)?.id, "zeta");
   rows[0]!.available = false;
+  assert.equal(resolveAgentHarnessRow(rows, identity), undefined,
+    "a row the Machine's installation choice excludes cannot launch, so it is never chosen");
+  delete rows[1]!.installation;
+  rows[1]!.harnessSelectionBlocked = true;
+  assert.equal(resolveAgentHarnessRow(rows, identity), undefined, "nor is a configured row an explicit choice blocks");
+  rows[1]!.harnessSelectionBlocked = false;
   assert.equal(resolveAgentHarnessRow(rows, identity)?.id, "alpha", "an unavailable row is never chosen");
   assert.equal(resolveAgentHarnessRow(rows, { ...identity, context: { kind: "wsl", distro: "Ubuntu" } }), undefined);
 });
