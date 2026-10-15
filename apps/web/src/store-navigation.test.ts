@@ -13,7 +13,7 @@ import {
 } from "./store.js";
 import { BrowserNavigation, encodeResourceId, viewFromPath, viewPath, type View } from "./navigation.js";
 import { TestBrowserHistory } from "./test-browser-history.js";
-import { MAX_CORRECTIONS } from "./history-position.js";
+import { MAX_CORRECTIONS, RETURN_QUIET_MS } from "./history-position.js";
 import { registerLeaveGuard } from "./leave-guard.js";
 import { uiStreamSubscriptions } from "./ui-subscriptions.js";
 import { saveInstanceStorageValue, type KeyValueStorage } from "./instance-storage.js";
@@ -280,6 +280,26 @@ test("two Backs before the undo lands, with entries beyond the editor, return to
   }
 });
 
+test("a Forward that lands before the return makes the return's move land nowhere, and it still settles (#3218 review)", () => {
+  const { browser, store } = storeOnHistory("/usage", "/runs", "/settings/orchestrator");
+  const asked: Array<() => void> = [];
+  const release = registerLeaveGuard((leave) => asked.push(leave));
+  try {
+    browser.traverse(-2);
+    // Before the return's +2 lands: from Runs it would pass the last entry, so it never arrives.
+    browser.forward();
+    for (let step = 0; step < 100 && browser.pending.length > 0; step += 1) browser.traverse(browser.pending.shift()!);
+    assert.equal(browser.path, "/settings/orchestrator");
+    assert.deepEqual(store.getState().view, ORCHESTRATOR, "the dirty editor stays");
+    assert.equal(asked.length, 1, "and asks before leaving");
+    asked[0]!();
+    browser.flush();
+    assert.deepEqual(store.getState().view, { name: "usage" }, "Discard completes the first move");
+  } finally {
+    release();
+  }
+});
+
 test("twelve Backs before the return lands still settle on the editor's entry, asked once (#3218)", () => {
   const paths = Array.from({ length: 20 }, (_, index) => `/runs/~${encodeResourceId(`run-${index}`)}`);
   const { browser, store } = storeOnHistory(...paths, "/settings/orchestrator");
@@ -298,16 +318,57 @@ test("twelve Backs before the return lands still settle on the editor's entry, a
   }
 });
 
-test("a return that needs more than its bound of corrections gives up and shows where the history is (#3218)", () => {
+test("a return that needs more than its bound of corrections stops, keeping the editor and its draft (#3218)", () => {
   const paths = Array.from({ length: MAX_CORRECTIONS + 10 }, (_, index) => `/runs/~${encodeResourceId(`run-${index}`)}`);
   const { browser, store } = storeOnHistory(...paths, "/settings/orchestrator");
-  const asked: Array<() => void> = [];
-  const release = registerLeaveGuard((leave) => asked.push(leave));
+  const release = registerLeaveGuard(() => {});
   try {
     for (let press = 0; press < MAX_CORRECTIONS + 5; press += 1) browser.back();
     for (let step = 0; step < 1000 && browser.pending.length > 0; step += 1) browser.traverse(browser.pending.shift()!);
     assert.deepEqual(browser.pending, [], "the moves settle");
-    assert.equal(viewPath(store.getState().view), browser.path, "what is on screen is where the history is");
+    assert.deepEqual(store.getState().view, ORCHESTRATOR, "the editor never left the screen");
+  } finally {
+    release();
+  }
+});
+
+test("a return's move that lands nowhere is given up after a quiet spell, and the return completes (#3218)", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { browser, store } = storeOnHistory("/usage", "/runs", "/settings/orchestrator");
+  const asked: Array<() => void> = [];
+  const release = registerLeaveGuard((leave) => asked.push(leave));
+  const go = browser.window.history.go!;
+  let dropped = 0;
+  // The browser drops the first move it is asked for, as it does one past either end.
+  browser.window.history.go = (delta) => { if (dropped++ > 0) go(delta); };
+  try {
+    browser.back();
+    browser.flush();
+    assert.equal(browser.path, "/runs", "the return's first move landed nowhere");
+    assert.equal(asked.length, 0);
+    assert.deepEqual(store.getState().view, ORCHESTRATOR);
+    t.mock.timers.tick(RETURN_QUIET_MS);
+    browser.flush();
+    assert.equal(browser.path, "/settings/orchestrator");
+    assert.equal(asked.length, 1);
+  } finally {
+    release();
+  }
+});
+
+test("a Forward then a Back before the return lands, near the first entry, still settles (#3218)", () => {
+  const { browser, store } = storeOnHistory("/settings/orchestrator", "/runs", "/usage");
+  browser.traverse(-2);
+  const asked: Array<() => void> = [];
+  const release = registerLeaveGuard((leave) => asked.push(leave));
+  try {
+    browser.traverse(2);
+    // Before the return's -2 lands: from Runs it would pass the first entry, so it lands nowhere.
+    browser.back();
+    for (let step = 0; step < 100 && browser.pending.length > 0; step += 1) browser.traverse(browser.pending.shift()!);
+    assert.equal(browser.path, "/settings/orchestrator");
+    assert.deepEqual(store.getState().view, ORCHESTRATOR);
+    assert.equal(asked.length, 1);
   } finally {
     release();
   }

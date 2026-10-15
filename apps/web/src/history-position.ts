@@ -73,38 +73,59 @@ export function pushPositionedEntry(history: PositionedHistory, path: string): v
 }
 
 /**
- * Corrections one return may make before it gives up and shows where the history is. Each is needed
- * only when the person moves again before the return lands, so this is far more than a hand makes;
- * the bound guarantees that a browser behaving unlike the model below cannot keep the history moving
- * forever.
+ * Corrections one return may make before it stops. Each is needed only when the person moves again
+ * before the return lands, so this is far more than a hand makes; the bound guarantees that a browser
+ * behaving unlike the model below cannot keep the history moving forever.
  */
 export const MAX_CORRECTIONS = 32;
+
+/**
+ * How long a return waits for a move it asked for before taking it to have landed nowhere. A move
+ * past either end of the history fires no `popstate`; that happens when the person moved first.
+ * Same-document moves land within a frame or two, so this is only ever reached by such a move.
+ */
+export const RETURN_QUIET_MS = 1000;
 
 /** A return to the entry on screen that is under way. */
 interface Return {
   then: () => void;
-  /** Where the last `popstate` left the history. */
-  at: EntryPosition;
+  /** Where the last `popstate` left the history, or `null` in another run, where it cannot be placed. */
+  at: EntryPosition | null;
   /** This class's own moves not yet arrived, in the order asked for. */
   moves: number[];
   corrections: number;
+  quiet?: ReturnType<typeof setTimeout>;
 }
 
 /** The positions of one navigation's entries: the one on screen, and the move a `popstate` made. */
 export class HistoryPositions {
   private shown: EntryPosition | null = null;
+  /**
+   * The furthest entry of the shown run known to exist. A move past it lands nowhere and fires no
+   * `popstate`. Entries after the shown one may exist unseen (a reload keeps them), so this can be
+   * short of the real last entry; arrivals extend it.
+   */
+  private last: EntryPosition | null = null;
   private restoring: Return | null = null;
 
   constructor(private readonly history: PositionedHistory) {}
 
   /** Records the current entry as the one on screen. */
   adopt(): void {
-    this.shown = stamp(this.history);
+    this.shown = this.see(stamp(this.history));
   }
 
   push(path: string): void {
     pushPositionedEntry(this.history, path);
-    this.shown = positionOf(this.history.state);
+    const pushed = positionOf(this.history.state)!;
+    // A push drops every entry after the one it leaves.
+    this.last = pushed;
+    this.shown = pushed;
+  }
+
+  private see(position: EntryPosition): EntryPosition {
+    if (!this.last || this.last.run !== position.run || this.last.index < position.index) this.last = position;
+    return position;
   }
 
   /**
@@ -114,32 +135,13 @@ export class HistoryPositions {
    */
   arrive(): { traversal?: HistoryTraversal } | null {
     const from = this.shown;
-    const to = stamp(this.history);
+    const to = this.see(stamp(this.history));
     const go = this.history.go?.bind(this.history);
     const restoring = this.restoring;
-    if (restoring && go && from && to.run === from.run) {
-      // Browsers run history moves in the order they were asked for, so an arrival that is the next
-      // of this class's own moves is that move; any other is the person's, made before it landed.
-      if (restoring.moves.length > 0 && restoring.at.index + restoring.moves[0]! === to.index) restoring.moves.shift();
-      restoring.at = to;
-      const landing = restoring.moves.reduce((index, delta) => index + delta, to.index);
-      if (landing !== from.index) {
-        if (++restoring.corrections <= MAX_CORRECTIONS) {
-          restoring.moves.push(from.index - landing);
-          go(from.index - landing);
-          return null;
-        }
-        // Give up holding: show where the history is.
-        this.restoring = null;
-        this.shown = to;
-        return {};
-      }
-      if (restoring.moves.length > 0) return null;
-      this.restoring = null;
-      restoring.then();
+    if (restoring && go && from) {
+      this.settle(restoring, from, to, go);
       return null;
     }
-    this.restoring = null;
     this.shown = to;
     if (!go || !from || from.run !== to.run || from.index === to.index) return {};
     const delta = to.index - from.index;
@@ -147,11 +149,86 @@ export class HistoryPositions {
       traversal: {
         undo: (then) => {
           this.shown = from;
-          this.restoring = { then, at: to, moves: [-delta], corrections: 0 };
+          const restoring: Return = { then, at: to, moves: [-delta], corrections: 0 };
+          this.restoring = restoring;
           go(-delta);
+          this.waitFor(restoring, from, go);
         },
         redo: () => go(delta),
       },
     };
+  }
+
+  /**
+   * Takes a return one step on from where `to` left the history: done once it is back on `from` with
+   * nothing still to land, otherwise corrected with one more move. The editor stays on screen
+   * throughout, whatever happens to the history.
+   */
+  private settle(restoring: Return, from: EntryPosition, to: EntryPosition | null, go: (delta: number) => void): void {
+    clearTimeout(restoring.quiet);
+    const next = restoring.moves[0];
+    if (to && to.run !== from.run) {
+      // In another run: the next own move, if it lands before this run's first entry, put it here.
+      if (next !== undefined && restoring.at && restoring.at.index + next < 0) restoring.moves.shift();
+      restoring.at = null;
+      this.waitFor(restoring, from, go);
+      return;
+    }
+    // An arrival that one of this class's own moves would make is taken to be that move; any other
+    // is the person's, made before it landed. Own moves land in the order asked for, so the ones
+    // before it landed nowhere.
+    if (to && restoring.at) {
+      const before = restoring.at.index;
+      const landed = restoring.moves.findIndex((delta) => before + delta === to.index);
+      if (landed >= 0) restoring.moves.splice(0, landed + 1);
+    }
+    if (to) restoring.at = to;
+    const at = restoring.at;
+    if (!at) {
+      this.waitFor(restoring, from, go);
+      return;
+    }
+    // The moves still to come run from here, in order. One that would pass the last entry never
+    // lands (the person's move got there first), so it is not waited for.
+    let landing = at.index;
+    restoring.moves = restoring.moves.filter((delta) => {
+      if (landing + delta > this.last!.index) return false;
+      landing += delta;
+      return true;
+    });
+    if (landing !== from.index) {
+      if (++restoring.corrections > MAX_CORRECTIONS) {
+        this.stop(at);
+        return;
+      }
+      restoring.moves.push(from.index - landing);
+      go(from.index - landing);
+    } else if (restoring.moves.length === 0) {
+      this.restoring = null;
+      restoring.then();
+      return;
+    }
+    this.waitFor(restoring, from, go);
+  }
+
+  /** Moves that have not landed after a quiet spell landed nowhere: settle from where things are. */
+  private waitFor(restoring: Return, from: EntryPosition, go: (delta: number) => void): void {
+    clearTimeout(restoring.quiet);
+    restoring.quiet = setTimeout(() => {
+      if (this.restoring !== restoring) return;
+      restoring.moves = [];
+      if (restoring.at) this.settle(restoring, from, null, go);
+      else this.stop(null);
+    }, RETURN_QUIET_MS);
+  }
+
+  /**
+   * Stops a return that cannot be completed. The editor stays on screen and is not asked, and its
+   * draft is kept; the next Back or Forward counts from where the history actually is.
+   */
+  private stop(at: EntryPosition | null): void {
+    if (this.restoring) clearTimeout(this.restoring.quiet);
+    this.restoring = null;
+    this.shown = at ?? stamp(this.history);
   }
 }
