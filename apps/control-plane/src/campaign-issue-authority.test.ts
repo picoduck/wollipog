@@ -451,3 +451,29 @@ test("a scoped Orchestrator refuses an older runner with the shared sentence on 
     assert.deepEqual(restart.capabilityRequirement, versions);
   } finally { h.db.close(); }
 });
+
+test("campaign issue scope refuses each runner floor with the shared sentence and returns the versions beside it", async () => {
+  for (const [full, capability, label] of [
+    [true, "fullControlIssueAuthority", "campaign issue limits"],
+    [false, "campaignIssueScopeChanges", "campaign issue scope changes"],
+  ] as const) {
+    const h = harness(full);
+    try {
+      const floor = RUNNER_CAPABILITY_MIN_PROTOCOL[capability];
+      const refusal = `This machine needs a newer runner for ${label}. Update and restart the runner.`;
+      const versions = { requiredRunnerProtocolVersion: floor, runnerProtocolVersion: floor - 1 };
+      h.db.registerRunner(h.metadata, 3, floor - 1);
+      const view = await h.svc.campaignIssueScope("root");
+      assert.ok(view.ok, view.error ?? "view");
+      assert.equal(view.data!.supported, false);
+      assert.equal(view.data!.compatibilityMessage, refusal);
+      assert.equal(view.data!.requiredRunnerProtocolVersion, floor);
+      assert.equal(view.data!.runnerProtocolVersion, floor - 1);
+      const proposed = await h.proposal(`old-runner-${capability}`);
+      assert.equal(proposed.status, 409);
+      assert.equal(proposed.error, refusal);
+      assert.deepEqual(proposed.capabilityRequirement, versions);
+      assert.doesNotMatch(refusal, /protocol|v\d/u);
+    } finally { h.db.close(); }
+  }
+});

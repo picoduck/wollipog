@@ -13,6 +13,8 @@ import type { HumanPrincipal } from "./identity.js";
 import { SessionsService } from "./sessions.js";
 import { isAgentControlApiRouteAllowed } from "./auth.js";
 
+const OLDER_RUNNER_REFUSAL = "This machine needs a newer runner for changing session roles. Update and restart the runner.";
+
 function harness(role: SessionRole = "normal", protocol = PROTOCOL_VERSION) {
   const db = ControlPlaneDb.open(":memory:");
   const metadata: RunnerMetadata = {
@@ -97,8 +99,15 @@ test("unsupported peers and incompatible permissions/isolation fail before dispa
       h.db.setAgentControlCredential("s", "r", "a".repeat(64), 15);
       h.db.setPolicyHookCredential("s", "r", "b".repeat(64), 15);
       const before = h.db.getSession("s");
-      assert.match(h.conversions.preview("s", target, h.defaults, () => null).reason!, /protocol v203/);
-      await assert.rejects(h.conversions.change("s", target, role, h.defaults, () => null), /protocol v203/);
+      const preview = h.conversions.preview("s", target, h.defaults, () => null);
+      assert.equal(preview.reason, OLDER_RUNNER_REFUSAL);
+      assert.equal(preview.requiredRunnerProtocolVersion, 203);
+      assert.equal(preview.runnerProtocolVersion, 202);
+      await assert.rejects(h.conversions.change("s", target, role, h.defaults, () => null), (error: Error & { capabilityRequirement?: unknown }) => {
+        assert.equal(error.message, OLDER_RUNNER_REFUSAL);
+        assert.deepEqual(error.capabilityRequirement, { requiredRunnerProtocolVersion: 203, runnerProtocolVersion: 202 });
+        return true;
+      });
       assert.deepEqual(h.db.getSession("s"), before);
       assert.equal(h.db.sessionRoleConversion("s"), null);
       assert.equal(h.commands.length, 0);
@@ -330,6 +339,34 @@ test("the actual human role routes enforce write authority, session scope and st
   } finally { await app.close(); h.db.close(); }
 });
 
+test("the role routes return an older runner's versions beside the sentence, never inside it", async () => {
+  const h = harness("normal", 202);
+  const app = Fastify();
+  const identity = h.db.localIdentityContext();
+  const owner: HumanPrincipal = { kind: "human", actorId: identity.userId, ...identity };
+  registerSessionRoleRoutes(app, {
+    db: h.db, conversions: h.conversions,
+    requestHuman: (req) => req.headers.authorization === "viewer" ? { ...owner, role: "viewer" } : owner,
+    defaultsFor: () => h.defaults, validatePolicy: () => null,
+  });
+  try {
+    await app.ready();
+    const preview = await app.inject({ method: "GET", url: "/api/sessions/s/role?role=orchestrator" });
+    assert.deepEqual(
+      (({ reason, requiredRunnerProtocolVersion, runnerProtocolVersion }) => ({ reason, requiredRunnerProtocolVersion, runnerProtocolVersion }))(preview.json()),
+      { reason: OLDER_RUNNER_REFUSAL, requiredRunnerProtocolVersion: 203, runnerProtocolVersion: 202 },
+    );
+    const viewer = (await app.inject({ method: "GET", url: "/api/sessions/s/role?role=orchestrator", headers: { authorization: "viewer" } })).json();
+    assert.equal(viewer.reason, "Your Viewer role is read-only.");
+    assert.equal("requiredRunnerProtocolVersion" in viewer || "runnerProtocolVersion" in viewer, false,
+      "a viewer's read-only reason carries no runner versions");
+    const refused = await app.inject({ method: "POST", url: "/api/sessions/s/role", payload: { role: "orchestrator", expectedRole: "normal" } });
+    assert.equal(refused.statusCode, 409);
+    assert.deepEqual(refused.json(), { error: OLDER_RUNNER_REFUSAL, requiredRunnerProtocolVersion: 203, runnerProtocolVersion: 202 });
+    assert.equal(h.commands.length, 0);
+  } finally { await app.close(); h.db.close(); }
+});
+
 test("an interrupted conversion cannot retry or reconcile through an older peer", async () => {
   const h = harness();
   try {
@@ -349,7 +386,11 @@ test("an interrupted conversion cannot retry or reconcile through an older peer"
       (h.db as unknown as { stmt(sql: string): { all(): unknown[] } }).stmt(`SELECT * FROM ${table}`).all());
     const credentials = credentialRows();
     h.conversions.reconcile("r", { id: "s", roleConversionReceipt: { conversionId: command!.conversionId, state: "prepared" } });
-    await assert.rejects(h.conversions.change("s", "orchestrator", "normal", h.defaults, () => null), /protocol v203/);
+    await assert.rejects(h.conversions.change("s", "orchestrator", "normal", h.defaults, () => null), (error: Error & { capabilityRequirement?: unknown }) => {
+      assert.equal(error.message, OLDER_RUNNER_REFUSAL, "finishing a started change refuses with the same sentence");
+      assert.deepEqual(error.capabilityRequirement, { requiredRunnerProtocolVersion: 203, runnerProtocolVersion: 202 });
+      return true;
+    });
     assert.deepEqual(h.db.getSession("s"), before);
     assert.deepEqual(h.db.sessionRoleConversion("s"), intent);
     assert.equal(h.commands.length, 1);

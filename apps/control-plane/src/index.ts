@@ -51,6 +51,7 @@ import {
   CONTROL_PLANE_SERVICE,
   providerSupportsConversationFork,
   runnerCapabilityRequirementError,
+  runnerCapabilityRequirementWithAlternative,
   type RunnerCapabilityRequirementDetails,
   runnerSupportsProtocol,
   scopeAudienceContained,
@@ -222,6 +223,7 @@ import {
   Hub,
   INDEFINITE_SESSION_REMINDER_UI_PROTOCOL,
   isRunnerRequestTimeoutError,
+  SOMEDAY_REMINDER_CLIENT_UPDATE_REQUIRED,
 } from "./hub.js";
 import { HistoryPreviewReader } from "./history-preview.js";
 import {
@@ -4501,13 +4503,15 @@ app.get("/api/sessions/:id/events", async (req, reply) => {
   if (query.limit === undefined && query.after !== undefined && query.eventEpoch === undefined &&
       principal?.kind === "agent" && principal.credentialSessionId) {
     const actor = db.getSession(principal.credentialSessionId);
-    if (!runnerSupportsProtocol(actor ? db.getRunner(actor.runnerId)?.protocolVersion : undefined,
-      "boundedSessionEventReads")) {
+    const actorProtocolVersion = actor ? db.getRunner(actor.runnerId)?.protocolVersion : undefined;
+    if (!runnerSupportsProtocol(actorProtocolVersion, "boundedSessionEventReads")) {
+      const requirement = runnerCapabilityRequirementWithAlternative(actorProtocolVersion, "boundedSessionEventReads",
+        "paged session event reads", "To read now, request an explicit limit and eventEpoch.");
       return reply.code(426).send({
-        error: "This runner uses an older unpaged session events reader. Update the Wollipog runner " +
-          "to protocol v222 or newer, or request an explicit limit and eventEpoch.",
+        ...requirement,
         code: "session_event_reader_upgrade_required",
-        requiredProtocolVersion: 222,
+        // Installed readers predating the shared runner fields read this one.
+        requiredProtocolVersion: requirement.requiredRunnerProtocolVersion,
       });
     }
   }
@@ -5856,7 +5860,9 @@ app.get("/api/sessions/:id/reminder", async (req, reply) => {
     && (parseUiProtocolVersion(req.query) ?? 0) < INDEFINITE_SESSION_REMINDER_UI_PROTOCOL
   ) {
     return reply.code(409).send({
-      error: "This reminder uses Someday and requires Wollipog protocol v174. Update this client and try again.",
+      error: SOMEDAY_REMINDER_CLIENT_UPDATE_REQUIRED,
+      requiredClientProtocolVersion: INDEFINITE_SESSION_REMINDER_UI_PROTOCOL,
+      clientProtocolVersion: parseUiProtocolVersion(req.query),
     });
   }
   return { reminder };

@@ -4,7 +4,7 @@ import type { HumanPrincipal } from "./identity.js";
 import type { CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl } from "./campaign-authority.js";
 import { campaignAuthorityPreflight, controlledReviewCapabilityKey, standingRootQuestionAnswers, type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary } from "@wollipog/protocol";
-import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, campaignNeedsEpicScope } from "./campaign-issue-scope.js";
+import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope } from "./campaign-issue-scope.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
 import { issueBoundary, issueEvidenceDigest, issueWork, closureEvidence, publicationEvidence, reservedPublicationSlots } from "./campaign-issue-authority.js";
 import { validIssueAdmission, campaignPublicationSafe } from "@wollipog/protocol";
@@ -44,6 +44,8 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   runnerCapabilityRequirement,
   runnerCapabilityRequirementError,
   runnerCapabilityRequirementWithAlternative,
+  campaignIssueLimitsRequirement,
+  campaignIssueScopeChangesRequirement,
   type RunnerCapabilityRequirementDetails,
   runnerSupportsProtocol,
   validatePromptImageInputs,
@@ -4345,11 +4347,13 @@ export class SessionsService {
       ? campaignController.orchestratorPolicy?.issueNumbers
       : undefined;
     if (campaignController && campaignNeedsEpicScope(this.db, campaignController)) {
-      return fail(scopeCompatibility(this.db, campaignController) ?? "Confirm the epic's authorized issue scope in Campaign Status before delegating work. Use get_campaign_issue_scope and request_campaign_issue_scope_change, then wait for human approval.", 409);
+      const unsupported = scopeCompatibility(this.db, campaignController);
+      if (unsupported) return capabilityFail(unsupported);
+      return fail("Confirm the epic's authorized issue scope in Campaign Status before delegating work. Use get_campaign_issue_scope and request_campaign_issue_scope_change, then wait for human approval.", 409);
     }
     const inheritedIssueScope = campaignController?.orchestratorPolicy?.issueScope ?? snapshotSpec?.orchestrator?.issueScope;
     if (orchestratorPolicy && inheritedIssueScope && !runnerSupportsProtocol(runner.protocolVersion, "campaignIssueScopeChanges")) {
-      return capabilityFail(runnerCapabilityRequirementError(runner.protocolVersion, "campaignIssueScopeChanges", "campaign issue scope changes"));
+      return capabilityFail(campaignIssueScopeChangesRequirement(runner.protocolVersion));
     }
     if (orchestratorPolicy && inheritedIssueScope && campaignController && !campaignIssueNumbers) return fail("A scoped Orchestrator participant must use the campaign's runner and repository workspace. Select that workspace or start an independent campaign.", 409);
     if (orchestratorPolicy && inheritedIssueScope) orchestratorPolicy.issueScope = inheritedIssueScope;
@@ -6789,7 +6793,7 @@ export class SessionsService {
     const agentId = session.agentId;
     const restartProtocolVersion = this.db.getRunner(session.runnerId)?.protocolVersion;
     if (session.orchestratorPolicy?.issueScope && !runnerSupportsProtocol(restartProtocolVersion, "campaignIssueScopeChanges")) {
-      return capabilityFail(runnerCapabilityRequirementError(restartProtocolVersion, "campaignIssueScopeChanges", "campaign issue scope changes"));
+      return capabilityFail(campaignIssueScopeChangesRequirement(restartProtocolVersion));
     }
     if (session.orchestratorPolicy?.issueScope) {
       const campaignId = this.db.campaignRootForMember(sessionId);
@@ -7730,11 +7734,7 @@ export class SessionsService {
         const outdated = scopeParticipants(this.db, session).find((participant) =>
           !runnerSupportsProtocol(this.db.getRunner(participant.runnerId)?.protocolVersion, "fullControlIssueAuthority"));
         if (outdated) {
-          return capabilityFail(runnerCapabilityRequirementError(
-            this.db.getRunner(outdated.runnerId)?.protocolVersion,
-            "fullControlIssueAuthority",
-            "campaign issue limits",
-          ));
+          return capabilityFail(campaignIssueLimitsRequirement(this.db.getRunner(outdated.runnerId)?.protocolVersion));
         }
       }
       if (!session.workspaceId) return fail("Full Control requires a repository workspace binding", 409);
@@ -8339,7 +8339,7 @@ export class SessionsService {
     if (!root?.orchestratorPolicy || !canAccess(root.id)) return fail("campaign not found", 404);
     const compatibility = scopeCompatibility(this.db, root);
     const stored = root.orchestratorPolicy.issueScope;
-    if (compatibility) return ok({ ...scopeView(this.db, root, stored?.repository ?? ""), supported: false, compatibilityMessage: compatibility });
+    if (compatibility) return ok({ ...scopeView(this.db, root, stored?.repository ?? ""), supported: false, ...compatibilityFields(compatibility) });
     if (!this.hub.isRunnerOnline(root.runnerId)) return ok({
       ...scopeView(this.db, root, stored?.repository ?? ""), supported: false,
       compatibilityMessage: "The campaign runner is disconnected. Saved issue scope is shown; reconnect the runner to verify the repository and request changes.",
@@ -8368,7 +8368,7 @@ export class SessionsService {
     if (!root?.orchestratorPolicy || this.db.campaignRootForMember(sessionId) !== sessionId || !canAccess(sessionId)) return fail("scope proposals require the root campaign", 403);
     if (human && (human.kind !== "human" || !this.db.isSessionOwner(human, sessionId))) return fail("Only the authenticated campaign owner can propose human scope authority", 403);
     const unsupported = scopeCompatibility(this.db, root);
-    if (unsupported) return fail(unsupported, 409);
+    if (unsupported) return capabilityFail(unsupported);
     const view = await this.campaignIssueScope(sessionId, undefined, canAccess, false);
     if (!view.ok || !view.data) return failAs(view);
     if (!view.data.supported) return fail(view.data.compatibilityMessage ?? "Campaign issue scope changes are unavailable.", 409);
@@ -8476,7 +8476,7 @@ export class SessionsService {
     if (unsupported) return unsupported;
     if (issueBoundary(session)) {
       const compatibility = scopeCompatibility(this.db, session);
-      if (compatibility) return fail(compatibility, 409);
+      if (compatibility) return capabilityFail(compatibility);
     }
     if (isTerminal(session.status) || !boundedDecisionString(request?.requestId, 256) ||
         !session.orchestratorPolicy.issueNumbers?.includes(request?.issue) ||
@@ -8867,7 +8867,7 @@ export class SessionsService {
         return fail("Only the campaign owner can approve changes to authorized issue scope", 403);
       }
       const unsupported = scopeCompatibility(this.db, currentChild);
-      if (unsupported) return fail(unsupported, 409);
+      if (unsupported) return capabilityFail(unsupported);
       const request: CampaignIssueScopeRequest = { requestId: decision.requestId, expectedRevision: snapshot.expectedRevision,
         additions: snapshot.additions.map((number) => ({ repository: snapshot.repository, number })),
         removals: snapshot.removals.map((number) => ({ repository: snapshot.repository, number })), explanation: snapshot.explanation,

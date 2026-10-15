@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { sessionRoleConversionRequirement } from "@wollipog/protocol";
 
 async function chooseRoleSetting(page: Page, label: string, option: string) {
   await page.getByRole("button", { name: new RegExp(`^${label}:`) }).click();
@@ -60,7 +61,10 @@ for (const scenario of ["busy", "children", "older-runner", "strict", "viewer"])
     const dialog = await openRoleDialog(page);
     await expect(dialog.getByRole("button", { name: /^Change to / })).toBeDisabled();
     await expect(dialog.locator(".notice")).toBeVisible();
-    if (scenario === "older-runner") await expect(dialog.locator(".notice")).toContainText("protocol v203 or later");
+    if (scenario === "older-runner") {
+      await expect(dialog.locator(".notice")).toContainText(sessionRoleConversionRequirement(202).error);
+      await expect(dialog.locator(".notice")).not.toContainText(/protocol|v\d/u);
+    }
     expect(await page.evaluate(() => window.__WOLLIPOG_ROLE_E2E__.calls())).toBe(0);
     await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
     await expect(dialog).toBeHidden();

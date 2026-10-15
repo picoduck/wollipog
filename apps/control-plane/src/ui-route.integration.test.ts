@@ -16,6 +16,17 @@ import {
   type RunnerMetadata,
 } from "@wollipog/protocol";
 import { hashToken } from "./auth.js";
+
+/** An installed reader's unpaged fallback: the shared runner sentence, with the versions beside it. */
+interface UpgradeRefusal {
+  error: string;
+  code: string;
+  requiredProtocolVersion: number;
+  requiredRunnerProtocolVersion: number;
+  runnerProtocolVersion: number | null;
+}
+const PAGED_READER_REFUSAL = "This machine needs a newer runner for paged session event reads. Update and restart the runner. " +
+  "To read now, request an explicit limit and eventEpoch.";
 import { ControlPlaneDb } from "./db.js";
 import { defaultLocalDeviceTokenPath, loadOrCreateLocalDeviceToken } from "./local-device-credential.js";
 import { MAX_UI_CLIENT_MESSAGE_BYTES } from "./ui-channel.js";
@@ -93,16 +104,18 @@ test("missing-limit event reads page 50,000 cached events with exact continuatio
     });
   const legacyFallback = await agentRead("default-events", oldReaderToken, "default-events", "?after=0");
   assert.equal(legacyFallback.status, 426, "an old installed reader's exact unpaged fallback cannot return a misleading prefix");
-  const upgrade = await legacyFallback.json() as { error: string; code: string; requiredProtocolVersion: number };
+  const upgrade = await legacyFallback.json() as UpgradeRefusal;
   assert.equal(upgrade.code, "session_event_reader_upgrade_required");
   assert.equal(upgrade.requiredProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads);
-  assert.match(upgrade.error, /Update the Wollipog runner/);
+  assert.equal(upgrade.error, PAGED_READER_REFUSAL);
+  assert.equal(upgrade.requiredRunnerProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads);
   const v221Fallback = await agentRead("v221-event-reader", v221ReaderToken, "default-events", "?after=0");
   assert.equal(v221Fallback.status, 426, "merged protocol-221 readers still cannot treat the default page as newest history");
-  const v221Upgrade = await v221Fallback.json() as { error: string; code: string; requiredProtocolVersion: number };
+  const v221Upgrade = await v221Fallback.json() as UpgradeRefusal;
   assert.equal(v221Upgrade.code, "session_event_reader_upgrade_required");
   assert.equal(v221Upgrade.requiredProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads);
-  assert.match(v221Upgrade.error, /Update the Wollipog runner/);
+  assert.equal(v221Upgrade.error, PAGED_READER_REFUSAL);
+  assert.equal(v221Upgrade.runnerProtocolVersion, 221);
   assert.equal((await agentRead("default-events", oldReaderToken, "current-event-reader", "?after=0")).status, 426,
     "the guard uses the credential actor's old runner even when the target is on a new runner");
   assert.equal((await agentRead("current-event-reader", currentReaderToken, "default-events", "?after=0")).status, 200,
