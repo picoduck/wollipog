@@ -15,6 +15,7 @@ import type { TimelineItem } from "../timeline.js";
 import { QuestionRowGallery } from "./question-row-gallery.js";
 import { ResolverGallery, SignInResolverGallery } from "./resolver-gallery.js";
 import { setQuestionResponseStyle, useQuestionResponseStyle } from "../question-response-style.js";
+import { useSessionReadingKeys } from "../useSessionReadingKeys.js";
 import { useFollowTail } from "../useFollowTail.js";
 import "../styles.css";
 
@@ -197,7 +198,7 @@ const issueDraftQuestions: AgentQuestion[] = [{
 // scroll region in the composer (#3256).
 function SessionShell({ children }: { children: React.ReactNode }) {
   return params.get("shell") === "1" ? (
-    <div className="main" style={{ height: "100%" }}>
+    <div className="main" data-focus-zone="main" style={{ height: "100%" }}>
       <div className="main-body inbox-main-body">{children}</div>
     </div>
   ) : <>{children}</>;
@@ -413,6 +414,14 @@ function Fixture() {
   // Reading back and Show Where Asked work as in a session: the reader follows its tail, and a reveal
   // pauses it, so the dock takes its strip.
   const followTail = useFollowTail({ scrollRef, contentRevision: items, sessionId: SESSION_ID, persistenceScope: "agent-questions-e2e" });
+  // The real desktop session listens in capture phase; keep that owner in the shell regression.
+  const readingActions = useMemo(() => {
+    const noop = () => {};
+    return { nextSession: noop, previousSession: noop, approve: noop, deny: noop, archive: noop,
+      snooze: noop, fork: noop, reply: noop, pauseFollow: followTail.pause, resumeFollow: followTail.follow };
+  }, [followTail.pause, followTail.follow]);
+  useSessionReadingKeys({ enabled: params.get("shell") === "1", sessionId: SESSION_ID, scrollRef, actions: readingActions });
+
   const [revealRequest, setRevealRequest] = useState<TimelineRevealRequest | null>(null);
   const revealSerial = useRef(0);
   const reveal = useCallback((eventId: number) => {

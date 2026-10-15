@@ -425,3 +425,23 @@ test("composition, repeat, mismatch, and session changes reset the gg sequence",
   await act(async () => { fixture.root.unmount(); });
   fixture.container.remove();
 });
+
+test("Composer Answer Mode owns reading keys without moving the transcript (#3256)", async () => {
+  const fixture = await renderHarness();
+  const panel = document.createElement("section");
+  panel.className = "composer-answer";
+  panel.tabIndex = 0;
+  fixture.container.querySelector("[data-focus-zone=main]")!.append(panel);
+  panel.focus();
+  try {
+    for (const key of ["End", " ", "j", "k"]) {
+      const event = dispatchKey(key);
+      assert.equal(event.defaultPrevented, false, `${key} stays with the answer surface`);
+    }
+    assert.deepEqual(fixture.scrollCalls, []);
+    assert.deepEqual(fixture.calls, []);
+  } finally {
+    await act(async () => fixture.root.unmount());
+    fixture.container.remove();
+  }
+});

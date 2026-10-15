@@ -72,6 +72,11 @@ function expandedDecisionIsReading(scroll: HTMLElement | null): boolean {
   return Boolean(scroll?.closest(".chat-reading")?.querySelector(".request-card[data-decision-expanded]"));
 }
 
+/** Answer Mode owns its reading and response keys, including the panel's keyboard Tab stop. */
+function composerAnswerOwnsFocus(targetDocument: Document): boolean {
+  return Boolean(targetDocument.activeElement?.closest(".composer-answer"));
+}
+
 function nativeControlOwnsFocus(targetDocument: Document): boolean {
   const active = targetDocument.activeElement;
   if (!(active instanceof HTMLElement)) return false;
@@ -128,7 +133,7 @@ export function useSessionReadingKeys({
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented || shortcutLayerActive(document, false, event) || terminalOwnsFocus(document) ||
-        expandedDecisionIsReading(scrollRef.current) ||
+        expandedDecisionIsReading(scrollRef.current) || composerAnswerOwnsFocus(document) ||
         (questionCardOwnsFocus(document) && !matchesShortcut(event, "session-reading-reply"))) {
         sequenceRef.current = null;
         return;

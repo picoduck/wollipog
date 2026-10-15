@@ -136,7 +136,7 @@ export function focusSessionRequest(sessionId: string, requestId: string): boole
     .find((candidate) => candidate.dataset.sessionRequestId === requestId &&
       candidate.dataset.sessionRequestSession === sessionId);
   if (!region) return false;
-  region.tabIndex = -1;
+  if (!region.hasAttribute("tabindex")) region.tabIndex = -1;
   region.scrollIntoView?.({ block: "nearest" });
   region.focus();
   return true;
