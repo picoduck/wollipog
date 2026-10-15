@@ -305,6 +305,10 @@ test("Settings name the Machines that can't run the saved Child Model, and only 
       { runnerId: "desktop", machineName: "desktop", supported: false },
       { runnerId: "laptop", machineName: "laptop", supported: true },
     ]);
+    const laptop = db.listRunnersForPrincipal(principal).filter((machine) => machine.runnerId === "laptop");
+    laptop[0]!.agents[0]!.installation = { id: "system", path: "/usr/bin/claude", via: "path", selection: "other" };
+    assert.deepEqual(childModelMachines(policy, laptop)?.map((machine) => machine.supported), [false],
+      "a row the Machine's installation choice excludes cannot run children");
     assert.equal(childModelMachines(resolveOrchestratorCampaignPolicy(defaults({ childHarness: harness }), "user_default"),
       db.listRunnersForPrincipal(principal)), undefined, "an Automatic model and effort list no Machines");
   } finally {
