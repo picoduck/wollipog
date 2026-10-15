@@ -93,6 +93,7 @@ function fixture(options: {
   releaseLease?: (directory: string) => boolean | Promise<boolean>;
   credentialHomeInUse?: () => boolean;
   removalBlocker?: () => string | undefined;
+  serializeHomeRetirement?: <T>(work: () => Promise<T>) => Promise<T>;
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), "wollipog-provider-login-"));
   const configPath = join(root, "runner.config.json");
@@ -122,6 +123,7 @@ function fixture(options: {
     identify: options.identify ?? (async () => undefined),
     ...(options.credentialHomeInUse ? { credentialHomeInUse: options.credentialHomeInUse } : {}),
     ...(options.removalBlocker ? { removalBlocker: options.removalBlocker } : {}),
+    ...(options.serializeHomeRetirement ? { serializeHomeRetirement: options.serializeHomeRetirement } : {}),
     timeoutMs: options.timeoutMs,
     ceremonyTimeoutMs: options.ceremonyTimeoutMs,
     spawn: ((spawnOptions: SpawnAgentOptions) => {
@@ -948,6 +950,31 @@ test("removing an account forgets it and deletes the credential home Wollipog cr
     assert.deepEqual(saved.providerAccounts.map((account) => account.id), ["keep"]);
     assert.equal(saved.untouched, true);
     await assert.rejects(fx.supervisor.removeAccount("work-1234"), /not configured/i);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("removed-account credential deletion waits for the running skill transaction", async () => {
+  let openQueue!: () => void;
+  const skillTransaction = new Promise<void>((resolve) => { openQueue = resolve; });
+  const acquired: string[] = [];
+  const fx = fixture({
+    acquireLease: (directory) => { acquired.push(directory); return true; },
+    serializeHomeRetirement: (work) => skillTransaction.then(work),
+  });
+  try {
+    const home = join(fx.root, "provider-accounts", "account");
+    mkdirSync(home, { recursive: true });
+    fx.accounts.push({ id: "account", label: "Account", provider: "claude", directory: home });
+    const removing = fx.supervisor.removeAccount("account");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(acquired, [], "no ownership proof is attempted inside a skill transaction");
+    assert.equal(existsSync(home), true);
+    openQueue();
+    assert.deepEqual(await removing, { credentialsRetained: false });
+    assert.deepEqual(acquired, [home]);
+    assert.equal(existsSync(home), false);
   } finally {
     fx.cleanup();
   }

@@ -46,6 +46,30 @@ The existing automatic-revalidation timeout cancels only its pending wait and ke
 result. Cancelling or dismissing recovery aborts the exact pending preparation; unrelated failures
 still propagate through the existing error handling.
 
+A refusal crosses the boundary as a fixed code, never as the registry's message, so no lock path
+reaches the parent. The codes are distinct, and callers receive a `ProviderHomeLeaseError` carrying
+the code:
+
+- `busy`: the recorded process is alive, or a publication is in progress.
+- `foreign_owner`: a stale lease from another runner or control plane whose recorded process is gone.
+- `foreign_host`: a lease recorded on another host.
+- `unavailable`: the helper is unavailable.
+- `refusal`: everything else the registry cannot prove.
+
+A foreign-owner lease is still never taken over automatically. Its text names that cause and the
+safe options, instead of the generic "could not be proved" refusal.
+
+Callers that release before shutdown (skill transactions, and a launch or skill acquisition that
+became stale after its grant) use `acquire_reference`. The worker keeps the receipt's exact-entry
+release for that completed acquisition, at most 1024 at once, and `release_reference` names the
+acquisition by its id. Every handle is settled: a consumer that keeps its reference until shutdown
+(a launched TUI or account launch, or an unfinished adoption or restore) sends `retain_reference`,
+which frees only the handle. Only in-flight transactions occupy the pool, however many launches a
+runner performs. Releasing by path would re-resolve the HOME, so a symlink retargeted in
+between could drop another HOME's reference. The handle cannot be redirected: it drops only the
+entry it joined, at most once. Path-based `release` remains only for the provider sign-in supervisor
+(sign-in and removed-account cleanup), which is unchanged here.
+
 A missing, late, malformed, duplicate or mismatched completion, failed cancellation unwind, worker
 error or unexpected exit poisons the lane. It rejects further work, retains canonical evidence and
 never transparently creates another registry to reconstruct private authority. Terminating a worker
@@ -106,5 +130,11 @@ temporary provider is constructed; existing plugin argument assertions remain in
 The Platform Isolation matrix runs Linux, macOS and both Windows images. It runs the focused source
 tests and `verify-provider-home-worker-binary.mjs --source`, then builds the real native SEA and runs
 the same daemon fixture with `--packaged`. The daemon fixture launches no live provider and uses
-private temporary HOME, configuration and data roots. Linux can additionally use `--maximal` with a
+private temporary HOME, configuration and data roots. It runs these steps:
+
+1. An idle runner releases the HOME after its skill transaction.
+2. A second live runner then acquires the same HOME.
+3. A separate holder process with the runners' owner and its own live PID takes the HOME; the
+   second runner's sync is refused, and the journal is unchanged.
+4. After the holder is killed, that runner recovers, then releases on graceful shutdown. Linux can additionally use `--maximal` with a
 packaged binary to measure normal heartbeat delivery through the entire shipped path.

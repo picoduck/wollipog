@@ -256,7 +256,7 @@ function integratedFixture() {
     homedir: () => home, resolve, log: (message: string) => logs.push(message),
     store: { listSessions: () => [] }, process: { platform: "linux" },
     errText: (error: unknown) => error instanceof Error ? error.message : String(error),
-    sessions: { acquireSkillReconciliationProviderHome: (directory: string) => acquire(directory) },
+    sessions: { skillProviderHomeScope: () => ({ acquire: (directory: string) => acquire(directory), release: async () => {}, retain: async () => {} }) },
     sendUp: (message: SkillsStateMessage) => { messages.push(message); db.setRunnerSkillState("fixture", message, messages.length + 1); },
     queueSkillsReconcile: undefined as ((requestId?: string) => void) | undefined,
   };

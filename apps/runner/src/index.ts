@@ -256,7 +256,7 @@ import {
   type DurableCommandHandle,
   type DurableCommandReceipt,
 } from "./durable-command-store.js";
-import type { DurableCommandLifecycle, SessionCommandInvocationLifecycle } from "./session-manager.js";
+import type { DurableCommandLifecycle, SessionCommandInvocationLifecycle, SkillProviderHomeScope } from "./session-manager.js";
 import {
   isInvokeSessionCommandMessage,
   SessionCommandReceiptStore,
@@ -812,6 +812,7 @@ const providerLoginSupervisor: ProviderLoginSupervisor = new ProviderLoginSuperv
   },
   credentialHomeInUse: (account) => store.listSessions().some((meta) =>
     meta.providerAccountId === account.id || meta.providerCredentialHome === account.directory),
+  serializeHomeRetirement: (work) => onSkillsQueue(work),
   onAccountRemoved: (account) => {
     providerAccountAuthStatus.delete(account.id);
     sendUp({
@@ -895,7 +896,7 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
       const accountHome = pluginProvider === "claude" ? meta.env.CLAUDE_CONFIG_DIR : meta.env.CODEX_HOME;
       if (meta.context.kind === "native" && accountHome &&
           (!meta.executionTarget || meta.executionTarget.adapter === "host")) {
-        await sessions.acquireSkillReconciliationProviderHome(accountHome, cancellation);
+        await sessions.acquireLaunchProviderHome(accountHome, cancellation);
       }
       assertPreparationCurrent();
       if (pluginProvider === "claude") {
@@ -1490,6 +1491,12 @@ function completeChunkedSkillsSync(msg: Extract<ControlPlaneToRunner, { type: "s
 /** Serializes reconcile passes so concurrent syncs and discovery rescans cannot interleave the
  * link-replacement and removal steps. */
 let skillsReconcileQueue: Promise<void> = Promise.resolve();
+/** Run `work` after every queued skill transaction and before any later one. */
+function onSkillsQueue<T>(work: () => Promise<T>): Promise<T> {
+  const result = skillsReconcileQueue.then(work, work);
+  skillsReconcileQueue = result.then(() => undefined, () => undefined);
+  return result;
+}
 /** Inventory and removal events belong to the current connection, never the general outbox. */
 function sendSkillState(message: import("@wollipog/protocol").SkillsStateMessage): void {
   const socket = ws;
@@ -1524,7 +1531,11 @@ function queueSkillsReconcile(requestId?: string): void {
         return current?.id === account.id && current.provider === account.provider && current.directory === account.directory;
       });
     let result: ReconcileSkillsResult | undefined;
+    // Release this pass's provider-HOME references once its links are written, so an idle runner
+    // does not keep every reconciled HOME leased against other runners.
+    let providerHomes: SkillProviderHomeScope | undefined;
     try {
+      const scope = providerHomes = sessions.skillProviderHomeScope();
       const accountScopesEnabled = runnerSupportsProtocol(
         controlPlaneProtocolVersion,
         "accountScopedAgentSkills",
@@ -1570,8 +1581,7 @@ function queueSkillsReconcile(requestId?: string): void {
         // newly cached digest (especially when previousVersionMinutes is configured to zero).
         allowRemovals,
         log,
-        acquireProviderHomeLease: () =>
-          sessions.acquireSkillReconciliationProviderHome(homedir()),
+        acquireProviderHomeLease: () => scope.acquire(homedir()),
         isCurrent: stillCurrent,
         removedSkillRetentionMs: config.skillRetention.removedSkillDays * 24 * 60 * 60 * 1000,
         previousVersionGraceMs: config.skillRetention.previousVersionMinutes * 60 * 1000,
@@ -1597,8 +1607,7 @@ function queueSkillsReconcile(requestId?: string): void {
           desired: desired ?? [],
           allowRemovals,
           log,
-          acquireProviderHomeLease: () =>
-            sessions.acquireSkillReconciliationProviderHome(account.directory),
+          acquireProviderHomeLease: () => scope.acquire(account.directory),
           isCurrent: stillCurrent,
           removedSkillRetentionMs: config.skillRetention.removedSkillDays * 24 * 60 * 60 * 1000,
           previousVersionGraceMs: config.skillRetention.previousVersionMinutes * 60 * 1000,
@@ -1628,6 +1637,8 @@ function queueSkillsReconcile(requestId?: string): void {
         ...(result?.superseded ? { superseded: true } : {}),
         error: `skill reconcile failed: ${errText(error)}`,
       };
+    } finally {
+      await providerHomes?.release();
     }
     // A failed handoff is transport failure, not a new empty reconciliation observation.
     skillStateReporter.report(result, request, stillCurrent(), generation);
@@ -1648,20 +1659,31 @@ function wslAdoptionEnvironment(): WslAdoptionEnvironment | undefined {
 function queueSkillAdoption(msg: SkillAdoptionMessage): void {
   const run = async () => {
     const wsl = wslAdoptionEnvironment();
-    const result = await handleSkillAdoption({
-      message: msg,
-      runnerId: config.runnerId,
-      home: homedir(),
-      dataDir: config.dataDir,
-      agents: metadata.agents,
-      currentAgents: () => metadata.agents,
-      providerAccounts: () => config.providerAccounts,
-      snapshots: machineSkillSnapshots,
-      desired: lastDesiredSkills,
-      currentDesired: () => lastDesiredSkills,
-      acquireProviderHomeLease: (home) => sessions.acquireSkillReconciliationProviderHome(home),
-      ...(wsl ? { wsl } : {}),
-    });
+    // An adoption that needs recovery (or threw) left a journaled mutation in the HOME, so its
+    // references stay held until runner shutdown, as every skill reference did before.
+    const providerHomes = sessions.skillProviderHomeScope();
+    let settled = false;
+    let result: Awaited<ReturnType<typeof handleSkillAdoption>>;
+    try {
+      result = await handleSkillAdoption({
+        message: msg,
+        runnerId: config.runnerId,
+        home: homedir(),
+        dataDir: config.dataDir,
+        agents: metadata.agents,
+        currentAgents: () => metadata.agents,
+        providerAccounts: () => config.providerAccounts,
+        snapshots: machineSkillSnapshots,
+        desired: lastDesiredSkills,
+        currentDesired: () => lastDesiredSkills,
+        acquireProviderHomeLease: providerHomes.acquire,
+        ...(wsl ? { wsl } : {}),
+      });
+      settled = result.status !== "recovery_required";
+    } finally {
+      if (settled) await providerHomes.release();
+      else await providerHomes.retain();
+    }
     sendUp(result);
     // A completed or interrupted transaction may have changed the source path. Reconcile and
     // inventory run next in the same queue so no link/GC pass can interleave with adoption.
@@ -1699,16 +1721,26 @@ function queueSkillAdoptionRecovery(msg: SkillAdoptionRecoveryMessage): void {
       }));
       return;
     }
-    const result = await restoreSkillAdoptionRecoveryWithWsl({
-      home: homedir(),
-      dataDir: config.dataDir,
-      agents: metadata.agents,
-      providerAccounts: runnerSupportsProtocol(controlPlaneProtocolVersion, "accountScopedAgentSkills")
-        ? config.providerAccounts
-        : [],
-      operationId: msg.operationId,
-      acquireProviderHomeLease: (home) => sessions.acquireSkillReconciliationProviderHome(home),
-    }, wslAdoptionEnvironment());
+    // Same rule as adoption: an unfinished restore keeps its references.
+    const providerHomes = sessions.skillProviderHomeScope();
+    let settled = false;
+    let result: Awaited<ReturnType<typeof restoreSkillAdoptionRecoveryWithWsl>>;
+    try {
+      result = await restoreSkillAdoptionRecoveryWithWsl({
+        home: homedir(),
+        dataDir: config.dataDir,
+        agents: metadata.agents,
+        providerAccounts: runnerSupportsProtocol(controlPlaneProtocolVersion, "accountScopedAgentSkills")
+          ? config.providerAccounts
+          : [],
+        operationId: msg.operationId,
+        acquireProviderHomeLease: providerHomes.acquire,
+      }, wslAdoptionEnvironment());
+      settled = result.status !== "recovery_required";
+    } finally {
+      if (settled) await providerHomes.release();
+      else await providerHomes.retain();
+    }
     sendUp(recoveryResult(config.runnerId, msg.requestId, result));
     // A restore attempt can move a managed link or source directory. Publish converged inventory
     // next in this same queue and keep reconcile/store GC out of every recovery transaction.

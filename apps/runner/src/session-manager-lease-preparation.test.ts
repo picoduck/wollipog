@@ -49,6 +49,7 @@ function fixture() {
   const internals = manager as unknown as {
     prepareLaunch: (meta: SessionMeta, cancellation?: LeaseCancellation) => Promise<void>;
     providerHomeLeases: { acquireHome(home: string, provider: string, cancellation: LeaseCancellation): Promise<boolean>;
+      acquireHomeReference(home: string, provider: string, cancellation: LeaseCancellation): Promise<{ first: boolean; release(): Promise<boolean>; retain(): Promise<void> }>;
       stopAcquisitions(): void };
     resolveProviderAuthentication(session: string, request: string, option: string): Promise<void>;
     completeProviderAuthentication(session: string, block: NonNullable<SessionMeta["providerAuthBlock"]>,
@@ -60,6 +61,11 @@ function fixture() {
   let cancellation: LeaseCancellation | undefined;
   internals.providerHomeLeases = {
     stopAcquisitions() {},
+    // Delegates at call time so tests that replace acquireHome also govern reference acquisition.
+    async acquireHomeReference(home, provider, pending) {
+      return { first: await internals.providerHomeLeases.acquireHome(home, provider, pending),
+        release: async () => true, retain: async () => {} };
+    },
     async acquireHome(_home, _provider, pending) {
       cancellation = pending; entered.resolve();
       await gate.promise;

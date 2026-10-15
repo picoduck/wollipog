@@ -191,7 +191,7 @@ import {
   usageWindowRejection,
   type UsageWindowRejection,
 } from "./automatic-provider-account-switch.js";
-import { AsyncProviderHomeLeaseRegistry, type LeaseCancellation } from "./provider-home-lease-async.js";
+import { AsyncProviderHomeLeaseRegistry, type LeaseCancellation, type ProviderHomeReference } from "./provider-home-lease-async.js";
 import { LEASE_WORKER_ERRORS } from "./provider-home-lease-worker-protocol.js";
 import { cleanupPiExternalSession } from "./external/sources.js";
 import {
@@ -289,6 +289,14 @@ export interface SessionNamingExecutionAuthorization {
 
 type Send = (msg: RunnerToControlPlane) => void;
 type Logger = (msg: string) => void;
+/** Provider-HOME references held by one skill transaction; see `skillProviderHomeScope()`.
+ * Settle with `release` once the work finished, or `retain` to keep the references until shutdown. */
+export interface SkillProviderHomeScope {
+  acquire(home: string): Promise<void>;
+  release(): Promise<void>;
+  retain(): Promise<void>;
+}
+
 export type AcpContextResolver = (spec: SessionLaunchSpec) => SessionLaunchSpec["acpSessionContext"];
 export type ProviderAccountResolver = (spec: SessionLaunchSpec) => {
   id: string;
@@ -4319,7 +4327,7 @@ export class SessionManager {
   /** A standalone Agent TUI bypasses structured-driver isolation but shares provider HOME. */
   async acquireAgentTuiProviderHome(meta: SessionMeta): Promise<void> {
     const epoch = this.agentTuiLaunchEpoch(meta.sessionId);
-    await this.providerHomeLeases?.acquire({
+    const reference = await this.providerHomeLeases?.acquireReference({
       driver: meta.driver,
       command: meta.command,
       context: meta.context,
@@ -4327,17 +4335,84 @@ export class SessionManager {
     }, { isCurrent: () => !this.shuttingDown && this.sessionCanOpen(meta.sessionId) &&
       this.agentTuiLaunchEpoch(meta.sessionId) === epoch });
     if (this.shuttingDown || !this.sessionCanOpen(meta.sessionId) || this.agentTuiLaunchEpoch(meta.sessionId) !== epoch) {
+      // No TUI process exists yet, so the reference this launch just took is safe to drop.
+      if (reference) await this.releaseProviderHomeReference(reference);
       throw new Error("Agent TUI launch changed while waiting for provider-home ownership");
+    }
+    // A launched TUI keeps its reference until runner shutdown, as provider processes do.
+    if (reference) await this.retainProviderHomeReference(reference);
+  }
+
+  /** Launch preparation's account-HOME reference: same post-grant cancellation as skill
+   * acquisition, but a successful launch keeps the reference until shutdown. */
+  async acquireLaunchProviderHome(home: string, cancellation: LeaseCancellation = {}): Promise<void> {
+    const reference = await this.acquireSkillReconciliationProviderHome(home, cancellation);
+    if (reference) await this.retainProviderHomeReference(reference);
+  }
+
+  /** Skill links mutate the same native provider HOME as Claude and Codex launches. Acquire one
+   * reference before reconciliation touches those shared directories. Returns null when this
+   * runner has no lease registry (nothing was acquired). */
+  async acquireSkillReconciliationProviderHome(
+    home: string,
+    cancellation: LeaseCancellation = {},
+  ): Promise<ProviderHomeReference | null> {
+    const isCurrent = () => !this.shuttingDown && !cancellation.signal?.aborted &&
+      (cancellation.isCurrent?.() ?? true);
+    if (!this.providerHomeLeases) return null;
+    const reference = await this.providerHomeLeases.acquireHomeReference(home, "skills", { ...cancellation, isCurrent });
+    if (!isCurrent()) {
+      // Cancelled after the worker granted the reference: drop it rather than leak it for the
+      // rest of the runner's life.
+      await this.releaseProviderHomeReference(reference);
+      throw new Error("provider-home acquisition was cancelled");
+    }
+    return reference;
+  }
+
+  /** Scope for one skill transaction (reconcile pass, adoption, or recovery restore). Each
+   * `acquire` adds one reference and `release` drops exactly those, after the transaction's
+   * filesystem work has finished. Each reference is released through its worker-side handle for
+   * the exact registry entry it joined, never by path, so a retargeted HOME alias cannot redirect
+   * the release to a reference a session, probe, or another scope still holds. */
+  skillProviderHomeScope(): SkillProviderHomeScope {
+    const held: ProviderHomeReference[] = [];
+    let released = false;
+    return {
+      acquire: async (home) => {
+        if (released) throw new Error("skill provider-home scope was already released");
+        const reference = await this.acquireSkillReconciliationProviderHome(home);
+        if (reference) held.push(reference);
+      },
+      release: async () => {
+        released = true;
+        for (const reference of held.splice(0)) await this.releaseProviderHomeReference(reference);
+      },
+      retain: async () => {
+        released = true;
+        for (const reference of held.splice(0)) await this.retainProviderHomeReference(reference);
+      },
+    };
+  }
+
+  /** Drop one reference. A failure is logged and the reference stays held, which is the
+   * conservative outcome; shutdown's close() still releases it. */
+  private async releaseProviderHomeReference(reference: ProviderHomeReference): Promise<void> {
+    try {
+      await reference.release();
+    } catch (error) {
+      this.log(`provider-home reference release deferred to shutdown: ${errText(error)}`);
     }
   }
 
-  /** Skill links mutate the same native provider HOME as Claude and Codex launches. Acquire the
-   * registry's process-lifetime lease before reconciliation touches those shared directories. */
-  async acquireSkillReconciliationProviderHome(home: string, cancellation: LeaseCancellation = {}): Promise<void> {
-    const isCurrent = () => !this.shuttingDown && !cancellation.signal?.aborted &&
-      (cancellation.isCurrent?.() ?? true);
-    await this.providerHomeLeases?.acquireHome(home, "skills", { ...cancellation, isCurrent });
-    if (!isCurrent()) throw new Error("provider-home acquisition was cancelled");
+  /** Keep one reference until shutdown and free its worker-side handle. A failure leaves only the
+   * handle occupied; the reference is held either way. */
+  private async retainProviderHomeReference(reference: ProviderHomeReference): Promise<void> {
+    try {
+      await reference.retain();
+    } catch (error) {
+      this.log(`provider-home reference handle retention failed: ${errText(error)}`);
+    }
   }
 
   /** Capture identity before launch preparation refreshes its mutable argument object. */
