@@ -26,7 +26,9 @@ const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-worker-daemon-"))
 const home = join(root, "home"), temp = join(root, "tmp"), emptyBin = join(root, "bin");
 for (const path of [home, temp, emptyBin]) mkdirSync(path, { mode: 0o700 });
 const instanceId = randomUUID(), runnerId = "isolated-lease-worker", interval = maximal ? 10_000 : 100;
-const children = [], peers = [], states = new Map();
+// Daemons only: Windows requires a native numeric exit receipt from each. Holders are plain Node
+// children whose forced exit reports a signal instead, so they are tracked and reaped separately.
+const children = [], holders = [], peers = [], states = new Map();
 let output = "", lastHeartbeat = 0, delays = [], measuring = false;
 const wss = new WebSocketServer({ noServer: true });
 const server = createServer((request, response) => {
@@ -145,7 +147,7 @@ async function hold(ownerHash) {
     `setInterval(() => {}, 1 << 30);`,
   ].join("\n"));
   const child = spawn(process.execPath, ["--import", loader, script], { cwd: root, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
-  children.push(child);
+  holders.push(child);
   let held = false;
   child.stdout.on("data", b => { output = (output + b).slice(-65536); if (String(b).includes("held")) held = true; });
   child.stderr.on("data", b => { output = (output + b).slice(-65536); });
@@ -216,7 +218,8 @@ try {
   await until(() => /lease unavailable|already in use/iu.test(output), "contended refusal log delivery");
   assert.match(output, /lease unavailable|already in use/iu);
   assert.deepEqual(evidence().map(({ path, hash }) => [path, hash]), before, "a live runner cannot adopt a live holder's private authority");
-  await stop(holder, "SIGKILL");
+  const holderExit = await stop(holder, "SIGKILL");
+  assert.ok(holderExit && (holderExit.code !== null || holderExit.signaled !== null), "the holder's death was observed before recovery");
   const recovered = await sync(second, "recovery");
   assert.equal(recovered.error, undefined, output);
   assert.ok(evidence().some(item => item.record.state === "active" && item.record.pid === second.child.pid), "actual runner death enables proved recovery");
@@ -226,6 +229,7 @@ try {
     operationDurationMs, heartbeatIntervalMs: interval, heartbeatDispatches: delays.length, maxHeartbeatDelayMs: Math.max(...delays),
     liveOwnerRefused: true, killedRunnerRecovered: true, gracefulReleaseProved: true }));
 } finally {
+  for (const child of holders) await stop(child, "SIGKILL");
   for (const child of children) await stop(child, "SIGKILL");
   for (const { peer } of peers) peer.terminate();
   await new Promise(resolveClose => wss.close(resolveClose));
