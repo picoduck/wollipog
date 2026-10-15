@@ -76,7 +76,10 @@ test("a failed comparison regenerates only the changed win32 images and still fa
     "a re-run job is the same run, so its upload must replace the earlier attempt's artifact");
 
   const summary = step(compare, "Tell the Author How to Commit Them");
-  assert.match(summary, /gh run download \$RUN_ID --repo \$REPOSITORY --name settings-rows-win32-baselines --dir \./);
+  // gh run download refuses to overwrite an existing file, and a stale baseline always exists.
+  assert.match(summary, /gh run download \$RUN_ID --repo \$REPOSITORY --name settings-rows-win32-baselines --dir \\"\\\$dir\\"/);
+  assert.match(summary, /echo 'cp -R "\$dir"\/\. \. && rm -rf "\$dir"'/);
+  assert.doesNotMatch(summary, /--dir \.(\s|"|$)/m, "downloading over the checkout fails on the stale images");
   assert.match(summary, /GITHUB_STEP_SUMMARY/);
 
   for (const [name, body] of [["regenerate", regenerate], ["collect", collect], ["upload", upload], ["summary", summary]]) {
