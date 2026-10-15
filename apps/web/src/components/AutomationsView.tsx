@@ -15,7 +15,13 @@ import type {
   AutomationTriggerView,
   WorkflowDefinition,
 } from "@wollipog/protocol";
-import { isRestartOnlyCodexExec, runnerSupportsProtocol } from "@wollipog/protocol";
+import {
+  AUTOMATION_CHOOSE_ALTERNATE_INSTALLATION, AUTOMATION_CHOOSE_INSTALLATION, AUTOMATION_INSTALLATION_UNAVAILABLE,
+  AUTOMATION_SAVED_ALTERNATE_INSTALLATION_UNAVAILABLE, AUTOMATION_SAVED_ALTERNATE_ORCHESTRATOR_INSTALLATION_UNAVAILABLE,
+  AUTOMATION_SAVED_ALTERNATE_ROLE_INSTALLATION_UNAVAILABLE, AUTOMATION_SAVED_INSTALLATION_UNAVAILABLE,
+  AUTOMATION_SAVED_ORCHESTRATOR_INSTALLATION_UNAVAILABLE, AUTOMATION_SAVED_ROLE_INSTALLATION_UNAVAILABLE,
+  automationChooseWorkflowInstallation, isRestartOnlyCodexExec, runnerSupportsProtocol,
+} from "@wollipog/protocol";
 import { AutomationsIcon } from "./Icons.js";
 import { useApi } from "../api-context.js";
 import { startVisiblePolling } from "../visible-polling.js";
@@ -409,12 +415,12 @@ export function AutomationsView() {
       }
       if (rebindPrimary) {
         const installation = installationFor(selectedRunner, form.agentId);
-        if (!installation) throw new Error("Select an available Agent Harness installation on this Machine.");
+        if (!installation) throw new Error(AUTOMATION_CHOOSE_INSTALLATION);
         spec.action.installationBindings = { ...spec.action.installationBindings, agent: installation };
       }
       if (rebindAlternate && spec.runnerPolicy.kind === "alternate") {
         const installation = installationFor(selectedFallback, form.fallbackAgentId);
-        if (!installation) throw new Error("Select an available Agent Harness installation on the alternate Machine.");
+        if (!installation) throw new Error(AUTOMATION_CHOOSE_ALTERNATE_INSTALLATION);
         spec.runnerPolicy.targets[0]!.installationBindings = {
           ...spec.runnerPolicy.targets[0]!.installationBindings, agent: installation,
         };
@@ -437,8 +443,8 @@ export function AutomationsView() {
         const installation = installationFor(selectedRunner, agentId);
         const configAgent = bindableAgents(selectedRunner).some((option) =>
           option.agent.id === agentId && !option.agent.installation);
-        if (!installation && !configAgent) throw new Error(`Select an available Agent Harness installation for ${
-          key === "orchestrator" ? "the Orchestrator" : titleCaseLabel(key.slice("role:".length))}.`);
+        if (!installation && !configAgent) throw new Error(automationChooseWorkflowInstallation(
+          key === "orchestrator" ? "the Orchestrator" : titleCaseLabel(key.slice("role:".length)), false));
         if (key === "orchestrator") {
           request.orchestratorAgentId = agentId;
           if (installation) installations.orchestrator = installation;
@@ -462,8 +468,8 @@ export function AutomationsView() {
         const installation = installationFor(selectedFallback, agentId);
         const configAgent = bindableAgents(selectedFallback).some((option) =>
           option.agent.id === agentId && !option.agent.installation);
-        if (!installation && !configAgent) throw new Error(`Select an available alternate Agent Harness installation for ${
-          key === "orchestrator" ? "the Orchestrator" : titleCaseLabel(key.slice("role:".length))}.`);
+        if (!installation && !configAgent) throw new Error(automationChooseWorkflowInstallation(
+          key === "orchestrator" ? "the Orchestrator" : titleCaseLabel(key.slice("role:".length)), true));
         if (key === "orchestrator") {
           target.orchestratorAgentId = agentId;
           if (installation) installations.orchestrator = installation;
@@ -690,7 +696,7 @@ export function AutomationsView() {
                 </select></label>}
                 {form.actionKind === "create_session" && primaryInstallationIssue &&
                   <div className="automation-error automation-span" role="alert">
-                    The saved Agent Harness installation is unavailable or unbound. This automation waits until you select an available installation.
+                    {AUTOMATION_SAVED_INSTALLATION_UNAVAILABLE}
                     <button type="button" className="btn ghost sm" disabled={!installationFor(selectedRunner, form.agentId)}
                       onClick={() => setRebindPrimary(true)}>Use Current Installation</button>
                   </div>}
@@ -715,7 +721,7 @@ export function AutomationsView() {
                         ...bindableAgents(selectedRunner).map((option) => ({ value: option.agent.id, label: option.label })),
                       ]} />
                     {unavailable && <p className="automation-error" role="alert">
-                      This saved role installation is unavailable or unbound.
+                      {AUTOMATION_SAVED_ROLE_INSTALLATION_UNAVAILABLE}
                       <button type="button" className="btn ghost sm"
                         disabled={!installationFor(selectedRunner, boundId)}
                         onClick={() => setWorkflowBindingEdits((current) => ({ ...current, [`role:${role}`]: boundId }))}>
@@ -746,7 +752,7 @@ export function AutomationsView() {
                           ...bindableAgents(selectedRunner).map((option) => ({ value: option.agent.id, label: option.label })),
                         ]} />
                       {unavailable && <p className="automation-error" role="alert">
-                        This saved orchestrator installation is unavailable or unbound.
+                        {AUTOMATION_SAVED_ORCHESTRATOR_INSTALLATION_UNAVAILABLE}
                         <button type="button" className="btn ghost sm"
                           disabled={!installationFor(selectedRunner, boundId)}
                           onClick={() => setWorkflowBindingEdits((current) => ({ ...current, orchestrator: boundId }))}>
@@ -845,7 +851,7 @@ export function AutomationsView() {
                       ...bindableAgents(selectedFallback).map((option) => ({ value: option.agent.id, label: option.label })),
                     ]} />
                   {unavailable && <p className="automation-error" role="alert">
-                    This saved alternate role installation is unavailable or unbound.
+                    {AUTOMATION_SAVED_ALTERNATE_ROLE_INSTALLATION_UNAVAILABLE}
                     <button type="button" className="btn ghost sm"
                       disabled={!installationFor(selectedFallback, boundId)}
                       onClick={() => setAlternateWorkflowBindingEdits((current) => ({ ...current, [`role:${role}`]: boundId }))}>
@@ -887,7 +893,7 @@ export function AutomationsView() {
                         ...bindableAgents(selectedFallback).map((option) => ({ value: option.agent.id, label: option.label })),
                       ]} />
                     {unavailable && <p className="automation-error" role="alert">
-                      This saved alternate orchestrator installation is unavailable or unbound.
+                      {AUTOMATION_SAVED_ALTERNATE_ORCHESTRATOR_INSTALLATION_UNAVAILABLE}
                       <button type="button" className="btn ghost sm"
                         disabled={!installationFor(selectedFallback, boundId)}
                         onClick={() => setAlternateWorkflowBindingEdits((current) => ({ ...current, orchestrator: boundId }))}>
@@ -911,7 +917,7 @@ export function AutomationsView() {
                     : unboundInstallationUnavailable(selectedFallback, form.fallbackAgentId,
                       oldTarget.installationBindings === undefined);
                   return unavailable ? <div className="automation-error automation-span" role="alert">
-                    The alternate Agent Harness installation is unavailable or unbound.
+                    {AUTOMATION_SAVED_ALTERNATE_INSTALLATION_UNAVAILABLE}
                     <button type="button" className="btn ghost sm"
                       disabled={!installationFor(selectedFallback, form.fallbackAgentId)}
                       onClick={() => setRebindAlternate(true)}>Use Current Installation</button>
@@ -1008,7 +1014,7 @@ export function AutomationsView() {
             });
           return <AutomationCard key={item.automationId} id={item.automationId} name={item.name} action={actionSummary(item.action)} enabled={item.enabled} unhealthy={Boolean(item.targetHealth)}>
             {(unavailableInstallation || unboundInstallation || unboundWorkflow || unboundOrchestrator || unavailableAlternate) && <p className="automation-execution-error" role="alert">
-              Saved Agent Harness installation unavailable or unbound. Edit this automation to choose an available installation.
+              {AUTOMATION_INSTALLATION_UNAVAILABLE}
             </p>}
             {item.targetHealth && <p className="automation-execution-error" role="alert">
               Waiting for target: {item.targetHealth.error}

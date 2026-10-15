@@ -755,6 +755,7 @@ export const SESSION_NAMING_TRANSPORT_MARGIN_MS = SESSION_NAMING_CLEANUP_BUDGET_
 /** Extra time the control plane's own abort timer allows beyond that runner request deadline. */
 export const SESSION_NAMING_SUPERVISION_MARGIN_MS = SESSION_NAMING_TRANSPORT_MARGIN_MS + 1_000;
 export { buildConversationHandoff, handoffDestinationError } from "./conversation-handoff.js";
+export * from "./automation-messages.js";
 export { PROMPT_TITLE_MAX, titleFromPrompt } from "./session-title.js";
 export { plainTextPreview } from "./plain-text-preview.js";
 export * from "./campaign-work-ledger.js";
