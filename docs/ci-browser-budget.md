@@ -1,6 +1,6 @@
 # Browser CI Budget
 
-The browser job retains five shards and a finite **43-minute** budget. A recovered
+The browser job retains five shards and a finite **49-minute** budget. A recovered
 dependency-install timeout and a passing suite exhausted the previous 25-minute
 budget in [PR #2694's run 37478932815, attempt 1](https://github.com/picoduck/wollipog/actions/runs/37478932815/job/112321655661).
 The annotation says the job exceeded `25m0s`; all 377 tests passed in 17.9 minutes.
@@ -82,18 +82,18 @@ still fails the job.
 | --- | --- | --- |
 | Active Install Attempts | 720 | Two configured six-minute attempts. |
 | Non-Install Work | 1450 | Measured maximum 1448, rounded upward. |
-| Timeout Enforcement | 60 | 15 per install attempt and per diagnostic step, above the observed 12-second overrun. |
+| Timeout Enforcement | 105 | 15 per install attempt and per diagnostic step, above the observed 12-second overrun. |
 | Required Reserve | 180 | At least three minutes of whole-job margin. |
-| Failure Diagnostics | 120 | Sanitization and upload each have a one-minute deadline; both skip on success. |
-| Total | 2530 | 42m10s; the 2580-second job limit adds 50s rounding slack. |
+| Failure Diagnostics | 480 | Sanitization and upload each have a one-minute deadline. Regenerating the linux settings-rows baselines ([#3215](https://github.com/picoduck/wollipog/issues/3215)) has four minutes, and uploading and summarising them a minute each. All five skip on success. |
+| Total | 2935 | 48m55s; the 2940-second job limit adds 5s rounding slack. |
 
-The modeled residual reserve is 230 seconds. Enforcement overhead can vary on
+The modeled residual reserve is 185 seconds. Enforcement overhead can vary on
 hosted runners; 15 seconds per attempt is an explicit sizing assumption, not a
 guarantee. The three-minute reserve and natural observations add evidence but
 cannot guarantee every future runner. Remeasure after workload or setup changes.
 
 This revisits the old below-thirty goal: its 16.3-minute envelope is stale, and
-30, 35, 39, 40 or 42 minutes cannot cover the current conservative equation. Forty-three stays
+30, 35, 39, 40, 42, 43 or 48 minutes cannot cover the current conservative equation. Forty-nine stays
 finite, beneath the repository's general 60-minute workflow ceiling, so hung or
 doubled workloads still fail loudly. It is not permission to grow the budget
 without new measurements and review.

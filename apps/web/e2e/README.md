@@ -166,6 +166,30 @@ CI:
   only when the pull request or merge group changes the spec or its snapshots; otherwise it reports
   success without starting a Windows runner. The required check waits for it either way.
 
+### The linux Set Comes From CI
+
+Do not regenerate the linux set locally. Text-bearing clips such as `settings-rows-*` and
+`colour-schemes-*` render 3–4% differently on an Ubuntu desktop and in the Playwright jammy image
+than on CI's runner. That is above the comparisons' 2% budget, so an image rendered locally fails
+CI's comparison.
+
+Push the change instead and let the comparison fail. The browser shard that ran the spec re-runs it
+with `--update-snapshots=changed`, uploads only the regenerated `*-linux.png` files as the
+`settings-rows-linux-baselines` artifact, and its job summary gives the command that downloads them
+into place:
+
+```bash
+gh run download <run-id> --repo <owner>/<repo> --name settings-rows-linux-baselines --dir .
+git add apps/web/e2e/settings-rows.spec.ts-snapshots
+```
+
+Look at each image before committing it: it should show the change you meant to make. The job
+still fails, and so does the required check, until the next run compares against the committed
+images. If the comparison failed but nothing differed, the summary says so instead, and the failure
+is not baseline drift.
+
+### The win32 Set Follows the linux Set
+
 When a change regenerates the linux set, expect the win32 comparison to fail on the same images.
 The failed job re-runs with `--update-snapshots=changed`, uploads only the regenerated
 `*-win32.png` files as the `settings-rows-win32-baselines` artifact, and its job summary gives the
