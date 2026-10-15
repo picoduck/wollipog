@@ -14,6 +14,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
+import type { Socket } from "node:net";
+import { CodexProbeLifecycle } from "../src/drivers/codex-probe-lifecycle.js";
 import { WebSocket, WebSocketServer } from "ws";
 import { CodexAppServerDriver, CodexAppServerResumeError } from "../src/drivers/codex-app-server.js";
 import type { DriverCallbacks, DriverOptions } from "../src/drivers/driver.js";
@@ -37,6 +39,7 @@ try {
   process.exit(1);
 }
 const root = mkdtempSync(join(tmpdir(), "codex-inference-transport-"));
+const lifetime = new CodexProbeLifecycle();
 const codexHome = join(root, "codex");
 const cwd = join(root, "project");
 // The preset requires a Wollipog MCP inventory entry. Supply an inert, local stdio server with
@@ -70,9 +73,11 @@ function emptyObservation(): Observation {
 }
 let current = emptyObservation();
 const sockets = new Set<WebSocket>();
+const connections = new Set<Socket>();
 const httpRequests = new Set<ReturnType<typeof httpsRequest>>();
 const observer = new WebSocketServer({ noServer: true });
 const server = createServer((req, res) => {
+  if (lifetime.interruptedBy) { res.writeHead(503).end(); return; }
   if (!req.url?.startsWith("/backend-api/codex/")) { res.writeHead(404).end(); return; }
   const observation = current;
   if (req.url.split("?")[0] === "/backend-api/codex/responses") observation.httpModelRequests++;
@@ -95,7 +100,12 @@ const server = createServer((req, res) => {
   res.on("close", () => upstream.destroy());
   req.pipe(upstream);
 });
+server.on("connection", socket => {
+  connections.add(socket);
+  socket.once("close", () => connections.delete(socket));
+});
 server.on("upgrade", (req, socket, head) => {
+  if (lifetime.interruptedBy) { socket.destroy(); return; }
   if (req.url?.split("?")[0] !== "/backend-api/codex/responses") { socket.destroy(); return; }
   if (forceHttpFallback) { socket.end("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"); return; }
   const observation = current;
@@ -152,15 +162,20 @@ server.on("upgrade", (req, socket, head) => {
   });
 });
 
-async function bounded<T>(operation: Promise<T>): Promise<T> {
-  let timer: ReturnType<typeof setTimeout>;
-  try {
-    return await Promise.race([operation, new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error("probe_timeout")), 120_000);
-    })]);
-  } finally { clearTimeout(timer!); }
+async function cleanupProxyConnections(): Promise<void> {
+  for (const socket of sockets) await lifetime.attempt(() => socket.terminate());
+  sockets.clear();
+  for (const request of httpRequests) await lifetime.attempt(() => request.destroy());
+  httpRequests.clear();
+  // Includes pending upgrades, before they become WebSockets, and inbound HTTP streams.
+  for (const socket of connections) await lifetime.attempt(() => socket.destroy());
+  connections.clear();
+}
+function sourceUnchanged(): boolean {
+  try { return authBefore === SOURCE_DIGEST(); } catch { return false; }
 }
 
+let probePassed = false;
 const results: unknown[] = [];
 try {
   mkdirSync(codexHome, { mode: 0o700 });
@@ -169,8 +184,11 @@ try {
   // Codex's required refresh_token field is empty; failed/expired access needs human recovery.
   writeFileSync(join(codexHome, "auth.json"), JSON.stringify(accessCredentials), { mode: 0o600 });
   writeFileSync(inertMcp, inertMcpSource, { mode: 0o600 });
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
+  await lifetime.run(async () => {
+    const listening = once(server, "listening");
+    server.listen(0, "127.0.0.1");
+    await listening;
+  });
   const port = (server.address() as { port: number }).port;
   const args = [
     "--disable", "apps", "--disable", "plugins", "--disable", "hooks",
@@ -224,21 +242,19 @@ try {
         onExit: () => {},
         onAuthenticationFailure: () => { authenticationRequired = true; },
       };
-      let exited: Promise<unknown> = Promise.resolve();
       const driver = new CodexAppServerDriver(options, callbacks, undefined, {
         spawn: launch => {
-          const child = spawnAgent(launch);
-          exited = once(child, "close").catch(() => undefined);
-          return child;
+          return lifetime.own(spawnAgent(launch));
         },
+        kill: child => { void lifetime.stop(child); },
       });
       let phase = "initialize";
       try {
-        await bounded(driver.initialize());
+        await lifetime.run(() => driver.initialize());
         phase = "new_session";
-        resumeId = await bounded(driver.newSession(cwd));
+        resumeId = await lifetime.run(() => driver.newSession(cwd));
         phase = "prompt";
-        const stop = await bounded(driver.prompt(
+        const stop = await lifetime.run(() => driver.prompt(
           'Run exec_command once with cmd "printf WS_PROBE_OK". After its tool result, reply with just OK. Do not call any other tool.',
         ));
         const websocketPassed = stop === "end_turn" && current.upstreamWebsocketConnections > 0 &&
@@ -259,29 +275,33 @@ try {
           ...current, authenticationRequired }));
         throw error;
       } finally {
-        driver.dispose();
-        // Await process exit before starting the next process over the same persisted thread.
-        await bounded(exited);
-        for (const socket of sockets) socket.terminate();
-        sockets.clear();
-        for (const request of httpRequests) request.destroy();
-        httpRequests.clear();
+        await lifetime.attempt(() => driver.dispose());
+        // Await exact owned process teardown before reopening the same persisted thread.
+        await lifetime.stopOwned();
+        await cleanupProxyConnections();
       }
     }
   }
-  const existingAuthenticationUnchanged = authBefore === SOURCE_DIGEST();
-  console.log(JSON.stringify({ event: "codex_inference_probe", passed: existingAuthenticationUnchanged,
-    mode: forceHttpFallback ? "http_fallback" : "websocket", cases: results.length, existingAuthenticationUnchanged }));
-  if (!existingAuthenticationUnchanged) process.exitCode = 1;
+  probePassed = sourceUnchanged();
 } catch {
-  console.log(JSON.stringify({ event: "codex_inference_probe", passed: false, completedCases: results.length,
-    existingAuthenticationUnchanged: authBefore === SOURCE_DIGEST() }));
-  process.exitCode = 1;
+  // Emit only bounded classifications below, after all cleanup steps have been attempted.
 } finally {
-  for (const socket of sockets) socket.terminate();
-  for (const request of httpRequests) request.destroy();
-  observer.close();
-  server.closeAllConnections();
-  server.close();
-  rmSync(root, { recursive: true, force: true });
+  await lifetime.stopOwned();
+  await cleanupProxyConnections();
+  await lifetime.attempt(() => observer.close());
+  await lifetime.attempt(() => new Promise<void>((resolve, reject) => {
+    server.closeAllConnections();
+    server.close(error => error && (error as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING"
+      ? reject(error) : resolve());
+  }));
+  await lifetime.attempt(() => rmSync(root, { recursive: true, force: true }));
+  const existingAuthenticationUnchanged = sourceUnchanged();
+  const interrupted = lifetime.interruptedBy !== undefined;
+  const passed = probePassed && !interrupted && !lifetime.cleanupFailed && existingAuthenticationUnchanged;
+  console.log(JSON.stringify({ event: "codex_inference_probe", passed,
+    mode: forceHttpFallback ? "http_fallback" : "websocket", completedCases: results.length,
+    existingAuthenticationUnchanged, interrupted, signal: lifetime.interruptedBy,
+    cleanupFailed: lifetime.cleanupFailed }));
+  process.exitCode = interrupted ? (lifetime.interruptedBy === "SIGINT" ? 130 : 143) : passed ? 0 : 1;
+  lifetime.releaseSignals();
 }
