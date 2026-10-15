@@ -145,6 +145,25 @@ export const REMOTE_TUNNEL_PORT_MAX = 47999;
  * that keep picking fresh ports at the normal backoff. */
 export const MAX_TUNNEL_PORT_ATTEMPTS = 8;
 const TUNNEL_PORT_RETRY_DELAY_MS = 250;
+/** Bound on waiting for stderr after ssh exits: a ControlPersist master can inherit and hold it. */
+const STDERR_DRAIN_TIMEOUT_MS = 1_000;
+
+/** Resolves once `child`'s stderr has ended or closed, or after `timeoutMs`, whichever is first. */
+export function stderrDrained(child: ChildProcess, timeoutMs: number): Promise<void> {
+  const stderr = child.stderr;
+  if (!stderr || stderr.readableEnded || stderr.destroyed) return Promise.resolve();
+  return new Promise((resolve) => {
+    const finish = () => {
+      clearTimeout(timer);
+      stderr.off("end", finish);
+      stderr.off("close", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    stderr.once("end", finish);
+    stderr.once("close", finish);
+  });
+}
 
 /** Pick a remote tunnel port not in `exclude`, or null when the range is exhausted. */
 export function pickRemoteTunnelPort(
@@ -1615,15 +1634,20 @@ export class BoxOrchestrator {
       if (rt.child === child) rt.child = null; // only clear if this child is still the current one
       if (!this.live(rt, epoch)) return; // a newer attempt / removal / shutdown owns the box now
       this.log(`${cfg.boxId} ssh exited (${signal ? `signal ${signal}` : `code ${code}`})`);
-      // ExitOnForwardFailure makes ssh exit before the remote command runs, so this runner never
-      // dialed the other listener and the tunnel that holds the port is untouched.
-      if (remoteForwardFailurePort(stderrTail) === rt.remotePort) {
-        this.recoverOccupiedTunnelPort(cfg, rt, epoch);
-        return;
-      }
-      const lastLine = stderrTail.trim().split("\n").pop()?.trim() || null;
-      this.setStatus(cfg.boxId, "offline", lastLine);
-      if (cfg.autoReconnect) this.scheduleReconnect(cfg, rt, epoch);
+      // Node may report exit before the last stderr chunk arrives, and that chunk is the one that
+      // names an occupied port, so classify only once stderr has ended.
+      void stderrDrained(child, STDERR_DRAIN_TIMEOUT_MS).then(() => {
+        if (!this.live(rt, epoch)) return;
+        // ExitOnForwardFailure makes ssh exit before the remote command runs, so this runner never
+        // dialed the other listener and the tunnel that holds the port is untouched.
+        if (remoteForwardFailurePort(stderrTail) === rt.remotePort) {
+          this.recoverOccupiedTunnelPort(cfg, rt, epoch);
+          return;
+        }
+        const lastLine = stderrTail.trim().split("\n").pop()?.trim() || null;
+        this.setStatus(cfg.boxId, "offline", lastLine);
+        if (cfg.autoReconnect) this.scheduleReconnect(cfg, rt, epoch);
+      });
     });
   }
 

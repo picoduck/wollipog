@@ -83,15 +83,20 @@ function controlPlane(host: FakeRemoteHost, label: string, db = boxDb()): Simula
           if (!host.lingerOnKill && host.listeners.get(port) === label) host.listeners.delete(port);
           child.signalCode = "SIGTERM";
           child.emit("exit", null, "SIGTERM");
+          child.stderr.emit("end");
         });
         return true;
       },
     }) as FakeTunnel;
     setImmediate(() => {
       if (host.listeners.has(port)) {
-        child.stderr.emit("data", Buffer.from(`Error: remote port forwarding failed for listen port ${port}\n`));
+        // Node may deliver exit before the stderr chunk that names the port; model that order.
         child.exitCode = 255;
         child.emit("exit", 255, null);
+        setImmediate(() => {
+          child.stderr.emit("data", Buffer.from(`Error: remote port forwarding failed for listen port ${port}\n`));
+          child.stderr.emit("end");
+        });
         return;
       }
       host.listeners.set(port, label);
