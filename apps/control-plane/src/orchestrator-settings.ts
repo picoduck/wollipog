@@ -303,7 +303,8 @@ export class OrchestratorSettings {
   constructor(private readonly db: ControlPlaneDb) {}
 
   private capabilities(principal: HumanPrincipal, defaults: OrchestratorDefaults): OrchestratorSettingsCapabilities {
-    const installations = this.db.listRunnersForPrincipal(principal).filter((runner) => runner.status === "online").flatMap((runner) =>
+    const onlineRunners = this.db.listRunnersForPrincipal(principal).filter((runner) => runner.status === "online");
+    const installations = onlineRunners.flatMap((runner) =>
       // A saved child harness on the restart-only exec row still renders through the stale entry below.
       runner.agents.filter((agent) => agent.available === true && agent.capabilities && !isRestartOnlyCodexExec(agent))
         .map((agent) => ({
@@ -343,7 +344,8 @@ export class OrchestratorSettings {
       ? "available" as const
       : "unavailable" as const;
     // Per Machine, not per installation: a Machine can run children when any of its rows can (#3248).
-    const machines = new Map<string, { name: string; supported: boolean }>();
+    // Every connected Machine counts, including one with no usable row, as get_campaign does.
+    const machines = new Map(onlineRunners.map((runner) => [runner.runnerId, { name: machineName(runner), supported: false }]));
     for (const installation of installations) {
       const machine = machines.get(installation.runnerId) ?? { name: installation.machineName, supported: false };
       // A row the Machine's installation choice excludes cannot launch, so it supports nothing.
@@ -352,7 +354,8 @@ export class OrchestratorSettings {
     }
     const unsupported = [...machines.values()].filter((machine) => !machine.supported).map((machine) => machine.name).sort();
     const childModelDrift = defaults.behavior.childModel ? modelResolutionDrift(installations
-      .filter((installation) => !defaults.behavior.childHarness || sameHarness(installation.identity, defaults.behavior.childHarness))
+      .filter((installation) => installation.launchable &&
+        (!defaults.behavior.childHarness || sameHarness(installation.identity, defaults.behavior.childHarness)))
       .map((installation) => ({ machineName: installation.machineName, models: installation.capabilities.models })),
     defaults.behavior.childModel) : null;
     return {
@@ -366,7 +369,7 @@ export class OrchestratorSettings {
       ...(status === "unavailable" ? {
         reason: installations.length === 0 ? NO_MACHINE_REASON : UNSUPPORTED_COMBINATION_REASON,
       } : {}),
-      ...(fixed && machines.size > 0 ? { machineSupport: {
+      ...(fixed && installations.length > 0 ? { machineSupport: {
         supported: machines.size - unsupported.length,
         total: machines.size,
         unsupportedMachines: unsupported,

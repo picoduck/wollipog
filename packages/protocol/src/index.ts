@@ -2838,13 +2838,19 @@ export function modelResolutionDrift(
   }
   const resolutions = new Set(machines.map((entry) => entry.displayName));
   if (resolutions.size < 2) return null;
-  const pinned = new Map<string, string>();
+  // A candidate is pinned only if it resolves to one model wherever it appears; another alias that
+  // also drifts would leave children on different models.
+  const candidates = new Map<string, Set<string>>();
   for (const installation of installations) {
     for (const model of installation.models) {
-      if (model.id !== modelId && !model.hidden && model.displayName && resolutions.has(model.displayName)) {
-        pinned.set(model.id, model.displayName);
-      }
+      if (model.id === modelId || model.hidden) continue;
+      candidates.set(model.id, (candidates.get(model.id) ?? new Set()).add(model.displayName ?? model.id));
     }
+  }
+  const pinned = new Map<string, string>();
+  for (const [id, names] of candidates) {
+    const [displayName] = [...names];
+    if (names.size === 1 && resolutions.has(displayName!)) pinned.set(id, displayName!);
   }
   const order = (left: string, right: string) => left < right ? -1 : left > right ? 1 : 0;
   return {
