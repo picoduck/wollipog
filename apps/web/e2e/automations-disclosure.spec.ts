@@ -314,3 +314,87 @@ for (const { label, viewport } of [
     });
   }
 }
+
+/* Every installation and target sentence of #3220 where it renders, in a real browser. */
+for (const { label, viewport } of [
+  { label: "desktop", viewport: { width: 1280, height: 900 } },
+  { label: "mobile", viewport: { width: 375, height: 812 } },
+]) {
+  for (const theme of ["dark", "light"] as const) {
+    test.describe(`${label} ${theme} installation and target wording`, () => {
+      test.use({ viewport });
+      const capture = async (page: Page, name: string) => {
+        const evidenceDir = process.env.WOLLIPOG_EVIDENCE_DIR;
+        if (evidenceDir) await page.screenshot({ path: join(evidenceDir, `${name}-${label}-${theme}.png`), fullPage: true });
+      };
+      const card = (page: Page) => page.getByRole("button", { name: /Nightly Dependency Sweep/ });
+      const saveError = (page: Page, text: string) => page.getByRole("alert").filter({ hasText: text });
+
+      test("names both waiting reasons in the card and the expired run", async ({ page }) => {
+        for (const [variant, reason] of [
+          ["", "None of this automation's machines can run it now. " +
+            "Check that the machine is online and up to date and still has the workspace and project."],
+          ["=installation", "This automation's agent installation isn't available on any of its machines. " +
+            "Choose an installation in Machine Settings, or edit the automation to choose another machine."],
+        ] as const) {
+          await page.goto(`/automations-e2e.html?theme=${theme}&waiting-target${variant}&expired-run`);
+          await card(page).click();
+          await expect(page.getByRole("alert").filter({ hasText: `Waiting for target: ${reason}` })).toBeVisible();
+          await page.getByText(/Execution History/).click();
+          await expect(page.locator(".automation-history").getByText(reason, { exact: true })).toBeVisible();
+          await capture(page, `automation-wording-waiting${variant ? "-installation" : ""}`);
+        }
+      });
+
+      test("names the machine a create-session rebind needs when its installation disappears", async ({ page }) => {
+        for (const alternate of [false, true]) {
+          await page.goto(`/automations-e2e.html?theme=${theme}&rediscover&${alternate
+            ? "alternate-installation=unavailable" : "saved-installation"}`);
+          await card(page).click();
+          await expect(page.getByText(
+            "This automation's agent installation isn't available. Edit the automation to choose another installation.",
+            { exact: true })).toBeVisible();
+          await page.getByRole("button", { name: "Edit", exact: true }).click();
+          await expect(page.getByText(alternate
+            ? "The saved installation of this agent isn't available on the other machine."
+            : "The saved installation of this agent isn't available. This automation waits until you choose an available installation.",
+          )).toBeVisible();
+          await capture(page, `automation-wording-${alternate ? "alternate" : "primary"}-warning`);
+          await page.getByRole("button", { name: "Use Current Installation" }).click();
+          await page.evaluate(() => (window as unknown as { automationsRediscover: () => void }).automationsRediscover());
+          await page.getByRole("button", { name: "Save Automation" }).click();
+          await expect(saveError(page, alternate
+            ? "Choose an available installation of this agent on the other machine."
+            : "Choose an available installation of this agent on this machine.")).toBeVisible();
+          await capture(page, `automation-wording-${alternate ? "alternate" : "primary"}-save-error`);
+        }
+      });
+
+      test("names unavailable workflow pins and the machine a role rebind needs", async ({ page }) => {
+        for (const alternate of [false, true]) {
+          await page.goto(`/automations-e2e.html?theme=${theme}&workflow-machine-switch&orchestrator-bound` +
+            "&inherited-alternate-pins&unavailable-pins&rediscover");
+          await card(page).click();
+          await page.getByRole("button", { name: "Edit", exact: true }).click();
+          const warning = (text: string) => page.getByRole("alert").filter({ hasText: text });
+          for (const text of [
+            "The saved installation of this role's agent isn't available.Use",
+            "The saved installation of the Orchestrator's agent isn't available.Use",
+            "The saved installation of this role's agent isn't available on the other machine.",
+            "The saved installation of the Orchestrator's agent isn't available on the other machine.",
+          ]) await expect(warning(text)).toBeVisible();
+          if (!alternate) await capture(page, "automation-wording-workflow-warnings");
+          await warning(alternate
+            ? "The saved installation of this role's agent isn't available on the other machine."
+            : "The saved installation of this role's agent isn't available.Use",
+          ).getByRole("button", { name: "Use Current Installation" }).click();
+          await page.evaluate(() => (window as unknown as { automationsRediscover: () => void }).automationsRediscover());
+          await page.getByRole("button", { name: "Save Automation" }).click();
+          await expect(saveError(page, `Choose an available installation of the agent for Agent-1 on ${
+            alternate ? "the other" : "this"} machine.`)).toBeVisible();
+          await capture(page, `automation-wording-workflow-${alternate ? "alternate" : "primary"}-save-error`);
+        }
+      });
+    });
+  }
+}
