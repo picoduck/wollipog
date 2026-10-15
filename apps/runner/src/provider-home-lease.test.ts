@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { after, test, type TestContext } from "node:test";
 const previousMask = process.umask(0o077);
 after(() => process.umask(previousMask));
@@ -941,6 +941,28 @@ function assertSuccessorFailureClosed(error: unknown, expected: RegExp): boolean
 
 test("the exclusive successor elects one winner across real runner processes", async (t) => {
   await runSuccessorElectionRace(t);
+});
+
+test("successor election uses its load harness's owned fixture parent", async (t) => {
+  const parent = mkdtempSync(join(tmpdir(), "wollipog-successor-parent-test-"));
+  const previous = process.env.WOLLIPOG_SUCCESSOR_FIXTURE_PARENT;
+  process.env.WOLLIPOG_SUCCESSOR_FIXTURE_PARENT = parent;
+  t.after(() => {
+    if (previous === undefined) delete process.env.WOLLIPOG_SUCCESSOR_FIXTURE_PARENT;
+    else process.env.WOLLIPOG_SUCCESSOR_FIXTURE_PARENT = previous;
+    rmSync(parent, { recursive: true, force: true });
+  });
+  let observedRoot: string | undefined;
+  let recorded: { contenders: Array<{ pid: number }> } | undefined;
+  await runSuccessorElectionRace(t, { beforeRemoveRoot(root) {
+    observedRoot = root;
+    recorded = JSON.parse(readFileSync(join(root, "contenders.json"), "utf8"));
+  } });
+  assert.ok(observedRoot, "the real fixture reached proved cleanup");
+  assert.equal(dirname(observedRoot), parent, "the harness can locate all fixture state after an outer timeout");
+  assert.equal(recorded?.contenders.length, 2);
+  assert.ok(recorded.contenders.every(({ pid }) => Number.isInteger(pid) && pid > 0 && pid !== process.pid));
+  assert.deepEqual(readdirSync(parent), [], "ordinary fixture cleanup leaves an empty parent");
 });
 
 test("successor election keeps slow startup out of the result deadline", async (t) => {
