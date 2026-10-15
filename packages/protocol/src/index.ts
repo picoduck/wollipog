@@ -2888,6 +2888,13 @@ export interface AgentDefinition {
   };
 }
 
+/** Discovery pairs every Codex App Server row with a `codex exec` row that exists only so sessions
+ * already running on it can restart. It is never offered for new work; an agent the user
+ * configured with `driver: "codex"` is a deliberate choice and stays selectable. */
+export function isRestartOnlyCodexExec(agent: Pick<AgentDefinition, "driver" | "source">): boolean {
+  return agent.source === "discovered" && agent.driver === "codex";
+}
+
 /** Secret-free runner-local provider account safe for a principal-scoped Machine view. */
 export interface ProviderAccountDefinition {
   id: string;

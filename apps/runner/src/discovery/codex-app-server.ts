@@ -37,14 +37,19 @@ export function supportsStructuredCodexDeviceLogin(version: string | undefined):
   return !!version && versionAtLeast(version, MIN_VERIFIED_CODEX_DEVICE_LOGIN_VERSION);
 }
 
-/** Convert the bounded `codex app-server --help` probe into a stable, secret-safe result. */
+/** Convert the bounded `codex app-server --help` probe into a stable, secret-safe result. Each
+ * failure message is shown to people as the reason Codex needs setup, so it names the fix. */
 export function interpretCodexAppServerProbe(version: string | undefined, result: ProbeResult): CodexAppServerCapabilities {
   if (result.timedOut) {
     return {
       status: "unsupported",
       installedVersion: version,
       appServerAvailable: false,
-      failure: { code: "probe_timeout", message: "The Codex App Server capability check timed out.", retryable: true },
+      failure: {
+        code: "probe_timeout",
+        message: "Wollipog couldn't check this Codex installation in time. Rediscover to try again.",
+        retryable: true,
+      },
     };
   }
   if (result.errorCode) {
@@ -52,7 +57,11 @@ export function interpretCodexAppServerProbe(version: string | undefined, result
       status: "unsupported",
       installedVersion: version,
       appServerAvailable: false,
-      failure: { code: "probe_failed", message: "The Codex App Server capability check could not run.", retryable: true },
+      failure: {
+        code: "probe_failed",
+        message: "Wollipog couldn't check this Codex installation. Rediscover to try again.",
+        retryable: true,
+      },
     };
   }
   if (result.code !== 0) {
@@ -60,7 +69,11 @@ export function interpretCodexAppServerProbe(version: string | undefined, result
       status: "unsupported",
       installedVersion: version,
       appServerAvailable: false,
-      failure: { code: "app_server_unavailable", message: "This Codex installation does not expose app-server.", retryable: false },
+      failure: {
+        code: "app_server_unavailable",
+        message: "This Codex installation doesn't include App Server. Update Codex, then rediscover.",
+        retryable: false,
+      },
     };
   }
 
@@ -77,7 +90,7 @@ export function interpretCodexAppServerProbe(version: string | undefined, result
       appServerAvailable: true,
       failure: {
         code: "contract_mismatch",
-        message: `Codex app-server is missing required contract markers: ${missing.join(", ")}.`,
+        message: `This Codex App Server is missing what Wollipog needs (${missing.join(", ")}). Update Codex, then rediscover.`,
         retryable: false,
       },
     };
@@ -91,8 +104,8 @@ export function interpretCodexAppServerProbe(version: string | undefined, result
       failure: {
         code: "version_unverified",
         message: version
-          ? `Codex ${version} is older than the verified app-server floor ${MIN_VERIFIED_CODEX_APP_SERVER_VERSION}.`
-          : `Codex version could not be verified; app-server requires ${MIN_VERIFIED_CODEX_APP_SERVER_VERSION} or newer.`,
+          ? `Codex ${version} is older than the supported version ${MIN_VERIFIED_CODEX_APP_SERVER_VERSION}. Update Codex, then rediscover.`
+          : `Wollipog couldn't read this Codex version. App Server needs Codex ${MIN_VERIFIED_CODEX_APP_SERVER_VERSION} or newer.`,
         retryable: false,
       },
     };

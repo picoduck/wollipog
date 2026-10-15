@@ -1,4 +1,4 @@
-import type { AgentDefinition, WorkflowDefinition } from "@wollipog/protocol";
+import { isRestartOnlyCodexExec, type AgentDefinition, type WorkflowDefinition } from "@wollipog/protocol";
 
 export type RunWorkMode = "parallel" | "workflow";
 
@@ -9,20 +9,22 @@ export function workflowAgentRoles(definition: WorkflowDefinition | undefined): 
     .map((node) => node.agentId!))];
 }
 
-/** Resolve graph-stable role ids to the best concrete agent advertised by this runner. */
+/** Resolve graph-stable role ids to the best concrete agent advertised by this runner. A Codex
+ * role binds only to App Server; without one it stays unbound rather than quietly using exec. */
 export function defaultWorkflowBindings(
   definition: WorkflowDefinition | undefined,
   agents: AgentDefinition[],
 ): Record<string, string> {
-  const available = agents.filter((agent) => agent.available === true);
+  const available = agents.filter((agent) => agent.available === true && !isRestartOnlyCodexExec(agent));
   const bindings: Record<string, string> = {};
   for (const role of workflowAgentRoles(definition)) {
-    const exact = available.find((agent) => agent.id === role);
+    const codexRole = /codex/i.test(role);
+    // Even an exact id match: a configured exec agent may carry the old stable `codex` id.
+    const exact = available.find((agent) => agent.id === role && (!codexRole || agent.driver === "codex-app-server"));
     const family = /claude/i.test(role)
       ? available.find((agent) => agent.driver === "claude-code")
-      : /codex/i.test(role)
-        ? available.find((agent) => agent.driver === "codex-app-server") ??
-          available.find((agent) => agent.driver === "codex")
+      : codexRole
+        ? available.find((agent) => agent.driver === "codex-app-server")
         : undefined;
     const selected = exact ?? family;
     if (selected) bindings[role] = selected.id;

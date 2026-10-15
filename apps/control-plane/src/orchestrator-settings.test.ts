@@ -170,6 +170,25 @@ test("Orchestrator capabilities keep identical model ids scoped to stable harnes
   }
 });
 
+test("Orchestrator child harnesses exclude discovery's restart-only Codex exec row (#3224)", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    const now = Date.now();
+    const metadata = runner("runner-codex", "gpt", ["high"]);
+    const appServer = { ...metadata.agents[0]!, source: "discovered" as const };
+    metadata.agents = [appServer, { ...appServer, id: "codex-exec", name: "Codex (Non-Interactive)", driver: "codex" }];
+    db.registerRunner(metadata, now, PROTOCOL_VERSION);
+    const settings = new OrchestratorSettings(db);
+    const principal = human(db);
+    assert.deepEqual(settings.view(principal).capabilities.harnesses?.map((harness) => harness.driver), ["codex-app-server"]);
+    assert.throws(() => settings.update(principal, { defaults: defaults({
+      childHarness: { agentId: "codex-exec", driver: "codex", context: { kind: "native" } },
+    }) }), /supports this Child Harness, Child Model and Child Effort together/);
+  } finally {
+    db.close();
+  }
+});
+
 test("Orchestrator parsing is exact and campaign resolution tracks field-level precedence", () => {
   assert.equal(parseOrchestratorDefaults({ ...defaults(), extra: true }), null);
   assert.equal(parseOrchestratorDefaults({ ...defaults(), behavior: { ...defaults().behavior, childModel: " sol " } }), null);

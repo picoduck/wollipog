@@ -1,6 +1,7 @@
 import {
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   WORKFLOW_DECISION_CATEGORIES,
+  isRestartOnlyCodexExec,
   type AgentCapabilities,
   type AgentHarnessIdentity,
   type AgentModel,
@@ -288,7 +289,8 @@ export class OrchestratorSettings {
 
   private capabilities(principal: HumanPrincipal, defaults: OrchestratorDefaults): OrchestratorSettingsCapabilities {
     const installations = this.db.listRunnersForPrincipal(principal).filter((runner) => runner.status === "online").flatMap((runner) =>
-      runner.agents.filter((agent) => agent.available === true && agent.capabilities)
+      // A saved child harness on the restart-only exec row still renders through the stale entry below.
+      runner.agents.filter((agent) => agent.available === true && agent.capabilities && !isRestartOnlyCodexExec(agent))
         .map((agent) => ({
           identity: agentHarnessIdentityFor(agent),
           name: agent.name,

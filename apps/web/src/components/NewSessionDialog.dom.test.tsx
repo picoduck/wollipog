@@ -771,6 +771,85 @@ test("saved-default recovery buttons name the agent they actually select", async
   }
 });
 
+test("a saved restart-only Codex exec default is not offered or started without a choice (#3224)", async () => {
+  domWindow.localStorage.clear();
+  saveAgentDefault({}, runner.runnerId, "codex-exec");
+  const codexRunner: RunnerView = {
+    ...runner,
+    agents: [
+      ...runner.agents,
+      { id: "codex-app", name: "Codex", command: "codex", args: [], env: {}, driver: "codex-app-server", available: true, source: "discovered" },
+      { id: "codex-exec", name: "Codex (Non-Interactive)", command: "codex", args: [], env: {}, driver: "codex", available: true, source: "discovered" },
+    ],
+  };
+  const fixture = await mountFixture({ runners: [codexRunner] }, { runnerId: runner.runnerId });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    const input = combobox(fixture.container, "Agent");
+    assert.equal(input.value, "", "the saved exec default is not preselected");
+    assert.equal(createButton(fixture.container).disabled, true);
+    assert.match(fixture.container.querySelector(".agent-default-warning")?.textContent ?? "",
+      /non-interactive mode, which new sessions no longer offer/);
+
+    await act(async () => { input.focus(); });
+    assert.deepEqual(comboboxOptions(fixture.container, "Agent").map((option) => option.textContent?.match(/^Codex App Server|^Claude Code/)?.[0]),
+      ["Claude Code", "Codex App Server"]);
+    assert.doesNotMatch(comboboxOptions(fixture.container, "Agent").map((option) => option.textContent).join(" "), /Non-Interactive/);
+
+    const action = [...fixture.container.querySelectorAll("button")].find((button) =>
+      button.textContent?.trim() === "Use Codex App Server") as HTMLButtonElement | undefined;
+    assert.ok(action, "the recovery action selects Codex App Server");
+    await act(async () => { action.click(); });
+    assert.equal(input.value, "Codex App Server");
+    const saved = loadAgentDefaults()[runner.runnerId];
+    assert.equal(typeof saved === "string" ? saved : saved?.agentId, "codex-app");
+    assertNoDomNode(fixture.container.querySelector(".agent-default-warning"));
+    assert.equal(createButton(fixture.container).disabled, false);
+  } finally {
+    await unmountFixture(fixture);
+    domWindow.localStorage.clear();
+  }
+});
+
+test("Codex App Server that failed its check needs setup with the runner's reason, not an exec fallback (#3224)", async () => {
+  domWindow.localStorage.clear();
+  const codexOnly: RunnerView = {
+    ...runner,
+    agents: [
+      {
+        id: "codex-app", name: "Codex", command: "codex", args: [], env: {}, driver: "codex-app-server",
+        available: false, source: "discovered", authStatus: "authenticated",
+        codexAppServer: {
+          status: "unsupported",
+          appServerAvailable: false,
+          failure: {
+            code: "probe_timeout",
+            message: "Wollipog couldn't check this Codex installation in time. Rediscover to try again.",
+            retryable: true,
+          },
+        },
+      },
+      { id: "codex-exec", name: "Codex (Non-Interactive)", command: "codex", args: [], env: {}, driver: "codex", available: true, source: "discovered" },
+    ],
+  };
+  const fixture = await mountFixture({ runners: [codexOnly] });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    const input = combobox(fixture.container, "Agent");
+    assert.equal(input.value, "");
+    await act(async () => { input.focus(); });
+    const options = comboboxOptions(fixture.container, "Agent");
+    assert.deepEqual(optionNamesAndDescriptions(options), [{
+      name: "Codex App Server",
+      description: "Needs setup. Wollipog couldn't check this Codex installation in time. Rediscover to try again.",
+    }]);
+    assert.equal(options[0]?.getAttribute("aria-disabled"), "true");
+    assert.equal(createButton(fixture.container).disabled, true);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("native orchestrator selection is sent at creation", async () => {
   const enabledRunner: RunnerView = {
     ...runner, protocolVersion: PROTOCOL_VERSION,
