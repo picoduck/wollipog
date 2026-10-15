@@ -91,6 +91,10 @@ jobs:
       - name: Verify Session Writer Lock Across Processes
         run: node --import tsx --test apps/runner/src/session-store-lock.test.ts
 
+      - name: Verify Successor Load Timeout Diagnostics
+        timeout-minutes: 2
+        run: node --test apps/runner/scripts/successor-load-lifecycle.test.mjs
+
       - name: Verify Lock Result Publication Ten Times Under Windows Load
         if: github.event_name == 'workflow_dispatch' && inputs.lock_result_publication_load && startsWith(matrix.os, 'windows-')
         timeout-minutes: 10

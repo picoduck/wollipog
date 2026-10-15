@@ -701,7 +701,7 @@ type SuccessorRaceOptions = {
 };
 
 async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOptions = {}) {
-  const root = mkdtempSync(join(tmpdir(), "wollipog-provider-home-process-race-"));
+  const root = mkdtempSync(join(process.env.WOLLIPOG_SUCCESSOR_FIXTURE_PARENT ?? tmpdir(), "wollipog-provider-home-process-race-"));
   const home = join(root, "home");
   const staging = join(root, "staging");
   const start = join(root, "start");
@@ -886,6 +886,10 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
         child.closeObserved = true;
         state.closed = true; state.code = code; state.signal = signal;
       });
+      // Advisory evidence only: a PID can be reused after the fixture dies.
+      writeFileSync(join(root, "contenders.json"), JSON.stringify({
+        version: 1, contenders: states.map((entry) => ({ pid: entry.child.pid, detached: process.platform !== "win32" })),
+      }));
     }
     // Windows measurements exceeded five seconds during both setup and actual
     // acquisition/verification. Each phase gets a separate finite ten-second bound;
