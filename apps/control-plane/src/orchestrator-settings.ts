@@ -5,6 +5,7 @@ import {
   canonicalAgentHarnessIdentity,
   exactAgentHarnessIdentityKey,
   isRestartOnlyCodexExec,
+  modelResolutionDrift,
   resolveAgentHarnessRow,
   type AgentCapabilities,
   type AgentHarnessIdentity,
@@ -12,6 +13,7 @@ import {
   type OrchestratorCampaignOverrides,
   type OrchestratorCampaignPolicy,
   type OrchestratorChildHarnessAgent,
+  type OrchestratorChildModelMachine,
   type OrchestratorDefaults,
   type OrchestratorExecutionDefaults,
   type OrchestratorPolicySource,
@@ -306,6 +308,7 @@ export class OrchestratorSettings {
       runner.agents.filter((agent) => agent.available === true && agent.capabilities && !isRestartOnlyCodexExec(agent))
         .map((agent) => ({
           runnerId: runner.runnerId,
+          machineName: machineName(runner),
           identity: agentHarnessIdentityFor(agent),
           name: agent.name,
           capabilities: agent.capabilities!,
@@ -338,6 +341,18 @@ export class OrchestratorSettings {
     const status = installations.length > 0 && (!fixed || compatibleInstallations > 0)
       ? "available" as const
       : "unavailable" as const;
+    // Per Machine, not per installation: a Machine can run children when any of its rows can (#3248).
+    const machines = new Map<string, { name: string; supported: boolean }>();
+    for (const installation of installations) {
+      const machine = machines.get(installation.runnerId) ?? { name: installation.machineName, supported: false };
+      machine.supported ||= installationSupportsBehavior(installation, defaults.behavior);
+      machines.set(installation.runnerId, machine);
+    }
+    const unsupported = [...machines.values()].filter((machine) => !machine.supported).map((machine) => machine.name).sort();
+    const childModelDrift = defaults.behavior.childModel ? modelResolutionDrift(installations
+      .filter((installation) => !defaults.behavior.childHarness || sameHarness(installation.identity, defaults.behavior.childHarness))
+      .map((installation) => ({ machineName: installation.machineName, models: installation.capabilities.models })),
+    defaults.behavior.childModel) : null;
     return {
       harnesses,
       models,
@@ -349,6 +364,12 @@ export class OrchestratorSettings {
       ...(status === "unavailable" ? {
         reason: installations.length === 0 ? NO_MACHINE_REASON : UNSUPPORTED_COMBINATION_REASON,
       } : {}),
+      ...(fixed && machines.size > 0 ? { machineSupport: {
+        supported: machines.size - unsupported.length,
+        total: machines.size,
+        unsupportedMachines: unsupported,
+      } } : {}),
+      ...(childModelDrift ? { childModelDrift } : {}),
     };
   }
 
@@ -424,8 +445,35 @@ export function childHarnessAgents(
       : resolveAgentHarnessRow(runner.agents.filter((candidate) => candidate.id === fixed.agentId), fixed);
     return {
       runnerId: runner.runnerId,
-      machineName: runner.displayName || runner.hostname || runner.runnerId,
+      machineName: machineName(runner),
       agentId: agent && childHarnessAdmits(policy, agentHarnessIdentityFor(agent)) ? agent.id : null,
     };
   }).sort((left, right) => left.machineName.localeCompare(right.machineName) || left.runnerId.localeCompare(right.runnerId));
+}
+
+function machineName(runner: Pick<RunnerView, "displayName" | "hostname" | "runnerId">): string {
+  return runner.displayName || runner.hostname || runner.runnerId;
+}
+
+/** Whether each online Machine can run children with the campaign's fixed Child Model and Effort,
+ * through a row its Child Harness admits (#3248). Absent while both are Automatic. */
+export function childModelMachines(
+  policy: Pick<OrchestratorCampaignPolicy, "behavior" | "childHarnessMatch">,
+  runners: readonly RunnerView[],
+): OrchestratorChildModelMachine[] | undefined {
+  if (policy.behavior.childModel === null && policy.behavior.childEffort === null) return undefined;
+  // The harness is checked by childHarnessAdmits, which knows how this campaign matches it.
+  const pair = { ...policy.behavior, childHarness: null };
+  return runners.filter((runner) => runner.status === "online").map((runner) => ({
+    runnerId: runner.runnerId,
+    machineName: machineName(runner),
+    supported: runner.agents.some((agent) => {
+      // A row the Machine's installation choice excludes cannot launch (getAgentLaunch refuses it).
+      if (agent.available !== true || !agent.capabilities || isRestartOnlyCodexExec(agent) ||
+          agent.installation?.selection === "other" || agent.harnessSelectionBlocked === true) return false;
+      const identity = agentHarnessIdentityFor(agent);
+      return childHarnessAdmits(policy, identity) &&
+        installationSupportsBehavior({ identity, capabilities: agent.capabilities }, pair);
+    }),
+  })).sort((left, right) => left.machineName.localeCompare(right.machineName) || left.runnerId.localeCompare(right.runnerId));
 }

@@ -505,6 +505,55 @@ test("each Child Harness option names the harness once and says how many machine
   }
 });
 
+test("the saved combination names the machines that can't run it, and a model that differs between machines offers a pinned one (#3248)", async () => {
+  const current = settings();
+  current.defaults.behavior.childModel = "sol";
+  current.capabilities.machineSupport = { supported: 1, total: 2, unsupportedMachines: ["Desktop"] };
+  current.capabilities.childModelDrift = {
+    modelId: "sol",
+    machines: [{ machineName: "Desktop", displayName: "Sol" }, { machineName: "Laptop", displayName: "Sol 2" }],
+    pinned: [{ modelId: "sol-1", displayName: "Sol" }, { modelId: "sol-2", displayName: "Sol 2" }],
+  };
+  // The pinned id is a real choice on these machines.
+  for (const catalog of [current.capabilities, ...current.capabilities.harnesses!]) {
+    catalog.models = [...catalog.models, { id: "sol-1", displayName: "Sol", efforts: ["high"] }];
+    catalog.supportedPairs = [...catalog.supportedPairs!, { modelId: "sol-1", effortLevels: ["high"] }];
+  }
+  const { transport, writes } = server(current);
+  const view = await mount(panel(transport));
+  try {
+    const { container } = view;
+    const notices = [...container.querySelectorAll(".notice")].map((node) => node.textContent ?? "");
+    const support = notices.find((text) => text.includes("Not Every Machine Can Run These Children"));
+    assert.ok(support, notices.join(" | "));
+    assert.match(support, /1 of 2 connected machines support the saved Child Harness, Child Model and Child Effort together\. Children can't start on Desktop\./);
+    const drift = notices.find((text) => text.includes("Child Model Differs Between Machines"));
+    assert.ok(drift, notices.join(" | "));
+    assert.match(drift, /“sol” is Sol on Desktop and Sol 2 on Laptop\. Choose a specific model so every child runs the same one\./);
+    assert.doesNotMatch(`${support} ${drift}`, /runner|installation|advertises/i);
+
+    await act(async () => button(container, "Use Sol")!.click());
+    assert.equal(button(container, "Use Sol"), undefined, "the warning describes the saved model, so it leaves with the change");
+    await act(async () => button(container.querySelector(".save-bar")!, "Save Defaults")!.click());
+    await settle();
+    assert.equal(writes[0]?.defaults.behavior.childModel, "sol-1", "the action saves the pinned id");
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("with every machine supporting the saved combination and one resolution, neither notice shows (#3248)", async () => {
+  const current = settings();
+  current.defaults.behavior.childModel = "sol";
+  current.capabilities.machineSupport = { supported: 2, total: 2, unsupportedMachines: [] };
+  const view = await mount(panel(server(current).transport));
+  try {
+    assert.doesNotMatch(view.container.textContent ?? "", /Not Every Machine Can Run These Children|Child Model Differs Between Machines/);
+  } finally {
+    await view.cleanup();
+  }
+});
+
 test("runner discovery refreshes capabilities without discarding unsaved defaults", async () => {
   const { transport, state } = server(settings());
   const view = await mount(panel(transport, { revision: 1 }));

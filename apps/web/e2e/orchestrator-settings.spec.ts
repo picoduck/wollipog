@@ -166,6 +166,19 @@ test("with no machine reporting models and efforts, the warning leads Children",
   await expect(page.locator(".form-error")).toHaveCount(0);
 });
 
+test("the saved combination names the machine that can't run it, and Use Opus 5 replaces a drifting alias (#3248)", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  await page.goto("/settings-rows-e2e.html?theme=light&section=orchestrator&orchestrator=machines");
+  const support = page.locator(".notice.t-warning", { hasText: "Not Every Machine Can Run These Children" });
+  await expect(support).toContainText("1 of 2 connected machines support the saved Child Harness, Child Model and Child Effort together. Children can't start on Desktop.");
+  const drift = page.locator(".notice.t-warning", { hasText: "Child Model Differs Between Machines" });
+  await expect(drift).toContainText("“opus” is Opus 5 on Desktop and Opus 5.5 on Laptop.");
+  await page.screenshot({ path: testInfo.outputPath("orchestrator-machine-support.png"), fullPage: true });
+  await drift.getByRole("button", { name: "Use Opus 5" }).click();
+  await expect(page.getByRole("button", { name: /^Child Model: Opus 5/ })).toBeVisible();
+  await expect(drift).toHaveCount(0);
+});
+
 test("Orchestrator settings retain a retired model and mark it at Child Model", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1280, height: 1000 });
   await page.goto("/settings-rows-e2e.html?theme=light&section=orchestrator&defaults=agent-repair");

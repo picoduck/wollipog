@@ -1,9 +1,11 @@
-import type {
-  AgentDriverKind,
-  AgentHarnessDefaultConfig,
-  AgentHarnessDefaultOption,
-  AgentModel,
+import {
+  modelResolutionDrift,
+  type AgentDriverKind,
+  type AgentHarnessDefaultConfig,
+  type AgentHarnessDefaultOption,
+  type AgentModel,
 } from "@wollipog/protocol";
+import { modelDriftText } from "../agent-presentation.js";
 import { effortLabel, permissionModeLabel, titleCaseLabel } from "../format.js";
 
 /**
@@ -145,10 +147,13 @@ export function agentDefaultsDescription(option: AgentHarnessDefaultOption): str
   const summary = !listed
     ? "Uses Wollipog defaults"
     : preference?.model ? listed : `${listed.charAt(0).toUpperCase()}${listed.slice(1)}`;
-  if (option.compatibleInstallations === 0) return `${summary}. Not available on any machine.`;
+  // A saved alias that resolves to different models on different machines says so (#3248).
+  const drift = preference?.model ? modelResolutionDrift(option.installations, preference.model) : null;
+  const driftText = drift ? ` ${modelDriftText(drift)}` : "";
+  if (option.compatibleInstallations === 0) return `${summary}. Not available on any machine.${driftText}`;
   if (option.compatibleInstallations < option.installations.length) {
     const total = option.installations.length;
-    return `${summary}. Available on ${option.compatibleInstallations} of ${total} machine${total === 1 ? "" : "s"}.`;
+    return `${summary}. Available on ${option.compatibleInstallations} of ${total} machine${total === 1 ? "" : "s"}.${driftText}`;
   }
-  return summary;
+  return drift ? `${summary}.${driftText}` : summary;
 }

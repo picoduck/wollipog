@@ -7,7 +7,7 @@ import {
   type OrchestratorSettingsView,
   type DelegatableWorkflowDecisionCategory,
 } from "@wollipog/protocol";
-import { agentHarnessMachinesDescription, agentHarnessOptionLabel } from "../agent-presentation.js";
+import { agentHarnessMachinesDescription, agentHarnessOptionLabel, modelDriftText, pinnedModelChoices } from "../agent-presentation.js";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { effortLabel } from "../format.js";
@@ -391,6 +391,26 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
   const noInstallations = capabilities?.status === "unavailable" && capabilities.installations === 0;
   // Under each disabled select, pointing at the notice rather than repeating its sentences.
   const noInstallationsReason = noInstallations ? "Unavailable until a connected machine reports models and efforts." : undefined;
+  // Machine support and model drift describe the saved combination, so they show only while the
+  // draft still holds it (#3248).
+  const savedCombination = Boolean(view && draft &&
+    (view.defaults.behavior.childHarness ? agentHarnessIdentityKey(view.defaults.behavior.childHarness) : null) ===
+      (draft.behavior.childHarness ? agentHarnessIdentityKey(draft.behavior.childHarness) : null) &&
+    view.defaults.behavior.childModel === draft.behavior.childModel &&
+    view.defaults.behavior.childEffort === draft.behavior.childEffort);
+  const machineSupport = savedCombination ? capabilities?.machineSupport : undefined;
+  const partialSupport = machineSupport && machineSupport.supported > 0 && machineSupport.supported < machineSupport.total
+    ? machineSupport : undefined;
+  const modelDrift = savedCombination ? capabilities?.childModelDrift : undefined;
+  const chooseModel = (childModel: string | null) => setDraft((current) => {
+    if (!current) return current;
+    const effort = current.behavior.childEffort;
+    const effortCompatible = !effort || candidateHarnesses.some((harness) =>
+      childModel
+        ? harness.supportedPairs.some((pair) => pair.modelId === childModel && pair.effortLevels.includes(effort))
+        : harness.effortLevels.includes(effort));
+    return { ...current, behavior: { ...current.behavior, childModel, ...(!effortCompatible ? { childEffort: null } : {}) } };
+  });
 
   const save = async () => {
     if (!draft || busy || invalidCount > 0) return;
@@ -471,7 +491,22 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
         >Open Connections</a>}
       >
         {capabilityNotice}
-      </Notice>}
+      </Notice> || (partialSupport || modelDrift) && <>
+        {partialSupport && <Notice tone="warning" compact title="Not Every Machine Can Run These Children">
+          {`${partialSupport.supported} of ${partialSupport.total} connected machines support the saved Child Harness, Child Model and Child Effort together. Children can't start on ${partialSupport.unsupportedMachines.join(", ")}.`}
+        </Notice>}
+        {modelDrift && <Notice
+          tone="warning"
+          compact
+          title="Child Model Differs Between Machines"
+          actions={pinnedModelChoices(modelDrift).length ? <>{pinnedModelChoices(modelDrift).slice(0, 3).map((choice) =>
+            <button key={choice.modelId} type="button" className="btn sm" onClick={() => chooseModel(choice.modelId)}>
+              Use {choice.displayName}
+            </button>)}</> : undefined}
+        >
+          {`${modelDriftText(modelDrift)} Choose a specific model so every child runs the same one.`}
+        </Notice>}
+      </>}
     >
       <SelectRow
         title="Child Harness"
@@ -502,18 +537,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
         disabled={noInstallations && !selectedModel}
         disabledReason={noInstallationsReason}
         error={modelError}
-        onChange={(value) => {
-          const childModel = value === AUTO ? null : value;
-          const effortCompatible = !draft.behavior.childEffort || candidateHarnesses.some((harness) =>
-            childModel
-              ? harness.supportedPairs.some((pair) => pair.modelId === childModel &&
-                pair.effortLevels.includes(draft.behavior.childEffort!))
-              : harness.effortLevels.includes(draft.behavior.childEffort!));
-          setDraft((current) => current ? {
-            ...current,
-            behavior: { ...current.behavior, childModel, ...(!effortCompatible ? { childEffort: null } : {}) },
-          } : current);
-        }}
+        onChange={(value) => chooseModel(value === AUTO ? null : value)}
       />
       <SelectRow
         title="Child Effort"

@@ -257,6 +257,8 @@ const harnessDefaultsTransport: ApiTransport = {
       const drifted = params.get("defaults") === "agent-repair";
       // `orchestrator=unavailable`: no connected machine reports child capabilities (#3026's warning);
       // `orchestrator=save-fails`: every save is refused, for the save bar's error state.
+      // `orchestrator=machines`: two connected machines; the saved Claude Code combination runs on
+      // only one, and its `opus` alias is a different model on each (#3248).
       const mode = params.get("orchestrator");
       if (init?.method === "PUT") {
         if (mode === "save-fails") {
@@ -267,6 +269,37 @@ const harnessDefaultsTransport: ApiTransport = {
       }
       const defaults = orchestratorSaved ? structuredClone(orchestratorSaved) : structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS);
       if (drifted) defaults.behavior.childModel = "retired-model";
+      if (mode === "machines" && !orchestratorSaved) {
+        defaults.behavior.childHarness = { agentId: "claude-code", driver: "claude-code", context: { kind: "native" } };
+        defaults.behavior.childModel = "opus";
+        defaults.behavior.childEffort = "max";
+      }
+      if (mode === "machines") {
+        const models = [
+          { id: "opus", displayName: "Opus 5.5", efforts: ["high", "max"] },
+          { id: "claude-opus-5", displayName: "Opus 5", efforts: ["high", "max"] },
+        ];
+        return new Response(JSON.stringify({
+          defaults,
+          source: "user_default",
+          capabilities: {
+            harnesses: [{
+              agentId: "claude-code", driver: "claude-code", context: { kind: "native" }, name: "Claude Code",
+              models, effortLevels: ["high", "max"],
+              supportedPairs: models.map((model) => ({ modelId: model.id, effortLevels: model.efforts })),
+              installations: 2, machines: 2,
+            }],
+            models, effortLevels: ["high", "max"],
+            installations: 2, compatibleInstallations: 1, status: "available",
+            machineSupport: { supported: 1, total: 2, unsupportedMachines: ["Desktop"] },
+            ...(defaults.behavior.childModel === "opus" ? { childModelDrift: {
+              modelId: "opus",
+              machines: [{ machineName: "Desktop", displayName: "Opus 5" }, { machineName: "Laptop", displayName: "Opus 5.5" }],
+              pinned: [{ modelId: "claude-opus-5", displayName: "Opus 5" }],
+            } } : {}),
+          },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
       if (mode === "unavailable") {
         return new Response(JSON.stringify({
           defaults,

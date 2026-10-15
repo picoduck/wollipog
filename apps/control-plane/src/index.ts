@@ -202,7 +202,7 @@ import {
 import { registerSessionNamingRoutes } from "./session-naming-route.js";
 import { AgentHarnessDefaultsSettings } from "./agent-harness-defaults.js";
 import { registerAgentHarnessDefaultsRoutes } from "./agent-harness-defaults-route.js";
-import { OrchestratorSettings, childHarnessAgents } from "./orchestrator-settings.js";
+import { OrchestratorSettings, childHarnessAgents, childModelMachines } from "./orchestrator-settings.js";
 import { registerArtifactUploadSettingsRoutes } from "./artifact-upload-settings-route.js";
 import { registerOrchestratorSettingsRoutes } from "./orchestrator-settings-route.js";
 import { registerRunnerAttestationRoute } from "./runner-attestation-route.js";
@@ -3936,11 +3936,14 @@ app.get("/api/sessions/:id/orchestrator-campaign", async (req, reply) => {
   }
   const projection = await svc.campaignProjectionWithHistory(id);
   const policy = db.getSession(id)?.orchestratorPolicy;
-  const agents = policy ? childHarnessAgents(policy, db.listRunnersForPrincipal(principal)) : undefined;
+  const runners = policy ? db.listRunnersForPrincipal(principal) : [];
+  const agents = policy ? childHarnessAgents(policy, runners) : undefined;
+  const modelMachines = policy ? childModelMachines(policy, runners) : undefined;
   return respond(reply, projection.ok && projection.data
     ? { ...projection, data: {
       ...withCampaignHoldAdviceFor(db, principal, projection.data),
       ...(agents ? { childHarnessAgents: agents } : {}),
+      ...(modelMachines ? { childModelMachines: modelMachines } : {}),
     } }
     : projection);
 });
