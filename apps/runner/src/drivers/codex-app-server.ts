@@ -934,12 +934,22 @@ export class CodexAppServerDriver implements Driver {
         event: "codex_diagnostic_discarded", reason: "oversized_line",
       }));
     }, 64 * 1024);
+    let discardingAuthenticationTail = false;
     child.stderr.on("data", (text: string) => {
       if (this.disposed || this.child !== child) return;
+      if (discardingAuthenticationTail) {
+        const newline = text.indexOf("\n");
+        if (newline < 0) return;
+        text = text.slice(newline + 1);
+        discardingAuthenticationTail = false;
+      }
       // Retain the previous whole-chunk authentication recognition: credential context may
       // occupy a different line from 401/Unauthorized. Never emit any part of a matched chunk.
       if (isProviderAuthenticationFailure(text)) {
         stderrLines.reset();
+        // A suppressed chunk can end inside a credential. Drop its continuation without
+        // buffering or reclassifying it, including on exit, until the line boundary returns.
+        discardingAuthenticationTail = !text.endsWith("\n");
         this.signalAuthenticationFailure();
         if (codexHttpFallbackWarning(text.trim())) this.reportInferenceHttpFallback("unattributed");
         return;
