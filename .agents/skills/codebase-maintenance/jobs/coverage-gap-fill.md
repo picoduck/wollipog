@@ -50,7 +50,18 @@ empty `lcov.info`, nothing on stderr, and every test reported passing, which lef
 diagnose; the TAP stream is the record that survives that failure.
 
 If all tests pass but coverage reporting fails, inspect the TAP warning before classifying any
-coverage gaps. One run reported `Could not report code coverage` with an unterminated JSON string
+coverage gaps. For `ERR_SOURCE_MAP_MISSING_SOURCE` naming a child script in a deleted temporary
+directory, inspect the fixture to identify the owning test file, then confirm the failure with
+one coverage run of that test file using the same coverage options and separate TAP/lcov
+destinations. Use this focused diagnostic instead of the full-suite retry and raw V8 collection
+below. A child can inherit `NODE_V8_COVERAGE`, then lose its script to fixture cleanup before
+reporting. One run reproduced this in `session-store-lock.test.ts`; repeating the entire suite
+cost about five minutes and 6 GiB of raw coverage without producing a report. Preserve the
+focused run's warning, exit status, test results, and lcov size. If it reproduces, report coverage
+as unavailable and stop coverage-based triage; do not weaken the fixture or infer coverage gaps
+from passing tests. If it does not reproduce, use the bounded diagnostic retry below.
+
+One run reported `Could not report code coverage` with an unterminated JSON string
 at position 1310720 and produced an empty lcov file. Retry the coverage command at most once,
 using distinct reporter destinations such as `<scratch>/tap-retry.txt` and
 `<scratch>/lcov-retry.info`, and adding `NODE_V8_COVERAGE=<scratch>/v8` to retain raw V8 coverage
