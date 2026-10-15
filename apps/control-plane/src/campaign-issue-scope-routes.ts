@@ -3,13 +3,15 @@ import type { ControlPlaneDb } from "./db.js";
 import type { AuthPrincipal } from "./identity.js";
 import type { SessionsService } from "./sessions.js";
 import { scopeView } from "./campaign-issue-scope.js";
+import { failureBody } from "./capability-refusal.js";
 
 export function registerCampaignIssueScopeRoutes(app: FastifyInstance, deps: {
   db: ControlPlaneDb; svc: SessionsService; requestPrincipal(req: FastifyRequest): AuthPrincipal | null;
 }): void {
   const { db, svc, requestPrincipal } = deps;
-  const respond = (reply: { code(n:number): {send(value:unknown):unknown} }, result: {ok:boolean;status:number;data?:unknown;error?:string}) =>
-    reply.code(result.status).send(result.ok ? result.data : {error:result.error});
+  // A runner-floor refusal keeps its versions beside the sentence (#3254).
+  const respond = (reply: { code(n:number): {send(value:unknown):unknown} }, result: Parameters<typeof failureBody>[0] & {ok:boolean;status:number;data?:unknown}) =>
+    reply.code(result.status).send(result.ok ? result.data : failureBody(result));
 app.get("/api/sessions/:id/campaign/issue-scope", async (req, reply) => {
   const { id } = req.params as { id: string };
   const principal = requestPrincipal(req);
