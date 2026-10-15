@@ -6,15 +6,22 @@ export type LeaseWorkerOperation =
   | { method: "release"; home: string }
   | { method: "cancel"; home: string; completedId: string }
   | { method: "close" };
-export type LeaseWorkerError = "busy" | "unavailable" | "refusal" | "cancelled" | "cancel_release_failed" | "expired";
+export type LeaseWorkerError = "busy" | "unavailable" | "foreign_owner" | "foreign_host" | "refusal" | "cancelled" | "cancel_release_failed" | "expired";
+/** Fixed, path-free texts: only the code crosses the worker boundary, never the registry's message. */
 export const LEASE_WORKER_ERRORS: Record<LeaseWorkerError, string> = {
   busy: "Provider HOME is already in use; retry after the current owner or publication finishes.",
   unavailable: "Provider-HOME lease helper unavailable; preserve all evidence and restore the fixed helper and executable staging directory before retrying.",
+  foreign_owner: "Provider HOME has a stale lease from another runner or control plane whose recorded process has exited; Wollipog does not take over another owner's lease automatically. Use a separate provider account HOME for this runner, or quarantine the entire provider-home-leases-v1 directory only after proving no provider process or runner uses this HOME, and do not remove individual records.",
+  foreign_host: "Provider HOME is leased by a runner on another host; use a separate provider account HOME or an isolated OS account for this runner, and preserve all lease evidence.",
   refusal: "Provider-HOME lease could not be proved; preserve all evidence and retry only with the exact private registry; quarantine the entire lease directory only after proving this HOME unused, and do not remove individual records.",
   cancelled: "Provider-HOME lease acquisition was cancelled.",
   cancel_release_failed: "Cancelled provider-HOME acquisition could not be exactly released; preserve all evidence and restart only after proving the HOME unused.",
   expired: "Provider-HOME lease operation exceeded its finite deadline; preserve all evidence.",
 };
+/** A worker refusal with its typed code, so callers can choose a recovery action without parsing text. */
+export class ProviderHomeLeaseError extends Error {
+  constructor(readonly code: LeaseWorkerError) { super(LEASE_WORKER_ERRORS[code]); }
+}
 export interface LeaseWorkerExecute {
   kind: "execute"; epoch: string; id: string; deadline: number; operation: LeaseWorkerOperation;
 }

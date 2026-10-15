@@ -19,7 +19,7 @@ import { join } from "node:path";
 import { after, test, type TestContext } from "node:test";
 const previousMask = process.umask(0o077);
 after(() => process.umask(previousMask));
-import { providerLaunchNeedsSharedHomeLease, ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
+import { providerHomeLeaseRefusalKind, providerLaunchNeedsSharedHomeLease, ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
 import { killTreeAndWait, type AgentProcess, type SpawnIsolation } from "./spawn.js";
 
 const OWNER_A = "a".repeat(64);
@@ -553,6 +553,8 @@ test("stale leases with a foreign owner or host and live leases all fail closed"
       assert.ok(String(error).includes(leasePaths(home).lock), "the operator can locate the refused state");
       assert.match(String(error), /quarantine the entire.*do not remove individual records/);
       assert.ok(!String(error).includes(OWNER_A) && !String(error).includes(OWNER_B));
+      assert.equal(providerHomeLeaseRefusalKind(error),
+        scenario === "owner" ? "foreign_owner" : scenario === "host" ? "foreign_host" : "busy");
       return true;
     });
     assert.deepEqual(readdirSync(leasePaths(home).lock), ["lease.json"]);

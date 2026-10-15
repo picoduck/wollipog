@@ -4,7 +4,7 @@ import { getAsset, isSea } from "node:sea";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
 import { providerHomeLeaseTarget, type ProviderHomeLeaseOptions, type ProviderHomeLeaseRequest } from "./provider-home-lease.js";
-import { boundedLeaseWorkerFrame, leaseWorkerFrameKeys, LEASE_WORKER_ASSET, LEASE_WORKER_ERRORS, LEASE_WORKER_LIMITS, validLeaseWorkerOperation, type LeaseWorkerOperation, type LeaseWorkerReply } from "./provider-home-lease-worker-protocol.js";
+import { boundedLeaseWorkerFrame, leaseWorkerFrameKeys, LEASE_WORKER_ASSET, LEASE_WORKER_ERRORS, LEASE_WORKER_LIMITS, ProviderHomeLeaseError, validLeaseWorkerOperation, type LeaseWorkerOperation, type LeaseWorkerReply } from "./provider-home-lease-worker-protocol.js";
 
 type Diagnostic = Parameters<NonNullable<ProviderHomeLeaseOptions["onDiagnostic"]>>[0];
 type WorkerDiagnostic = Diagnostic |
@@ -70,9 +70,12 @@ export class AsyncProviderHomeLeaseRegistry {
         !Number.isSafeInteger(this.pendingLimit) || this.pendingLimit < 1 || this.pendingLimit > LEASE_WORKER_LIMITS.pending) throw new Error("invalid lease worker test budget");
   }
 
-  async acquire(request: ProviderHomeLeaseRequest, cancellation: LeaseCancellation = {}): Promise<void> {
+  /** Returns the leased HOME, or null when the request needs no lease. */
+  async acquire(request: ProviderHomeLeaseRequest, cancellation: LeaseCancellation = {}): Promise<string | null> {
     const target = providerHomeLeaseTarget(request);
-    if (target) await this.acquireHome(target.home, target.provider, cancellation);
+    if (!target) return null;
+    await this.acquireHome(target.home, target.provider, cancellation);
+    return target.home;
   }
 
   acquireHome(home: string, provider = "skills", cancellation: LeaseCancellation = {}): Promise<boolean> {
@@ -218,7 +221,7 @@ export class AsyncProviderHomeLeaseRegistry {
       operationDurationMs: Math.round(finishedAt - pending.startedAt!),
       outcome: pending.cancelled ? "cancelled" : reply.ok ? "completed" : "refused" });
     if (pending.cancelled) pending.reject(new Error(LEASE_WORKER_ERRORS.cancelled));
-    else if (!reply.ok) pending.reject(new Error(LEASE_WORKER_ERRORS[reply.error!]));
+    else if (!reply.ok) pending.reject(new ProviderHomeLeaseError(reply.error!));
     else pending.resolve(reply.value);
     this.pump();
   }

@@ -1,5 +1,5 @@
 import { parentPort, workerData } from "node:worker_threads";
-import { ProviderHomeLeaseRegistry, type ProviderHomeLeaseOptions } from "./provider-home-lease.js";
+import { ProviderHomeLeaseRegistry, providerHomeLeaseRefusalKind, type ProviderHomeLeaseOptions } from "./provider-home-lease.js";
 import { boundedLeaseWorkerFrame, leaseWorkerFrameKeys, LEASE_WORKER_LIMITS, validLeaseWorkerOperation, type LeaseWorkerExecute, type LeaseWorkerAccept, type LeaseWorkerError, type LeaseWorkerReply } from "./provider-home-lease-worker-protocol.js";
 
 /** Only the fixed source/SEA entry starts this worker; there is no public RPC/CLI entry. */
@@ -19,6 +19,8 @@ export function runProviderHomeLeaseWorker(): void {
     port.postMessage(reply);
   }
   const fail = (error: unknown): LeaseWorkerError => {
+    const kind = providerHomeLeaseRefusalKind(error);
+    if (kind === "busy" || kind === "foreign_owner" || kind === "foreign_host") return kind;
     const message = error instanceof Error ? error.message : "";
     return message.includes("helper unavailable") ? "unavailable" : /already in use|publication is in progress/u.test(message) ? "busy" : "refusal";
   };

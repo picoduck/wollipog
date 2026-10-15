@@ -8,6 +8,8 @@ import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import fc from "fast-check";
 import { AsyncProviderHomeLeaseRegistry } from "./provider-home-lease-async.js";
+import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
+import { LEASE_WORKER_ERRORS, ProviderHomeLeaseError } from "./provider-home-lease-worker-protocol.js";
 
 function worker(data: Record<string, unknown>): Worker {
   return new Worker(`require(${JSON.stringify(createRequire(import.meta.url).resolve("tsx/cjs"))});require(${JSON.stringify(fileURLToPath(new URL("./provider-home-lease-worker.ts", import.meta.url)))});`,
@@ -128,4 +130,27 @@ test("generated reference and cancellation sequences preserve the independent ow
       assert.equal(await registry.close(), true);
     } finally { await registry.close(); rmSync(root, { recursive: true, force: true }); }
   }), { numRuns: process.platform === "win32" ? 3 : 15, seed: 2317 });
+});
+
+test("foreign-owner and foreign-host refusals keep their typed code across the worker boundary", async t => {
+  // Above every platform's pid_max, so the recorded holder is provably gone.
+  const deadPid = 2 ** 22 + 1;
+  for (const scenario of ["foreign_owner", "foreign_host"] as const) {
+    const root = mkdtempSync(join(tmpdir(), `wollipog-async-${scenario}-`)), home = join(root, "home");
+    mkdirSync(home);
+    const previous = new ProviderHomeLeaseRegistry("b".repeat(64), {
+      pid: deadPid,
+      ...(scenario === "foreign_host" ? { hostname: "another-host.invalid" } : {}),
+    });
+    assert.equal(previous.acquireHome(home, "claude"), true); // never released: the runner was replaced
+    const registry = new AsyncProviderHomeLeaseRegistry("a".repeat(64));
+    t.after(async () => { await registry.close(); rmSync(root, { recursive: true, force: true }); });
+    await assert.rejects(registry.acquireHome(home, "claude"), (error: unknown) => {
+      assert.ok(error instanceof ProviderHomeLeaseError);
+      assert.equal(error.code, scenario);
+      assert.equal(error.message, LEASE_WORKER_ERRORS[scenario]);
+      assert.ok(!error.message.includes(root), "no lock path crosses the boundary");
+      return true;
+    });
+  }
 });

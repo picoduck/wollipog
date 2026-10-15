@@ -46,6 +46,22 @@ The existing automatic-revalidation timeout cancels only its pending wait and ke
 result. Cancelling or dismissing recovery aborts the exact pending preparation; unrelated failures
 still propagate through the existing error handling.
 
+A refusal crosses the boundary as a fixed code, never as the registry's message, so no lock path
+reaches the parent. The codes are distinct, and callers receive a `ProviderHomeLeaseError` carrying
+the code:
+
+- `busy`: the recorded process is alive, or a publication is in progress.
+- `foreign_owner`: a stale lease from another runner or control plane whose recorded process is gone.
+- `foreign_host`: a lease recorded on another host.
+- `unavailable`: the helper is unavailable.
+- `refusal`: everything else the registry cannot prove.
+
+A foreign-owner lease is still never taken over automatically. Its text names that cause and the
+safe options, instead of the generic "could not be proved" refusal.
+
+A caller whose acquisition was granted but whose launch or skill transaction became stale while it
+waited drops that one reference before failing, rather than holding it until runner shutdown.
+
 A missing, late, malformed, duplicate or mismatched completion, failed cancellation unwind, worker
 error or unexpected exit poisons the lane. It rejects further work, retains canonical evidence and
 never transparently creates another registry to reconstruct private authority. Terminating a worker
