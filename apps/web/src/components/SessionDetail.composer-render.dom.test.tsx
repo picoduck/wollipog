@@ -134,8 +134,17 @@ const transcript: SessionEvent["payload"][] = [
 
 let appendEvent: (sessionId: string, payload: SessionEvent["payload"]) => void = () => {};
 
-function EventSeeder({ sessionId, payloads }: { sessionId: string; payloads: SessionEvent["payload"][] }) {
+function EventSeeder({ sessionId, payloads, fixture }: {
+  sessionId: string;
+  payloads: SessionEvent["payload"][];
+  fixture: { historyReady: boolean };
+}) {
   const ready = useStoreSelector((state) => state.sessions.has(sessionId));
+  const historyReady = useStoreSelector((state) => {
+    const history = state.eventHistory.get(sessionId);
+    return history?.everComplete === true && !history.refreshing && history.error === null;
+  });
+  React.useEffect(() => { fixture.historyReady = historyReady; }, [fixture, historyReady]);
   const { dispatch } = useStoreActions();
   const seq = React.useRef(0);
   appendEvent = (target, payload) => {
@@ -168,9 +177,21 @@ async function mount(client: Partial<ApiClient> = {}) {
     push() {},
     listen: () => () => {},
   };
+  const fixture = { historyReady: false };
   const apiClient = {
     ...api,
     session: () => new Promise<never>(() => {}),
+    // History recovery must finish in the fixture. Leaving the real API here lets its late
+    // rejection change anchorRecoveryPending while the typing probes are counting (#3202).
+    getSessionEventTailPage: async (sessionId: string) => ({
+      events: sessionId === first.id
+        ? transcript.map((payload, index) => ({ id: index + 1, sessionId, seq: index + 1, ts: index + 1, payload }))
+        : [],
+      eventEpoch: 0,
+      hasMoreOlder: false,
+      turnAligned: true,
+      cacheComplete: true,
+    }),
     searchWorkspaceReferences: async () => ({ results: [], truncated: false }),
     ...client,
   } as unknown as ApiClient;
@@ -200,7 +221,7 @@ async function mount(client: Partial<ApiClient> = {}) {
     <ApiProvider client={apiClient}>
       <StoreProvider connection={connection} navigation={navigation}>
         <FeedbackProvider>
-          <EventSeeder sessionId={first.id} payloads={transcript} />
+          <EventSeeder sessionId={first.id} payloads={transcript} fixture={fixture} />
           <SessionDetail
             key={sessionId}
             sessionId={sessionId}
@@ -225,6 +246,7 @@ async function mount(client: Partial<ApiClient> = {}) {
     pods: [],
   }));
   await settle();
+  assert.equal(fixture.historyReady, true, "history recovery completes before render counting begins");
   const composer = () => {
     const element = mountPoint.querySelector(".composer-input") as HTMLTextAreaElement | null;
     assert.ok(element, "the composer is mounted");
