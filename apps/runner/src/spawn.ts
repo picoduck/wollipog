@@ -873,6 +873,15 @@ export function terminateDescendantBoundariesAfterPendingKills(): void {
   }));
 }
 
+/** True only when `child`'s complete process tree is proven gone, which a lease release needs.
+ * The POSIX boundary terminates every process carrying the child's marker and reports survivors;
+ * it is idempotent, so a boundary already terminated on close returns that same result. Without a
+ * boundary (Windows, WSL, remote or untracked spawns) only the root's exit is observable, and that
+ * is not a tree proof, so the answer is false. */
+export function provenProcessTreeExit(child: AgentProcess): Promise<boolean> {
+  return child.posixBoundary ? child.posixBoundary.terminate().catch(() => false) : Promise.resolve(false);
+}
+
 /** Kill a process and all of its children, returning exact completion for callers that own one
  * cleanup boundary. Global shutdown still registers the same promise through killTree(). */
 export function killTreeAndWait(child: AgentProcess): Promise<boolean> {
