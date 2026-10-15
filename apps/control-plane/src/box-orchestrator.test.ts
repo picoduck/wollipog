@@ -338,9 +338,11 @@ type TestRuntime = {
   activeCredentialId: string | null;
   activeBinaryVerified: boolean;
   activeBinarySha256?: string | null;
+  occupiedRemotePorts?: Set<number>;
 };
 
 function installRuntime(orchestrator: BoxOrchestrator, runtime: TestRuntime, boxId = "box-0123abcd"): void {
+  runtime.occupiedRemotePorts ??= new Set();
   (orchestrator as unknown as { runtimes: Map<string, TestRuntime> }).runtimes.set(boxId, runtime);
 }
 

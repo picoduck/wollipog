@@ -29,6 +29,20 @@ keep its dashboard-supervised tunnel alive, but does not make that runner indepe
 When the owning control plane or tunnel exits, schedules wait, expire, or select an explicitly
 configured compatible alternate according to their runner policy.
 
+### Remote tunnel ports
+
+The tunnel's remote listener binds a loopback port in `47100`–`47999` on the SSH host, never the
+SSH port. Several control planes can target the same SSH account, and none can see which ports the
+others hold, so each box starts from a random port in that range (distinct from this control plane's
+other boxes). `ExitOnForwardFailure=yes` makes `ssh` exit before the runner starts when the port is
+occupied; the control plane then retries on another port, up to 8 ports in quick succession, without
+disturbing whichever tunnel holds the occupied one. The same recovery runs on reconnect and after a
+control-plane restart, so no replacement Machine entry is needed. If every quick attempt finds its
+port occupied, the box is marked failed with a message that says the runner was installed but the
+tunnel could not be established, and automatic reconnect keeps trying fresh ports at the normal
+backoff. Bootstrap failures are labelled by stage (`SSH connection failed`, `Runner installation
+failed`, `Runner credential deployment failed`) so they are not mistaken for a tunnel failure.
+
 ## Deployment and rollback contract
 
 Bootstrap detects one of four shipped Unix triples: Linux or macOS on x86-64 or ARM64. It resolves
