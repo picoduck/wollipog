@@ -24,10 +24,15 @@ class CountingRegistry {
     return count === 0;
   }
 
-  async acquire(request: { env?: Record<string, string> }, cancellation: LeaseCancellation = {}): Promise<string | null> {
-    const home = request.env?.HOME ?? null;
-    if (home) await this.acquireHome(home, "claude", cancellation);
-    return home;
+  async acquireHomeReference(home: string, provider: string, cancellation: LeaseCancellation = {}) {
+    const first = await this.acquireHome(home, provider, cancellation);
+    let released: Promise<boolean> | undefined;
+    return { first, release: () => released ??= this.releaseHome(home) };
+  }
+
+  async acquireReference(request: { env?: Record<string, string> }, cancellation: LeaseCancellation = {}) {
+    const home = request.env?.HOME;
+    return home ? this.acquireHomeReference(home, "claude", cancellation) : null;
   }
 
   async releaseHome(home: string): Promise<boolean> {

@@ -59,8 +59,13 @@ the code:
 A foreign-owner lease is still never taken over automatically. Its text names that cause and the
 safe options, instead of the generic "could not be proved" refusal.
 
-A caller whose acquisition was granted but whose launch or skill transaction became stale while it
-waited drops that one reference before failing, rather than holding it until runner shutdown.
+Callers that release before shutdown (skill transactions, and a launch or skill acquisition that
+became stale after its grant) use `acquire_reference`. The worker keeps the receipt's exact-entry
+release for that completed acquisition, at most 1024 at once, and `release_reference` names the
+acquisition by its id. Releasing by path would re-resolve the HOME, so a symlink retargeted in
+between could drop another HOME's reference. The handle cannot be redirected: it drops only the
+entry it joined, at most once. Path-based `release` remains only for the provider sign-in supervisor
+(sign-in and removed-account cleanup), which is unchanged here.
 
 A missing, late, malformed, duplicate or mismatched completion, failed cancellation unwind, worker
 error or unexpected exit poisons the lane. It rejects further work, retains canonical evidence and

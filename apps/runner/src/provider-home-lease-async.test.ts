@@ -132,6 +132,24 @@ test("generated reference and cancellation sequences preserve the independent ow
   }), { numRuns: process.platform === "win32" ? 3 : 15, seed: 2317 });
 });
 
+test("a reference handle releases the entry it joined even after its HOME alias is retargeted", async t => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-async-reference-"));
+  const registry = new AsyncProviderHomeLeaseRegistry("a".repeat(64));
+  t.after(async () => { await registry.close(); rmSync(root, { recursive: true, force: true }); });
+  const homeA = join(root, "a"), homeB = join(root, "b"), alias = join(root, "alias");
+  mkdirSync(homeA); mkdirSync(homeB);
+  symlinkSync(homeA, alias);
+  assert.equal(await registry.acquireHome(homeB, "claude"), true, "a running session holds B");
+  const reference = await registry.acquireHomeReference(alias);
+  assert.equal(reference.first, true, "the alias resolved to A when acquired");
+  unlinkSync(alias); symlinkSync(homeB, alias);
+  assert.equal(await reference.release(), true, "A's only reference is dropped");
+  assert.equal(await reference.release(), true, "release is idempotent and performs no second release");
+  assert.equal(await registry.acquireHome(homeA), true, "A has no reference left");
+  assert.equal(await registry.releaseHome(homeA), true);
+  assert.equal(await registry.releaseHome(homeB), true, "B's session reference was never touched");
+});
+
 test("foreign-owner and foreign-host refusals keep their typed code across the worker boundary", async t => {
   // Above every platform's pid_max, so the recorded holder is provably gone.
   const deadPid = 2 ** 22 + 1;

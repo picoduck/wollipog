@@ -191,7 +191,7 @@ import {
   usageWindowRejection,
   type UsageWindowRejection,
 } from "./automatic-provider-account-switch.js";
-import { AsyncProviderHomeLeaseRegistry, type LeaseCancellation } from "./provider-home-lease-async.js";
+import { AsyncProviderHomeLeaseRegistry, type LeaseCancellation, type ProviderHomeReference } from "./provider-home-lease-async.js";
 import { LEASE_WORKER_ERRORS } from "./provider-home-lease-worker-protocol.js";
 import { cleanupPiExternalSession } from "./external/sources.js";
 import {
@@ -4325,7 +4325,7 @@ export class SessionManager {
   /** A standalone Agent TUI bypasses structured-driver isolation but shares provider HOME. */
   async acquireAgentTuiProviderHome(meta: SessionMeta): Promise<void> {
     const epoch = this.agentTuiLaunchEpoch(meta.sessionId);
-    const home = await this.providerHomeLeases?.acquire({
+    const reference = await this.providerHomeLeases?.acquireReference({
       driver: meta.driver,
       command: meta.command,
       context: meta.context,
@@ -4334,52 +4334,58 @@ export class SessionManager {
       this.agentTuiLaunchEpoch(meta.sessionId) === epoch });
     if (this.shuttingDown || !this.sessionCanOpen(meta.sessionId) || this.agentTuiLaunchEpoch(meta.sessionId) !== epoch) {
       // No TUI process exists yet, so the reference this launch just took is safe to drop.
-      if (home) await this.releaseOwnProviderHomeReference(home);
+      if (reference) await this.releaseProviderHomeReference(reference);
       throw new Error("Agent TUI launch changed while waiting for provider-home ownership");
     }
+    // A launched TUI keeps its reference until runner shutdown, as provider processes do.
   }
 
   /** Skill links mutate the same native provider HOME as Claude and Codex launches. Acquire one
-   * reference before reconciliation touches those shared directories. Returns false when this
+   * reference before reconciliation touches those shared directories. Returns null when this
    * runner has no lease registry (nothing was acquired). */
-  async acquireSkillReconciliationProviderHome(home: string, cancellation: LeaseCancellation = {}): Promise<boolean> {
+  async acquireSkillReconciliationProviderHome(
+    home: string,
+    cancellation: LeaseCancellation = {},
+  ): Promise<ProviderHomeReference | null> {
     const isCurrent = () => !this.shuttingDown && !cancellation.signal?.aborted &&
       (cancellation.isCurrent?.() ?? true);
-    if (!this.providerHomeLeases) return false;
-    await this.providerHomeLeases.acquireHome(home, "skills", { ...cancellation, isCurrent });
+    if (!this.providerHomeLeases) return null;
+    const reference = await this.providerHomeLeases.acquireHomeReference(home, "skills", { ...cancellation, isCurrent });
     if (!isCurrent()) {
       // Cancelled after the worker granted the reference: drop it rather than leak it for the
       // rest of the runner's life.
-      await this.releaseOwnProviderHomeReference(home);
+      await this.releaseProviderHomeReference(reference);
       throw new Error("provider-home acquisition was cancelled");
     }
-    return true;
+    return reference;
   }
 
   /** Scope for one skill transaction (reconcile pass, adoption, or recovery restore). Each
    * `acquire` adds one reference and `release` drops exactly those, after the transaction's
-   * filesystem work has finished. Counting is per reference, so a scope can never release a
-   * reference a session, probe, or another scope still holds. */
+   * filesystem work has finished. Each reference is released through its worker-side handle for
+   * the exact registry entry it joined, never by path, so a retargeted HOME alias cannot redirect
+   * the release to a reference a session, probe, or another scope still holds. */
   skillProviderHomeScope(): SkillProviderHomeScope {
-    const held: string[] = [];
+    const held: ProviderHomeReference[] = [];
     let released = false;
     return {
       acquire: async (home) => {
         if (released) throw new Error("skill provider-home scope was already released");
-        if (await this.acquireSkillReconciliationProviderHome(home)) held.push(home);
+        const reference = await this.acquireSkillReconciliationProviderHome(home);
+        if (reference) held.push(reference);
       },
       release: async () => {
         released = true;
-        for (const home of held.splice(0)) await this.releaseOwnProviderHomeReference(home);
+        for (const reference of held.splice(0)) await this.releaseProviderHomeReference(reference);
       },
     };
   }
 
-  /** Drop one reference this runner holds. A failure is logged and the reference stays held, which
-   * is the conservative outcome; shutdown's close() still releases it. */
-  private async releaseOwnProviderHomeReference(home: string): Promise<void> {
+  /** Drop one reference. A failure is logged and the reference stays held, which is the
+   * conservative outcome; shutdown's close() still releases it. */
+  private async releaseProviderHomeReference(reference: ProviderHomeReference): Promise<void> {
     try {
-      await this.providerHomeLeases?.releaseHome(home);
+      await reference.release();
     } catch (error) {
       this.log(`provider-home reference release deferred to shutdown: ${errText(error)}`);
     }

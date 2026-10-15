@@ -4,7 +4,14 @@ import { getAsset, isSea } from "node:sea";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
 import { providerHomeLeaseTarget, type ProviderHomeLeaseOptions, type ProviderHomeLeaseRequest } from "./provider-home-lease.js";
-import { boundedLeaseWorkerFrame, leaseWorkerFrameKeys, LEASE_WORKER_ASSET, LEASE_WORKER_ERRORS, LEASE_WORKER_LIMITS, ProviderHomeLeaseError, validLeaseWorkerOperation, type LeaseWorkerOperation, type LeaseWorkerReply } from "./provider-home-lease-worker-protocol.js";
+import { boundedLeaseWorkerFrame, isLeaseWorkerAcquisition, leaseWorkerFrameKeys, LEASE_WORKER_ASSET, LEASE_WORKER_ERRORS, LEASE_WORKER_LIMITS, ProviderHomeLeaseError, validLeaseWorkerOperation, type LeaseWorkerOperation, type LeaseWorkerReply } from "./provider-home-lease-worker-protocol.js";
+
+/** One acquired provider-HOME reference. `release` drops exactly it, at most once. */
+export interface ProviderHomeReference {
+  /** True when this acquisition created the registry entry. */
+  first: boolean;
+  release(): Promise<boolean>;
+}
 
 type Diagnostic = Parameters<NonNullable<ProviderHomeLeaseOptions["onDiagnostic"]>>[0];
 type WorkerDiagnostic = Diagnostic |
@@ -70,22 +77,41 @@ export class AsyncProviderHomeLeaseRegistry {
         !Number.isSafeInteger(this.pendingLimit) || this.pendingLimit < 1 || this.pendingLimit > LEASE_WORKER_LIMITS.pending) throw new Error("invalid lease worker test budget");
   }
 
-  /** Returns the leased HOME, or null when the request needs no lease. */
-  async acquire(request: ProviderHomeLeaseRequest, cancellation: LeaseCancellation = {}): Promise<string | null> {
+  async acquire(request: ProviderHomeLeaseRequest, cancellation: LeaseCancellation = {}): Promise<void> {
     const target = providerHomeLeaseTarget(request);
-    if (!target) return null;
-    await this.acquireHome(target.home, target.provider, cancellation);
-    return target.home;
+    if (target) await this.acquireHome(target.home, target.provider, cancellation);
+  }
+
+  /** Like `acquire`, but returns a handle that releases exactly this reference, or null when the
+   * request needs no lease. */
+  async acquireReference(request: ProviderHomeLeaseRequest, cancellation: LeaseCancellation = {}): Promise<ProviderHomeReference | null> {
+    const target = providerHomeLeaseTarget(request);
+    return target ? this.acquireHomeReference(target.home, target.provider, cancellation) : null;
   }
 
   acquireHome(home: string, provider = "skills", cancellation: LeaseCancellation = {}): Promise<boolean> {
     if (this.closing) return Promise.reject(unavailable("shutdown admission closed"));
-    return this.enqueue({ method: "acquire", home, provider }, cancellation);
+    return this.enqueue({ method: "acquire", home, provider }, cancellation).then(({ value }) => value);
+  }
+
+  /** Acquire one reference whose release is bound in the worker to the exact registry entry it
+   * joined. Releasing through `home` instead would re-resolve the path, so a symlinked HOME
+   * retargeted in between could drop another HOME's reference. Release is idempotent. */
+  async acquireHomeReference(home: string, provider = "skills", cancellation: LeaseCancellation = {}): Promise<ProviderHomeReference> {
+    if (this.closing) throw unavailable("shutdown admission closed");
+    const { value, id } = await this.enqueue({ method: "acquire_reference", home, provider }, cancellation);
+    let released: Promise<boolean> | undefined;
+    return {
+      first: value,
+      release: () => released ??= this.closePromise || this.closed
+        ? Promise.reject(unavailable("shutdown release already queued"))
+        : this.enqueue({ method: "release_reference", home, referenceId: id }).then((result) => result.value),
+    };
   }
 
   releaseHome(home: string): Promise<boolean> {
     if (this.closePromise) return Promise.reject(unavailable("shutdown release already queued"));
-    return this.enqueue({ method: "release", home });
+    return this.enqueue({ method: "release", home }).then(({ value }) => value);
   }
 
   /** Close admission immediately; the caller must reap every provider tree before calling this. */
@@ -95,7 +121,7 @@ export class AsyncProviderHomeLeaseRegistry {
     if (this.closePromise) return this.closePromise;
     this.stopAcquisitions();
     if (!this.worker && !this.active && this.queue.length === 0) { this.closed = true; return Promise.resolve(true); }
-    this.closePromise = this.enqueue({ method: "close" }).then(value => {
+    this.closePromise = this.enqueue({ method: "close" }).then(({ value }) => {
       if (value) this.closed = true;
       this.closePromise = undefined;
       return value;
@@ -105,11 +131,12 @@ export class AsyncProviderHomeLeaseRegistry {
 
   stopAcquisitions(): void {
     this.closing = true;
-    for (const pending of [...this.queue]) if (pending.operation.method === "acquire") this.cancel(pending);
-    if (this.active?.operation.method === "acquire") this.cancel(this.active);
+    for (const pending of [...this.queue]) if (isLeaseWorkerAcquisition(pending.operation.method)) this.cancel(pending);
+    if (this.active && isLeaseWorkerAcquisition(this.active.operation.method)) this.cancel(this.active);
   }
 
-  private enqueue(operation: LeaseWorkerOperation, cancellation: LeaseCancellation = {}): Promise<boolean> {
+  /** Resolves with the operation's value and the id of the request that completed it. */
+  private enqueue(operation: LeaseWorkerOperation, cancellation: LeaseCancellation = {}): Promise<{ value: boolean; id: string }> {
     const { signal, isCurrent } = cancellation;
     if (this.poisonReason || this.closed) return Promise.reject(unavailable(this.poisonReason ?? "closed"));
     if (!validLeaseWorkerOperation(operation) || !boundedLeaseWorkerFrame(operation, LEASE_WORKER_LIMITS.requestBytes - 512)) return Promise.reject(new Error("invalid or oversized provider-HOME lease request"));
@@ -120,7 +147,8 @@ export class AsyncProviderHomeLeaseRegistry {
     return new Promise((resolve, reject) => {
       const pending: Pending = { id: randomUUID(), operation, deadline: Date.now() + this.deadlineMs, timer: undefined!, signal, isCurrent,
         enqueuedAt: performance.now(),
-        cancelled: false, acceptedCancel: false, compensation: false, phase: "queued", resolve, reject };
+        cancelled: false, acceptedCancel: false, compensation: false, phase: "queued",
+        resolve: (value) => resolve({ value, id: pending.id }), reject };
       pending.timer = setTimeout(() => {
         if (pending === this.active) this.poison("active deadline or ambiguous completion");
         else { this.remove(pending); pending.reject(new Error(LEASE_WORKER_ERRORS.expired)); }
@@ -196,7 +224,7 @@ export class AsyncProviderHomeLeaseRegistry {
     if (reply.kind === "receipt" && pending.phase === "executing") {
       if (!this.current(pending)) pending.cancelled = true;
       pending.receipt = reply; pending.phase = "accepting";
-      pending.acceptedCancel = pending.cancelled && pending.operation.method === "acquire";
+      pending.acceptedCancel = pending.cancelled && isLeaseWorkerAcquisition(pending.operation.method);
       this.post({ kind: "accept", epoch: this.epoch, id: pending.id, cancel: pending.acceptedCancel }); return;
     }
     if (reply.kind !== "done" || pending.phase !== "accepting" || !pending.receipt) return this.poison("unexpected completion phase");
@@ -207,7 +235,8 @@ export class AsyncProviderHomeLeaseRegistry {
     if (reply.error === "cancel_release_failed") return this.poison("unproved cancelled reference release");
     if (!this.current(pending)) pending.cancelled = true;
     // An abort can arrive after accept was sent. Compensate before dispatching any other work.
-    if (pending.cancelled && !pending.acceptedCancel && pending.operation.method === "acquire" && reply.ok) {
+    if (pending.cancelled && !pending.acceptedCancel && reply.ok &&
+        (pending.operation.method === "acquire" || pending.operation.method === "acquire_reference")) {
       pending.operation = { method: "cancel", home: pending.operation.home, completedId: pending.id };
       pending.id = randomUUID(); pending.compensation = true; pending.phase = "executing"; pending.receipt = undefined;
       this.post({ kind: "execute", epoch: this.epoch, id: pending.id, deadline: pending.deadline, operation: pending.operation }); return;
