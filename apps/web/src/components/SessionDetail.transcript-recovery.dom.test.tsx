@@ -2679,7 +2679,7 @@ for (const input of ["wheel", "ArrowUp", "k", "touch", "touch-pointer"] as const
         await flushAsyncWork(10);
         assert.equal(pages.tailCalls.length, 2, `a scrollable prepend waits for fresh navigation: ${reader()}`);
         assert.equal(followState(fixture), "paused", `history input retains its pause through the prepend (#3188): ${reader()}`);
-        assert.equal(domWindow.document.activeElement, fixture.scroller, "focus stays in the reader");
+        assert.ok(domWindow.document.activeElement as unknown === fixture.scroller, "focus stays in the reader");
       } finally { await unmountFixture(fixture); }
     });
   }
@@ -2709,7 +2709,7 @@ for (const kind of ["native", "pointer"] as const) {
           nextBefore: earlier[0]!.seq, hasMoreOlder: true, cacheComplete: true }));
         await flushAsyncWork(10);
         assert.equal(followState(fixture), "paused", "the prepend preserves the existing pause");
-        assert.equal(domWindow.document.activeElement, fixture.scroller);
+        assert.ok(domWindow.document.activeElement as unknown === fixture.scroller, "focus stays in the reader");
       } finally { await unmountFixture(fixture); }
     });
   }
