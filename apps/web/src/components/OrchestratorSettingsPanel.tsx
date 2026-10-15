@@ -179,8 +179,9 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
       cancelLabel: "Keep Editing",
       // Danger opens with focus on Keep Editing, the choice that loses nothing (§7.4).
       tone: "danger",
-    // The confirmation belongs to the app, so it can outlive this panel (browser Back is not held):
-    // confirmed after the editor is gone, there is nothing left to leave from.
+    // The confirmation belongs to the app, so it can outlive this panel (a Back or Forward that
+    // cannot be held, history-position.ts): confirmed after the editor is gone, there is nothing left
+    // to leave from.
     }).then((discard) => { if (discard && alive.current) leave(); });
   };
   // A save in flight cannot be discarded (Discard is disabled while busy, §8.6), so leaving waits
@@ -189,7 +190,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
   busyRef.current = busy;
   const leaveAfterSave = useRef<(() => void) | null>(null);
   // Whether the editor is still on screen. Gone before a save settled or a confirmation was answered
-  // (browser Back is not held), nothing is left to leave from.
+  // (a Back or Forward that cannot be held), nothing is left to leave from.
   const alive = useRef(true);
   useEffect(() => {
     alive.current = true;

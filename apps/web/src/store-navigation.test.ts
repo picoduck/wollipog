@@ -11,7 +11,8 @@ import {
   parseInboxSplitRatio,
   parseSessionFilters,
 } from "./store.js";
-import { encodeResourceId, viewFromPath, type View } from "./navigation.js";
+import { BrowserNavigation, encodeResourceId, viewFromPath, viewPath, type View } from "./navigation.js";
+import { TestBrowserHistory } from "./test-browser-history.js";
 import { registerLeaveGuard } from "./leave-guard.js";
 import { uiStreamSubscriptions } from "./ui-subscriptions.js";
 import { saveInstanceStorageValue, type KeyValueStorage } from "./instance-storage.js";
@@ -144,16 +145,164 @@ test("an editor's leave guard holds in-app navigation until it lets the person l
   }
 });
 
-test("browser Back and Forward are never held, so no history entry is rewritten (#3026)", () => {
+/** A store on browser history, as StoreProvider wires one, opened at `paths[0]` and pushed through the rest. */
+function storeOnHistory(...paths: string[]) {
+  const browser = new TestBrowserHistory(paths[0]!);
+  const navigation = new BrowserNavigation(browser.window);
   const pushed: View[] = [];
-  const store = new Store({ name: "settings", section: "orchestrator" }, (view) => pushed.push(view));
+  const store = new Store(navigation.current(), (view) => { pushed.push(view); navigation.push(view); });
+  navigation.listen((view, traversal) => store.navigateFromHistory(view, traversal));
+  for (const path of paths.slice(1)) store.navigate(viewFromPath(path)!);
+  pushed.length = 0;
+  return { browser, store, pushed };
+}
+
+const ORCHESTRATOR: View = { name: "settings", section: "orchestrator" };
+
+test("browser Back with unsaved changes asks first, and Keep Editing keeps the editor and every entry (#3218)", () => {
+  const { browser, store, pushed } = storeOnHistory("/settings/appearance", "/settings/orchestrator", "/usage");
+  browser.back();
+  assert.deepEqual(store.getState().view, ORCHESTRATOR, "no guard yet: Back is immediate");
   const asked: Array<() => void> = [];
   const release = registerLeaveGuard((leave) => asked.push(leave));
   try {
-    store.navigateFromHistory({ name: "usage" });
-    assert.equal(asked.length, 0);
+    browser.back();
+    assert.deepEqual(store.getState().view, ORCHESTRATOR, "the editor stays while the move is undone");
+    assert.equal(asked.length, 0, "asked once the editor's entry is current again");
+    browser.flush();
+    assert.equal(asked.length, 1);
+    assert.equal(browser.path, "/settings/orchestrator", "the address returns to the editor's entry");
+    assert.deepEqual(browser.paths(), ["/settings/appearance", "/settings/orchestrator", "/usage"], "no entry is dropped");
+    assert.deepEqual(store.getState().view, ORCHESTRATOR);
+    assert.deepEqual(pushed, []);
+  } finally {
+    release();
+  }
+  // Keep Editing never calls `leave`. With the draft saved, Forward reaches the entry it reached before.
+  browser.forward();
+  assert.deepEqual(store.getState().view, { name: "usage" });
+  assert.equal(browser.path, "/usage");
+});
+
+for (const direction of ["Back", "Forward"] as const) {
+  test(`browser ${direction} with unsaved changes completes exactly once on Discard Changes (#3218)`, () => {
+    const { browser, store, pushed } = storeOnHistory("/settings/appearance", "/settings/orchestrator", "/usage");
+    browser.back();
+    const asked: Array<() => void> = [];
+    const changes: View[] = [];
+    let shown = store.getState().view;
+    const release = registerLeaveGuard((leave) => asked.push(leave));
+    const unsubscribe = store.subscribe(() => {
+      if (store.getState().view !== shown) changes.push(shown = store.getState().view);
+    });
+    try {
+      browser.traverse(direction === "Back" ? -1 : 1);
+      browser.flush();
+      assert.equal(asked.length, 1, `${direction} asks`);
+      assert.deepEqual(store.getState().view, ORCHESTRATOR);
+      assert.equal(browser.path, "/settings/orchestrator");
+
+      asked[0]!();
+      browser.flush();
+      const destination: View = direction === "Back" ? { name: "settings", section: "appearance" } : { name: "usage" };
+      assert.deepEqual(store.getState().view, destination);
+      assert.equal(browser.path, viewPath(destination));
+      assert.equal(browser.index, direction === "Back" ? 0 : 2, "exactly one move");
+      assert.deepEqual(changes, [destination], "the view changed once, to the destination");
+      assert.equal(asked.length, 1, "the guard released itself before leaving, so it is not asked again");
+      assert.deepEqual(browser.paths(), ["/settings/appearance", "/settings/orchestrator", "/usage"]);
+      assert.deepEqual(pushed, []);
+    } finally {
+      unsubscribe();
+      release();
+    }
+  });
+}
+
+test("a Back of several entries is held and completed as the same move (#3218)", () => {
+  const { browser, store } = storeOnHistory("/usage", "/runs", "/settings/orchestrator");
+  const asked: Array<() => void> = [];
+  const release = registerLeaveGuard((leave) => asked.push(leave));
+  try {
+    browser.traverse(-2);
+    browser.flush();
+    assert.equal(asked.length, 1);
+    assert.equal(browser.path, "/settings/orchestrator");
+    asked[0]!();
+    browser.flush();
     assert.deepEqual(store.getState().view, { name: "usage" });
-    assert.deepEqual(pushed, [], "pushing the editor's address back would drop the forward entries");
+    assert.equal(browser.index, 0);
+  } finally {
+    release();
+  }
+});
+
+test("a second Back while the first is undone still returns to the editor's entry (#3218)", () => {
+  const { browser, store } = storeOnHistory("/usage", "/runs", "/settings/orchestrator");
+  const asked: Array<() => void> = [];
+  const release = registerLeaveGuard((leave) => asked.push(leave));
+  try {
+    browser.back();
+    browser.back();
+    browser.flush();
+    assert.equal(browser.path, "/settings/orchestrator");
+    assert.deepEqual(store.getState().view, ORCHESTRATOR);
+    assert.equal(asked.length, 1, "asked once, after the editor's entry is current");
+    asked[0]!();
+    browser.flush();
+    assert.deepEqual(store.getState().view, { name: "runs" }, "Discard completes the first move");
+  } finally {
+    release();
+  }
+});
+
+test("with no unsaved changes Back and Forward are immediate, and a save in flight decides later (#3218)", () => {
+  const { browser, store } = storeOnHistory("/settings/appearance", "/settings/orchestrator");
+  browser.back();
+  assert.deepEqual(store.getState().view, { name: "settings", section: "appearance" });
+  browser.forward();
+  assert.deepEqual(store.getState().view, ORCHESTRATOR);
+
+  // A save in flight holds on to `leave` and calls it once the save succeeds, without asking.
+  let afterSave: (() => void) | null = null;
+  const release = registerLeaveGuard((leave) => { afterSave = leave; });
+  try {
+    browser.back();
+    browser.flush();
+    assert.deepEqual(store.getState().view, ORCHESTRATOR, "held while the save is in flight");
+    afterSave!();
+    browser.flush();
+    assert.deepEqual(store.getState().view, { name: "settings", section: "appearance" });
+  } finally {
+    release();
+  }
+});
+
+test("a guard released while the move is undone lets it complete without asking (#3218)", () => {
+  const { browser, store } = storeOnHistory("/settings/appearance", "/settings/orchestrator");
+  const asked: Array<() => void> = [];
+  const release = registerLeaveGuard((leave) => asked.push(leave));
+  browser.back();
+  release();
+  browser.flush();
+  assert.equal(asked.length, 0);
+  assert.deepEqual(store.getState().view, { name: "settings", section: "appearance" });
+  assert.equal(browser.path, "/settings/appearance");
+});
+
+test("an entry written before positions were recorded is left at once, as before (#3218)", () => {
+  const browser = new TestBrowserHistory("/usage");
+  browser.window.history.pushState(null, "", "/settings/orchestrator");
+  const navigation = new BrowserNavigation(browser.window);
+  const store = new Store(navigation.current(), (view) => navigation.push(view));
+  navigation.listen((view, traversal) => store.navigateFromHistory(view, traversal));
+  const asked: Array<() => void> = [];
+  const release = registerLeaveGuard((leave) => asked.push(leave));
+  try {
+    browser.back();
+    browser.flush();
+    assert.equal(asked.length, 0, "the distance to an unrecorded entry is unknown");
+    assert.deepEqual(store.getState().view, { name: "usage" });
   } finally {
     release();
   }

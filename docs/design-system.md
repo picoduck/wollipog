@@ -1979,7 +1979,9 @@ above the bottom of the settings panel; on a phone its two actions share the bar
 the message. Settings › Orchestrator is its first screen (#3026): the editor's groups are the
 settings panel's own children so the bar is too, a field error at a setting (`NumberRow`'s or
 `SelectRow`'s `error`) blocks Save with "Fix N settings to save", and leaving the section or the
-page with a dirty draft asks **Keep Editing** or **Discard Changes** first (`useLeaveGuard`).
+page with a dirty draft asks **Keep Editing** or **Discard Changes** first (`useLeaveGuard`). Browser
+Back and Forward ask too (#3218): the editor's entry is put back while it asks, so Keep Editing loses
+no forward entry, and Discard Changes completes the move.
 
 An editor names its actions and states with four props, and changes nothing in `SaveBar` itself:
 

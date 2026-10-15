@@ -30,6 +30,8 @@ test("desktop navigation wraps legacy routes and ignores another profile's histo
   const location = { pathname: "/runs", search: "", hash: "" };
   const writes: Array<["push" | "replace", string]> = [];
   const write = (kind: "push" | "replace", path: string | URL | null | undefined) => {
+    // A replace without a URL records only the entry's position (#3218) and keeps its address.
+    if (path == null) return;
     const url = new URL(String(path), "https://tauri.localhost");
     location.pathname = url.pathname;
     location.search = url.search;
@@ -115,6 +117,7 @@ test("an instance's old Settings address opens its new view and replaces its own
       state: null,
       pushState() {},
       replaceState(_state: unknown, _unused: string, path?: string | URL | null) {
+        if (path == null) return;
         const url = new URL(String(path), "https://app.local");
         location.pathname = url.pathname;
         location.search = url.search;

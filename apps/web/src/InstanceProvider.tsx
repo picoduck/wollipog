@@ -43,6 +43,7 @@ import { closeGuardLinks as appCloseGuardLinks, type CloseGuardLinks } from "./d
 import { LOCAL_INSTANCE_SCOPE } from "./instance-storage.js";
 import { sessionsDestination } from "./sessions-view-mode.js";
 import { browserRandomUUID } from "./browser-crypto.js";
+import { pushPositionedEntry } from "./history-position.js";
 import {
   clearAllDurableQueuedEditRecoveries,
   clearRuntimeQueuedEditRecoveriesForInstance,
@@ -277,7 +278,7 @@ export function InstanceProvider({
       holdRedirectFocus(profile.id, destination);
       if (replace) window.history.replaceState(window.history.state, "", path);
       else if (`${window.location.pathname}${window.location.search}` !== path) {
-        window.history.pushState(window.history.state, "", path);
+        pushPositionedEntry(window.history, path);
       }
       await openProfile(profile, registry, generation);
     } catch (error) {
@@ -517,7 +518,7 @@ export function InstanceProvider({
     const path = instanceViewPath(profileId, view);
     saveLastInstanceView(profileId, view);
     if (`${window.location.pathname}${window.location.search}` !== path) {
-      window.history.pushState(window.history.state, "", path);
+      pushPositionedEntry(window.history, path);
     }
     window.dispatchEvent(new PopStateEvent("popstate"));
   }, [switchTo]);

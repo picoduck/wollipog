@@ -714,7 +714,7 @@ test("a leave waiting on a save is dropped if the editor goes away first", async
         container.querySelector('nav.settings-nav a[href="/settings/appearance"]')!
           .dispatchEvent(new domWindow.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }) as never);
       });
-      // Browser Back is not held, so it can take the editor away while the save is in flight.
+      // A Back that cannot be held (history-position.ts) can take the editor away mid-save.
       await view.cleanup();
       unmounted = true;
       await act(async () => release());
@@ -728,7 +728,7 @@ test("a leave waiting on a save is dropped if the editor goes away first", async
   }
 });
 
-test("a Discard Changes prompt answered after browser Back took the editor away does not navigate", async () => {
+test("a Discard Changes prompt answered after an unheld browser Back took the editor away does not navigate", async () => {
   let setView: (view: View) => void = () => undefined;
   const store = new Store({ name: "settings", section: "orchestrator" }, (view) => setView(view));
   const { transport } = server(settings());
@@ -745,8 +745,8 @@ test("a Discard Changes prompt answered after browser Back took the editor away 
     const dialog = document.querySelector('[role="dialog"]');
     assert.ok(dialog, "the prompt is open");
 
-    // Browser Back to Behavior: the store follows history and the shell shows that section, which
-    // unmounts the editor while the app-level prompt stays open.
+    // A Back to Behavior that cannot be held (no traversal): the store follows history and the shell
+    // shows that section, which unmounts the editor while the app-level prompt stays open.
     const behavior: View = { name: "settings", section: "behavior" };
     await act(async () => { store.navigateFromHistory(behavior); setView(behavior); });
     await settle();

@@ -1,3 +1,4 @@
+import { HistoryPositions, type HistoryTraversal, type PositionedHistory } from "./history-position.js";
 import {
   decodeResourceId,
   encodeResourceId,
@@ -84,20 +85,30 @@ export function saveLastInstanceView(instanceId: string, view: View): void {
 
 export interface InstanceNavigationWindow {
   location: Pick<Location, "pathname" | "search" | "hash">;
-  history: Pick<History, "state" | "pushState" | "replaceState">;
+  history: PositionedHistory;
   addEventListener(type: "popstate", listener: () => void): void;
   removeEventListener(type: "popstate", listener: () => void): void;
 }
 
 /** A fixed-profile history adapter. Cross-profile entries are owned by InstanceProvider. */
 export class DesktopInstanceNavigation implements ViewNavigation {
+  private readonly positions: HistoryPositions;
+
   constructor(
     readonly instanceId: string,
     private readonly target: InstanceNavigationWindow = window,
     private readonly onActivate?: (instanceId: string, view: View) => void,
-  ) {}
+  ) {
+    this.positions = new HistoryPositions(target.history);
+  }
 
   current(): View {
+    const view = this.read();
+    this.positions.adopt();
+    return view;
+  }
+
+  private read(): View {
     const scoped = instanceRouteFromPath(this.target.location.pathname, this.target.location.search);
     const held = takeHeldRedirect(`${this.target.location.pathname}${this.target.location.search}`);
     if (scoped?.instanceId === this.instanceId) {
@@ -118,16 +129,18 @@ export class DesktopInstanceNavigation implements ViewNavigation {
     const path = instanceViewPath(this.instanceId, view);
     saveLastInstanceView(this.instanceId, view);
     if (`${this.target.location.pathname}${this.target.location.search}` === path && !this.target.location.hash) return;
-    this.target.history.pushState(this.target.history.state, "", path);
+    this.positions.push(path);
   }
 
-  listen(onView: (view: View) => void): () => void {
+  listen(onView: (view: View, traversal?: HistoryTraversal) => void): () => void {
     const onPopState = () => {
       const scoped = instanceRouteFromPath(this.target.location.pathname, this.target.location.search);
+      // Another instance's entry is InstanceProvider's to open, with a store of its own.
       if (scoped?.instanceId !== this.instanceId) return;
       this.replaceAlias(scoped.view);
       saveLastInstanceView(this.instanceId, scoped.view);
-      onView(scoped.view);
+      const move = this.positions.arrive();
+      if (move) onView(scoped.view, move.traversal);
     };
     this.target.addEventListener("popstate", onPopState);
     return () => this.target.removeEventListener("popstate", onPopState);

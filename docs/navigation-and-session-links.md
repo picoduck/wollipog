@@ -27,6 +27,10 @@ ids, extra literal segments, and unknown paths resolve to Board and replace the 
 - Back and Forward dispatch through the existing store navigation reducer without adding another
   entry. That reducer remains responsible for pruning off-view timelines, shell scrollback, pod
   context, and recovery cursors.
+- Each entry the app pushes records its position in `history.state` (`history-position.ts`), so an
+  editor with unsaved changes can hold Back and Forward (#3218): the move is undone with
+  `history.go` while the editor asks, and redone if the person leaves. A move to an entry recorded
+  before positions were, or by another document, is not held.
 - The initial URL becomes the store's initial view before the UI WebSocket opens, so a copied session
   URL subscribes to that session immediately and never briefly requests Board streams.
 - The control plane serves the marked app shell for extensionless client routes while keeping API,
