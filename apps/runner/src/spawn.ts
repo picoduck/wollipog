@@ -873,11 +873,17 @@ export function terminateDescendantBoundariesAfterPendingKills(): void {
   }));
 }
 
-/** True only when `child`'s complete process tree is proven gone, which a lease release needs.
- * The POSIX boundary terminates every process carrying the child's marker and reports survivors;
- * it is idempotent, so a boundary already terminated on close returns that same result. Without a
- * boundary (Windows, WSL, remote or untracked spawns) only the root's exit is observable, and that
- * is not a tree proof, so the answer is false. */
+/** True when `child`'s process tree is gone by the same standard runner shutdown uses before it
+ * releases every provider-HOME lease: the POSIX boundary terminated every process it tracks
+ * (parent links plus the inherited environment marker) and found no survivor. It is idempotent,
+ * so a boundary already terminated on close returns that result.
+ *
+ * Known limit, shared with shutdown: a helper that detaches with a scrubbed environment before its
+ * parent link is observed, or whose environment cannot be read, is invisible to that tracking.
+ * Closing it needs kernel containment (a Linux subreaper or cgroup).
+ *
+ * Without a boundary (Windows, WSL, remote or untracked spawns) only the root's exit is
+ * observable, which is not a tree proof, so the answer is false. */
 export function provenProcessTreeExit(child: AgentProcess): Promise<boolean> {
   return child.posixBoundary ? child.posixBoundary.terminate().catch(() => false) : Promise.resolve(false);
 }
