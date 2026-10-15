@@ -529,6 +529,87 @@ jobs:
     name: Settings-Rows win32 Baselines
     uses: ./.github/workflows/settings-rows-win32.yml
 
+  # The specs that opt into WebKit (playwright.webkit.config.ts), which is Safari's engine and both
+  # desktop webviews'. It is its own job, beside the Chromium shards rather than inside one, so it
+  # adds no time to the browser job's budget (#2700); it installs only WebKit and its packages.
+  # Budget: one install path's two six-minute attempts, plus a remainder of setup, the dev server and
+  # the specs that took under four minutes when measured (#3214), plus reserve.
+  webkit:
+    if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false
+    name: WebKit End-to-End Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Setup Node 24
+        id: setup_node_24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        continue-on-error: true
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Retry Setup Node 24
+        if: ${{ !cancelled() && steps.setup_node_24.outcome == 'failure' }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Resolve Playwright Version
+        id: playwright-version
+        run: |
+          playwright_version="$(pnpm exec playwright --version)"
+          echo "version=${playwright_version#Version }" >> "$GITHUB_OUTPUT"
+
+      # Its own key: the browser job's cache holds only Chromium under the same directory.
+      - name: Cache Playwright WebKit
+        id: playwright-webkit-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-webkit-${{ steps.playwright-version.outputs.version }}
+
+      # The same bounded attempt and lock-clearing retry as the Chromium installs above (#2123).
+      - name: Install Playwright WebKit
+        id: playwright-webkit
+        if: steps.playwright-webkit-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        timeout-minutes: 6
+        run: pnpm exec playwright install --with-deps webkit
+      - name: Retry Install Playwright WebKit
+        if: ${{ !cancelled() && steps.playwright-webkit.outcome == 'failure' }}
+        timeout-minutes: 6
+        run: |
+          pkill -KILL -f 'playwright[^ ]* install' || true
+          sudo pkill -KILL -x 'apt-get|dpkg' || true
+          sudo dpkg --configure -a
+          pnpm exec playwright install --with-deps webkit
+
+      - name: Install Playwright WebKit System Dependencies
+        id: playwright-webkit-system-dependencies
+        if: steps.playwright-webkit-cache.outputs.cache-hit == 'true'
+        continue-on-error: true
+        timeout-minutes: 6
+        run: pnpm exec playwright install-deps webkit
+      - name: Retry Install Playwright WebKit System Dependencies
+        if: ${{ !cancelled() && steps.playwright-webkit-system-dependencies.outcome == 'failure' }}
+        timeout-minutes: 6
+        run: |
+          pkill -KILL -f 'playwright[^ ]* install' || true
+          sudo pkill -KILL -x 'apt-get|dpkg' || true
+          sudo dpkg --configure -a
+          pnpm exec playwright install-deps webkit
+
+      - name: WebKit Browser End-to-End Tests
+        run: pnpm test:e2e:webkit
+
   check:
     # Report failed, cancelled or skipped dependencies while PR CI is active. !cancelled()
     # lets superseded PR runs cancel this job (#2452), without changing non-PR aggregation.
@@ -538,13 +619,14 @@ jobs:
     name: Typecheck, Test & Sidecar Bundle
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    needs: [checks, browser, win32]
+    needs: [checks, browser, win32, webkit]
     steps:
       - name: Require Every Job to Have Succeeded
         env:
           CHECKS_RESULT: ${{ needs.checks.result }}
           BROWSER_RESULT: ${{ needs.browser.result }}
           WIN32_RESULT: ${{ needs.win32.result }}
+          WEBKIT_RESULT: ${{ needs.webkit.result }}
         run: |
           status=0
           report() {
@@ -557,4 +639,5 @@ jobs:
           report "Typecheck, Unit Tests & Bundles" "$CHECKS_RESULT"
           report "Browser End-to-End Tests" "$BROWSER_RESULT"
           report "Settings-Rows win32 Baselines" "$WIN32_RESULT"
+          report "WebKit End-to-End Tests" "$WEBKIT_RESULT"
           exit "$status"
