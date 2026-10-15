@@ -305,7 +305,8 @@ test("a selected requested worktree keeps its root while sibling edits wait for 
   }
   const secondIsolation = await isolate(second);
   assert.equal(secondIsolation?.backend, "bwrap");
-  const writable = sandboxed(second, secondIsolation!, "printf after-relaunch > new.txt && git add new.txt && git commit -qm after-relaunch");
+  const writable = sandboxed(second, secondIsolation!, "printf after-relaunch > new.txt && git add new.txt && " +
+    "git -c user.email=runner@example.invalid -c user.name=Runner commit -qm after-relaunch");
   assert.equal(writable.status, 0, writable.output);
   assert.equal(readFileSync(join(second, "new.txt"), "utf8"), "after-relaunch");
 });
