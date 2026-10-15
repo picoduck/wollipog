@@ -147,6 +147,20 @@ jobs:
 
       # Everything below runs only when the comparison failed, and the job still fails: these
       # steps turn the failure into the files that fix it rather than into a green check.
+
+      # The failed attempts' traces, screenshots and error context, including a test that passed
+      # only on retry, so a failure that is not baseline drift can be diagnosed (#3216). Uploaded
+      # before regeneration, whose own Playwright run empties test-results.
+      - name: Upload the win32 Comparison Test Results
+        if: failure() && steps.compare.outcome == 'failure'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: settings-rows-win32-test-results
+          path: test-results
+          overwrite: true
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Regenerate the Changed win32 Baselines
         if: failure() && steps.compare.outcome == 'failure'
         continue-on-error: true
@@ -213,6 +227,6 @@ jobs:
             else
               echo "## The win32 Settings-Rows Comparison Failed Without a Baseline Difference"
               echo
-              echo "Regenerating changed no \`*-win32.png\` file, so this is not baseline drift. Read the test log above."
+              echo "Regenerating changed no \`*-win32.png\` file, so this is not baseline drift. Read the test log above; the failed attempts' Playwright traces are in this run's \`settings-rows-win32-test-results\` artifact."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
