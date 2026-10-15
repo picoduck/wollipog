@@ -29,7 +29,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomInt, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { get as httpsGet } from "node:https";
@@ -134,6 +134,53 @@ export function buildSshArgs(o: {
     o.sshTarget,
     o.remoteCommand,
   ];
+}
+
+/** Remote loopback range for reverse-tunnel listeners. Several control planes may share one SSH
+ * account, and none of them can see which ports the others hold, so selection is random within the
+ * range and an occupied port is detected from ssh's forward failure rather than predicted. */
+export const REMOTE_TUNNEL_PORT_MIN = 47100;
+export const REMOTE_TUNNEL_PORT_MAX = 47999;
+/** Consecutive occupied ports tried quickly before the box is reported failed. Reconnects after
+ * that keep picking fresh ports at the normal backoff. */
+export const MAX_TUNNEL_PORT_ATTEMPTS = 8;
+const TUNNEL_PORT_RETRY_DELAY_MS = 250;
+
+/** Pick a remote tunnel port not in `exclude`, or null when the range is exhausted. */
+export function pickRemoteTunnelPort(
+  exclude: ReadonlySet<number>,
+  randomIndex: (span: number) => number,
+): number | null {
+  const span = REMOTE_TUNNEL_PORT_MAX - REMOTE_TUNNEL_PORT_MIN + 1;
+  const start = randomIndex(span);
+  for (let offset = 0; offset < span; offset++) {
+    const port = REMOTE_TUNNEL_PORT_MIN + ((start + offset) % span);
+    if (!exclude.has(port)) return port;
+  }
+  return null;
+}
+
+/** The listen port named by ssh's ExitOnForwardFailure error, or null for any other failure. */
+export function remoteForwardFailurePort(stderr: string): number | null {
+  const match = /remote port forwarding failed for listen port (\d+)/u.exec(stderr);
+  return match ? Number(match[1]) : null;
+}
+
+export function tunnelPortExhaustedMessage(o: {
+  remotePort: number;
+  sshPort: number;
+  attempts: number;
+}): string {
+  return `Tunnel establishment failed after the runner was installed: remote tunnel port ${o.remotePort} ` +
+    `was already in use on the machine (${o.attempts} ports tried). The SSH connection on port ${o.sshPort} ` +
+    "succeeded; another control plane or process is holding the tunnel ports. Wollipog keeps retrying with other ports.";
+}
+
+export function bootstrapFailureMessage(stage: "connect" | "install" | "credential", message: string): string {
+  if (stage === "install") return `Runner installation failed: ${message}`;
+  if (stage === "credential") return `Runner credential deployment failed: ${message}`;
+  // An unsupported platform is reported after a successful SSH round trip.
+  return message.startsWith("unsupported remote platform") ? message : `SSH connection failed: ${message}`;
 }
 
 /** Is the binary identified by `localHash` already the one deployed to this box? Compared by
@@ -992,6 +1039,9 @@ interface BoxRuntime {
   activeBinaryVerified: boolean;
   /** Full digest remotely attested for this exact launch. */
   activeBinarySha256: string | null;
+  /** Ports another listener held during the current run of occupied-port failures. Cleared once a
+   * runner registers, so a later conflict starts a fresh bounded recovery. */
+  occupiedRemotePorts: Set<number>;
 }
 
 interface BinaryReadiness {
@@ -1007,6 +1057,10 @@ export interface OrchestratorDeps {
   issueCredential: (runnerId: string) => RunnerCredentialSecret;
   resolveBinary: BinaryResolver;
   stopManagedChild?: (child: ChildProcess) => Promise<void>;
+  /** Spawns the long-lived tunnel+runner ssh process; tests substitute a fake child. */
+  spawnTunnel?: (args: string[]) => ChildProcess;
+  /** Uniform integer in [0, span); defaults to crypto.randomInt. */
+  randomIndex?: (span: number) => number;
   log?: (msg: string) => void;
 }
 
@@ -1112,20 +1166,28 @@ export class BoxOrchestrator {
   private readonly lifecycleOperations = new Map<string, Promise<unknown>>();
   private readonly pendingStops = new Map<string, Promise<void>>();
   private readonly legacyAccountOperations = new Map<string, Promise<unknown>>();
-  // Distinct high loopback port per box for the reverse tunnel's REMOTE listener. Must not be
-  // cpPort: under mirrored-networking WSL, the box's loopback already maps to the host's CP, so
-  // binding cpPort on the box collides ("remote port forwarding failed").
-  private nextRemotePort = 47100;
   private stopping = false;
   private readonly stopManagedChild: (child: ChildProcess) => Promise<void>;
+  private readonly spawnTunnel: (args: string[]) => ChildProcess;
+  private readonly randomIndex: (span: number) => number;
   constructor(private readonly deps: OrchestratorDeps) {
     this.stopManagedChild = deps.stopManagedChild ?? stopAndWaitForManagedChild;
+    this.spawnTunnel = deps.spawnTunnel
+      ?? ((args) => spawn("ssh", args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true }));
+    this.randomIndex = deps.randomIndex ?? ((span) => randomInt(span));
   }
 
-  private allocRemotePort(): number {
-    const p = this.nextRemotePort;
-    this.nextRemotePort = this.nextRemotePort >= 47999 ? 47100 : this.nextRemotePort + 1;
-    return p;
+  // High loopback port for the reverse tunnel's REMOTE listener, distinct from every other box of
+  // this control plane. Must not be cpPort: under mirrored-networking WSL, the box's loopback
+  // already maps to the host's CP, so binding cpPort on the box collides. Other control planes on
+  // the same SSH account are invisible here, so a random start keeps them from all choosing the
+  // same first port, and launch() moves to another port when ssh reports one occupied.
+  private allocRemotePort(occupied: ReadonlySet<number> = new Set()): number {
+    const exclude = new Set(occupied);
+    for (const runtime of this.runtimes.values()) exclude.add(runtime.remotePort);
+    return pickRemoteTunnelPort(exclude, this.randomIndex)
+      ?? pickRemoteTunnelPort(occupied, this.randomIndex)
+      ?? REMOTE_TUNNEL_PORT_MIN + this.randomIndex(REMOTE_TUNNEL_PORT_MAX - REMOTE_TUNNEL_PORT_MIN + 1);
   }
 
   private log(msg: string): void {
@@ -1305,7 +1367,10 @@ export class BoxOrchestrator {
     const boxId = this.deps.db.boxIdForRunner(runnerId);
     if (!boxId) return;
     const rt = this.runtimes.get(boxId);
-    if (rt) rt.backoffMs = INITIAL_BACKOFF_MS; // a healthy connection resets backoff
+    if (rt) {
+      rt.backoffMs = INITIAL_BACKOFF_MS; // a healthy connection resets backoff
+      rt.occupiedRemotePorts.clear(); // and ends any occupied-port recovery
+    }
     const completedAdoption = Boolean(rt?.activeAdoptionEpoch && rt.activeBinaryVerified && rt.activeBinarySha256
       && rt.activeCredentialId === credentialId && this.deps.db.completeBoxLegacyDataAdoption(
       boxId,
@@ -1355,6 +1420,7 @@ export class BoxOrchestrator {
       activeCredentialId: null,
       activeBinaryVerified: false,
       activeBinarySha256: null,
+      occupiedRemotePorts: new Set(),
     };
     this.runtimes.set(boxId, created);
     return created;
@@ -1454,10 +1520,14 @@ export class BoxOrchestrator {
     epoch: number,
     adoptionEpoch: string | null,
   ): Promise<void> {
+    // Failures name their stage so the Machine view can tell an SSH connection or authentication
+    // problem from a failed install, a failed credential write, or (in launch()) a failed tunnel.
+    let stage: "connect" | "install" | "credential" = "connect";
     try {
       if (!this.live(rt, epoch)) return;
       this.setStatus(cfg.boxId, "bootstrapping");
       const triple = await this.detectTriple(cfg);
+      stage = "install";
       // Persist the detected platform: the Runners view shows it, and "Update runner" needs it
       // to name WHICH binary to rebuild when no fresh one can be resolved.
       if (cfg.triple !== triple) this.deps.db.setBoxTriple(cfg.boxId, triple, Date.now());
@@ -1476,6 +1546,7 @@ export class BoxOrchestrator {
       }
       rt.activeBinaryVerified = binaryReadiness.kind === "verified";
       rt.activeBinarySha256 = binaryReadiness.sha256;
+      stage = "credential";
       const secret = this.deps.issueCredential(cfg.runnerId);
       rt.activeCredentialId = secret.credential.credentialId;
       const tokenFile = remoteCredentialPath(secret.credential.credentialId);
@@ -1492,7 +1563,7 @@ export class BoxOrchestrator {
       this.launch(fresh, rt, epoch, tokenFile, adoptionEpoch, binaryReadiness.runnerPath);
     } catch (err) {
       if (!this.live(rt, epoch)) return;
-      const msg = (err as Error).message;
+      const msg = bootstrapFailureMessage(stage, (err as Error).message);
       this.log(`${cfg.boxId} bootstrap failed: ${msg}`);
       this.setStatus(cfg.boxId, "failed", msg);
       this.scheduleReconnect(cfg, rt, epoch);
@@ -1525,7 +1596,7 @@ export class BoxOrchestrator {
       remoteCommand,
     });
     this.log(`${cfg.boxId} launching ssh ${cfg.sshTarget} (tunnel :${rt.remotePort} → CP :${this.deps.cpPort})`);
-    const child = spawn("ssh", args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    const child = this.spawnTunnel(args);
     rt.child = child;
     let stderrTail = "";
     child.stderr?.on("data", (b: Buffer) => {
@@ -1544,10 +1615,46 @@ export class BoxOrchestrator {
       if (rt.child === child) rt.child = null; // only clear if this child is still the current one
       if (!this.live(rt, epoch)) return; // a newer attempt / removal / shutdown owns the box now
       this.log(`${cfg.boxId} ssh exited (${signal ? `signal ${signal}` : `code ${code}`})`);
+      // ExitOnForwardFailure makes ssh exit before the remote command runs, so this runner never
+      // dialed the other listener and the tunnel that holds the port is untouched.
+      if (remoteForwardFailurePort(stderrTail) === rt.remotePort) {
+        this.recoverOccupiedTunnelPort(cfg, rt, epoch);
+        return;
+      }
       const lastLine = stderrTail.trim().split("\n").pop()?.trim() || null;
       this.setStatus(cfg.boxId, "offline", lastLine);
       if (cfg.autoReconnect) this.scheduleReconnect(cfg, rt, epoch);
     });
+  }
+
+  /** Move this box to another remote port after ssh found its listen port occupied. A few quick
+   * retries absorb ordinary collisions and allocation races with another control plane; once they
+   * are spent the box is reported failed and later reconnects keep trying fresh ports at the
+   * normal backoff. Recovery belongs to establishing the connection, so it runs even when automatic
+   * reconnect is off. */
+  private recoverOccupiedTunnelPort(cfg: BoxConfig, rt: BoxRuntime, epoch: number): void {
+    const occupied = rt.remotePort;
+    rt.occupiedRemotePorts.add(occupied);
+    rt.remotePort = this.allocRemotePort(rt.occupiedRemotePorts);
+    const attempts = rt.occupiedRemotePorts.size;
+    if (attempts >= MAX_TUNNEL_PORT_ATTEMPTS) {
+      this.log(`${cfg.boxId} remote tunnel port ${occupied} is in use; ${attempts} ports tried`);
+      this.setStatus(
+        cfg.boxId,
+        "failed",
+        tunnelPortExhaustedMessage({ remotePort: occupied, sshPort: cfg.sshPort, attempts }),
+      );
+      this.scheduleReconnect(cfg, rt, epoch);
+      return;
+    }
+    this.log(`${cfg.boxId} remote tunnel port ${occupied} is in use; retrying on :${rt.remotePort}`);
+    if (rt.reconnectTimer) return;
+    rt.reconnectTimer = setTimeout(() => {
+      rt.reconnectTimer = null;
+      if (!this.live(rt, epoch)) return;
+      const fresh = this.deps.db.getBoxConfig(cfg.boxId);
+      if (fresh) void this.bootstrap(fresh, rt, epoch, rt.activeAdoptionEpoch);
+    }, TUNNEL_PORT_RETRY_DELAY_MS);
   }
 
   private scheduleReconnect(cfg: BoxConfig, rt: BoxRuntime, epoch: number): void {
