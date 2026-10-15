@@ -24,7 +24,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       await expect(dialog.getByRole("button", { name: "Change to Orchestrator", exact: true })).toBeEnabled();
       await expect(dialog).toContainText("Provider permissions stay unchanged (auto)");
       await expect(dialog).toContainText("PR Merge");
-      await chooseRoleSetting(page, "Child Harness", "Codex App · Codex App Server · Native");
+      await chooseRoleSetting(page, "Child Harness", "Codex App Server · Native");
       await chooseRoleSetting(page, "Child Model", "GPT-6.1 Sol");
       await chooseRoleSetting(page, "Child Effort", "High");
       await dialog.getByLabel("Maximum Concurrent Children", { exact: true }).fill("7");

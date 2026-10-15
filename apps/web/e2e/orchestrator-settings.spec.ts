@@ -51,12 +51,12 @@ for (const viewport of [{ width: 1280, height: 1000 }, { width: 390, height: 844
     await page.screenshot({ path: testInfo.outputPath(`orchestrator-settings-${viewport.width}.png`), fullPage: true });
 
     await childHarness.click();
-    await page.getByRole("option", { name: /Codex App Server · Codex App Server · Native/ }).click();
+    await page.getByRole("option", { name: /Codex App Server · Native/ }).click();
     await page.getByRole("button", { name: /Child Model: Automatic/ }).click();
     await page.getByRole("option", { name: /GPT-5.6 Sol/ }).click();
     await page.getByRole("button", { name: /Child Effort: Automatic/ }).click();
     await page.getByRole("option", { name: /High/ }).click();
-    await expect(page.getByRole("button", { name: /Child Harness: Codex App Server · Codex App Server · Native/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Child Harness: Codex App Server · Native/ })).toBeVisible();
     await expect(page.getByRole("button", { name: /Child Model: GPT-5.6 Sol/ })).toBeVisible();
     await expect(page.getByRole("button", { name: /Child Effort: High/ })).toBeVisible();
 

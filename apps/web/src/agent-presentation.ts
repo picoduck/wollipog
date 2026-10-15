@@ -1,4 +1,10 @@
-import type { AgentDefinition, AgentDriverKind, AgentHarnessIdentity, OrchestratorHarnessCapability } from "@wollipog/protocol";
+import {
+  builtInAgentHarnessName,
+  type AgentDefinition,
+  type AgentDriverKind,
+  type AgentHarnessIdentity,
+  type OrchestratorHarnessCapability,
+} from "@wollipog/protocol";
 
 export function driverKindLabel(driver: AgentDriverKind, registry = false): string {
   if (driver === "codex-app-server") return "Codex App Server";
@@ -20,14 +26,26 @@ export function agentHarnessContextLabel(identity: Pick<AgentHarnessIdentity, "c
   return identity.context.kind === "wsl" ? `WSL ${identity.context.distro}` : "Native";
 }
 
+/** Built-in harnesses are the same harness on every Machine, so they are named by driver alone;
+ * only an ACP row's own name says which agent it wraps (#3247). */
 export function agentHarnessOptionLabel(
   harness: Pick<OrchestratorHarnessCapability, "name" | "driver" | "context">,
 ): string {
-  return `${harness.name} · ${agentHarnessDriverLabel(harness.driver)} · ${agentHarnessContextLabel(harness)}`;
+  return harness.driver === "acp"
+    ? `${harness.name} · ${agentHarnessDriverLabel(harness.driver)} · ${agentHarnessContextLabel(harness)}`
+    : `${builtInAgentHarnessName(harness.driver)} · ${agentHarnessContextLabel(harness)}`;
 }
 
 export function agentHarnessIdentityLabel(identity: AgentHarnessIdentity): string {
-  return `${identity.agentId} · ${agentHarnessDriverLabel(identity.driver)} · ${agentHarnessContextLabel(identity)}`;
+  return agentHarnessOptionLabel({ ...identity, name: identity.agentId });
+}
+
+/** How many connected Machines provide a Child Harness option. */
+export function agentHarnessMachinesDescription(
+  harness: Pick<OrchestratorHarnessCapability, "installations" | "machines">,
+): string {
+  const machines = harness.machines ?? harness.installations;
+  return `Available on ${machines} connected machine${machines === 1 ? "" : "s"}.`;
 }
 
 /** Normalize only names emitted by earlier Wollipog onboarding, preserving custom agent names. */
