@@ -2549,6 +2549,9 @@ export interface OrchestratorPolicySources {
  * and source; editing user defaults never reaches an existing session. */
 export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
   version: 1;
+  /** `harness`: a fixed Child Harness admits any row of the same harness on every Machine (#3247).
+   * Absent on campaigns created earlier, which keep enforcing the exact Machine-local agent id. */
+  childHarnessMatch?: "harness";
   /** Server-owned human authorization. Never accepted from child config or ordinary prompts. */
   control?: CampaignControl;
   /** Human initial epic request, persisted before runner echo; this is a proposal seed, never authority. */
@@ -2689,6 +2692,16 @@ export interface OrchestratorCampaignProjection {
   /** v196 campaign work ledger summary (#2417), filled by the Read API slice. Omitted by older
    * control planes, which clients present as unsupported rather than as an empty plan. */
   work?: CampaignWorkSummary;
+  /** Present when the campaign fixes its Child Harness: the agent row each of the owner's online
+   * Machines uses for it, or `null` where none can run it (#3247). Pass that `agentId` to
+   * `create_session`; the policy's own `childHarness.agentId` is not a row on any Machine. */
+  childHarnessAgents?: OrchestratorChildHarnessAgent[];
+}
+
+export interface OrchestratorChildHarnessAgent {
+  runnerId: string;
+  machineName: string;
+  agentId: string | null;
 }
 
 /** True only when a campaign gains human work. Exact content-free identities distinguish a
@@ -2787,6 +2800,8 @@ export interface OrchestratorHarnessCapability extends AgentHarnessIdentity {
   effortLevels: string[];
   supportedPairs: Array<{ modelId: string; effortLevels: string[] }>;
   installations: number;
+  /** Distinct online Machines providing this harness. Absent from older control planes. */
+  machines?: number;
 }
 
 export interface OrchestratorSettingsView {
@@ -5864,14 +5879,59 @@ export interface AgentHarnessIdentity {
   context: AgentContext;
 }
 
-/** Canonical comparison key for a stable Agent Harness identity. */
+/**
+ * A built-in driver runs one harness product, so the same driver and context is the same harness
+ * on every Machine; the agent row's id is only that Machine's local name for it, and it differs
+ * between Machines (#3247). An ACP row says nothing reliable about what it wraps, so ACP keeps its
+ * exact agent id.
+ */
+export function canonicalAgentHarnessIdentity(identity: AgentHarnessIdentity): AgentHarnessIdentity {
+  return identity.driver === "acp" ? identity : { ...identity, agentId: identity.driver };
+}
+
+/** Comparison key for one Agent Harness across Machines. */
 export function agentHarnessIdentityKey(identity: AgentHarnessIdentity): string {
+  return exactAgentHarnessIdentityKey(canonicalAgentHarnessIdentity(identity));
+}
+
+/** Key including the Machine-local agent id. Campaigns created before #3247 still enforce it. */
+export function exactAgentHarnessIdentityKey(identity: AgentHarnessIdentity): string {
   return JSON.stringify([
     identity.agentId,
     identity.driver,
     identity.context.kind,
     identity.context.kind === "wsl" ? identity.context.distro : "",
   ]);
+}
+
+/** Display name of a built-in harness, independent of what any Machine named its row. */
+export function builtInAgentHarnessName(driver: AgentDriverKind): string | null {
+  if (driver === "claude-code") return "Claude Code";
+  if (driver === "codex-app-server") return "Codex App Server";
+  if (driver === "codex") return "Codex Non-Interactive";
+  if (driver === "pi") return "Pi";
+  return null;
+}
+
+/**
+ * The agent row one Machine uses for a harness identity: an available row of the same harness, the
+ * Machine's selected installation first, then the lowest agent id, so the same inputs always pick
+ * the same row. Rows the Machine's installation choice excludes cannot launch, and restart-only
+ * Codex exec rows are never used for new work, so neither is chosen.
+ */
+export function resolveAgentHarnessRow<T extends Pick<AgentDefinition, "id" | "driver" | "context" |
+  "available" | "source" | "installation" | "harnessSelectionBlocked">>(agents: readonly T[], identity: AgentHarnessIdentity): T | undefined {
+  const key = agentHarnessIdentityKey(identity);
+  const rank = (agent: T) => agent.installation?.selection === "selected" ? 0 : 1;
+  return agents
+    .filter((agent) => agent.available === true && !isRestartOnlyCodexExec(agent) &&
+      agent.installation?.selection !== "other" && agent.harnessSelectionBlocked !== true &&
+      agentHarnessIdentityKey({
+        agentId: agent.id,
+        driver: agent.driver ?? "acp",
+        context: agent.context?.kind === "wsl" ? { kind: "wsl", distro: agent.context.distro } : { kind: "native" },
+      }) === key)
+    .sort((left, right) => rank(left) - rank(right) || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0))[0];
 }
 
 /** Parse the credential-free durable Agent Harness identity shared by settings and campaigns. */

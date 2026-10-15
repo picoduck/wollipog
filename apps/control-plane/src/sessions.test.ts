@@ -890,6 +890,82 @@ test("orchestrator separates default provider execution from the negotiated stri
   } finally { db.close(); }
 });
 
+test("a fixed Child Harness admits the same harness under another Machine's agent id (#3247)", () => {
+  const { db, svc } = makeHarness();
+  try {
+    const meta = runnerMeta();
+    meta.agents.find((agent) => agent.id === "test-orchestrator")!.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    // The second Machine names its Codex App Server row `codex-app` and uses `codex` for an ACP row.
+    const other = runnerMeta();
+    other.runnerId = "runner-2";
+    const codexApp = other.agents.find((agent) => agent.id === CODEX_APP_AGENT_ID)!;
+    const acp = other.agents.find((agent) => agent.driver === "acp")!;
+    other.agents = [{ ...codexApp, id: "codex-app" }, { ...acp, id: CODEX_APP_AGENT_ID, capabilities: codexApp.capabilities }];
+    db.registerRunner(other, Date.now(), PROTOCOL_VERSION);
+    const settings: OrchestratorSettingsView = {
+      source: "user_default",
+      defaults: {
+        behavior: {
+          childHarness: { agentId: CODEX_APP_AGENT_ID, driver: "codex-app-server", context: { kind: "native" } },
+          childModel: "text-model",
+          childEffort: null,
+          maximumConcurrentChildren: 6,
+          followUps: "recommend_only",
+          completion: "retain",
+        },
+        delegation: {
+          parentControl: "questions",
+          decisions: {
+            implementation_question: "human",
+            pr_merge: "human",
+            merged_branch_deletion: "human",
+            follow_up_issue_publication: "human",
+            ui_evidence_approval: "human",
+          },
+        },
+        execution: { strictProjectIsolation: false, integrationIsolation: false },
+      },
+      capabilities: {
+        models: [{ id: "text-model" }], effortLevels: [], installations: 2, compatibleInstallations: 2, status: "available",
+      },
+    };
+    const created = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, prompt: "Orchestrate.",
+    }, undefined, undefined, false, false, false, {
+      defaultOwnerUserId: "owner", orchestratorDefaults: settings, validateOrchestratorDefaults: () => null,
+    });
+    assert.ok(created.ok && created.data, created.error);
+    const parent = created.data;
+    assert.equal(parent.orchestratorPolicy?.childHarnessMatch, "harness");
+    db.updateSessionStatus(parent.id, "running", Date.now());
+    if (parent.projectId) db.addProjectLocation(parent.projectId, { runnerId: "runner-2", workspaceId: WORKSPACE_ID });
+
+    const child = (agentId: string) => svc.createSession({
+      runnerId: "runner-2", workspaceId: WORKSPACE_ID, agentId, config: { model: "text-model" },
+    }, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+    const sameHarness = child("codex-app");
+    assert.ok(sameHarness.ok, sameHarness.error);
+    const acpNamedCodex = child(CODEX_APP_AGENT_ID);
+    assert.equal(acpNamedCodex.status, 409);
+    assert.match(acpNamedCodex.error ?? "", /fixed by campaign policy at Codex App Server \(native\)/,
+      "an ACP row sharing the policy's agent id is a different harness");
+
+    const legacy = db.sessionOrchestratorPolicy(parent.id)!;
+    delete legacy.childHarnessMatch;
+    db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(legacy), parent.id);
+    const legacyOther = child("codex-app");
+    assert.equal(legacyOther.status, 409, "a campaign created before #3247 keeps enforcing the exact agent id");
+    assert.match(legacyOther.error ?? "", /fixed by campaign policy at codex \(codex-app-server, native\)/);
+  } finally {
+    db.close();
+  }
+});
+
 test("Orchestrator campaign policy resolves precedence, isolates active sessions, and governs child defaults", async () => {
   const { db, svc, hub } = makeHarness();
   try {
@@ -1134,7 +1210,7 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     assert.equal(child.data.orchestratorPolicy?.sources.behavior.childModel, "active_campaign");
     const assignment = hub.sentOfType("start_session").find((message) => message.spec.sessionId === child.data!.id)?.initialPrompt ?? "";
     assert.match(assignment, /Wollipog Campaign Policy — server-derived, revision 1/);
-    assert.match(assignment, new RegExp(`Child Harness ${CODEX_APP_AGENT_ID}`));
+    assert.match(assignment, /Child Harness Codex App Server \(native; use each Machine's agent from get_campaign childHarnessAgents\)/);
     assert.match(assignment, /This is not blanket approval/);
     assert.match(assignment, /exact-head CI/);
     assert.match(assignment, /UI evidence remains human-owned/);

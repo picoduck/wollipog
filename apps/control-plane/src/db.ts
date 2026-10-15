@@ -52,6 +52,7 @@ import {
   BACKGROUND_JOB_STALL_MS,
   BACKGROUND_HANDOFF_WAIT_MAX_MS,
   normalizeAgentHarnessIdentity,
+  canonicalAgentHarnessIdentity,
   agentContextKey,
   runnerSupportsProtocol,
   scopeAudienceContained,
@@ -6293,6 +6294,23 @@ export class ControlPlaneDb {
         db.exec("PRAGMA foreign_keys = ON;");
       }
     }
+    // #3247: a built-in harness default applies to that harness on every Machine, not to one
+    // Machine-local agent id. Keep the newest row per harness (then one already canonical, then the
+    // lowest id) and rename it to the canonical id. ACP rows keep their exact id.
+    db.exec(`
+      BEGIN IMMEDIATE;
+      DELETE FROM agent_harness_defaults WHERE rowid IN (
+        SELECT d.rowid FROM agent_harness_defaults d
+        WHERE d.driver <> 'acp' AND EXISTS (
+          SELECT 1 FROM agent_harness_defaults o
+          WHERE o.rowid <> d.rowid AND o.user_id = d.user_id AND o.driver = d.driver
+            AND o.context_kind = d.context_kind AND o.context_distro = d.context_distro
+            AND (o.updated_at > d.updated_at OR (o.updated_at = d.updated_at AND (
+              (o.agent_id = o.driver) > (d.agent_id = d.driver) OR
+              ((o.agent_id = o.driver) = (d.agent_id = d.driver) AND o.agent_id < d.agent_id))))));
+      UPDATE agent_harness_defaults SET agent_id = driver WHERE driver <> 'acp' AND agent_id <> driver;
+      COMMIT;
+    `);
     const sessionColumnsBeforeMigration = db.prepare("PRAGMA table_info(sessions)")
       .all() as unknown as Array<{ name: string }>;
     const needsCreationActorBackfill = !sessionColumnsBeforeMigration.some((column) =>
@@ -10324,7 +10342,8 @@ export class ControlPlaneDb {
     ).run(organizationId, mode, now);
   }
 
-  getAgentHarnessDefault(userId: string, identity: AgentHarnessIdentity): AgentHarnessDefaultRecord | null {
+  getAgentHarnessDefault(userId: string, requested: AgentHarnessIdentity): AgentHarnessDefaultRecord | null {
+    const identity = canonicalAgentHarnessIdentity(requested);
     const contextKind = identity.context.kind;
     const contextDistro = identity.context.kind === "wsl" ? identity.context.distro : "";
     const row = this.stmt(
@@ -10414,7 +10433,8 @@ export class ControlPlaneDb {
     return {
       defaults: {
         behavior: {
-          childHarness: normalizeAgentHarnessIdentity(parseJson<unknown>(row.child_harness)),
+          // Saved before #3247 under a Machine-local agent id; read as the harness it names.
+          childHarness: canonicalChildHarness(parseJson<unknown>(row.child_harness)),
           childModel: row.child_model,
           childEffort: row.child_effort,
           maximumConcurrentChildren: row.maximum_concurrent_children,
@@ -10463,10 +10483,11 @@ export class ControlPlaneDb {
 
   setAgentHarnessDefault(
     userId: string,
-    identity: AgentHarnessIdentity,
+    requested: AgentHarnessIdentity,
     config: AgentHarnessDefaultConfig,
     now = Date.now(),
   ): void {
+    const identity = canonicalAgentHarnessIdentity(requested);
     const contextKind = identity.context.kind;
     const contextDistro = identity.context.kind === "wsl" ? identity.context.distro : "";
     this.stmt(
@@ -10489,7 +10510,8 @@ export class ControlPlaneDb {
     );
   }
 
-  deleteAgentHarnessDefault(userId: string, identity: AgentHarnessIdentity): boolean {
+  deleteAgentHarnessDefault(userId: string, requested: AgentHarnessIdentity): boolean {
+    const identity = canonicalAgentHarnessIdentity(requested);
     const contextDistro = identity.context.kind === "wsl" ? identity.context.distro : "";
     return Number(this.stmt(
       `DELETE FROM agent_harness_defaults
@@ -28659,6 +28681,11 @@ function parentControlDecisionPolicyFromJson(raw: string | null): ParentControlD
   return candidate as ParentControlDecisionPolicy;
 }
 
+function canonicalChildHarness(value: unknown): AgentHarnessIdentity | null {
+  const identity = normalizeAgentHarnessIdentity(value);
+  return identity && canonicalAgentHarnessIdentity(identity);
+}
+
 function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCampaignPolicy | null {
   const value = parseJson<OrchestratorCampaignPolicy>(raw);
   if (!value || value.version !== 1 ||
@@ -28668,6 +28695,8 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
       typeof value.sources.behavior !== "object" || value.sources.behavior === null ||
       Array.isArray(value.sources.behavior)) return null;
   if (value.control !== undefined && !validCampaignControl(value.control)) return null;
+  // Anything but the known marker keeps the narrower exact-agent match a pre-#3247 campaign had.
+  if (value.childHarnessMatch !== undefined && value.childHarnessMatch !== "harness") delete value.childHarnessMatch;
   // Pre-v157 policies had no harness bind. Preserve their automatic-harness semantics and mark
   // the source as legacy rather than silently making a fixed choice during migration.
   if (value.behavior.childHarness === undefined) value.behavior.childHarness = null;

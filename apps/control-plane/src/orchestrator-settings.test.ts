@@ -4,6 +4,8 @@ import Fastify from "fastify";
 import {
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   PROTOCOL_VERSION,
+  resolveAgentHarnessRow,
+  type AgentDefinition,
   type OrchestratorDefaults,
   type RunnerMetadata,
 } from "@wollipog/protocol";
@@ -11,6 +13,8 @@ import { ControlPlaneDb } from "./db.js";
 import type { AuthPrincipal, HumanPrincipal } from "./identity.js";
 import {
   OrchestratorSettings,
+  childHarnessAdmits,
+  childHarnessAgents,
   parseOrchestratorDefaults,
   parseOrchestratorOverrides,
   resolveOrchestratorCampaignPolicy,
@@ -168,6 +172,101 @@ test("Orchestrator capabilities keep identical model ids scoped to stable harnes
   } finally {
     db.close();
   }
+});
+
+function claudeAgent(id: string, driver: "claude-code" | "acp"): AgentDefinition {
+  return {
+    id,
+    name: driver === "acp" ? "Claude Code (ACP)" : `Claude ${id}`,
+    command: "claude",
+    args: [],
+    env: {},
+    driver,
+    available: true,
+    context: { kind: "native" },
+    capabilities: {
+      models: [{ id: "opus", displayName: "Opus", efforts: ["high"] }],
+      effortLevels: ["high"],
+      permissionModes: ["orchestrator"],
+      slashCommands: [],
+      supportsImages: true,
+      supportsApprovals: true,
+    },
+  };
+}
+
+test("a Child Harness is one harness across Machines whatever each names its row (#3247)", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    const now = Date.now();
+    const machineA = runner("machine-a", "opus", ["high"]);
+    machineA.agents = [claudeAgent("claude-code", "claude-code")];
+    const machineB = runner("machine-b", "opus", ["high"]);
+    machineB.agents = [claudeAgent("claude-native", "claude-code"), claudeAgent("claude-code", "acp")];
+    db.registerRunner(machineA, now, PROTOCOL_VERSION);
+    db.registerRunner(machineB, now + 1, PROTOCOL_VERSION);
+    const settings = new OrchestratorSettings(db);
+    const principal = human(db);
+
+    const harnesses = settings.view(principal).capabilities.harnesses!;
+    const native = harnesses.filter((harness) => harness.driver === "claude-code");
+    assert.equal(native.length, 1, "both Machines' native rows are one option");
+    assert.equal(native[0]!.name, "Claude Code");
+    assert.equal(native[0]!.agentId, "claude-code");
+    assert.equal(native[0]!.machines, 2);
+    assert.equal(native[0]!.installations, 2);
+    assert.deepEqual(harnesses.filter((harness) => harness.driver === "acp").map((harness) => [harness.agentId, harness.machines]),
+      [["claude-code", 1]], "an ACP row stays its own harness");
+
+    const saved = settings.update(principal, { defaults: defaults({
+      childHarness: { agentId: "claude-native", driver: "claude-code", context: { kind: "native" } },
+    }) }, now + 2);
+    assert.deepEqual(saved.defaults.behavior.childHarness, { agentId: "claude-code", driver: "claude-code", context: { kind: "native" } },
+      "a saved Child Harness names the harness, not the row it was picked from");
+
+    const policy = resolveOrchestratorCampaignPolicy(saved.defaults, "user_default");
+    assert.equal(policy.childHarnessMatch, "harness");
+    for (const agentId of ["claude-code", "claude-native"]) {
+      assert.equal(childHarnessAdmits(policy, { agentId, driver: "claude-code", context: { kind: "native" } }), true);
+    }
+    assert.equal(childHarnessAdmits(policy, { agentId: "claude-code", driver: "acp", context: { kind: "native" } }), false);
+    const runners = db.listRunnersForPrincipal(principal);
+    assert.deepEqual(childHarnessAgents(policy, runners), [
+      { runnerId: "machine-a", machineName: "machine-a", agentId: "claude-code" },
+      { runnerId: "machine-b", machineName: "machine-b", agentId: "claude-native" },
+    ]);
+
+    // A campaign created before #3247 still admits only its exact agent id.
+    const legacy = { ...policy, behavior: { ...policy.behavior,
+      childHarness: { agentId: "claude-native", driver: "claude-code" as const, context: { kind: "native" as const } } } };
+    delete legacy.childHarnessMatch;
+    assert.equal(childHarnessAdmits(legacy, { agentId: "claude-code", driver: "claude-code", context: { kind: "native" } }), false);
+    assert.deepEqual(childHarnessAgents(legacy, runners)?.map((entry) => entry.agentId), [null, "claude-native"]);
+    assert.equal(childHarnessAgents(resolveOrchestratorCampaignPolicy(defaults(), "user_default"), runners), undefined,
+      "an Automatic harness lists no agents");
+  } finally {
+    db.close();
+  }
+});
+
+test("a Machine with several rows of one harness resolves them deterministically (#3247)", () => {
+  const identity = { agentId: "claude-code", driver: "claude-code" as const, context: { kind: "native" as const } };
+  const rows = [claudeAgent("zeta", "claude-code"), claudeAgent("alpha", "claude-code"), claudeAgent("acp", "acp")];
+  assert.equal(resolveAgentHarnessRow(rows, identity)?.id, "alpha", "the lowest agent id without a selection");
+  assert.equal(resolveAgentHarnessRow([...rows].reverse(), identity)?.id, "alpha", "independent of row order");
+  rows[0]!.installation = { id: "user-local", path: "/opt/claude", via: "path", selection: "selected" };
+  assert.equal(resolveAgentHarnessRow(rows, identity)?.id, "zeta", "the Machine's selected installation wins");
+  rows[1]!.installation = { id: "system", path: "/usr/bin/claude", via: "path", selection: "other" };
+  assert.equal(resolveAgentHarnessRow(rows, identity)?.id, "zeta");
+  rows[0]!.available = false;
+  assert.equal(resolveAgentHarnessRow(rows, identity), undefined,
+    "a row the Machine's installation choice excludes cannot launch, so it is never chosen");
+  delete rows[1]!.installation;
+  rows[1]!.harnessSelectionBlocked = true;
+  assert.equal(resolveAgentHarnessRow(rows, identity), undefined, "nor is a configured row an explicit choice blocks");
+  rows[1]!.harnessSelectionBlocked = false;
+  assert.equal(resolveAgentHarnessRow(rows, identity)?.id, "alpha", "an unavailable row is never chosen");
+  assert.equal(resolveAgentHarnessRow(rows, { ...identity, context: { kind: "wsl", distro: "Ubuntu" } }), undefined);
 });
 
 test("Orchestrator child harnesses exclude discovery's restart-only Codex exec row (#3224)", () => {

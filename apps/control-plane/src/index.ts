@@ -202,7 +202,7 @@ import {
 import { registerSessionNamingRoutes } from "./session-naming-route.js";
 import { AgentHarnessDefaultsSettings } from "./agent-harness-defaults.js";
 import { registerAgentHarnessDefaultsRoutes } from "./agent-harness-defaults-route.js";
-import { OrchestratorSettings } from "./orchestrator-settings.js";
+import { OrchestratorSettings, childHarnessAgents } from "./orchestrator-settings.js";
 import { registerArtifactUploadSettingsRoutes } from "./artifact-upload-settings-route.js";
 import { registerOrchestratorSettingsRoutes } from "./orchestrator-settings-route.js";
 import { registerRunnerAttestationRoute } from "./runner-attestation-route.js";
@@ -3935,8 +3935,13 @@ app.get("/api/sessions/:id/orchestrator-campaign", async (req, reply) => {
     return reply.code(403).send({ error: "a matching Orchestrator session credential is required" });
   }
   const projection = await svc.campaignProjectionWithHistory(id);
+  const policy = db.getSession(id)?.orchestratorPolicy;
+  const agents = policy ? childHarnessAgents(policy, db.listRunnersForPrincipal(principal)) : undefined;
   return respond(reply, projection.ok && projection.data
-    ? { ...projection, data: withCampaignHoldAdviceFor(db, principal, projection.data) }
+    ? { ...projection, data: {
+      ...withCampaignHoldAdviceFor(db, principal, projection.data),
+      ...(agents ? { childHarnessAgents: agents } : {}),
+    } }
     : projection);
 });
 

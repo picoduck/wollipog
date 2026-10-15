@@ -464,7 +464,7 @@ test("Child Harness precedes and scopes model and effort while clearing incompat
     assert.ok(titles.indexOf("Child Harness") < titles.indexOf("Child Model"));
     assert.ok(titles.indexOf("Child Model") < titles.indexOf("Child Effort"));
 
-    await choose(container, "Child Harness", /Pi · Pi · Native/);
+    await choose(container, "Child Harness", /Pi · Native/);
     assert.match(container.querySelector('[aria-label^="Child Model:"]')?.getAttribute("aria-label") ?? "", /Automatic/);
     assert.match(container.querySelector('[aria-label^="Child Effort:"]')?.getAttribute("aria-label") ?? "", /Automatic/);
 
@@ -480,6 +480,26 @@ test("Child Harness precedes and scopes model and effort while clearing incompat
     assert.equal(writes[0]?.defaults.behavior.childHarness?.driver, "pi");
     assert.equal(writes[0]?.defaults.behavior.childModel, null);
     assert.equal(writes[0]?.defaults.behavior.childEffort, null);
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("each Child Harness option names the harness once and says how many machines provide it (#3247)", async () => {
+  const current = settings();
+  current.capabilities.harnesses![0]!.machines = 2;
+  current.capabilities.harnesses![0]!.installations = 2;
+  const { transport } = server(current);
+  const view = await mount(panel(transport));
+  try {
+    const { container } = view;
+    const trigger = container.querySelector<HTMLButtonElement>('[aria-label^="Child Harness:"]')!;
+    await act(async () => trigger.click());
+    const options = [...container.querySelectorAll('[role="option"]')].map((node) => node.textContent ?? "");
+    assert.equal(options.filter((text) => text.startsWith("Codex App Server")).length, 1);
+    assert.ok(options.some((text) => /^Codex App Server · Native.*Available on 2 connected machines\./.test(text)), options.join(" | "));
+    assert.ok(options.some((text) => /^Pi · Native.*Available on 1 connected machine\./.test(text)), options.join(" | "));
+    await act(async () => trigger.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never));
   } finally {
     await view.cleanup();
   }

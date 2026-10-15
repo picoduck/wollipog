@@ -255,7 +255,7 @@ test("the dialog has three titled sections, the campaign's facts and a close-onl
   assert.equal(fact("Campaign Status")?.querySelector(".status")?.textContent?.includes("Awaiting Decision"), true,
     "a campaign waiting on a person reads as a status badge");
   assert.match(fact("Campaign Status")?.textContent ?? "", /Policy Revision 3/);
-  assert.match(fact("Child Harness")?.textContent ?? "", /claude · Claude Code · Native/);
+  assert.match(fact("Child Harness")?.textContent ?? "", /Claude Code · Native/);
   assert.match(fact("Child Model")?.textContent ?? "", /claude-opus-5.*Session Override/);
   assert.match(fact("Children")?.textContent ?? "", /1 Waiting for Human/);
   assert.match(fact("Follow-Up Recommendations")?.textContent ?? "", /1 Duplicate Skipped/, "one duplicate is singular");

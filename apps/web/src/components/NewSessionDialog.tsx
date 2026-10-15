@@ -29,7 +29,7 @@ import {
   type SessionConfig,
   type DelegatableWorkflowDecisionCategory,
 } from "@wollipog/protocol";
-import { agentHarnessOptionLabel } from "../agent-presentation.js";
+import { agentHarnessMachinesDescription, agentHarnessOptionLabel } from "../agent-presentation.js";
 import { useApi } from "../api-context.js";
 import { managedSkillsAvailableForTarget, SKILLS_UNAVAILABLE_ON_TARGET } from "./SkillsUnavailableNotice.js";
 import { ApiError } from "../api.js";
@@ -573,7 +573,7 @@ export function NewSessionDialog({
         ? agentHarnessOptionLabel(harness)
         : `${agentHarnessOptionLabel(harness)} (Unavailable)`,
       description: harness.installations > 0
-        ? `${harness.installations} current installation${harness.installations === 1 ? "" : "s"}.`
+        ? agentHarnessMachinesDescription(harness)
         : "No current installation advertises this saved Agent Harness.",
     })),
   ];

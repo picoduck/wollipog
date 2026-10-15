@@ -262,10 +262,11 @@ import { type GuardrailFields, type PolicyInput, normalizeCostCheckpoints,
 import { executionTargetRef, relaunchExecutionTarget, resolveExecutionTarget } from "./execution-targets.js";
 import {
   agentHarnessIdentityFor,
-  agentHarnessIdentityKey,
   installationSupportsDefault,
 } from "./agent-harness-defaults.js";
 import {
+  childHarnessAdmits,
+  childHarnessRefusal,
   parseOrchestratorOverrides,
   resolveOrchestratorCampaignPolicy,
 } from "./orchestrator-settings.js";
@@ -3600,7 +3601,8 @@ export class SessionsService {
     }
     const campaignAuthority = this.orchestratorCampaignController(parent);
     if (campaignAuthority === "refused") return fail(MALFORMED_ANCESTRY_AUTHORITY_REFUSAL, 409);
-    const campaignBehavior = campaignAuthority?.orchestratorPolicy?.behavior;
+    const campaignPolicy = campaignAuthority?.orchestratorPolicy;
+    const campaignBehavior = campaignPolicy?.behavior;
     const reserved = { ...this.db.childSessionAllocations(parentSessionId) };
     if (configs.length > (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.liveCount) {
       const remaining = Math.max(0, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.liveCount);
@@ -3616,16 +3618,7 @@ export class SessionsService {
           driver: member.launch.driver,
           context: member.launch.context,
         });
-        if (campaignBehavior.childHarness &&
-            agentHarnessIdentityKey(launchHarness) !== agentHarnessIdentityKey(campaignBehavior.childHarness)) {
-          const fixed = campaignBehavior.childHarness;
-          return fail(
-            `child harness is fixed by campaign policy at ${fixed.agentId} (${fixed.driver}, ${
-              fixed.context.kind === "wsl" ? `WSL ${fixed.context.distro}` : "native"
-            })`,
-            409,
-          );
-        }
+        if (!childHarnessAdmits(campaignPolicy!, launchHarness)) return fail(childHarnessRefusal(campaignPolicy!), 409);
         if (campaignBehavior.childModel !== null && candidate.model !== undefined &&
             candidate.model !== campaignBehavior.childModel) {
           return fail(`child model is fixed by campaign policy at ${campaignBehavior.childModel}`, 409);
@@ -3789,14 +3782,9 @@ export class SessionsService {
       driver: launch.driver,
       context: launch.context,
     });
-    const fixedChildHarness = campaignController?.orchestratorPolicy?.behavior.childHarness;
-    if (fixedChildHarness && agentHarnessIdentityKey(launchHarness) !== agentHarnessIdentityKey(fixedChildHarness)) {
-      return fail(
-        `child harness is fixed by campaign policy at ${fixedChildHarness.agentId} (${fixedChildHarness.driver}, ${
-          fixedChildHarness.context.kind === "wsl" ? `WSL ${fixedChildHarness.context.distro}` : "native"
-        })`,
-        409,
-      );
+    const controllerPolicy = campaignController?.orchestratorPolicy;
+    if (controllerPolicy && !childHarnessAdmits(controllerPolicy, launchHarness)) {
+      return fail(childHarnessRefusal(controllerPolicy), 409);
     }
     // An ad-hoc directory chosen via the remote browser overrides the preconfigured workspace.
     const adHoc = snapshotSpec
@@ -4136,6 +4124,8 @@ export class SessionsService {
         inheritedCampaign ? "active_campaign" : parentSessionId ? "system_default" : configured?.source ?? "system_default",
         inheritedCampaign ? {} : overrides,
       );
+      // A nested Orchestrator joins its campaign's harness matching as well as its settings.
+      if (inheritedCampaign && inheritedCampaign.childHarnessMatch !== "harness") delete orchestratorPolicy.childHarnessMatch;
       if (inheritedCampaign?.control) {
         orchestratorPolicy.control = structuredClone(inheritedCampaign.control);
         const preflight = campaignAuthorityPreflight(orchestratorPolicy.control, launch.driver, runner.protocolVersion);

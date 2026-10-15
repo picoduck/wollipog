@@ -988,7 +988,7 @@ test("new Orchestrator sessions send only explicit overrides after showing effec
     assert.match(fixture.container.querySelector('[aria-label^="Child Model:"]')?.getAttribute("aria-label") ?? "", /Test Model/);
     assert.equal(labelledNumberInput(fixture.container, "Maximum Concurrent Children")?.value, "5");
     assert.match(fixture.container.textContent ?? "", /These effective values are resolved and stored before the campaign's first turn/);
-    await chooseSelectOption(fixture.container, "Child Harness", "Pi · Pi · Native");
+    await chooseSelectOption(fixture.container, "Child Harness", "Pi · Native");
     await chooseSelectOption(fixture.container, "Child Model", "Sol");
     await chooseSelectOption(fixture.container, "PR Merge Approval", "Orchestrator");
     assert.match(fixture.container.textContent ?? "", /Session Override/);
