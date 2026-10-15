@@ -262,6 +262,34 @@ test("onboarding health accepts runnable Codex batch fallback and labels offline
   assert.match(offlineAgent.detail, /Last reported when this runner was online/);
 });
 
+test("discovery's restart-only exec row does not make Codex ready when App Server's check failed", () => {
+  const message = "Wollipog couldn't check this Codex installation in time. Rediscover to try again.";
+  const codexAppServer = {
+    status: "unsupported" as const,
+    appServerAvailable: false,
+    failure: { code: "probe_timeout" as const, message, retryable: true },
+  };
+  const agents: RunnerView["agents"] = [
+    {
+      id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex-app-server",
+      source: "discovered", available: false, authStatus: "authenticated", codexAppServer,
+    },
+    {
+      id: "codex-exec", name: "Codex (Non-Interactive)", command: "codex", args: [], env: {}, driver: "codex",
+      source: "discovered", available: true, authStatus: "authenticated", codexAppServer,
+    },
+  ];
+  const readiness = localRunnerReadiness(runner({ agents }));
+  assert.equal(readiness.state, "needs-attention");
+  assert.equal(readiness.detail, message, "a failed check is fixed by rediscovering, not by an upgrade");
+  assert.deepEqual(readiness.agentLabels, ["Codex App Server"]);
+
+  const health = onboardingHealth({ credentialAvailable: true, runnerId: "laptop", workspaceId: "repo", runner: runner({ agents }) });
+  const check = health.find((item) => item.id === "agents")!;
+  assert.equal(check.status, "fail");
+  assert.equal(check.detail, message);
+});
+
 test("local runner readiness moves from startup through discovery to agent-ready", () => {
   assert.equal(localRunnerReadiness(undefined).state, "starting");
   assert.equal(localRunnerReadiness(runner({ agentsRefreshed: false })).state, "discovering");

@@ -15,7 +15,7 @@ import type {
   AutomationTriggerView,
   WorkflowDefinition,
 } from "@wollipog/protocol";
-import { runnerSupportsProtocol } from "@wollipog/protocol";
+import { isRestartOnlyCodexExec, runnerSupportsProtocol } from "@wollipog/protocol";
 import { AutomationsIcon } from "./Icons.js";
 import { useApi } from "../api-context.js";
 import { startVisiblePolling } from "../visible-polling.js";
@@ -147,7 +147,12 @@ export function AutomationsView() {
   // renders truthfully — the flag hides surfaces, it does not orphan stored data.
   const multiAgentEnabled = useExperiments().flags.multiAgent;
   const defaultAgentId = (agents: readonly AgentDefinition[] | undefined) =>
-    agentOptions([...(agents ?? [])]).find((option) => !option.disabled)?.agent.id ?? agents?.[0]?.id ?? "";
+    agentOptions([...(agents ?? [])]).find((option) => !option.disabled)?.agent.id ??
+      agents?.find((agent) => !isRestartOnlyCodexExec(agent))?.id ?? "";
+  // An automation already bound to discovery's restart-only exec row keeps it listed so editing
+  // renders truthfully; it is never offered to a new or rebound automation.
+  const offeredAgents = (agents: readonly AgentDefinition[] | undefined, current: string) =>
+    (agents ?? []).filter((agent) => !isRestartOnlyCodexExec(agent) || agent.id === current);
   const runners = useStoreSelector((state) => state.runners);
   const boxes = useStoreSelector((state) => state.boxes);
   // Passing the correlated Box matters for an SSH Machine left unnamed: runnerDisplay falls back
@@ -678,7 +683,7 @@ export function AutomationsView() {
                   setPrimaryAgentTouched(true);
                   setForm((current) => withAgent(current, event.target.value));
                 }}>
-                  {(selectedRunner?.agents ?? []).map((agent) => <option key={agent.id} value={agent.id}
+                  {offeredAgents(selectedRunner?.agents, form.agentId).map((agent) => <option key={agent.id} value={agent.id}
                     disabled={agentOptions(selectedRunner?.agents ?? []).some((option) => option.agent.id === agent.id && option.disabled)}>{agentDisplayName(agent)}</option>)}
                 </select></label> : <label>Workflow<select value={form.workflowId} onChange={(event) => patch("workflowId", event.target.value)}>
                   {workflows.map((workflow) => <option key={`${workflow.workflowId}:${workflow.version}`} value={workflow.workflowId}>{workflow.name} · v{workflow.version}</option>)}
@@ -895,7 +900,7 @@ export function AutomationsView() {
                 setRebindAlternate(false);
                 setAlternateAgentTouched(true);
                 patch("fallbackAgentId", event.target.value);
-              }}>{(selectedFallback?.agents ?? []).map((agent) => <option key={agent.id} value={agent.id}
+              }}>{offeredAgents(selectedFallback?.agents, form.fallbackAgentId).map((agent) => <option key={agent.id} value={agent.id}
                 disabled={agentOptions(selectedFallback?.agents ?? []).some((option) => option.agent.id === agent.id && option.disabled)}>{agentDisplayName(agent)}</option>)}</select></label>}
               {form.actionKind === "create_session" && editingSpec?.runnerPolicy.kind === "alternate" &&
                 !rebindAlternate && (() => {

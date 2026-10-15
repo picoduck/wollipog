@@ -28,6 +28,16 @@ test("workflow presets dedupe graph roles and bind primary provider-native agent
   assert.equal(workflowBindingsComplete(definition, { claude: "claude-code", codex: "codex" }), true);
 });
 
+test("a Codex role stays unbound rather than falling back to discovery's restart-only exec row", () => {
+  const agents = [
+    agent({ id: "claude-code", name: "Claude", driver: "claude-code" }),
+    agent({ id: "codex", name: "Codex", driver: "codex-app-server", source: "discovered", available: false }),
+    agent({ id: "codex-exec", name: "Codex (Non-Interactive)", driver: "codex", source: "discovered" }),
+  ];
+  assert.deepEqual(defaultWorkflowBindings(definition, agents), { claude: "claude-code" });
+  assert.equal(workflowBindingsComplete(definition, defaultWorkflowBindings(definition, agents)), false);
+});
+
 test("workflow preset binding fails closed when a required provider is unavailable", () => {
   const agents = [
     agent({ id: "claude-code", name: "Claude", driver: "claude-code", available: false }),

@@ -60,6 +60,7 @@ import { loadAgentDefaults, saveAgentDefault } from "../agent-defaults.js";
 import {
   agentMeta,
   agentOptions,
+  codexAppServerSetupReason,
   currentAgentSelectionIssue,
   savedAgentSelection,
 } from "./agent-options.js";
@@ -246,7 +247,7 @@ export function NewSessionDialog({
       : runner?.workspaces[0]?.id) ?? "",
   );
   const initialAgentOptions = agentOptions(runner?.agents ?? []);
-  const initialAgentSelection = savedAgentSelection(initialAgentOptions, agentDefaults[runnerId]);
+  const initialAgentSelection = savedAgentSelection(initialAgentOptions, agentDefaults[runnerId], runner?.agents);
   const [agentId, setAgentId] = useState(initialAgentSelection.agentId);
   const [providerAccountId, setProviderAccountId] = useState("");
   // `undefined` until the user chooses: a saved Orchestrator harness default then selects the role
@@ -399,7 +400,9 @@ export function NewSessionDialog({
         ? option.advanced ? "Advanced Agent" : undefined
         : `${option.advanced ? "Advanced Agent · " : ""}${metadata}`,
       disabled: option.disabled,
-      disabledReason: option.disabled ? `Needs setup. ${metadata}` : undefined,
+      disabledReason: option.disabled
+        ? `Needs setup. ${codexAppServerSetupReason(option.agent) ?? metadata}`
+        : undefined,
     };
   }), [agentOpts]);
   const selectedAgentOption = agentOpts.find((option) => option.agent.id === agentId);
@@ -817,8 +820,8 @@ export function NewSessionDialog({
   const directoryGrants = !browsedPath && (agent?.driver ?? "acp") === "acp"
     ? (workspace?.additionalDirectoryGrants ?? [])
     : [];
-  const savedSelection = savedAgentSelection(agentOpts, agentDefaults[runnerId]);
-  const selectionIssue = currentAgentSelectionIssue(agentOpts, agentId, agentDefaults[runnerId]);
+  const savedSelection = savedAgentSelection(agentOpts, agentDefaults[runnerId], runner?.agents);
+  const selectionIssue = currentAgentSelectionIssue(agentOpts, agentId, agentDefaults[runnerId], runner?.agents);
   const suggestedAgentOption = agentOpts.find((option) => option.agent.id === savedSelection.recommendedId);
   // Browse the runner's filesystem in the selected agent's context (native host vs a WSL distro).
   const browseDistro = agent?.context?.kind === "wsl" ? agent.context.distro : undefined;
@@ -868,7 +871,7 @@ export function NewSessionDialog({
     const r = runners.get(id);
     setWorkspaceId(r?.workspaces[0]?.id ?? "");
     const options = agentOptions(r?.agents ?? []);
-    const selection = savedAgentSelection(options, agentDefaults[id]);
+    const selection = savedAgentSelection(options, agentDefaults[id], r?.agents);
     setAgentId(selection.agentId);
     setBrowsedPath(null);
     setChoosingFolder(false);
@@ -887,7 +890,7 @@ export function NewSessionDialog({
     setRunnerId(loc.runnerId);
     setWorkspaceId(loc.workspaceId);
     const options = agentOptions(r.agents);
-    const selection = savedAgentSelection(options, agentDefaults[loc.runnerId]);
+    const selection = savedAgentSelection(options, agentDefaults[loc.runnerId], r.agents);
     setAgentId(selection.agentId);
     setBrowsedPath(null);
     setChoosingFolder(false);
@@ -1561,7 +1564,7 @@ export function NewSessionDialog({
               <div className="agent-default-warning" role="alert">
                 <span>
                   {selectionIssue === "legacy"
-                    ? "Your saved default uses Codex non-interactive mode. Codex App Server supports interactive approvals and resumable conversations."
+                    ? "Your saved default uses Codex non-interactive mode, which new sessions no longer offer. Codex App Server supports interactive approvals and resumable conversations."
                     : selectionIssue === "unbound"
                       ? "This older saved agent choice has no installation identity. Select the installation shown here to keep future sessions bound to it."
                     : selectionIssue === "unavailable"

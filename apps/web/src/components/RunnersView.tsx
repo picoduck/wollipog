@@ -3,6 +3,7 @@ import { State, useSnapshotState } from "./State.js";
 import { TabList } from "./Tabs.js";
 import {
   agentContextKey,
+  isRestartOnlyCodexExec,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   type AgentContext,
@@ -293,16 +294,19 @@ function AgentRow({
         {a.registry && <span className="atag">{a.registry.transport}</span>}
         {!a.registry && a.acpTransport && <span className="atag">{a.acpTransport}</span>}
         {a.registry && <span className="atag">Adapter v{a.registry.adapterVersion}</span>}
-        {a.codexAppServer?.status === "supported" && a.authStatus !== "unauthenticated" && (
-          <span className="atag">{driver === "codex" ? "Fallback Ready" : "Interactive Ready"}</span>
+        {isRestartOnlyCodexExec(a) && (
+          <span className="atag" title="Restarts sessions that already use it. New sessions use Codex App Server.">
+            Existing Sessions Only
+          </span>
+        )}
+        {driver === "codex-app-server" && a.codexAppServer?.status === "supported" && a.authStatus !== "unauthenticated" && (
+          <span className="atag">Interactive Ready</span>
         )}
         {(driver === "codex" || driver === "codex-app-server") && a.authStatus === "unauthenticated" && (
           <span className="atag broken" title="Run `codex login`, then rediscover.">Not Signed In</span>
         )}
-        {a.codexAppServer?.status === "unsupported" && (
-          <span className="atag broken" title={a.codexAppServer.failure?.message}>
-            {driver === "codex" ? "Non-Interactive Fallback" : "Interactive Unavailable"}
-          </span>
+        {driver === "codex-app-server" && a.codexAppServer?.status === "unsupported" && (
+          <span className="atag broken" title={a.codexAppServer.failure?.message}>Interactive Unavailable</span>
         )}
         {a.codexAppServer?.status === "unavailable" && (
           <span className="atag broken" title={a.codexAppServer.failure?.message}>Not Installed</span>
