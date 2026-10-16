@@ -1418,6 +1418,12 @@ test("ordinary commands reaching nothing are allowed, and every real access stay
     "bash <<'EOF'\necho hi # a note\nEOF\necho done",
     "bash <<'EOF'\nx=a#/b\nEOF\necho done",
     "bash <<'EOF'\n#!/bin/sh\necho hi\nEOF\necho done",
+    // AC1: a command that NAMES `/`, `//`, or `~` but cannot reach the hook state is allowed — a pure
+    // builtin never opens its operands, and the pattern/script of grep/sed/awk is not a path.
+    "echo /", "echo // ~", "printf '%s\\n' //", "true /", ": /",
+    "echo / > out.txt", "echo ~ >> notes.txt",
+    "grep '//' file.ts", "grep -n '//' file.ts", "grep -i -n // src.ts",
+    "sed 's|/|_|g' file", "awk '/\\//{print}' file",
   ]) {
     assert.equal(commandTargetsGuardState(command, project, directory), null, command);
   }
@@ -1463,11 +1469,36 @@ test("ordinary commands reaching nothing are allowed, and every real access stay
     `cat > a.ts <<EOF\n${into}\nEOF`,
     // A body handed to a shell is executed, so it is kept and scanned.
     `bash <<'EOF'\nrm -rf ${into}\nEOF`,
+    // Codex round-1 class: an earlier command that can rebind the consumer, a delimiter whose
+    // quote-removed terminator the tokenizer would mismatch, or a bare CR, must all keep the body —
+    // otherwise a stripped body swallows the read that follows it (#1734).
+    `hash -p /bin/bash cat; cat <<'EOF'\n/bin/cat ${join(directory, "s1.protections.json")}\nEOF`,
+    `alias cat=rm; cat > f <<'EOF'\n${into}\nEOF`,
+    `function cat { rm; }; cat > f <<'EOF'\n${into}\nEOF`,
+    `source ./x; cat > f <<'EOF'\n${into}\nEOF`,
+    `export PATH=/x; cat > f <<'EOF'\n${into}\nEOF`,
+    `PATH=/x; cat > f <<'EOF'\n${into}\nEOF`,
+    `cat <<"E\\OF"\nbody\nE\\OF\ncat ${join(directory, "s1.protections.json")}`,
+    `cat > f <<\\EOF\n${into}\nEOF`,
+    `echo hi # ignored\rcat <<'EOF'\ncat ${join(directory, "s1.protections.json")}\nEOF`,
     // The ancestor and root triggers the report lists.
     "find / -name s1.protections.json",
     `cd / && cat ${directory.slice(1)}/s1.protections.json`,
     "rm -rf /",
     `grep -r token ${home}`,
+    // AC1 must-refuse: recursion, an option that moves/takes the positional, a file-position
+    // ancestor, a non-pure command, a write into the state, or a pipe out of a pure command all keep
+    // the ancestor a reaching path.
+    `grep -R x ${home}`,
+    `grep -e / file`,
+    `grep -f / file`,
+    `rg x ${home}`,
+    `sed -i 's/a/b/' ${home}`,
+    `awk -f / file`,
+    `grep x ${home}`,
+    "cat /",
+    `echo / > ${join(directory, "x")}`,
+    "printf %s / | xargs cat",
   ]) {
     assertGuardRefused(commandTargetsGuardState(command, project, directory), command);
   }
@@ -1497,4 +1528,26 @@ test("the bash-faithful pre-pass never throws and opens no bypass under noise (#
   );
   fc.assert(fc.property(reaching, verb, noise, (path, v, pre) =>
     commandTargetsGuardState(`${pre}${v} ${path}`, project, directory) !== null), { numRuns: 2000 });
+});
+
+test("a heredoc never strips the command that follows it, whatever precedes it (#1734 Codex round 1)", (t) => {
+  const { project, directory } = guardLayout(t);
+  const abs = join(directory, "s1.protections.json");
+  // [prefix] + heredoc + [read of the state]. The read sits AFTER the heredoc, so bash executes it
+  // (or, for an unterminated heredoc, treats it as body the guard keeps and scans). Either way the
+  // read is still seen: no prefix that rebinds the consumer, no delimiter form, and no carriage
+  // return may let the body strip remove it from both readings.
+  const prefix = fc.constantFrom(
+    "", "cd x && ", "mkdir -p y && ", "git stash && ",
+    "hash -p /bin/bash cat; ", "alias cat=rm; ", "function cat { rm; }; ", "cat() { rm; }; ",
+    "PATH=/x ", "export PATH=/x; ", "source ./z; ", "eval foo; ", "echo hi # c\n",
+  );
+  const heredoc = fc.constantFrom(
+    "cat > f <<'EOF'\nb\nEOF\n", "cat > f <<\"EOF\"\nb\nEOF\n", "tee f <<'EOF'\nb\nEOF\n",
+    "cat > f <<\\EOF\nb\nEOF\n", "cat > f <<\"E\\OF\"\nb\nE\\OF\n", "cat > f <<$'EOF'\nb\nEOF\n",
+    "cat > f <<'EOF'\nb\n", "cat > f <<'EOF'\nb\nEOF\r", "cat <<'EOF' | sh\nb\nEOF\n",
+  );
+  const read = fc.constantFrom(`cat ${abs}`, `/bin/cat ${abs}`, `head ${abs}`, `rm -rf ${abs}`);
+  fc.assert(fc.property(prefix, heredoc, read, (p, h, r) =>
+    commandTargetsGuardState(`${p}${h}${r}\n`, project, directory) !== null), { numRuns: 3000 });
 });

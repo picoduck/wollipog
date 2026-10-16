@@ -2714,6 +2714,69 @@ function inspectsAncestorOnly(
 }
 
 /* ---------------------------------------------------------------------------------------------
+ * Operands that do not reach the guard state even when they name an ancestor (#1734 AC1).
+ *
+ * A command naming `/`, `//`, or `~` is refused today unless the whole command is an inspection,
+ * which left `echo /`, `grep '//' file`, and the like refused though they never open that path.
+ * The subset below is PROVABLY non-reaching, and only the ANCESTOR check is relaxed for it — the
+ * `inside` check (with symlink resolution) and the raw-text scan still refuse any operand that
+ * resolves into the hook directory, so a symlinked or literal hook path is caught regardless.
+ *
+ *  - Pure, argument-not-a-path builtins (`echo`, `printf`, `true`, `false`, `:`) never open ANY
+ *    operand, so none of their ancestor operands can reach. A redirect INTO the hook directory is
+ *    still caught by the inside check, and a redirect onto an ancestor directory cannot reach
+ *    (a write to `/` is a write to a directory, not into the state).
+ *  - The PATTERN of `grep`/`egrep`/`fgrep` and the SCRIPT of `sed`/`awk` are not paths, so an
+ *    ancestor there is inert — but ONLY when the invocation is unambiguous: no recursion and no
+ *    option that takes a value or moves the positional (`-r`/`-R`/`-e`/`-f`/`-i`/…). Any other
+ *    option, or an unrecognised one, keeps every operand a path (refuse). A FILE operand stays a
+ *    path; a non-recursive read of an ancestor directory errors rather than reaching, and a file
+ *    that resolves inside the state is caught by the inside check.
+ * ------------------------------------------------------------------------------------------ */
+
+/** Builtins whose operands are never opened as paths, so an ancestor among them cannot reach. */
+const GUARD_STATE_NONPATH_COMMANDS = new Set(["echo", "printf", "true", "false", ":"]);
+
+/** `grep`-family options that take no value and do not recurse. A short cluster must be only these
+ *  letters; anything else (notably `-r`/`-R`/`-d`/`-e`/`-f`/`-m`/`-A`/`-B`/`-C`) keeps operands paths. */
+const GUARD_STATE_GREP_SAFE_SHORT = /^-[invwxocHhsqaEFGPzUIl]+$/u;
+const GUARD_STATE_GREP_SAFE_LONG = new Set([
+  "--ignore-case", "--invert-match", "--line-number", "--word-regexp", "--line-regexp", "--count",
+  "--no-filename", "--with-filename", "--quiet", "--silent", "--null", "--extended-regexp",
+  "--fixed-strings", "--basic-regexp", "--perl-regexp", "--line-buffered", "--byte-offset",
+  "--only-matching", "--files-with-matches", "--files-without-match", "--no-messages", "--text",
+]);
+/** `sed` options that take no value, do not write in place, and do not move the script positional. */
+const GUARD_STATE_SED_SAFE_SHORT = /^-[nErsuz]+$/u;
+
+/**
+ * For `grep`/`egrep`/`fgrep`/`sed`/`awk`, the value of the single leading positional — the pattern
+ * or script, which is not a path — when every option before it is provably value-free and
+ * non-recursive. `null` when the command is something else, when an option is unsafe or unknown
+ * (fail closed), or when there is no positional. Exempting by value may also exempt a later file
+ * operand of the same spelling, which is safe: a non-recursive read of an ancestor cannot reach.
+ */
+function nonPathFirstPositional(words: readonly string[]): string | null {
+  const name = words[0];
+  const isGrep = name === "grep" || name === "egrep" || name === "fgrep";
+  const isSed = name === "sed";
+  const isAwk = name === "awk";
+  if (!isGrep && !isSed && !isAwk) return null;
+  for (let k = 1; k < words.length; k += 1) {
+    const word = words[k]!;
+    if (word === "--") return words[k + 1] ?? null; // end of options: next word is the positional
+    if (word.startsWith("-") && word !== "-") {
+      if (isGrep && (GUARD_STATE_GREP_SAFE_SHORT.test(word) || GUARD_STATE_GREP_SAFE_LONG.has(word) ||
+          /^--colou?r(=.*)?$/u.test(word))) continue;
+      if (isSed && GUARD_STATE_SED_SAFE_SHORT.test(word)) continue;
+      return null; // an option that may take a value, move the positional, or recurse: fail closed
+    }
+    return word; // the first positional: the pattern or script
+  }
+  return null;
+}
+
+/* ---------------------------------------------------------------------------------------------
  * Reading a command the way bash does, not the way the tokenizer happens to (#1734).
  *
  * `shell-quote` diverges from bash in three ways that each turned into a wrong verdict here. The
@@ -2728,10 +2791,15 @@ function inspectsAncestorOnly(
  *  - QUOTED HEREDOC BODIES. A `<<'E'` body handed to a copy-only consumer (`cat`, `tee`) is inert
  *    data: the consumer writes it to its operand or redirect target, both of which the classifier
  *    still inspects, so the body provably cannot reach the state. Its `/`, `//`, and `${...}` no
- *    longer read as paths. A body opened by an UNQUOTED delimiter (it expands), or handed to
- *    anything that executes it (a shell, an unknown command), or spelled inside a pipe/subshell
- *    where the consumer is not the command that wrote the `<<`, is kept and scanned exactly as
- *    before — so a write INTO the state, or a read of it after the heredoc, is still refused.
+ *    longer read as paths. Stripping is deeply fail-closed — the body is kept and scanned unless
+ *    EVERY one of these holds (so a body never swallows a command that follows it): the consumer is
+ *    `cat`/`tee` as the FIRST word of its simple command (no leading redirect/assignment); no
+ *    earlier command could rebind that consumer (`hash`/`alias`/`function`/`PATH=`/`source`/… —
+ *    `GUARD_STATE_REBIND_BUILTINS`, Codex CR-1.1); the delimiter is a clean single- or
+ *    double-quoted word whose terminator the tokenizer matches exactly as bash (Codex CR-1.2); no
+ *    bare `\r` is present (Codex CR-1.3); no pipe/subshell/backtick routes the body; and the
+ *    terminator is actually found (an unterminated body is kept). A write INTO the state, or a read
+ *    of it after the heredoc, is always refused.
  *  - REJECTED `${...}`. A substitution bash accepts but the tokenizer rejects (an embedded space,
  *    a `%`/`#`/`:` operator) was refused outright. It is reduced to a reference to its leading
  *    name, so the command is classified on its merits; an assigned name still substitutes, so
@@ -2820,6 +2888,22 @@ const GUARD_STATE_COMMAND_BOUNDARY = new Set([";", "&", "|", "\n", "\r", "(", ")
 const GUARD_STATE_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/u;
 
 /**
+ * Builtins and constructs in a PRECEDING command that can rebind what a later `cat`/`tee` runs — by
+ * aliasing, hashing, defining a function, re-pathing, or sourcing/evaluating something that does.
+ * A function definition (`name()`) and a subshell are already caught by the `(` → `routingSeen`
+ * rule, and a `NAME=` assignment (which could set `PATH`/`BASH_ENV`) is caught separately. If any of
+ * these precedes a heredoc, its body is not stripped, since the consumer may not be what it spells.
+ */
+const GUARD_STATE_REBIND_BUILTINS = new Set([
+  "hash", "alias", "unalias", "enable", "eval", "source", ".", "export", "declare", "typeset",
+  "readonly", "local", "set", "shopt", "command", "builtin", "exec", "trap", "let", "function",
+]);
+
+/** A clean single- or double-quoted delimiter word, with no expansion/escape that would make the
+ *  tokenizer's terminator differ from bash's (#1734 Codex CR-1.2). Anything else keeps the body. */
+const GUARD_STATE_CLEAN_DELIMITER = /^'[^']*'$|^"[^"\\$`]*"$/u;
+
+/**
  * Rewrite a command so the guard-state classifier reads it as bash would. See the block comment
  * above for the three corrections; everything the scanner cannot parse with confidence is emitted
  * verbatim, so the result is never read MORE permissively than the raw command was.
@@ -2827,9 +2911,16 @@ const GUARD_STATE_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/u;
  * `$'...'` ANSI-C quoting is modelled (a backslash escapes the next character, so `\'` does not
  * close the string), so a `#` or quote after one is read in the right state. A bare carriage return
  * is treated as a line and command boundary — bash does not, but splitting more only scans more.
+ *
+ * A heredoc body is stripped only when it is provably inert: see `heredocBodyStrippable`. Every
+ * condition fails closed — anything unproven keeps the body, which is then scanned.
  */
 export function prepareGuardStateCommand(command: string): PreparedGuardStateCommand {
   const n = command.length;
+  // A bare carriage return anywhere disables body stripping: bash does not end a comment or a
+  // heredoc body at `\r`, so a `\r` could make this scanner see a heredoc bash does not (Codex
+  // CR-1.3). Kept bodies are still scanned, so the command is only read more strictly.
+  const hasCarriageReturn = command.includes("\r");
   let scan = "";                // raw text, minus only stripped heredoc bodies — for the text scan
   let out = "";                 // the bash-faithful rewrite — for the tokenizer
   let quote: "'" | '"' | "$'" | null = null;
@@ -2841,11 +2932,21 @@ export function prepareGuardStateCommand(command: string): PreparedGuardStateCom
   // skipped) means a body's consumer is not the word that wrote the `<<`, so no body is stripped.
   // Set persistently once seen; a quoted body full of these metacharacters never reaches here.
   let routingSeen = false;
+  // A preceding command that could rebind the consumer (see `GUARD_STATE_REBIND_BUILTINS`). Once
+  // seen, no later heredoc body is stripped: the `cat` that spells a heredoc may run something else
+  // that reads the body and reaches the state (Codex CR-1.1).
+  let rebindSeen = false;
   const pending: PendingHeredoc[] = [];
   let i = 0;
 
   const both = (text: string) => { scan += text; out += text; };
   const resetSegment = () => { firstWord = ""; firstWordComplete = false; segmentAmbiguous = false; };
+  // Called as a command segment ends: remember whether it could rebind a later consumer.
+  const noteSegmentForRebinding = () => {
+    if (firstWord !== "" && (GUARD_STATE_REBIND_BUILTINS.has(firstWord) || GUARD_STATE_ASSIGNMENT.test(firstWord))) {
+      rebindSeen = true;
+    }
+  };
   const settleFirstWord = (isRedirect: boolean) => {
     if (firstWord === "") { if (isRedirect) segmentAmbiguous = true; return; }
     if (!firstWordComplete) {
@@ -2855,7 +2956,8 @@ export function prepareGuardStateCommand(command: string): PreparedGuardStateCom
   };
   const addWordChar = (ch: string) => { if (!firstWordComplete) firstWord += ch; inWord = true; };
   const strippableConsumer = () =>
-    !routingSeen && !segmentAmbiguous && GUARD_STATE_HEREDOC_DATA_CONSUMERS.has(firstWord);
+    !hasCarriageReturn && !routingSeen && !rebindSeen && !segmentAmbiguous &&
+    GUARD_STATE_HEREDOC_DATA_CONSUMERS.has(firstWord);
 
   // Consume each pending heredoc body up to its terminator, which bash recognises only on a `\n`
   // line boundary. A stripped body is dropped (it is inert data copied to an inspected destination);
@@ -2923,18 +3025,18 @@ export function prepareGuardStateCommand(command: string): PreparedGuardStateCom
     }
     if (c === "<" && command[i + 1] === "<") { i = handleHeredocOperator(i); continue; }
     if (c === "\n") { // bash starts a pending heredoc body after the newline ending the command line
-      both(c); inWord = false; resetSegment(); i += 1;
+      noteSegmentForRebinding(); both(c); inWord = false; resetSegment(); i += 1;
       if (pending.length > 0) consumeBodies();
       continue;
     }
-    if (c === "\r") { both(c); inWord = false; resetSegment(); i += 1; continue; } // a boundary, not a body start
+    if (c === "\r") { noteSegmentForRebinding(); both(c); inWord = false; resetSegment(); i += 1; continue; } // a boundary, not a body start
     if (c === " " || c === "\t") { settleFirstWord(false); both(c); inWord = false; i += 1; continue; }
     if (GUARD_STATE_WORD_BOUNDARY.has(c)) { // an operator: `;`, `&`, `|`, redirects, `(`, `)`
       settleFirstWord(c === "<" || c === ">" || c === "&");
       if (c === "|") for (const p of pending) p.strip = false; // this body feeds the pipeline
       if (c === "(") routingSeen = true;
       both(c); inWord = false;
-      if (GUARD_STATE_COMMAND_BOUNDARY.has(c)) resetSegment();
+      if (GUARD_STATE_COMMAND_BOUNDARY.has(c)) { noteSegmentForRebinding(); resetSegment(); }
       i += 1;
       continue;
     }
@@ -2966,23 +3068,23 @@ export function prepareGuardStateCommand(command: string): PreparedGuardStateCom
     const dashStrip = command[j] === "-";
     if (dashStrip) j += 1;
     while (j < n && (command[j] === " " || command[j] === "\t")) j += 1;
+    const delimStart = j;
     let delimiter = "";
-    let quoted = false;
-    let dollar = false; // a `$` in the delimiter (e.g. `<<$'EOF'`) means a spelling this does not model
     let dq: "'" | '"' | null = null;
     while (j < n) {
       const ch = command[j]!;
-      if (ch === "$") dollar = true;
       if (dq) { if (ch === dq) { dq = null; } else { delimiter += ch; } j += 1; continue; }
-      if (ch === "'" || ch === '"') { dq = ch; quoted = true; j += 1; continue; }
-      if (ch === "\\") { quoted = true; delimiter += command[j + 1] ?? ""; j += 2; continue; }
+      if (ch === "'" || ch === '"') { dq = ch; j += 1; continue; }
+      if (ch === "\\") { delimiter += command[j + 1] ?? ""; j += 2; continue; }
       if (GUARD_STATE_WORD_BOUNDARY.has(ch)) break;
       delimiter += ch; j += 1;
     }
     if (delimiter === "") { both(command.slice(start, j)); inWord = false; return j; }
-    // A `$` in the delimiter is not modelled precisely, so keep the body (fail closed); even so, a
-    // body with no terminator is never stripped (see consumeBodies).
-    const strip = quoted && !dollar && strippableConsumer();
+    // Strip only a delimiter whose quote-removed form the tokenizer reproduces exactly as bash does:
+    // a clean single- or double-quoted word. Any escape/expansion/concatenation keeps the body, so a
+    // mis-read terminator cannot let a stripped body swallow a following command (Codex CR-1.2).
+    const cleanDelimiter = GUARD_STATE_CLEAN_DELIMITER.test(command.slice(delimStart, j));
+    const strip = cleanDelimiter && strippableConsumer();
     pending.push({ delimiter, dashStrip, strip });
     scan += command.slice(start, j);
     // Escape any `#` in the operator/delimiter for the tokenizer: an unquoted `<<E#F` would otherwise
@@ -3104,12 +3206,17 @@ export function commandTargetsGuardState(
     return enclosing ? guardStateUninspectableRefusal(UNMODELLED_SHAPE_REASON) : null;
   }
   let namesAncestor = false;
-  for (const { operands } of segments) {
+  for (const { operands, words } of segments) {
+    // Operands that name an ancestor but cannot reach it (#1734 AC1): a pure builtin opens none of
+    // them, and the pattern/script of grep/sed/awk is not a path. The `inside` check below still
+    // runs on every operand, so a symlinked or literal hook path is refused regardless of role.
+    const pure = words !== null && words.length > 0 && GUARD_STATE_NONPATH_COMMANDS.has(words[0]!);
+    const exemptPositional = !pure && words !== null ? nonPathFirstPositional(words) : null;
     for (const value of operands) {
       if (value === null) continue;
       const relation = wordRelation(value);
       if (relation === "inside") return GUARD_STATE_REFUSAL;
-      if (relation === "ancestor") namesAncestor = true;
+      if (relation === "ancestor" && !pure && value !== exemptPositional) namesAncestor = true;
     }
   }
   if (!namesAncestor) return null;
