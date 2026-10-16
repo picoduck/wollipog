@@ -41,6 +41,7 @@ import {
   mkdirSync,
   openSync,
   readdirSync,
+  rmdirSync,
   rmSync,
   writeSync,
 } from "node:fs";
@@ -134,16 +135,22 @@ function unlinkQuietly(path: string): void {
   try { rmSync(path, { force: true }); } catch { /* Already gone, or its directory is. */ }
 }
 
-function removeChannelDirectory(directory: string): void {
+/** Remove a tree the runner made unlistable: a 0300 directory cannot be listed, so it could not
+ * be emptied. Each directory is opened first, never through a link. */
+function removeTree(path: string): void {
   let stat;
   try {
-    stat = lstatSync(directory);
+    stat = lstatSync(path);
   } catch {
     return;
   }
-  // A 0300 directory cannot be listed, so it could not be emptied. Never chmod through a link.
-  if (stat.isDirectory()) chmodSync(directory, 0o700);
-  rmSync(directory, { recursive: true, force: true });
+  if (stat.isDirectory()) {
+    chmodSync(path, 0o700);
+    for (const entry of readdirSync(path, { withFileTypes: true })) {
+      if (entry.isDirectory()) removeTree(join(path, entry.name));
+    }
+  }
+  rmSync(path, { recursive: true, force: true });
 }
 
 /** The base holds every session's channel; 0300, so no session can list it to find another's. */
@@ -154,6 +161,22 @@ function prepareBase(base: string): void {
     throw new Error("Agent Control FIFO relay base is not a directory");
   }
   chmodSync(base, 0o300);
+}
+
+/** Nothing unlistable may outlive the last channel: an unreadable directory, even an empty one,
+ * defeats an ordinary recursive delete of the runner's data directory. */
+function removeEmptyBase(base: string): void {
+  try {
+    if (!lstatSync(base).isDirectory()) return;
+    chmodSync(base, 0o700);
+  } catch {
+    return;
+  }
+  try {
+    rmdirSync(base);
+  } catch {
+    chmodSync(base, 0o300);
+  }
 }
 
 /** Startup cleanup: no channel survives a runner restart. A provider still holding an old path
@@ -168,8 +191,7 @@ export function sweepAgentControlFifoRelays(base: string): number {
   } catch {
     return 0;
   }
-  for (const entry of entries) removeChannelDirectory(join(base, entry.name));
-  chmodSync(base, 0o300);
+  removeTree(base);
   return entries.length;
 }
 
@@ -188,6 +210,9 @@ interface Channel {
 export class AgentControlFifoRelays {
   private readonly channels = new Map<string, Channel>();
   private readonly pending = new Map<string, Promise<unknown>>();
+  /** Sessions whose channel directory exists but is not published yet. */
+  private readonly creating = new Set<string>();
+  private shutDown = false;
 
   constructor(
     private readonly base: string,
@@ -207,6 +232,7 @@ export class AgentControlFifoRelays {
   ensure(sessionId: string): Promise<string> {
     return this.serialized(sessionId, async () => {
       if (!isSafeSessionFileId(sessionId)) throw new Error("unsafe session id for the Agent Control FIFO relay");
+      if (this.shutDown) throw new Error("the Agent Control FIFO relay has shut down");
       const existing = this.channels.get(sessionId);
       if (existing && !existing.doorbell.destroyed) return existing.directory;
       this.closeNow(sessionId);
@@ -216,8 +242,11 @@ export class AgentControlFifoRelays {
       mkdirSync(directory, { mode: 0o700 });
       const doorbellPath = join(directory, DOORBELL);
       let doorbell: Socket | undefined;
+      this.creating.add(sessionId);
       try {
         await makeFifos([doorbellPath]);
+        // Shutdown removed the whole tree while mkfifo ran; publish nothing.
+        if (this.shutDown) throw new Error("the Agent Control FIFO relay has shut down");
         // Read-write, so the runner is always a writer too: the doorbell never reports end-of-file
         // and opening it never waits for a client.
         const fd = openFifo(doorbellPath, constants.O_RDWR);
@@ -225,10 +254,13 @@ export class AgentControlFifoRelays {
         chmodSync(doorbellPath, 0o200);
         chmodSync(directory, 0o300);
       } catch (error) {
+        this.creating.delete(sessionId);
         doorbell?.destroy();
-        removeChannelDirectory(directory);
+        removeTree(directory);
+        this.removeBaseIfUnused();
         throw error;
       }
+      this.creating.delete(sessionId);
       const channel: Channel = { directory, doorbell, exchanges: new Map() };
       this.channels.set(sessionId, channel);
       this.listen(sessionId, channel);
@@ -246,13 +278,27 @@ export class AgentControlFifoRelays {
     await Promise.all([...sessionIds].map((sessionId) => this.close(sessionId)));
   }
 
+  /** Runner shutdown: synchronous, so it completes before the process exits, and it leaves nothing
+   * on disk. A channel still being created is refused when its mkfifo returns. */
+  closeAllNow(): void {
+    this.shutDown = true;
+    for (const sessionId of [...this.channels.keys()]) this.closeNow(sessionId);
+    removeTree(this.base);
+  }
+
+  /** The base goes as soon as no channel lives in it and none is being created there. */
+  private removeBaseIfUnused(): void {
+    if (this.channels.size === 0 && this.creating.size === 0) removeEmptyBase(this.base);
+  }
+
   private closeNow(sessionId: string): void {
     const channel = this.channels.get(sessionId);
     this.channels.delete(sessionId);
     if (!channel) return;
     for (const exchange of [...channel.exchanges.values()]) exchange.finish();
     channel.doorbell.destroy();
-    removeChannelDirectory(channel.directory);
+    removeTree(channel.directory);
+    this.removeBaseIfUnused();
   }
 
   private listen(sessionId: string, channel: Channel): void {

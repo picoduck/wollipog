@@ -3929,7 +3929,9 @@ function shutdown(exitCode = 0): void {
   });
   bestEffort("dispose shells", () => shells.dispose());
   bestEffort("close guard sockets", () => { void guardSockets.closeAll(); });
-  bestEffort("close Agent Control relays", () => { void agentControlRelays.closeAll(); void agentControlFifoRelays?.closeAll(); });
+  // The FIFO channels close synchronously: their directories are unlistable, so one left behind
+  // would block an ordinary recursive delete of the data directory until the next startup sweep.
+  bestEffort("close Agent Control relays", () => { void agentControlRelays.closeAll(); agentControlFifoRelays?.closeAllNow(); });
   // Providers that exited normally may have intentional background descendants retained under
   // their session boundary. Runner shutdown is the final owner and must drain every such scope.
   bestEffort("register retained descendant cleanup", () => terminateDescendantBoundariesAfterPendingKills());

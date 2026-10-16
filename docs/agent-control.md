@@ -112,7 +112,9 @@ Limits:
 - The loopback relay's frame bounds.
 
 An exchange that misses a limit is abandoned and its FIFOs removed. Session end removes the
-directory, and runner startup sweeps every channel an earlier runner left.
+directory, and the base goes with the last channel. Runner shutdown removes everything
+synchronously, because an unlistable directory left behind would block an ordinary recursive
+delete of the data directory. Runner startup sweeps whatever a killed runner left.
 
 Where no channel is established (macOS, Windows, runner `bwrap`/Seatbelt modes, or a failed
 setup), the Artifact Guidance of a Codex session other than the Orchestrator preset stops offering

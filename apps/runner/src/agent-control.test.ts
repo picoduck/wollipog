@@ -1034,9 +1034,9 @@ test("startup sweep also removes FIFO relay channels an earlier runner left (#32
     chmodSync(agentControlFifoRelayBase(root), 0o300);
     assert.equal(sweepAgentControlFiles(root), 1);
     assert.equal(existsSync(channel), false);
+    assert.equal(existsSync(agentControlFifoRelayBase(root)), false, "no unlistable base is left behind");
     assert.equal(sweepAgentControlFiles(root), 0);
   } finally {
-    chmodSync(agentControlFifoRelayBase(root), 0o700);
     rmSync(root, { recursive: true, force: true });
   }
 });

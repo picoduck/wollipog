@@ -500,16 +500,51 @@ test("startup sweep removes every channel an earlier runner left, unlistable or 
   writeFileSync(join(outside, "kept"), "kept");
   symlinkSync(outside, join(relayBase, "s_link"));
   assert.equal(sweepAgentControlFifoRelays(relayBase), 3);
-  assert.equal(statSync(relayBase).mode & 0o777, 0o300, "the swept base stays unlistable");
+  assert.equal(existsSync(relayBase), false, "the sweep leaves no unlistable base behind");
   assert.equal(sweepAgentControlFifoRelays(relayBase), 0, "nothing is left");
   assert.equal(existsSync(join(outside, "kept")), true, "a link is removed, never followed");
-  assert.equal(sweepAgentControlFifoRelays(join(relayBase, "missing")), 0);
   // A base a running runner made unlistable is swept just the same.
   const channel = new AgentControlFifoRelays(relayBase, async () => ({ status: 200, body: "{}" }));
   const live = await channel.ensure("s_live");
+  assert.equal(statSync(relayBase).mode & 0o777, 0o300);
   assert.equal(sweepAgentControlFifoRelays(relayBase), 1);
   assert.equal(existsSync(live), false);
+  assert.equal(existsSync(relayBase), false);
   await channel.closeAll();
+});
+
+test("nothing the relay leaves behind blocks an ordinary recursive delete of the data directory", { skip: SKIP }, async () => {
+  // Three integration tests that start a real runner failed exactly this way: an empty 0300 base
+  // left after shutdown made rmSync(dataDir, { recursive: true }) fail with EACCES.
+  const handler: AgentControlRelayHandler = async () => ({ status: 200, body: "{}" });
+  for (const shutdown of ["close each session", "closeAll", "closeAllNow"] as const) {
+    const dataDir = mkdtempSync(join(tmpdir(), "wollipog-fifo-relay-rm-"));
+    const channel = new AgentControlFifoRelays(join(dataDir, "agent-control", "fifo-relay"), handler);
+    try {
+      const first = await channel.ensure("s_rm_one");
+      const second = await channel.ensure("s_rm_two");
+      assert.equal(statSync(join(first, "..")).mode & 0o777, 0o300, "unlistable while a channel lives");
+      if (shutdown === "close each session") {
+        await channel.close("s_rm_one");
+        assert.equal(existsSync(join(first, "..")), true, "the base stays while another channel lives");
+        await channel.close("s_rm_two");
+      } else if (shutdown === "closeAll") {
+        await channel.closeAll();
+      } else {
+        // Synchronous, as runner shutdown needs, even with a creation still in flight.
+        const creating = channel.ensure("s_rm_three");
+        channel.closeAllNow();
+        await assert.rejects(() => creating, /has shut down/);
+        await assert.rejects(() => channel.ensure("s_rm_four"), /has shut down/);
+      }
+      assert.equal(existsSync(first) || existsSync(second), false, shutdown);
+      assert.equal(existsSync(join(first, "..")), false, `${shutdown}: no base is left`);
+      assert.doesNotThrow(() => rmSync(dataDir, { recursive: true, force: true }), shutdown);
+    } finally {
+      channel.closeAllNow();
+      removeTree(dataDir);
+    }
+  }
 });
 
 test("ensure refuses unsafe session ids and a linked base", { skip: SKIP }, async () => {
