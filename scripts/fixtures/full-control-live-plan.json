@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "status": "proposed",
+  "repository": "picoduck/wollipog-full-control-2939-validation",
+  "objective": "Verify one complete Full Control campaign on synthetic UI issues in a disposable private repository, including one justified related follow-up.",
+  "scope": {
+    "originalIssues": [1],
+    "relatedFollowUps": 1,
+    "effects": ["issue_create", "issue_close", "branch_push", "pull_request_create", "pull_request_merge", "merged_branch_delete", "session_archive", "worktree_retire"]
+  },
+  "integration": { "reviewedMainSha": null, "mergedPrerequisites": [] },
+  "limits": {
+    "costUsd": 40,
+    "toolCalls": 1200,
+    "concurrency": 2,
+    "followUps": 1,
+    "wallTimeMinutes": 180,
+    "faultAttempts": 6,
+    "onExhaustion": "stop_without_override",
+    "unknownUsage": "retain_reservation"
+  },
+  "provider": {
+    "root": { "driver": "codex-app-server", "model": "gpt-6.1-sol", "effort": "high", "accountProfile": "existing runner-default OpenAI account; operator must verify" },
+    "media": {
+      "driver": "codex-app-server", "model": "gpt-6.1-sol", "provider": "OpenAI", "accountProfile": "existing runner-default OpenAI account; operator must verify",
+      "capabilitiesSha256": null,
+      "nativeBoundary": {
+        "driver": "codex-app-server", "effort": "high", "installedVersion": "0.162.1",
+        "executableSha256": "628e35487d888a28f0427fc37501da529dd3d81fcbad7a2c3421c1e8670d92e1",
+        "schemaSha256": "80a40a7fac15b4bf70efb7f893fb353acc0a0d30c68f54aee4f01923deca85de",
+        "supported": false, "reason": "builtin_tool_allowlist_unavailable",
+        "enforcedProfileRef": null, "deniedRoutesProofSha256": null,
+        "completeToolAllowlist": false, "isolatedContext": false, "immutableResumePolicy": false
+      },
+      "retentionDisclosure": "Provider-local transcripts/media may retain disclosed synthetic evidence outside Wollipog audit guarantees; actual account retention must be confirmed by the operator."
+    },
+    "codeReview": {
+      "profile": "native_opus_5_5_high_read_only", "accountProfile": "existing runner-default Claude account; operator must verify",
+      "cliVersion": null, "controllerSha256": null, "executableSha256": null
+    }
+  },
+  "evidence": {
+    "destinationKind": "private_session_artifacts",
+    "destination": "Disposable isolated control-plane private artifact store, /tmp/wollipog-2939-live/operator/artifacts; no production Session uploads",
+    "retention": "Operator deletes disposable captures and provider state after inspected report; retain only approved private metadata/proof references under the operator's explicit retention decision.",
+    "sanitizedGeneratedMediaOnly": true,
+    "videoProfile": "paced-silent-complete-frames-v1",
+    "allSourceFrames": true,
+    "candidateOnly": false,
+    "originalGateSnapshotPreserved": true,
+    "normalVideoCertification": {
+      "proofId": null,
+      "proofSha256": null,
+      "capabilitiesSha256": null,
+      "separateOperatorReservationId": null,
+      "completedBeforeAuthorization": true
+    }
+  },
+  "oracle": {
+    "operatorDirectory": "/tmp/wollipog-2939-live/operator/oracle",
+    "reviewerDirectory": "/tmp/wollipog-2939-live/reviewer",
+    "namespaceProbeSha256": null,
+    "generateAfterNamespaceProbe": true,
+    "mediaOnlyTools": true
+  },
+  "isolation": {
+    "controlPlaneData": "/tmp/wollipog-2939-live/operator/control-plane.db",
+    "runnerState": "/tmp/wollipog-2939-live/isolated-runner",
+    "hostingStackChanges": false,
+    "newPersistentGrants": false
+  },
+  "cleanup": {
+    "failurePolicy": "Stop only disposable processes, preserve unknown launch/effect reservations and receipts, reconcile exact forge objects before retry or deletion; retain dirty/unpushed worktrees and report one actionable exception.",
+    "preserveUncertainEffects": true,
+    "verifyForgeAndRetirement": true
+  },
+  "accounting": { "modelPricedSeparateFromBilled": true, "unpricedIsZero": false, "meterInvalidAttempts": true }
+}
