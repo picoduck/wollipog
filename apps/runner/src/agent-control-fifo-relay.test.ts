@@ -531,7 +531,8 @@ test("nothing the relay leaves behind blocks an ordinary recursive delete of the
       } else if (shutdown === "closeAll") {
         await channel.closeAll();
       } else {
-        // Synchronous, as runner shutdown needs, even with a creation still in flight.
+        // Synchronous, as runner shutdown needs. A creation queued just before it is refused; one
+        // whose mkfifo is already running is held deterministically in the -shutdown test file.
         const creating = channel.ensure("s_rm_three");
         channel.closeAllNow();
         await assert.rejects(() => creating, /has shut down/);
