@@ -793,7 +793,10 @@ export async function runWollipogCli(
   const data = payload(result);
   if (json) io.stdout(`${JSON.stringify(data)}\n`);
   else io.stdout(`${JSON.stringify(data, null, 2)}\n`);
-  return result.isError ? 1 : 0;
+  if (result.isError) return 1;
+  // `session wait` exits like `pr wait`: 124 when the timeout elapsed first, so scripts can tell
+  // an unreached state from success without parsing the summary (#3269).
+  return parsed.tool === "wait_session" && (data as { outcome?: unknown }).outcome === "timeout" ? 124 : 0;
 }
 
 export async function runAgentControlMcp(env: NodeJS.ProcessEnv): Promise<void> {

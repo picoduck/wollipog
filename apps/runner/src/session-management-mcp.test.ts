@@ -12,6 +12,7 @@ import {
 } from "@wollipog/protocol";
 import {
   dispatch,
+  executeManagerTool,
   nextWaitSessionIntervalMs,
   serveSessionManagementMcp,
   SPAWN_APPROVAL_POLL_WINDOW_MS,
@@ -546,11 +547,108 @@ test("wait_session uses adaptive delays and preserves its exact timeout boundary
     intervalMs: 500,
   });
 
-  assert.equal(result.isError, true);
-  assert.match(resultText(result), /timed out/);
+  assert.equal(result.isError, undefined, "an elapsed timeout is a result, not a tool error");
+  const body = resultJson(result);
+  assert.equal(body.outcome, "timeout");
+  assert.deepEqual(body.waitingFor, ["completed"]);
+  assert.equal(body.session.id, "s_wait");
+  assert.equal(body.session.status, "running");
+  assert.equal(body.reached, undefined);
   assert.deepEqual(delays, [500, 750, 1125, 1625]);
   assert.equal(now, 4_000);
   assert.equal(calls.length, 5, "one immediate read plus four adaptively delayed reads");
+});
+
+test("wait_session timeout carries the last read's metadata", async () => {
+  const statuses = ["starting", "running", "idle"];
+  let reads = 0;
+  const { deps } = makeDeps(() => ({
+    status: 200,
+    body: { session: { id: "s_wait", status: statuses[Math.min(reads++, statuses.length - 1)], runnerId: "r1" } },
+  }));
+  let now = 0;
+  deps.now = () => now;
+  deps.sleep = async (milliseconds) => { now += milliseconds; };
+
+  const result = await callTool(deps, "wait_session", {
+    sessionId: "s_wait", states: ["completed", "failed"], timeoutMs: 1_000, intervalMs: 500,
+  });
+
+  assert.equal(result.isError, undefined);
+  assert.equal(reads, 3);
+  const body = resultJson(result);
+  assert.equal(body.outcome, "timeout");
+  assert.deepEqual(body.waitingFor, ["completed", "failed"]);
+  assert.equal(body.session.status, "idle", "the newest read, not the first");
+  assert.equal(body.session.runnerId, "r1");
+});
+
+test("wait_session reports the reached state with outcome reached", async () => {
+  const { deps } = makeDeps(() => ({
+    status: 200,
+    body: { session: { id: "s_wait", status: "input_required", runnerId: "r1", title: "Waiting" } },
+  }));
+  const result = await callTool(deps, "wait_session", {
+    sessionId: "s_wait", states: ["input_required", "completed"], timeoutMs: 1_000,
+  });
+  assert.equal(result.isError, undefined);
+  const body = resultJson(result);
+  assert.equal(body.outcome, "reached");
+  assert.equal(body.reached, "input_required");
+  assert.equal(body.session.title, "Waiting");
+});
+
+test("wait_session refuses unknown states before any read and lists the valid ones", async () => {
+  const { deps, calls } = makeDeps(() => ({ status: 200, body: { session: { id: "s_wait", status: "running" } } }));
+  const one = await callTool(deps, "wait_session", { sessionId: "s_wait", states: ["needs_input"], timeoutMs: 1_000 });
+  assert.equal(one.isError, true);
+  assert.equal(resultText(one),
+    "unknown session state needs_input; valid states: queued, starting, running, input_required, idle, completed, failed, stopped");
+
+  const mixed = await callTool(deps, "wait_session", {
+    sessionId: "s_wait", states: ["completed", "needs_input", "toString"], timeoutMs: 1_000,
+  });
+  assert.equal(mixed.isError, true);
+  assert.match(resultText(mixed), /^unknown session states needs_input, toString; valid states: queued, /);
+  assert.equal(calls.length, 0, "a refused state never polls the control plane");
+
+  const tool = TOOLS.find((t) => t.name === "wait_session")!;
+  assert.deepEqual((tool.inputSchema as any).properties.states.items.enum,
+    ["queued", "starting", "running", "input_required", "idle", "completed", "failed", "stopped"]);
+  assert.match(tool.description, /outcome "timeout"/);
+});
+
+test("wait_session keeps a missing session and a control-plane failure as errors", async () => {
+  for (const [status, body] of [[404, { error: "session not found" }], [503, { error: "unavailable" }]] as const) {
+    const { deps, calls } = makeDeps(() => ({ status, body }));
+    let now = 0;
+    deps.now = () => now;
+    deps.sleep = async (milliseconds) => { now += milliseconds; };
+    const result = await callTool(deps, "wait_session", { sessionId: "s_gone", states: ["completed"], timeoutMs: 5_000 });
+    assert.equal(result.isError, true, String(status));
+    assert.doesNotMatch(resultText(result), /timeout/);
+    assert.equal(calls.length, 1, `${status} ends the wait at the first read`);
+  }
+});
+
+test("wait_session never turns an unreadable or cancelled session read into a timeout result", async () => {
+  // A 2xx whose body fails to read reaches the handler without a session; past the deadline that
+  // must stay an error rather than a timeout carrying empty metadata.
+  for (const mode of ["reset", "cancelled", "no session"] as const) {
+    let now = 0;
+    const controller = new AbortController();
+    const result = await executeManagerTool("wait_session", { sessionId: "child", states: ["completed"], timeoutMs: 1 }, {
+      cpUrl: CP_URL, selfSessionId: SELF_ID, token: "", signal: controller.signal, now: () => now,
+      fetch: async () => ({ ok: true, status: 200, text: async () => {
+        now = 2;
+        if (mode === "no session") return "{}";
+        if (mode === "cancelled") controller.abort();
+        throw new Error(mode);
+      } }),
+    });
+    assert.equal(result.isError, true, mode);
+    assert.match(resultText(result), mode === "cancelled" ? /^request cancelled$/ : /^control plane returned no session status for child$/, mode);
+  }
 });
 
 test("mutating tools describe governance instead of promising a now-optional human gate", () => {

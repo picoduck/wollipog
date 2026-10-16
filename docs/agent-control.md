@@ -113,6 +113,16 @@ starts more than 20 seconds past it and one still in flight then is abandoned. R
 number's repository is one of those reads, so `--timeout 1` still returns one snapshot. Polling is clamped to
 10 seconds–10 minutes (default 30 seconds); lists are capped at 30 required checks and 20 failed jobs.
 
+`wollipog session wait` (MCP `wait_session`) polls a session until its status is one of `--for`
+(default `input_required,completed,failed,stopped`) and returns `outcome: "reached"`, the status it
+`reached`, and the session's metadata. A bounded wait usually ends at its timeout (1 ms–1 hour,
+default 60 seconds), so that is a normal result rather than a tool error (#3269):
+`outcome: "timeout"`, the states it was `waitingFor`, and the session's metadata from its last read.
+Call again to keep waiting. A state outside `queued`, `starting`, `running`, `input_required`,
+`idle`, `completed`, `failed`, and `stopped` is refused before any read, with the valid list. A
+missing session, a control-plane failure, and cancellation remain errors. The CLI exits 0 when
+reached, 124 on timeout, and 1 on an error.
+
 `wollipog session steering` (MCP `list_steering_attempts`) returns at most 50 receipts, prioritizing
 pending and unresolved uncertain attempts. `session steering-get` (`get_steering_attempt`) reads an
 exact submission, including its durable resolution. `prompt_session` includes steering receipts in

@@ -10,6 +10,7 @@ import {
   SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
   WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
+  type SessionStatus,
   type UiEvidenceReviewDelivery,
 } from "@wollipog/protocol";
 import { contextGhRunner, type GhRunner } from "./campaign-forge-status.js";
@@ -43,6 +44,13 @@ const WORKER_PERMISSION_MODES = ["default", "auto", "acceptEdits", "plan", "orch
  * box-tunnel blip) would stall an ordinary call for undici's ~300s header/body timeouts. */
 const CP_TIMEOUT_MS = 30_000;
 const MAX_WAIT_SESSION_INTERVAL_MS = 10_000;
+/** Every status `wait_session` can wait for. A Record so a new SessionStatus fails to compile here
+ * until it is listed; the handler refuses anything else (#3269). */
+const WAIT_SESSION_STATE_SET: Record<SessionStatus, true> = {
+  queued: true, starting: true, running: true, input_required: true,
+  idle: true, completed: true, failed: true, stopped: true,
+};
+const WAIT_SESSION_STATES = Object.keys(WAIT_SESSION_STATE_SET) as SessionStatus[];
 
 /** How long one create call keeps re-polling a pending child approval before it hands the control
  * plane's 428 text back to the agent. A harness ends a tool call that outlives its own timeout with
@@ -1967,7 +1975,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "wait_session",
-    description: "Wait until a session reaches one of the requested states, then return its metadata.",
+    description: "Wait until a session reaches one of the requested states, then return its metadata with outcome \"reached\". When timeoutMs (default 60000) elapses first, the result is not an error: it has outcome \"timeout\" and the session's metadata from the last read, so call again to keep waiting. Unknown state names are refused at once; a missing session, a control-plane failure, or cancellation is an error.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1975,7 +1983,7 @@ export const TOOLS: McpTool[] = [
         states: {
           type: "array",
           minItems: 1,
-          items: { type: "string", enum: ["queued", "starting", "running", "input_required", "idle", "completed", "failed", "stopped"] },
+          items: { type: "string", enum: WAIT_SESSION_STATES },
         },
         timeoutMs: { type: "integer", minimum: 1, maximum: 3_600_000 },
         intervalMs: {
@@ -1994,18 +2002,30 @@ export const TOOLS: McpTool[] = [
           args.states.some((state: unknown) => typeof state !== "string")) {
         return errorResult("states must be a non-empty array of session states");
       }
+      const unknown = args.states.filter((state: string) => !Object.hasOwn(WAIT_SESSION_STATE_SET, state));
+      if (unknown.length > 0) {
+        return errorResult(`unknown session state${unknown.length === 1 ? "" : "s"} ${unknown.join(", ")}; ` +
+          `valid states: ${WAIT_SESSION_STATES.join(", ")}`);
+      }
       const wanted = new Set<string>(args.states);
       const timeoutMs = Math.min(3_600_000, Math.max(1, Number.isFinite(args.timeoutMs) ? Math.floor(args.timeoutMs) : 60_000));
       let intervalMs = Math.min(MAX_WAIT_SESSION_INTERVAL_MS,
         Math.max(50, Number.isFinite(args.intervalMs) ? Math.floor(args.intervalMs) : 500));
       const now = deps.now ?? Date.now;
       const deadline = now() + timeoutMs;
+      let session: Json;
       do {
         const r = await cpFetch(deps, "GET", `/api/sessions/${encodeURIComponent(args.sessionId)}`);
         if (!r.ok) return errorResult(r.message);
-        const session = r.data?.session;
-        if (typeof session?.status === "string" && wanted.has(session.status)) {
-          return textResult({ session: mapSession(session), reached: session.status });
+        // cpFetch reports a 2xx whose body could not be read as ok with no data; that read, like
+        // one cancelled mid-body, is a failure and must never become a timeout result.
+        if (deps.signal?.aborted) return errorResult("request cancelled");
+        session = r.data?.session;
+        if (typeof session?.status !== "string") {
+          return errorResult(`control plane returned no session status for ${args.sessionId}`);
+        }
+        if (wanted.has(session.status)) {
+          return textResult({ outcome: "reached", reached: session.status, session: mapSession(session) });
         }
         const remaining = deadline - now();
         if (remaining <= 0) break;
@@ -2014,7 +2034,8 @@ export const TOOLS: McpTool[] = [
         }
         intervalMs = nextWaitSessionIntervalMs(intervalMs);
       } while (now() <= deadline);
-      return errorResult(`timed out waiting for session ${args.sessionId} to reach ${[...wanted].join(", ")}`);
+      // An elapsed timeout is the expected end of a bounded wait, not a failed call (#3269).
+      return textResult({ outcome: "timeout", waitingFor: [...wanted], session: mapSession(session) });
     },
   },
   {
