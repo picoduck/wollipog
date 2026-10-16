@@ -1,6 +1,6 @@
 import type { AgentContext, ShellOpenMessage, ShellOpenResultMessage } from "@wollipog/protocol";
 import type { SessionMeta } from "./session-store.js";
-import type { ShellProcessLaunch } from "./shell-manager.js";
+import type { AgentTuiProviderHome, ShellProcessLaunch } from "./shell-manager.js";
 
 export type ShellOpenTarget =
   | { root: string; context: AgentContext; meta: SessionMeta }
@@ -28,6 +28,8 @@ export interface ShellOpenCommandDependencies {
   resolveCleanupBoundary(sessionId: string, worktreePath: string | null): ShellCleanupBoundary;
   launchEpoch(sessionId: string): number;
   resolveAgentTuiLaunch(meta: SessionMeta, assertCurrent: () => Promise<void>): ShellProcessLaunch | null | Promise<ShellProcessLaunch | null>;
+  /** Spawn the shell. A launch's `providerHome` is owned by the opened shell once this returns
+   * (its ended callback settles it); when this throws, no TUI process was started. */
   open(
     message: ShellOpenMessage,
     target: ShellOpenLaunchTarget,
@@ -90,6 +92,9 @@ export async function handleShellOpenCommand(
       return;
     }
 
+    // The launch's provider-HOME reference (#3238) until a TUI process owns it: any refusal between
+    // a successful preparation and a successful spawn settles it as "no TUI process started".
+    let unopenedProviderHome: AgentTuiProviderHome | undefined;
     try {
       // Only launch-relevant fields participate: transcript ticks must not continually
       // invalidate a slow MCP probe, but a replacement launch or workspace change must.
@@ -116,6 +121,7 @@ export async function handleShellOpenCommand(
       const launch = message.kind === "agent_tui"
         ? (await dependencies.resolveAgentTuiLaunch(target.meta, assertCurrent)) ?? undefined
         : undefined;
+      unopenedProviderHome = launch?.providerHome;
       if (message.kind === "agent_tui" && !launch) {
         throw new Error("this session's agent does not expose a standalone TUI");
       }
@@ -138,8 +144,13 @@ export async function handleShellOpenCommand(
         target.meta.worktreePath ?? null,
       );
       const { pty } = dependencies.open(message, target, launch, cleanupBoundary);
+      unopenedProviderHome = undefined;
       dependencies.send({ type: "shell_open_result", requestId: message.requestId, ok: true, pty });
     } catch (error) {
+      const unopened = unopenedProviderHome;
+      unopenedProviderHome = undefined;
+      // Settled before the failure is reported, so a caller that saw the refusal sees the release.
+      await unopened?.settle(null).catch(() => {});
       fail(dependencies.errorText(error));
     }
   } finally {

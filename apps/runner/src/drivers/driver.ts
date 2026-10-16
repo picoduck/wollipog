@@ -292,7 +292,7 @@ export interface Driver {
   forkSession?(
     lastTurnId: string,
     cwd: string,
-    options?: { isolation?: SpawnIsolation; descendantMarker?: string },
+    options?: ForkSessionOptions,
   ): Promise<string>;
 
   /** Best-effort provider cleanup for a fork that failed before becoming a manager session. */
@@ -371,4 +371,15 @@ export interface Driver {
    * descendants, is proven gone (see ProviderProcessLedger). Memoized and never rejects. A driver
    * that cannot prove this omits the method, and its provider-HOME reference is kept. */
   proveProcessTreeExit?(options: { terminate: boolean }): Promise<boolean>;
+}
+
+/** Options for one provider-native conversation fork. */
+export interface ForkSessionOptions {
+  isolation?: SpawnIsolation;
+  descendantMarker?: string;
+  /** Learns about every process the fork itself starts (#3238). Each proof settles after that
+   * process finished and is true only when its complete process tree is proven gone. A driver
+   * that does not report its fork processes leaves the caller nothing to prove with, so a caller
+   * holding a provider-HOME reference for the fork keeps it whenever no proof arrived. */
+  onProcess?(proof: Promise<boolean>): void;
 }

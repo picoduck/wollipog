@@ -3617,6 +3617,48 @@ test("Claude fork fails closed if the local bootstrap reports model cost", async
   driver.dispose();
 });
 
+test("Claude fork reports its bootstrap's own tree proof only after the bootstrap finished (#3238)", async () => {
+  const source = "11111111-2222-3333-4444-555555555555";
+  const capabilities = {
+    models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: false,
+    supportsConversationFork: true,
+  };
+  for (const outcome of ["confirmed", "refused"] as const) {
+    const child = fakeProcess();
+    let terminations = 0;
+    child.posixBoundary = { owner: undefined, terminate: async () => { terminations++; return outcome === "confirmed"; } };
+    const launches: any[] = [];
+    const driver = new ClaudeCodeDriver({ ...baseOpts, resumeId: source, capabilities }, noopCb, {
+      spawn: (options: any) => { launches.push(options); return child; },
+      kill: () => {},
+    } as any);
+    const proofs: Promise<boolean>[] = [];
+    const fork = driver.forkSession(source, "/tmp/fork", { onProcess: (proof) => proofs.push(proof) });
+    void fork.catch(() => {});
+    assert.equal(proofs.length, 1, `${outcome}: the bootstrap is reported as soon as it is spawned`);
+    let proven: boolean | undefined;
+    void proofs[0]!.then((value) => { proven = value; });
+    await nextTask();
+    assert.equal(proven, undefined, `${outcome}: no proof while the bootstrap still runs`);
+    assert.equal(terminations, 0, `${outcome}: a running bootstrap is never proven`);
+    const args = launches[0].args as string[];
+    const target = args[args.indexOf("--session-id") + 1]!;
+    if (outcome === "confirmed") {
+      child.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: target }) + "\n");
+      child.stdout.write(JSON.stringify({ type: "result", subtype: "success", session_id: target, total_cost_usd: 0 }) + "\n");
+      child.emit("close", 0);
+      assert.equal(await fork, target);
+      assert.equal(await proofs[0], true, "a closed bootstrap whose boundary has no survivor is proven gone");
+    } else {
+      child.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "wrong" }) + "\n");
+      await assert.rejects(fork, /wrong session id/);
+      assert.equal(await proofs[0], false, "a killed bootstrap with a surviving descendant is not proven gone");
+    }
+    assert.ok(terminations >= 1, `${outcome}: the proof is the bootstrap's own boundary`);
+    driver.dispose();
+  }
+});
+
 test("system/init reports the provider-resolved model without emitting an event", () => {
   const h = makeHarness();
   const r = h.feed({

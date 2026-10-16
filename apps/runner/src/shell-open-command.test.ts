@@ -206,6 +206,40 @@ test("manual Agent TUI attachment bypasses even a retained failed start fence", 
   assert.equal(state.replies[0]?.ok, true);
 });
 
+test("an Agent TUI refused after its launch was prepared settles the launch's reference as no TUI process (#3238)", async () => {
+  for (const refusal of ["spawn", "cancel", "replaced"] as const) {
+    const settlements: Array<boolean | null> = [];
+    let resolutions = 0;
+    let cancellationChecks = 0;
+    const providerHome = { markUnprovable: () => {}, settle: async (proven: boolean | null) => { settlements.push(proven); } };
+    const state = harness({
+      resolveAgentTuiLaunch: () => ({ command: "claude", args: [], providerHome }),
+      // The third check is the first one after preparation, at the spawn boundary.
+      consumeCancellation: () => refusal === "cancel" && ++cancellationChecks === 3,
+      resolveTarget: () => {
+        resolutions++;
+        // The recheck after preparation sees a replaced launch.
+        return { root: "/repo", context: { kind: "native" },
+          meta: refusal === "replaced" && resolutions > 1 ? { ...meta, command: "other" } : meta };
+      },
+      open: () => { throw new Error("session already has a running agent TUI"); },
+    });
+    await handleShellOpenCommand(command("agent_tui"), state.dependencies);
+    assert.equal(state.replies[0]?.ok, false, refusal);
+    assert.deepEqual(settlements, [null], `${refusal}: settled once, before the refusal was reported`);
+  }
+});
+
+test("an opened Agent TUI leaves its reference to the opened shell", async () => {
+  const settlements: Array<boolean | null> = [];
+  const providerHome = { markUnprovable: () => {}, settle: async (proven: boolean | null) => { settlements.push(proven); } };
+  const state = harness({ resolveAgentTuiLaunch: () => ({ command: "claude", args: [], providerHome }) });
+  await handleShellOpenCommand(command("agent_tui"), state.dependencies);
+  assert.equal(state.opens, 1);
+  assert.equal(state.replies[0]?.ok, true);
+  assert.deepEqual(settlements, [], "the TUI's ended callback settles it, not the open path");
+});
+
 test("Agent TUI launch-resolution failures return a failed shell result", async () => {
   const state = harness({
     resolveAgentTuiLaunch: () => { throw new Error("provider HOME lease is unavailable"); },

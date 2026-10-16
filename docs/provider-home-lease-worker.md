@@ -63,9 +63,9 @@ Callers that release before shutdown (skill transactions, and a launch or skill 
 became stale after its grant) use `acquire_reference`. The worker keeps the receipt's exact-entry
 release for that completed acquisition, at most 1024 at once, and `release_reference` names the
 acquisition by its id. Every handle is settled: a consumer that keeps its reference until shutdown
-(a launched TUI or account launch, or an unfinished adoption or restore) sends `retain_reference`,
-which frees only the handle. Only in-flight transactions occupy the pool, however many launches a
-runner performs. Releasing by path would re-resolve the HOME, so a symlink retargeted in
+(an account launch, an Agent TUI or fork whose tree was not proven gone, or an unfinished adoption
+or restore) sends `retain_reference`, which frees only the handle. Only in-flight transactions and
+open session, TUI and fork handles occupy the pool, however many launches a runner performs. Releasing by path would re-resolve the HOME, so a symlink retargeted in
 between could drop another HOME's reference. The handle cannot be redirected: it drops only the
 entry it joined, at most once. Path-based `release` remains only for the provider sign-in supervisor
 (sign-in and removed-account cleanup), which is unchanged here.
@@ -100,9 +100,19 @@ How an instance ended decides which proof it gets:
 
 A failed construction keeps the reference if a constructor ran, and releases it otherwise. During shutdown nothing is settled per instance; `close()` releases every reference after the global reaping proof.
 
-Session handles live as long as their sessions. A runner with 512 open session handles gives later launches a plain reference until shutdown, so the worker's 1024-handle pool stays free for transactions and probes.
+Session and Agent TUI handles live as long as their sessions and terminals. A runner with 512 open session and TUI handles together gives later launches and TUIs a plain reference until shutdown, so the worker's 1024-handle pool stays free for transactions and probes.
 
-Codex exec, Pi, Codex app-server, Claude Code and ACP prove their trees. Agent TUIs and launch preparation still keep their references until shutdown.
+Codex exec, Pi, Codex app-server, Claude Code and ACP prove their trees. Launch preparation still keeps its reference until shutdown (part 3c of #3238 is pending).
+
+**Agent TUIs** hold their reference from the grant until the TUI has ended. The launch preparation owns it first, then the shell open path, then the opened terminal:
+
+- When the TUI process closes or fails to start, `ShellManager` reports its tree proof once: on native Linux the TUI's ownerless POSIX boundary, terminated at close, decides; a Windows ConPTY process always reports false. The reference is released only for a true proof. Explicit close, session close and worktree retirement end in that same close event, so they settle the same way.
+- A preparation or open that fails after the grant settles with no TUI process: it releases, unless a probe already ran outside a boundary.
+- A Codex TUI keeps its reference until shutdown even when its own tree is proven gone. Its preparation runs the permission-profile proof, the hook inventory and, for the Orchestrator TUI, the MCP inventory, all outside any boundary. Tracking those probes is deferred to a follow-up.
+- Windows native and WSL TUIs keep theirs too, since neither has a tree proof, and so does a false or failed proof.
+- Runner shutdown settles nothing per TUI; `close()` releases every reference after the global reaping proof.
+
+**Claude forks** take an exact-entry reference for the target fork (isolated to the new worktree), whichever client runs the fork: the live driver or a temporary one. The live client's ledger is never asked to prove, because proving would seal it. Instead `forkSession` reports the fork bootstrap's own tree proof through an optional process observer once the bootstrap has finished. The bootstrap has an ownerless boundary terminated at close. The reference is released only when that proof arrived and is true. A false proof, or none at all (a driver without the observer, or a bootstrap that never spawned), keeps it. A fork refused before `forkSession` was called releases it, since nothing was started.
 
 **Claude Code** records its one-shot and persistent provider spawns under the ledger's owner, and its resume and fork accounting probe without one, so the probe is proven on its own.
 

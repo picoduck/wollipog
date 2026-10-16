@@ -43,6 +43,7 @@ import {
 import { classifyRoutineClaudeOrchestratorPermission } from "../orchestrator-provider-permissions.js";
 import {
   killTree,
+  provenProcessTreeExit,
   ProviderProcessLedger,
   spawnAgent,
   terminateDescendantBoundaries,
@@ -63,6 +64,7 @@ import type {
   DriverOptions,
   DriverSteerInput,
   DriverSteerResult,
+  ForkSessionOptions,
   PreparedDriverCommand,
   StopReason,
 } from "./driver.js";
@@ -923,7 +925,7 @@ export class ClaudeCodeDriver implements Driver {
     return this.sessionId;
   }
 
-  async forkSession(lastTurnId: string, cwd: string, options?: { isolation?: SpawnIsolation; descendantMarker?: string }): Promise<string> {
+  async forkSession(lastTurnId: string, cwd: string, options?: ForkSessionOptions): Promise<string> {
     if (this.disposed) throw new Error("Claude driver is disposed");
     if (this.opts.capabilities?.supportsConversationFork !== true) {
       throw new Error("Claude conversation fork was not verified for this installation");
@@ -941,7 +943,7 @@ export class ClaudeCodeDriver implements Driver {
     cwd: string,
     targetSessionId: string,
     signal?: AbortSignal,
-    options?: { isolation?: SpawnIsolation; descendantMarker?: string },
+    options?: ForkSessionOptions,
   ): Promise<Json> {
     const isFork = targetSessionId !== this.sessionId;
     // /context is a local zero-cost command. It makes Claude persist the fork immediately so the
@@ -994,6 +996,11 @@ export class ClaudeCodeDriver implements Driver {
       throw new Error(`Claude fork failed to spawn: ${(err as Error).message}`);
     }
     this.auxiliaryChildren.add(child);
+    let markFinished!: () => void;
+    const finished = new Promise<void>((done) => { markFinished = done; });
+    // Proven only after the probe finished (closed, or failed and was killed). Its boundary has no
+    // owner, so the proof is the probe's own tree and never touches this driver's ledger.
+    options?.onProcess?.(finished.then(() => provenProcessTreeExit(child)));
 
     return new Promise<Json>((resolve, reject) => {
       let result: Json = null;
@@ -1008,6 +1015,7 @@ export class ClaudeCodeDriver implements Driver {
         signal?.removeEventListener("abort", onAbort);
         this.deps.clearTimer(timer);
         this.auxiliaryChildren.delete(child);
+        markFinished();
       };
       const fail = (err: Error) => {
         if (settled) return;
