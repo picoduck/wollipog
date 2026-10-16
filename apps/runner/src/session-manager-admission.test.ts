@@ -1664,7 +1664,7 @@ test("authoritative background work retains the active-work permit and cannot be
 });
 
 test("native persistent drivers and resume-capable ACP sessions park and resume by provider identity", async () => {
-  for (const driver of ["codex", "codex-app-server", "pi", "acp"] as const) {
+  for (const driver of ["codex-app-server", "pi", "acp"] as const) {
     const root = mkdtempSync(join(tmpdir(), `wollipog-${driver}-parking-`));
     try {
       const store = new SessionStore(join(root, "sessions"));
@@ -1760,7 +1760,6 @@ test("parking eligibility is capability-derived and fails closed for provider-ow
     });
     const providers = [
       { id: "claude", driver: "claude-code", expected: true },
-      { id: "codex", driver: "codex", expected: true },
       { id: "app-server", driver: "codex-app-server", expected: true },
       { id: "pi", driver: "pi", expected: true },
       { id: "acp-resume", driver: "acp", acpCapabilities: { sessionResume: true }, expected: true },
@@ -2730,7 +2729,7 @@ test("a superseded async launch preparation cannot patch or publish over its rep
     const second = manager.start({
       ...launchSpec(root, "s1"),
       agentId: "codex",
-      driver: "codex",
+      driver: "codex-app-server",
       command: "codex",
       capabilities: { supportsImages: false },
     });
@@ -2739,7 +2738,7 @@ test("a superseded async launch preparation cannot patch or publish over its rep
     assert.equal(await first, false);
 
     const current = store.readMeta("s1");
-    assert.equal(current?.driver, "codex");
+    assert.equal(current?.driver, "codex-app-server");
     assert.deepEqual(current?.capabilities, { supportsImages: false });
     assert.equal(current?.sessionSlashCommands, undefined);
     assert.equal(

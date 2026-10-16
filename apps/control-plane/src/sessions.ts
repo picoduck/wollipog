@@ -7,7 +7,7 @@ import { campaignAuthorityPreflight, controlledReviewCapabilityKey, standingRoot
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope } from "./campaign-issue-scope.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
 import { issueBoundary, issueEvidenceDigest, issueWork, closureEvidence, publicationEvidence, reservedPublicationSlots } from "./campaign-issue-authority.js";
-import { validIssueAdmission, campaignPublicationSafe } from "@wollipog/protocol";
+import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe } from "@wollipog/protocol";
 import { normalizeCampaignIssueScopeSnapshot, titleFromPrompt, type CampaignIssueScopeRequest, type CampaignIssueScopeView, type CampaignIssueScopeSnapshot } from "@wollipog/protocol";
 import { normalizeIssueClosureSnapshot, issueClosureActiveChildren } from "./github-issue-closure.js";
 import { observeReconciliationSnapshot, reconciliationSnapshotAvailable, correctionFrame, latestReconciliationRepair, normalizeReconciledSnapshot, reconciliationRevision } from "./claude-cost-reconciliation.js";
@@ -1347,26 +1347,14 @@ export function sessionBlocksConversationFork(status: SessionStatus): boolean {
   return ["queued", "running", "starting", "input_required"].includes(status);
 }
 
-function legacyCodexExecAgentId(agentId: string): string | null {
-  if (agentId === "codex" || agentId === "codex-native") return "codex-exec";
-  if (agentId.startsWith("codex-wsl-")) return agentId.replace(/^codex-wsl-/, "codex-exec-wsl-");
-  return null;
-}
-
-/** Preserve the session's persisted driver when discovery reassigns the old `codex` id to app-server. */
+/** The runner's current launch for a session's agent. Driver changes for configured agents restart
+ * with the runner's current definition. A session persisted on the retired Codex exec driver has no
+ * launch (#3259): its old stable `codex` id now names App Server, which must not silently replace
+ * the conversation it ran. */
 export function launchForRestart(db: ControlPlaneDb, session: SessionView): AgentLaunch | null {
-  if (!session.agentId) return null;
+  if (!session.agentId || isRetiredCodexExec(session)) return null;
   const targetBound = session.executionTarget !== undefined && session.executionTarget.adapter !== "host";
-  const exact = db.getAgentLaunch(session.runnerId, session.agentId, targetBound);
-  if (exact?.driver === session.driver) return exact;
-  // Driver changes for ordinary configured agents have always restarted with the runner's
-  // current definition. Codex exec is the one exception: discovery deliberately migrated its
-  // old stable id to app-server, so a persisted exec session must use the compatibility row.
-  if (session.driver !== "codex") return exact;
-  const compatibilityId = legacyCodexExecAgentId(session.agentId);
-  if (!compatibilityId) return null;
-  const compatibility = db.getAgentLaunch(session.runnerId, compatibilityId, targetBound);
-  return compatibility?.driver === "codex" ? compatibility : null;
+  return db.getAgentLaunch(session.runnerId, session.agentId, targetBound);
 }
 
 /** Placeholder title for a session created without a first prompt (named by its first message). */
@@ -1396,6 +1384,7 @@ function workflowMemberCapabilityError(
   config: SessionConfig | undefined,
   launch: AgentLaunch,
 ): string | null {
+  if (isRetiredCodexExec(launch)) return `${agentId}: ${CODEX_EXEC_RETIRED_REASON}`;
   if (config?.serviceTier && launch.driver !== "codex-app-server") {
     return `${agentId}: service tier selection is supported only by Codex app-server sessions`;
   }
@@ -1438,25 +1427,6 @@ export function workflowRunCapabilityError(
     if (launch) return workflowMemberCapabilityError(req.orchestratorAgentId, req.config, launch);
   }
   return null;
-}
-
-/** Classify exec usage without recording a session/user identifier. Same-context app-server
- * availability means the user explicitly chose Advanced exec; otherwise exec is compatibility. */
-function codexExecFallbackReason(
-  db: ControlPlaneDb,
-  runnerId: string,
-  launch: AgentLaunch,
-): "explicit_exec" | "compatibility_exec" | undefined {
-  if (launch.driver !== "codex") return undefined;
-  const interactive = db.getRunner(runnerId)?.agents.some(
-    (agent) =>
-      agent.driver === "codex-app-server" &&
-      agent.available === true &&
-      (agent.context?.kind ?? "native") === launch.context.kind &&
-      (launch.context.kind !== "wsl" ||
-        (agent.context?.kind === "wsl" && agent.context.distro === launch.context.distro)),
-  );
-  return interactive ? "explicit_exec" : "compatibility_exec";
 }
 
 function auditDigest(value: unknown): string | undefined {
@@ -3781,6 +3751,7 @@ export class SessionsService {
       capabilities: snapshotSpec.capabilities,
     } : this.db.getAgentLaunch(req.runnerId, req.agentId, targetBoundLaunch);
     if (!launch) return fail(`unknown agent '${req.agentId}' on runner '${req.runnerId}'`, 404);
+    if (isRetiredCodexExec(launch)) return fail(CODEX_EXEC_RETIRED_REASON, 409);
     const launchHarness = agentHarnessIdentityFor({
       id: req.agentId,
       driver: launch.driver,
@@ -4453,7 +4424,6 @@ export class SessionsService {
       providerAccountLabel: providerAccount?.label,
       agentVersion: launch.version,
       capabilities: launch.capabilities,
-      codexExecFallbackReason: codexExecFallbackReason(this.db, req.runnerId, launch),
       title,
       titleSource,
       command: launch.command,
@@ -4588,7 +4558,6 @@ export class SessionsService {
       providerAccountLabel: providerAccount?.label,
       agentVersion: launch.version,
       capabilities: launch.capabilities,
-      codexExecFallbackReason: codexExecFallbackReason(this.db, req.runnerId, launch),
       title,
       titleSource,
       command: launch.command,
@@ -6698,6 +6667,7 @@ export class SessionsService {
     const reconciliationBlock = this.podReconciliationMutationError(sessionId);
     if (reconciliationBlock) return fail(reconciliationBlock, 409);
     if (!session.agentId) return fail("session is missing its agent", 400);
+    if (isRetiredCodexExec(session)) return fail(CODEX_EXEC_RETIRED_REASON, 409);
     const launch = launchForRestart(this.db, session);
     if (!launch) return fail(`unknown agent '${session.agentId}' on runner '${session.runnerId}'`, 404);
     // Resolve the launch directory: an ad-hoc browsed path (workspaceId is null) takes precedence over
@@ -6855,7 +6825,6 @@ export class SessionsService {
       providerAccountLabel: session.providerAccountLabel,
       agentVersion: launchVersion,
       capabilities: launchCapabilities,
-      codexExecFallbackReason: codexExecFallbackReason(this.db, session.runnerId, launch),
       title: session.title,
       titleSource: session.titleSource,
       command: launch.command,
@@ -12067,7 +12036,6 @@ export class SessionsService {
           agentId: member.agentId,
           agentVersion: member.launch.version,
           capabilities: member.launch.capabilities,
-          codexExecFallbackReason: codexExecFallbackReason(this.db, req.runnerId, member.launch),
           title: memberTitle,
           titleSource,
           command: member.launch.command,
@@ -12207,7 +12175,6 @@ export class SessionsService {
         agentId: member.agentId,
         agentVersion: member.launch.version,
         capabilities: member.launch.capabilities,
-        codexExecFallbackReason: codexExecFallbackReason(this.db, req.runnerId, member.launch),
         title: memberTitle,
         titleSource,
         command: member.launch.command,
@@ -13030,6 +12997,7 @@ export class SessionsService {
     const unknown: string[] = [];
     for (const agentId of req.agentIds) {
       const launch = this.db.getAgentLaunch(req.runnerId, agentId);
+      if (launch && isRetiredCodexExec(launch)) return fail(`${agentId}: ${CODEX_EXEC_RETIRED_REASON}`, 409);
       const configCapabilityError = capabilityConfigError(req.config, launch?.capabilities);
       if (configCapabilityError) return fail(`${agentId}: ${configCapabilityError}`, 409);
       if (req.config?.serviceTier && launch?.driver !== "codex-app-server") {
@@ -13132,7 +13100,6 @@ export class SessionsService {
         agentId,
         agentVersion: launch.version,
         capabilities: launch.capabilities,
-        codexExecFallbackReason: codexExecFallbackReason(this.db, req.runnerId, launch),
         title: `${title} · ${agentId}`,
         titleSource,
         command: launch.command,

@@ -14,7 +14,7 @@ import { claudeProjectPathKey } from "./claude-background-work.js";
 import { CodexAppServerResumeError } from "./drivers/codex-app-server.js";
 import { setGitRunnerForTests } from "./git-ops.js";
 import type { ProviderAuthRecoveryController } from "./provider-auth-recovery.js";
-import { accrueRatePricedUsage } from "@wollipog/protocol";
+import { accrueRatePricedUsage, CODEX_EXEC_RETIRED_REASON } from "@wollipog/protocol";
 import {
   SessionManager,
   type DurableCommandLifecycle,
@@ -2616,7 +2616,7 @@ test("evidence-free identity mismatch offers accurate redacted recovery guidance
     cancel: () => false,
   };
   const h = harness({
-    driver: "codex",
+    driver: "codex-app-server",
     command: "codex",
     agentId: "codex-native",
     env: { OPENAI_API_KEY: "current-secret" },
@@ -3760,9 +3760,9 @@ test("a different-driver Restart releases a superseded app-server Restart lock",
 
     const replacement = h.manager.start({
       ...launchSpec(h.root),
-      agentId: "codex-native",
-      driver: "codex",
-      command: "codex",
+      agentId: "claude",
+      driver: "claude-code",
+      command: "claude",
     });
     await tick();
     await tick();
@@ -3779,12 +3779,12 @@ test("a different-driver Restart releases a superseded app-server Restart lock",
     );
     assert.deepEqual(
       releasedDrivers,
-      ["codex"],
+      ["claude-code"],
       "the replacement row is durable before the obsolete app-server lock is released",
     );
     assert.deepEqual(
       competingProcessLockState(h.root),
-      { driver: "codex", acquired: true },
+      { driver: "claude-code", acquired: true },
       "a competing runner observes the replacement row and acquires promptly without stale recovery",
     );
 
@@ -6244,30 +6244,6 @@ test("an idle Claude exit without a resumable conversation reports that recovery
   }
 });
 
-test("exec launches record fallback usage while failed initialization records launch failure", async () => {
-  const h = harness(
-    { driver: "codex", agentVersion: "0.63.0", agentSessionId: null },
-    Promise.reject(new Error("init failed")),
-  );
-  try {
-    const spec = {
-      ...launchSpec(h.root),
-      driver: "codex" as const,
-      agentVersion: "0.63.0",
-      codexExecFallbackReason: "explicit_exec" as const,
-    };
-    await h.manager.start(spec);
-    const telemetry = h.sent.filter((message) => message.type === "driver_telemetry");
-    assert.deepEqual(
-      telemetry.map((message) => message.type === "driver_telemetry" ? [message.metric, message.outcome, message.reason] : []),
-      [["fallback", "observed", "explicit_exec"], ["launch", "failure", "fresh"]],
-    );
-  } finally {
-    h.manager.shutdownAll();
-    h.cleanup();
-  }
-});
-
 test("a prompt after runner restart resumes the same app-server thread", async () => {
   const h = harness();
   try {
@@ -6318,21 +6294,6 @@ test("app-server crash resumes queued-but-unsubmitted prompts and never replays 
       (message) => message.type === "session_event" && message.payload.kind === "user_message",
     );
     assert.equal(userMessages.length, 1, "only the known-unsubmitted queued prompt is emitted");
-  } finally {
-    h.manager.shutdownAll();
-    h.cleanup();
-  }
-});
-
-test("existing exec Codex sessions retain their resume-by-id path", async () => {
-  const h = harness({ driver: "codex", agentSessionId: "exec-thread" });
-  try {
-    h.manager.prompt("resume-session", "continue exec");
-    await tick();
-    await tick();
-    assert.equal(h.launches[0]!.kind, "codex");
-    assert.equal(h.launches[0]!.options.resumeId, "exec-thread");
-    assert.deepEqual(h.prompts, ["continue exec"]);
   } finally {
     h.manager.shutdownAll();
     h.cleanup();
@@ -6494,12 +6455,12 @@ test("changing away from an adopted Pi driver removes its managed native transcr
     assert.equal(await h.manager.start({
       ...launchSpec(h.root),
       agentId: "codex-native",
-      driver: "codex",
+      driver: "codex-app-server",
       command: "codex",
     }), true);
     assert.equal(existsSync(managedSessionDir), false);
     assert.equal(h.store.readMeta("resume-session")?.adoptedProviderState, undefined);
-    assert.equal(h.launches[0]?.kind, "codex");
+    assert.equal(h.launches[0]?.kind, "codex-app-server");
   } finally {
     h.manager.shutdownAll();
     h.cleanup();
@@ -6508,7 +6469,7 @@ test("changing away from an adopted Pi driver removes its managed native transcr
 
 test("restart retries a committed managed Pi cleanup before launching", async () => {
   const h = harness({
-    driver: "codex",
+    driver: "codex-app-server",
     command: "codex",
     agentSessionId: null,
   });
@@ -6523,7 +6484,7 @@ test("restart retries a committed managed Pi cleanup before launching", async ()
     },
   });
   try {
-    assert.equal(await h.manager.start({ ...launchSpec(h.root), driver: "codex" }), true);
+    assert.equal(await h.manager.start({ ...launchSpec(h.root), driver: "codex-app-server" }), true);
     assert.equal(existsSync(managedSessionDir), false);
     assert.equal(h.store.readMeta("resume-session")?.adoptedProviderState, undefined);
   } finally {
@@ -6633,22 +6594,6 @@ test("a superseding Pi restart preserves managed state before a driver switch co
     });
   } finally {
     releaseTransition.resolve();
-    h.manager.shutdownAll();
-    h.cleanup();
-  }
-});
-
-test("explicit restart keeps legacy exec Codex fresh while its process-loss resume path stays unchanged", async () => {
-  const h = harness({ driver: "codex", agentSessionId: "exec-thread", tokensIn: 40, tokensOut: 10 });
-  try {
-    await h.manager.start({ ...launchSpec(h.root), driver: "codex" });
-    assert.equal(h.launches[0]!.kind, "codex");
-    assert.equal(h.launches[0]!.options.resumeId, undefined);
-    const meta = h.store.readMeta("resume-session")!;
-    assert.equal(meta.agentSessionId, null);
-    assert.equal(meta.tokensIn, 0);
-    assert.equal(meta.tokensOut, 0);
-  } finally {
     h.manager.shutdownAll();
     h.cleanup();
   }
@@ -7671,3 +7616,25 @@ for (const category of ["capacity", "quota", "transport", null] as const) {
     } finally { h.manager.shutdownAll(); h.cleanup(); }
   });
 }
+
+test("a persisted Codex exec session never relaunches and says why (#3259)", async () => {
+  const h = harness({ driver: "codex", agentId: "codex-exec", args: ["exec"] });
+  const failures: Array<[string, string | undefined]> = [];
+  const durable: DurableCommandLifecycle = {
+    commandId: "retired-exec-command",
+    queued: () => {}, started: () => {}, completed: () => {}, uncertain: () => {},
+    failed: (error, code) => failures.push([error, code]),
+  };
+  try {
+    h.manager.prompt("resume-session", "keep going", [], undefined, undefined, durable);
+    for (let i = 0; i < 5; i++) await tick();
+    assert.deepEqual(failures, [[CODEX_EXEC_RETIRED_REASON, "INVALID_COMMAND"]]);
+    assert.equal(h.launches.length, 0, "no driver is constructed for the retired exec driver");
+    assert.equal(h.store.readMeta("resume-session")!.status, "failed");
+    assert.ok(h.sent.some((message) => JSON.stringify(message).includes(CODEX_EXEC_RETIRED_REASON)),
+      "the reason reaches the control plane as a session event");
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});

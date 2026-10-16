@@ -14,7 +14,7 @@ export async function probeTargetHarness(
   configuredArgs: string[],
   run: (args: string[]) => Promise<ExecResult>,
 ): Promise<ProbeStatus> {
-  if (agentId !== "claude-code" && agentId !== "codex" && agentId !== "codex-exec") {
+  if (agentId !== "claude-code" && agentId !== "codex") {
     return { authentication: "unknown", capability: "unknown" };
   }
   // Configured launch arguments can select a different profile, settings file, or credential

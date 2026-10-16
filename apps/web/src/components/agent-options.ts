@@ -1,4 +1,4 @@
-import { isRestartOnlyCodexExec, type AgentDefinition } from "@wollipog/protocol";
+import { isRetiredCodexExec, type AgentDefinition } from "@wollipog/protocol";
 import { agentProvider } from "./AgentIcon.js";
 import type { SavedAgentChoice } from "../agent-defaults.js";
 
@@ -22,7 +22,6 @@ export function agentFamily(a: AgentDefinition): string {
 export function agentVariant(a: AgentDefinition): string {
   const wsl = a.context?.kind === "wsl" ? ` · WSL: ${a.context.distro}` : "";
   if (a.driver === "codex-app-server") return `App Server${wsl}`;
-  if (a.driver === "codex") return `Non-Interactive (codex exec)${wsl}`;
   if (a.driver === "pi") return `RPC${wsl}`;
   if (a.context?.kind === "wsl") return `WSL: ${a.context.distro}`;
   if (a.driver === "claude-code") return "Native";
@@ -33,7 +32,7 @@ export { agentDriverLabel } from "../agent-presentation.js";
 
 function variantRank(v: string): number {
   if (v.startsWith("App Server")) return 0;
-  if (v === "Native" || v.startsWith("Non-Interactive")) return 1;
+  if (v === "Native") return 1;
   if (v.startsWith("WSL")) return 2;
   return 3;
 }
@@ -50,10 +49,6 @@ export interface AgentOption {
    * Shown greyed-out with a "needs setup" hint rather than hidden — the user should learn the
    * agent could exist here — but it must never be auto-selected or launched. */
   disabled?: boolean;
-  /** A `codex exec` agent the user configured stays available, but does not compete with
-   * interactive agents in the ordinary picker or get selected into a new multi-agent run by
-   * default. Discovery's own exec row is never an option (`isRestartOnlyCodexExec`). */
-  advanced?: boolean;
 }
 
 /** Group → dedup → order → label the runner's agents into flat, cleanly-named dropdown options. */
@@ -64,14 +59,14 @@ export function agentOptions(
   // Hide the generic ACP path for a provider once a USABLE native harness for it exists — it's a
   // weaker duplicate (no model picker / slash commands). ACP stays for providers with no native
   // driver, and an unavailable or unverified native entry must not hide a working ACP fallback.
-  // Nor may discovery's restart-only exec row, which is never offered itself.
+  // Nor may the retired Codex exec driver, which is never offered itself (#3259).
   const nativeProviders = new Set(
     agents
-      .filter((a) => a.driver && a.driver !== "acp" && a.available === true && !isRestartOnlyCodexExec(a))
+      .filter((a) => a.driver && a.driver !== "acp" && a.available === true && !isRetiredCodexExec(a))
       .map((a) => agentProvider(a.driver!, a.name)),
   );
   const visible = agents.filter((a) => {
-    if (isRestartOnlyCodexExec(a)) return false;
+    if (isRetiredCodexExec(a)) return false;
     if (options.includeProviderAdapters) return true;
     const driver = a.driver ?? "acp";
     if (driver !== "acp") return true;
@@ -111,10 +106,9 @@ export function agentOptions(
         agent: a,
         label: a.driver === "codex-app-server" || a.driver === "pi"
           ? `${f} ${v}${location}`
-          : `${!v || (!multi && a.driver !== "codex") ? f : `${f} — ${v}`}${location}`,
+          : `${!v || !multi ? f : `${f} — ${v}`}${location}`,
         ...(a.available !== true || a.installation?.selection === "other" || a.harnessSelectionBlocked
           ? { disabled: true } : {}),
-        ...(a.driver === "codex" ? { advanced: true } : {}),
       });
     }
   }
@@ -123,16 +117,7 @@ export function agentOptions(
 
 /** The option a fresh dialog should select: the first USABLE one (never a needs-setup entry). */
 export function firstEnabledAgentId(options: AgentOption[]): string {
-  return (options.find((option) => !option.advanced && !option.disabled) ??
-    options.find((option) => !option.disabled))?.agent.id ?? "";
-}
-
-export function primaryAgentOptions(options: AgentOption[]): AgentOption[] {
-  return options.filter((option) => !option.advanced);
-}
-
-export function advancedAgentOptions(options: AgentOption[]): AgentOption[] {
-  return options.filter((option) => option.advanced);
+  return options.find((option) => !option.disabled)?.agent.id ?? "";
 }
 
 export type SavedAgentDefaultIssue = "legacy" | "unavailable" | "missing" | "unbound";
@@ -147,8 +132,8 @@ function sameContext(a: AgentDefinition, b: AgentDefinition): boolean {
 
 /** Resolve a saved per-runner default without silently rewriting it. Legacy/unavailable choices
  * remain visible so the dialog can explain them and offer an explicit one-click migration.
- * `agents` is the runner's full list, needed to recognize a saved choice of discovery's
- * restart-only exec row, which `options` never contains. */
+ * `agents` is the runner's full list, needed to recognize a saved choice of the retired Codex exec
+ * driver, which `options` never contains. */
 export function savedAgentSelection(
   options: AgentOption[],
   choice: string | SavedAgentChoice | undefined,
@@ -156,15 +141,16 @@ export function savedAgentSelection(
 ): { agentId: string; issue?: SavedAgentDefaultIssue; recommendedId: string } {
   const recommendedId = firstEnabledAgentId(options);
   if (!choice) return { agentId: recommendedId, recommendedId };
-  const restartOnly = agents.find((agent) => isRestartOnlyCodexExec(agent) && (typeof choice === "string"
+  const retired = agents.find((agent) => isRetiredCodexExec(agent) && (typeof choice === "string"
     ? agent.id === choice
     : agent.installation?.id === choice.installationId && agent.driver === choice.driver &&
       sameContext(agent, { context: choice.context } as AgentDefinition)));
-  if (restartOnly) {
-    // Nothing is preselected: a new session must never start on exec without the user choosing.
+  if (retired) {
+    // Nothing is preselected: the saved agent can no longer start, and the user chooses its
+    // replacement.
     const appServers = options.filter((option) =>
-      option.agent.driver === "codex-app-server" && !option.disabled && sameContext(option.agent, restartOnly));
-    const sibling = appServers.find((option) => option.agent.installation?.id === restartOnly.installation?.id) ??
+      option.agent.driver === "codex-app-server" && !option.disabled && sameContext(option.agent, retired));
+    const sibling = appServers.find((option) => option.agent.installation?.id === retired.installation?.id) ??
       appServers[0];
     return { agentId: "", issue: "legacy", recommendedId: sibling?.agent.id ?? recommendedId };
   }
@@ -184,17 +170,6 @@ export function savedAgentSelection(
     agentId: "", issue: "unbound", recommendedId: saved.disabled ? recommendedId : savedId,
   };
   if (saved.disabled) return { agentId: savedId, issue: "unavailable", recommendedId };
-  if (saved.advanced) {
-    const interactiveSibling = options.find(
-      (option) =>
-        option.agent.driver === "codex-app-server" &&
-        !option.disabled &&
-        sameContext(option.agent, saved.agent),
-    );
-    return interactiveSibling
-      ? { agentId: savedId, issue: "legacy", recommendedId: interactiveSibling.agent.id }
-      : { agentId: savedId, recommendedId: savedId };
-  }
   return { agentId: savedId, recommendedId };
 }
 
@@ -215,18 +190,10 @@ export function runnableAgentIds(agents: AgentDefinition[]): string[] {
     .map((option) => option.agent.id);
 }
 
-/** Ordinary multi-agent runs default to interactive/non-legacy targets. Advanced exec remains
- * selectable after disclosure, but is never silently paired with its app-server sibling. */
-export function defaultRunAgentIds(agents: AgentDefinition[]): string[] {
-  return agentOptions(agents)
-    .filter((option) => !option.disabled && !option.advanced)
-    .map((option) => option.agent.id);
-}
-
 /** One-line context shown under the dropdown: where it runs, version, and auth state. */
 export function agentMeta(a: AgentDefinition): string {
   const where = a.context?.kind === "wsl" ? `WSL · ${a.context.distro}` : "native host";
-  const codexFamily = a.driver === "codex-app-server" || a.driver === "codex";
+  const codexFamily = a.driver === "codex-app-server";
   const bits = codexFamily && a.authStatus === "unauthenticated"
     // Signed-out is a setup problem, not an installation problem: name the fix, and don't let
     // the generic "Interactive target unavailable" branch below mislabel it.
@@ -250,8 +217,6 @@ export function agentMeta(a: AgentDefinition): string {
               : []),
           `runs on ${where}`,
         ]
-    : a.driver === "codex"
-      ? ["Non-interactive via codex exec", "approval settings are fixed before each turn", `runs on ${where}`]
       : [`Runs on ${where}`];
   if (a.version) bits.push(/^\d/.test(a.version) ? `v${a.version}` : a.version);
   if (a.installation?.selection === "other") bits.push("select this installation in Machine Settings to use it");
@@ -267,10 +232,10 @@ export function agentMeta(a: AgentDefinition): string {
     if (a.registry.installStatus === "unsupported-platform") bits.push("no compatible registry distribution");
   }
   if (a.codexAppServer?.status === "supported" && a.authStatus !== "unauthenticated") {
-    bits.push(a.driver === "codex" ? "non-interactive fallback ready" : "interactive target ready");
+    bits.push("interactive target ready");
   }
   if (a.codexAppServer?.status === "unsupported") {
-    bits.push(`${a.driver === "codex" ? "batch fallback" : "interactive target unavailable"}: ${a.codexAppServer.failure?.message ?? "interactive mode unavailable"}`);
+    bits.push(`interactive target unavailable: ${a.codexAppServer.failure?.message ?? "interactive mode unavailable"}`);
   }
   if (a.codexAppServer?.status === "unavailable") {
     bits.push(`unavailable: ${a.codexAppServer.failure?.message ?? "Codex is not installed"}`);
@@ -287,7 +252,7 @@ export function agentMeta(a: AgentDefinition): string {
 }
 
 /** Why discovery could not verify a signed-in Codex App Server, in the words the runner wrote for
- * people. Without the exec row to fall back on, this is the only explanation of why Codex cannot
+ * people. With no exec driver to fall back on, this is the only explanation of why Codex cannot
  * start here. A signed-out row keeps `agentMeta`'s `codex login` instruction. */
 export function codexAppServerSetupReason(a: AgentDefinition): string | undefined {
   if (a.driver !== "codex-app-server" || a.authStatus === "unauthenticated") return undefined;

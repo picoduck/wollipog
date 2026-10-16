@@ -342,16 +342,17 @@ test.describe("responsive Project and Agent controls", () => {
     await expect(page.getByRole("combobox", { name: "Search Agent Options" })).toBeFocused();
 
     const options = page.getByRole("listbox", { name: "Agent" }).getByRole("option");
-    await expect(options).toHaveCount(4);
-    await expect(options.filter({ hasText: "Advanced Agent" })).toHaveCount(1);
+    // Claude Code, Codex App Server, and Pi; the retired Codex exec agent is never listed (#3259).
+    await expect(options).toHaveCount(3);
+    await expect(options.filter({ hasText: /Non-Interactive|codex exec/ })).toHaveCount(0);
     await expect(options.filter({ hasText: "Pi" })).toContainText("RPC");
     const unavailable = options.filter({ hasText: "Codex App Server" });
     await expect(unavailable).toHaveAttribute("aria-disabled", "true");
     await expect(unavailable).toContainText("Needs setup");
 
-    await options.filter({ hasText: "Codex — Non-Interactive" }).click();
-    await expect(agent).toHaveAccessibleName(/Agent: Codex — Non-Interactive/);
-    await expect(page.locator(".agent-meta")).toContainText("Non-interactive via codex exec");
+    await options.filter({ hasText: "Pi" }).click();
+    await expect(agent).toHaveAccessibleName(/Agent: Pi RPC/);
+    await expect(page.locator(".agent-meta")).toContainText("Runs on native host");
   });
 
   test("a short Project list grows to its wrapped descriptions instead of scrolling", async ({ page }) => {
@@ -524,9 +525,9 @@ test.describe("responsive Project and Agent presentation", () => {
     // value instead of keeping a selection (#1951). Replace the value the way a person would.
     await desktopAgent.focus();
     await page.keyboard.press("ControlOrMeta+a");
-    await page.keyboard.type("non-interactive");
+    await page.keyboard.type("pi rpc");
     await page.keyboard.press("Enter");
-    await expect(desktopAgent).toHaveValue(/Codex — Non-Interactive/);
+    await expect(desktopAgent).toHaveValue(/Pi RPC/);
 
     await page.setViewportSize({ width: 390, height: 780 });
     const touchProject = page.getByRole("button", { name: /^Project:/ });
@@ -535,8 +536,8 @@ test.describe("responsive Project and Agent presentation", () => {
     await page.getByRole("listbox", { name: "Project" }).getByRole("option", { name: /Wollipog/ }).click();
 
     const touchAgent = page.getByRole("button", { name: /^Agent:/ });
-    await expect(touchAgent).toHaveAccessibleName(/Agent: Codex — Non-Interactive/);
-    await expect(page.locator(".agent-meta")).toContainText("Non-interactive via codex exec");
+    await expect(touchAgent).toHaveAccessibleName(/Agent: Pi RPC/);
+    await expect(page.locator(".agent-meta")).toContainText("Runs on native host");
 
     await touchAgent.click();
     await page.getByRole("listbox", { name: "Agent" }).getByRole("option", { name: /Claude Code/ }).click();

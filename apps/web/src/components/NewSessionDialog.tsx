@@ -399,9 +399,7 @@ export function NewSessionDialog({
     return {
       value: option.agent.id,
       label: option.label,
-      description: option.disabled
-        ? option.advanced ? "Advanced Agent" : undefined
-        : `${option.advanced ? "Advanced Agent · " : ""}${metadata}`,
+      description: option.disabled ? undefined : metadata,
       disabled: option.disabled,
       disabledReason: option.disabled
         ? `Needs setup. ${codexAppServerSetupReason(option.agent) ?? metadata}`
@@ -1564,7 +1562,7 @@ export function NewSessionDialog({
               <div className="agent-default-warning" role="alert">
                 <span>
                   {selectionIssue === "legacy"
-                    ? "Your saved default uses Codex non-interactive mode, which new sessions no longer offer. Codex App Server supports interactive approvals and resumable conversations."
+                    ? "Your saved default uses Codex non-interactive mode, which is no longer supported. Codex App Server supports interactive approvals and resumable conversations."
                     : selectionIssue === "unbound"
                       ? "This older saved agent choice has no installation identity. Select the installation shown here to keep future sessions bound to it."
                     : selectionIssue === "unavailable"

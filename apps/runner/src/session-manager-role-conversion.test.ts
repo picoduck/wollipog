@@ -61,7 +61,7 @@ function fixture(driver: AgentDriverKind = "codex-app-server", close?: () => Pro
   return { manager, store, spec, command, messages, launches, root, registrations, revoke, localLaunch, disposed: () => disposed, cleanup };
 }
 
-for (const driver of ["claude-code", "codex", "codex-app-server", "pi"] as const) {
+for (const driver of ["claude-code", "codex-app-server", "pi"] as const) {
   test(`${driver} real launch provisioning rotates credentials and removes the old role overlay`, async () => {
     const h = fixture(driver, undefined, true);
     try {
@@ -98,7 +98,7 @@ for (const driver of ["claude-code", "codex", "codex-app-server", "pi"] as const
   });
 }
 
-for (const driver of ["claude-code", "codex", "codex-app-server", "pi"] as const) {
+for (const driver of ["claude-code", "codex-app-server", "pi"] as const) {
   test(driver + " refuses protocol202 prepare and commit without retirement or credential mutation", async () => {
     const h = fixture(driver);
     try {
@@ -237,7 +237,7 @@ test("a lock-refused retry retains its durable retirement and can finish after t
   } finally { await h.cleanup(); }
 });
 
-for (const driver of ["claude-code", "codex", "codex-app-server", "pi"] as const) {
+for (const driver of ["claude-code", "codex-app-server", "pi"] as const) {
   test(`${driver} converts both directions and resumes the exact conversation with unchanged account and worktree`, async () => {
     const h = fixture(driver);
     try {

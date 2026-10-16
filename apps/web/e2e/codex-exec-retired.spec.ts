@@ -1,9 +1,9 @@
 import { expect, test, type Page } from "@playwright/test";
 
 /**
- * #3224: discovery's `codex exec` row exists only so sessions already on it can restart. The REAL
- * New Session dialog must never offer it, must not start a saved exec default without a choice,
- * and must explain an App Server that failed its check instead of quietly falling back to exec.
+ * #3224, #3259: Codex Non-Interactive (`codex exec`) is retired. The REAL New Session dialog must
+ * never offer it, must not start a saved exec default without a choice, and must explain an App
+ * Server that failed its check instead of quietly falling back to exec.
  */
 
 async function open(page: Page, query: string) {
@@ -20,7 +20,7 @@ async function agentOptions(page: Page) {
 test("a saved exec default asks for a choice and offers Codex App Server", async ({ page }) => {
   await open(page, "savedAgent=codex-exec");
   const warning = page.locator(".agent-default-warning");
-  await expect(warning).toContainText("which new sessions no longer offer");
+  await expect(warning).toContainText("which is no longer supported");
   await expect(page.getByRole("combobox", { name: "Agent" })).toHaveValue("");
   await expect(page.getByRole("button", { name: "Create Session" })).toBeDisabled();
 

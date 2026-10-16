@@ -169,9 +169,10 @@ The runner can discover supported native installations or launch explicitly conf
 | --- | --- | --- |
 | `claude-code` | Claude Code stream JSON | Existing Claude Code login or `ANTHROPIC_API_KEY` |
 | `codex-app-server` | Persistent Codex app-server over stdio | Existing Codex login |
-| `codex` | Codex exec JSON | Existing Codex login |
 | `pi` | Pi RPC over stdio | Provider authentication configured in Pi |
 | `acp` | Agent Client Protocol over stdio | Adapter-specific |
+
+The `codex` driver (Codex Non-Interactive, `codex exec`) is retired. An agent configured with it is listed as unavailable; change its driver to `codex-app-server`. Sessions that used it stay readable but cannot restart.
 
 A minimal configured native agent looks like:
 

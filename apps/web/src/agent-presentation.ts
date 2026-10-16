@@ -1,5 +1,6 @@
 import {
   builtInAgentHarnessName,
+  CODEX_EXEC_RETIRED_CONFIG_REASON,
   type AgentDefinition,
   type AgentDriverKind,
   type AgentHarnessIdentity,
@@ -86,9 +87,7 @@ export function agentDriverDescription(agent: AgentDefinition): string {
   if (agent.driver === "codex-app-server") {
     return "Keeps a live Codex connection for resumable conversations, streaming updates, and interactive approval requests.";
   }
-  if (agent.driver === "codex") {
-    return "Uses codex exec to run each turn non-interactively. Approval and sandbox settings are fixed before the turn starts.";
-  }
+  if (agent.driver === "codex") return CODEX_EXEC_RETIRED_CONFIG_REASON;
   if (agent.driver === "claude-code") {
     return "Uses the native Claude Code integration and its local session history.";
   }

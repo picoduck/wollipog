@@ -577,7 +577,7 @@ test("recommitting the selected Project preserves an explicit Location", async (
   }
 });
 
-test("primary, Advanced, and unavailable Agents share one searchable flow", async () => {
+test("available and unavailable Agents share one searchable flow, without the retired exec driver", async () => {
   domWindow.localStorage.clear();
   const agentRunner: RunnerView = {
     ...runner,
@@ -591,24 +591,17 @@ test("primary, Advanced, and unavailable Agents share one searchable flow", asyn
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     const input = combobox(fixture.container, "Agent");
-    assert.equal(input.value, "Claude Code", "the recommended primary Agent is selected initially");
+    assert.equal(input.value, "Claude Code", "the first usable Agent is selected initially");
     assertNoDomNode(fixture.container.querySelector('select[aria-label="Agent"]'));
-    assertNoDomNode(fixture.container.querySelector('[aria-label="Advanced Agents"]'));
 
     await act(async () => { input.focus(); });
     assert.equal(input.getAttribute("aria-expanded"), "true");
-    const allOptions = comboboxOptions(fixture.container, "Agent");
-    assert.equal(allOptions.length, 3);
-    assert.ok(allOptions.some((option) => /Advanced Agent/.test(option.textContent ?? "")),
-      "the compatibility target is disclosed inside the same list");
+    assert.equal(comboboxOptions(fixture.container, "Agent").length, 2, "Claude Code and Codex App Server only (#3259)");
 
     await act(async () => { setComboboxQuery(input, "non-interactive"); });
-    assert.equal(comboboxOptions(fixture.container, "Agent").length, 1);
-    await act(async () => { pressComboboxKey(input, "Enter"); });
-    assert.match(input.value, /Non-Interactive/);
-    assert.match(fixture.container.querySelector(".agent-meta")?.textContent ?? "", /Non-interactive via codex exec/);
+    assert.equal(comboboxOptions(fixture.container, "Agent").length, 0);
 
-    await act(async () => { input.click(); setComboboxQuery(input, "codex login"); });
+    await act(async () => { setComboboxQuery(input, "codex login"); });
     const unavailable = comboboxOptions(fixture.container, "Agent");
     assert.equal(unavailable.length, 1);
     assert.equal(unavailable[0]?.getAttribute("aria-disabled"), "true");
@@ -619,37 +612,6 @@ test("primary, Advanced, and unavailable Agents share one searchable flow", asyn
   } finally {
     await unmountFixture(fixture);
     domWindow.localStorage.clear();
-  }
-});
-
-test("an unavailable Advanced Agent keeps its marker, search term, and refusal reason", async () => {
-  const fixture = await mountFixture({ runners: [{
-    ...runner,
-    agents: [
-      ...runner.agents,
-      {
-        id: "codex-exec",
-        name: "Codex",
-        command: "codex",
-        args: ["exec"],
-        env: {},
-        driver: "codex",
-        available: false,
-      },
-    ],
-  }] });
-  try {
-    await act(async () => { await selectProject(fixture.container, project.id); });
-    const input = combobox(fixture.container, "Agent");
-    await act(async () => { input.focus(); setComboboxQuery(input, "advanced"); });
-    const options = comboboxOptions(fixture.container, "Agent");
-    assert.equal(options.length, 1);
-    assert.equal(options[0]?.getAttribute("aria-disabled"), "true");
-    assert.match(options[0]?.textContent ?? "", /Advanced Agent.*Needs setup.*Non-interactive via codex exec/);
-    assert.equal(options[0]?.textContent?.match(/Non-interactive via codex exec/g)?.length, 1,
-      "unavailable metadata is rendered once, in its actionable setup reason");
-  } finally {
-    await unmountFixture(fixture);
   }
 });
 
@@ -666,7 +628,7 @@ test("Project and Agent options are named by their label and described by their 
     ...runner,
     agents: [
       ...runner.agents,
-      { id: "codex-exec", name: "Codex", command: "codex", args: ["exec"], env: {}, driver: "codex", available: false },
+      { id: "codex-app", name: "Codex", command: "codex", args: [], env: {}, driver: "codex-app-server", available: false },
     ],
   };
   const fixture = await mountFixture({ runners: [agentRunner] });
@@ -688,8 +650,8 @@ test("Project and Agent options are named by their label and described by their 
     assert.deepEqual(optionNamesAndDescriptions(agentOptions), [
       { name: "Claude Code", description: "Runs on native host" },
       {
-        name: "Codex — Non-Interactive (codex exec)",
-        description: "Advanced Agent Needs setup. Non-interactive via codex exec · approval settings are fixed before each turn · runs on native host",
+        name: "Codex App Server",
+        description: "Needs setup. Interactive target unavailable · runs on native host",
       },
     ]);
     assert.equal(agentOptions[1]?.getAttribute("aria-disabled"), "true");
@@ -740,8 +702,8 @@ test("saved-default recovery buttons name the agent they actually select", async
   const recoveryRunner: RunnerView = {
     ...runner,
     agents: [
+      ...runner.agents,
       { id: "codex-app", name: "Codex", command: "codex", args: [], env: {}, driver: "codex-app-server", available: false },
-      { id: "codex-exec", name: "Codex", command: "codex", args: ["exec"], env: {}, driver: "codex", available: true },
     ],
   };
   const unavailableFixture = await mountFixture(
@@ -750,10 +712,11 @@ test("saved-default recovery buttons name the agent they actually select", async
   );
   try {
     const action = [...unavailableFixture.container.querySelectorAll("button")].find((button) =>
-      button.textContent?.trim() === "Use Codex — Non-Interactive (codex exec)") as HTMLLabelElement | undefined;
-    assert.ok(action, "the recovery action names Codex Exec rather than App Server");
+      button.textContent?.trim() === "Use Claude Code") as HTMLLabelElement | undefined;
+    assert.ok(action, "the recovery action names the usable agent it selects");
     await act(async () => { action.click(); });
-    assert.equal(loadAgentDefaults()[runner.runnerId], "codex-exec");
+    const saved = loadAgentDefaults()[runner.runnerId];
+    assert.equal(typeof saved === "string" ? saved : saved?.agentId, "claude");
   } finally {
     await unmountFixture(unavailableFixture);
     domWindow.localStorage.clear();
@@ -771,7 +734,7 @@ test("saved-default recovery buttons name the agent they actually select", async
   }
 });
 
-test("a saved restart-only Codex exec default is not offered or started without a choice (#3224)", async () => {
+test("a saved Codex exec default is not offered or started without a choice (#3224, #3259)", async () => {
   domWindow.localStorage.clear();
   saveAgentDefault({}, runner.runnerId, "codex-exec");
   const codexRunner: RunnerView = {
@@ -789,7 +752,7 @@ test("a saved restart-only Codex exec default is not offered or started without 
     assert.equal(input.value, "", "the saved exec default is not preselected");
     assert.equal(createButton(fixture.container).disabled, true);
     assert.match(fixture.container.querySelector(".agent-default-warning")?.textContent ?? "",
-      /non-interactive mode, which new sessions no longer offer/);
+      /non-interactive mode, which is no longer supported/);
 
     await act(async () => { input.focus(); });
     assert.deepEqual(comboboxOptions(fixture.container, "Agent").map((option) => option.textContent?.match(/^Codex App Server|^Claude Code/)?.[0]),

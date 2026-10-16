@@ -3036,12 +3036,20 @@ export interface AgentDefinition {
   };
 }
 
-/** Discovery pairs every Codex App Server row with a `codex exec` row that exists only so sessions
- * already running on it can restart. It is never offered for new work; an agent the user
- * configured with `driver: "codex"` is a deliberate choice and stays selectable. */
-export function isRestartOnlyCodexExec(agent: Pick<AgentDefinition, "driver" | "source">): boolean {
-  return agent.source === "discovered" && agent.driver === "codex";
+/** Codex Non-Interactive (`driver: "codex"`, `codex exec`) is retired (#3259). Sessions that used it
+ * stay readable, but nothing launches or offers it: not a configured agent, and not the row an
+ * older runner's discovery still emits beside App Server. */
+export function isRetiredCodexExec(agent: Pick<AgentDefinition, "driver">): boolean {
+  return agent.driver === "codex";
 }
+
+/** Why a session on the retired Codex exec driver cannot be created, started, or restarted. */
+export const CODEX_EXEC_RETIRED_REASON =
+  "Codex Non-Interactive is no longer supported. Start a new session with Codex App Server to continue.";
+
+/** Why a runner-configured `driver: "codex"` agent is unavailable, and how to fix the configuration. */
+export const CODEX_EXEC_RETIRED_CONFIG_REASON =
+  "Codex Non-Interactive is no longer supported. Change this agent's driver to codex-app-server in the runner configuration.";
 
 /** Secret-free runner-local provider account safe for a principal-scoped Machine view. */
 export interface ProviderAccountDefinition {
@@ -6031,15 +6039,15 @@ export function builtInAgentHarnessName(driver: AgentDriverKind): string | null 
 /**
  * The agent row one Machine uses for a harness identity: an available row of the same harness, the
  * Machine's selected installation first, then the lowest agent id, so the same inputs always pick
- * the same row. Rows the Machine's installation choice excludes cannot launch, and restart-only
- * Codex exec rows are never used for new work, so neither is chosen.
+ * the same row. Rows the Machine's installation choice excludes cannot launch, and retired Codex
+ * exec rows never launch, so neither is chosen.
  */
 export function resolveAgentHarnessRow<T extends Pick<AgentDefinition, "id" | "driver" | "context" |
   "available" | "source" | "installation" | "harnessSelectionBlocked">>(agents: readonly T[], identity: AgentHarnessIdentity): T | undefined {
   const key = agentHarnessIdentityKey(identity);
   const rank = (agent: T) => agent.installation?.selection === "selected" ? 0 : 1;
   return agents
-    .filter((agent) => agent.available === true && !isRestartOnlyCodexExec(agent) &&
+    .filter((agent) => agent.available === true && !isRetiredCodexExec(agent) &&
       agent.installation?.selection !== "other" && agent.harnessSelectionBlocked !== true &&
       agentHarnessIdentityKey({
         agentId: agent.id,
@@ -9126,8 +9134,6 @@ export interface SessionLaunchSpec {
   agentVersion?: string;
   /** Discovery-verified launch capabilities; the runner re-checks these before emitting CLI flags. */
   capabilities?: AgentCapabilities;
-  /** Why exec is being used instead of the interactive app-server path (telemetry only). */
-  codexExecFallbackReason?: "explicit_exec" | "compatibility_exec";
   /** Display title (so the box store — and other dashboards — can show it). */
   title?: string;
   titleSource?: SessionTitleSource;

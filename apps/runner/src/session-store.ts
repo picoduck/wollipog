@@ -152,7 +152,6 @@ export interface SessionMeta {
   /** What a Claude Code session's catalog is merged from: its command files, skills and the last
    * init list for the same provenance (#1224). */
   claudeSlashCatalogInputs?: import("./discovery/claude-slash-catalog.js").ClaudeSessionCatalogInputs;
-  codexExecFallbackReason?: "explicit_exec" | "compatibility_exec";
   workspaceId: string | null;
   /** The original repo path; worktrees live in the runner data directory, outside this repo. */
   repoPath: string;
