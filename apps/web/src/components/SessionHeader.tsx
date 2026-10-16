@@ -49,7 +49,7 @@ import { writeClipboardText } from "../clipboard.js";
 import { sessionStatusSummary } from "../status-meta.js";
 import { SessionStatusButton } from "./SessionStatusButton.js";
 import { useBackgroundDeliveryStep } from "./useBackgroundDeliveryStep.js";
-import { blockedResultSessionAlternative, historicalBackgroundResultRecovery } from "../background-delivery-status.js";
+import { historicalBackgroundResultRecovery } from "../background-delivery-status.js";
 
 /** The second line of an item that waits on another session action already running. */
 const BUSY_REASON = "Available when the current action finishes.";
@@ -576,7 +576,9 @@ export function SessionHeader({
                 if (historicalResultRecovery && !await confirm({
                   title: "Restart Session",
                   message: "This starts a new conversation and ends every background job. " +
-                    blockedResultSessionAlternative(runnerSupportsProtocol(runnerProtocolVersion, "restartKeepsQueuedWork")) +
+                    (runnerSupportsProtocol(runnerProtocolVersion, "restartKeepsQueuedWork")
+                      ? "Finished results are reported to the new conversation."
+                      : "Held results are discarded.") +
                     " The original job commands are not rerun. Review the conversation before continuing.",
                   confirmLabel: "Restart Session",
                   tone: "danger",

@@ -517,6 +517,17 @@ The lifetime policy is quiescence-aware and fail-safe:
   unfinished sibling from its launching turn, and it gets a continuation id of its own, because a
   sibling's continuation may already be queued without it. A call that a cancelled or failed turn left without a result still ends the job, but it
   keeps the ordinary continuation rule.
+  Historical reconciliation also recognizes a durable successful `TaskStop` tool result correlated
+  by tool-use id with its assistant call and exact task id. Failed, missing-task, unmatched, quoted,
+  or unreadable receipts prove nothing; a later launch/resume invalidates an earlier stop, including
+  a resume racing the stop response. Startup and reconnect inspect retained unfinished rows even
+  without task artifacts or aggregate background state. Confirmed model stops become killed and
+  settled without launching a recovery turn. Unresolved rows remain unverified; unknown parent
+  turns never authorize resubmission. The Background Work notice explains this uncertainty and
+  exposes an explicit, confirmed Restart Session recovery through More Actions. Restart ends every
+  job and follows the existing result-carrying and at-most-once continuation rules. Repairs emit
+  `historical_claude_jobs_reconciled` with entry point, correlation id, and job counts, without
+  transcript contents.
 - Eviction and runner-shutdown stops send EOF first and allow five seconds for a clean exit before
   `killTree` reaps the remaining native or WSL process group; explicit Stop and cancellation kill
   immediately. A stop with pending work writes the
