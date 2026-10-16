@@ -72,7 +72,7 @@ test("queued prompt promotion removes only the exact queue identity, including a
     { seq: 5, text: "prompt 5", submissionId: "submission-1" },
   ] });
   assert.equal(history.previous(local, read), "prompt 5");
-  assert.equal(await history.previous(local, read, new Map([["submission-1", "q1"]])), "prompt 3");
+  assert.equal(await history.previous(local, read, new Map([["submission-1", "q1"]]), { localIsContiguous: false }), "prompt 3");
   assert.equal(history.next(local), "prompt 5");
   assert.equal(history.next(local), "", "the promoted queue is not reinserted as a duplicate");
 });
@@ -94,4 +94,19 @@ test("a locally delivered queued message replaces its queue identity without a h
   const local = [{ ...event(5), queueId: "q1" }, event(7)];
   assert.equal(history.next(local), "prompt 7");
   assert.equal(history.next(local), "");
+});
+
+test("loaded contiguous prompts remain immediately recallable without a server round trip", () => {
+  const history = new ComposerHistory();
+  const read = async () => { throw new Error("offline"); };
+  const local = [event(1), event(3)];
+  assert.equal(history.previous(local, read), "prompt 3");
+  assert.equal(history.previous(local, read), "prompt 1");
+});
+
+test("a reader opened before the tail starts recall from the newest remote prompt", async () => {
+  const history = new ComposerHistory();
+  const read = async () => page([3, 5], true);
+  assert.equal(await history.previous([event(1)], read, new Map(), { localIsTail: false, localIsContiguous: false }), "prompt 5");
+  assert.equal(await history.previous([event(1)], read), "prompt 3");
 });

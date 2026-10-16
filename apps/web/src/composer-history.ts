@@ -49,17 +49,26 @@ export class ComposerHistory {
   }
 
   previous(local: readonly ComposerHistoryPrompt[], read: (before: number | undefined, signal: AbortSignal) => Promise<SessionPromptHistoryPage>,
-    promotedQueues: ReadonlyMap<string, string> = new Map()): string | undefined | Promise<string | undefined> {
+    promotedQueues: ReadonlyMap<string, string> = new Map(),
+    options: { localIsTail?: boolean; localIsContiguous?: boolean } = {}): string | undefined | Promise<string | undefined> {
     if (this.controller) return undefined;
     const entries = this.entries(local);
+    const needsNewest = this.current === null && options.localIsTail === false;
+    if (needsNewest) { this.before = undefined; this.hasMore = true; }
     // Keep the existing instant recall for the current loaded turn and locally queued messages.
-    if (this.current === null && entries.length) return this.select(entries.at(-1));
+    if (this.current === null && entries.length && !needsNewest) return this.select(entries.at(-1));
     const index = entries.findIndex(prompt => prompt.key === this.current);
     const previous = index < 0 ? entries.at(-1) : entries[index - 1];
+    const localIndex = local.findIndex(prompt => prompt.key === this.current);
+    const localFallback = localIndex < 0 ? this.current === null ? local.at(-1) : undefined : local[localIndex - 1];
+    // Adjacent messages in a contiguous loaded window never need the network. Offline/partial
+    // sessions retain the recall they already had, and ordinary key repeats stay synchronous.
+    if (!needsNewest && options.localIsContiguous !== false && previous &&
+        localIndex >= 0 && local.some(prompt => prompt.key === previous.key)) return this.select(previous);
     // A fetched page proves this range is contiguous. Below its boundary, fetch a prompt page,
     // even if the transcript happens to contain an older prompt across an unloaded gap.
-    if (!this.hasMore || (this.before !== undefined && previous &&
-        (previous.seq === undefined || previous.seq >= this.before))) return this.select(previous);
+    if (!needsNewest && (!this.hasMore || (this.before !== undefined && previous &&
+        (previous.seq === undefined || previous.seq >= this.before)))) return this.select(previous);
     const controller = new AbortController();
     const generation = this.generation;
     this.controller = controller;
@@ -84,6 +93,7 @@ export class ComposerHistory {
         }
       } catch (cause) {
         if (generation !== this.generation || controller.signal.aborted) return undefined;
+        if (localFallback) return this.select(localFallback);
         throw cause;
       } finally {
         if (this.controller === controller) this.controller = null;

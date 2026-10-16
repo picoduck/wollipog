@@ -1587,10 +1587,13 @@ function SessionDetailLoaded({
   const dragActive = dropImageCount !== null;
   // The marker controls keyboard engagement; actual recall uses stable identities and its own pages.
   const promptHistory = useMemo(() => new ComposerHistory(), [sessionId, recoveryEventEpoch, instanceScope]);
-  useEffect(() => () => promptHistory.reset(), [promptHistory]);
   const promptHistoryRef = useRef(promptHistory);
   promptHistoryRef.current = promptHistory;
   const [histIdx, setHistoryIndex] = useState(-1);
+  useEffect(() => {
+    setHistoryIndex(-1);
+    return () => promptHistory.reset();
+  }, [promptHistory]);
   const setHistIdx = useCallback((value: number) => {
     if (value === -1) promptHistoryRef.current.reset();
     setHistoryIndex(value);
@@ -2184,6 +2187,7 @@ function SessionDetailLoaded({
   }, [mutationKey, replace, sessionId, setProgrammaticComposerText]);
   // Tap-or-hold dictation (browser SpeechRecognition; hidden when unsupported, #2193).
   const dictation = useVoiceDictation((phrase) => {
+    setHistIdx(-1);
     revealOrdinaryComposerRef.current("always");
     markDraftDirty();
     const next = appendTranscript(draftState.current.text, phrase);
@@ -2198,6 +2202,7 @@ function SessionDetailLoaded({
     return () => { sideChatUndoTargetRef.current = null; };
   }, [sessionId]);
   const insertSideChatDraft = useCallback((response: string) => {
+    setHistIdx(-1);
     restoreExpandedPanel();
     revealComposerFromTerminal();
     revealOrdinaryComposerRef.current("always");
@@ -2208,6 +2213,7 @@ function SessionDetailLoaded({
     const target = sessionId;
     showUndo("Inserted into your session draft.", () => {
       if (sideChatUndoTargetRef.current !== target) throw new Error("This session's draft is no longer open.");
+      setHistIdx(-1);
       restoreExpandedPanel();
       revealOrdinaryComposerRef.current("always");
       markDraftDirty();
@@ -6728,8 +6734,16 @@ function SessionDetailLoaded({
       if (e.key === "ArrowUp" && (histIdx !== -1 || composerText.text === "")) {
         e.preventDefault();
         setHistIdx(0);
+        const draftVersion = composerDraftVersionRef.current;
+        const recalledFrom = composerText.text;
         const apply = (text: string | undefined) => {
           if (text === undefined) return;
+          // Programmatic writers (dictation, Side Chat, commands, attachments and hydration) can
+          // change the draft without a textarea change event. A late read never wins over them.
+          if (composerDraftVersionRef.current !== draftVersion || composerText.text !== recalledFrom) {
+            setHistIdx(-1);
+            return;
+          }
           markDraftDirty();
           setProgrammaticComposerText(text);
         };
@@ -6745,7 +6759,10 @@ function SessionDetailLoaded({
             return { prompts: timelineUserPrompts.map(prompt => ({ seq: prompt.seq!, text: prompt.text })),
               eventEpoch: recoveryEventEpoch, hasMore: false, cacheComplete: true };
           }
-        }, promotedQueueBySubmission);
+        }, promotedQueueBySubmission, {
+          localIsTail: !historyPreview.active && eventWindow?.laterGap === undefined && eventWindow?.complete !== false,
+          localIsContiguous: eventWindow?.laterGap === undefined,
+        });
         if (recalled instanceof Promise) void recalled.then(apply).catch((cause: unknown) => {
           if (cause instanceof DOMException && cause.name === "AbortError") return;
           showToast("Could not load older messages. Press Up to try again.", { tone: "error" });
