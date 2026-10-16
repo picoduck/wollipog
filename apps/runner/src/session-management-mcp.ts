@@ -121,6 +121,29 @@ function errorResult(text: string): ToolResult {
   return { content: [{ type: "text", text }], isError: true };
 }
 
+/** A refusal because Wollipog is older than this runner. The sentence names what to update and keeps
+ * the caller's alternative; the versions travel beside it as fields, never inside it
+ * (docs/design-system.md §17.2, #3265). The text block is a JSON body like a successful result's, so
+ * the CLI prints the same fields. The connected version is omitted when it is unknown. */
+function controlPlaneUpdateRequired(error: string, required: number, actual?: unknown): ToolResult {
+  return errorResult(JSON.stringify({
+    error,
+    requiredControlPlaneProtocolVersion: required,
+    ...(Number.isInteger(actual) ? { controlPlaneProtocolVersion: actual } : {}),
+  }));
+}
+
+const UPDATE_AND_TRY_AGAIN = "Update Wollipog and try again.";
+
+/** `needs` takes the subject with its verb ("Attaching a file needs", "Campaign allocations need"). */
+function needsNewerWollipog(needs: string, action = UPDATE_AND_TRY_AGAIN): string {
+  return `${needs} a newer version of Wollipog. ${action}`;
+}
+
+function wollipogSupportUnverified(feature: string, cause: string): string {
+  return `Could not check whether Wollipog supports ${feature}: ${cause}`;
+}
+
 function truncate(s: string, n: number): string {
   return s.length > n ? s.slice(0, n) + "…" : s;
 }
@@ -236,8 +259,9 @@ async function campaignIssueScopeCompatibilityError(deps: McpDeps): Promise<Tool
     if (!compatibility.ok) return errorResult("Campaign issue scope compatibility could not be verified; update Wollipog and reconnect");
     actual = compatibility.data?.protocolVersion;
   }
-  return Number.isInteger(actual) && actual! >= RUNNER_CAPABILITY_MIN_PROTOCOL.campaignIssueScopeChanges
-    ? null : errorResult("Campaign issue scope changes require control plane protocol v208; update Wollipog and reconnect");
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.campaignIssueScopeChanges;
+  return Number.isInteger(actual) && actual! >= required
+    ? null : controlPlaneUpdateRequired(needsNewerWollipog("Campaign issue scope changes need"), required, actual);
 }
 
 async function workflowDecisionInspectionCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
@@ -247,8 +271,11 @@ async function workflowDecisionInspectionCompatibilityError(deps: McpDeps): Prom
     if (!compatibility.ok) return errorResult("Workflow decision inspection compatibility could not be verified; update Wollipog and reconnect");
     actual = compatibility.data?.protocolVersion;
   }
-  return Number.isInteger(actual) && actual! >= RUNNER_CAPABILITY_MIN_PROTOCOL.descendantWorkflowDecisionInspection
-    ? null : errorResult("Descendant reads and decision lists require control plane protocol v214; update Wollipog and reconnect. Self get_workflow_decision still works; list_descendant_requests shows pending requests only, and a 404 never proves consumption.");
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.descendantWorkflowDecisionInspection;
+  return Number.isInteger(actual) && actual! >= required
+    ? null : controlPlaneUpdateRequired(needsNewerWollipog("Descendant reads and decision lists need",
+      `${UPDATE_AND_TRY_AGAIN} Self get_workflow_decision still works; list_descendant_requests shows pending requests only, and a 404 never proves consumption.`),
+    required, actual);
 }
 
 async function campaignBudgetCompatibilityError(deps:McpDeps):Promise<ToolResult|null> {
@@ -258,7 +285,8 @@ async function campaignBudgetCompatibilityError(deps:McpDeps):Promise<ToolResult
     if(!compatibility.ok) return errorResult("Campaign budget/review compatibility could not be verified");
     actual=compatibility.data?.protocolVersion;
   }
-  return Number.isInteger(actual) && actual!>=RUNNER_CAPABILITY_MIN_PROTOCOL.campaignBudgetAdmission?null:errorResult("Campaign budget/review jobs require control plane protocol v218; update and reconnect.");
+  const required=RUNNER_CAPABILITY_MIN_PROTOCOL.campaignBudgetAdmission;
+  return Number.isInteger(actual) && actual!>=required?null:controlPlaneUpdateRequired(needsNewerWollipog("Campaign budget and review jobs need"),required,actual);
 }
 
 async function issueClosureCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
@@ -268,8 +296,9 @@ async function issueClosureCompatibilityError(deps: McpDeps): Promise<ToolResult
     if (!compatibility.ok) return errorResult("Issue closure compatibility could not be verified");
     actual = compatibility.data?.protocolVersion;
   }
-  return Number.isInteger(actual) && actual! >= RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueClosure
-    ? null : errorResult("Human-approved issue closure requires control plane protocol v194; update Wollipog");
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueClosure;
+  return Number.isInteger(actual) && actual! >= required
+    ? null : controlPlaneUpdateRequired(needsNewerWollipog("Human-approved issue closure needs"), required, actual);
 }
 
 /** A pre-v220 control plane would ignore `campaignWorkItemId` and start the child unattributed,
@@ -280,13 +309,15 @@ async function campaignWorkItemAtCreationCompatibilityError(deps: McpDeps): Prom
   if (!Number.isInteger(actual)) {
     const compatibility = await cpFetch(deps, "GET", "/api/compatibility");
     if (!compatibility.ok) {
-      return errorResult(`Naming a campaign work item at child creation requires control plane protocol v${required}, but compatibility could not be verified: ${compatibility.message}`);
+      return controlPlaneUpdateRequired(
+        wollipogSupportUnverified("naming a campaign work item at child creation", compatibility.message), required);
     }
     actual = compatibility.data?.protocolVersion;
   }
   return Number.isInteger(actual) && actual! >= required
     ? null
-    : errorResult(`Naming a campaign work item at child creation requires control plane protocol v${required}; connected control plane reports v${String(actual ?? "unknown")}. Update Wollipog; no child was created.`);
+    : controlPlaneUpdateRequired(needsNewerWollipog("Naming a campaign work item at child creation needs",
+      "Update Wollipog and try again; no child was created."), required, actual);
 }
 
 /** A pre-v196 control plane has no campaign work ledger. It would ignore an unknown `workItem` or
@@ -297,13 +328,13 @@ async function campaignWorkLedgerCompatibilityError(deps: McpDeps): Promise<Tool
   if (!Number.isInteger(actual)) {
     const compatibility = await cpFetch(deps, "GET", "/api/compatibility");
     if (!compatibility.ok) {
-      return errorResult(`The campaign work ledger requires control plane protocol v${required}, but compatibility could not be verified: ${compatibility.message}`);
+      return controlPlaneUpdateRequired(wollipogSupportUnverified("the campaign work ledger", compatibility.message), required);
     }
     actual = compatibility.data?.protocolVersion;
   }
   return Number.isInteger(actual) && actual! >= required
     ? null
-    : errorResult(`The campaign work ledger requires control plane protocol v${required}; connected control plane reports v${String(actual ?? "unknown")}. Update Wollipog.`);
+    : controlPlaneUpdateRequired(needsNewerWollipog("The campaign work ledger needs"), required, actual);
 }
 
 const CAMPAIGN_ISSUE_SCHEMA = {
@@ -313,26 +344,23 @@ const CAMPAIGN_ISSUE_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+const EFFORT_NEEDS_NEWER_WOLLIPOG =
+  needsNewerWollipog("Reasoning effort selection needs", "Update Wollipog, or omit effort to keep the default.");
+
 async function explicitEffortCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
   const required = RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControlReasoningEffort;
   if (Number.isInteger(deps.controlPlaneProtocolVersion)) {
     return deps.controlPlaneProtocolVersion! >= required
       ? null
-      : errorResult(
-          `Reasoning effort selection requires control plane protocol v${required}; connected control plane reports v${deps.controlPlaneProtocolVersion}. Update Wollipog or omit effort to preserve default resolution.`,
-        );
+      : controlPlaneUpdateRequired(EFFORT_NEEDS_NEWER_WOLLIPOG, required, deps.controlPlaneProtocolVersion);
   }
   const result = await cpFetch(deps, "GET", "/api/compatibility");
   if (!result.ok) {
-    return errorResult(
-      `Reasoning effort selection requires control plane protocol v${required}, but compatibility could not be verified: ${result.message}`,
-    );
+    return controlPlaneUpdateRequired(wollipogSupportUnverified("reasoning effort selection", result.message), required);
   }
   const actual = result.data?.protocolVersion;
   if (!Number.isInteger(actual) || actual < required) {
-    return errorResult(
-      `Reasoning effort selection requires control plane protocol v${required}; connected control plane reports v${String(actual ?? "unknown")}. Update Wollipog or omit effort to preserve default resolution.`,
-    );
+    return controlPlaneUpdateRequired(EFFORT_NEEDS_NEWER_WOLLIPOG, required, actual);
   }
   return null;
 }
@@ -343,17 +371,14 @@ async function worktreeRetirementCompatibilityError(deps: McpDeps): Promise<Tool
   if (!Number.isInteger(actual)) {
     const result = await cpFetch(deps, "GET", "/api/compatibility");
     if (!result.ok) {
-      return errorResult(
-        `Managed worktree retirement requires control plane protocol v${required}, but compatibility could not be verified: ${result.message}`,
-      );
+      return controlPlaneUpdateRequired(wollipogSupportUnverified("managed worktree retirement", result.message), required);
     }
     actual = result.data?.protocolVersion;
   }
   return Number.isInteger(actual) && actual! >= required
     ? null
-    : errorResult(
-        `Managed worktree retirement requires control plane protocol v${required}; connected control plane reports v${String(actual ?? "unknown")}. Update Wollipog before discarding a runner-owned worktree.`,
-      );
+    : controlPlaneUpdateRequired(needsNewerWollipog("Managed worktree retirement needs",
+      "Update Wollipog before discarding a runner-owned worktree."), required, actual);
 }
 
 /** A pre-v190 control plane has no stop route, and its refusal would not say why. */
@@ -363,17 +388,13 @@ async function backgroundJobStopCompatibilityError(deps: McpDeps): Promise<ToolR
   if (!Number.isInteger(actual)) {
     const result = await cpFetch(deps, "GET", "/api/compatibility");
     if (!result.ok) {
-      return errorResult(
-        `Stopping one background job requires control plane protocol v${required}, but compatibility could not be verified: ${result.message}`,
-      );
+      return controlPlaneUpdateRequired(wollipogSupportUnverified("stopping one background job", result.message), required);
     }
     actual = result.data?.protocolVersion;
   }
   return Number.isInteger(actual) && actual! >= required
     ? null
-    : errorResult(
-        `Stopping one background job requires control plane protocol v${required}; connected control plane reports v${String(actual ?? "unknown")}. Update Wollipog first.`,
-      );
+    : controlPlaneUpdateRequired(needsNewerWollipog("Stopping one background job needs"), required, actual);
 }
 
 async function workflowDecisionActionCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
@@ -382,17 +403,14 @@ async function workflowDecisionActionCompatibilityError(deps: McpDeps): Promise<
   if (!Number.isInteger(actual)) {
     const result = await cpFetch(deps, "GET", "/api/compatibility");
     if (!result.ok) {
-      return errorResult(
-        `PR merge action admission requires control plane protocol v${required}, but compatibility could not be verified: ${result.message}`,
-      );
+      return controlPlaneUpdateRequired(wollipogSupportUnverified("PR merge action admission", result.message), required);
     }
     actual = result.data?.protocolVersion;
   }
   return Number.isInteger(actual) && actual! >= required
     ? null
-    : errorResult(
-        `PR merge action admission requires control plane protocol v${required}; connected control plane reports v${String(actual ?? "unknown")}. Update Wollipog before consuming this approval.`,
-      );
+    : controlPlaneUpdateRequired(needsNewerWollipog("PR merge action admission needs",
+      "Update Wollipog before consuming this approval."), required, actual);
 }
 
 /** A pre-v166 control plane drops an unknown childMessage and still resolves the decision, so the
@@ -403,17 +421,14 @@ async function workflowDecisionChildMessageCompatibilityError(deps: McpDeps): Pr
   if (!Number.isInteger(actual)) {
     const result = await cpFetch(deps, "GET", "/api/compatibility");
     if (!result.ok) {
-      return errorResult(
-        `A child-facing decision message requires control plane protocol v${required}, but compatibility could not be verified: ${result.message}`,
-      );
+      return controlPlaneUpdateRequired(wollipogSupportUnverified("a child-facing decision message", result.message), required);
     }
     actual = result.data?.protocolVersion;
   }
   return Number.isInteger(actual) && actual! >= required
     ? null
-    : errorResult(
-        `A child-facing decision message requires control plane protocol v${required}; connected control plane reports v${String(actual ?? "unknown")}. Resolve without childMessage and send it with prompt_session, or update Wollipog.`,
-      );
+    : controlPlaneUpdateRequired(needsNewerWollipog("A child-facing decision message needs",
+      "Resolve without childMessage and send it with prompt_session, or update Wollipog."), required, actual);
 }
 
 /** An 8 MiB image is about 10.7 MiB of base64. The ordinary RPC deadline would fail a valid upload
@@ -429,17 +444,13 @@ async function sessionArtifactFileAttachCompatibilityError(deps: McpDeps, video 
   if (!Number.isInteger(actual)) {
     const result = await cpFetch(deps, "GET", "/api/compatibility");
     if (!result.ok) {
-      return errorResult(
-        `Attaching a file requires control plane protocol v${required}, but compatibility could not be verified: ${result.message}`,
-      );
+      return controlPlaneUpdateRequired(wollipogSupportUnverified("attaching a file", result.message), required);
     }
     actual = result.data?.protocolVersion;
   }
   return Number.isInteger(actual) && actual! >= required
     ? null
-    : errorResult(
-        `Attaching a file requires control plane protocol v${required}; connected control plane reports v${String(actual ?? "unknown")}. Update the Wollipog control plane, then attach again.`,
-      );
+    : controlPlaneUpdateRequired(needsNewerWollipog("Attaching a file needs", "Update Wollipog, then attach again."), required, actual);
 }
 
 async function workflowDecisionReconciliationCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
@@ -448,17 +459,14 @@ async function workflowDecisionReconciliationCompatibilityError(deps: McpDeps): 
   if (!Number.isInteger(actual)) {
     const result = await cpFetch(deps, "GET", "/api/compatibility");
     if (!result.ok) {
-      return errorResult(
-        `PR merge reconciliation requires control plane protocol v${required}, but compatibility could not be verified: ${result.message}`,
-      );
+      return controlPlaneUpdateRequired(wollipogSupportUnverified("PR merge reconciliation", result.message), required);
     }
     actual = result.data?.protocolVersion;
   }
   return Number.isInteger(actual) && actual! >= required
     ? null
-    : errorResult(
-        `PR merge reconciliation requires control plane protocol v${required}; connected control plane reports v${String(actual ?? "unknown")}. Update Wollipog before reconciling this approval.`,
-      );
+    : controlPlaneUpdateRequired(needsNewerWollipog("PR merge reconciliation needs",
+      "Update Wollipog before reconciling this approval."), required, actual);
 }
 
 /** Bounds the fence probe so it cannot push a create call toward the harness's tool timeout. */
@@ -1485,7 +1493,9 @@ export const TOOLS: McpTool[] = [
       if (!deps.selfSessionId || !deps.orchestrator) return errorResult("this tool requires an Orchestrator session identity");
       const compatibility = deps.controlPlaneProtocolVersion === undefined ? await cpFetch(deps, "GET", "/api/compatibility") : null;
       const version = deps.controlPlaneProtocolVersion ?? (compatibility?.ok ? compatibility.data?.protocolVersion : null);
-      if (typeof version !== "number" || version < RUNNER_CAPABILITY_MIN_PROTOCOL.campaignBudgetAdmission) return errorResult("Campaign allocations require control plane protocol v218; update and reconnect.");
+      if (typeof version !== "number" || version < RUNNER_CAPABILITY_MIN_PROTOCOL.campaignBudgetAdmission) {
+        return controlPlaneUpdateRequired(needsNewerWollipog("Campaign allocations need"), RUNNER_CAPABILITY_MIN_PROTOCOL.campaignBudgetAdmission, version);
+      }
       const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/orchestrator-campaign/budget-allocations`, args);
       return r.ok ? textResult(r.data) : errorResult(r.message);
     },
