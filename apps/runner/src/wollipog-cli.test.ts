@@ -183,6 +183,7 @@ test("pr wait runs locally through gh with outcome exit codes and never contacts
           mergeStateStatus: "BLOCKED", mergeCommit: null, mergeQueueEntry: null,
           commits: { nodes: [{ commit: { oid: head, statusCheckRollup: { contexts: { pageInfo: { hasNextPage: false }, nodes: [
             { __typename: "CheckRun", name: "CI", status: conclusion ? "COMPLETED" : "IN_PROGRESS", conclusion, startedAt: "t" },
+            ...(conclusion === "SKIPPED" ? [{ __typename: "CheckRun", name: "Browser", status: "QUEUED", conclusion: null }] : []),
           ] } } } }] },
           ...extra,
         } } } });
@@ -217,6 +218,11 @@ test("pr wait runs locally through gh with outcome exit codes and never contacts
   const pending = await run(["pr", "wait", "picoduck/wollipog#7", "--timeout", "1", "--json"], fakeGh(null).gh);
   assert.equal(pending.code, 124);
   assert.equal(JSON.parse(pending.stdout).outcome, "timeout");
+
+  const skipped = await run(["pr", "wait", "picoduck/wollipog#7", "--head", head, "--timeout", "1", "--json"], fakeGh("SKIPPED").gh);
+  assert.equal(skipped.code, 124, "an old skipped draft check cannot certify newly admitted CI");
+  assert.equal(JSON.parse(skipped.stdout).outcome, "timeout");
+  assert.deepEqual(JSON.parse(skipped.stdout).checks.required, [{ name: "CI", state: "pending", reported: true }]);
 
   const merged = await run(["pr", "wait", "https://github.com/picoduck/wollipog/pull/7", "--json"],
     fakeGh(null, { state: "MERGED", mergeCommit: { oid: head } }).gh);

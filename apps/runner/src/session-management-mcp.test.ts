@@ -795,15 +795,18 @@ test("wait_pull_request reads GitHub through gh, never the control plane, and re
   const { deps, calls } = makeDeps();
   const head = "44579c6c25235598f1a28f8ccb0449cb8dbbc810";
   const ghCalls: string[][] = [];
+  let conclusion = "SUCCESS";
+  let mergeStateStatus = "CLEAN";
   deps.gh = async (args) => {
     ghCalls.push(args);
     const json = (value: unknown) => ({ stdout: JSON.stringify(value), stderr: "", code: null, timedOut: false });
     if (args.includes("graphql")) {
       return json({ data: { repository: { defaultBranchRef: { name: "main" }, pullRequest: {
         url: "https://github.com/picoduck/wollipog/pull/7", state: "OPEN", isDraft: false, headRefOid: head, baseRefName: "main",
-        mergeStateStatus: "CLEAN", mergeCommit: null, mergeQueueEntry: null,
+        mergeStateStatus, mergeCommit: null, mergeQueueEntry: null,
         commits: { nodes: [{ commit: { oid: head, statusCheckRollup: { contexts: { pageInfo: { hasNextPage: false }, nodes: [
-          { __typename: "CheckRun", name: "Typecheck, Test & Sidecar Bundle", status: "COMPLETED", conclusion: "SUCCESS", startedAt: "t", isRequired: true },
+          { __typename: "CheckRun", name: "Typecheck, Test & Sidecar Bundle", status: "COMPLETED", conclusion, startedAt: "t", isRequired: true },
+          ...(conclusion === "SKIPPED" ? [{ __typename: "CheckRun", name: "Browser", status: "QUEUED", conclusion: null }] : []),
         ] } } } }] },
       } } } });
     }
@@ -822,6 +825,15 @@ test("wait_pull_request reads GitHub through gh, never the control plane, and re
   assert.deepEqual(summary.checks.required, [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed", reported: true }]);
   assert.equal(calls.length, 0, "no control-plane request");
   assert.ok(ghCalls.every((args) => args[0] === "api"), "reads only");
+
+  conclusion = "SKIPPED";
+  mergeStateStatus = "BLOCKED";
+  const skipped = resultJson(await callTool(deps, "wait_pull_request", {
+    pullRequest: "picoduck/wollipog#7", headSha: head, timeoutMs: 1,
+  }));
+  assert.equal(skipped.outcome, "timeout", "an old skipped draft check cannot certify newly admitted CI");
+  assert.deepEqual(skipped.checks.required, [{ name: "Typecheck, Test & Sidecar Bundle", state: "pending", reported: true }]);
+  assert.equal(calls.length, 0);
 
   const missingRepo = await callTool(deps, "wait_pull_request", { pullRequest: "7" });
   assert.equal(missingRepo.isError, true);
