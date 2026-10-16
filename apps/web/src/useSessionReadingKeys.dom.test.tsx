@@ -86,6 +86,7 @@ function setupActions() {
     snooze: action("snooze"),
     fork: action("fork"),
     reply: action("reply"),
+    markReviewed: action("markReviewed"),
     pauseFollow: action("pauseFollow"),
     resumeFollow: action("resumeFollow"),
   };
@@ -188,11 +189,15 @@ test("Session Reading dispatches contextual triage and session hopping bindings"
   const fork = dispatchKey("f");
   dispatchKey("F", { shiftKey: true });
   dispatchKey("r");
+  dispatchKey("m");
+  for (const modifier of ["shiftKey", "ctrlKey", "metaKey", "altKey"]) {
+    dispatchKey("m", { [modifier]: true });
+  }
 
   assert.equal(next.defaultPrevented, true);
   assert.equal(previous.defaultPrevented, true);
   assert.equal(fork.defaultPrevented, true);
-  assert.deepEqual(fixture.calls, ["nextSession", "previousSession", "approve", "deny", "archive", "snooze", "fork", "reply"],
+  assert.deepEqual(fixture.calls, ["nextSession", "previousSession", "approve", "deny", "archive", "snooze", "fork", "reply", "markReviewed"],
     "Shift+F is not Fork");
 
   await act(async () => { fixture.root.unmount(); });
@@ -297,12 +302,13 @@ test("typing, native controls, layers, focus zones, and xterm keep their key own
   const composer = fixture.container.querySelector<HTMLTextAreaElement>('[aria-label="Composer"]')!;
   composer.focus();
   dispatchKey("a");
+  dispatchKey("m");
   dispatchKey("f");
   dispatchKey("ArrowDown", { altKey: true });
   assert.deepEqual(fixture.calls, ["nextSession"], "typing blocks bare keys but preserves modifier navigation");
 
   fixture.container.querySelector<HTMLButtonElement>("[data-focus-zone=main] button")!.focus();
-  for (const key of ["a", "f", "j", " "]) dispatchKey(key);
+  for (const key of ["a", "f", "j", " ", "m"]) dispatchKey(key);
   // An open picker, a filter combobox and a resize grip move their own value with Alt+arrows, and
   // the pipe-mode shell input keeps its own ↑/↓ history like any terminal.
   for (const label of ["Worktree", "Filter Worktrees", "Resize Terminal", "Command"]) {
@@ -310,10 +316,12 @@ test("typing, native controls, layers, focus zones, and xterm keep their key own
     const picked = dispatchKey("ArrowDown", { altKey: true });
     assert.equal(picked.defaultPrevented, false, label);
     dispatchKey("a");
+    dispatchKey("m");
   }
   fixture.container.querySelector<HTMLTextAreaElement>('[aria-label="Terminal"]')!.focus();
   dispatchKey("ArrowDown", { altKey: true });
   dispatchKey("f");
+  dispatchKey("m");
   fixture.container.querySelector<HTMLButtonElement>("[data-focus-zone=rail] button")!.focus();
   dispatchKey("e");
 
@@ -323,12 +331,14 @@ test("typing, native controls, layers, focus zones, and xterm keep their key own
   domWindow.document.body.append(modal);
   dispatchKey("d");
   dispatchKey("f");
+  dispatchKey("m");
   modal.remove();
   // An open menu (More Actions, with the reader still focused) owns its keys too.
   const menu = domWindow.document.createElement("div");
   menu.setAttribute("role", "menu");
   domWindow.document.body.append(menu);
   dispatchKey("f");
+  dispatchKey("m");
   menu.remove();
   assert.deepEqual(fixture.calls, ["nextSession"]);
 
@@ -341,7 +351,7 @@ test("a question card owns its keys while focus is on its heading, leaving R to 
   // The heading is a focusable div, not a native control, so only the card's ownership keeps D on
   // its question rather than the session's top request.
   fixture.container.querySelector<HTMLElement>(".question-card [role=heading]")!.focus();
-  for (const key of ["d", "a", "e", "s", "j", "1"]) {
+  for (const key of ["d", "a", "e", "s", "j", "1", "m"]) {
     assert.equal(dispatchKey(key).defaultPrevented, false, key);
   }
   assert.deepEqual(fixture.calls, []);
@@ -360,7 +370,7 @@ test("an expanded workflow decision owns focus without moving the hidden transcr
   request.classList.remove("question-card");
   request.setAttribute("data-decision-expanded", "");
   request.querySelector<HTMLElement>("[role=heading]")!.focus();
-  for (const key of ["j", "k", "PageDown", "PageUp", "End", "g", "g", "a", "d"]) {
+  for (const key of ["j", "k", "PageDown", "PageUp", "End", "g", "g", "a", "d", "m"]) {
     assert.equal(dispatchKey(key).defaultPrevented, false, key);
   }
   assert.deepEqual(fixture.scrollCalls, []);

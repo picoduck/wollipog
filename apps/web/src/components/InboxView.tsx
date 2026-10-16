@@ -65,6 +65,7 @@ import { RenameSessionDialog } from "./RenameSessionDialog.js";
 import type { NewSessionPreset } from "./NewSessionDialog.js";
 import { BoardIcon, ListIcon, PanelBottomIcon, PanelRightIcon } from "./Icons.js";
 import { PageHeader } from "./PageHeader.js";
+import { useMarkResultReviewed } from "../useMarkResultReviewed.js";
 import { shortcutDisplay } from "../shortcuts.js";
 import { sessionDisplayTitle } from "../session-title.js";
 import { Board } from "./Board.js";
@@ -217,6 +218,7 @@ export function InboxView({
 }: InboxViewProps) {
   const api = useApi();
   const { confirm, showToast, showUndo } = useFeedback();
+  const markResultReviewed = useMarkResultReviewed();
   const sessions = useStoreSelector((state) => state.sessions);
   const projects = useStoreSelector((state) => state.projects);
   const projectsSupported = useStoreSelector((state) => state.projectsSupported);
@@ -1469,6 +1471,11 @@ export function InboxView({
     snooze: () => { if (displayedSelection && sessionRemindersSupported) setSnoozeSessionId(displayedSelection); },
     pin: () => { if (displayedSelection) togglePin(displayedSelection); },
     unread: () => { if (displayedSelection) toggleUnread(displayedSelection); },
+    markReviewed: () => {
+      const target = displayedSelection ? sessions.get(displayedSelection) : undefined;
+      const result = target && outstandingSessionResult(target);
+      if (result) markResultReviewed(target.id, result.revision);
+    },
     reply: () => { if (displayedSelection) expand(displayedSelection, true); },
     resumeFollow: () => {
       const controls = previewNavigationRef.current;
@@ -1484,7 +1491,7 @@ export function InboxView({
       const scroll = viewRef.current?.querySelector<HTMLElement>(".detail-scroll");
       pageInboxPreview(scroll, "previous", previewNavigationRef.current?.beginProgrammaticScroll);
     },
-  }), [activeSplit?.key, archive, collapseThread, decide, displayedIds, displayedSelection, expand, expandThread, goToParent, moveSelection, openTopRequest, previewForkControls, selectRow, selectSplit, sessionRemindersSupported, showToast, splits, toggleAllThreads, togglePin, toggleThread, toggleUnread]);
+  }), [activeSplit?.key, archive, collapseThread, decide, displayedIds, displayedSelection, expand, expandThread, goToParent, markResultReviewed, moveSelection, openTopRequest, previewForkControls, selectRow, selectSplit, sessionRemindersSupported, sessions, showToast, splits, toggleAllThreads, togglePin, toggleThread, toggleUnread]);
   // Board mode has no row selection, so the list's j/k/a/d… vocabulary would act on an invisible
   // row; only the shared toolbar (tabs, search, toggle) stays keyboard-reachable there.
   useInboxKeys(!isMobile && !expanded && !boardMode, keyActions);
@@ -2033,11 +2040,7 @@ export function InboxView({
           }}
           onTogglePin={togglePin}
           onMarkReviewed={sessionMenu.reviewedResultRevision && outstandingSessionResult(sessions.get(sessionMenu.sessionId)!) ? (sessionId) => {
-            if (sessionMenu.reviewedResultRevision) void api.markResultReviewed(sessionId, sessionMenu.reviewedResultRevision)
-              .then(({ acknowledged, session }) => {
-                loadSession(session);
-                if (!acknowledged) showToast("A newer result is waiting for review.");
-              }).catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" }));
+            if (sessionMenu.reviewedResultRevision) markResultReviewed(sessionId, sessionMenu.reviewedResultRevision);
           } : undefined}
           onSnooze={(sessionId) => {
             const restore = sessionMenu.restoreTarget;

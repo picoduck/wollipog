@@ -781,6 +781,7 @@ function ReadingKeys({ scrollRef }: {
       snooze: noop,
       fork: noop,
       reply: noop,
+      markReviewed: noop,
       pauseFollow: noop,
       resumeFollow: noop,
     },

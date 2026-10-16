@@ -181,7 +181,7 @@ export function SessionContextMenu({
       <MenuItem icon={pinned ? <UnpinIcon /> : <PinIcon />} {...key("inbox-pin")} onClick={act(onTogglePin, true)}>
         {pinned ? "Unpin Session" : "Pin Session"}
       </MenuItem>
-      {onMarkReviewed && <MenuItem icon={<CheckIcon />} onClick={act(onMarkReviewed, true)}>Mark Reviewed</MenuItem>}
+      {onMarkReviewed && <MenuItem icon={<CheckIcon />} {...key("inbox-mark-reviewed")} onClick={act(onMarkReviewed, true)}>Mark Reviewed</MenuItem>}
       <MenuItem icon={unread ? <MarkReadIcon /> : <MarkUnreadIcon />} {...key("inbox-unread")} onClick={act((sessionId) => onSetUnread(sessionId, !unread), true)}>
         {unread ? "Mark Read" : "Mark Unread"}
       </MenuItem>
