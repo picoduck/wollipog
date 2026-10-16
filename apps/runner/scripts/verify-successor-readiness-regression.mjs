@@ -8,7 +8,8 @@ import { runFocusedValidation } from "./successor-load-lifecycle.mjs";
 // test, outer timeout, or incomplete cleanup must not count as killing the mutant.
 const repo = fileURLToPath(new URL("../../..", import.meta.url));
 const original = new URL("../src/provider-home-lease.test.ts", import.meta.url);
-const mutated = new URL(`../src/provider-home-lease.readiness-${randomUUID()}.test.ts`, import.meta.url);
+// Explicitly named to Node; excluded from the regular test glob if interrupted.
+const mutated = new URL(`../src/provider-home-lease.readiness-${randomUUID()}.mutation.ts`, import.meta.url);
 const source = readFileSync(original, "utf8");
 const gate = /^    assert\.ok\(await waitUntil\(\(\) => states\.every\(\(state\) => state\.ready\), options\.readinessMs \?\? 10_000, true\), "contender readiness timed out"\);$/gm;
 assert.equal([...source.matchAll(gate)].length, 1, "locate exactly one parent readiness wait");
