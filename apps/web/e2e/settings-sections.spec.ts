@@ -28,6 +28,8 @@ const SETTLED: Record<SettingsSection, (page: Page) => Locator> = {
   approvals: (page) => page.getByRole("button", { name: /^Review Agent-Created Sessions/ }),
   orchestrator: (page) => page.getByRole("radiogroup", { name: "Completion" }),
   network: (page) => page.getByRole("switch", { name: "Tailnet Access" }),
+  // Eligible Now shows once the organization's policy has loaded.
+  storage: (page) => page.getByText("128 sessions, about 604,115 events", { exact: true }),
   experimental: (page) => page.getByRole("switch").first(),
   about: (page) => page.getByText("0.27.0", { exact: true }),
 };

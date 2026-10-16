@@ -27,6 +27,19 @@ owner or admin, or the host operator, turns it on.
   later of their last update and last activity, which is never earlier than their real archive time,
   so none is pruned early.
 
+**Settings › Storage** holds it, with "Your Organization" as its scope:
+
+- **Prune Archived History.** The switch. Turning it on, like shortening Prune After, first shows a
+  danger confirmation with what the new policy would prune (sessions and, roughly, events) and when
+  it starts. Turning it off saves at once.
+- **Prune After.** The threshold in days. While the switch is off it holds the value the switch will
+  use (90 until changed); while it is on, a change saves when the field loses focus.
+- **Eligible Now** and **Last Pass.** What the policy would prune now, when pruning starts or the
+  next pass runs, and what the last pass pruned.
+- A neutral notice names the host's environment default while it is the policy in effect. Members
+  who are not owners or admins see the rows read-only, with the reason. A control plane that
+  predates retention leaves them disabled, asking for an update.
+
 `GET /api/archived-history-retention` returns the policy, where it comes from, when pruning may
 start, when the next pass runs, how many archived sessions (and roughly how many events) it would
 prune, and the last pass's totals. `?previewDays=N` adds the same counts for a threshold of `N` days,
@@ -51,7 +64,9 @@ Kept as events, so the transcript still shows them and search still finds them:
 - every prompt (`user_message`);
 - the session's final response: every part of its last top-level agent message;
 - every turn completion and final-flagged report. Campaign report proofs and assignment checks read
-  exactly these, so a verified campaign child stays verified;
+  exactly these, so a verified campaign child stays verified. Live claude-code and codex-app-server
+  answers stream without the flag, so a live session keeps only its final response; an adopted
+  transcript flags every answer final, and keeps each one;
 - every `token_usage` event, the evidence Claude cost corrections are reconciled against;
 - control-plane attachment events, which no runner can supply again.
 
@@ -121,6 +136,17 @@ after it, so a crash can never restore an artifact row whose blob is gone. See
 A pruned session stays in the archive with its metadata, cost and kept events. Its session view
 carries `historyPruned` (when, how many events, which threshold) and `archivedAt`.
 
+- **Archived Sessions** shows a neutral **History Pruned** badge beside its lifecycle; the badge's
+  tooltip gives the date and the threshold.
+- **Opening it** shows a compact **History Pruned** notice above the transcript, one line saying how
+  many events went and when; its Show Details says under which threshold, what kind went, and what
+  was kept. The kept events follow. Load Earlier Activity gives no count, since a pruned history
+  has gaps, and a session with nothing kept says so instead of "ended before anything was sent".
+- **Before it is pruned**, an archived session's Session Archived notice says on which date its
+  history will be pruned under the current policy.
+- **Search** finds it by its metadata and its kept prompts and final response; a transcript hit
+  says "History Pruned" in its details.
+
 It can be unarchived; the record stays. It can be restarted or resumed: the agent's own context lives
 with the runner and is unaffected, and new activity is numbered after the pruned range, so no event
 sequence number is reused. If it is archived again, a later prune applies the same rule to the whole
@@ -160,3 +186,8 @@ history as it always has.
 - `pnpm benchmark:archived-history-retention [--dir <path>]` prunes sessions with the indexed-text
   mix measured in real logs and fails if a batch's p95 reaches 16 ms. Point `--dir` at the disk that
   holds the database.
+- `apps/web`: `ArchivedHistoryRetentionPanel.dom.test.tsx` (off until confirmed; shortening is
+  confirmed, lengthening and off are not; limits; read-only members; older control planes),
+  `archived-history-retention.test.ts` (the copy and the prune date), the History Pruned badge in
+  `ArchivedSessionsView.dom.test.tsx`, the notice in `TranscriptReadingStates.dom.test.tsx`, and
+  Settings › Storage in every section-wide check of `e2e/settings-sections.spec.ts`.

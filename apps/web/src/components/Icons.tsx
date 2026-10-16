@@ -28,6 +28,7 @@ import {
   CircleUserRound as LucideCircleUserRound,
   CircleX as LucideCircleX,
   CircleDot as LucideCircleDot,
+  Database as LucideDatabase,
   CircleGauge as LucideCircleGauge,
   CirclePause as LucideCirclePause,
   ClipboardList as LucideClipboardList,
@@ -958,6 +959,11 @@ export function AppearanceIcon(props: IconProps) {
 
 export function NotificationsIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideBell} {...props} />;
+}
+
+/** Settings › Storage: how long archived sessions keep their history (#2777). */
+export function StorageIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideDatabase} {...props} />;
 }
 
 export function NetworkIcon(props: IconProps) {
