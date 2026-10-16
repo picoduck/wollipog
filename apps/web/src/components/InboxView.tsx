@@ -631,11 +631,23 @@ export function InboxView({
   // and threading only moves a child under its parent and drops a collapsed parent's children, so
   // the rows the user was browsing keep their places. Threading the live list before holding it
   // would have appended a re-expanded thread's children at the END of the held order instead.
-  const entries = useMemo(() => threadInboxRows(
-    displayedHeldOrder ? reconcileInboxItems(displayedHeldOrder, liveEntries, (entry) => entry.session.id) : liveEntries,
-    collapsedThreads,
-    stalledSessionIds,
-  ), [collapsedThreads, displayedHeldOrder, liveEntries, stalledSessionIds]);
+  const canonicalEntries = useMemo(() => threadInboxRows(
+    liveEntries, collapsedThreads, stalledSessionIds,
+  ), [collapsedThreads, liveEntries, stalledSessionIds]);
+  const entries = useMemo(() => {
+    if (!displayedHeldOrder) return canonicalEntries;
+    const heldEntries = threadInboxRows(
+      reconcileInboxItems(displayedHeldOrder, liveEntries, (entry) => entry.session.id),
+      collapsedThreads,
+      stalledSessionIds,
+    );
+    // Starting or ending a hold usually changes no visible rows. Preserve their array identity:
+    // a fabricated items change can make the virtualizer restore an old anchor between aiming
+    // and clicking, before its native scroll listener has recorded the browser's latest movement.
+    return heldEntries.length === canonicalEntries.length && heldEntries.every(
+      (entry, index) => entry.session.id === canonicalEntries[index]?.session.id,
+    ) ? canonicalEntries : heldEntries;
+  }, [canonicalEntries, collapsedThreads, displayedHeldOrder, liveEntries, stalledSessionIds]);
   const displayedIds = useMemo(() => entries.map((entry) => entry.session.id), [entries]);
   // Selection repair reads the last committed list, never a speculative/Strict Mode render.
   useLayoutEffect(() => { displayedIdsRef.current = displayedIds; }, [displayedIds]);
