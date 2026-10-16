@@ -17,6 +17,11 @@ const EXPECTED_GROUP_TEMPLATE =
   "${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.event.action != 'ready_for_review' && 'draft' || 'active' }}";
 const EXPECTED_JOB_GUARD =
   "github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false";
+// CI carries the required check, so its pull-request lanes are also per head and never cancel in
+// progress (#3283); pr-ci-supersede.yml stops older heads. The other PR workflows report no
+// required check and keep cancelling, but every workflow shares the same ready/draft lanes.
+const CI_HEAD_SEGMENT = "-${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || 'ref' }}";
+const CI_CANCEL = "${{ github.event_name != 'pull_request' }}";
 
 function workflowContract(path) {
   const text = readFileSync(resolve(process.cwd(), path), "utf8");
@@ -31,7 +36,15 @@ function workflowContract(path) {
   const jobIds = (text.split(/^jobs:\r?\n/m)[1] ?? "").match(/^  [A-Za-z_][A-Za-z0-9_-]*:$/gm) ?? [];
   assert.ok(jobIds.length >= 1, `${path}: expected at least one job`);
   assert.equal(jobGuards.length, jobIds.length, `${path}: every job needs a job-level if guard (${jobGuards.length} of ${jobIds.length} jobs have one)`);
-  assert.match(text, /^  cancel-in-progress: true$/m, `${path}: concurrency must cancel in progress`);
+  const cancelInProgress = text.match(/^  cancel-in-progress: (.+)$/m)?.[1].trim();
+  let groupTemplate = concurrencyGroup[1].trim();
+  if (path === ".github/workflows/ci.yml") {
+    assert.equal(cancelInProgress, CI_CANCEL, `${path}: only non-PR runs may cancel in progress`);
+    assert.ok(groupTemplate.endsWith(CI_HEAD_SEGMENT), `${path}: PR lanes must be per head commit`);
+    groupTemplate = groupTemplate.slice(0, -CI_HEAD_SEGMENT.length);
+  } else {
+    assert.equal(cancelInProgress, "true", `${path}: concurrency must cancel in progress`);
+  }
   // Every job carries the same draft guard. The aggregator adds PR-only !cancelled()
   // admission; non-PR reporting remains unconditional, including on cancellation.
   const guards = [...new Set(jobGuards.map((match) => unwrapAggregatorGuard(match[1].trim())))];
@@ -39,7 +52,7 @@ function workflowContract(path) {
 
   return {
     pullRequestTypes: pullRequestTypes[1].split(",").map((value) => value.trim()),
-    groupTemplate: concurrencyGroup[1].trim(),
+    groupTemplate,
     jobGuard: guards[0],
   };
 }

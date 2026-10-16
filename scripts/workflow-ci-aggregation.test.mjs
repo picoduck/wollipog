@@ -106,14 +106,24 @@ test("cancellation regression rejects unconditional aggregation and failure-hidi
 test("concurrency remains independent for unrelated PRs, refs and workflows", () => {
   const template = workflow.match(/^  group: (.+)$/m)?.[1];
   assert.ok(template);
-  assert.match(workflow, /^  cancel-in-progress: true$/m);
-  function group(event, number = 2452, ref = "refs/pull/2452/merge", workflowName = "CI") {
-    const github = { workflow: workflowName, ref, event_name: event.event_name, event: {
+  const cancelTemplate = workflow.match(/^  cancel-in-progress: (.+)$/m)?.[1];
+  assert.ok(cancelTemplate);
+  const headA = "a".repeat(40), headB = "b".repeat(40);
+  function context(event, number, ref, workflowName, sha) {
+    return { github: { workflow: workflowName, ref, event_name: event.event_name, event: {
       action: event.action,
-      pull_request: event.event_name === "pull_request" ? { number, draft: event.draft } : {},
-    } };
-    return template.replace(/\$\{\{ (.+?) \}\}/g, (_, expression) =>
-      String(vm.runInNewContext(expression, { github }, { timeout: 1_000 })));
+      pull_request: event.event_name === "pull_request" ? { number, draft: event.draft, head: { sha } } : {},
+    } } };
+  }
+  function evaluate(text, ctx) {
+    return text.replace(/\$\{\{ (.+?) \}\}/g, (_, expression) =>
+      String(vm.runInNewContext(expression, ctx, { timeout: 1_000 })));
+  }
+  function group(event, number = 2452, ref = "refs/pull/2452/merge", workflowName = "CI", sha = headA) {
+    return evaluate(template, context(event, number, ref, workflowName, sha));
+  }
+  function cancels(event) {
+    return evaluate(cancelTemplate, context(event, 2452, "refs/pull/2452/merge", "CI", headA)) === "true";
   }
   const ready = events[0];
   const samePR = group(ready);
@@ -126,6 +136,17 @@ test("concurrency remains independent for unrelated PRs, refs and workflows", ()
   assert.notEqual(main, samePR);
   const merge = events.find((event) => event.name === "merge-group");
   assert.notEqual(group(merge, undefined, "refs/heads/gh-readonly-queue/main/pr-2452-a"), main);
-  assert.notEqual(group(merge, undefined, "refs/heads/gh-readonly-queue/main/pr-2452-a"),
-    group(merge, undefined, "refs/heads/gh-readonly-queue/main/pr-2452-b"));
+  assert.notEqual(group(merge, undefined, "refs/heads/gh-readonly-queue/main/pr-2452-b"),
+    group(merge, undefined, "refs/heads/gh-readonly-queue/main/pr-2452-a"));
+
+  // #3283: two runs of one head share a lane that never cancels in progress, so neither leaves a
+  // cancelled required check on that head. A newer head gets its own lane; pr-ci-supersede.yml
+  // cancels the older head's runs instead.
+  assert.notEqual(group(ready, 2452, "refs/pull/2452/merge", "CI", headB), samePR);
+  for (const event of events.filter((candidate) => candidate.event_name === "pull_request")) {
+    assert.equal(cancels(event), false, `${event.name} must not cancel a same-head run in progress`);
+  }
+  for (const name of ["main-push", "merge-group", "manual"]) {
+    assert.equal(cancels(events.find((event) => event.name === name)), true, `${name} keeps cancelling superseded runs`);
+  }
 });
