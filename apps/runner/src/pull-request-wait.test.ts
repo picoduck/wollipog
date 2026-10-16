@@ -105,6 +105,60 @@ test("an unreported required check is pending, then passing returns checks_passe
   assert.equal(fake.calls.filter((args) => args.some((arg) => arg.includes("/rules/branches/"))).length, 1);
 });
 
+for (const conclusion of ["SUCCESS", "FAILURE"]) {
+  test(`draft → ready on the same head waits past the skipped aggregator for admitted ${conclusion}`, async () => {
+    // The draft run already completed; ready_for_review admits new jobs on this same HEAD,
+    // but its required aggregator does not exist until its dependencies finish.
+    const skipped = run(AGGREGATOR, "SKIPPED", { databaseId: 10, isRequired: true });
+    const browser = run("Browser End-to-End Tests", null, { databaseId: 11 });
+    const fake = fakeGh([
+      ok(pr({}, [skipped, browser])),
+      ok(pr({}, [skipped, browser, run(AGGREGATOR, null, { databaseId: 12, status: "QUEUED", startedAt: null })])),
+      ok(pr({}, [skipped, run("Browser End-to-End Tests", conclusion, { databaseId: 11 }),
+        run(AGGREGATOR, conclusion, { databaseId: 12 })])),
+    ]);
+    const time = clock();
+    const result = await waitForPullRequest({ repository: "o/r", number: 7, headSha: HEAD, timeoutMs: 600_000 },
+      { gh: fake.gh, ...time });
+    assert.ok(result.ok);
+    assert.equal(result.summary.outcome, conclusion === "SUCCESS" ? "checks_passed" : "checks_failed");
+    assert.equal(result.summary.polls, 3, "the skipped draft aggregator must not certify the admitted run");
+    assert.deepEqual(time.sleeps, [30_000, 30_000]);
+    assert.equal(result.summary.headSha, HEAD);
+    assert.equal(result.summary.checks.required[0]!.state, conclusion === "SUCCESS" ? "passed" : "failed");
+  });
+}
+
+test("a skipped required check stays pending while GitHub blocks the ready PR", async () => {
+  const fake = fakeGh([ok(pr({}, [run(AGGREGATOR, "SKIPPED"), run("Browser End-to-End Tests", null)]))]);
+  const result = await waitForPullRequest({ repository: "o/r", number: 7, headSha: HEAD, timeoutMs: 1 },
+    { gh: fake.gh, ...clock() });
+  assert.ok(result.ok);
+  assert.equal(result.summary.outcome, "timeout");
+  assert.deepEqual(result.summary.checks.required, [{ name: AGGREGATOR, state: "pending", reported: true }]);
+  assert.deepEqual(result.summary.checks.failedJobs, []);
+});
+
+test("optional skips and genuine required successes pass even when another gate blocks the PR", async () => {
+  const fake = fakeGh([ok(pr({}, [run(AGGREGATOR, "SUCCESS"), run("Optional", "SKIPPED"), run("Other", null)]))]);
+  const time = clock();
+  const result = await waitForPullRequest({ repository: "o/r", number: 7, returnOnAnyFailure: true }, { gh: fake.gh, ...time });
+  assert.ok(result.ok);
+  assert.equal(result.summary.outcome, "checks_passed");
+  assert.deepEqual(result.summary.checks.other, { passed: 1, failed: 0, pending: 1 });
+  assert.deepEqual(time.sleeps, []);
+});
+
+for (const mergeStateStatus of ["CLEAN", "HAS_HOOKS", "UNSTABLE"]) {
+  test(`a required skip can pass when GitHub confirms requirements are met (${mergeStateStatus})`, async () => {
+    const result = await waitForPullRequest({ repository: "o/r", number: 7 },
+      { gh: fakeGh([ok(pr({ mergeStateStatus }, [run(AGGREGATOR, "SKIPPED")]))]).gh, ...clock() });
+    assert.ok(result.ok);
+    assert.equal(result.summary.outcome, "checks_passed");
+    assert.equal(result.summary.checks.required[0]!.state, "passed");
+  });
+}
+
 test("the first poll reports a missing required check as pending and not reported", async () => {
   const fake = fakeGh([ok(pr({}, [run("Lint", "SUCCESS")]))]);
   const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 1 }, { gh: fake.gh, ...clock() });

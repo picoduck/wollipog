@@ -349,13 +349,15 @@ function newer(node: CheckNode, previous: CheckNode): boolean {
  * both pass, and a name a rule restricts to particular apps counts only check runs from those apps
  * (a status context carries no app here, so it still matches by name). The verdict covers every
  * required check, including any cut from the bounded list; `complete` is false when GitHub had
- * more contexts than one page, so an unseen context could still change it.
+ * more contexts than one page, so an unseen context could still change it. When the PR's merge
+ * state is supplied, skipped requirements stay pending until GitHub confirms requirements are met.
  */
 export function evaluateCommitChecks(
   sha: string,
   rollup: unknown,
   requiredNames: readonly string[],
   requiredApps: Readonly<Record<string, readonly number[]>> = {},
+  mergeStateStatus?: string | null,
 ): { summary: CommitChecksSummary; requiredState: CheckState | "none"; complete: boolean } {
   const contexts = record(record(rollup)?.contexts);
   const rawNodes = Array.isArray(contexts?.nodes) ? contexts.nodes : [];
@@ -381,6 +383,12 @@ export function evaluateCommitChecks(
   // Rules are the authority; a check GitHub itself marks required is added, never removed.
   const required = new Set(requiredNames);
   for (const node of latest.values()) if (node.isRequired && !appsFor(node.name)) required.add(node.name);
+  // A draft run can leave a skipped required job on the same head while a newly admitted
+  // ready_for_review run has not created its aggregator yet. With a PR observation, a skip
+  // needs GitHub's confirmation; real successes and optional skips keep their normal semantics.
+  const requiredNodeState = (node: CheckNode | undefined): CheckState | undefined =>
+    node?.conclusion === "SKIPPED" && mergeStateStatus !== undefined && !REQUIREMENTS_MET.has(mergeStateStatus ?? "")
+      ? "pending" : node?.state;
   const requiredList: RequiredCheckSummary[] = [...required].sort().map((name) => {
     const named = [...latest.values()].filter((node) => node.name === name);
     const apps = appsFor(name);
@@ -390,10 +398,10 @@ export function evaluateCommitChecks(
     const statuses = named.filter((node) => node.kind === "StatusContext");
     const results: Array<CheckState | undefined> = apps
       ? [
-        ...apps.map((app) => (named.find((node) => node.kind === "CheckRun" && node.appId === app) ?? statuses[0])?.state),
-        ...statuses.map((node) => node.state),
+        ...apps.map((app) => requiredNodeState(named.find((node) => node.kind === "CheckRun" && node.appId === app) ?? statuses[0])),
+        ...statuses.map(requiredNodeState),
       ]
-      : named.length > 0 ? named.map((node) => node.state) : [undefined];
+      : named.length > 0 ? named.map(requiredNodeState) : [undefined];
     const state: CheckState = results.includes("failed") ? "failed"
       : results.every((result) => result === "passed") ? "passed" : "pending";
     return { name: clip(name, MAX_NAME), state, reported: results.every((result) => result !== undefined) };
@@ -431,8 +439,9 @@ export function summarizeCommitChecks(
   rollup: unknown,
   requiredNames: readonly string[],
   requiredApps: Readonly<Record<string, readonly number[]>> = {},
+  mergeStateStatus?: string | null,
 ): CommitChecksSummary {
-  return evaluateCommitChecks(sha, rollup, requiredNames, requiredApps).summary;
+  return evaluateCommitChecks(sha, rollup, requiredNames, requiredApps, mergeStateStatus).summary;
 }
 
 interface Observation {
@@ -567,7 +576,7 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
     defaultBranch: seen.defaultBranch,
     mergeStateStatus: seen.mergeStateStatus,
     requiredCheckNames: required ? required.names.slice(0, MAX_LISTED_CHECKS).map((name) => clip(name, MAX_NAME)) : null,
-    checks: summarizeCommitChecks(seen.headSha, seen.rollup, required?.names ?? [], required?.apps),
+    checks: summarizeCommitChecks(seen.headSha, seen.rollup, required?.names ?? [], required?.apps, seen.mergeStateStatus),
     mergeQueue: seen.queue
       ? {
           state: seen.queue.state,
@@ -708,7 +717,7 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
       if (!await pause(EJECTION_CONFIRM_MS - missingFor)) return { ok: false, error: "request cancelled" };
       continue;
     } else {
-      const checks = evaluateCommitChecks(seen.headSha, seen.rollup, required.names, required.apps);
+      const checks = evaluateCommitChecks(seen.headSha, seen.rollup, required.names, required.apps, seen.mergeStateStatus);
       if (checks.requiredState === "failed" || (input.returnOnAnyFailure && checks.summary.failedJobs.length > 0)) {
         return { ok: true, summary: summarize("checks_failed", seen) };
       }
