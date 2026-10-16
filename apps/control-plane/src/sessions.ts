@@ -1218,8 +1218,12 @@ export function capabilityConfigError(
       return `service tier ${JSON.stringify(config.serviceTier)} is not supported by this model`;
     }
   }
-  if (config.permissionMode && !(capabilities.permissionModes ?? []).includes(config.permissionMode)) {
-    return `permission mode ${JSON.stringify(config.permissionMode)} is not supported by this agent installation`;
+  const permissionModes = capabilities.permissionModes ?? [];
+  if (config.permissionMode && !permissionModes.includes(config.permissionMode)) {
+    const refusal = `permission mode ${JSON.stringify(config.permissionMode)} is not supported by this agent installation`;
+    return permissionModes.length
+      ? `${refusal}; supported permission modes: ${permissionModes.join(", ")}`
+      : `${refusal}, which advertises no permission modes`;
   }
   return null;
 }
