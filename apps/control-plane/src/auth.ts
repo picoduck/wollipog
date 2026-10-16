@@ -1,3 +1,4 @@
+import { mediaReviewerApiRouteAllowed } from "./media-session-route-policy.js";
 /**
  * Per-device bearer auth for the UI-facing surface (REST + /ui socket).
  *
@@ -198,7 +199,8 @@ const ORCHESTRATOR_API_ROUTES = new Set([
 ]);
 
 /** `role` is the credential session's current role; the legacy preset literal is accepted for it. */
-export function isAgentControlApiRouteAllowed(method: string, routePath: string, role?: SessionRole | string | null): boolean {
+export function isAgentControlApiRouteAllowed(method: string, routePath: string, role?: SessionRole | string | null, mediaPurpose = false): boolean {
+  if (mediaPurpose) return mediaReviewerApiRouteAllowed(method.toUpperCase(), routePath);
   if (role === "orchestrator") return ORCHESTRATOR_API_ROUTES.has(`${method.toUpperCase()} ${routePath}`);
   return AGENT_CONTROL_API_ROUTES.has(`${method.toUpperCase()} ${routePath}`);
 }

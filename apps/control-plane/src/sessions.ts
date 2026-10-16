@@ -1,4 +1,15 @@
 import { formatCampaignAssignment } from "./campaign-assignment.js";
+import { mintCampaignEvidenceAuthority, campaignEvidenceDisclosuresCurrent, type EvidenceAuthorityProposal, type EvidenceAuthorityDisclosures } from "./evidence-authority.js";
+import { supportsPacedVideoReviewPeer } from "@wollipog/protocol";
+import type { WorkflowVideoEvidenceApprovals } from "./workflow-video-evidence-approvals.js";
+import { MediaSessionPurposes } from "./media-session-purposes.js";
+import { PreparedMediaReservationRelease } from "./prepared-media-reservation-release.js";
+import type { PreparedMediaActiveStops } from "./prepared-media-active-stops.js";
+import { MEDIA_SESSION_PURPOSE_ERROR, type PreparedMediaSessionRuntime, type PreparedMediaSubject } from "./prepared-media-session-runtime.js";
+import type { PreparedMediaIdentity, MaterializedMediaSession, PreparedMediaRecord } from "./prepared-media-sessions.js";
+import { reviewerAdmissionReadiness } from "./evidence-review-worker.js";
+import type { OperatorVideoValidationPermits } from "./operator-video-validation.js";
+import type { OperatorVideoValidationPurpose } from "@wollipog/protocol";
 import { acknowledgementRepairFrame } from "./claude-cost-repair.js";
 import type { HumanPrincipal } from "./identity.js";
 import type { PreparedCampaignLaunch } from "@wollipog/protocol";
@@ -1593,7 +1604,12 @@ function backgroundJobStopRefusal(reason: StopBackgroundJobRefusal | undefined):
   }
 }
 
+const PREPARED_MEDIA_CAPTURE = Symbol("private prepared media Session capture");
+type PreparedMediaCapture = { identity: PreparedMediaIdentity; subject: PreparedMediaSubject; decision: WorkflowDecisionView; operatorValidation?: OperatorVideoValidationPurpose; command: Extract<DurableSessionCommand, { type: "start_session" }> | null };
+
 export class SessionsService {
+  readonly mediaSessionPurposes: MediaSessionPurposes;
+  private readonly preparedMediaCaptures = new WeakSet<PreparedMediaCapture>();
   /** Bound stored-video reads and derivation across all service instances in this process. */
   private static readonly videoReviewRequests = new Set<string>();
   private static readonly inFlightVideoDecisions = new Map<string, {
@@ -1650,7 +1666,16 @@ export class SessionsService {
     private readonly videoFrameReviewCandidateEnabled = false,
     /** Operator-selected controlling Session for the dogfood validation. Omitted only in tests. */
     private readonly videoFrameReviewValidationSessionId?: string,
+    private readonly preparedMediaRuntime?: PreparedMediaSessionRuntime,
+    private readonly workflowVideoApprovals?: WorkflowVideoEvidenceApprovals,
+    private readonly evidenceAuthorityDisclosures?: EvidenceAuthorityDisclosures,
+    private readonly operatorValidationPermits?: OperatorVideoValidationPermits,
+    private readonly preparedMediaActiveStops?: PreparedMediaActiveStops,
   ) {
+    if (workflowVideoApprovals && workflowVideoApprovals.database !== db) throw new Error("Media approvals require the same durable database.");
+    if (operatorValidationPermits && operatorValidationPermits.database !== db.raw()) throw new Error("Validation permits require the same durable database.");
+    if (preparedMediaActiveStops && preparedMediaActiveStops.database !== db.raw()) throw new Error("Dedicated media Stop requires the same durable database.");
+    this.mediaSessionPurposes = new MediaSessionPurposes(this.db.raw());
     this.promptOutbox = new SessionPromptOutbox(this.db, this.hub, this.log);
     this.campaignRecovery = new CampaignRecoveryService(this.db, id => this.hub.sessionChangedById(id), this.log);
     // Replayed events took new sequence numbers after a crash: the upsert's new epoch makes open
@@ -3475,6 +3500,7 @@ export class SessionsService {
     request: { title?: string; agentId: string },
     childCount = 1,
   ): ServiceResult<null> {
+    if (this.mediaSessionPurposes.owns(parentSessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
     const parent = this.db.getSession(parentSessionId);
     if (!parent) return fail("parent session not found", 404);
     const now = Date.now();
@@ -3647,6 +3673,136 @@ export class SessionsService {
     return gate.ok ? ok(applied) : failAs(gate);
   }
 
+  /** Private server materialization, called only inside PreparedMediaSessions' transaction.
+   * Configuration and all authority come from the installed trusted resolver, never agent JSON.
+   * Creates the actual member and exact unsent command; no provider start is sent here. */
+  private resolvePreparedMediaAdmission(identity: PreparedMediaIdentity, subject: PreparedMediaSubject):
+    ServiceResult<{ resolved: NonNullable<ReturnType<PreparedMediaSessionRuntime["resolve"]>>; childAudience: ResourceScope }> {
+    if (!this.preparedMediaRuntime) return fail("Prepared media Session admission is unavailable.", 409);
+    const resolved = this.preparedMediaRuntime.resolve(identity, subject);
+    // Media review origin is pinned by its trusted purpose/lineage, never by replacing an
+    // implementer's work-item assignment. The public child-at-creation transaction publishes
+    // after its own commit and cannot be nested inside private media materialization.
+    if (resolved?.request.campaignWorkItemId !== undefined) {
+      return fail("Prepared media reviewers cannot name a campaign work item.", 409);
+    }
+    const root = this.db.getSession(identity.rootSessionId), child = this.db.getSession(identity.childSessionId);
+    const decision = this.db.workflowDecisionByOccurrence(subject.occurrenceId);
+    const control = root?.orchestratorPolicy?.control;
+    const validation = resolved?.operatorValidation;
+    if (validation && (Object.keys(validation).length !== 1 || typeof validation.permitId !== "string" ||
+      !validation.permitId || resolved.liveProof !== null)) return fail("Validation admission cannot borrow or fabricate production proof.", 409);
+    const owner = validation ? "human" : "orchestrator";
+    if (!resolved || !root || !child || control?.mode !== "full_control" || !control.boundary.evidenceAuthority ||
+      !campaignEvidenceDisclosuresCurrent(control.boundary.evidenceAuthority, this.evidenceAuthorityDisclosures) ||
+      !campaignBoundaryCurrent(root) || !decision || decision.status !== "pending" || decision.authority !== owner ||
+      decision.category !== "ui_evidence_approval" || decision.resourceSnapshot.category !== "ui_evidence_approval" ||
+      decision.controllingSessionId !== root.id || decision.sessionId !== child.id ||
+      decision.policyRevision !== root.parentControlPolicy?.revision ||
+      !this.workflowDecisionRelationship(root.id, child.id) || this.workflowDecisionChildEnded(child) ||
+      (validation ? !root.parentControlPolicy || !this.workflowDecisionAuthorityCurrent(root, root.parentControlPolicy, decision) :
+        evaluateCampaignAuthority(root, child, this.db.getRunner(child.runnerId)?.protocolVersion,
+          decision.resourceSnapshot, root.parentControlPolicy, this.db.getRunner(root.runnerId)?.protocolVersion,
+          this.campaignPeerContracts(root, child.id)).owner !== owner)) {
+      return fail("The exact original media gate has no current preparation authority.", 409);
+    }
+    const { context, target, liveProof, request } = resolved;
+    if (!this.sessionPacedVideoCompatible(root) || !this.sessionPacedVideoCompatible(child) ||
+      !supportsPacedVideoReviewPeer(target.runnerProtocolVersion,
+        this.pacedVideoInstallationContract(target.runnerId, target.agentId))) {
+      return fail("The selected installations do not declare the exact private media compatibility contract; preparation had no effects.", 409);
+    }
+    const scope = root.orchestratorPolicy?.issueScope;
+    const rootAudience = this.db.sessionScope(root.id), childAudience = this.db.sessionScope(child.id);
+    if (context.rootSessionId !== root.id || context.childSessionId !== child.id ||
+      JSON.stringify(context.boundary) !== JSON.stringify(control.boundary) ||
+      JSON.stringify(context.evidenceAuthority) !== JSON.stringify(control.boundary.evidenceAuthority) ||
+      !scope || !scope.issueNumbers.includes(context.issue) || scope.revision !== context.issueScopeRevision ||
+      !rootAudience || !childAudience || !this.db.scopeAudienceContainedWithMembership(rootAudience, childAudience) ||
+      request.runnerId !== root.runnerId || request.workspaceId !== root.workspaceId || request.workspacePath ||
+      request.agentId !== target.agentId || target.runnerId !== root.runnerId ||
+      this.db.getRunner(root.runnerId)?.protocolVersion !== context.controllerProtocolVersion ||
+      this.db.getRunner(child.runnerId)?.protocolVersion !== context.childProtocolVersion ||
+      this.db.getRunner(target.runnerId)?.protocolVersion !== target.runnerProtocolVersion ||
+      request.config?.model !== target.modelId || request.role === "orchestrator" || request.launchSurface === "native_tui" ||
+      request.images?.length || this.db.getAgentLaunch(request.runnerId, request.agentId)?.driver !== target.driver ||
+      (validation ? !this.operatorValidationPermits?.authorizePreparation(validation.permitId, identity, subject, context, target, request) :
+        reviewerAdmissionReadiness(context, target, liveProof, Date.now()))) {
+      return fail("Current scoped media profile, destination, disclosure or allowance preparation is unsupported.", 409);
+    }
+    const item = decision.resourceSnapshot.evidence.find((e) => e.evidenceId === subject.evidenceId);
+    const source = item?.artifactId ? this.db.workflowArtifactExportPreflight(item.artifactId)?.artifact : null;
+    if (!item || !source || source.sessionId !== child.id || source.kind !== "video" || source.sha256 !== item.sha256 ||
+      source.mimeType !== item.mediaType || !["video/webm", "video/mp4"].includes(source.mimeType ?? "")) {
+      return fail("The original source artifact is unavailable or mismatched.", 409);
+    }
+    let bytes: Buffer | null;
+    try { bytes = this.db.readWorkflowArtifactBytes(source.artifactId); } catch { bytes = null; }
+    if (!bytes || bytes.length > MAX_SESSION_VIDEO_BYTES || createHash("sha256").update(bytes).digest("hex") !== item.sha256) {
+      return fail("The original source artifact no longer matches its immutable digest.", 409);
+    }
+    if (validation) {
+      const permit = this.operatorValidationPermits!.current(validation.permitId);
+      if (!permit || permit.scope.gate.resourceDigest !== decision.resourceDigest || permit.scope.gate.policyRevision !== decision.policyRevision ||
+        permit.scope.source.artifactId !== source.artifactId || permit.scope.source.sha256 !== item.sha256 ||
+        permit.scope.source.sizeBytes !== bytes.length) return fail("Original Human validation source or occurrence changed.", 409);
+    }
+    // The controller can receive quality observations only within the source audience.
+    // Use its already narrower audience for the reviewer; never broaden either audience.
+    return ok({ resolved, childAudience: rootAudience });
+  }
+
+  /** Persist normal policy asks outside the Session/member/command transaction. Ordinary
+   * createSession repeats the same current gate inside it; no governance bypass or lost ask. */
+  preflightPreparedMediaSession(identity: PreparedMediaIdentity, subject: PreparedMediaSubject): ServiceResult<null> {
+    if (this.db.raw().isTransaction) return fail("Media governance preflight must precede atomic materialization.", 409);
+    const checked = this.resolvePreparedMediaAdmission(identity, subject);
+    return checked.ok && checked.data ? this.sessionSpawnGate(identity.rootSessionId, checked.data.resolved.request) : failAs(checked);
+  }
+
+  materializePreparedMediaSession(identity: PreparedMediaIdentity, subject: PreparedMediaSubject): ServiceResult<MaterializedMediaSession> {
+    if (!this.db.raw().isTransaction) return fail("Prepared media Session admission requires an atomic ledger transaction.", 409);
+    const checked = this.resolvePreparedMediaAdmission(identity, subject);
+    if (!checked.ok || !checked.data) return failAs(checked);
+    const { resolved, childAudience } = checked.data;
+    const request = resolved.request;
+    const root = this.db.getSession(identity.rootSessionId)!;
+    const decision = this.db.workflowDecisionByOccurrence(subject.occurrenceId)!;
+    const capture: PreparedMediaCapture = { identity: structuredClone(identity), subject: structuredClone(subject),
+      decision, command: null,
+      ...(resolved.operatorValidation ? { operatorValidation: this.operatorValidationPermits!.purpose(resolved.operatorValidation.permitId)! } : {}) };
+    this.preparedMediaCaptures.add(capture);
+    let created: ServiceResult<SessionView>;
+    try {
+      created = this.createSession(request, undefined, childAudience, false, false, false,
+        { parentSessionId: root.id, [PREPARED_MEDIA_CAPTURE]: capture });
+    } finally { this.preparedMediaCaptures.delete(capture); }
+    if (!created.ok || !created.data) return failAs(created);
+    if (!capture.command) throw new Error("Actual prepared media command was not captured.");
+    const admission = this.campaignBudgetWorkerPreflight(root.id, { kind: "managed", sessionId: created.data.id });
+    if (!admission.ok || !admission.data) throw new Error("Actual post-materialization budget preflight failed.");
+    const again = this.preparedMediaRuntime!.resolve(identity, subject);
+    if (!again || JSON.stringify(again) !== JSON.stringify(resolved)) throw new Error("Media preparation authority changed during materialization.");
+    const materialized = { sessionId: created.data.id, runnerId: created.data.runnerId,
+      command: structuredClone(capture.command), admission: admission.data };
+    if (resolved.operatorValidation) this.operatorValidationPermits!.bindPrepared(resolved.operatorValidation.permitId, materialized);
+    return ok(materialized);
+  }
+
+  /** Private preparedCommitted port: announce only an exact actually committed stored Session. */
+  publishPreparedMediaSession(record: PreparedMediaRecord): void {
+    if (this.db.raw().isTransaction) throw new Error("Prepared media metadata must follow its owning commit.");
+    const saved = this.db.raw().prepare("SELECT payload_sha256 FROM prepared_media_sessions WHERE root_id=? AND admission_id=?")
+      .get(record.rootSessionId, record.admissionId) as { payload_sha256: string } | undefined;
+    const session = this.db.getSession(record.sessionId);
+    if (!saved || saved.payload_sha256 !== createHash("sha256").update(JSON.stringify(record)).digest("hex") ||
+      !session || session.parentSessionId !== record.rootSessionId || !this.mediaSessionPurposes.owns(session.id)) {
+      throw new Error("An exact committed media Session is required for notification.");
+    }
+    this.hub.sessionChanged(session);
+    this.log.info(`session created ${session.id} on ${session.runnerId} (${session.agentId} @ ${session.workspaceId})`);
+  }
+
   createSession(
     req: CreateSessionRequest,
     delivery?: PreStagedDeliveryOptions,
@@ -3659,6 +3815,7 @@ export class SessionsService {
       parentSessionId?: string;
       orchestratorDefaults?: OrchestratorSettingsView;
       validateOrchestratorDefaults?: (defaults: OrchestratorCampaignPolicy) => string | null;
+      [PREPARED_MEDIA_CAPTURE]?: PreparedMediaCapture;
       /** Trusted internal inspection seam. Returns before any stage, insert or provider call. */
       inspectLaunchPlan?: (plan: PreparedCampaignLaunch) => void;
       /** Internal fixture/admission seam; never accepted from ordinary session request JSON. */
@@ -3670,6 +3827,8 @@ export class SessionsService {
     },
   ): ServiceResult<SessionView> {
     // Attribution is supplied only by the authenticated route, never by the request payload.
+    const capture = creationContext?.[PREPARED_MEDIA_CAPTURE];
+    if (capture && (!this.preparedMediaCaptures.has(capture) || delivery || !this.db.raw().isTransaction)) return fail("Private media preparation capability is unavailable.", 409);
     const spawnRequest = req;
     const configInputError = sessionGuardrailConfigError(req.config);
     if (configInputError) return fail(configInputError, 400);
@@ -3797,7 +3956,8 @@ export class SessionsService {
     const runner = this.db.getRunner(req.runnerId);
     if (!runner) return fail("runner not found", 404);
     if (campaignController?.orchestratorPolicy?.control?.mode === "full_control") {
-      const preflight = campaignAuthorityPreflight(campaignController.orchestratorPolicy.control, launch.driver, runner.protocolVersion);
+      const preflight = campaignAuthorityPreflight(campaignController.orchestratorPolicy.control, launch.driver, runner.protocolVersion,
+        this.pacedVideoInstallationContract(req.runnerId, req.agentId));
       if (!preflight.supported || !campaignBoundaryCurrent(campaignController)) return fail(preflight.reason ?? "campaign authority boundary is stale", 409);
       if (req.runnerId !== campaignController.runnerId || req.workspaceId !== campaignController.workspaceId || req.workspacePath) {
         return fail("Full Control children must use the campaign's repository workspace and runner", 409);
@@ -3968,6 +4128,7 @@ export class SessionsService {
     const id = delivery?.sessionId ?? shortId("s_");
     const now = Date.now();
     const images = snapshotCommand?.type === "start_session" ? (snapshotCommand.initialImages ?? []) : (req.images ?? []);
+    if (capture && images.length) return fail("Initial media is delivered only through the exact prepared grant.", 409);
     const imageValidation = validateImagesForDriver(images, launch.driver);
     if (!imageValidation.ok) return fail(imageValidation.error ?? "invalid image attachment", 400);
     if (images.some(isWorkspaceReference)) {
@@ -4128,7 +4289,8 @@ export class SessionsService {
       if (inheritedCampaign && inheritedCampaign.childHarnessMatch !== "harness") delete orchestratorPolicy.childHarnessMatch;
       if (inheritedCampaign?.control) {
         orchestratorPolicy.control = structuredClone(inheritedCampaign.control);
-        const preflight = campaignAuthorityPreflight(orchestratorPolicy.control, launch.driver, runner.protocolVersion);
+        const preflight = campaignAuthorityPreflight(orchestratorPolicy.control, launch.driver, runner.protocolVersion,
+          this.pacedVideoInstallationContract(req.runnerId, req.agentId));
         if (!preflight.supported) return fail(preflight.reason!, 409);
       }
       // A saved account default must remain portable across a mixed runner fleet. Capabilities
@@ -4614,7 +4776,7 @@ export class SessionsService {
       }
       if (command.type === "start_session") command.initialImages = nonEmpty(externalized.data);
     }
-    this.hub.sessionChanged(this.db.getSession(id) ?? session);
+    if (!capture) this.hub.sessionChanged(this.db.getSession(id) ?? session);
     // The runner emits the user_message into the box store (source of truth) when it runs the
     // initial prompt — the control plane no longer appends it locally.
 
@@ -4649,7 +4811,17 @@ export class SessionsService {
       } } : {}),
       acpSessionContext,
     };
-    if (delivery) {
+    if (capture) {
+      if (command.type !== "start_session") throw new Error("Prepared media command is malformed.");
+      capture.command = { ...command, spec };
+      capture.command.spec = { ...spec, mediaReviewPurpose: {
+        rootSessionId: capture.identity.rootSessionId, childSessionId: capture.identity.childSessionId,
+        admissionId: capture.identity.admissionId, occurrenceId: capture.subject.occurrenceId,
+        evidenceId: capture.subject.evidenceId, generation: spec.campaignBudgetDispatch!.generation,
+        ...(capture.operatorValidation ? { operatorValidation: capture.operatorValidation } : {}),
+      } };
+      this.mediaSessionPurposes.add({ sessionId: id, rootSessionId: capture.identity.rootSessionId, childSessionId: capture.identity.childSessionId, admissionId: capture.identity.admissionId, occurrenceId: capture.subject.occurrenceId, evidenceId: capture.subject.evidenceId, resourceDigest: capture.decision.resourceDigest, policyRevision: capture.decision.policyRevision, generation: spec.campaignBudgetDispatch!.generation, command: capture.command, ...(capture.operatorValidation ? { operatorValidation: capture.operatorValidation } : {}) });
+    } else if (delivery) {
       delivery.activate(plan!);
     } else {
       if (command.type !== "start_session") return fail("session launch command is malformed", 409);
@@ -4681,7 +4853,7 @@ export class SessionsService {
         return fail("runner disconnected while launching the session", 409);
       }
     }
-    this.log.info(`session created ${id} on ${req.runnerId} (${req.agentId} @ ${req.workspaceId})`);
+    if (!capture) this.log.info(`session created ${id} on ${req.runnerId} (${req.agentId} @ ${req.workspaceId})`);
     return ok(this.db.getSession(id)!, 201);
   }
 
@@ -4775,6 +4947,7 @@ export class SessionsService {
     slashCommand: string | undefined,
     config: SessionConfig | undefined,
   ): Promise<ServiceResult<PromptAdmissionView> | null> {
+    if (this.mediaSessionPurposes.owns(sessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
     // The steering lane carries plain conversational text only. A slash command, an attachment, or
     // a per-turn config change is turn-scoped work that must start a turn of its own.
     if (slashCommand || images.length > 0 || config) return null;
@@ -4879,6 +5052,7 @@ export class SessionsService {
     }
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    if (this.mediaSessionPurposes.owns(sessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
     // An older runner would still resume a persisted exec session for this turn (#3259).
     if (isRetiredCodexExec(session)) return fail(CODEX_EXEC_RETIRED_REASON, 409);
     const budgetError = this.db.campaignBudgets.admissionError(sessionId);
@@ -5626,6 +5800,7 @@ export class SessionsService {
     if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before changing configuration", 409);
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    if (this.mediaSessionPurposes.owns(sessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
     const configInputError = sessionGuardrailConfigError(config);
     if (configInputError) return fail(configInputError, 400);
     const budgetConfigError = this.campaignBudgetConfigError(session, config);
@@ -6079,6 +6254,7 @@ export class SessionsService {
   }
 
   async steer(sessionId: string, request: SteerRequest): Promise<ServiceResult<SteeringAttemptView>> {
+    if (this.mediaSessionPurposes.owns(sessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
     this.db.compactSteeringAttempts(Date.now());
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
@@ -6535,6 +6711,30 @@ export class SessionsService {
   }
 
   private requestStop(session: SessionView, now: number, archiveAfterStop = false, refreshProject = true): SessionView {
+    if (this.mediaSessionPurposes.owns(session.id) && session.status !== "queued" &&
+      this.mediaSessionPurposes.lifecycleState(session.id) !== "cancelled") {
+      this.requestDedicatedMediaStop(session);
+      return this.db.getSession(session.id)!; // No generic kill, optimistic terminal state or archive.
+    }
+    if (session.status === "stopped" && this.mediaSessionPurposes.owns(session.id) &&
+      this.db.raw().prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='prepared_media_sessions'").get() &&
+      this.db.raw().prepare("SELECT 1 FROM prepared_media_sessions WHERE state='cancelled' AND json_extract(payload,'$.sessionId')=?").get(session.id)) {
+      return session; // duplicate locally proven cancellation never dispatches a generic Stop
+    }
+    if (session.status === "queued" && this.mediaSessionPurposes.owns(session.id)) {
+      // Never turn an unknown queued dispatch into a generic stopped row: that would destroy
+      // the exact queued proof required by later authenticated cancellation/reconciliation.
+      try {
+        if (["prepared_media_sessions", "media_session_purposes", "media_never_dispatched_fences"].some((name) =>
+          !this.db.raw().prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name)) ||
+          !new PreparedMediaReservationRelease(this.db.raw(), this.db.campaignBudgets).cancelLocallyUnsent(session.id)) return session;
+      } catch { return session; }
+      this.revokeUnconsumedWorkflowDecisionsForSession(session.id, "session-stopped");
+      if (archiveAfterStop) this.db.setSessionArchived(session.id, true, now);
+      const stopped = this.db.getSession(session.id)!;
+      this.hub.sessionChanged(stopped, refreshProject);
+      return stopped;
+    }
     const campaignBefore = this.campaignAttentionController(session);
     // Persist before touching the socket: ws.send acceptance is not delivery proof on a half-open
     // connection. Reconnect inventory/status reconciliation owns retry and final clearance.
@@ -6558,10 +6758,25 @@ export class SessionsService {
     return stopped;
   }
 
+  /** An unresolved permanent media purpose retains its actual lifecycle identity. This is
+   * independent of usage/history ingestion and grants no new dispatch or quality authority. */
+  private pendingMediaLifecycle(session: SessionView | null): boolean {
+    if (!session || !this.mediaSessionPurposes.owns(session.id)) return false;
+    if (this.preparedMediaActiveStops?.owns(session.id)) return true; // ACK is not terminal usage/fence proof.
+    const state = this.mediaSessionPurposes.lifecycleState(session.id);
+    return state !== "active" && state !== "cancelled";
+  }
+
   /** Declining a guardrail card is a Stop, so it is as durable as one: persist the intent before
    * touching the socket, or a lost frame leaves nothing to resend and the runner's next live
    * snapshot restores the session the user stopped. */
   private stopAtGuardrail(session: SessionView, now: number): void {
+    if (this.mediaSessionPurposes.owns(session.id) || this.pendingMediaLifecycle(session)) {
+      // Reuse only the exact same-DB locally unsent cancellation. Unknown delivery is not a
+      // generic Stop authorization or terminal proof, even when the root budget is stopped.
+      if (!this.requestDedicatedMediaStop(session) && session.status === "queued") this.requestStop(session, now);
+      return;
+    }
     this.abortPolicyHookApprovals(session, now, "guardrail-stopped");
     this.revokeUnconsumedWorkflowDecisionsForSession(session.id, "guardrail-stopped");
     this.db.setPendingApproval(session.id, null);
@@ -6586,10 +6801,45 @@ export class SessionsService {
     if (settled.archived) this.queueCampaignWorktreeRetirement(sessionId);
   }
 
+  /** Read only the current authenticated catalog row for this exact selected installation.
+   * Session config, model metadata and another agent's declaration cannot supply compatibility. */
+  private pacedVideoInstallationContract(runnerId: string, agentId: string | null | undefined): unknown {
+    if (typeof agentId !== "string" || !agentId.trim()) return undefined;
+    return this.db.getRunner(runnerId)?.agents.find((agent) => agent.id === agentId)?.capabilities?.pacedVideoReviewContract;
+  }
+
+  private campaignPeerContracts(controller: SessionView, requesterId: string): { controller?: unknown; requester?: unknown } | undefined {
+    const control = controller.orchestratorPolicy?.control;
+    if (control?.mode !== "full_control" || !control.boundary.evidenceAuthority) return undefined;
+    const requester = this.db.getSession(requesterId);
+    return { controller: this.pacedVideoInstallationContract(controller.runnerId, controller.agentId),
+      requester: requester ? this.pacedVideoInstallationContract(requester.runnerId, requester.agentId) : undefined };
+  }
+
+  private sessionPacedVideoCompatible(session: SessionView): boolean {
+    const contract = this.pacedVideoInstallationContract(session.runnerId, session.agentId);
+    return supportsPacedVideoReviewPeer(this.runnerProtocolVersion(session.runnerId), contract) &&
+      supportsPacedVideoReviewPeer(this.db.getRunner(session.runnerId)?.protocolVersion, contract);
+  }
+
+  private requestDedicatedMediaStop(session: SessionView): boolean {
+    if (!this.mediaSessionPurposes.owns(session.id) || !this.sessionPacedVideoCompatible(session)) return false;
+    return Boolean(this.preparedMediaActiveStops?.request(session.id));
+  }
+
   stop(sessionId: string): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
-    return ok(this.requestStop(session, Date.now()));
+    if (this.requestDedicatedMediaStop(session)) return ok(this.db.getSession(sessionId)!, 202);
+    if (this.mediaSessionPurposes.owns(session.id) && session.status !== "queued" &&
+      this.mediaSessionPurposes.lifecycleState(session.id) !== "cancelled") {
+      return fail("Dedicated media Stop requires an exact registered owning worker handle; capacity is retained.", 409);
+    }
+    const stopped = this.requestStop(session, Date.now());
+    if (stopped.status === "queued" && this.mediaSessionPurposes.owns(session.id)) {
+      return fail("Prepared media Stop requires exact never-enqueued proof or authenticated reconciliation; capacity is retained.", 409);
+    }
+    return ok(stopped);
   }
 
   /** Explicit recovery keeps the same operation identity. A duplicate request that races the
@@ -6734,6 +6984,7 @@ export class SessionsService {
     if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before restarting", 409);
     let session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    if (this.mediaSessionPurposes.owns(sessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
     const budgetError = this.db.campaignBudgets.admissionError(sessionId) ?? this.campaignBudgetConfigError(session);
     if (budgetError) return fail(budgetError, 409);
     const budgetRoot = this.db.campaignBudgets.root(sessionId);
@@ -7556,7 +7807,8 @@ export class SessionsService {
     task: string,
   ): string {
     const preflight = campaignAuthorityPreflight(campaign.orchestratorPolicy?.control, campaign.driver,
-      this.db.getRunner(campaign.runnerId)?.protocolVersion);
+      this.db.getRunner(campaign.runnerId)?.protocolVersion,
+      this.pacedVideoInstallationContract(campaign.runnerId, campaign.agentId));
     return formatCampaignAssignment(campaign, projection, {
       ...preflight,
       supported: preflight.supported && campaignBoundaryCurrent(campaign),
@@ -7743,7 +7995,8 @@ export class SessionsService {
       ? this.db.sessionRepositoryRoot(requester.id) : undefined;
     const workspaceId = requester.workspaceId ?? (controller.orchestratorPolicy?.control?.mode === "full_control" ? this.db.getSession(requester.id)?.workspaceId : undefined);
     return evaluateCampaignAuthority(controller, { ...requester, workspaceId, repositoryRoot: repositoryRoot ?? undefined }, this.db.getRunner(requester.runnerId)?.protocolVersion, this.db.campaignPolicyRequest(requester.id, controller.orchestratorPolicy?.control, request), controller.parentControlPolicy,
-      controller.orchestratorPolicy?.control?.mode === "full_control" ? this.db.getRunner(controller.runnerId)?.protocolVersion : undefined);
+      controller.orchestratorPolicy?.control?.mode === "full_control" ? this.db.getRunner(controller.runnerId)?.protocolVersion : undefined,
+      this.campaignPeerContracts(controller, requester.id));
   }
 
   /** Synchronous provider requests park the root model. Settle only eligible exact occurrences
@@ -7785,6 +8038,7 @@ export class SessionsService {
     delegatablePolicyIds: string[];
     issueAuthority?: CampaignAuthorityBoundary["issueAuthority"];
     budgetAuthority?: CampaignAuthorityBoundary["budgetAuthority"];
+    evidenceAuthority?: EvidenceAuthorityProposal;
   }, expectedRevision: number, principal: HumanPrincipal): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session || principal.kind !== "human" || !this.db.isSessionOwner(principal, sessionId)) return fail("campaign not found", 404);
@@ -7792,7 +8046,7 @@ export class SessionsService {
     if (!root || root === "refused" || root.id !== sessionId || isTerminal(session.status)) return fail("only a live root campaign can change control", 409);
     if (!proposal || typeof proposal !== "object" || Array.isArray(proposal) || !["custom", "full_control"].includes(proposal.mode)) return fail("invalid campaign control mode", 400);
     if (proposal.mode === "custom" && Object.keys(proposal).some((key) => key !== "mode")) return fail("Custom has no authority boundary", 400);
-    if (proposal.mode === "full_control" && Object.keys(proposal).some((key) => !["mode", "objective", "operations", "delegatablePolicyIds", "issueAuthority", "budgetAuthority"].includes(key))) return fail("invalid campaign authority fields", 400);
+    if (proposal.mode === "full_control" && Object.keys(proposal).some((key) => !["mode", "objective", "operations", "delegatablePolicyIds", "issueAuthority", "budgetAuthority", "evidenceAuthority"].includes(key))) return fail("invalid campaign authority fields", 400);
     const scope = session.orchestratorPolicy?.issueScope;
     const now = Date.now();
     const control = proposal.mode === "custom" ? { mode: "custom" as const } : scope &&
@@ -7809,6 +8063,15 @@ export class SessionsService {
           return capabilityFail(campaignIssueLimitsRequirement(this.db.getRunner(outdated.runnerId)?.protocolVersion));
         }
       }
+      if (proposal.mode === "full_control" && proposal.evidenceAuthority !== undefined) {
+        if (!this.evidenceAuthorityDisclosures || !control.boundary.operations.includes("ui_evidence_approval")) {
+          return fail("Evidence authority requires an available private destination/provider disclosure and the existing UI evidence operation", 409);
+        }
+        const evidence = mintCampaignEvidenceAuthority(principal, control.boundary, sessionId,
+          proposal.evidenceAuthority, this.evidenceAuthorityDisclosures);
+        if (!evidence) return fail("Evidence destination/provider disclosure is unknown, public, stale or outside the authenticated human boundary", 400);
+        control.boundary.evidenceAuthority = evidence;
+      }
       if (!session.workspaceId) return fail("Full Control requires a repository workspace binding", 409);
       if(control.boundary.budgetAuthority?.controlledReview) {
         if(this.db.sessionScope(sessionId)?.owner.kind!=="user") return fail("Controlled native review requires a user-owned campaign charge scope.",409);
@@ -7819,7 +8082,8 @@ export class SessionsService {
         const participant = this.db.getSession(id);
         if (!participant || isTerminal(participant.status)) continue;
         if (participant.runnerId !== session.runnerId || participant.workspaceId !== session.workspaceId) return fail("campaign participants must share the repository workspace and runner", 409);
-        const preflight = campaignAuthorityPreflight(control, participant.driver, this.db.getRunner(participant.runnerId)?.protocolVersion);
+        const preflight = campaignAuthorityPreflight(control, participant.driver, this.db.getRunner(participant.runnerId)?.protocolVersion,
+          this.pacedVideoInstallationContract(participant.runnerId, participant.agentId));
         if (!preflight.supported) return fail(preflight.reason!, 409);
         if (control.boundary.budgetAuthority) {
           const accountingError = this.db.campaignBudgetAccountingError(participant.driver, participant.model, control.boundary.budgetAuthority.costUsd !== undefined);
@@ -7997,6 +8261,23 @@ export class SessionsService {
     if(!report || !metadata.data.receiptSha256) return fail("no machine-valid completed review report is available",409);
     // This is only the controller-validated review prose, never the raw provider transcript.
     return ok({jobId,receiptSha256:metadata.data.receiptSha256,reviewReport:report});
+  }
+
+  /** Owning authenticated runner WebSocket ingress only; never an agent or HTTP body. */
+  onMediaReviewStopAcknowledged(runnerId: string, receipt: import("@wollipog/protocol").MediaActiveStopAcknowledgement): boolean {
+    const session = receipt && typeof receipt.sessionId === "string" ? this.db.getSession(receipt.sessionId) : undefined;
+    if (!session || session.runnerId !== runnerId || !this.sessionPacedVideoCompatible(session)) return false;
+    return this.preparedMediaActiveStops?.acknowledge(runnerId, receipt) ?? false;
+  }
+
+  onMediaReviewNeverDispatched(runnerId: string, receipt: import("@wollipog/protocol").MediaNeverDispatchedFence): boolean {
+    const session = receipt && typeof receipt.sessionId === "string" ? this.db.getSession(receipt.sessionId) : undefined;
+    if (!session || session.runnerId !== runnerId || !this.sessionPacedVideoCompatible(session) ||
+      !this.db.raw().prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='prepared_media_sessions'").get()) return false;
+    try {
+      return new PreparedMediaReservationRelease(this.db.raw(), this.db.campaignBudgets)
+        .recordAuthenticatedFence(runnerId, receipt);
+    } catch { return false; }
   }
 
   onCampaignReviewJobUpdate(runnerId:string,update:import("@wollipog/protocol").CampaignReviewJobUpdate):void {
@@ -8210,7 +8491,8 @@ export class SessionsService {
     const view = this.db.campaignBudgets.view(rootId)!;
     const controller = this.db.getSession(rootId), control = controller?.orchestratorPolicy?.control;
     if (!controller || control?.mode !== "full_control" || !campaignBoundaryCurrent(controller)) return "campaign allowance boundary is stale or revoked";
-    const preflight = campaignAuthorityPreflight(control, driver, this.db.getRunner(session.runnerId)?.protocolVersion);
+    const preflight = campaignAuthorityPreflight(control, driver, this.db.getRunner(session.runnerId)?.protocolVersion,
+      this.pacedVideoInstallationContract(session.runnerId, session.agentId));
     if (!preflight.supported) return preflight.reason ?? "campaign allowance requires supported accounting peers";
     if (session.runnerId !== controller.runnerId || session.workspaceId !== controller.workspaceId) return "campaign allowance requires the original runner and workspace";
     if (view.state !== "active") return view.reason ?? "campaign allowance unavailable";
@@ -8251,7 +8533,8 @@ export class SessionsService {
     if (controller === "refused") return MALFORMED_ANCESTRY_AUTHORITY_REFUSAL;
     if (controller?.orchestratorPolicy?.control?.mode === "full_control") {
       const preflight = campaignAuthorityPreflight(controller.orchestratorPolicy.control, session.driver,
-        this.db.getRunner(session.runnerId)?.protocolVersion);
+        this.db.getRunner(session.runnerId)?.protocolVersion,
+        this.pacedVideoInstallationContract(session.runnerId, session.agentId));
       if (!preflight.supported || !campaignBoundaryCurrent(controller)) return preflight.reason ?? "campaign authority boundary is stale";
     }
     const behavior = controller?.orchestratorPolicy?.behavior;
@@ -8887,7 +9170,7 @@ export class SessionsService {
     const authority = evaluated.effectiveOwner;
     const authorityEvaluation = evaluateCampaignAuthority(controller.session, child,
       this.db.getRunner(child.runnerId)?.protocolVersion, normalized.data, controller.policy,
-      this.db.getRunner(controller.session.runnerId)?.protocolVersion);
+      this.db.getRunner(controller.session.runnerId)?.protocolVersion, this.campaignPeerContracts(controller.session, child.id));
     if (authorityEvaluation.owner !== authority) {
       authorityEvaluation.owner = authority;
       authorityEvaluation.basis = "human_required";
@@ -9010,25 +9293,31 @@ export class SessionsService {
     }
     if (authority === "orchestrator" && parentSessionId === childSessionId &&
         evaluateCampaignAuthority(currentParent, currentChild, this.db.getRunner(currentChild.runnerId)?.protocolVersion,
-          decision.resourceSnapshot, currentPolicy, this.db.getRunner(currentParent.runnerId)?.protocolVersion).basis !== "standing_authorization") {
+          decision.resourceSnapshot, currentPolicy, this.db.getRunner(currentParent.runnerId)?.protocolVersion,
+          this.campaignPeerContracts(currentParent, currentChild.id)).basis !== "standing_authorization") {
       return fail("a root request requires standing human campaign authorization", 403);
     }
     if ((decision.category === "issue_closure" || decision.category === "campaign_issue_scope") && authority === "human" && actor.kind !== "human") {
       return fail("issue closure always requires an authenticated human response", 403);
     }
+    if (resolution?.delegatedVideoEvidence !== undefined && (authority !== "orchestrator" || !this.workflowVideoApprovals)) {
+      return fail("Delegated video approval requires an admitted current managed-media runtime and Orchestrator owner", 403);
+    }
     const checked = this.validateWorkflowDecisionResolution(decision, resolution);
     if (!checked.ok || !checked.data) return failAs(checked);
+    const normalizedResolution = checked.data;
     const now = Date.now();
     // Repeating evidence identifiers proves nothing. An Orchestrator approval is backed only by
     // receipts the server itself recorded when it delivered each exact artifact to this reviewer.
     let reviewReceipts: UiEvidenceReviewReceipt[] = [];
     if (decision.resourceSnapshot.category === "ui_evidence_approval" && authority === "orchestrator") {
       reviewReceipts = this.db.validUiEvidenceReviewReceipts(occurrenceId, parentSessionId, now);
-      const unreviewed = decision.resourceSnapshot.evidence.filter((item) => !reviewReceipts.some((receipt) =>
+      const unreviewed = decision.resourceSnapshot.evidence.filter((item) =>
+        !(normalizedResolution.delegatedVideoEvidence?.some((reference) => reference.evidenceId === item.evidenceId)) && !reviewReceipts.some((receipt) =>
         receipt.evidenceId === item.evidenceId && receipt.sha256 === item.sha256 &&
         receipt.artifactId === item.artifactId && receipt.childSessionId === childSessionId &&
         receipt.policyRevision === decision.policyRevision));
-      if (checked.data.outcome === "approve" && unreviewed.length) {
+      if (normalizedResolution.outcome === "approve" && unreviewed.length) {
         return fail(
           `UI evidence approval requires a current review receipt for every evidence item; review ${
             unreviewed.map((item) => JSON.stringify(item.evidenceId)).join(", ")
@@ -9037,7 +9326,7 @@ export class SessionsService {
         );
       }
       const video = decision.resourceSnapshot.videoReview;
-      if (checked.data.outcome === "approve" && video) {
+      if (normalizedResolution.outcome === "approve" && video) {
         let sourceBytes: Buffer | null;
         try { sourceBytes = this.db.readWorkflowArtifactBytes(video.sourceArtifactId); } catch { sourceBytes = null; }
         if (!sourceBytes || createHash("sha256").update(sourceBytes).digest("hex") !== video.sourceSha256) {
@@ -9065,7 +9354,7 @@ export class SessionsService {
     // it is staged cannot lose it, and a child whose worktree needs recovery (#1650) or whose
     // runner is offline keeps it until the first boundary that can deliver it. A guardrail card
     // still refuses it, leaving the outcome, and any message, on the decision record.
-    if (decision.resourceSnapshot.category === "campaign_issue_scope" && checked.data.outcome === "approve") {
+    if (decision.resourceSnapshot.category === "campaign_issue_scope" && normalizedResolution.outcome === "approve") {
       const snapshot = decision.resourceSnapshot;
       const audience = this.db.sessionScope(childSessionId);
       if (authority === "human" && (!actor.id || !audience || !this.db.isSessionOwner({ userId: actor.id, organizationId: audience.organizationId }, childSessionId))) {
@@ -9099,7 +9388,7 @@ export class SessionsService {
         this.recordWorkflowDecisionAudit(stale, "revoked", actor, now);
       }
       this.settleResolvedWorkflowDecision(resolvedScope, now, null);
-      this.recordWorkflowDecisionAudit(resolvedScope, "allowed", actor, now, checked.data.rationale);
+      this.recordWorkflowDecisionAudit(resolvedScope, "allowed", actor, now, normalizedResolution.rationale);
       this.recordWorkflowDecisionAudit(resolvedScope, "consumed", actor, now);
       this.log.info(JSON.stringify({ event: "campaign_issue_scope_approved", sessionId: childSessionId, occurrenceId,
         entryPoint: "scope_resolution", authority, boundaryRevision: snapshot.issueAdmission?.boundaryRevision, lineage: snapshot.lineage?.kind ?? "removal",
@@ -9109,26 +9398,32 @@ export class SessionsService {
       return ok(resolvedScope);
     }
     const oweResume = this.workflowDecisionResumeOwed(currentChild);
-    const resolved = this.db.resolveWorkflowDecision(
+    const commitResolution = () => this.db.resolveWorkflowDecision(
       occurrenceId,
       authority,
-      checked.data.outcome === "approve" ? "approved" : "denied",
+      normalizedResolution.outcome === "approve" ? "approved" : "denied",
       now,
-      checked.data.selectedOptionId,
-      checked.data.evidenceReviewed,
-      auditDigest(checked.data.rationale),
-      checked.data.childMessage,
+      normalizedResolution.selectedOptionId,
+      normalizedResolution.evidenceReviewed,
+      auditDigest(normalizedResolution.rationale),
+      normalizedResolution.childMessage,
       oweResume,
+      normalizedResolution.delegatedVideoEvidence,
     );
+    let resolved: WorkflowDecisionView | null;
+    try {
+      resolved = normalizedResolution.delegatedVideoEvidence
+        ? this.workflowVideoApprovals!.resolve(decision, normalizedResolution, now, commitResolution) : commitResolution();
+    } catch { return fail("Original video approval lacks current complete worker and image provenance", 409); }
     if (!resolved) return fail("workflow decision was resolved concurrently", 409);
     this.db.consumeUiEvidenceReviewReceipts(occurrenceId, now);
     this.settleResolvedWorkflowDecision(resolved, now, oweResume ? "held" : null);
     this.recordWorkflowDecisionAudit(
       resolved,
-      checked.data.outcome === "approve" ? "allowed" : "denied",
+      normalizedResolution.outcome === "approve" ? "allowed" : "denied",
       actor,
       now,
-      checked.data.rationale,
+      normalizedResolution.rationale,
       reviewReceipts.map((receipt) => receipt.receiptId),
     );
     this.hub.sessionChangedById(childSessionId);
@@ -9311,7 +9606,21 @@ export class SessionsService {
       this.hub.sessionChangedById(parent.id);
       return ok(armed);
     }
-    const consumed = this.db.consumeWorkflowDecision(occurrenceId, now);
+    const originalVideoApproval = decision.authority === "orchestrator" &&
+      decision.resourceSnapshot.category === "ui_evidence_approval" && !decision.resourceSnapshot.videoReview &&
+      decision.resourceSnapshot.evidence.some((item) => item.mediaType?.startsWith("video/"));
+    let consumed: WorkflowDecisionView | null;
+    try {
+      if (originalVideoApproval && (!this.workflowVideoApprovals || !decision.delegatedVideoEvidence?.length)) {
+        throw new Error("Original video approval is missing its durable managed-media provenance.");
+      }
+      consumed = originalVideoApproval
+        ? this.workflowVideoApprovals!.consume(decision, () => this.db.consumeWorkflowDecision(occurrenceId, now))
+        : this.db.consumeWorkflowDecision(occurrenceId, now);
+    } catch {
+      this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+      return fail("Original video provenance expired, changed or was revoked before consumption", 409);
+    }
     if (!consumed) return fail("workflow decision was already consumed", 409);
     this.recordWorkflowDecisionAudit(consumed, "consumed", { kind: "agent", id: sessionId }, now);
     this.hub.sessionChangedById(sessionId);
@@ -9674,7 +9983,8 @@ export class SessionsService {
   ): UiEvidenceReviewEvaluation {
     const requester = this.db.getSession(childSessionId);
     const authority = requester ? evaluateCampaignAuthority(controller, requester,
-      this.db.getRunner(requester.runnerId)?.protocolVersion, snapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion).owner : "human";
+      this.db.getRunner(requester.runnerId)?.protocolVersion, snapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion,
+      this.campaignPeerContracts(controller, requester.id)).owner : "human";
     if (snapshot.category !== "ui_evidence_approval") {
       return { effectiveOwner: authority };
     }
@@ -9696,12 +10006,42 @@ export class SessionsService {
       return { effectiveOwner: "human", fallback: { code: "artifact_mismatch",
         reason: "The derived video frames no longer match their complete source manifest." } };
     }
+    const child = this.db.getSession(childSessionId);
+    if (!snapshot.videoReview && child && this.productionVideoReviewAvailable(controller, child, snapshot)) {
+      const images = snapshot.evidence.filter((item) => item.mediaType?.startsWith("image/"));
+      return images.length ? evaluateUiEvidenceItems(controller.driver, childSessionId, images,
+        (artifactId) => this.db.workflowArtifactExportPreflight(artifactId)?.artifact ?? null) : { effectiveOwner: "orchestrator" };
+    }
     return evaluateUiEvidenceItems(
       controller.driver,
       childSessionId,
       snapshot.evidence,
       (artifactId) => this.db.workflowArtifactExportPreflight(artifactId)?.artifact ?? null,
     );
+  }
+
+  private productionVideoReviewAvailable(controller: SessionView, child: SessionView,
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "ui_evidence_approval" }>): boolean {
+    const control = controller.orchestratorPolicy?.control;
+    if (!this.workflowVideoApprovals || control?.mode !== "full_control" || !control.boundary?.evidenceAuthority ||
+      !campaignEvidenceDisclosuresCurrent(control.boundary.evidenceAuthority, this.evidenceAuthorityDisclosures) ||
+      !campaignBoundaryCurrent(controller) || snapshot.videoReview ||
+      ![controller, child].every((session) => this.sessionPacedVideoCompatible(session))) return false;
+    const videos = snapshot.evidence.filter((item) => item.mediaType?.startsWith("video/"));
+    const rootAudience = this.db.sessionScope(controller.id), sourceAudience = this.db.sessionScope(child.id);
+    if (!videos.length || !rootAudience || !sourceAudience ||
+      !this.db.scopeAudienceContainedWithMembership(rootAudience, sourceAudience) ||
+      snapshot.evidence.some((item) => !item.mediaType?.startsWith("image/") &&
+        item.mediaType !== "video/webm" && item.mediaType !== "video/mp4")) return false;
+    for (const item of videos) {
+      const source = item.artifactId ? this.db.workflowArtifactExportPreflight(item.artifactId)?.artifact : null;
+      if (!source || source.sessionId !== child.id || source.kind !== "video" ||
+        source.mimeType !== item.mediaType || source.sha256 !== item.sha256 || source.sizeBytes > MAX_SESSION_VIDEO_BYTES) return false;
+      let bytes: Buffer | null;
+      try { bytes = this.db.readWorkflowArtifactBytes(source.artifactId); } catch { return false; }
+      if (!bytes || createHash("sha256").update(bytes).digest("hex") !== item.sha256) return false;
+    }
+    return this.workflowVideoApprovals.available(controller, child, snapshot);
   }
 
   /** Second half of a delivery: the reviewer's runner re-hashed the bytes and is handing them to
@@ -9733,7 +10073,8 @@ export class SessionsService {
     const requester = this.db.getSession(decision.sessionId);
     if (decision.authorityEvaluation?.boundaryRevision !== undefined && (!requester ||
         evaluateCampaignAuthority(controller, requester, this.db.getRunner(requester.runnerId)?.protocolVersion,
-          decision.resourceSnapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion).boundaryRevision !== decision.authorityEvaluation.boundaryRevision ||
+          decision.resourceSnapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion,
+          this.campaignPeerContracts(controller, requester.id)).boundaryRevision !== decision.authorityEvaluation.boundaryRevision ||
         !campaignBoundaryCurrent(controller))) return false;
     if (decision.category === "ui_evidence_approval" && decision.authority === "human") return true;
     return this.evaluateWorkflowDecisionAuthority(
@@ -9910,7 +10251,24 @@ export class SessionsService {
     }
     if (snapshot.category === "ui_evidence_approval") {
       if (resolution.outcome === "approve") {
-        const requested = snapshot.evidence.map((item) => item.evidenceId).sort();
+        const delegated = resolution.delegatedVideoEvidence;
+        if (delegated !== undefined) {
+          const videos = snapshot.evidence.filter((item) => item.mediaType === "video/webm" || item.mediaType === "video/mp4");
+          if (decision.authority !== "orchestrator" || snapshot.videoReview || !Array.isArray(delegated) ||
+            delegated.length < 1 || delegated.length > 32 || delegated.length !== videos.length ||
+            new Set(delegated.map((item) => item?.evidenceId)).size !== delegated.length ||
+            delegated.some((item) => !item || typeof item !== "object" || Array.isArray(item) ||
+              Object.keys(item).sort().join(",") !== "evidenceId,reviewId,reviewerSessionId,verdictId" ||
+              Object.values(item).some((value) => !boundedDecisionString(value, 256)) ||
+              !videos.some((video) => video.evidenceId === item.evidenceId))) {
+            return fail("Delegated video references must exactly identify each original video and actual review verdict", 400);
+          }
+        } else if (decision.authority === "orchestrator" && !snapshot.videoReview &&
+          snapshot.evidence.some((item) => item.mediaType?.startsWith("video/"))) {
+          return fail("Original video approval requires separate actual-worker provenance", 400);
+        }
+        const requested = snapshot.evidence.filter((item) => !delegated?.some((reference) => reference.evidenceId === item.evidenceId))
+          .map((item) => item.evidenceId).sort();
         const reviewed = Array.isArray(resolution.evidenceReviewed) &&
           resolution.evidenceReviewed.every((item): item is string => typeof item === "string")
           ? [...new Set(resolution.evidenceReviewed)].sort() : [];
@@ -9919,11 +10277,13 @@ export class SessionsService {
         }
         resolution = { ...resolution, evidenceReviewed: reviewed };
       }
-      if (resolution.outcome === "deny" && resolution.evidenceReviewed !== undefined) {
+      if (resolution.outcome === "deny" && (resolution.evidenceReviewed !== undefined || resolution.delegatedVideoEvidence !== undefined)) {
         return fail("a denied UI evidence decision cannot carry evidenceReviewed; omit it when denying", 400);
       }
-    } else if (resolution.evidenceReviewed !== undefined) {
-      return fail("evidenceReviewed is valid only for ui_evidence_approval decisions", 400);
+    } else if (resolution.evidenceReviewed !== undefined || resolution.delegatedVideoEvidence !== undefined) {
+      return fail(resolution.evidenceReviewed !== undefined
+        ? "evidenceReviewed is valid only for ui_evidence_approval decisions"
+        : "delegatedVideoEvidence is valid only for ui_evidence_approval decisions", 400);
     }
     return ok(resolution);
   }
@@ -11625,6 +11985,9 @@ export class SessionsService {
     }
     if (archiveRequiresStop(session.status) || this.db.hasSessionStopIntent(sessionId)) {
       const pending = this.requestStop(session, now, true, refreshProject);
+      if (pending.status === "queued" && this.mediaSessionPurposes.owns(session.id)) {
+        return fail("Prepared media archive requires exact never-enqueued proof or authenticated reconciliation; capacity is retained.", 409);
+      }
       return ok(pending, 202);
     }
     if (session.archived) return ok(session);
@@ -11883,6 +12246,11 @@ export class SessionsService {
   delete(sessionId: string): ServiceResult<{ deleted: true }> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    if (this.mediaSessionPurposes.owns(sessionId) && this.mediaSessionPurposes.lifecycleState(sessionId) !== "cancelled") {
+      // Live/unknown command cleanup needs independent terminal proof and a dedicated retention
+      // contract before registration. Generic Delete cannot remove reconciliation identity/kill.
+      return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
+    }
     const reconciliationBlock = this.podReconciliationMutationError(sessionId);
     if (reconciliationBlock) return fail(reconciliationBlock, 409);
     const sideChat = this.db.getSideChat(sessionId);
@@ -13406,6 +13774,7 @@ export class SessionsService {
       // History can arrive after terminal status. Its durable hydration completes settlement.
       void this.hydrateHistory(sessionId).then(() => this.settleCampaignUsage(sessionId)).catch(() => {});
     }
+    if (this.pendingMediaLifecycle(session)) return;
     const campaignBefore = this.campaignAttentionController(session);
     let admittedReplacement = false;
     if (this.db.hasSessionStopIntent(sessionId)) {
@@ -13960,6 +14329,29 @@ export class SessionsService {
       : this.db.getRunner(runnerId)?.protocolVersion;
   }
 
+  /** Accounting synchronization does not authorize status, continuation or policy mutations. */
+  private acknowledgePricedSessionCost(sessionId: string, runnerId: string): void {
+    // v106 runners enforce this authoritative cumulative price during the live turn. Older
+    // runners retain provider-reported local pricing; correction provenance must stay bound.
+    if (!runnerSupportsProtocol(this.runnerProtocolVersion(runnerId), "pricedSessionCost")) return;
+    let frame: import("@wollipog/protocol").PricedSessionCostMessage | undefined;
+    if (reconciliationRevision(this.db, sessionId) > 0 || latestReconciliationRepair(this.db, sessionId)) {
+      const supportsIdentity = runnerSupportsProtocol(this.runnerProtocolVersion(runnerId), "costReconciliationIdentity");
+      if (supportsIdentity) {
+        try { frame = correctionFrame(this.db, sessionId); }
+        catch { /* Missing correction provenance defers price synchronization. */ }
+      }
+      if (!frame) {
+        // Never strip the coordinate and fall back to an unbound cumulative price.
+        this.log.warn(JSON.stringify({ event: "cost_reconciliation_price_deferred", entryPoint: "runner",
+          runnerId, sessionId, reason: supportsIdentity ? "correction_prefix_unavailable" : "runner_upgrade_required" }));
+      }
+    } else {
+      frame = { type: "priced_session_cost", sessionId, costUsd: this.db.sessionCostUsd(sessionId) };
+    }
+    if (frame) this.hub.sendToRunner(runnerId, frame);
+  }
+
   /** Ingest one live runner event. The runner socket passes a staged large payload from
    * awaitStagedLiveSessionEvent; without one, a large payload is written on the calling thread. */
   onSessionEvent(
@@ -14172,6 +14564,18 @@ export class SessionsService {
         payload.kind === "background_continuation_delivered") {
       this.hub.sessionChangedById(sessionId);
     }
+    // Keep authoritative usage/tool/history ingestion above. An unresolved media command has
+    // no generic prompt/question/permission lifecycle; such events cannot overwrite its queue
+    // identity, mint a generic continuation, or launch auxiliary title-generation work.
+    if (this.mediaSessionPurposes.owns(sessionId) && this.pendingMediaLifecycle(session())) {
+      // Possible usage still needs the existing authoritative price ACK for the owning runner's
+      // cost ceiling. Quarantine continues to fence every generic policy/lifecycle side effect.
+      if (payload.kind === "token_usage" && (!payload.parentToolUseId || payload.independentUsage === true)) {
+        this.acknowledgePricedSessionCost(sessionId, head.runnerId);
+      }
+      this.hub.sessionChangedById(sessionId);
+      return;
+    }
     // A durable Stop fences lifecycle side effects as well as status/snapshot resurrection.
     // Preserve the authoritative history event, but never let a late permission/question/policy
     // event recreate an approval card or move the control-plane session out of stopped.
@@ -14202,31 +14606,7 @@ export class SessionsService {
     // Claude's parented breakdown is already included in root totals. Codex child requests are
     // independent: acknowledge their price and apply live budget gates before the root settles.
     if (payload.kind === "token_usage" && (!payload.parentToolUseId || payload.independentUsage === true)) {
-      // v106 runners enforce this authoritative cumulative price during the live turn. The frame
-      // carries no provider credential or transcript content, and older runners retain their
-      // provider-reported local-cost behavior.
-      if (runnerSupportsProtocol(
-        this.runnerProtocolVersion(head.runnerId),
-        "pricedSessionCost",
-      )) {
-        let frame: import("@wollipog/protocol").PricedSessionCostMessage | undefined;
-        if (reconciliationRevision(this.db, sessionId) > 0 || latestReconciliationRepair(this.db, sessionId)) {
-          const supportsIdentity = runnerSupportsProtocol(this.runnerProtocolVersion(head.runnerId), "costReconciliationIdentity");
-          if (supportsIdentity) {
-            try { frame = correctionFrame(this.db, sessionId); }
-            catch { /* Missing correction provenance defers price synchronization. */ }
-          }
-          if (!frame) {
-            // Retain accepted usage and budget enforcement while missing provenance fences price sync.
-            // Never strip the coordinate and fall back to an unbound cumulative price.
-            this.log.warn(JSON.stringify({ event: "cost_reconciliation_price_deferred", entryPoint: "runner",
-              runnerId: head.runnerId, sessionId, reason: supportsIdentity ? "correction_prefix_unavailable" : "runner_upgrade_required" }));
-          }
-        } else {
-          frame = { type: "priced_session_cost", sessionId, costUsd: this.db.sessionCostUsd(sessionId) };
-        }
-        if (frame) this.hub.sendToRunner(head.runnerId, frame);
-      }
+      this.acknowledgePricedSessionCost(sessionId, head.runnerId);
       // Guardrail card gate: pause + ask once a policy rule trips. A v47 runner independently
       // cancels the active turn at the normalized usage threshold; v106 also applies that gate to
       // the acknowledged control-plane price. Re-applied at turn-settle (onSessionStatus) so a
@@ -14607,6 +14987,7 @@ export class SessionsService {
   failRunnerSessions(runnerId: string): void {
     const now = Date.now();
     for (const s of this.db.listSessions({ includeArchived: true })) {
+      if (this.pendingMediaLifecycle(s)) continue;
       if (s.runnerId === runnerId && !isTerminal(s.status)) {
         const campaignBefore = this.campaignAttentionController(s);
         this.automaticQuestions.delete(s.id);
@@ -14637,6 +15018,7 @@ export class SessionsService {
     this.endAbsentWorkflowDecisionWork(runnerId, (sessionId) => !liveSet.has(sessionId));
     for (const s of this.db.listSessions({ includeArchived: true })) {
       if (s.runnerId !== runnerId) continue;
+      if (this.pendingMediaLifecycle(s)) continue;
       if (this.db.hasSessionStopIntent(s.id)) {
         if (liveSet.has(s.id)) {
           this.sendStopCommand(runnerId, s.id);
@@ -14687,6 +15069,7 @@ export class SessionsService {
    * absent session is stopped by the caller, which revokes on that path. */
   private endAbsentWorkflowDecisionWork(runnerId: string, absent: (sessionId: string) => boolean): void {
     for (const sessionId of this.db.sessionsOwingWorkflowDecisionWork(runnerId)) {
+      if (this.pendingMediaLifecycle(this.db.getSession(sessionId))) continue;
       const status = this.db.getSession(sessionId)?.status;
       if (absent(sessionId) && status && isTerminal(status)) {
         this.revokeUnconsumedWorkflowDecisionsForSession(sessionId, "provider-session-absent");
@@ -14879,7 +15262,7 @@ export class SessionsService {
         if (unsupportedCostSessions.has(snap.id) || !isTerminal(snap.status) || duplicateSnapshotIds.has(snap.id) ||
             stopIntentIds.has(snap.id) || this.db.isTombstoned(snap.id) || changedSinceInventory(snap.id)) return [];
         const existing = this.db.getSession(snap.id);
-        if (!existing || existing.runnerId !== runnerId || !isTerminal(existing.status) ||
+        if (!existing || existing.runnerId !== runnerId || !isTerminal(existing.status) || this.pendingMediaLifecycle(existing) ||
             this.db.unconsumedWorkflowDecisionsForSession(snap.id).length > 0 ||
             this.db.heldWorkflowDecisionResumes(snap.id).length > 0 ||
             this.db.hasOpenRestartNotices(snap.id) ||
@@ -14902,7 +15285,12 @@ export class SessionsService {
         this.hub.sessionChangedById(snap.id);
         recordAppliedVersion(snap.id);
       }
-      for (const [snapshotIndex, snap] of chunk.entries()) {
+      for (const [snapshotIndex, incoming] of chunk.entries()) {
+        // Preserve possible costs/history/checkpoints through normal accounting while generic
+        // snapshot status cannot overwrite an unresolved media dispatch/cancellation identity.
+        const mediaSession = this.db.getSession(incoming.id);
+        const mediaPending = this.pendingMediaLifecycle(mediaSession);
+        const snap = mediaPending ? { ...incoming, status: mediaSession!.status } : incoming;
         if (terminalBatchIndexes.has(snapshotIndex)) continue;
         // A session the user deleted must not be recreated — re-issue the delete to the (now online)
         // runner and skip it. The tombstone is pruned below once the box stops reporting the id.
@@ -14993,6 +15381,7 @@ export class SessionsService {
       const s = this.db.getSession(id);
       if (!s || changedSinceInventory(id)) continue;
       if (s.runnerId === runnerId && !byId.has(s.id)) {
+        if (this.pendingMediaLifecycle(s)) continue;
         campaignBefore(s);
         if (this.db.hasSessionStopIntent(s.id)) this.settleStopIntent(s.id, now, "runner_absent");
         if (isTerminal(s.status)) this.revokeUnconsumedWorkflowDecisionsForSession(s.id, "provider-session-absent");
@@ -15056,6 +15445,7 @@ export class SessionsService {
     const existing = this.db.getSession(snapshot.id);
     if (!existing || existing.runnerId !== runnerId || this.db.isTombstoned(snapshot.id)) return;
     if(isTerminal(snapshot.status) && snapshot.campaignBudgetCheckpoint) this.db.campaignBudgets.recordCheckpoint(snapshot.id,snapshot.campaignBudgetCheckpoint);
+    if (this.pendingMediaLifecycle(existing)) snapshot = { ...snapshot, status: existing.status };
     const unsupportedCost = this.unsupportedCostReconciliation(runnerId, snapshot);
     const unacknowledgedRevision = snapshot.costReconciliationRevision ?? 0;
     snapshot = unsupportedCost ? { ...snapshot, costUsd: existing.costUsd } : normalizeReconciledSnapshot(this.db, snapshot);

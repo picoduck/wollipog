@@ -1,3 +1,4 @@
+import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 /**
  * Shared protocol types for Wollipog.
  *
@@ -686,6 +687,7 @@ export const PROTOCOL_VERSION = 223;
 
 export * from "./campaign-authority.js";
 export * from "./campaign-issue-publication.js";
+export * from "./campaign-evidence-authority.js";
 export * from "./campaign-budget.js";
 export * from "./campaign-review-job.js";
 export * from "./session-review-job.js";
@@ -2063,6 +2065,9 @@ export interface AgentCapabilities {
    * installation, so a session snapshot never drops it.
    */
   imageToolResults?: boolean;
+  /** Private compatibility identity for this exact installation, never a runtime attestation.
+   * No current discovery path emits it. Native admission/delivery/quality proof remains separate. */
+  pacedVideoReviewContract?: import("./paced-video-review.js").PacedVideoReviewPeerContract;
   /** Provider exposes a receipted primitive that incorporates input into the active turn. */
   supportsSteering?: boolean;
   /** Provider can mint an independent conversation from its current/history checkpoint. */
@@ -4631,6 +4636,8 @@ export interface WorkflowDecisionView {
   status: WorkflowDecisionStatus;
   selectedOptionId?: string;
   evidenceReviewed?: string[];
+  /** Exact non-self media proof; never an assertion that the owner inspected video frames. */
+  delegatedVideoEvidence?: DelegatedVideoEvidenceReference[];
   createdAt: number;
   resolvedAt?: number;
   consumedAt?: number;
@@ -4651,9 +4658,12 @@ export interface CreateWorkflowDecisionRequest {
 export interface ResolveWorkflowDecisionRequest {
   outcome: "approve" | "deny";
   selectedOptionId?: string;
-  /** Required to approve UI evidence and must exactly cover the requested evidence ids. Omit it when
-   * denying, and for every other category. */
+  /** Directly inspected evidence IDs. With admitted delegated video proof, includes only images;
+   * otherwise exactly covers all requested evidence. Omit when denying or for other categories. */
   evidenceReviewed?: string[];
+  /** Production managed-media provenance for original video IDs. Server verifies every reference.
+   * Only an admitted Orchestrator UI approval may supply it; human and legacy paths omit it. */
+  delegatedVideoEvidence?: DelegatedVideoEvidenceReference[];
   /** Audit-only: never retained, never shown to the child; only its digest reaches audit. */
   rationale?: string;
   /** v166: retained on the decision for the child to read and delivered as the prompt that resumes
@@ -9031,6 +9041,8 @@ export interface SessionNamingCustomModelResultMessage {
 }
 
 export type RunnerToControlPlane =
+  | { type: "media_review_stop_acknowledged"; receipt: import("./media-active-stop.js").MediaActiveStopAcknowledgement }
+  | { type: "media_review_never_dispatched"; receipt: import("./media-dispatch-fence.js").MediaNeverDispatchedFence }
   | import("./campaign-control-launch.js").CampaignLaunchInspectionResult
   | import("./campaign-review-job.js").CampaignReviewJobUpdate
   | import("./session-review-job.js").SessionReviewJobUpdate
@@ -9149,6 +9161,11 @@ export interface RegisterRejectedMessage {
 
 /** Everything the runner needs to launch an agent session locally. */
 export interface SessionLaunchSpec {
+  /** Private prepared media marker. Generic start/restart must refuse it, even on mixed peers.
+   * The dedicated dispatcher additionally needs the complete immutable grant and namespace. */
+  mediaReviewPurpose?: { rootSessionId: string; childSessionId: string; admissionId: string;
+    occurrenceId: string; evidenceId: string; generation: string;
+    operatorValidation?: import("./paced-video-review.js").OperatorVideoValidationPurpose };
   /** Server-owned accounting lifecycle; never part of user session configuration. */
   campaignBudgetDispatch?: import("./campaign-budget.js").CampaignBudgetDispatch;
   artifactUploads?: ArtifactUploadPreference;
@@ -10806,6 +10823,7 @@ export interface GitActionResultMessage {
 }
 
 export type ControlPlaneToRunner =
+  | { type: "media_review_stop"; request: import("./media-active-stop.js").MediaActiveStopRequest }
   | import("./campaign-control-launch.js").CampaignLaunchInspectionMessage
   | import("./campaign-review-job.js").CampaignReviewJobCommand
   | { type: "cancel_campaign_review_job"; jobId: string; nonce: string }
@@ -11638,3 +11656,13 @@ export const TERMINAL_STATUSES: SessionStatus[] = ["completed", "failed", "stopp
 export function isTerminal(status: SessionStatus): boolean {
   return TERMINAL_STATUSES.includes(status);
 }
+
+export type { PacedVideoReviewReceipt, PacedVideoReviewDelivery, PacedVideoReviewBatchDelivery, PacedVideoTransportGrant, DelegatedVideoEvidenceReference, OperatorVideoValidationPurpose } from "./paced-video-review.js";
+
+export { PACED_VIDEO_REVIEW_BATCH_LIMITS, PACED_VIDEO_REVIEW_MIN_PROTOCOL, PACED_VIDEO_REVIEW_CONTRACT_ID,
+  validPacedVideoReviewPeerContract, supportsPacedVideoReviewPeer } from "./paced-video-review.js";
+export type { PacedVideoReviewPeerContract } from "./paced-video-review.js";
+export type { MediaDispatchFenceIdentity, MediaNeverDispatchedFence } from "./media-dispatch-fence.js";
+export type { MediaActiveStopIdentity, MediaActiveStopRequest, MediaActiveStopAcknowledgement } from "./media-active-stop.js";
+export { mediaActiveStopIdentityBody, mediaActiveStopRequestBody, mediaActiveStopAcknowledgementBody } from "./media-active-stop.js";
+export { validMediaDispatchFenceIdentity, mediaDispatchFenceBody, validMediaNeverDispatchedFence } from "./media-dispatch-fence.js";
