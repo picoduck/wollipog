@@ -23,6 +23,7 @@ import { Notice } from "./Notice.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { ChoiceRows, SegmentedControl, type ChoiceRowOption } from "./ui/ChoiceControls.js";
 import { SAVED_MS } from "./ui/SettingsRows.js";
+import { FullControlPreparation } from "./FullControlPreparation.js";
 
 /** Who answers a descendant session's requests (§8.4 choice rows). The off choice is "Human",
  * matching each gate's Human | Orchestrator (#2192). */
@@ -83,7 +84,7 @@ function sourceLabel(source: string | undefined): string {
   return titleCaseLabel((source ?? "legacy_session").replaceAll("_", " "));
 }
 
-type SaveKey = "parentControl" | DelegatableWorkflowDecisionCategory;
+type SaveKey = "parentControl" | "control" | DelegatableWorkflowDecisionCategory;
 
 type PendingChoices = Partial<Record<SaveKey, { value: string; request: number }>>;
 
@@ -196,6 +197,9 @@ export function OrchestratorControlsDialog({
 }) {
   const api = useApi();
   const ids = useId();
+  const [controlPreview, setControlPreview] = useState<"custom" | "full_control">(() =>
+    session.orchestratorCampaign?.control !== undefined && Number.isSafeInteger(session.orchestratorCampaign.policyRevision)
+      ? session.orchestratorCampaign.control.mode : session.parentSessionId ? "custom" : session.orchestratorPolicy?.control?.mode ?? "custom");
   // The choices still saving on this session, from this dialog or one closed before it.
   const pending = useSyncExternalStore(
     subscribePending,
@@ -266,9 +270,13 @@ export function OrchestratorControlsDialog({
 
   const parentControl = (pending.parentControl?.value as ParentControlMode | undefined) ?? session.parentControl ?? "off";
   const policy = session.parentControlPolicy;
+  const projectedControl = session.orchestratorCampaign?.control !== undefined && Number.isSafeInteger(session.orchestratorCampaign.policyRevision)
+    ? session.orchestratorCampaign.control : undefined;
+  const fullControl = (projectedControl ?? (session.parentSessionId ? undefined : session.orchestratorPolicy?.control))?.mode === "full_control";
+  const canRevoke = fullControl && !session.parentSessionId && policy !== undefined && refusal === null;
   const savedStatus = saved === null
     ? ""
-    : `${saved === "parentControl" ? "Child Session Requests" : WORKFLOW_DECISION_LABELS[saved]} saved`;
+    : `${saved === "parentControl" ? "Child Session Requests" : saved === "control" ? "Orchestrator Control" : WORKFLOW_DECISION_LABELS[saved]} saved`;
 
   return (
     <Modal
@@ -279,6 +287,17 @@ export function OrchestratorControlsDialog({
       footer={<button type="button" className="btn" onClick={onClose}>Done</button>}
     >
       {refusal !== null && <Notice tone="neutral" compact>{refusal}</Notice>}
+      {session.orchestratorPolicy && <FullControlPreparation surface="campaign" session={session}
+        defaults={session.orchestratorPolicy} mode={controlPreview} onChange={setControlPreview} disabled={refusal !== null} />}
+      {fullControl && <section className="section">
+        <p className="section-note">Revoking Full Control updates this root campaign and its descendants and invalidates unused approvals. Your saved defaults and selected session configuration stay unchanged.</p>
+        <button type="button" className="btn" disabled={!canRevoke || Object.keys(pending).length > 0}
+          onClick={() => change("control", "custom", (current) => api.revokeCampaignControl(current.id, current.parentControlPolicy!.revision))}>
+          Revoke Full Control
+        </button>
+        {session.parentSessionId && <p className="section-note">Change control on the root campaign.</p>}
+        {saved === "control" && <SavedCheck />}
+      </section>}
 
       <section className="section" aria-labelledby={`${ids}-requests`}>
         <div className="section-head">

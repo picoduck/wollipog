@@ -1,6 +1,7 @@
 import { formatCampaignAssignment } from "./campaign-assignment.js";
 import { acknowledgementRepairFrame } from "./claude-cost-repair.js";
 import type { HumanPrincipal } from "./identity.js";
+import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl } from "./campaign-authority.js";
 import { campaignAuthorityPreflight, controlledReviewCapabilityKey, standingRootQuestionAnswers, type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary } from "@wollipog/protocol";
@@ -3651,6 +3652,14 @@ export class SessionsService {
       parentSessionId?: string;
       orchestratorDefaults?: OrchestratorSettingsView;
       validateOrchestratorDefaults?: (defaults: OrchestratorCampaignPolicy) => string | null;
+      /** Trusted internal inspection seam. Returns before any stage, insert or provider call. */
+      inspectLaunchPlan?: (plan: PreparedCampaignLaunch) => void;
+      /** Internal fixture/admission seam; never accepted from ordinary session request JSON. */
+      humanCampaignLaunch?: {
+        principal: HumanPrincipal; requestId: string; digest: string;
+        control: Extract<import("@wollipog/protocol").CampaignControl, { mode: "full_control" }>;
+        issueScope: import("@wollipog/protocol").CampaignIssueScope;
+      };
     },
   ): ServiceResult<SessionView> {
     // Attribution is supplied only by the authenticated route, never by the request payload.
@@ -4424,6 +4433,45 @@ export class SessionsService {
         this.db.getUsageDailyBudget(effectiveSessionScope.organizationId).perUserUsd !== null) {
       return fail(NATIVE_TUI_DAILY_BUDGET_ERROR, 409);
     }
+    if (creationContext?.inspectLaunchPlan) {
+      if (parentSessionId || delivery || !orchestratorPolicy || !workspaceId || adHoc ||
+          executionTarget.adapter !== "host" || launch.context.kind !== "native" || images.length ||
+          req.launchSurface === "native_tui" || effectiveSessionScope?.owner.kind !== "user" ||
+          effectiveSessionScope.owner.userId !== creationContext.defaultOwnerUserId) {
+        return fail("Full Control launch preparation requires a Human-owned managed root in a registered native workspace", 409);
+      }
+      creationContext.inspectLaunchPlan(structuredClone({ runnerId: req.runnerId, workspaceId,
+        ...requestedProject.data, agentId: req.agentId, driver: launch.driver, providerAccountId: providerAccount?.id,
+        config, useWorktree, executionTarget, policy: orchestratorPolicy, scope: effectiveSessionScope }));
+      return fail("internal launch preparation completed without creating a session", 409);
+    }
+    const humanLaunch = creationContext?.humanCampaignLaunch;
+    if (humanLaunch) {
+      if (parentSessionId || delivery || !orchestratorPolicy || !workspaceId || adHoc || images.length ||
+          req.launchSurface === "native_tui" || launch.context.kind !== "native" || executionTarget.adapter !== "host" ||
+          humanLaunch.principal.kind !== "human" ||
+          creationContext.defaultOwnerUserId !== humanLaunch.principal.userId ||
+          effectiveSessionScope?.owner.kind !== "user" || effectiveSessionScope.owner.userId !== humanLaunch.principal.userId) {
+        return fail("atomic Human launch requires the exact Human-owned managed root", 409);
+      }
+      const authoritySupport = campaignAuthorityPreflight(humanLaunch.control, launch.driver, runner.protocolVersion);
+      if (!authoritySupport.supported) return fail(authoritySupport.reason ?? "campaign authority is unsupported", 409);
+      const accountingError = this.db.campaignBudgetAccountingError(launch.driver, config.model, true);
+      if (accountingError) return fail(accountingError, 409);
+      const nativeReview = humanLaunch.control.boundary.budgetAuthority?.controlledReview;
+      if (nativeReview && (!runner.runtime?.campaignReview || controlledReviewCapabilityKey(nativeReview) !== controlledReviewCapabilityKey(runner.runtime.campaignReview))) {
+        return fail("the required native reviewer does not match current runner discovery", 409);
+      }
+      if (humanLaunch.control.boundary.delegatablePolicyIds.some((policyId) => !this.governancePolicies().some((rule) =>
+          rule.policyId === policyId && rule.enabled && rule.effect === "ask" && !rule.builtin && !rule.conditions?.humanRequired))) {
+        return fail("unknown, disabled or Human Required policy asks cannot enter the launch boundary", 400);
+      }
+      orchestratorPolicy.control = structuredClone(humanLaunch.control);
+      orchestratorPolicy.issueScope = structuredClone(humanLaunch.issueScope);
+      orchestratorPolicy.issueNumbers = [...humanLaunch.issueScope.issueNumbers];
+      parentControlPolicy = { decisions: structuredClone(orchestratorPolicy.delegation.decisions) };
+      text = requestedText || humanLaunch.control.boundary.objective;
+    }
     const commandSpec: SessionLaunchSpec = {
       sessionId: id,
       workspaceId,
@@ -4446,8 +4494,9 @@ export class SessionsService {
       config,
       ...(orchestratorPolicy ? { orchestrator: {
         ...orchestratorPolicy.execution,
-        ...(orchestratorIssueNumbers.length || orchestratorPolicy.issueScope ? { issueNumbers: orchestratorIssueNumbers } : {}),
+        ...(orchestratorIssueNumbers.length || orchestratorPolicy.issueScope ? { issueNumbers: orchestratorPolicy.issueNumbers ?? orchestratorIssueNumbers } : {}),
         ...(orchestratorPolicy.issueScope ? { issueScope: orchestratorPolicy.issueScope } : {}),
+        ...(orchestratorPolicy.control ? { control: orchestratorPolicy.control } : {}),
       } } : {}),
       acpSessionContext,
     };
@@ -4489,7 +4538,7 @@ export class SessionsService {
     }
     if (delivery) delivery.stage(plan!);
     let session: SessionView;
-    const insert = () => this.db.createSession({
+    const sessionInput: Parameters<ControlPlaneDb["createSession"]>[0] = {
       campaignBudgetUserLimits,
       id,
       parentSessionId,
@@ -4520,23 +4569,30 @@ export class SessionsService {
       scope: sessionScope,
       automationOrigin: delivery?.automationOrigin,
       now,
-    });
+    };
+    const insert = () => this.db.createSession(sessionInput);
     try {
-      session = existing ?? (campaignWorkScope
+      if (humanLaunch) {
+        const admitted = this.db.createHumanCampaignLaunch(sessionInput, humanLaunch.principal, humanLaunch.requestId, humanLaunch.digest);
+        if (!admitted.created) return ok(admitted.session);
+        session = admitted.session;
+        config.costBudgetUsd = session.costBudgetUsd ?? undefined;
+        config.maxToolCalls = session.maxToolCalls ?? undefined;
+      } else session = existing ?? (campaignWorkScope
         ? this.insertCampaignChild(campaignWorkScope, campaignWorkItemId!, insert)
         : insert());
     } catch (error) {
       if (error instanceof CampaignAttemptRefusal) return fail(error.message, error.status);
-      if (budgetRoot) return fail((error as Error).message, 409);
+      if (budgetRoot || humanLaunch) return fail((error as Error).message, 409);
       throw error;
     }
-    if (config.costBudgetUsd && config.costBudgetUsd > 0) {
+    if (!humanLaunch && config.costBudgetUsd && config.costBudgetUsd > 0) {
       this.db.updateSessionCostBudget(id, config.costBudgetUsd, now);
     }
-    if (config.maxToolCalls && Math.floor(config.maxToolCalls) > 0) {
+    if (!humanLaunch && config.maxToolCalls && Math.floor(config.maxToolCalls) > 0) {
       this.db.updateSessionMaxToolCalls(id, Math.floor(config.maxToolCalls), now);
     }
-    if (config.costCheckpointsUsd?.length) {
+    if (!humanLaunch && config.costCheckpointsUsd?.length) {
       this.db.updateSessionCostCheckpoints(id, config.costCheckpointsUsd, now);
     }
     if (!snapshotCommand && images.length) {
@@ -4580,8 +4636,9 @@ export class SessionsService {
       config,
       ...(orchestratorPolicy ? { orchestrator: {
         ...orchestratorPolicy.execution,
-        ...(orchestratorIssueNumbers.length || orchestratorPolicy.issueScope ? { issueNumbers: orchestratorIssueNumbers } : {}),
+        ...(orchestratorIssueNumbers.length || orchestratorPolicy.issueScope ? { issueNumbers: orchestratorPolicy.issueNumbers ?? orchestratorIssueNumbers } : {}),
         ...(orchestratorPolicy.issueScope ? { issueScope: orchestratorPolicy.issueScope } : {}),
+        ...(orchestratorPolicy.control ? { control: orchestratorPolicy.control } : {}),
       } } : {}),
       acpSessionContext,
     };
@@ -4589,11 +4646,21 @@ export class SessionsService {
       delivery.activate(plan!);
     } else {
       if (command.type !== "start_session") return fail("session launch command is malformed", 409);
+      if (humanLaunch && !this.db.claimHumanCampaignDispatch(session.id)) {
+        return fail("the committed Human launch was already claimed; no provider command was replayed", 409);
+      }
       const sent = this.hub.sendToRunner(req.runnerId, {
         ...command,
         spec,
       });
+      if (humanLaunch && sent) this.db.settleHumanCampaignDispatch(session.id, true);
       if (!sent) {
+        if (humanLaunch) {
+          // Hub's boolean collapses a missing socket and a send failure. It cannot prove that
+          // no bytes escaped; retain the root/reservation and the claimed uncertain identity.
+          return { ok: false, status: 409, error: "Human campaign delivery was not confirmed; the committed Session is retained and no launch will be replayed",
+            errorDetails: { sessionId: session.id, code: "FULL_CONTROL_LAUNCH_RETAINED" } };
+        }
         // The runner can disconnect after the online preflight. Keep the durable row observable but
         // terminal instead of reporting that a launch was accepted when no runner owns it.
         if (cleanupUndelivered) {

@@ -42,7 +42,8 @@ const EXECUTION_KEYS = ["strictProjectIsolation", "integrationIsolation"] as con
 export function parseOrchestratorDefaults(value: unknown): OrchestratorDefaults | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const input = value as Partial<OrchestratorDefaults>;
-  if (Object.keys(input).some((key) => !["behavior", "delegation", "execution"].includes(key))) return null;
+  if (Object.keys(input).some((key) => !["behavior", "delegation", "execution", "controlMode"].includes(key))) return null;
+  if (input.controlMode !== undefined && input.controlMode !== "custom" && input.controlMode !== "full_control") return null;
   const behavior = input.behavior;
   const delegation = input.delegation;
   const execution = input.execution;
@@ -75,6 +76,7 @@ export function parseOrchestratorDefaults(value: unknown): OrchestratorDefaults 
       !WORKFLOW_DECISION_CATEGORIES.every((category) =>
         decisions[category] === "human" || decisions[category] === "orchestrator")) return null;
   return {
+    ...(input.controlMode === undefined ? {} : { controlMode: input.controlMode }),
     behavior: {
       childHarness,
       childModel: behavior.childModel,
@@ -385,6 +387,7 @@ export class OrchestratorSettings {
       defaults,
       source: record ? "user_default" : "system_default",
       capabilities: this.capabilities(principal, defaults),
+      controlModeSupported: true,
     };
   }
 
