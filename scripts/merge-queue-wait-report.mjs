@@ -40,20 +40,33 @@ export function pullRequestOf(branch) {
   return match ? Number(match[1]) : null;
 }
 
+// A called workflow's jobs are named "<caller> / <job>".
+const callerOf = (job) => job.name.includes(" / ") ? job.name.slice(0, job.name.indexOf(" / ")) : null;
+
 /**
- * The chain of executed jobs ending at `job`, newest first. A job created after the run started
- * was created when its last dependency finished, which is the latest job to complete by then; a
- * job created with the run has no dependency. The jobs API does not name dependencies, so this is
- * reconstructed from timing.
+ * The jobs `job` can depend on, from ci.yml's structure: the aggregator needs every other
+ * top-level job, no other top-level job has needs, and a called workflow's jobs need only jobs of
+ * the same call. The jobs API does not name dependencies; a test pins this to the workflow files.
  */
-export function criticalPath(run, job, work) {
+function dependencyCandidates(job, work, aggregator) {
+  if (job === aggregator) return work;
+  const caller = callerOf(job);
+  return caller === null ? [] : work.filter((other) => other !== job && callerOf(other) === caller);
+}
+
+/**
+ * The chain of executed jobs ending at `job`, newest first, or null when it cannot be told apart.
+ * A job created with the run has no dependency. One created later was created when its last
+ * dependency finished: the latest of its possible dependencies to complete by then.
+ */
+export function criticalPath(run, job, work, aggregator = job) {
   const path = [job];
   const started = Date.parse(run.created_at);
   for (let current = job; Date.parse(current.created_at) - started > DEPENDENCY_SLACK_MS;) {
     const created = Date.parse(current.created_at);
-    const previous = latest(work.filter((candidate) =>
+    const previous = latest(dependencyCandidates(current, work, aggregator).filter((candidate) =>
       !path.includes(candidate) && Date.parse(candidate.completed_at) <= created + DEPENDENCY_SLACK_MS));
-    if (!previous) break;
+    if (!previous) return null;
     path.push(previous);
     current = previous;
   }
@@ -71,8 +84,8 @@ export function runMetrics(run, jobs) {
   const work = executed.filter((job) => job !== aggregator);
   const waits = executed.map((job) => minutes(job.created_at, job.started_at)).filter((value) => value !== null);
   const requiredMinutes = aggregator ? minutes(run.created_at, aggregator.completed_at) : null;
-  const executionMinutes = aggregator
-    ? criticalPath(run, aggregator, work).reduce((sum, job) => sum + minutes(job.started_at, job.completed_at), 0) : null;
+  const path = aggregator ? criticalPath(run, aggregator, work) : null;
+  const executionMinutes = path ? path.reduce((sum, job) => sum + minutes(job.started_at, job.completed_at), 0) : null;
   return {
     id: run.id,
     rerun: run.run_attempt > 1,
@@ -120,6 +133,7 @@ export function summarize(metrics, removals, timeoutMinutes) {
     overTimeout: metrics.filter((m) => m.requiredMinutes !== null && m.requiredMinutes > timeoutMinutes).length,
     waitingDominated: metrics.filter((m) => m.criticalWaitMinutes !== null && m.criticalWaitMinutes > m.criticalExecutionMinutes).length,
     aggregatorNeverRan: metrics.filter((m) => !m.aggregatorRan).length,
+    criticalPathUnmeasured: metrics.filter((m) => m.aggregatorRan && m.criticalExecutionMinutes === null).length,
     removalReasons: reasons,
     timedOut: removals.filter((removal) => removal.reason === "checks_timed_out"),
   };
@@ -209,7 +223,7 @@ export function markdown(report) {
     "",
     `- Required result later than the ${summary.timeoutMinutes}-minute queue timeout: ${summary.overTimeout} of ${summary.runs}.`,
     `- Critical path spent longer waiting than executing: ${summary.waitingDominated} of ${summary.runs}.`,
-    `- Aggregator never ran: ${summary.aggregatorNeverRan}.`,
+    `- Aggregator never ran: ${summary.aggregatorNeverRan}. Critical path unmeasured (a job's dependency could not be identified): ${summary.criticalPathUnmeasured}.`,
     `- Queue removals in the window: ${Object.entries(summary.removalReasons).map(([reason, count]) => `${reason} ${count}`).join(", ") || "none"}` +
       (report.removalsTruncated ? ` (incomplete: a pull request has more than ${MAX_PAGES * 100} removals)` : "") + ".",
     ...summary.timedOut.map((removal) => `  - #${removal.pullRequest} removed with checks_timed_out at ${removal.at}.`),

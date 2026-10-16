@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   AGGREGATOR, collect, listRemovals, main, markdown, MAX_PAGES, options, pullRequestOf, quantile, runMetrics, summarize,
@@ -58,6 +59,45 @@ test("a dependency chain's sequential execution is not counted as waiting (#3343
     job(AGGREGATOR, 18, 18, 19),
   ]);
   assert.equal(waited.criticalWaitMinutes, 3);
+});
+
+test("a parallel job finishing as a dependency does is never taken for that dependency (#3343 review)", () => {
+  const second = (s) => new Date(Date.UTC(2026, 9, 16) + s * 1000).toISOString();
+  const timed = (name, created, started, completed) => ({
+    name, conclusion: "success", created_at: second(created), started_at: second(started), completed_at: second(completed),
+  });
+  // A shard finishes three seconds after change detection; the comparison needs only detection.
+  const metrics = runMetrics({ id: 5, run_attempt: 1, head_branch: branch(1), created_at: second(0) }, [
+    timed("Browser End-to-End Tests (1)", 0, 0, 603),
+    timed("Settings-Rows win32 Baselines / Detect Settings-Rows Changes", 0, 540, 600),
+    timed("Settings-Rows win32 Baselines / Compare win32 Settings-Rows Baselines", 600, 600, 900),
+    timed(AGGREGATOR, 900, 900, 960),
+  ]);
+  assert.equal(metrics.criticalExecutionMinutes, 7);
+  assert.equal(metrics.criticalWaitMinutes, 9);
+});
+
+test("a late job with no known dependency leaves the split unmeasured rather than guessed", () => {
+  const metrics = runMetrics(run(6, 1, 30), [
+    job("Browser End-to-End Tests (1)", 0, 0, 10),
+    job("Typecheck, Unit Tests & Bundles", 10, 12, 28),
+    job(AGGREGATOR, 28, 29, 30),
+  ]);
+  assert.equal(metrics.requiredMinutes, 30);
+  assert.equal(metrics.criticalExecutionMinutes, null);
+  assert.equal(metrics.criticalWaitMinutes, null);
+  assert.equal(summarize([metrics], [], 120).criticalPathUnmeasured, 1);
+});
+
+test("the assumed dependency structure matches the CI workflow files", () => {
+  // Only the aggregator has needs in ci.yml, and the settings-rows call is the only called workflow,
+  // whose comparison needs only its change detection.
+  const ci = readFileSync(".github/workflows/ci.yml", "utf8");
+  assert.deepEqual(ci.match(/^\s+needs:.*$/gm).map((line) => line.trim()), ["needs: [checks, browser, win32, webkit]"]);
+  assert.match(ci, /\n  check:\n(?:    .*\n)*?    name: Typecheck, Test & Sidecar Bundle\n(?:    .*\n)*?    needs: \[checks, browser, win32, webkit\]\n/);
+  assert.deepEqual(ci.match(/uses: \.\/\.github\/workflows\/[^\s]+/g), ["uses: ./.github/workflows/settings-rows-win32.yml"]);
+  const win32 = readFileSync(".github/workflows/settings-rows-win32.yml", "utf8");
+  assert.deepEqual(win32.match(/^\s+needs:.*$/gm).map((line) => line.trim()), ["needs: scope"]);
 });
 
 test("an aggregator that never ran leaves the required result unmeasured", () => {

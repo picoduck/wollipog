@@ -25,10 +25,12 @@ and maximum for:
 
 - **Run created to required result:** when the aggregator completed.
 - **Critical path executing:** the summed execution of the chain of jobs ending at
-  the aggregator. The jobs API does not name dependencies, so the chain is rebuilt
-  from timing: a job created after the run started was created when the latest job
-  to finish by then completed, as in the settings-rows change detection followed by
-  its comparison.
+  the aggregator. The jobs API does not name dependencies, so the chain follows
+  `ci.yml`'s structure, which a test pins to the workflow files: the aggregator
+  follows the last of its dependencies to finish, a called workflow's job (such as
+  the settings-rows comparison) follows the last job of the same call to finish
+  before it was created, and no other job has dependencies. A run with a job created
+  late for any other reason is counted as unmeasured rather than guessed.
 - **Critical path waiting:** the rest of the time to the required result.
 - **Longest job wait for a runner**, **aggregator wait after dependencies**,
   **longest job execution**, and **run created to last job finished**.
