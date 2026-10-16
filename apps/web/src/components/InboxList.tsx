@@ -85,6 +85,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
   onExpand: (sessionId: string) => void;
   onToggleThread?: (sessionId: string) => void;
   onScrollPosition: (scrollTop: number) => void;
+  onTouchGestureChange?: (active: boolean) => void;
   onPointerTargetChange?: (pointerId: number, targeting: boolean, pointerType: string) => void;
   onPointerPressChange?: (pointerId: number, active: boolean, pointerType: string) => void;
   /** One stable callback shared by every row (#154); the keyboard path anchors at the row's box. */
@@ -107,6 +108,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
   onExpand,
   onToggleThread,
   onScrollPosition,
+  onTouchGestureChange,
   onPointerTargetChange,
   onPointerPressChange,
   onSessionMenu,
@@ -155,6 +157,9 @@ export const InboxList = forwardRef<HTMLDivElement, {
       tabIndex={0}
       aria-activedescendant={selectedSessionId ? `inbox-session-${encodeResourceId(selectedSessionId)}` : undefined}
       onScroll={(event) => onScrollPosition(event.currentTarget.scrollTop)}
+      onTouchStart={() => onTouchGestureChange?.(true)}
+      onTouchEnd={(event) => onTouchGestureChange?.(event.touches.length > 0)}
+      onTouchCancel={(event) => onTouchGestureChange?.(event.touches.length > 0)}
       onPointerEnter={(event) => onPointerTargetChange?.(event.pointerId, true, event.pointerType)}
       onPointerMove={(event) => onPointerTargetChange?.(event.pointerId, true, event.pointerType)}
       onPointerLeave={(event) => onPointerTargetChange?.(event.pointerId, false, event.pointerType)}

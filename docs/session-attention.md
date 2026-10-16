@@ -11,10 +11,12 @@ priority and oldest occurrence first; results use newest result first; Working a
 meaningful work time and session ID. Pins lead within a group. Families stay parent first and use
 their strongest human follow-up; due reminders surface below concrete human input. Existing snooze
 visibility and wake rules remain in force. List priority changes apply immediately when idle.
-Pointer movement and keyboard navigation hold the displayed order for 500 ms after the last
+Pointer movement, scrolling and keyboard navigation hold the displayed order for 500 ms after the last
 interaction; an active press, touch gesture or row menu keeps its targets until it ends, followed
 by the same settle interval. Focus and a resting pointer do not hold order indefinitely, and
-streaming-only updates never renew the hold. Selection and the virtual list's scroll anchor stay
+streaming-only updates never renew the hold. Native touch ownership survives pointer cancellation
+when the browser takes over a pan; momentum scrolling renews the settle interval. There is no
+transient order line or Apply button to shift the rows during these brief holds. Selection and the virtual list's scroll anchor stay
 attached to session identity when canonical order is applied.
 
 Only a successful response-completed boundary following live top-level output creates a result.

@@ -164,7 +164,7 @@ test.describe("at 1440×900, stacked", () => {
     await expect(menu.getByRole("menuitem")).toHaveText(["Set Up Alpha", "Recommended Skills"]);
   });
 
-  test("new activity shows one quiet line under the slot, and Apply reorders without moving a control", async ({ page }) => {
+  test("pending priorities and automatic adoption move no controls or rows during an interaction", async ({ page }) => {
     await page.clock.install();
     await open(page, "skills");
     await page.locator(".inbox-row").first().click();
@@ -177,7 +177,7 @@ test.describe("at 1440×900, stacked", () => {
     const rowIndex = () => page.locator(".inbox-row-shell").evaluateAll((rows) =>
       rows.findIndex((row) => row.textContent?.includes("Review Pull Request 20")));
     const indexBefore = await rowIndex();
-    await page.clock.pauseAt(Date.now());
+    await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1_000));
     await page.locator(".inbox-row").first().hover();
     await page.evaluate(() => {
       window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-fill-20", {
@@ -186,20 +186,14 @@ test.describe("at 1440×900, stacked", () => {
       });
     });
     await page.clock.runFor(32);
-    const line = page.locator(".inbox-list-head > .inbox-order-line");
-    await expect(line).toBeVisible();
-    await expect(line.locator("span")).toHaveText("Session priorities changed the order.");
-    expect(await line.evaluate((element) => {
-      const slotElement = element.closest(".inbox-list-pane")!.querySelector(".list-notice-slot")!;
-      return slotElement.getBoundingClientRect().bottom <= element.getBoundingClientRect().top;
-    })).toBe(true);
+    await expect(page.locator(".inbox-order-line")).toHaveCount(0);
     expect(await stationary()).toEqual(before);
     await expectWholeRowsAt(page, (await split(page)).line);
 
-    await line.getByRole("button", { name: "Apply" }).click();
+    await page.mouse.move(0, 0);
+    await page.clock.runFor(500);
     await page.clock.resume();
-    await expect(line).toHaveCount(0);
-    // The session was far down the list, past what is rendered; applying brings it up among the first.
+    // Automatic adoption brings the changed priority up from outside the rendered range.
     await expect.poll(rowIndex, { message: "the newest activity moves up" }).toBeGreaterThanOrEqual(0);
     const indexAfter = await rowIndex();
     expect(indexAfter).toBeLessThan(6);

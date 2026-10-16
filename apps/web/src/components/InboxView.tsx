@@ -1,4 +1,4 @@
-import { lazy, Suspense, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, memo, useCallback, useDeferredValue, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { lazy, Suspense, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { prioritizedPendingRequests, providerSupportsConversationFork, type BoardColumn, type SessionReminderView, type SessionView, type SetSessionReminderRequest, type SnoozeScheduleInput, type SourceLocation } from "@wollipog/protocol";
 import { archiveAndStopMessage, archiveResultMessage, archiveResultTone, sessionArchiveRequiresStop } from "../archive-actions.js";
 import { sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
@@ -306,6 +306,7 @@ export function InboxView({
   const seenTimerRef = useRef<number | null>(null);
   const settleTimerRef = useRef<number | null>(null);
   const activePointerIdsRef = useRef(new Set<number>());
+  const activeTouchRef = useRef(false);
   const sessionMenuOpenRef = useRef(false);
   sessionMenuOpenRef.current = sessionMenu !== null;
   const structuralOrderKeyRef = useRef<string | null>(null);
@@ -601,7 +602,7 @@ export function InboxView({
     structuralOrderKeyRef.current = structuralOrderKey;
     if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
     settleTimerRef.current = null;
-    setHeldOrder(activePointerIdsRef.current.size > 0 || sessionMenuOpenRef.current
+    setHeldOrder(activePointerIdsRef.current.size > 0 || activeTouchRef.current || sessionMenuOpenRef.current
       ? liveIdsRef.current
       : null);
   }, [structuralOrderKey]);
@@ -636,7 +637,8 @@ export function InboxView({
     stalledSessionIds,
   ), [collapsedThreads, displayedHeldOrder, liveEntries, stalledSessionIds]);
   const displayedIds = useMemo(() => entries.map((entry) => entry.session.id), [entries]);
-  displayedIdsRef.current = displayedIds;
+  // Selection repair reads the last committed list, never a speculative/Strict Mode render.
+  useLayoutEffect(() => { displayedIdsRef.current = displayedIds; }, [displayedIds]);
   // What the list pane shows (#2220), in the §12 order: offline, loading, no results, empty, rows.
   // The board keeps its own states, and an open session shows none.
   const listView = expandedSessionId === null && !boardMode;
@@ -701,14 +703,6 @@ export function InboxView({
     else if (fromPreview) (previewPaneRef.current?.querySelector<HTMLElement>(".detail-scroll") ?? listZone())?.focus();
     else listZone()?.focus();
   });
-  // The order the list WOULD show if nothing were held, threaded the same way, so a collapsed
-  // thread's absent children never read as a pending reorder.
-  const liveDisplayedIds = useMemo(() => displayedHeldOrder
-    ? threadInboxRows(liveEntries, collapsedThreads, stalledSessionIds).map((entry) => entry.session.id)
-    : displayedIds, [collapsedThreads, displayedIds, displayedHeldOrder, liveEntries, stalledSessionIds]);
-  const orderUpdateAvailable = !isMobile && !boardMode && displayedHeldOrder !== null && (
-    displayedIds.length !== liveDisplayedIds.length || displayedIds.some((id, index) => id !== liveDisplayedIds[index])
-  );
   // A selection that threading hid (its thread was collapsed, or a search kept the parent and not
   // the child) lands on its nearest displayed ancestor, so a row is always active and Enter, F2,
   // and the rest keep a target. The persisted selection itself is untouched: expanding the thread
@@ -770,6 +764,7 @@ export function InboxView({
     // Unmounting the list can swallow pointerup. Do not carry an interaction into another surface.
     if (!expanded && !boardMode) return;
     activePointerIdsRef.current.clear();
+    activeTouchRef.current = false;
     clearHeldOrder();
   }, [boardMode, clearHeldOrder, expanded]);
   const surfaceSessionId = expandedSessionId ?? selectedSession?.id ?? null;
@@ -844,7 +839,7 @@ export function InboxView({
     if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
     settleTimerRef.current = window.setTimeout(() => {
       settleTimerRef.current = null;
-      if (activePointerIdsRef.current.size > 0 || sessionMenuOpenRef.current) return;
+      if (activePointerIdsRef.current.size > 0 || activeTouchRef.current || sessionMenuOpenRef.current) return;
       setHeldOrder(null);
     }, INBOX_REORDER_SETTLE_MS);
   }, []);
@@ -859,13 +854,6 @@ export function InboxView({
     holdDisplayedOrder();
     scheduleOrderRelease();
   }, [holdDisplayedOrder, scheduleOrderRelease]);
-
-  const applyCanonicalOrder = useCallback(() => {
-    if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
-    settleTimerRef.current = null;
-    setHeldOrder(null);
-    window.requestAnimationFrame(() => listRef.current?.focus({ preventScroll: true }));
-  }, []);
 
   const handlePointerTargetChange = useCallback((_pointerId: number, targeting: boolean) => {
     if (targeting) holdDisplayedOrder();
@@ -882,6 +870,12 @@ export function InboxView({
     }
   }, [holdDisplayedOrder, scheduleOrderRelease]);
 
+  const handleTouchGestureChange = useCallback((active: boolean) => {
+    activeTouchRef.current = active;
+    if (active) holdDisplayedOrder();
+    else scheduleOrderRelease();
+  }, [holdDisplayedOrder, scheduleOrderRelease]);
+
   useEffect(() => {
     if (sessionMenu) holdDisplayedOrder();
     else scheduleOrderRelease();
@@ -893,8 +887,14 @@ export function InboxView({
     };
     const finishAllPointers = () => {
       activePointerIdsRef.current.clear();
+      activeTouchRef.current = false;
       scheduleOrderRelease();
     };
+    const finishTouch = (event: TouchEvent) => {
+      if (event.touches.length === 0) handleTouchGestureChange(false);
+    };
+    window.addEventListener("touchend", finishTouch);
+    window.addEventListener("touchcancel", finishTouch);
     const trackVisibility = () => {
       if (document.visibilityState === "hidden") finishAllPointers();
     };
@@ -903,16 +903,19 @@ export function InboxView({
     window.addEventListener("pointercancel", finishPointer);
     window.addEventListener("blur", finishAllPointers);
     return () => {
+      window.removeEventListener("touchend", finishTouch);
+      window.removeEventListener("touchcancel", finishTouch);
       document.removeEventListener("visibilitychange", trackVisibility);
       window.removeEventListener("pointerup", finishPointer);
       window.removeEventListener("pointercancel", finishPointer);
       window.removeEventListener("blur", finishAllPointers);
     };
-  }, [handlePointerPressChange, scheduleOrderRelease]);
+  }, [handlePointerPressChange, handleTouchGestureChange, scheduleOrderRelease]);
 
   useEffect(() => {
     if (liveIds.length > 0) return;
     activePointerIdsRef.current.clear();
+    activeTouchRef.current = false;
     scheduleOrderRelease();
   }, [liveIds.length, scheduleOrderRelease]);
 
@@ -1558,7 +1561,6 @@ export function InboxView({
       notices.removeEventListener("focusin", revealFocusedControl);
     };
   }, [isMobile]);
-  const orderLineId = `inbox-order-line-${useId().replace(/:/gu, "")}`;
   // A list notice that held focus and went (Dismiss All took the last skill) leaves focus in the list.
   const focusListZone = useCallback(() => {
     const target = listRef.current ?? stateRef.current ?? document.getElementById("page-title");
@@ -1819,23 +1821,9 @@ export function InboxView({
             onFocusLost={focusListZone}
           />
         </div>
-        {/* The quiet order and reconnecting lines stay above the rows in every layout. */}
         <div className="inbox-list-head" ref={listHeadRef}>
-          {/* Follow-up priorities changed during an interaction. Neutral and outside the slot, so no notice ever
-              waits behind it, and nothing in the header or the tab row moves for it. */}
-          {orderUpdateAvailable && (
-            <div className="inbox-order-line">
-              <span id={orderLineId}>Session priorities changed the order.</span>
-              <button type="button" className="btn sm ghost" aria-describedby={orderLineId} onClick={applyCanonicalOrder}>
-                Apply
-              </button>
-            </div>
-          )}
           {listOffline && !pageState && <p className="inbox-list-status" role="status">Reconnecting…</p>}
         </div>
-        <span className="sr-only" data-live="order" aria-live="polite" aria-atomic="true">
-          {orderUpdateAvailable ? "Session priorities changed the order." : ""}
-        </span>
         {pageState ? (
           // One state in both panes' place (§6.1), on the page grid. It is the list zone's landing
           // spot while the list is replaced (F6, §16.1).
@@ -1907,7 +1895,14 @@ export function InboxView({
                 onSelect={handleSelect}
                 onExpand={expand}
                 onToggleThread={toggleThread}
-                onScrollPosition={(scrollTop) => inboxScrollPositions.set(instanceScope, scrollTop)}
+                onScrollPosition={(scrollTop) => {
+                  inboxScrollPositions.set(instanceScope, scrollTop);
+                  // Native pans cancel pointer events; wheel and momentum scrolling have no press.
+                  // Keep the current rows until scrolling itself has been quiet for 500 ms.
+                  // Let the virtualizer observe the new scroll anchor before holding entries.
+                  queueMicrotask(() => { if (mountedRef.current) holdOrderAfterNavigation(); });
+                }}
+                onTouchGestureChange={handleTouchGestureChange}
                 onPointerTargetChange={handlePointerTargetChange}
                 onPointerPressChange={handlePointerPressChange}
                 onSessionMenu={openRowSessionMenu}

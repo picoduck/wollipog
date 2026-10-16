@@ -59,7 +59,9 @@ test("All and Project lists share priorities; new results defer reordering while
   await open(page);
   await row(page, work).click();
   const grid = page.getByRole("grid", { name: "Sessions", exact: true });
-  await page.clock.pauseAt(Date.now());
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1_000));
+  await page.mouse.move(0, 0);
+  await row(page, work).hover();
   await page.evaluate(() => {
     const fixture = window.__WOLLIPOG_PROJECT_INBOX_E2E__;
     const facts = fixture.model().sessions.find((s) => s.id === "session-working")!.attention!;
@@ -74,13 +76,11 @@ test("All and Project lists share priorities; new results defer reordering while
   await expect(row(page, work).locator(".status")).toHaveText("Ready for Review");
   await expect(row(page, work)).toHaveAttribute("aria-selected", "true");
   await expect.poll(() => titles(page)).toEqual([input, result, work, quiet]);
-  const orderLine = page.locator(".inbox-order-line");
-  await expect(orderLine).toBeVisible();
-  await expect(orderLine).toContainText("Session priorities changed the order.");
-  await orderLine.getByRole("button", { name: "Apply", exact: true }).click();
+  await expect(page.locator(".inbox-order-line")).toHaveCount(0);
+  await page.mouse.move(0, 0);
+  await page.clock.runFor(500);
   await page.clock.resume();
   await expect.poll(() => titles(page)).toEqual([input, work, result, quiet]);
-  await expect(orderLine).toHaveCount(0);
   await expect(grid).toBeFocused();
   await grid.press("j");
   await expect(row(page, result)).toHaveAttribute("aria-selected", "true");

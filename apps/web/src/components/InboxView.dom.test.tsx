@@ -312,9 +312,9 @@ for (const viewport of ["mobile", "desktop"] as const) {
 
       await act(async () => {
         root.render(
-          <StoreProvider connection={connection} navigation={navigation}>
+          <React.StrictMode><StoreProvider connection={connection} navigation={navigation}>
             <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
-          </StoreProvider>,
+          </StoreProvider></React.StrictMode>,
         );
       });
       await act(async () => {
@@ -3580,4 +3580,39 @@ test("every mounted root is torn down before the next test starts", () => {
     "",
     "a previous test left nodes in the body, so portalled menus and dialogs outlive their test",
   );
+});
+
+
+test("native touch ownership survives pointercancel until touchend (#3301, CR-1.1)", async (t) => {
+  mobileViewport = true;
+  const tick = orderClock(t);
+  const { container, socket, grid, pointer } = await mountOrderingTest();
+  const touch = (type: string, active: boolean) => {
+    const event = new domWindow.Event(type, { bubbles: true });
+    Object.defineProperty(event, "touches", { value: active ? [{}] : [] });
+    grid.dispatchEvent(event as unknown as Event);
+  };
+  await act(async () => { touch("touchstart", true); pointer("pointerdown", "touch"); pointer("pointercancel", "touch"); });
+  await act(async () => socket.push({ type: "session_upsert", session: session("B", 40, { status: "input_required" }) }));
+  await act(async () => tick(5_000));
+  assert.deepEqual(rowTitles(container), ["Session A", "Session B"], "native panning still owns the gesture after pointercancel");
+  await act(async () => touch("touchend", false));
+  await act(async () => tick(500));
+  assert.deepEqual(rowTitles(container), ["Session B", "Session A"]);
+});
+
+test("scrolling renews the hold through wheel or momentum movement (#3301, CR-1.1)", async (t) => {
+  mobileViewport = false;
+  const tick = orderClock(t);
+  const { container, socket, grid } = await mountOrderingTest();
+  const scroll = () => grid.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as unknown as Event);
+  await act(async () => scroll());
+  await act(async () => socket.push({ type: "session_upsert", session: session("B", 40, { status: "input_required" }) }));
+  for (let frame = 0; frame < 4; frame++) {
+    await act(async () => { tick(400); scroll(); });
+    assert.deepEqual(rowTitles(container), ["Session A", "Session B"]);
+  }
+  assertNoDomNode(container.querySelector(".inbox-order-line"), "a short hold must not insert a line that moves its targets");
+  await act(async () => tick(500));
+  assert.deepEqual(rowTitles(container), ["Session B", "Session A"]);
 });

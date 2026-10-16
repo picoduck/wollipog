@@ -344,3 +344,43 @@ for (const width of [1440, 390]) test(`an automatic priority reorder keeps the r
   expect(after, "the reader's row keeps its offset").toMatchObject({ key: reading.key, offset: reading.offset });
   expect(after.scrollTop).toBeGreaterThan(reading.scrollTop);
 });
+
+
+test("a native touch pan survives pointer cancellation and defers priorities until the gesture settles (#3301)", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 900 });
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });
+  await openScrolling(page);
+  const lastKey = await grid(page).evaluate(async (list) => {
+    list.scrollTop = list.scrollHeight;
+    for (let frame = 0; frame < 4; frame++) await new Promise(requestAnimationFrame);
+    return [...list.querySelectorAll<HTMLElement>("[data-virtual-row]")]
+      .sort((a, b) => Number(b.dataset.index) - Number(a.dataset.index))[0]!.dataset.virtualKey!;
+  });
+  await grid(page).evaluate((list) => { list.scrollTop = 500; });
+  const reading = await settled(page);
+  const index = () => grid(page).evaluate((list, key) =>
+    Number(list.querySelector<HTMLElement>(`[data-virtual-key="${key}"]`)?.dataset.index), reading.key);
+  const box = (await grid(page).boundingBox())!;
+  await page.evaluate(() => {
+    (window as typeof window & { __panCancels: number }).__panCancels = 0;
+    window.addEventListener("pointercancel", () => {
+      (window as typeof window & { __panCancels: number }).__panCancels++;
+    });
+  });
+  const point = { x: box.x + box.width / 2, y: box.y + Math.min(box.height - 20, 400) };
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ ...point, y: point.y - 40 }] });
+  await page.evaluate((id) => window.__updateSession(id, { status: "input_required",
+    pendingApproval: { requestId: "during-pan", title: "Approve Command", options: [] },
+    updatedAt: Date.now(), lastEventAt: Date.now() }), lastKey);
+  for (let step = 1; step <= 15; step++) {
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ ...point, y: point.y - 40 - step * 3 }] });
+    await page.waitForTimeout(50);
+  }
+  expect(await page.evaluate(() => (window as typeof window & { __panCancels: number }).__panCancels)).toBeGreaterThan(0);
+  expect(await index(), "the canonical priority change is held beyond 500 ms of native panning").toBe(reading.index);
+  expect(await grid(page).evaluate((list) => list.scrollTop)).toBeGreaterThan(reading.scrollTop);
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await expect.poll(index).toBe(reading.index + 1);
+});
