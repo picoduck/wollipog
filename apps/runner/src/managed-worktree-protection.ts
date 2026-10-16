@@ -2838,23 +2838,32 @@ export function prepareGuardStateCommand(command: string): PreparedGuardStateCom
   const strippableConsumer = () =>
     !routingSeen && !segmentAmbiguous && GUARD_STATE_HEREDOC_DATA_CONSUMERS.has(firstWord);
 
-  // Consume the remaining body lines of `pending`. A stripped body leaves BOTH readings (it is inert
-  // data copied to an inspected destination). A kept body stays in both — verbatim in `scan`, with
-  // its `${...}` reduced in `parse` so a literal substitution does not break tokenizing (#1734).
+  // Consume each pending heredoc body up to its terminator, which bash recognises only on a `\n`
+  // line boundary. A stripped body is dropped (it is inert data copied to an inspected destination);
+  // a kept body stays in both readings — verbatim in `scan`, with its `${...}` reduced in `parse` so
+  // a literal substitution does not break tokenizing (#1734). FAIL CLOSED: a body that runs to the
+  // end of the command WITHOUT its terminator is never stripped — a mis-read delimiter or an
+  // unterminated heredoc must not let a stripped body swallow a real command that follows it.
   const consumeBodies = () => {
     while (pending.length > 0 && i < n) {
-      let lineEnd = i;
-      while (lineEnd < n && command[lineEnd] !== "\n" && command[lineEnd] !== "\r") lineEnd += 1;
-      const line = command.slice(i, lineEnd);
-      const terminatorLine = pending[0]!.dashStrip ? line.replace(/^\t+/u, "") : line;
-      const sep = command.slice(lineEnd, Math.min(lineEnd + 1, n)); // the single \n or \r, if any
-      const isTerminator = terminatorLine === pending[0]!.delimiter;
-      if (!pending[0]!.strip) {
+      const heredoc = pending.shift()!;
+      const lines: Array<{ line: string; sep: string; isTerminator: boolean }> = [];
+      let terminated = false;
+      while (i < n) {
+        let lineEnd = i;
+        while (lineEnd < n && command[lineEnd] !== "\n") lineEnd += 1;
+        const line = command.slice(i, lineEnd);
+        const sep = command.slice(lineEnd, Math.min(lineEnd + 1, n)); // the single `\n`, if any
+        i = lineEnd + (sep ? 1 : 0);
+        const isTerminator = (heredoc.dashStrip ? line.replace(/^\t+/u, "") : line) === heredoc.delimiter;
+        lines.push({ line, sep, isTerminator });
+        if (isTerminator) { terminated = true; break; }
+      }
+      if (heredoc.strip && terminated) continue; // drop body and terminator
+      for (const { line, sep, isTerminator } of lines) {
         scan += line + sep;
         out += (isTerminator ? line : reduceBraceSubstitutions(line)) + sep;
       }
-      if (isTerminator) pending.shift();
-      i = lineEnd + (sep ? 1 : 0);
     }
   };
 
@@ -2871,6 +2880,11 @@ export function prepareGuardStateCommand(command: string): PreparedGuardStateCom
       both(c); if (c === '"') quote = null; i += 1; continue;
     }
     if (c === "\\") { both(c + (command[i + 1] ?? "")); i += 2; addWordChar("\\"); continue; }
+    // A special parameter (`$$`, `$?`, `$!`, `$#`, `$-`, `$@`, `$*`, `$0`–`$9`) is consumed whole, so
+    // the second `$` of `$$` is never mistaken for the start of a `$'...'` string.
+    if (c === "$" && (command[i + 1] ?? "") !== "" && "$?!#-@*0123456789".includes(command[i + 1]!)) {
+      both(c + command[i + 1]!); addWordChar("$"); i += 2; continue;
+    }
     if (c === "$" && command[i + 1] === "'") { both("$'"); addWordChar("$"); quote = "$'"; i += 2; continue; }
     if (c === "'" || c === '"') { quote = c; both(c); addWordChar(c); i += 1; continue; }
     if (c === "#" && !inWord) { // a comment: `parse` drops it to end of line; `scan` keeps it, so a
@@ -2886,11 +2900,12 @@ export function prepareGuardStateCommand(command: string): PreparedGuardStateCom
       settleFirstWord(true); both("<<<"); inWord = false; i += 3; continue;
     }
     if (c === "<" && command[i + 1] === "<") { i = handleHeredocOperator(i); continue; }
-    if (c === "\n" || c === "\r") {
+    if (c === "\n") { // bash starts a pending heredoc body after the newline ending the command line
       both(c); inWord = false; resetSegment(); i += 1;
       if (pending.length > 0) consumeBodies();
       continue;
     }
+    if (c === "\r") { both(c); inWord = false; resetSegment(); i += 1; continue; } // a boundary, not a body start
     if (c === " " || c === "\t") { settleFirstWord(false); both(c); inWord = false; i += 1; continue; }
     if (GUARD_STATE_WORD_BOUNDARY.has(c)) { // an operator: `;`, `&`, `|`, redirects, `(`, `)`
       settleFirstWord(c === "<" || c === ">" || c === "&");
@@ -2931,9 +2946,11 @@ export function prepareGuardStateCommand(command: string): PreparedGuardStateCom
     while (j < n && (command[j] === " " || command[j] === "\t")) j += 1;
     let delimiter = "";
     let quoted = false;
+    let dollar = false; // a `$` in the delimiter (e.g. `<<$'EOF'`) means a spelling this does not model
     let dq: "'" | '"' | null = null;
     while (j < n) {
       const ch = command[j]!;
+      if (ch === "$") dollar = true;
       if (dq) { if (ch === dq) { dq = null; } else { delimiter += ch; } j += 1; continue; }
       if (ch === "'" || ch === '"') { dq = ch; quoted = true; j += 1; continue; }
       if (ch === "\\") { quoted = true; delimiter += command[j + 1] ?? ""; j += 2; continue; }
@@ -2941,7 +2958,9 @@ export function prepareGuardStateCommand(command: string): PreparedGuardStateCom
       delimiter += ch; j += 1;
     }
     if (delimiter === "") { both(command.slice(start, j)); inWord = false; return j; }
-    const strip = quoted && strippableConsumer();
+    // A `$` in the delimiter is not modelled precisely, so keep the body (fail closed); even so, a
+    // body with no terminator is never stripped (see consumeBodies).
+    const strip = quoted && !dollar && strippableConsumer();
     pending.push({ delimiter, dashStrip, strip });
     scan += command.slice(start, j);
     if (!strip) out += command.slice(start, j);

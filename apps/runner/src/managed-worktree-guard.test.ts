@@ -1439,6 +1439,12 @@ test("ordinary commands reaching nothing are allowed, and every real access stay
     `echo $'x'#; cat ${into}`,
     `cat $'${join(directory, "s1.protections.json")}'`,
     `echo x#\rcat ${into}`,
+    `echo $$'x'#; cat ${into}`,
+    // A heredoc whose body is never stripped-and-swallowed: a mis-read `$`-delimiter, an
+    // unterminated body, or a CR before the terminator must not hide the command that follows.
+    `cat > f.ts <<$'EOF'\nbody\nEOF\ncat ${into}`,
+    `cat > f.ts <<'EOF'\nbody\ncat ${into}`,
+    `cat > f.ts <<'EOF'\nbody\nEOF\rcat ${into}`,
     // An UNQUOTED heredoc expands, so its body is kept and scanned, conservatively.
     `cat > a.ts <<EOF\n${into}\nEOF`,
     // A body handed to a shell is executed, so it is kept and scanned.
@@ -1471,8 +1477,9 @@ test("the bash-faithful pre-pass never throws and opens no bypass under noise (#
   );
   const verb = fc.constantFrom("cat", "rm -rf", "cp /tmp/x", "mv", "stat", "truncate -s0");
   const noise = fc.constantFrom(
-    "", "echo hi; ", "echo a#; ", "ls # c\n", "x=1; ",
+    "", "echo hi; ", "echo a#; ", "ls # c\n", "x=1; ", "printf $'x\\n'; ", "echo $$'q'; ",
     "cat > f.ts <<'EOF'\n// a / b ${x}\nEOF\n", "cat >> g.ts <<'EOF'\nconst z=`${a - 1}`//c\nEOF\n",
+    "cat > f.ts <<'EOF'\nbody\n", "cat > f.ts <<$'EOF'\nbody\nEOF\n", // unterminated / `$`-delimiter
   );
   fc.assert(fc.property(reaching, verb, noise, (path, v, pre) =>
     commandTargetsGuardState(`${pre}${v} ${path}`, project, directory) !== null), { numRuns: 2000 });
