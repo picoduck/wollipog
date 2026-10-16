@@ -2716,216 +2716,93 @@ function inspectsAncestorOnly(
 }
 
 /* ---------------------------------------------------------------------------------------------
- * Reading two narrow, POSITIVE command shapes — never removing text from inside an arbitrary
- * command (#1734; Codex review rounds 1–2).
+ * Two narrow, POSITIVE, WHITELIST-gated shapes — never modelling arbitrary bash (#1734; Codex
+ * review rounds 1–3).
  *
- * Earlier attempts emulated bash across whole commands and kept leaking: each rewrite that REMOVED
- * text (a heredoc body, a comment, a `${...}`) hid some reaching command. The design now strips a
- * heredoc body only for one exact whole-command shape, relaxes the ancestor check only for one
- * single-simple-command shape, and otherwise reads the command exactly as `shell-quote` does (the
- * old, stricter behaviour) with two neutralisations that remove NO text.
+ * Rounds 1–3 each found a new bypass in syntax the pre-pass did not model (comments, escapes, ANSI-C
+ * quoting, brace expansion, `${...}` operators). Per the parent's binding direction the allowance is
+ * now matched by a CHARACTER WHITELIST, not by emulation: anything the whitelist does not recognise
+ * disqualifies the allowance and the command is read exactly as shell-quote reads it (the old,
+ * stricter behaviour).
  *
- *  1. STRIPPABLE HEREDOC (`matchStrippableHeredoc`). The whole command is exactly `cat`/`tee`
- *     writing one quoted heredoc to a target and nothing more. Only then is the body dropped — from
- *     BOTH readings — since the consumer copies it to the target, which is still classified. Any
- *     other shape (a second command, pipe, process substitution, an unterminated or non-`cat`/`tee`
- *     heredoc, a staged script run afterwards) keeps the body, which is scanned.
- *  2. NON-REACHING ANCESTOR / AC1 (`nonPathWordIndices` + the AC1 gate in
- *     `commandTargetsGuardState`). A single simple command whose only ancestor operand sits in a
- *     slot the command never opens — a pure builtin's argument, or the pattern/script of
- *     grep/sed/awk under strict option rules — is allowed. Only the ancestor check is relaxed; the
- *     inside check (with symlink resolution) and the raw-text scan are unchanged.
+ *  1. STRIPPABLE HEREDOC (`matchStrippableHeredoc`). The body is dropped only when the command's
+ *     first line matches one anchored regex over a tiny charset — `cat`/`tee`/`tee -a`, one `>`/`>>`
+ *     redirect (cat) or target (tee) from `[A-Za-z0-9._/@+-]`, one `<<'DELIM'` with a plain
+ *     single-quoted word, single spaces only — AND the body is terminated by a line equal to DELIM
+ *     that is the last line (bar one trailing newline). Any `#`, `\`, `$`, backtick, extra quote,
+ *     brace, glob, `;&|()<>` beyond the exact operators, or odd whitespace disqualifies it. The
+ *     target is classified normally, so a target in the hook dir is refused.
+ *  2. NON-REACHING ANCESTOR / AC1 (the gate in `commandTargetsGuardState`). A single simple command
+ *     whose command word is a pure builtin (`echo`/`printf`/`true`/`false`/`:`) that opens no
+ *     operand, with no redirect and every character whitelisted (`ac1CommandWhitelisted`), is allowed
+ *     even when it names `/`, `//`, or `~`. Only the ancestor check is relaxed; the inside check and
+ *     the raw-text scan still refuse anything resolving into the state. (grep/sed/awk pattern/script
+ *     exemptions were dropped as they could not be made both whitelist-tight and useful.)
  *
- * Two text-level corrections keep ALL text, so they can never hide a reach:
- *  - COMMENT (#1734 under-refusal). `shell-quote` treats any `#` as a comment running to the end of
- *    the whole string, so `echo x#; cat <state>` dropped the `cat` unseen. Every unquoted `#` is
- *    ESCAPED (`\#`), not removed, so the tokenizer keeps the word and the later command.
- *  - `${...}` the tokenizer rejects is reduced to its leading name — but ONLY when it holds no
- *    executable substitution (`$(`/backtick/`<(`/`>(`); such a `${...}` is kept verbatim so the
- *    tokenizer still refuses it (Codex CR-2.6).
+ * The only text-level correction keeps ALL text, so it can never hide a reach: `shell-quote` treats
+ * any `#` as a comment running to the end of the whole string, so `echo x#; cat <state>` dropped the
+ * `cat` unseen. Every `#` is ESCAPED (`\#`), never removed. There is no `${...}` reduction and no
+ * quote-state modelling (both were sources of round-2/round-3 bypasses).
  * ------------------------------------------------------------------------------------------ */
 
 /** Builtins whose operands are never opened as paths, so an ancestor among them cannot reach. */
 const GUARD_STATE_NONPATH_COMMANDS = new Set(["echo", "printf", "true", "false", ":"]);
 
-/** `grep`-family options that take no value and do not recurse or move the pattern positional. A
- *  short cluster must be only these letters; `-r`/`-R`/`-d`/`-e`/`-f`/`-m`/`-A`/`-B`/`-C` are absent. */
-const GUARD_STATE_GREP_SAFE_SHORT = /^-[invwxocHhsqaEFGPzUIl]+$/u;
-const GUARD_STATE_GREP_SAFE_LONG = new Set([
-  "--ignore-case", "--invert-match", "--line-number", "--word-regexp", "--line-regexp", "--count",
-  "--no-filename", "--with-filename", "--quiet", "--silent", "--null", "--extended-regexp",
-  "--fixed-strings", "--basic-regexp", "--perl-regexp", "--line-buffered", "--byte-offset",
-  "--only-matching", "--files-with-matches", "--files-without-match", "--no-messages", "--text",
-]);
-/** `sed` options that take no value, do not write in place, and do not move the script positional. */
-const GUARD_STATE_SED_SAFE_SHORT = /^-[nErsuz]+$/u;
+/** Characters allowed OUTSIDE single quotes in an AC1 command; a single-quoted run with no nested
+ *  `'` is otherwise opaque-clean. Excludes `$`, `` ` ``, `\`, `"`, `#`, braces, globs (`*?[]`), and
+ *  `;&|()<>`, so any substitution, expansion, quoting trick, or redirect disqualifies the exemption. */
+const GUARD_STATE_AC1_OUTSIDE_QUOTE = /[A-Za-z0-9._/:=,@+%~ -]/u;
 
-/**
- * Which word indices of a single simple command are NON-PATH slots the command never opens, so an
- * ancestor there cannot reach (#1734 AC1). `null` when the command is not one of these, or when any
- * option is value-taking / position-moving / recursive / unrecognised (fail closed). A pure builtin
- * exempts every argument; grep/sed/awk exempt only the one leading positional (pattern or script),
- * found by scanning ALL words so a GNU-permuted option after the pattern is still seen (Codex CR-2.4).
- */
-function nonPathWordIndices(words: readonly string[]): Set<number> | null {
-  const name = words[0];
-  if (name === undefined || name.includes("\0")) return null; // a variable/assignment is not a literal command word
-  if (GUARD_STATE_NONPATH_COMMANDS.has(name)) {
-    const all = new Set<number>();
-    for (let k = 1; k < words.length; k += 1) all.add(k);
-    return all;
-  }
-  const isGrep = name === "grep" || name === "egrep" || name === "fgrep";
-  const isSed = name === "sed";
-  const isAwk = name === "awk";
-  if (!isGrep && !isSed && !isAwk) return null;
-  let positional = -1;
-  let endOfOptions = false;
-  for (let k = 1; k < words.length; k += 1) {
-    const word = words[k]!;
-    if (!endOfOptions && word === "--") { endOfOptions = true; continue; }
-    if (!endOfOptions && word.startsWith("-") && word !== "-") {
-      if (isGrep && (GUARD_STATE_GREP_SAFE_SHORT.test(word) || GUARD_STATE_GREP_SAFE_LONG.has(word) ||
-          /^--colou?r(=.*)?$/u.test(word))) continue;
-      if (isSed && GUARD_STATE_SED_SAFE_SHORT.test(word)) continue;
-      return null; // awk takes no safe options here; any value-taking/recursive/unknown option fails closed
-    }
-    if (positional < 0) positional = k; // the pattern or script; any later positional is a path operand
-  }
-  return positional < 0 ? null : new Set([positional]);
-}
-
-/** The opaque name a `${...}` with no leading identifier is reduced to: unknown, never assigned. */
-const GUARD_STATE_OPAQUE_SUBSTITUTION = "__WOLLIPOG_GUARD_SUB__";
-
-/** The leading identifier of a `${...}` inner, or an opaque never-assigned name when it has none. */
-function leadingSubstitutionName(inner: string): string {
-  return /^[A-Za-z_][A-Za-z0-9_]*/u.exec(inner)?.[0] ?? GUARD_STATE_OPAQUE_SUBSTITUTION;
-}
-
-/** Reduce the `${...}` at `start` to `${leadingName}`, EXCEPT when its inner text holds an executable
- *  substitution (`$(`/backtick/`<(`/`>(` all contain `(` or a backtick), which is kept verbatim so
- *  the tokenizer still sees and refuses it (Codex CR-2.6). An unbalanced `${` is left verbatim. */
-function reduceSubstitutionAt(command: string, start: number): { text: string; next: number } {
-  let depth = 0;
-  let j = start + 1; // at the `{`
-  for (; j < command.length; j += 1) {
-    if (command[j] === "{" && command[j - 1] === "$") depth += 1;
-    else if (command[j] === "}") { depth -= 1; if (depth === 0) break; }
-  }
-  if (j >= command.length) return { text: command.slice(start), next: command.length };
-  const inner = command.slice(start + 2, j);
-  if (/[`(]/u.test(inner)) return { text: command.slice(start, j + 1), next: j + 1 };
-  return { text: `\${${leadingSubstitutionName(inner)}}`, next: j + 1 };
-}
-
-/** A single-quoted plain heredoc delimiter word, e.g. `'EOF'`. */
-const GUARD_STATE_STRIP_DELIMITER = /^'[A-Za-z_][A-Za-z0-9_]*'$/u;
-/** In a strippable-heredoc command LINE, any of these starts a second command, a substitution, a
- *  subshell, process substitution, or a variable, and disqualifies the exact shape. */
-const GUARD_STATE_HEREDOC_LINE_FORBIDDEN = /[;&|`()$\r]/u;
-
-type HeredocToken = { op: string } | { word: string };
-
-/** Tokenise the command LINE of a heredoc candidate into words and the operators `<<`/`>>`/`>`.
- *  `null` when it contains anything else (a lone `<`, `<<<`, `<<-`, `>&`, an unterminated quote). */
-function tokenizeHeredocCommandLine(line: string): HeredocToken[] | null {
-  const tokens: HeredocToken[] = [];
-  let i = 0;
-  const n = line.length;
-  while (i < n) {
-    const c = line[i]!;
-    if (c === " " || c === "\t") { i += 1; continue; }
-    if (c === "<") {
-      if (line[i + 1] !== "<" || line[i + 2] === "<" || line[i + 2] === "-") return null; // only `<<`
-      tokens.push({ op: "<<" }); i += 2; continue;
-    }
-    if (c === ">") {
-      if (line[i + 1] === ">") { tokens.push({ op: ">>" }); i += 2; } else { tokens.push({ op: ">" }); i += 1; }
+/** True when every character of a single simple command is whitelisted — plain characters outside
+ *  single quotes, and single-quoted runs (no nested `'`) treated as opaque. Fails closed on an
+ *  unterminated quote. Used to gate the AC1 ancestor exemption (#1734, Codex round 3). */
+function ac1CommandWhitelisted(command: string): boolean {
+  for (let i = 0; i < command.length;) {
+    const c = command[i]!;
+    if (c === "'") {
+      const close = command.indexOf("'", i + 1);
+      if (close < 0) return false;
+      i = close + 1;
       continue;
     }
-    // a word: plain or quoted, ending at whitespace or an operator
-    let word = "";
-    while (i < n) {
-      const ch = line[i]!;
-      if (ch === " " || ch === "\t" || ch === "<" || ch === ">") break;
-      if (ch === "'" || ch === '"') {
-        const close = line.indexOf(ch, i + 1);
-        if (close < 0) return null; // unterminated quote
-        word += line.slice(i, close + 1);
-        i = close + 1;
-        continue;
-      }
-      word += ch; i += 1;
-    }
-    tokens.push({ word });
+    if (!GUARD_STATE_AC1_OUTSIDE_QUOTE.test(c)) return false;
+    i += 1;
   }
-  return tokens;
+  return true;
 }
 
-/** Validate the token sequence of a strippable-heredoc command line and return the delimiter value,
- *  or `null`. Exactly `cat`/`tee`, one `<<'DELIM'`, the target redirect/operand, nothing else. */
-function validateStrippableShape(tokens: readonly HeredocToken[]): string | null {
-  const first = tokens[0];
-  if (!first || !("word" in first) || (first.word !== "cat" && first.word !== "tee")) return null;
-  const isTee = first.word === "tee";
-  let delimiter: string | null = null;
-  let catRedirects = 0;
-  let teeTargets = 0;
-  for (let i = 1; i < tokens.length; i += 1) {
-    const t = tokens[i]!;
-    if ("op" in t && t.op === "<<") {
-      if (delimiter !== null) return null; // more than one heredoc
-      const d = tokens[i + 1];
-      if (!d || !("word" in d) || !GUARD_STATE_STRIP_DELIMITER.test(d.word)) return null;
-      delimiter = d.word.slice(1, -1);
-      i += 1; continue;
-    }
-    if (!isTee && "op" in t && (t.op === ">" || t.op === ">>")) {
-      const target = tokens[i + 1];
-      if (!target || !("word" in target)) return null; // redirect needs a target word
-      catRedirects += 1;
-      i += 1; continue;
-    }
-    if (isTee && "word" in t) {
-      if (t.word === "-a") continue; // tee append flag
-      teeTargets += 1;
-      continue;
-    }
-    return null; // any other token (a `>` for tee, a bare op, etc.) disqualifies
-  }
-  if (delimiter === null) return null;
-  if (!isTee && catRedirects !== 1) return null; // cat writes to exactly one redirect target
-  if (isTee && teeTargets !== 1) return null;     // tee writes to exactly one target operand
-  return delimiter;
-}
+/** The command line of a strippable heredoc, as one anchored whitelist. A target is
+ *  `[A-Za-z0-9._/@+-]+` (no `$`, quotes, spaces, or metacharacters); the delimiter is a plain
+ *  single-quoted word; the redirect may precede or follow the `<<`. Single spaces only. */
+const GUARD_STATE_STRIPPABLE_HEREDOC_LINE = new RegExp(
+  "^(?:" +
+    "cat >>? ?[A-Za-z0-9._/@+-]+ <<'[A-Za-z_][A-Za-z0-9_]*'" + "|" + // cat > T <<'D'
+    "cat <<'[A-Za-z_][A-Za-z0-9_]*' >>? ?[A-Za-z0-9._/@+-]+" + "|" + // cat <<'D' > T
+    "tee (?:-a )?[A-Za-z0-9._/@+-]+ <<'[A-Za-z_][A-Za-z0-9_]*'" + "|" + // tee [-a] T <<'D'
+    "tee (?:-a )?<<'[A-Za-z_][A-Za-z0-9_]*' [A-Za-z0-9._/@+-]+" + // tee [-a] <<'D' T
+  ")$",
+  "u",
+);
 
 /**
- * If the WHOLE command is exactly one `cat`/`tee` command writing a single quoted heredoc to a
- * target — `cat > T <<'D'`, `cat >> T <<'D'`, `tee [-a] T <<'D'`, redirect either side of the `<<`,
- * the body terminated by a line equal to `D`, and NOTHING after the terminator — return that command
- * line with the body removed (the caller still classifies `T`). Otherwise `null`: the body is kept
- * and scanned. Deliberately strict; any deviation (a second command, pipe, substitution, staged
- * script, non-`cat`/`tee` consumer, unterminated body) falls back.
+ * If the command's first line is exactly a `cat`/`tee` heredoc of the whitelisted shape, the body is
+ * terminated by a line equal to the delimiter that is the last line (bar one trailing newline), and
+ * nothing deviates, return that first line with the body removed (the caller still classifies the
+ * target). Otherwise `null`: the body is kept and scanned. The whitelist regex is the whole gate —
+ * a `#`, `\`, `$`, substitution, brace, glob, second command, or process substitution all fail it.
  */
 function matchStrippableHeredoc(command: string): string | null {
-  const firstNewline = command.indexOf("\n");
-  if (firstNewline < 0) return null; // a heredoc needs a body on later lines
-  const commandLine = command.slice(0, firstNewline);
-  if (GUARD_STATE_HEREDOC_LINE_FORBIDDEN.test(commandLine)) return null;
-  const tokens = tokenizeHeredocCommandLine(commandLine);
-  if (tokens === null) return null;
-  const delimiter = validateStrippableShape(tokens);
-  if (delimiter === null) return null;
-  const lines = command.slice(firstNewline + 1).split("\n");
-  let terminator = -1;
-  for (let k = 0; k < lines.length; k += 1) {
-    if (lines[k] === delimiter) { terminator = k; break; } // bash matches a body line exactly
-  }
+  const newline = command.indexOf("\n");
+  if (newline < 0) return null; // a heredoc needs a body on later lines
+  const commandLine = command.slice(0, newline);
+  if (!GUARD_STATE_STRIPPABLE_HEREDOC_LINE.test(commandLine)) return null;
+  const delimiter = /<<'([A-Za-z_][A-Za-z0-9_]*)'/u.exec(commandLine)?.[1];
+  if (delimiter === undefined) return null;
+  const lines = command.slice(newline + 1).split("\n");
+  const terminator = lines.indexOf(delimiter); // bash: the first body line equal to the delimiter
   if (terminator < 0) return null; // unterminated → keep the body
-  for (let k = terminator + 1; k < lines.length; k += 1) {
-    if (lines[k]!.trim() !== "") return null; // a staged command after the terminator → keep the body
-  }
+  const last = lines.length - 1;
+  if (terminator !== last && !(terminator === last - 1 && lines[last] === "")) return null; // content after → keep
   return commandLine;
 }
 
@@ -2934,31 +2811,21 @@ function matchStrippableHeredoc(command: string): string | null {
 export interface PreparedGuardStateCommand { scan: string; parse: string }
 
 /**
- * Rewrite a command for the guard-state classifier, returning two readings (see
- * `PreparedGuardStateCommand`). `scan` is the raw text with only a provably-inert stripped heredoc
- * body removed; the literal-path text scan reads it, so no rewrite can hide a literal hook path.
- * `parse` is the text the tokenizer reads: a strippable heredoc has its body removed, every unquoted
- * `#` is escaped so the tokenizer cannot run a comment to the end of the command, and a `${...}` the
- * tokenizer would reject is reduced to its leading name (unless it holds an executable substitution).
+ * Rewrite a command for the guard-state classifier, returning two readings. `scan` is the raw text
+ * with only a whitelisted strippable heredoc body removed; the literal-path text scan reads it, so
+ * no rewrite can hide a literal hook path. `parse` is the text the tokenizer reads: the same, with
+ * every `#` escaped so `shell-quote` cannot run a comment to the end of the command and swallow a
+ * later command (the #1734 under-refusal fix). Escaping only ADDS text, so it can never hide a reach;
+ * there is no `${...}` reduction and no quote-state modelling.
  */
 export function prepareGuardStateCommand(command: string): PreparedGuardStateCommand {
   const stripped = matchStrippableHeredoc(command);
   if (stripped !== null) return { scan: stripped, parse: stripped };
   let parse = "";
-  let quote: "'" | '"' | null = null;
-  for (let i = 0; i < command.length;) {
+  for (let i = 0; i < command.length; i += 1) {
     const c = command[i]!;
-    if (quote === "'") { parse += c; if (c === "'") quote = null; i += 1; continue; }
-    if (quote === '"') {
-      if (c === "\\") { parse += c + (command[i + 1] ?? ""); i += 2; continue; }
-      if (c === "$" && command[i + 1] === "{") { const r = reduceSubstitutionAt(command, i); parse += r.text; i = r.next; continue; }
-      parse += c; if (c === '"') quote = null; i += 1; continue;
-    }
-    if (c === "\\") { parse += c + (command[i + 1] ?? ""); i += 2; continue; } // keep an escaped pair whole
-    if (c === "'" || c === '"') { quote = c; parse += c; i += 1; continue; }
-    if (c === "#") { parse += "\\#"; i += 1; continue; } // neutralise: a `#` never starts a comment
-    if (c === "$" && command[i + 1] === "{") { const r = reduceSubstitutionAt(command, i); parse += r.text; i = r.next; continue; }
-    parse += c; i += 1;
+    if (c === "\\") { parse += c + (command[i + 1] ?? ""); i += 1; continue; } // keep an escaped pair whole
+    parse += c === "#" ? "\\#" : c;
   }
   return { scan: command, parse };
 }
@@ -2976,9 +2843,9 @@ export function commandTargetsGuardState(
 ): string | null {
   if (!directory || !command || command.length > MAX_COMMAND_LENGTH || command.includes("\0")) return null;
   const root = resolve(directory);
-  // Read the command as bash would before matching: comments, quoted copy-only heredoc bodies, and
-  // substitutions the tokenizer rejects all turned into wrong verdicts otherwise (#1734). The text
-  // scan reads `scan` (literal paths kept everywhere bash could reach); the tokenizer reads `parse`.
+  // Two readings (#1734): a whitelisted `cat`/`tee` heredoc has its body removed, and every `#` is
+  // escaped so the tokenizer cannot run a comment to the end of the command. The text scan reads
+  // `scan` (literal paths kept everywhere bash could reach); the tokenizer reads `parse`.
   const { scan: scanText, parse: parseText } = prepareGuardStateCommand(command);
   const foldCase = process.platform === "win32" || process.platform === "darwin";
   const haystack = foldCase ? scanText.toLowerCase() : scanText;
@@ -3073,32 +2940,21 @@ export function commandTargetsGuardState(
     }
     return enclosing ? guardStateUninspectableRefusal(UNMODELLED_SHAPE_REASON) : null;
   }
-  // AC1 (#1734): a SINGLE simple command whose only ancestor operand sits in a slot the command
-  // never opens — a pure builtin's argument, or the pattern/script of grep/sed/awk — is allowed.
-  // Only the ancestor check is relaxed here; the `inside` check below (with symlink resolution) and
-  // the raw-text scan still refuse anything resolving into the state. The exemption is by POSITION
-  // and requires the command word to be the first token (no leading redirect/assignment).
+  // AC1 (#1734): a SINGLE simple command whose command word is a pure builtin that opens no operand
+  // (echo/printf/true/false/:), with no redirect and every character whitelisted, is allowed even
+  // when it names `/`, `//`, or `~`. Only the ancestor check is relaxed; the `inside` check below
+  // (with symlink resolution) and the raw-text scan still refuse anything resolving into the state.
+  // The command word must be the first token (no leading redirect/assignment), and the whitelist
+  // (no `$`, backtick, `\`, `"`, `#`, braces, globs, or extra operators) keeps out any expansion or
+  // substitution that could reach — so this needs no bash modelling (Codex round 3).
   if (segments.length === 1) {
     const { operands, words, redirects } = segments[0]!;
-    const nonPath = words !== null && words.length > 0 && operands[0] === words[0]
-      ? nonPathWordIndices(words)
-      : null;
-    if (nonPath !== null && words !== null) {
-      let reaches = false;
-      // echo/printf admit no redirect at all; any redirect disqualifies the pure exemption.
-      let pathAncestor = GUARD_STATE_NONPATH_COMMANDS.has(words[0]!) && redirects.length > 0;
-      words.forEach((value, index) => {
-        const relation = wordRelation(value);
-        if (relation === "inside") reaches = true;
-        else if (relation === "ancestor" && !nonPath.has(index)) pathAncestor = true;
-      });
-      for (const target of redirects) {
-        if (target === null) continue;
-        const relation = wordRelation(target);
-        if (relation === "inside") reaches = true;
-        else if (relation === "ancestor") pathAncestor = true;
-      }
-      if (!reaches && !pathAncestor) return null; // provably non-reaching → allowed
+    if (words !== null && words.length > 0 && operands[0] === words[0] &&
+        GUARD_STATE_NONPATH_COMMANDS.has(words[0]!) && redirects.length === 0 &&
+        ac1CommandWhitelisted(command)) {
+      // A pure builtin opens none of its operands; still refuse if one resolves inside the state.
+      const reaches = operands.some((value) => value !== null && wordRelation(value) === "inside");
+      if (!reaches) return null; // names at most an ancestor it cannot open → allowed
     }
   }
   let namesAncestor = false;

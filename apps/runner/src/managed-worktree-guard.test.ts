@@ -1314,25 +1314,20 @@ test("a variable the command itself assigns is judged by its value (#1632 review
   assert.equal(commandTargetsGuardState("S=/tmp/x; for d in a b; do cat $S/$d/outdated.txt; done", project, directory), null);
 });
 
-test("a substitution the tokenizer cannot balance is refused for that reason, not blamed on guard state (#1632)", (t) => {
+test("a ${...} the tokenizer cannot parse is refused as a documented residual, not blamed on guard state (#1734)", (t) => {
   const { project, directory } = guardLayout(t);
-  // A `${...}` bash accepts but the tokenizer once rejected — an embedded space, a `%`/`#`/`:`
-  // operator — is reduced to its leading name in a single simple command, so the command is judged
-  // on its merits instead of refused outright (#1734).
-  for (const command of ["echo ${scrollHeight - 500}", "echo ${r%% *}"]) {
-    assert.equal(commandTargetsGuardState(command, project, directory), null, command);
-  }
-  // A substitution the tokenizer cannot even balance stays refused, and says the tokenizer is why.
-  // A `${...}` holding an executable substitution is kept verbatim so the tokenizer still refuses it,
-  // and a heredoc body fed to a non-`cat`/`tee` consumer (node here) is kept and scanned (#1734).
+  // The `${...}` reduction was removed (it caused the round-2/round-3 bypasses CR-2.6 and CR-3.2), so
+  // a substitution the tokenizer rejects outside a heredoc — an embedded space, a `%`/`#`/`:`
+  // operator, an executable inner, an unbalanced brace, or a kept interpreter heredoc body — is
+  // refused. That is an accepted residual (the issue's `${...}` cases live inside heredoc bodies).
   for (const command of [
-    "echo ${x", "echo \"${y",
+    "echo ${r%% *}", "echo ${scrollHeight - 500}", "echo ${x", "echo \"${y",
     "echo ${X:-$(cat ../.wollipog-data/hooks/s1.protections.json)}",
     "node - <<'EOF'\nconsole.log(`${items.join(\", \")}`)\nEOF",
   ]) {
     assert.ok(commandTargetsGuardState(command, project, directory) !== null, command);
   }
-  // The two balance failures name the tokenizer as the reason, not the guard state.
+  // A balance failure names the tokenizer as the reason, not the guard state.
   for (const command of ["echo ${x", "echo \"${y"]) {
     const verdict = commandTargetsGuardState(command, project, directory);
     assert.ok(verdict?.startsWith(GUARD_STATE_UNINSPECTABLE_PREFIX) && verdict.includes("Bad substitution"), `${command}: ${verdict}`);
@@ -1413,25 +1408,17 @@ test("ordinary commands reaching nothing are allowed, and every real access stay
     "tee out.txt <<'EOF'\n/usr/bin\nEOF",
     `cat > notes.md <<'EOF'\n${directory}\nEOF`,
     "cat > scratch.ts <<'EOF'\n/ // ${x}\nEOF",
-    // A substitution bash accepts but the tokenizer rejects no longer refuses on its own.
-    "echo ${r%% *}",
-    "echo ${scrollHeight - 500}",
-    "x=foo; echo ${x%% *}",
-    // A comment that ends at its line leaves the real command on the next line intact.
+    // A `#` that is escaped (not dropped) keeps the real command intact; a body `#` does not swallow.
     "echo done # a trailing note",
-    // ANSI-C `$'...'` is modelled, so a benign one with escapes and a following comment is allowed.
-    "printf $'a\\tb\\n'",
     "echo $'hi' # a note",
-    // A benign kept heredoc with a comment in its body does not refuse the command after it, and a
-    // mid-word `#` in a body stays literal rather than splitting into a spurious `/` ancestor.
     "bash <<'EOF'\necho hi # a note\nEOF\necho done",
     "bash <<'EOF'\nx=a#/b\nEOF\necho done",
     "bash <<'EOF'\n#!/bin/sh\necho hi\nEOF\necho done",
-    // AC1: a SINGLE simple command that NAMES `/`, `//`, or `~` but cannot reach the hook state is
-    // allowed — a pure builtin never opens its operands, and the pattern/script of grep/sed/awk is
-    // not a path.
+    // AC1: a SINGLE simple command that NAMES `/`, `//`, or `~` but cannot reach is allowed — a pure
+    // builtin (echo/printf/true/false/:) opens none of its operands. (grep/sed/awk were dropped from
+    // AC1 as they could not be made whitelist-tight; `grep '//'` is now a documented residual.)
     "echo /", "echo // ~", "printf '%s\\n' //", "true /", ": /",
-    "grep '//' file.ts", "grep -n '//' file.ts", "grep -i -n // src.ts",
+    // sed/awk with the slash embedded in the script word (not a standalone ancestor) still allow.
     "sed 's|/|_|g' file", "awk '/\\//{print}' file",
   ]) {
     assert.equal(commandTargetsGuardState(command, project, directory), null, command);
@@ -1505,6 +1492,17 @@ test("ordinary commands reaching nothing are allowed, and every real access stay
     `cat <<'EOF'\n${into}\nEOF`,
     `cat <<-'EOF'\n${into}\nEOF`,
     `echo / > ${join(directory, "x")}`,
+    // Codex round-3 class: a `#` comment or an escaped `<` before the `<<`, an ANSI-C quote that
+    // desyncs a modeller, and brace expansion before the ancestor exemption — all closed by the
+    // whitelist (the first line / every word must be whitelist-clean), so each keeps the reach.
+    `tee # <<'EOF'\ncat ${join(directory, "s1.protections.json")}\nEOF`,
+    `cat > f\\<<'EOF'\ncat ${join(directory, "s1.protections.json")}\nEOF`,
+    `echo $'\\'\${X'; cat ${into}; echo '}'`,
+    `grep / {-R,${into}}`,
+    // Documented residuals now refused: a `${...}` the tokenizer rejects outside a heredoc, and a
+    // grep/sed/awk pattern naming a standalone ancestor (grep/sed/awk dropped from AC1).
+    "echo ${r%% *}",
+    "grep '//' file.ts",
     // The ancestor and root triggers the report lists.
     "find / -name s1.protections.json",
     `cd / && cat ${directory.slice(1)}/s1.protections.json`,
@@ -1576,4 +1574,35 @@ test("a heredoc never strips the command that follows it, whatever precedes it (
   const read = fc.constantFrom(`cat ${abs}`, `/bin/cat ${abs}`, `head ${abs}`, `rm -rf ${abs}`);
   fc.assert(fc.property(prefix, heredoc, read, (p, h, r) =>
     commandTargetsGuardState(`${p}${h}${r}\n`, project, directory) !== null), { numRuns: 3000 });
+});
+
+test("injecting any forbidden character into a strippable shape falls back to scanning the body (#1734 Codex round 3)", (t) => {
+  const { project, directory } = guardLayout(t);
+  const abs = join(directory, "s1.protections.json");
+  // A character the whitelist does not recognise anywhere in the command line must disqualify the
+  // strip, so the body — here a read of the hook file — is kept and scanned, and refused. This is
+  // the regression guard for the "syntax the pre-pass doesn't model" class (comments, escapes,
+  // substitutions, braces, globs, extra quotes/operators).
+  // `<`/`>` are deliberately excluded: they are structural operators the whitelist DOES model, so an
+  // injected `>` can form a valid `>>` append rather than breaking the shape. Everything here is a
+  // character no whitelisted shape recognises (comment, escape, substitution, brace, glob, operator,
+  // quote, odd whitespace, tilde) — exactly the syntax classes that produced the round 1–3 bypasses.
+  const forbidden = fc.constantFrom("#", "\\", "$", "`", "(", ")", "{", "}", "*", "?", "[", "]",
+    ";", "&", "|", '"', "  ", "\t", "\r", "~");
+  const shape = fc.constantFrom(
+    (x: string) => `cat > t${x}gt <<'EOF'\n/bin/cat ${abs}\nEOF`,
+    (x: string) => `cat ${x}> tgt <<'EOF'\n/bin/cat ${abs}\nEOF`,
+    (x: string) => `tee tgt${x} <<'EOF'\n/bin/cat ${abs}\nEOF`,
+    (x: string) => `cat > tgt <<'EOF${x}'\n/bin/cat ${abs}\nEOF`,
+  );
+  fc.assert(fc.property(forbidden, shape, (ch, make) =>
+    commandTargetsGuardState(make(ch), project, directory) !== null), { numRuns: 2000 });
+  // Control: the same shapes WITHOUT a forbidden character strip the body (a worktree file write),
+  // so a benign body is allowed — confirming the fallback above is caused by the injected character.
+  for (const make of [
+    (b: string) => `cat > tgt <<'EOF'\n${b}\nEOF`,
+    (b: string) => `tee tgt <<'EOF'\n${b}\nEOF`,
+  ]) {
+    assert.equal(commandTargetsGuardState(make("// a / b"), project, directory), null, make("// a / b"));
+  }
 });
