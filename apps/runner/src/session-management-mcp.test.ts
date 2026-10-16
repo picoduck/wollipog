@@ -883,6 +883,7 @@ test("get_agent_capabilities projects advertised metadata and exact effort fallb
           capabilities: {
             modelSource: "cached",
             effortLevels: ["low", "high"],
+            permissionModes: ["read-only", "on-request", "danger-full-access", "orchestrator", 7],
             models: [
               {
                 id: "model-own", displayName: "Model Own", default: true,
@@ -906,6 +907,10 @@ test("get_agent_capabilities projects advertised metadata and exact effort fallb
   assert.equal(result.agent.command, undefined);
   assert.equal(result.discovery.modelSource, "cached");
   assert.deepEqual(result.harnessEfforts, ["low", "high"]);
+  assert.deepEqual(result.permissionModes, {
+    supported: ["read-only", "on-request", "danger-full-access", "orchestrator"],
+    selectable: ["orchestrator"],
+  }, "harness-specific modes are reported but only create_session's accepted modes are selectable (#3271)");
   assert.deepEqual(result.models, [{
     id: "model-own", displayName: "Model Own", default: true, hidden: false,
     description: "Provider description", contextWindow: 200_000, inputModalities: ["text", "image"],
@@ -929,6 +934,37 @@ test("get_agent_capabilities projects advertised metadata and exact effort fallb
   assert.equal(hidden.models[0].hidden, true);
   assert.equal(hidden.models[0].effortSource, "model");
   assert.equal(hidden.page.targeted, true);
+  assert.deepEqual(hidden.permissionModes, result.permissionModes, "a targeted lookup reports the same modes");
+});
+
+test("get_agent_capabilities reports Claude permission modes without bypass-equivalent selections", async () => {
+  const { deps } = makeDeps(() => ({
+    status: 200,
+    body: { runners: [{ runnerId: "r1", agents: [
+      {
+        id: "claude-code", driver: "claude-code", capabilities: {
+          models: [{ id: "opus" }], effortLevels: [], slashCommands: [],
+          supportsImages: true, supportsApprovals: true,
+          permissionModes: ["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions", "orchestrator"],
+        },
+      },
+      {
+        id: "no-modes", capabilities: {
+          models: [{ id: "fixed" }], effortLevels: [], slashCommands: [],
+          supportsImages: false, supportsApprovals: false,
+        },
+      },
+    ] }] },
+  }));
+  const claude = resultJson(await callTool(deps, "get_agent_capabilities", {
+    runnerId: "r1", agentId: "claude-code",
+  }));
+  assert.deepEqual(claude.permissionModes, {
+    supported: ["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions", "orchestrator"],
+    selectable: ["default", "acceptEdits", "plan", "auto", "orchestrator"],
+  });
+  const none = resultJson(await callTool(deps, "get_agent_capabilities", { runnerId: "r1", agentId: "no-modes" }));
+  assert.deepEqual(none.permissionModes, { supported: [], selectable: [] });
 });
 
 test("get_agent_capabilities distinguishes missing discovery from supported no-effort models", async () => {
@@ -949,6 +985,7 @@ test("get_agent_capabilities distinguishes missing discovery from supported no-e
   }));
   assert.deepEqual(missing.discovery, { status: "unavailable", reason: "not_advertised", modelSource: null });
   assert.deepEqual(missing.models, []);
+  assert.deepEqual(missing.permissionModes, { supported: [], selectable: [] });
 
   const fixed = resultJson(await callTool(deps, "get_agent_capabilities", {
     runnerId: "r1", agentId: "fixed",
@@ -977,6 +1014,8 @@ test("get_agent_capabilities treats the orchestrator-only ACP marker as session-
     status: "unavailable", reason: "session_negotiated", modelSource: null,
   });
   assert.deepEqual(result.models, []);
+  assert.deepEqual(result.permissionModes, { supported: ["orchestrator"], selectable: ["orchestrator"] },
+    "the marker still proves the orchestrator preset");
 });
 
 test("get_agent_capabilities fails closed for invisible installations and invalid bounds", async () => {
@@ -2269,6 +2308,33 @@ test("create_session refuses bypassPermissions and a missing workspace — no fe
     assert.match(resultText(result), why);
     assert.equal(calls.length, 0);
   }
+});
+
+test("create_session points callers to get_agent_capabilities for permission modes (#3271)", async () => {
+  const { deps, calls } = makeDeps(() => ({
+    status: 409,
+    body: {
+      error: 'permission mode "default" is not supported by this agent installation; supported permission modes: read-only, on-request',
+    },
+  }));
+  const tool = TOOLS.find((candidate) => candidate.name === "create_session")!;
+  assert.match(tool.description, /get_agent_capabilities.*permissionModes\.selectable/su);
+  const property = (tool.inputSchema as { properties: Record<string, { description?: string }> }).properties.permissionMode!;
+  assert.match(property.description ?? "", /get_agent_capabilities/u);
+
+  const schemaRefusal = await callTool(deps, "create_session", {
+    runnerId: "r1", agentId: "codex", workspaceId: "ws", permissionMode: "read-only",
+  });
+  assert.equal(schemaRefusal.isError, true);
+  assert.match(resultText(schemaRefusal), /get_agent_capabilities/u);
+  assert.equal(calls.length, 0);
+
+  const installationRefusal = await callTool(deps, "create_session", {
+    runnerId: "r1", agentId: "codex", workspaceId: "ws", permissionMode: "default",
+  });
+  assert.equal(installationRefusal.isError, true);
+  assert.match(resultText(installationRefusal), /supported permission modes: read-only, on-request/u,
+    "the control plane's list of supported modes reaches the caller");
 });
 
 test("set_guardrails without either limit refuses — no fetch", async () => {

@@ -164,6 +164,17 @@ function advertisedStrings(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
+/** The installation's advertised permission modes, plus the subset create_session accepts. Codex
+ * sandbox modes and bypass-equivalent Claude modes are installation truth but never selectable
+ * here, so an empty `selectable` tells the caller to omit permissionMode (#3271). */
+function mapPermissionModes(capabilities: Json): { supported: string[]; selectable: string[] } {
+  const supported = advertisedStrings(capabilities?.permissionModes);
+  return {
+    supported,
+    selectable: supported.filter((mode) => (WORKER_PERMISSION_MODES as readonly string[]).includes(mode)),
+  };
+}
+
 /** Project one installation's model catalog without exposing runner-local launch configuration.
  * Per-model effort arrays use the same fallback rule as session creation and the UI: a non-empty
  * model list wins, otherwise the harness list applies, otherwise the model has no effort knob. */
@@ -1064,7 +1075,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "get_agent_capabilities",
     description:
-      "Read the advertised model and reasoning-effort capabilities for one visible runner and agent installation without launching a child. Hidden models are excluded by default; exact modelId lookup remains available for persisted hidden selections. Results are bounded and creation revalidates every selected pair.",
+      "Read the advertised model, reasoning-effort, and permission-mode capabilities for one visible runner and agent installation without launching a child. permissionModes.supported lists the installation's modes; permissionModes.selectable is the subset create_session accepts, and when it is empty omit permissionMode. Hidden models are excluded by default; exact modelId lookup remains available for persisted hidden selections. Results are bounded and creation revalidates every selected pair.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1128,12 +1139,14 @@ export const TOOLS: McpTool[] = [
             modelSource: null,
           },
           harnessEfforts: [],
+          permissionModes: mapPermissionModes(capabilities),
           models: [],
           page: { offset: 0, limit: args.limit ?? DEFAULT_MODEL_PAGE_SIZE, returned: 0, total: 0, nextOffset: null, truncated: false },
         });
       }
 
       const harnessEfforts = advertisedStrings(capabilities.effortLevels);
+      const permissionModes = mapPermissionModes(capabilities);
       const allModels = Array.isArray(capabilities.models)
         ? capabilities.models.filter((model: Json) => typeof model?.id === "string" && model.id)
         : [];
@@ -1145,6 +1158,7 @@ export const TOOLS: McpTool[] = [
           agent: agentView,
           discovery: { status: "available", modelSource: capabilities.modelSource ?? null },
           harnessEfforts,
+          permissionModes,
           models: [mapAgentModel(model, harnessEfforts)],
           page: { offset: 0, limit: 1, returned: 1, total: 1, nextOffset: null, truncated: false, targeted: true },
         });
@@ -1160,6 +1174,7 @@ export const TOOLS: McpTool[] = [
         agent: agentView,
         discovery: { status: "available", modelSource: capabilities.modelSource ?? null },
         harnessEfforts,
+        permissionModes,
         models,
         hiddenModelsExcluded: includeHidden ? 0 : allModels.length - visibleModels.length,
         page: {
@@ -2647,7 +2662,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "create_session",
     description:
-      "Start a child session with an optional model and reasoning effort applied before its initial task. An Orchestrator passes campaignWorkItemId to record the child's attempt on that campaign work item before the task is delivered; if the attempt cannot be recorded, no child is created. Unsupported model/effort pairs fail before launch; omitting effort preserves saved/default resolution. It gets its own worktree unless you pass useWorktree: false, so its branch, diff, checkpoints, review, and PR state are visible. Omitted cost and tool-call limits remain unlimited unless Project defaults, a finite parent ceiling, or governance policy supplies them; explicit 0 opts out when the parent is unbounded. The result reports the effective model, effort, and each guardrail as a value or null (none). A pending human approval returns after about 45 seconds, stating how long the control plane keeps it pending between calls; repeat the identical call promptly, without ending your turn, to keep waiting. Subject to session permissions and governance policies.",
+      "Start a child session with an optional model and reasoning effort applied before its initial task. An Orchestrator passes campaignWorkItemId to record the child's attempt on that campaign work item before the task is delivered; if the attempt cannot be recorded, no child is created. Unsupported model/effort pairs fail before launch; omitting effort preserves saved/default resolution. Permission modes differ per agent installation: read get_agent_capabilities permissionModes.selectable before passing permissionMode, or omit it for the installation's default. It gets its own worktree unless you pass useWorktree: false, so its branch, diff, checkpoints, review, and PR state are visible. Omitted cost and tool-call limits remain unlimited unless Project defaults, a finite parent ceiling, or governance policy supplies them; explicit 0 opts out when the parent is unbounded. The result reports the effective model, effort, and each guardrail as a value or null (none). A pending human approval returns after about 45 seconds, stating how long the control plane keeps it pending between calls; repeat the identical call promptly, without ending your turn, to keep waiting. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2660,7 +2675,11 @@ export const TOOLS: McpTool[] = [
         useWorktree: { type: "boolean", description: "Defaults to true; pass false to run the child in place in the workspace directory" },
         model: { type: "string" },
         effort: { type: "string", minLength: 1, description: "Reasoning effort supported by the selected model and agent installation" },
-        permissionMode: { type: "string", enum: [...WORKER_PERMISSION_MODES] },
+        permissionMode: {
+          type: "string",
+          enum: [...WORKER_PERMISSION_MODES],
+          description: "One of this installation's modes from get_agent_capabilities permissionModes.selectable; omit for the default",
+        },
         costBudgetUsd: { type: "number" },
         maxToolCalls: { type: "number" },
         maxChildSessions: { type: "integer", minimum: 0, maximum: 64 },
@@ -2681,7 +2700,8 @@ export const TOOLS: McpTool[] = [
       }
       if (args.permissionMode !== undefined && !WORKER_PERMISSION_MODES.includes(args.permissionMode)) {
         return errorResult(
-          `permissionMode must be one of ${WORKER_PERMISSION_MODES.join(", ")} — bypassPermissions is never allowed`,
+          `permissionMode must be one of ${WORKER_PERMISSION_MODES.join(", ")} — bypassPermissions is never allowed. ` +
+            "get_agent_capabilities permissionModes.selectable lists the modes this installation accepts.",
         );
       }
       if (args.campaignWorkItemId !== undefined &&

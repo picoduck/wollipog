@@ -207,7 +207,12 @@ test("capability config validation rejects unverified effort and permission mode
   };
   assert.match(capabilityConfigError({ effort: "max" }, caps)!, /effort/);
   assert.match(capabilityConfigError({ model: "missing" }, { ...caps, models: [{ id: "known" }] })!, /model/);
-  assert.match(capabilityConfigError({ permissionMode: "auto" }, caps)!, /permission mode/);
+  assert.equal(capabilityConfigError({ permissionMode: "auto" }, { ...caps, permissionModes: ["acceptEdits", "plan"] }),
+    'permission mode "auto" is not supported by this agent installation; supported permission modes: acceptEdits, plan',
+    "the refusal names the modes the caller can choose instead (#3271)");
+  assert.equal(capabilityConfigError({ permissionMode: "default" }, { ...caps, permissionModes: undefined }),
+    'permission mode "default" is not supported by this agent installation, which advertises no permission modes',
+    "an installation without modes says so instead of listing nothing");
   assert.equal(capabilityConfigError({ effort: "low", permissionMode: "acceptEdits" }, caps), null);
   const perModelCaps = {
     ...caps,
