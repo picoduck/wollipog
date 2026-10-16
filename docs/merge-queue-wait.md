@@ -17,16 +17,21 @@ The window defaults to the last 48 hours. `--timeout-minutes` should match the
 ruleset's `check_response_timeout_minutes` for that window.
 
 For each completed merge-group CI run created in the window, it reads the jobs of
-that run's attempt. GitHub creates a job when its dependencies finish, so a job's
-created-to-started span is its wait for a runner. It reports median, p90, and
-maximum for:
+that run's first attempt, the one the queue waited on. A rerun copies the earlier
+attempt's finished jobs with new creation times, so a later attempt's timeline
+cannot be read as waits. GitHub creates a job when its dependencies finish, so a
+job's created-to-started span is its wait for a runner. It reports median, p90,
+and maximum for:
 
 - **Run created to required result:** when the aggregator completed.
-- **Critical path executing:** the execution of the dependency that finished last,
-  plus the aggregator's own execution.
+- **Critical path executing:** the summed execution of the chain of jobs ending at
+  the aggregator. The jobs API does not name dependencies, so the chain is rebuilt
+  from timing: a job created after the run started was created when the latest job
+  to finish by then completed, as in the settings-rows change detection followed by
+  its comparison.
 - **Critical path waiting:** the rest of the time to the required result.
 - **Longest job wait for a runner**, **aggregator wait after dependencies**,
-  **longest job execution**, and **run wall time**.
+  **longest job execution**, and **run created to last job finished**.
 
 It also counts runs whose required result came later than the timeout, runs whose
 critical path waited longer than it executed, runs whose aggregator never ran, and
@@ -37,7 +42,9 @@ merge-queue removals by reason, listing each `checks_timed_out` removal.
 Times run from the run's creation. A run can be created well after its queue entry
 (one waited over three hours), and the queue's window starts at the entry, so the
 report understates the window used. Removals are read only for pull requests with
-a merge-group run created in the window. The report does not attribute a wait to a
+a merge-group run created in the window, up to 1,000 per pull request; the report
+says when that bound cut a history short. `--since` and `--until` accept any ISO
+8601 offset and are compared as instants. The report does not attribute a wait to a
 cause; runner contention is the observed pattern, measured separately in #2674.
 
 ## Acceptance Measure

@@ -72,9 +72,15 @@ test("all live queue entries and refs protect an integration, including another 
     if (source === "ref") payload.data.repository.refs.nodes[0].target.oid = sha;
     if (source === "entry") payload.data.repository.mergeQueue.entries.nodes[0].headCommit.oid = sha;
     // The integration's own ref, even pointing somewhere unexpected, keeps it.
-    if (source === "own-ref") payload.data.repository.refs.nodes.push({ name: "pr-42-" + "c".repeat(40), target: { oid: thirdSha } });
+    if (source === "own-ref") payload.data.repository.refs = connection([
+      ...payload.data.repository.refs.nodes, { name: "pr-42-" + "c".repeat(40), target: { oid: thirdSha } },
+    ]);
     assert.equal(obsoleteEvidence(payload, target).obsolete, false, source);
   }
+  // Complete evidence reaches the membership check itself, not the completeness guard (#3343 review).
+  const own = proof();
+  own.data.repository.refs = connection([{ name: "pr-42-" + "c".repeat(40), target: { oid: thirdSha } }]);
+  assert.deepEqual(obsoleteEvidence(own, target), { obsolete: false, reason: "integration-ref-present" });
 });
 
 test("partial, unauthorized, malformed, or uncomputed evidence cannot authorize cancellation", () => {
@@ -163,7 +169,8 @@ test("live or uncomputed groups retain CI and stop at the monitor budget", async
 });
 
 test("transient errors and live observations reset the consecutive-observation proof", async () => {
-  const live = proof(); live.data.repository.refs.nodes.push({ name: "pr-42-" + "c".repeat(40), target: { oid: sha } });
+  const live = proof();
+  live.data.repository.refs = connection([...live.data.repository.refs.nodes, { name: "pr-42-" + "c".repeat(40), target: { oid: sha } }]);
   for (const middle of [new Error("secret error"), live]) {
     const result = await simulate({ proofs: [proof(), middle, proof()] });
     assert.equal(result.cancels.length, 0);

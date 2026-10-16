@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { AGGREGATOR, collect, markdown, options, pullRequestOf, quantile, runMetrics, summarize } from "./merge-queue-wait-report.mjs";
+import {
+  AGGREGATOR, collect, listRemovals, main, markdown, MAX_PAGES, options, pullRequestOf, quantile, runMetrics, summarize,
+} from "./merge-queue-wait-report.mjs";
 
 const repository = "example/project";
 const branch = (n) => `gh-readonly-queue/main/pr-${n}-${"c".repeat(40)}`;
@@ -39,6 +41,25 @@ test("a run's required result splits into critical-path waiting and executing", 
   assert.equal(metrics.aggregatorRan, true);
 });
 
+test("a dependency chain's sequential execution is not counted as waiting (#3343 review)", () => {
+  // Settings-rows comparison depends on change detection; neither waited for a runner.
+  const metrics = runMetrics(run(3, 1, 16), [
+    job("Browser End-to-End Tests (1)", 0, 0, 12),
+    job("Settings-Rows win32 Baselines / Detect Settings-Rows Changes", 0, 0, 5),
+    job("Settings-Rows win32 Baselines / Compare win32 Settings-Rows Baselines", 5, 5, 15),
+    job(AGGREGATOR, 15, 15, 16),
+  ]);
+  assert.equal(metrics.criticalExecutionMinutes, 16);
+  assert.equal(metrics.criticalWaitMinutes, 0);
+  // The same chain, where the comparison waited three minutes for a runner.
+  const waited = runMetrics(run(4, 1, 19), [
+    job("Settings-Rows win32 Baselines / Detect Settings-Rows Changes", 0, 0, 5),
+    job("Settings-Rows win32 Baselines / Compare win32 Settings-Rows Baselines", 5, 8, 18),
+    job(AGGREGATOR, 18, 18, 19),
+  ]);
+  assert.equal(waited.criticalWaitMinutes, 3);
+});
+
 test("an aggregator that never ran leaves the required result unmeasured", () => {
   const metrics = runMetrics(run(2, 2741), [job("Browser End-to-End Tests (1)", 0, 5, 30), job(AGGREGATOR, 30, null, 43, "failure")]);
   assert.equal(metrics.aggregatorRan, false);
@@ -68,7 +89,7 @@ test("the summary counts timeouts, waiting-dominated runs and removal reasons", 
   assert.equal(summary.measures.requiredMinutes.max, 130);
 });
 
-test("collection reads each run's own attempt and only removals inside the window", async () => {
+test("collection reads each run's first attempt and only removals inside the window", async () => {
   const since = at(-60), until = at(120);
   const paths = [];
   const api = async (path, body) => {
@@ -89,7 +110,10 @@ test("collection reads each run's own attempt and only removals inside the windo
   const report = await collect(api, { repository, since, until, timeoutMinutes: 60 });
   assert.equal(report.truncated, false);
   assert.deepEqual(report.metrics.map((m) => m.id), [10, 12]);
-  assert.ok(paths.includes("/repos/example/project/actions/runs/12/attempts/2/jobs?per_page=100"));
+  // A rerun is measured on its first attempt, the one the queue waited on.
+  assert.ok(paths.includes("/repos/example/project/actions/runs/12/attempts/1/jobs?per_page=100"));
+  assert.ok(!paths.some((path) => path.includes("/attempts/2/")));
+  assert.deepEqual(report.metrics.map((m) => m.rerun), [false, true]);
   const listing = new URL(paths[0], "https://x");
   assert.equal(listing.searchParams.get("created"), `${since}..${until}`);
   assert.equal(listing.searchParams.get("event"), "merge_group");
@@ -101,6 +125,69 @@ test("collection reads each run's own attempt and only removals inside the windo
   assert.match(text, /#2699 removed with checks_timed_out/);
   // 62 minutes to the required result, of which the shard ran 22 and the aggregator 0.
   assert.match(text, /\| Critical path waiting \| 40\.0 \| 40\.0 \| 40\.0 \|/);
+});
+
+const timeline = (nodes, hasNextPage = false, endCursor = null) =>
+  ({ data: { repository: { pullRequest: { timelineItems: { pageInfo: { hasNextPage, endCursor }, nodes } } } } });
+
+test("removal history is read page by page, and an unbounded history is marked incomplete (#3343 review)", async () => {
+  const afters = [];
+  const paged = await listRemovals(async (path, body) => {
+    afters.push(body.variables.after);
+    return body.variables.after === null
+      ? timeline([{ createdAt: at(0), reason: "merged" }], true, "cursor-1")
+      : timeline([{ createdAt: at(1), reason: "checks_timed_out" }]);
+  }, repository, 7);
+  assert.deepEqual(afters, [null, "cursor-1"]);
+  assert.deepEqual(paged.nodes.map((node) => node.reason), ["merged", "checks_timed_out"]);
+  assert.equal(paged.truncated, false);
+  const endless = await listRemovals(async () => timeline([], true, "next"), repository, 7);
+  assert.equal(endless.truncated, true);
+  await assert.rejects(listRemovals(async () => timeline([], true, null), repository, 7), /Unreadable merge-queue removals/);
+  await assert.rejects(listRemovals(async () => ({ data: { repository: { pullRequest: { timelineItems: { nodes: [] } } } } }), repository, 7),
+    /Unreadable merge-queue removals/);
+
+  const report = await collect(async (path) => path === "/graphql" ? timeline([], true, "next")
+    : path.includes("/workflows/") ? { total_count: 1, workflow_runs: [run(1, 5)] } : { jobs: [] },
+  { repository, since: at(-1), until: at(1), timeoutMinutes: 120 });
+  assert.equal(report.removalsTruncated, true);
+  assert.match(markdown(report), new RegExp(`more than ${MAX_PAGES * 100} removals`));
+});
+
+test("removals are filtered by instant, whatever offset the bounds are written in (#3343 review)", async () => {
+  const api = async (path) => path === "/graphql" ? timeline([{ createdAt: "2026-10-14T05:30:00Z", reason: "checks_timed_out" }])
+    : path.includes("/workflows/") ? { total_count: 1, workflow_runs: [run(1, 5)] } : { jobs: [] };
+  const offset = await collect(api, { repository, since: "2026-10-14T00:00:00-05:00", until: "2026-10-14T01:00:00-05:00", timeoutMinutes: 120 });
+  assert.equal(offset.summary.timedOut.length, 1);
+  const outside = await collect(api, { repository, since: "2026-10-14T00:00:00Z", until: "2026-10-14T05:29:59.999Z", timeoutMinutes: 120 });
+  assert.equal(outside.summary.timedOut.length, 0);
+  const normalised = options(["--repo", repository, "--since", "2026-10-14T00:00:00-05:00", "--until", "2026-10-14T01:00:00-05:00"]);
+  assert.equal(normalised.since, "2026-10-14T05:00:00.000Z");
+  assert.equal(normalised.until, "2026-10-14T06:00:00.000Z");
+});
+
+test("the CLI never prints an unexpected exception's message (#3343 review)", async () => {
+  const invoke = async (fetchImpl, argv = ["--repo", repository]) => {
+    const errors = [], output = [];
+    const code = await main(argv, { env: { GITHUB_TOKEN: "test-token" }, fetchImpl, out: (line) => output.push(line), err: (line) => errors.push(line) });
+    return { code, errors, output };
+  };
+  const malformed = await invoke(async () => new Response("PRIVATE_RESPONSE_SENTINEL", { status: 200 }));
+  assert.equal(malformed.code, 1);
+  assert.deepEqual(malformed.errors, ["GitHub API request failed: unreadable response or transport error"]);
+  const transport = await invoke(async () => { throw new Error("PRIVATE_RESPONSE_SENTINEL"); });
+  assert.ok(!transport.errors.join("").includes("PRIVATE_RESPONSE_SENTINEL"));
+  const denied = await invoke(async () => new Response("PRIVATE_RESPONSE_SENTINEL", { status: 403 }));
+  assert.deepEqual(denied.errors, ["GitHub API request failed (HTTP 403)"]);
+  const unreadable = await invoke(async () => Response.json({ message: "PRIVATE_RESPONSE_SENTINEL" }));
+  assert.deepEqual(unreadable.errors, ["Unreadable workflow run listing"]);
+  const badArgs = await invoke(async () => { throw new Error("unreached"); }, ["--repo", repository, "--since", "nope"]);
+  assert.deepEqual(badArgs.errors, ["--since must be an ISO 8601 time"]);
+  const noToken = await main(["--repo", repository], { env: {}, err: () => {}, out: () => {} });
+  assert.equal(noToken, 1);
+  const empty = await invoke(async () => Response.json({ total_count: 0, workflow_runs: [] }));
+  assert.equal(empty.code, 0);
+  assert.match(empty.output[0], /0 runs\./);
 });
 
 test("unreadable listings fail instead of reporting partial numbers", async () => {

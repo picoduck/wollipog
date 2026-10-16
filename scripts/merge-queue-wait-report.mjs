@@ -12,12 +12,17 @@ const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 export const MAX_PAGES = 10;
 const POOL = 6;
 const MINUTE = 60_000;
+// GitHub creates a job within seconds of its last dependency finishing.
+const DEPENDENCY_SLACK_MS = 5_000;
 
-export const REMOVALS_QUERY = `query($owner:String!, $repo:String!, $number:Int!) {
+/** A failure this script describes itself; anything else is reported without its message. */
+export class ReportError extends Error {}
+
+export const REMOVALS_QUERY = `query($owner:String!, $repo:String!, $number:Int!, $after:String) {
   repository(owner:$owner, name:$repo) {
     pullRequest(number:$number) {
-      timelineItems(itemTypes:[REMOVED_FROM_MERGE_QUEUE_EVENT], first:100) {
-        pageInfo { hasNextPage }
+      timelineItems(itemTypes:[REMOVED_FROM_MERGE_QUEUE_EVENT], first:100, after:$after) {
+        pageInfo { hasNextPage endCursor }
         nodes { ... on RemovedFromMergeQueueEvent { createdAt reason } }
       }
     }
@@ -28,6 +33,7 @@ const minutes = (from, to) => {
   const span = Date.parse(to) - Date.parse(from);
   return Number.isFinite(span) ? span / MINUTE : null;
 };
+const latest = (jobs) => jobs.reduce((last, job) => !last || Date.parse(job.completed_at) > Date.parse(last.completed_at) ? job : last, null);
 
 export function pullRequestOf(branch) {
   const match = QUEUE_BRANCH.exec(branch ?? "");
@@ -35,27 +41,44 @@ export function pullRequestOf(branch) {
 }
 
 /**
- * One merge-group run's timeline. GitHub creates a job when its dependencies finish, so a job's
- * created-to-started span is its wait for a runner. The required result's time from the run's
- * creation splits into the critical path's execution (the dependency that finished last, then the
- * aggregator) and everything else, which is waiting.
+ * The chain of executed jobs ending at `job`, newest first. A job created after the run started
+ * was created when its last dependency finished, which is the latest job to complete by then; a
+ * job created with the run has no dependency. The jobs API does not name dependencies, so this is
+ * reconstructed from timing.
+ */
+export function criticalPath(run, job, work) {
+  const path = [job];
+  const started = Date.parse(run.created_at);
+  for (let current = job; Date.parse(current.created_at) - started > DEPENDENCY_SLACK_MS;) {
+    const created = Date.parse(current.created_at);
+    const previous = latest(work.filter((candidate) =>
+      !path.includes(candidate) && Date.parse(candidate.completed_at) <= created + DEPENDENCY_SLACK_MS));
+    if (!previous) break;
+    path.push(previous);
+    current = previous;
+  }
+  return path;
+}
+
+/**
+ * One merge-group run's timeline. A job's created-to-started span is its wait for a runner. The
+ * required result's time from the run's creation splits into the execution of its critical path
+ * (see criticalPath) and everything else, which is waiting.
  */
 export function runMetrics(run, jobs) {
   const executed = jobs.filter((job) => job.conclusion !== "skipped" && job.started_at && job.completed_at);
   const aggregator = executed.find((job) => job.name === AGGREGATOR) ?? null;
   const work = executed.filter((job) => job !== aggregator);
   const waits = executed.map((job) => minutes(job.created_at, job.started_at)).filter((value) => value !== null);
-  const last = work.reduce((latest, job) => !latest || Date.parse(job.completed_at) > Date.parse(latest.completed_at) ? job : latest, null);
   const requiredMinutes = aggregator ? minutes(run.created_at, aggregator.completed_at) : null;
-  const executionMinutes = aggregator && last
-    ? minutes(last.started_at, last.completed_at) + minutes(aggregator.started_at, aggregator.completed_at) : null;
+  const executionMinutes = aggregator
+    ? criticalPath(run, aggregator, work).reduce((sum, job) => sum + minutes(job.started_at, job.completed_at), 0) : null;
   return {
     id: run.id,
-    attempt: run.run_attempt,
+    rerun: run.run_attempt > 1,
     pullRequest: pullRequestOf(run.head_branch),
     createdAt: run.created_at,
-    conclusion: run.conclusion,
-    wallMinutes: run.status === "completed" ? minutes(run.created_at, run.updated_at) : null,
+    wallMinutes: executed.length ? minutes(run.created_at, latest(executed).completed_at) : null,
     requiredMinutes,
     criticalExecutionMinutes: executionMinutes,
     criticalWaitMinutes: requiredMinutes !== null && executionMinutes !== null ? requiredMinutes - executionMinutes : null,
@@ -80,7 +103,7 @@ export const MEASURES = [
   ["longestJobWaitMinutes", "Longest job wait for a runner"],
   ["aggregatorWaitMinutes", "Aggregator wait after dependencies"],
   ["longestExecutionMinutes", "Longest job execution"],
-  ["wallMinutes", "Run wall time"],
+  ["wallMinutes", "Run created to last job finished"],
 ];
 
 export function summarize(metrics, removals, timeoutMinutes) {
@@ -121,32 +144,52 @@ export async function listRuns(api, repository, since, until) {
     const body = await api(`/repos/${repository}/actions/workflows/ci.yml/runs?event=merge_group&status=completed` +
       `&exclude_pull_requests=true&created=${encodeURIComponent(`${since}..${until}`)}&per_page=100&page=${page}`);
     if (!Array.isArray(body?.workflow_runs) || !Number.isSafeInteger(body?.total_count))
-      throw new Error("Unreadable workflow run listing");
+      throw new ReportError("Unreadable workflow run listing");
     runs.push(...body.workflow_runs);
     if (runs.length >= body.total_count || body.workflow_runs.length === 0) return { runs, truncated: false };
   }
   return { runs, truncated: true };
 }
 
+/** One pull request's merge-queue removals, every page up to the bound. */
+export async function listRemovals(api, repository, number) {
+  const [owner, repo] = repository.split("/");
+  const nodes = [];
+  let after = null;
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const payload = await api("/graphql", { query: REMOVALS_QUERY, variables: { owner, repo, number, after } });
+    const items = payload?.data?.repository?.pullRequest?.timelineItems;
+    if (payload?.errors?.length || !Array.isArray(items?.nodes) || typeof items?.pageInfo?.hasNextPage !== "boolean")
+      throw new ReportError("Unreadable merge-queue removals");
+    nodes.push(...items.nodes);
+    if (!items.pageInfo.hasNextPage) return { nodes, truncated: false };
+    if (typeof items.pageInfo.endCursor !== "string") throw new ReportError("Unreadable merge-queue removals");
+    after = items.pageInfo.endCursor;
+  }
+  return { nodes, truncated: true };
+}
+
 export async function collect(api, { repository, since, until, timeoutMinutes }) {
   const { runs, truncated } = await listRuns(api, repository, since, until);
   const ci = runs.filter((run) => run?.path === ".github/workflows/ci.yml" && run?.event === "merge_group");
   const metrics = await pool(ci, async (run) => {
-    const body = await api(`/repos/${repository}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`);
-    if (!Array.isArray(body?.jobs)) throw new Error("Unreadable job listing");
+    // The first attempt is the one the queue waited on. A rerun copies the earlier attempt's
+    // finished jobs with new creation times, so its timeline cannot be read as waits.
+    const body = await api(`/repos/${repository}/actions/runs/${run.id}/attempts/1/jobs?per_page=100`);
+    if (!Array.isArray(body?.jobs)) throw new ReportError("Unreadable job listing");
     return runMetrics(run, body.jobs);
   });
-  const [owner, repo] = repository.split("/");
   const pullRequests = [...new Set(metrics.map((metric) => metric.pullRequest).filter((n) => n !== null))].sort((a, b) => a - b);
+  const [from, to] = [Date.parse(since), Date.parse(until)];
+  let removalsTruncated = false;
   const removals = (await pool(pullRequests, async (number) => {
-    const payload = await api("/graphql", { query: REMOVALS_QUERY, variables: { owner, repo, number } });
-    const nodes = payload?.data?.repository?.pullRequest?.timelineItems?.nodes;
-    if (payload?.errors?.length || !Array.isArray(nodes)) throw new Error("Unreadable merge-queue removals");
+    const { nodes, truncated: partial } = await listRemovals(api, repository, number);
+    removalsTruncated ||= partial;
     return nodes
-      .filter((node) => node?.createdAt >= since && node.createdAt <= until)
+      .filter((node) => Date.parse(node?.createdAt) >= from && Date.parse(node.createdAt) <= to)
       .map((node) => ({ pullRequest: number, at: node.createdAt, reason: node.reason }));
-  })).flat().sort((a, b) => a.at.localeCompare(b.at));
-  return { repository, since, until, truncated, metrics, summary: summarize(metrics, removals, timeoutMinutes) };
+  })).flat().sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  return { repository, since, until, truncated, removalsTruncated, metrics, summary: summarize(metrics, removals, timeoutMinutes) };
 }
 
 const fixed = (value) => value === null ? "—" : value.toFixed(1);
@@ -167,7 +210,8 @@ export function markdown(report) {
     `- Required result later than the ${summary.timeoutMinutes}-minute queue timeout: ${summary.overTimeout} of ${summary.runs}.`,
     `- Critical path spent longer waiting than executing: ${summary.waitingDominated} of ${summary.runs}.`,
     `- Aggregator never ran: ${summary.aggregatorNeverRan}.`,
-    `- Queue removals in the window: ${Object.entries(summary.removalReasons).map(([reason, count]) => `${reason} ${count}`).join(", ") || "none"}.`,
+    `- Queue removals in the window: ${Object.entries(summary.removalReasons).map(([reason, count]) => `${reason} ${count}`).join(", ") || "none"}` +
+      (report.removalsTruncated ? ` (incomplete: a pull request has more than ${MAX_PAGES * 100} removals)` : "") + ".",
     ...summary.timedOut.map((removal) => `  - #${removal.pullRequest} removed with checks_timed_out at ${removal.at}.`),
     "",
     "Times run from the run's creation, which can lag the queue entry; the queue's own window starts at the entry.",
@@ -177,37 +221,55 @@ export function markdown(report) {
 }
 
 export function options(argv, now = new Date()) {
-  const { values } = parseArgs({
-    args: argv,
-    options: {
-      repo: { type: "string" },
-      since: { type: "string" },
-      until: { type: "string" },
-      "timeout-minutes": { type: "string", default: "120" },
-      json: { type: "boolean", default: false },
-    },
-  });
-  const until = values.until ?? now.toISOString();
-  const since = values.since ?? new Date(Date.parse(until) - 48 * 60 * MINUTE).toISOString();
+  let values;
+  try {
+    ({ values } = parseArgs({
+      args: argv,
+      options: {
+        repo: { type: "string" },
+        since: { type: "string" },
+        until: { type: "string" },
+        "timeout-minutes": { type: "string", default: "120" },
+        json: { type: "boolean", default: false },
+      },
+    }));
+  } catch (error) {
+    throw new ReportError(error.message);
+  }
+  const parse = (name, value) => {
+    const time = Date.parse(value);
+    if (!Number.isFinite(time)) throw new ReportError(`${name} must be an ISO 8601 time`);
+    return time;
+  };
+  // Normalised to UTC, so the run listing and removal filtering read the same instants.
+  const until = values.until === undefined ? now.getTime() : parse("--until", values.until);
+  const since = values.since === undefined ? until - 48 * 60 * MINUTE : parse("--since", values.since);
   const timeoutMinutes = Number(values["timeout-minutes"]);
-  if (!REPOSITORY.test(values.repo ?? "")) throw new Error("--repo <owner>/<name> is required");
-  for (const [name, value] of [["--since", since], ["--until", until]])
-    if (!Number.isFinite(Date.parse(value))) throw new Error(`${name} must be an ISO 8601 time`);
-  if (Date.parse(since) >= Date.parse(until)) throw new Error("--since must be before --until");
-  if (!Number.isFinite(timeoutMinutes) || timeoutMinutes <= 0) throw new Error("--timeout-minutes must be positive");
-  return { repository: values.repo, since, until, timeoutMinutes, json: values.json };
+  if (!REPOSITORY.test(values.repo ?? "")) throw new ReportError("--repo <owner>/<name> is required");
+  if (since >= until) throw new ReportError("--since must be before --until");
+  if (!Number.isFinite(timeoutMinutes) || timeoutMinutes <= 0) throw new ReportError("--timeout-minutes must be positive");
+  return {
+    repository: values.repo, since: new Date(since).toISOString(), until: new Date(until).toISOString(), timeoutMinutes, json: values.json,
+  };
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+/** Runs the report; resolves to the process exit code. */
+export async function main(argv, { env = process.env, fetchImpl = fetch, out = console.log, err = console.error } = {}) {
   try {
-    const opts = options(process.argv.slice(2));
-    const token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN;
-    if (!token) throw new Error("Set GITHUB_TOKEN, for example GITHUB_TOKEN=$(gh auth token)");
-    const report = await collect(githubApi(token), opts);
-    console.log(opts.json ? JSON.stringify(report, null, 2) : markdown(report));
+    const opts = options(argv);
+    const token = env.GITHUB_TOKEN ?? env.GH_TOKEN;
+    if (!token) throw new ReportError("Set GITHUB_TOKEN, for example GITHUB_TOKEN=$(gh auth token)");
+    const report = await collect(githubApi(token, fetchImpl), opts);
+    out(opts.json ? JSON.stringify(report, null, 2) : markdown(report));
+    return 0;
   } catch (error) {
-    // Only this script's own messages; an API failure carries just its HTTP status.
-    console.error(Number.isInteger(error?.status) ? `GitHub API request failed (HTTP ${error.status})` : error.message);
-    process.exitCode = 1;
+    // Never print other exception messages: a parse or transport error can quote a response body.
+    err(error instanceof ReportError ? error.message
+      : Number.isInteger(error?.status) ? `GitHub API request failed (HTTP ${error.status})`
+        : "GitHub API request failed: unreadable response or transport error");
+    return 1;
   }
 }
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)
+  process.exitCode = await main(process.argv.slice(2));
