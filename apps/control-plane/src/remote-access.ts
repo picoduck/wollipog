@@ -107,7 +107,7 @@ export async function probeRemoteLive(origin: string, token: string, signal?: Ab
     if (signal?.aborted) cancel();
     socket.addEventListener("message", (event) => {
       try {
-        if (typeof event.data === "string" && JSON.parse(event.data).type === "snapshot") finish();
+        if (typeof event.data === "string" && JSON.parse(event.data).type === "remote_access_verified") finish();
       } catch { finish(new SetupError("The live connection returned an unexpected response.")); }
     });
     socket.addEventListener("error", () => finish(new SetupError("The live connection failed. Allow WebSocket forwarding for /ui and retry.")), { once: true });
@@ -120,12 +120,14 @@ export class RemoteAccess {
   private saved: SavedState = { version: 1, active: null, pending: null };
   private verifiedAt: number | null = null;
   private busy = false;
+  private entryPoint: string | null = null;
   private checkedAt: number | null = null;
   private stateError = false;
   private abort?: AbortController;
   private operationDone: Promise<void> | null = null;
   private finishOperation?: () => void;
   private failure: string | null = null;
+  private failureEntryPoint: string | null = null;
   private authorizationUrl?: string;
   private challenges = new Map<string, Challenge>();
   private probes = new Map<string, number>();
@@ -206,12 +208,14 @@ export class RemoteAccess {
   view(canConfigure: boolean): RemoteAccessView {
     const config = this.saved.pending ?? this.saved.active;
     const ready = this.verifiedAt !== null && this.saved.active !== null;
+    const setupPhase = this.authorizationUrl ? "needs_authorization" : this.failure ? "needs_repair" : undefined;
     return {
       canConfigure,
-      phase: this.authorizationUrl ? "needs_authorization" : this.failure || (config && !ready) ? "needs_repair" : ready ? "ready" : "not_configured",
-      provider: config?.provider ?? null,
+      phase: ready ? "ready" : setupPhase ?? (config ? "needs_repair" : "not_configured"),
+      provider: (ready ? this.saved.active : config)?.provider ?? null,
       origin: ready ? this.saved.active!.origin : null,
-      message: this.failure ?? (ready ? "Your secure dashboard is ready. Pair a device to connect." : "Set up a secure address to use Wollipog from a phone or another computer."),
+      message: ready ? "Your secure dashboard is ready. Pair a device to connect." : this.failure ?? "Set up a secure address to use Wollipog from a phone or another computer.",
+      ...(canConfigure && ready && setupPhase ? { setupPhase, setupMessage: this.failure! } : {}),
       ...(canConfigure && this.authorizationUrl ? { authorizationUrl: this.authorizationUrl } : {}),
       canDisable: canConfigure && Boolean(config),
       verifiedAt: this.verifiedAt,
@@ -219,7 +223,9 @@ export class RemoteAccess {
   }
 
   async status(canConfigure: boolean): Promise<RemoteAccessView> {
-    if (this.saved.active && !this.busy && (this.checkedAt === null || this.now() - this.checkedAt > 30_000)) {
+    // Coalesce readers with the active operation; never publish its intermediate state.
+    while (this.operationDone) await this.operationDone;
+    if (this.saved.active && (this.checkedAt === null || this.now() - this.checkedAt > 30_000)) {
       await this.operation("status", async () => {
         this.checkedAt = this.now();
         const active = this.saved.active!;
@@ -235,14 +241,18 @@ export class RemoteAccess {
   }
 
   private async operation(entryPoint: string, action: () => Promise<void>): Promise<void> {
+    while (this.operationDone && this.entryPoint === "status") await this.operationDone;
     if (this.busy) throw new SetupError("Remote access setup is already running. Wait for it to finish and retry.");
     this.busy = true;
+    this.entryPoint = entryPoint;
     this.abort = new AbortController();
     this.operationDone = new Promise((resolve) => { this.finishOperation = resolve; });
     const operationId = randomUUID();
     const start = this.now();
-    if (!this.stateError) this.failure = null;
-    this.authorizationUrl = undefined;
+    if (entryPoint !== "status" || this.failureEntryPoint === "status") {
+      if (!this.stateError) this.failure = null;
+      this.authorizationUrl = undefined;
+    }
     let outcome = "ready";
     try {
       if (this.stateError) throw new SetupError(this.failure!);
@@ -250,11 +260,13 @@ export class RemoteAccess {
     }
     catch (error) {
       outcome = error instanceof SetupError && error.authorizationUrl ? "authorization_required" : "failed";
+      this.failureEntryPoint = entryPoint;
       this.failure = error instanceof SetupError ? error.message : "The secure connection could not be verified. Check that Tailscale or your HTTPS proxy is running, then retry.";
       this.authorizationUrl = error instanceof SetupError ? error.authorizationUrl : undefined;
       if (entryPoint === "status") this.verifiedAt = null;
     } finally {
       this.busy = false;
+      this.entryPoint = null;
       this.finishOperation?.();
       this.operationDone = null;
       this.deps.log?.({ event: "remote_access_operation", operationId, entryPoint, durationMs: this.now() - start, outcome });
@@ -301,6 +313,8 @@ export class RemoteAccess {
       let config: Configuration;
       if (input.provider === "https") {
         config = { provider: "https", origin: remoteHttpsOrigin(input.origin), owned: false };
+        this.saved.pending = config;
+        this.persist();
       } else {
         const status = await this.execute(["status", "--json"]);
         if (!status.ok) throw new SetupError("Tailscale is unavailable. Install or open Tailscale on this computer, sign in, and retry.");
@@ -352,7 +366,10 @@ export class RemoteAccess {
 
   async cancel(): Promise<RemoteAccessView> {
     const done = this.operationDone;
-    if (done) { this.abort?.abort(); await done; }
+    if (done) {
+      if (this.entryPoint !== "status") this.abort?.abort();
+      await done;
+    }
     await this.operation("cancel", async () => {
       if (this.saved.pending && this.saved.pending.origin !== this.saved.active?.origin) await this.removeOwned(this.saved.pending);
       this.saved.pending = null;

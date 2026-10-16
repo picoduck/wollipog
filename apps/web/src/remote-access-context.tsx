@@ -1,6 +1,7 @@
 import { useOptionalStoreSelector } from "./store.js";
 import React, { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import type { RemoteAccessView } from "@wollipog/protocol";
+import { ApiError } from "./api.js";
 import { useApi } from "./api-context.js";
 import { instancePublicOrigin, useInstances } from "./instances-context.js";
 
@@ -15,11 +16,12 @@ export function RemoteAccessProvider({ children }: { children: ReactNode }) {
     let current = true;
     if (connection && connection !== "online") return;
     const read = () => {
-      if (!api.remoteAccess) return;
-      void api.remoteAccess().then((view) => { if (current) setLoaded({ api, view }); }).catch(() => {
-        if (current) setLoaded((previous) => ({ api, view: previous?.api === api && previous.view?.provider
-          ? { ...previous.view, phase: "needs_repair", origin: null, message: "The secure address could not be checked. Reconnect and retry." }
-          : null }));
+      if (!api.remoteAccess) { setLoaded({ api, view: null }); return; }
+      void api.remoteAccess().then((view) => { if (current) setLoaded({ api, view }); }).catch((error: unknown) => {
+        if (current) setLoaded({ api, view: error instanceof ApiError && error.status === 404 ? null : {
+          canConfigure: false, phase: "unavailable", provider: null, origin: null, canDisable: false, verifiedAt: null,
+          message: "The secure address could not be checked. Reconnect and retry.",
+        } });
       });
     };
     read();
@@ -38,7 +40,7 @@ export function useDashboardPublicOrigin(): string | null {
   const instances = useInstances();
   const remote = useRemoteAccess();
   const view = remote?.view;
-  if (remote?.loading) return null;
+  if (remote?.loading || view?.phase === "unavailable") return null;
   if (view?.provider) return view.phase === "ready" ? view.origin : null;
   return instancePublicOrigin(instances);
 }

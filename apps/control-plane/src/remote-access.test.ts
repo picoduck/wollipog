@@ -130,7 +130,9 @@ test("a reused operator listener is not owned, and externally changed owned serv
   delete f.config.TCP["443"]; delete f.config.Web["fixture.example.ts.net:443"];
   await f.service.setup({ provider: "tailscale" });
   f.config.Web["fixture.example.ts.net:443"]!.Handlers["/other"] = { Proxy: "http://127.0.0.1:9000" };
-  assert.equal((await f.service.disable()).phase, "needs_repair");
+  const blocked = await f.service.disable();
+  assert.equal(blocked.phase, "ready", "failed removal preserves the working address");
+  assert.equal(blocked.setupPhase, "needs_repair");
   assert.ok(f.config.Web["fixture.example.ts.net:443"]!.Handlers["/other"]);
 });
 
@@ -204,4 +206,39 @@ test("malformed optional settings leave local access available and are never ove
   assert.equal((await reloaded.setup({ provider: "tailscale" })).phase, "needs_repair");
   assert.equal(readFileSync(f.statePath, "utf8"), "broken settings");
   assert.equal(f.calls.length, 0);
+});
+
+test("concurrent status reads wait for one verification and closing setup does not cancel a read", async (t) => {
+  const f = fixture(t);
+  await f.service.setup({ provider: "https", origin: "https://working.example.test" });
+  let release!: () => void;
+  let arrived!: () => void;
+  const reached = new Promise<void>((resolve) => { arrived = resolve; });
+  f.deps.live = async () => { arrived(); await new Promise<void>((resolve) => { release = resolve; }); };
+  const reloaded = f.reload();
+  const first = reloaded.status(true);
+  await reached;
+  let secondReturned = false;
+  const second = reloaded.status(true).then((view) => { secondReturned = true; return view; });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const returnedBeforeVerification = secondReturned;
+  const closing = reloaded.cancel();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  release();
+  assert.equal((await first).phase, "ready");
+  assert.equal((await second).phase, "ready");
+  assert.equal((await closing).phase, "ready");
+  assert.equal(returnedBeforeVerification, false, "a concurrent reader must not publish an unverified view");
+});
+
+test("a failed replacement leaves the previous verified address available to every consumer", async (t) => {
+  const f = fixture(t);
+  await f.service.setup({ provider: "https", origin: "https://working.example.test" });
+  f.failLive(true);
+  const view = await f.service.setup({ provider: "https", origin: "https://replacement.example.test" });
+  assert.equal(view.phase, "ready");
+  assert.equal(view.origin, "https://working.example.test");
+  assert.equal(view.setupPhase, "needs_repair");
+  assert.ok(view.setupMessage);
+  assert.equal(f.service.view(false).setupMessage, undefined, "remote consumers see only active availability");
 });

@@ -5,6 +5,8 @@ import { useApi } from "../api-context.js";
 import { ApiError } from "../api.js";
 import { CopyButton, Modal } from "./common.js";
 import { Notice } from "./Notice.js";
+import { BusyButton } from "./ui/BusyButton.js";
+import { ChoiceRows } from "./ui/ChoiceControls.js";
 import { ActionRow, SettingsGroup, ValueRow } from "./ui/SettingsRows.js";
 
 const PairDeviceDialog = lazy(() => import("./PeopleDevicesPanel.js").then((module) => ({ default: module.PairDeviceDialog })));
@@ -67,6 +69,7 @@ export function RemoteAccessSetupDialog({ initial, onChange, onClose, onPair }: 
   const [remove, setRemove] = useState(false);
   const alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  const phase = status.setupPhase ?? status.phase;
   const apply = (next: RemoteAccessView) => { setStatus(next); onChange(next); };
   const run = async (action: "setup" | "disable") => {
     if (busy) return;
@@ -80,40 +83,42 @@ export function RemoteAccessSetupDialog({ initial, onChange, onClose, onPair }: 
     finally { if (alive.current) setBusy(false); }
   };
   const close = async () => {
-    if (busy || status.canDisable && status.phase !== "ready" || status.phase === "needs_repair") {
+    if (busy || status.canDisable && phase !== "ready" || phase === "needs_repair") {
       setBusy(true);
       try { apply(await api.cancelRemoteAccess()); }
-      catch { setError("Setup could not be cancelled. Retry before closing."); setBusy(false); return; }
+      catch { setError("Setup could not be canceled. Retry before closing."); setBusy(false); return; }
     }
     onClose();
   };
   return <Modal title="Set Up Remote Access" description="Connect your phone or another computer through a secure address."
     onClose={() => void close()} footer={<>
-      <button type="button" className="btn" onClick={() => void close()}>{status.phase === "ready" ? "Done" : "Cancel Setup"}</button>
-      {status.phase === "ready" && !remove
+      <button type="button" className="btn" onClick={() => void close()}>{phase === "ready" ? "Done" : "Cancel Setup"}</button>
+      {phase === "ready" && !remove
         ? <button type="button" className="btn primary" onClick={onPair}>Pair a Device</button>
-        : <button type="button" className="btn primary" disabled={busy || (provider === "https" && !origin.trim())} onClick={() => void run(remove ? "disable" : "setup")}>
-          {busy ? "Checking Connection…" : remove ? "Turn Off Remote Access" : status.phase === "not_configured" ? "Set Up Remote Access" : "Retry Setup"}
-        </button>}
+        : <BusyButton className="btn primary" busy={busy} progress={remove ? "Turning off remote access…" : "Checking the secure connection…"}
+          disabled={!remove && provider === "https" && !origin.trim()} onClick={() => void run(remove ? "disable" : "setup")}>
+          {remove ? "Turn Off Remote Access" : phase === "not_configured" ? "Set Up Remote Access" : "Retry Setup"}
+        </BusyButton>}
     </>}>
     <div className="remote-access-form">
-      {status.phase === "ready" && status.origin ? <Notice tone="success" title="Secure Dashboard Ready" actions={<>
+      {phase === "ready" && status.origin ? <Notice tone="success" title="Secure Dashboard Ready" actions={<>
         <a className="btn sm" href={status.origin} target="_blank" rel="noopener noreferrer">Open Dashboard</a>
         <CopyButton text={status.origin} label="Copy Address" className="btn sm" />
       </>}><p className="remote-access-address">{status.origin}</p><p>Pair your device, then use this address whenever you connect.</p></Notice> : null}
-      {status.phase !== "ready" && <>
-        <label className="field"><span>Connection Method</span><select aria-label="Connection Method" value={provider} disabled={busy} onChange={(event) => { setProvider(event.target.value as "tailscale" | "https"); setError(null); }}>
-          <option value="tailscale">Tailscale</option><option value="https">Use an Existing HTTPS Address</option>
-        </select><small>Tailscale keeps access within your private network. Your other device also needs Tailscale connected.</small></label>
+      {phase !== "ready" && <>
+        <ChoiceRows label="Connection Method" value={provider} onChange={(next) => { if (!busy) { setProvider(next); setError(null); } }} options={[
+          { value: "tailscale", title: "Tailscale", description: "Keep access within your private network. Connect Tailscale on your other device too.", disabled: busy, disabledReason: busy ? "Wait for the connection check to finish." : undefined },
+          { value: "https", title: "Use an Existing HTTPS Address", description: "Connect through an HTTPS proxy you already manage.", disabled: busy, disabledReason: busy ? "Wait for the connection check to finish." : undefined },
+        ]} />
         {provider === "https" && <label className="field"><span>HTTPS Address</span><input aria-label="HTTPS Address" type="url" value={origin} disabled={busy} placeholder="https://wollipog.example.com"
           onChange={(event) => setOrigin(event.target.value)} /><small>Use the address your HTTPS proxy provides, including its external port if needed.</small></label>}
       </>}
-      {status.phase !== "not_configured" && status.phase !== "ready" && <Notice tone="warning" title={status.phase === "needs_authorization" ? "Authorize HTTPS" : "Connection Needs Attention"}
-        actions={status.authorizationUrl ? <a className="btn sm" href={status.authorizationUrl} target="_blank" rel="noopener noreferrer">Authorize HTTPS</a> : undefined}>{status.message}</Notice>}
+      {phase !== "not_configured" && phase !== "ready" && <Notice tone="warning" title={phase === "needs_authorization" ? "Authorize HTTPS" : "Connection Needs Attention"}
+        actions={status.authorizationUrl ? <a className="btn sm" href={status.authorizationUrl} target="_blank" rel="noopener noreferrer">Authorize HTTPS</a> : undefined}>{status.setupMessage ?? status.message}</Notice>}
       {busy && <p role="status">Checking HTTPS, this server's identity, the dashboard, and the live connection…</p>}
       {error && <Notice tone="danger" role="alert">{error}</Notice>}
       <div className="remote-access-actions">
-      {!busy && status.phase === "ready" && !remove && <button type="button" className="btn" onClick={() => setStatus({ ...status, phase: "not_configured" })}>Change Connection…</button>}
+      {!busy && phase === "ready" && !remove && <button type="button" className="btn" onClick={() => setStatus({ ...status, phase: "not_configured", setupPhase: undefined, setupMessage: undefined })}>Change Connection…</button>}
       {!busy && status.canDisable && !remove && <button type="button" className="btn ghost" onClick={() => setRemove(true)}>Turn Off Remote Access…</button>}
       </div>
       {remove && <Notice tone="warning" title="Turn Off Remote Access?" actions={<button type="button" className="btn sm" disabled={busy} onClick={() => setRemove(false)}>Keep Remote Access</button>}>

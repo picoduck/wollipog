@@ -253,6 +253,9 @@ const harnessDefaultsTransport: ApiTransport = {
     // Behavior › Evidence (#3023). Unstubbed, the read fell through to the agent defaults below and
     // every Behavior capture showed a load failure. `artifact=save-fails` makes a change fail the way
     // a dropped connection does, for the danger notice and its Retry.
+    // This row-geometry harness represents a server without guided setup; the dedicated
+    // remote-access suite exercises the new group against a real control plane.
+    if (path === "/api/remote-access") return new Response(null, { status: 404 });
     if (path === "/api/artifact-upload-settings") {
       if (init?.method === "PUT") {
         if (new URLSearchParams(window.location.search).get("artifact") === "save-fails") throw new TypeError("Failed to fetch");
@@ -610,7 +613,7 @@ function Harness() {
                 </FeedbackProvider>
               ),
               network: (
-                <NetworkPanel
+                <ApiProvider client={harnessDefaultsApi}><NetworkPanel
                   tailnet={tailnetState === "write-retry" ? {
                     ...tailnetFixture(tailnetRetry === "failed" ? "write-failed" : tailnetRetry === "saved" ? "on" : "off"),
                     busy: tailnetRetry === "saving",
@@ -630,7 +633,7 @@ function Harness() {
                     retry: () => undefined,
                   }}
                   onNavigate={navigate}
-                />
+                /></ApiProvider>
               ),
               storage: (
                 <FeedbackProvider>

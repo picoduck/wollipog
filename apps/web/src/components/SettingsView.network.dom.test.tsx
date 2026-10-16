@@ -4,6 +4,7 @@ import { after, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
+import type { RemoteAccessView } from "@wollipog/protocol";
 import type { TailnetAccessSetting } from "../tailnet-access.js";
 import type { View } from "../navigation.js";
 import type { InstanceManager } from "../instances-context.js";
@@ -55,7 +56,8 @@ for (const [name, value] of Object.entries(globals)) {
 }
 const { NetworkPanel } = await import("./SettingsView.js");
 const { ApiProvider } = await import("../api-context.js");
-const { api } = await import("../api.js");
+const { api, ApiError } = await import("../api.js");
+const { RemoteAccessProvider, useDashboardPublicOrigin } = await import("../remote-access-context.js");
 const { browserInstanceManager, InstancesContextProvider } = await import("../instances-context.js");
 
 after(() => {
@@ -391,5 +393,39 @@ test("a re-read that succeeds leaves focus alone if the user moved it elsewhere"
   } finally {
     await view.unmount();
     outside.remove();
+  }
+});
+
+
+test("remote links fail closed on an unknown status and retain a working address after replacement fails", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const ready: RemoteAccessView = { canConfigure: true, phase: "ready", provider: "https",
+    origin: "https://verified.example.test", message: "Ready.", canDisable: true, verifiedAt: 1,
+    setupPhase: "needs_repair", setupMessage: "The replacement did not respond." };
+  function Link() { return <output>{useDashboardPublicOrigin() ?? "unavailable"}</output>; }
+  const draw = (read: () => Promise<RemoteAccessView>) => act(async () => root.render(
+    <ApiProvider client={{ ...api, remoteAccess: read }}><InstancesContextProvider value={desktopInstances}>
+      <RemoteAccessProvider><Link /></RemoteAccessProvider>
+    </InstancesContextProvider></ApiProvider>,
+  ));
+  try {
+    await draw(async () => ready);
+    assert.equal(container.textContent, ready.origin);
+    let release!: (view: RemoteAccessView) => void;
+    await draw(() => new Promise((resolve) => { release = resolve; }));
+    assert.equal(container.textContent, "unavailable", "switching clients cannot reuse the previous host's origin");
+    await act(async () => release({ ...ready, origin: "https://second.example.test" }));
+    assert.equal(container.textContent, "https://second.example.test");
+    for (const error of [new Error("offline"), new ApiError("unavailable", 503)]) {
+      await draw(async () => { throw error; });
+      assert.equal(container.textContent, "unavailable", "an initial failed read cannot fall back to an unverified address");
+    }
+    await draw(async () => { throw new ApiError("unsupported", 404); });
+    assert.equal(container.textContent, "https://studio.example.ts.net", "an older server retains its existing public-origin behavior");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
   }
 });

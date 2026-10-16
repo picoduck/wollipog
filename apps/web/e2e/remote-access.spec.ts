@@ -39,11 +39,11 @@ for (const theme of ["dark", "light"]) {
       await hold(page, 2000);
       await page.getByRole("button", { name: /Set Up Remote Access/u }).click();
       const dialog = page.getByRole("dialog", { name: "Set Up Remote Access" });
-      await expect(dialog.getByLabel("Connection Method")).toHaveValue("tailscale");
+      await expect(dialog.getByRole("radio", { name: "Tailscale", exact: true })).toBeChecked();
       await expect(page.locator(".modal")).toHaveCSS("opacity", "1");
       await page.screenshot({ path: `${SHOTS}/${theme}-${width}-choose.png` });
       await hold(page, 2000);
-      await dialog.getByLabel("Connection Method").selectOption("https");
+      await dialog.getByRole("radio", { name: "Use an Existing HTTPS Address", exact: true }).check();
       await dialog.getByLabel("HTTPS Address", { exact: true }).fill(fixture.origin);
       await hold(page, 1500);
       await dialog.getByRole("button", { name: "Set Up Remote Access", exact: true }).click();

@@ -1923,6 +1923,15 @@ app.register(async (instance) => {
     socket.close(1008, "unauthorized — open the startup pairing URL or pair this device");
     return;
   }
+  if (remoteAccess.isProbeRequest(req)) {
+    // A verification capability proves forwarding only. It never joins the session-data hub.
+    const timer = setTimeout(() => socket.terminate(), 1_000);
+    timer.unref();
+    socket.once("close", () => clearTimeout(timer));
+    socket.once("error", () => clearTimeout(timer));
+    socket.send(JSON.stringify({ type: "remote_access_verified" }), () => socket.close(1000));
+    return;
+  }
   const client = {
     send: (data: string, onComplete?: (error?: Error) => void) => socket.send(data, onComplete),
     get bufferedAmount() { return socket.bufferedAmount; },
@@ -2555,7 +2564,12 @@ const skillGitAutoUpdater = new SkillGitAutoUpdater({ db, intervalMs: db.skillGi
 // mint further tokens. The plaintext token is returned exactly once; only its hash persists.
 app.post("/api/devices", async (req, reply) => {
   if (!trustedLoopback(req)) return reply.code(403).send({ error: "devices can only be paired from the local dashboard" });
-  await remoteAccess.status(true);
+  const remote = await remoteAccess.status(true);
+  if (remote.phase !== "ready" && remote.phase !== "not_configured") {
+    return reply.code(503).send({ error: "Secure remote access needs attention. Repair it in Network settings before pairing a device." });
+  }
+  // Verification may outlive a disconnected requester. Do not create an undeliverable token.
+  if (req.raw.aborted || reply.raw.destroyed) return;
   const body = (req.body ?? {}) as { name?: unknown; userId?: unknown };
   const name = String(body.name ?? "").trim().slice(0, 64);
   if (!name) return reply.code(400).send({ error: "name is required" });

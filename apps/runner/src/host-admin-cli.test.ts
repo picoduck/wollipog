@@ -937,3 +937,24 @@ test("admin remote-access uses the shared authenticated setup and requires mutat
   assert.equal(await runHostAdminCli(["admin", "remote-access", "setup", "--origin", "https://proxy.example.test", "--yes"], env(tokenFile), existing.io, fetchImpl, host), 0);
   assert.deepEqual(setups.at(-1), { provider: "https", origin: "https://proxy.example.test" });
 });
+
+
+test("admin remote-access reports a failed replacement while retaining the active address", async (t) => {
+  const { tokenFile } = fixture(t);
+  const backend = server();
+  const fetchImpl: McpFetch = async (url, init) => {
+    if (!url.endsWith("/api/remote-access")) return backend.fetch(url, init);
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      canConfigure: true, phase: "ready", provider: "https", origin: "https://working.example.test",
+      message: "Your secure dashboard is ready.", canDisable: true, verifiedAt: 1,
+      setupPhase: "needs_repair", setupMessage: "The replacement did not respond.",
+    }) };
+  };
+  const setup = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "remote-access", "setup", "--yes"], env(tokenFile), setup.io, fetchImpl, host), 3);
+  assert.match(setup.stdout(), /The replacement did not respond/u);
+  assert.match(setup.stdout(), /https:\/\/working.example.test/u);
+  const status = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "remote-access", "status", "--json"], env(tokenFile), status.io, fetchImpl, host), 0);
+  assert.equal(JSON.parse(status.stdout()).origin, "https://working.example.test");
+});

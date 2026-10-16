@@ -839,7 +839,7 @@ export function Shell() {
     : dialog?.kind === "run" ? "New Run" : dialog?.kind === "pod" ? "New Pod"
     : palette !== null ? "Search" : "Keyboard Shortcuts";
   const shell = (
-    <div className={`app${rightPanel.dragging ? " panel-dragging" : ""}`}>
+    <RemoteAccessProvider><div className={`app${rightPanel.dragging ? " panel-dragging" : ""}`}>
       <Rail
         view={view}
         blockedCount={blockedSessions}
@@ -1068,10 +1068,10 @@ export function Shell() {
         />
       )}
       </LazyDialogBoundary>}
-    </div>
+    </div></RemoteAccessProvider>
   );
   // The rail tile and the Instances card read the banner's truth from here, so they never disagree.
-  return <ActiveInstanceConnectionProvider value={instanceConnection}><RemoteAccessProvider>{shell}</RemoteAccessProvider></ActiveInstanceConnectionProvider>;
+  return <ActiveInstanceConnectionProvider value={instanceConnection}>{shell}</ActiveInstanceConnectionProvider>;
 }
 
 export function Header({

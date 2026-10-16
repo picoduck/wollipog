@@ -177,7 +177,7 @@ The guided setting is saved in a private `<CONTROL_PLANE_DB>.remote-access.json`
 back it up with the host configuration. Its verified address takes precedence over the legacy
 public-origin environment setting for remote pairing. A restart rechecks the address before using
 it. The short-lived verification capability is held only in memory, permits only identity reads
-and a live-channel check, and expires immediately afterward. Neither startup nor paired-device
+and a live-channel acknowledgement (without session data), and expires immediately afterward. Neither startup nor paired-device
 credentials are forwarded to an address under verification.
 
 Existing Serve listeners are reused without being adopted for removal. Occupied listeners are

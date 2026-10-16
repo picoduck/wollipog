@@ -19512,6 +19512,19 @@ a.tab { text-decoration: none; }
   --primary-hover-inset: rgb(0 0 0 / 0.12);
 }
 
+/* Guided remote setup uses the shared field, notice, and dialog recipes. */
+.remote-access-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.remote-access-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.remote-access-address { overflow-wrap: anywhere; }
+
 /* ---------------------------------------------------------------------------
    iOS focus-zoom guard — deliberately the LAST rule in this stylesheet.
 
@@ -19537,16 +19550,3 @@ a.tab { text-decoration: none; }
     font-size: 16px;
   }
 }
-
-/* Guided remote setup uses the shared field, notice, and dialog recipes. */
-.remote-access-form {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
-}
-.remote-access-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-}
-.remote-access-address { overflow-wrap: anywhere; }

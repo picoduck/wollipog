@@ -427,7 +427,7 @@ function makeClient(fetchImpl: McpFetch, cpUrl: string, token: string): Client {
         method,
         headers,
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        signal: AbortSignal.timeout(path === "/api/remote-access" ? 60_000 : 15_000),
+        signal: AbortSignal.timeout(path === "/api/remote-access" || path === "/api/devices" ? 60_000 : 15_000),
       });
     } catch (error) {
       throw new CliError(`control plane at ${cpUrl} is unreachable: ${(error as Error).message}. Is the control-plane service running?`);
@@ -855,14 +855,15 @@ export async function runHostAdminCli(
       if (verb === "disable") { await client.del("/api/remote-access"); view = await client.get<RemoteView>("/api/remote-access"); }
       else view = verb === "setup" ? await client.post<RemoteView>("/api/remote-access", input) : await client.get<RemoteView>("/api/remote-access");
       if (!json && view.authorizationUrl && io.stdinIsTTY) {
-        io.stdout(`${view.message}\nAuthorize HTTPS: ${view.authorizationUrl}\n`);
+        io.stdout(`${view.setupMessage ?? view.message}\nAuthorize HTTPS: ${view.authorizationUrl}\n`);
         if (await io.confirm("After authorizing HTTPS in your browser, retry setup?")) view = await client.post<RemoteView>("/api/remote-access", input);
       }
-      emit(view, () => [view.message, view.origin ? `Secure Address: ${view.origin}` : null,
+      emit(view, () => [view.setupMessage, view.message, view.origin ? `Secure Address: ${view.origin}` : null,
         view.authorizationUrl ? `Authorize HTTPS: ${view.authorizationUrl}` : null,
         view.phase === "ready" ? "Next: wollipog admin device create --name <device-name> --output <pairing-file>" : null,
       ].filter(Boolean).join("\n"));
-      return view.phase === "ready" || (verb === "disable" && view.phase === "not_configured") ? 0 : 3;
+      const available = view.phase === "ready" || (verb === "disable" && view.phase === "not_configured");
+      return available && (verb === "status" || !view.setupPhase) ? 0 : 3;
     }
 
     if (command === "user") {
