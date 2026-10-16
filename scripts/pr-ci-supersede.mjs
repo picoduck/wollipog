@@ -77,6 +77,7 @@ export async function supersede(target, { api, log = console.log } = {}) {
   const emit = (event, fields = {}) => log(JSON.stringify({
     event, entryPoint: "workflow_run", runId: target.id, headSha: target.sha, ...fields,
   }));
+  const cancelled = [];
   try {
     const head = currentReadyHead(await openPulls(api, target), target);
     if (!head.current) {
@@ -88,15 +89,15 @@ export async function supersede(target, { api, log = console.log } = {}) {
       emit("pr_ci_supersede_skipped", { reason: "no-older-head-runs" });
       return [];
     }
-    // Re-read the pull request immediately before the only mutation: a newer push makes this
-    // run the superseded one, and its own supersede pass will handle the rest.
-    const recheck = currentReadyHead(await openPulls(api, target), target);
-    if (!recheck.current) {
-      emit("pr_ci_supersede_skipped", { reason: recheck.reason });
-      return [];
-    }
-    const cancelled = [];
-    for (const run of candidates) {
+    for (const [index, run] of candidates.entries()) {
+      // Re-read the pull request immediately before every mutation: a push in the meantime, even
+      // one back to a candidate's commit, makes this run the superseded one, and the new head's
+      // own pass handles the rest. A failed read throws and retains every remaining run.
+      const recheck = currentReadyHead(await openPulls(api, target), target);
+      if (!recheck.current) {
+        emit("pr_ci_supersede_skipped", { reason: recheck.reason, remaining: candidates.length - index });
+        return cancelled;
+      }
       try {
         await api(`/repos/${target.repository}/actions/runs/${run.id}/cancel`, {});
         cancelled.push(run.id);
@@ -114,7 +115,7 @@ export async function supersede(target, { api, log = console.log } = {}) {
       status: Number.isInteger(error?.status) ? error.status : null,
       action: "Older-head CI keeps running; the current head's required check is unaffected",
     });
-    return [];
+    return cancelled;
   }
 }
 

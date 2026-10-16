@@ -124,6 +124,48 @@ test("nothing is cancelled unless the head is still current immediately before c
   }
 });
 
+test("the head is re-read before every cancel, so a push back to a candidate retains its run (#3285 review)", async () => {
+  const c = "c".repeat(40);
+  const runs = [workflowRun({ id: 150, head_sha: older }), workflowRun({ id: 151, head_sha: c })];
+  let current = head;
+  const cancels = [];
+  const api = async (path) => {
+    if (path.includes("/pulls?")) return [pull({ head: { ...pull().head, sha: current } })];
+    if (path.includes("/actions/workflows/")) return { total_count: runs.length, workflow_runs: runs };
+    if (path.endsWith("/cancel")) {
+      cancels.push(path);
+      current = c; // the contributor force-pushes back to C while the first cancel is in flight
+      return null;
+    }
+    throw new Error("unexpected " + path);
+  };
+  const logs = [];
+  assert.deepEqual(await supersede(target, { api, log: (line) => logs.push(JSON.parse(line)) }), [150]);
+  assert.deepEqual(cancels, ["/repos/example/project/actions/runs/150/cancel"]);
+  assert.ok(logs.some((log) => log.event === "pr_ci_supersede_skipped" && log.reason === "head-moved" && log.remaining === 1));
+
+  let reads = 0;
+  current = head;
+  cancels.length = 0;
+  const flaky = async (path) => {
+    if (path.endsWith("/cancel")) {
+      cancels.push(path);
+      return null;
+    }
+    if (path.includes("/pulls?") && ++reads > 2) {
+      const error = new Error("GitHub API request failed");
+      error.status = 502;
+      throw error;
+    }
+    return api(path);
+  };
+  const unreadable = [];
+  assert.deepEqual(await supersede(target, { api: flaky, log: (line) => unreadable.push(JSON.parse(line)) }), [150],
+    "the result names what was cancelled before the read failed");
+  assert.deepEqual(cancels, ["/repos/example/project/actions/runs/150/cancel"], "a failed re-read stops before the next cancel");
+  assert.equal(unreadable.at(-1).event, "pr_ci_supersede_evidence_unavailable");
+});
+
 test("unavailable evidence retains CI, and one refused cancel does not stop the rest", async () => {
   for (const failPath of ["/pulls?", "/actions/workflows/"]) {
     const fake = fakeApi({ runs: [workflowRun({ id: 150, head_sha: older })], failPath });
