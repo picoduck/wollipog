@@ -40,7 +40,7 @@ export function useDashboardPublicOrigin(): string | null {
   const instances = useInstances();
   const remote = useRemoteAccess();
   const view = remote?.view;
-  if (remote?.loading || view?.phase === "unavailable") return null;
+  if (remote?.loading || view && view.phase !== "ready" && view.phase !== "not_configured") return null;
   if (view?.provider) return view.phase === "ready" ? view.origin : null;
   return instancePublicOrigin(instances);
 }

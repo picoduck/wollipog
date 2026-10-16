@@ -418,6 +418,9 @@ test("remote links fail closed on an unknown status and retain a working address
     assert.equal(container.textContent, "unavailable", "switching clients cannot reuse the previous host's origin");
     await act(async () => release({ ...ready, origin: "https://second.example.test" }));
     assert.equal(container.textContent, "https://second.example.test");
+    await draw(async () => ({ ...ready, phase: "needs_repair", provider: null, origin: null,
+      setupPhase: undefined, setupMessage: undefined }));
+    assert.equal(container.textContent, "unavailable", "a malformed host configuration cannot fall back to a legacy origin");
     for (const error of [new Error("offline"), new ApiError("unavailable", 503)]) {
       await draw(async () => { throw error; });
       assert.equal(container.textContent, "unavailable", "an initial failed read cannot fall back to an unverified address");
