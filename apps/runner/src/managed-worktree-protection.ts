@@ -2736,6 +2736,11 @@ function inspectsAncestorOnly(
  *    a `%`/`#`/`:` operator) was refused outright. It is reduced to a reference to its leading
  *    name, so the command is classified on its merits; an assigned name still substitutes, so
  *    nothing that reached the state through a variable stops being refused.
+ *
+ * The pre-pass returns TWO readings (see `PreparedGuardStateCommand`): the literal-path text scan
+ * reads `scan`, which removes only a copy-only heredoc body (inert data) and keeps everything else —
+ * comments, `${...}` operator defaults — verbatim, so dropping text for the tokenizer can never hide
+ * a literal hook path from the scan. The tokenizer reads the fully-rewritten `parse`.
  * ------------------------------------------------------------------------------------------ */
 
 /**
@@ -2781,6 +2786,16 @@ function reduceBraceSubstitutions(text: string): string {
 
 interface PendingHeredoc { delimiter: string; dashStrip: boolean; strip: boolean }
 
+/**
+ * The two readings of a command the guard needs. `scan` is the raw text with ONLY the provably-inert
+ * regions removed (a copy-only heredoc body); everything else — comments, `${...}`, operator default
+ * values — is kept verbatim, so the literal-path raw-text scan still sees a hook path anywhere bash
+ * could reach, exactly as it did on the untouched command. `parse` is the fully bash-faithful
+ * rewrite the tokenizer reads. Keeping them separate means the rewrite that makes a command parseable
+ * can never also hide a literal path from the text scan.
+ */
+export interface PreparedGuardStateCommand { scan: string; parse: string }
+
 const GUARD_STATE_WORD_BOUNDARY = new Set([" ", "\t", "\n", "\r", ";", "&", "|", "<", ">", "(", ")"]);
 const GUARD_STATE_COMMAND_BOUNDARY = new Set([";", "&", "|", "\n", "\r", "(", ")"]);
 const GUARD_STATE_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/u;
@@ -2789,10 +2804,16 @@ const GUARD_STATE_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/u;
  * Rewrite a command so the guard-state classifier reads it as bash would. See the block comment
  * above for the three corrections; everything the scanner cannot parse with confidence is emitted
  * verbatim, so the result is never read MORE permissively than the raw command was.
+ *
+ * `$'...'` ANSI-C quoting (which shell-quote already models) and a bare carriage return are the two
+ * places this scanner would risk a quote-state or line-boundary desync, so a command containing
+ * either is handed back untouched — the old, stricter reading on the raw command.
  */
-export function prepareGuardStateCommand(command: string): string {
+export function prepareGuardStateCommand(command: string): PreparedGuardStateCommand {
+  if (command.includes("$'") || command.includes("\r")) return { scan: command, parse: command };
   const n = command.length;
-  let out = "";
+  let scan = "";                // raw text, minus only stripped heredoc bodies — for the text scan
+  let out = "";                 // the bash-faithful rewrite — for the tokenizer
   let quote: "'" | '"' | null = null;
   let inWord = false;           // inside a word: a `#` here is literal, not a comment
   let firstWord = "";           // the current simple command's first word, for consumer detection
@@ -2805,6 +2826,7 @@ export function prepareGuardStateCommand(command: string): string {
   const pending: PendingHeredoc[] = [];
   let i = 0;
 
+  const both = (text: string) => { scan += text; out += text; };
   const resetSegment = () => { firstWord = ""; firstWordComplete = false; segmentAmbiguous = false; };
   const settleFirstWord = (isRedirect: boolean) => {
     if (firstWord === "") { if (isRedirect) segmentAmbiguous = true; return; }
@@ -2817,7 +2839,9 @@ export function prepareGuardStateCommand(command: string): string {
   const strippableConsumer = () =>
     !routingSeen && !segmentAmbiguous && GUARD_STATE_HEREDOC_DATA_CONSUMERS.has(firstWord);
 
-  // Drop the remaining body lines of `pending`, keeping the lines of a non-strip heredoc verbatim.
+  // Consume the remaining body lines of `pending`. A stripped body leaves BOTH readings (it is inert
+  // data copied to an inspected destination). A kept body stays in both — verbatim in `scan`, with
+  // its `${...}` reduced in `parse` so a literal substitution does not break tokenizing (#1734).
   const consumeBodies = () => {
     while (pending.length > 0 && i < n) {
       let lineEnd = i;
@@ -2826,9 +2850,10 @@ export function prepareGuardStateCommand(command: string): string {
       const terminatorLine = pending[0]!.dashStrip ? line.replace(/^\t+/u, "") : line;
       const sep = command.slice(lineEnd, Math.min(lineEnd + 1, n)); // the single \n or \r, if any
       const isTerminator = terminatorLine === pending[0]!.delimiter;
-      // A kept body is still scanned (a shell executes it), but a `${...}` in it is literal data that
-      // must not break tokenizing, so it is reduced the same way a command-region one is (#1734).
-      if (!pending[0]!.strip) out += (isTerminator ? line : reduceBraceSubstitutions(line)) + sep;
+      if (!pending[0]!.strip) {
+        scan += line + sep;
+        out += (isTerminator ? line : reduceBraceSubstitutions(line)) + sep;
+      }
       if (isTerminator) pending.shift();
       i = lineEnd + (sep ? 1 : 0);
     }
@@ -2836,47 +2861,48 @@ export function prepareGuardStateCommand(command: string): string {
 
   while (i < n) {
     const c = command[i]!;
-    if (quote === "'") { out += c; if (c === "'") quote = null; i += 1; continue; }
+    if (quote === "'") { both(c); if (c === "'") quote = null; i += 1; continue; }
     if (quote === '"') {
-      if (c === "\\") { out += c + (command[i + 1] ?? ""); i += 2; continue; }
+      if (c === "\\") { both(c + (command[i + 1] ?? "")); i += 2; continue; }
       if (c === "$" && command[i + 1] === "{") { i = emitSubstitution(i); continue; }
-      out += c; if (c === '"') quote = null; i += 1; continue;
+      both(c); if (c === '"') quote = null; i += 1; continue;
     }
-    if (c === "\\") { out += c + (command[i + 1] ?? ""); i += 2; addWordChar("\\"); continue; }
-    if (c === "'" || c === '"') { quote = c; out += c; addWordChar(c); i += 1; continue; }
-    if (c === "#" && !inWord) { // a comment: drop to end of line, leaving the newline itself
-      while (i < n && command[i] !== "\n" && command[i] !== "\r") i += 1;
+    if (c === "\\") { both(c + (command[i + 1] ?? "")); i += 2; addWordChar("\\"); continue; }
+    if (c === "'" || c === '"') { quote = c; both(c); addWordChar(c); i += 1; continue; }
+    if (c === "#" && !inWord) { // a comment: `parse` drops it to end of line; `scan` keeps it, so a
+      while (i < n && command[i] !== "\n" && command[i] !== "\r") { scan += command[i]; i += 1; } // literal path in a comment still refuses, as before
       continue;
     }
-    if (c === "#") { out += "\\#"; addWordChar("#"); i += 1; continue; } // mid-word: literal, escaped
-    if (c === "`") { out += c; routingSeen = true; inWord = false; i += 1; continue; }
+    if (c === "#") { scan += "#"; out += "\\#"; addWordChar("#"); i += 1; continue; } // mid-word: literal
+    if (c === "`") { both(c); routingSeen = true; inWord = false; i += 1; continue; }
     if (c === "$" && command[i + 1] === "{") { i = emitSubstitution(i); continue; }
     // `<<<` is a here-string (its word is on the line, no body); emit it whole so its trailing `<<`
     // is never mistaken for a heredoc operator.
     if (c === "<" && command[i + 1] === "<" && command[i + 2] === "<") {
-      settleFirstWord(true); out += "<<<"; inWord = false; i += 3; continue;
+      settleFirstWord(true); both("<<<"); inWord = false; i += 3; continue;
     }
     if (c === "<" && command[i + 1] === "<") { i = handleHeredocOperator(i); continue; }
     if (c === "\n" || c === "\r") {
-      out += c; inWord = false; resetSegment(); i += 1;
+      both(c); inWord = false; resetSegment(); i += 1;
       if (pending.length > 0) consumeBodies();
       continue;
     }
-    if (c === " " || c === "\t") { settleFirstWord(false); out += c; inWord = false; i += 1; continue; }
+    if (c === " " || c === "\t") { settleFirstWord(false); both(c); inWord = false; i += 1; continue; }
     if (GUARD_STATE_WORD_BOUNDARY.has(c)) { // an operator: `;`, `&`, `|`, redirects, `(`, `)`
       settleFirstWord(c === "<" || c === ">" || c === "&");
       if (c === "|") for (const p of pending) p.strip = false; // this body feeds the pipeline
       if (c === "(") routingSeen = true;
-      out += c; inWord = false;
+      both(c); inWord = false;
       if (GUARD_STATE_COMMAND_BOUNDARY.has(c)) resetSegment();
       i += 1;
       continue;
     }
-    out += c; addWordChar(c); i += 1;
+    both(c); addWordChar(c); i += 1;
   }
-  return out;
+  return { scan, parse: out };
 
-  /** Emit a `${...}` as `${leadingName}`, dropping the operators the tokenizer chokes on. */
+  /** Keep the `${...}` verbatim in `scan`, and reduce it to `${leadingName}` in `parse` so the
+   *  operators the tokenizer chokes on are dropped only from the text the tokenizer reads. */
   function emitSubstitution(start: number): number {
     let depth = 0;
     let j = start + 1; // at the `{`
@@ -2884,13 +2910,15 @@ export function prepareGuardStateCommand(command: string): string {
       if (command[j] === "{" && command[j - 1] === "$") depth += 1;
       else if (command[j] === "}") { depth -= 1; if (depth === 0) break; }
     }
-    if (j >= n) { out += command.slice(start); addWordChar("$"); return n; } // unbalanced: verbatim
+    if (j >= n) { both(command.slice(start)); addWordChar("$"); return n; } // unbalanced: verbatim
+    scan += command.slice(start, j + 1);
     out += `\${${leadingSubstitutionName(command.slice(start + 2, j))}}`;
     addWordChar("$");
     return j + 1;
   }
 
-  /** Consume a `<<`/`<<-` operator and its delimiter; emit it unless this heredoc is strippable. */
+  /** Consume a `<<`/`<<-` operator and its delimiter. `scan` keeps it; `parse` drops it when the
+   *  body is stripped, so the kept operator never reads as a path (its delimiter is not one). */
   function handleHeredocOperator(start: number): number {
     settleFirstWord(true); // the `<<` ends the command word; a leading one marks the segment ambiguous
     let j = start + 2;
@@ -2908,9 +2936,10 @@ export function prepareGuardStateCommand(command: string): string {
       if (GUARD_STATE_WORD_BOUNDARY.has(ch)) break;
       delimiter += ch; j += 1;
     }
-    if (delimiter === "") { out += command.slice(start, j); inWord = false; return j; }
+    if (delimiter === "") { both(command.slice(start, j)); inWord = false; return j; }
     const strip = quoted && strippableConsumer();
     pending.push({ delimiter, dashStrip, strip });
+    scan += command.slice(start, j);
     if (!strip) out += command.slice(start, j);
     inWord = false;
     return j;
@@ -2931,10 +2960,11 @@ export function commandTargetsGuardState(
   if (!directory || !command || command.length > MAX_COMMAND_LENGTH || command.includes("\0")) return null;
   const root = resolve(directory);
   // Read the command as bash would before matching: comments, quoted copy-only heredoc bodies, and
-  // substitutions the tokenizer rejects all turned into wrong verdicts otherwise (#1734).
-  const prepared = prepareGuardStateCommand(command);
+  // substitutions the tokenizer rejects all turned into wrong verdicts otherwise (#1734). The text
+  // scan reads `scan` (literal paths kept everywhere bash could reach); the tokenizer reads `parse`.
+  const { scan: scanText, parse: parseText } = prepareGuardStateCommand(command);
   const foldCase = process.platform === "win32" || process.platform === "darwin";
-  const haystack = foldCase ? prepared.toLowerCase() : prepared;
+  const haystack = foldCase ? scanText.toLowerCase() : scanText;
   // Raw text first: concatenations, inline `--settings=<path>`, and quoting styles that tokenize
   // in ways a path comparison would miss still name the directory verbatim.
   for (const candidate of [root, root.split(sep).join("/")]) {
@@ -2945,7 +2975,7 @@ export function commandTargetsGuardState(
     // `$HOME` is as direct a spelling of the data directory's parent as `~`; every other variable
     // stays opaque, which is the documented limit of a command-text matcher. It is kept in place as
     // a reference so the word around it stays whole (see `guardStateReadings`).
-    tokens = parse(prepared, (name) => name === "HOME" ? homedir() : reference(name)) as ShellToken[];
+    tokens = parse(parseText, (name) => name === "HOME" ? homedir() : reference(name)) as ShellToken[];
   } catch (error) {
     // Still refused: this is the state the veto itself depends on. The raw-text scan above has
     // already refused any command that names the hook directory outright.
@@ -3004,7 +3034,7 @@ export function commandTargetsGuardState(
   };
   // A backtick nests a command the tokenizer does not separate, and a newline would silently join
   // two commands into one; nothing in either is inspectable.
-  const segments = /[`\n\r]/u.test(prepared) ? null : commandSegments(tokens);
+  const segments = /[`\n\r]/u.test(parseText) ? null : commandSegments(tokens);
   if (segments === null) {
     // Nothing here is an inspection, so any related word refuses. A word INSIDE the hook directory
     // names the guard state itself. One that only encloses it is refused because the command cannot

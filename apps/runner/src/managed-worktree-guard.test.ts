@@ -1420,10 +1420,17 @@ test("ordinary commands reaching nothing are allowed, and every real access stay
     `cat >> ${join(directory, "s1.protections.json")} <<'EOF'\nx\nEOF`,
     `cat > a.ts <<'EOF'\nbody\nEOF\ncat ${into}`,
     `cat ${into} <<'EOF'\nbody\nEOF`,
-    // A comment must not swallow the command that follows it (an under-refusal before #1734).
+    // A comment must not swallow the command that follows it (an under-refusal before #1734), and a
+    // literal hook path in a comment is still refused (the text scan keeps comments).
     `echo x#; cat ${into}`,
     `ls # a comment\ncat ${into}`,
     `echo x#; echo y > ${into}`,
+    `# cat ${join(directory, "s1.protections.json")}`,
+    // A `${...}` default value is text bash substitutes, so a hook path in one is still refused: the
+    // reduction that makes it tokenize must not hide the path from the text scan.
+    `cat \${VAR:-${join(directory, "s1.protections.json")}}`,
+    `cat \${VAR:=${join(directory, "s1.protections.json")}}`,
+    `echo \${VAR:+${join(directory, "s1.protections.json")}}`,
     // An UNQUOTED heredoc expands, so its body is kept and scanned, conservatively.
     `cat > a.ts <<EOF\n${into}\nEOF`,
     // A body handed to a shell is executed, so it is kept and scanned.
@@ -1444,7 +1451,8 @@ test("the bash-faithful pre-pass never throws and opens no bypass under noise (#
   // classifier treats as an unresolved reference).
   fc.assert(fc.property(fc.string({ maxLength: 160 }), (s) => {
     commandTargetsGuardState(s, project, directory);
-    return !prepareGuardStateCommand(s).includes("\0");
+    const prepared = prepareGuardStateCommand(s);
+    return !prepared.scan.includes("\0") && !prepared.parse.includes("\0");
   }), { numRuns: 1500 });
   // A command whose operand reads or writes the hook file is refused whatever comment, heredoc, or
   // substitution noise precedes it: the pre-pass must never drop the reaching word.
