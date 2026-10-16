@@ -2017,8 +2017,14 @@ export const TOOLS: McpTool[] = [
       do {
         const r = await cpFetch(deps, "GET", `/api/sessions/${encodeURIComponent(args.sessionId)}`);
         if (!r.ok) return errorResult(r.message);
+        // cpFetch reports a 2xx whose body could not be read as ok with no data; that read, like
+        // one cancelled mid-body, is a failure and must never become a timeout result.
+        if (deps.signal?.aborted) return errorResult("request cancelled");
         session = r.data?.session;
-        if (typeof session?.status === "string" && wanted.has(session.status)) {
+        if (typeof session?.status !== "string") {
+          return errorResult(`control plane returned no session status for ${args.sessionId}`);
+        }
+        if (wanted.has(session.status)) {
           return textResult({ outcome: "reached", reached: session.status, session: mapSession(session) });
         }
         const remaining = deadline - now();

@@ -12,6 +12,7 @@ import {
 } from "@wollipog/protocol";
 import {
   dispatch,
+  executeManagerTool,
   nextWaitSessionIntervalMs,
   serveSessionManagementMcp,
   SPAWN_APPROVAL_POLL_WINDOW_MS,
@@ -627,6 +628,26 @@ test("wait_session keeps a missing session and a control-plane failure as errors
     assert.equal(result.isError, true, String(status));
     assert.doesNotMatch(resultText(result), /timeout/);
     assert.equal(calls.length, 1, `${status} ends the wait at the first read`);
+  }
+});
+
+test("wait_session never turns an unreadable or cancelled session read into a timeout result", async () => {
+  // A 2xx whose body fails to read reaches the handler without a session; past the deadline that
+  // must stay an error rather than a timeout carrying empty metadata.
+  for (const mode of ["reset", "cancelled", "no session"] as const) {
+    let now = 0;
+    const controller = new AbortController();
+    const result = await executeManagerTool("wait_session", { sessionId: "child", states: ["completed"], timeoutMs: 1 }, {
+      cpUrl: CP_URL, selfSessionId: SELF_ID, token: "", signal: controller.signal, now: () => now,
+      fetch: async () => ({ ok: true, status: 200, text: async () => {
+        now = 2;
+        if (mode === "no session") return "{}";
+        if (mode === "cancelled") controller.abort();
+        throw new Error(mode);
+      } }),
+    });
+    assert.equal(result.isError, true, mode);
+    assert.match(resultText(result), mode === "cancelled" ? /^request cancelled$/ : /^control plane returned no session status for child$/, mode);
   }
 });
 
