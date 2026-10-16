@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawn as spawnProcess, type ChildProcess } from "node:child_process";
+import { spawn as spawnProcess, type ChildProcess } from "node:child_process";
+import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import { EventEmitter, once } from "node:events";
 import {
   chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync,
