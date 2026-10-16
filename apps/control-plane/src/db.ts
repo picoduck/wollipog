@@ -2893,16 +2893,18 @@ const LEGACY_SEARCH_SCAN_KEY = "session_events_fts_legacy_scan";
 
 /** Search rows indexed before keyed rows (or by an older build since) carry arbitrary row ids.
  * Record the row id range retention must map before it prunes, and keep new event ids above every
- * existing search row id so a keyed insert never collides with one. */
+ * existing search row id so a keyed insert never collides with one. An older build numbers its rows
+ * from the highest row id left, which a prune or a session deletion may have lowered below a scan
+ * already done, so its rows can sit anywhere: the scan starts again from the first row. Mapping is
+ * idempotent, so rows it already covered are only read again. */
 function prepareKeyedSearchRows(db: DatabaseSync): void {
   const state = db.prepare("SELECT last_rowid, keyed_through FROM fts_state WHERE id=1").get() as
     { last_rowid: number; keyed_through: number | null };
   const top = (db.prepare("SELECT rowid FROM session_events_fts ORDER BY rowid DESC LIMIT 1").get() as
     { rowid: number } | undefined)?.rowid ?? 0;
   if (state.keyed_through === null || state.last_rowid > state.keyed_through) {
-    const scan = readLegacySearchScan((sql) => db.prepare(sql));
     db.prepare("INSERT OR REPLACE INTO control_plane_metadata (key, value) VALUES (?, ?)")
-      .run(LEGACY_SEARCH_SCAN_KEY, JSON.stringify({ cursor: scan?.cursor ?? 0, end: Math.max(scan?.end ?? 0, top) }));
+      .run(LEGACY_SEARCH_SCAN_KEY, JSON.stringify({ cursor: 0, end: top }));
     db.prepare("UPDATE fts_state SET keyed_through=last_rowid WHERE id=1").run();
   }
   const sequence = db.prepare("SELECT seq FROM sqlite_sequence WHERE name='session_events'").get() as
@@ -4732,6 +4734,9 @@ type ConfirmedSessionNamingHarnessTargetWrite = SessionNamingHarnessTargetWrite 
 // restart re-reserves the child's unspent limits.
 const TERMINAL_STATUS_SQL = "('completed','failed','stopped')";
 
+/** Rows one prune batch tests against HISTORY_PRUNE_KEEP_SQL at most: about 1 ms of JSON reads. */
+const HISTORY_PRUNE_SCAN_ROWS = 1024;
+
 /** Rows a prune keeps (#2777), never NULL: a row it cannot classify is pruned, not silently kept by a
  * NULL comparison under NOT. Prompts, turn completions and final-flagged reports are exactly the
  * rows campaign report proofs and assignment checks read; token_usage rows are cost-correction
@@ -5155,7 +5160,7 @@ const FOLD_LAST_EVENT_AT = `last_event_at=CASE WHEN COALESCE(message_count,0)=0
  * tool calls return with it, so the pruned ones stop counting separately. */
 const CLEAR_HISTORY_PRUNE_SQL = `history_pruned_at=NULL, history_pruned_retention_days=NULL,
   history_pruned_events=0, history_pruned_tool_calls=0, history_prune_through_seq=NULL,
-  history_prune_run_events=NULL, history_prune_run_days=NULL`;
+  history_prune_run_events=NULL, history_prune_run_days=NULL, history_prune_run_seq=NULL`;
 
 function sessionHistoryRetentionView(
   row: Pick<SessionRow, "archived" | "archived_at" | "history_pruned_at" | "history_pruned_retention_days" | "history_pruned_events">,
@@ -6625,9 +6630,11 @@ export class ControlPlaneDb {
       "history_pruned_tool_calls INTEGER NOT NULL DEFAULT 0",
       // Highest seq a prune has covered. New events are numbered above it, so no seq is reused.
       "history_prune_through_seq INTEGER",
-      // Events removed so far by a prune still in progress, and its threshold; NULL when none is.
+      // Events removed so far by a prune still in progress, its threshold, and the seq it has read
+      // through: every row at or below that seq is kept. NULL when no prune is in progress.
       "history_prune_run_events INTEGER",
       "history_prune_run_days INTEGER",
+      "history_prune_run_seq INTEGER",
     ]) {
       try {
         db.exec(`ALTER TABLE sessions ADD COLUMN ${col}`);
@@ -16500,29 +16507,42 @@ export class ControlPlaneDb {
     cutoff: number; retentionDays: number; maxEvents: number; maxPayloadBytes: number; maxSearchLength: number;
   }): { removed: number; searchLength: number } | { complete: boolean } {
     const session = this.stmt(
-      `SELECT s.archived, s.archived_at, s.status, s.history_prune_run_events,
+      `SELECT s.archived, s.archived_at, s.status, s.history_prune_run_events, s.history_prune_run_seq,
               EXISTS (SELECT 1 FROM session_stop_intents intent WHERE intent.session_id=s.id) AS stopping
          FROM sessions s WHERE s.id=?`,
     ).get(sessionId) as {
       archived: number; archived_at: number | null; status: string;
-      history_prune_run_events: number | null; stopping: number;
+      history_prune_run_events: number | null; history_prune_run_seq: number | null; stopping: number;
     } | undefined;
     const eligible = session !== undefined && session.archived === 1 && session.archived_at !== null &&
       session.archived_at <= input.cutoff && TERMINAL_STATUSES.includes(session.status as SessionStatus) &&
       session.stopping === 0;
     if (!eligible) return { complete: false };
     if (session.history_prune_run_events === null) {
-      this.stmt("UPDATE sessions SET history_prune_run_events=0, history_prune_run_days=? WHERE id=?")
+      this.stmt("UPDATE sessions SET history_prune_run_events=0, history_prune_run_days=?, history_prune_run_seq=0 WHERE id=?")
         .run(input.retentionDays, sessionId);
     }
+    // Each batch tests the keep rule on at most one window of rows past where its run has read
+    // through, so a long kept stretch costs one window per batch instead of being read again by
+    // every batch. A run reads a session once: a final response that moves mid-run keeps the earlier
+    // one too, and the next run removes it.
+    const after = session.history_prune_run_seq ?? 0;
+    const windowEnd = (this.stmt(
+      "SELECT seq FROM session_events WHERE session_id=? AND seq>? ORDER BY seq LIMIT 1 OFFSET ?",
+    ).get(sessionId, after, HISTORY_PRUNE_SCAN_ROWS - 1) as { seq: number } | undefined)?.seq ?? null;
     const response = this.historyPruneFinalResponse(sessionId);
     const candidates = this.stmt(
       `SELECT e.id, e.seq, length(e.payload) AS bytes FROM session_events e
-        WHERE e.session_id=? AND NOT ${HISTORY_PRUNE_KEEP_SQL}
+        WHERE e.session_id=? AND e.seq>? AND e.seq<=? AND NOT ${HISTORY_PRUNE_KEEP_SQL}
         ORDER BY e.seq LIMIT ?`,
-    ).all(sessionId, response.messageId, response.messageId, response.afterSeq, response.lastSeq, input.maxEvents) as
-      unknown as Array<{ id: number; seq: number; bytes: number }>;
-    if (!candidates.length) return { complete: true };
+    ).all(sessionId, after, windowEnd ?? Number.MAX_SAFE_INTEGER, response.messageId, response.messageId,
+      response.afterSeq, response.lastSeq, input.maxEvents) as unknown as Array<{ id: number; seq: number; bytes: number }>;
+    if (!candidates.length) {
+      // Fewer than a window of rows remained, and all are kept: nothing is left to remove.
+      if (windowEnd === null) return { complete: true };
+      this.stmt("UPDATE sessions SET history_prune_run_seq=? WHERE id=?").run(windowEnd, sessionId);
+      return { removed: 0, searchLength: 0 };
+    }
     const events: number[] = [];
     const searchRows: number[] = [];
     let payloadBytes = 0;
@@ -16539,6 +16559,10 @@ export class ControlPlaneDb {
       payloadBytes = nextPayload;
       throughSeq = candidate.seq;
     }
+    // Every row through `throughSeq` is now kept, and through the window's end when the batch took
+    // all of the window's removable rows.
+    const readThrough = windowEnd !== null && events.length === candidates.length && candidates.length < input.maxEvents
+      ? windowEnd : throughSeq;
     const toolCallsBefore = this.storedToolCalls(sessionId);
     for (const rowid of searchRows) this.stmt("DELETE FROM session_events_fts WHERE rowid=?").run(rowid);
     this.stmt(`DELETE FROM session_events WHERE id IN (${events.map(() => "?").join(",")})`).run(...events);
@@ -16546,9 +16570,10 @@ export class ControlPlaneDb {
       `UPDATE sessions SET message_count=MAX(0, COALESCE(message_count, 0)-?),
           history_prune_run_events=history_prune_run_events+?,
           history_pruned_tool_calls=history_pruned_tool_calls+?,
-          history_prune_through_seq=MAX(COALESCE(history_prune_through_seq, 0), ?)
+          history_prune_through_seq=MAX(COALESCE(history_prune_through_seq, 0), ?),
+          history_prune_run_seq=?
         WHERE id=?`,
-    ).run(events.length, events.length, toolCallsBefore - this.storedToolCalls(sessionId), throughSeq, sessionId);
+    ).run(events.length, events.length, toolCallsBefore - this.storedToolCalls(sessionId), throughSeq, readThrough, sessionId);
     return { removed: events.length, searchLength };
   }
 
@@ -16575,12 +16600,14 @@ export class ControlPlaneDb {
     if (runEvents > 0) {
       this.stmt(
         `UPDATE sessions SET history_pruned_at=?, history_pruned_retention_days=history_prune_run_days,
-            history_pruned_events=history_pruned_events+?, history_prune_run_events=NULL, history_prune_run_days=NULL
+            history_pruned_events=history_pruned_events+?, history_prune_run_events=NULL, history_prune_run_days=NULL,
+            history_prune_run_seq=NULL
           WHERE id=?`,
       ).run(now, runEvents, sessionId);
       this.advanceEventEpochInTransaction(sessionId);
     } else {
-      this.stmt("UPDATE sessions SET history_prune_run_events=NULL, history_prune_run_days=NULL WHERE id=?").run(sessionId);
+      this.stmt("UPDATE sessions SET history_prune_run_events=NULL, history_prune_run_days=NULL, history_prune_run_seq=NULL WHERE id=?")
+        .run(sessionId);
     }
     return { prunedEvents: runEvents, removedArtifacts };
   }

@@ -25,7 +25,8 @@ export class CampaignBudgetLedger {
     );
     CREATE TABLE IF NOT EXISTS campaign_budget_members (
       session_id TEXT PRIMARY KEY, root_id TEXT NOT NULL, cost REAL NOT NULL, tools INTEGER NOT NULL,
-      cost_limit REAL, tool_limit INTEGER, user_cost_limit REAL, user_tool_limit INTEGER, active INTEGER NOT NULL
+      cost_limit REAL, tool_limit INTEGER, user_cost_limit REAL, user_tool_limit INTEGER, active INTEGER NOT NULL,
+      pruned_tools INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS campaign_budget_members_root ON campaign_budget_members(root_id);
     CREATE TABLE IF NOT EXISTS campaign_budget_tool_calls (
@@ -55,13 +56,18 @@ export class CampaignBudgetLedger {
         SELECT NEW.session_id,json_extract(NEW.payload,'$.toolCallId') WHERE json_extract(NEW.payload,'$.toolCallId') IS NOT NULL
           AND EXISTS(SELECT 1 FROM campaign_budget_members WHERE session_id=NEW.session_id);
       UPDATE campaign_budget_members SET tools=MAX(tools,
-        (SELECT COUNT(*) FROM campaign_budget_tool_calls WHERE session_id=NEW.session_id))
+        (SELECT COUNT(*) FROM campaign_budget_tool_calls WHERE session_id=NEW.session_id)+pruned_tools)
       WHERE session_id=NEW.session_id;
     END;
     DROP TRIGGER IF EXISTS campaign_budget_stop_settled;
     `);
     if (!(sql.prepare("PRAGMA table_info(campaign_budget_members)").all() as Array<{name:string}>).some((c) => c.name === "generation")) {
       sql.exec("ALTER TABLE campaign_budget_members ADD COLUMN generation TEXT NOT NULL DEFAULT ''");
+    }
+    // Tool calls a member's history retention pruned before it joined: they have no row in
+    // campaign_budget_tool_calls, so the trigger adds them to the calls it counts (#2777).
+    if (!(sql.prepare("PRAGMA table_info(campaign_budget_members)").all() as Array<{name:string}>).some((c) => c.name === "pruned_tools")) {
+      sql.exec("ALTER TABLE campaign_budget_members ADD COLUMN pruned_tools INTEGER NOT NULL DEFAULT 0");
     }
     for (const row of sql.prepare("SELECT session_id FROM campaign_budget_members WHERE generation=''").all() as Array<{session_id:string}>) {
       sql.prepare("UPDATE campaign_budget_members SET generation=? WHERE session_id=?").run(randomUUID(),row.session_id);
@@ -156,8 +162,9 @@ export class CampaignBudgetLedger {
         const count = (this.sql.prepare("SELECT COUNT(DISTINCT json_extract(payload,'$.toolCallId')) AS n FROM session_events WHERE session_id=? AND kind='tool_call'").get(m.id) as { n: number }).n
           + m.pruned_tools;
         if (!old && authority.toolCalls !== undefined && m.tools > count) throw new Error("Campaign tool accounting is unavailable because preauthorization history is incomplete; protected admission is refused.");
-        this.sql.prepare(`INSERT OR IGNORE INTO campaign_budget_members(session_id,root_id,cost,tools,cost_limit,tool_limit,user_cost_limit,user_tool_limit,active)
-          VALUES (?,?,?,?,?,?,?,?,?)`).run(m.id,rootId,m.cost,m.tools,m.cost_limit,m.tool_limit,m.cost_limit,m.tool_limit,["completed","failed","stopped"].includes(m.status)?0:1);
+        this.sql.prepare(`INSERT OR IGNORE INTO campaign_budget_members(session_id,root_id,cost,tools,cost_limit,tool_limit,user_cost_limit,user_tool_limit,active,pruned_tools)
+          VALUES (?,?,?,?,?,?,?,?,?,?)`).run(m.id,rootId,m.cost,m.tools,m.cost_limit,m.tool_limit,m.cost_limit,m.tool_limit,
+          ["completed","failed","stopped"].includes(m.status)?0:1,m.pruned_tools);
         this.sql.prepare(`INSERT OR IGNORE INTO campaign_budget_tool_calls(session_id,tool_call_id)
           SELECT session_id,json_extract(payload,'$.toolCallId') FROM session_events WHERE session_id=? AND kind='tool_call' AND json_extract(payload,'$.toolCallId') IS NOT NULL`).run(m.id);
       }

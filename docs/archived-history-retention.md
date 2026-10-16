@@ -77,15 +77,18 @@ ends. It never runs during startup.
 Each session is pruned in short transactions of at most 500 events or 2 MiB of payload. Removing
 indexed text is the dominant cost (2–5 ms per KB with FTS5 secure-delete), so each batch's event and
 text budgets adapt toward 4 ms, and the pass rests three times as long as each batch took: pruning
-uses at most about a quarter of the event loop. A run interrupted by a restart, by unarchiving, or by
-the policy being turned off continues or closes at the next pass.
+uses at most about a quarter of the event loop. Each batch tests the kept set on at most 1,024 rows
+past where its run has read through, so a long stretch of kept rows costs one bounded read per
+batch, never a read of the whole session. A run interrupted by a restart, by unarchiving, or by the
+policy being turned off continues or closes at the next pass.
 
 The last step of each session records when it was pruned, how many events were removed and under
 which threshold, and gives the session a new event epoch, as crash recovery does. Open dashboards
 then reload the transcript, campaign and work-item proofs move to the new epoch with their kept
 report events, and accounting keeps its epoch (`accountingEventEpoch`), so cost corrections are not
 fenced. The session's tool-call count, which guardrails and campaign budgets read, keeps counting
-the removed tool calls.
+the removed tool calls. A campaign allowance granted after a prune counts them too, and adds each
+new call to them.
 
 Removal batches commit without their own WAL flush, like runner ingest: a batch an OS crash rolls
 back is removed again by the next pass. The final step flushes, and blob files are deleted only
@@ -100,7 +103,10 @@ after it, so a crash can never restore an artifact row whose blob is gone. See
   every supported Node.js bundles. Terms deleted before the option was set stay until the index
   merges their segments.
 - Search rows are deleted by key. New search rows are written with their event's row id; rows
-  indexed earlier are mapped to their events once, in paced steps, before the first prune.
+  indexed earlier are mapped to their events once, in paced steps, before the first prune. If an
+  older build has written to the database since, the mapping starts again from the first row: that
+  build numbers its rows from the highest one left, which a prune may have lowered below rows
+  already mapped.
 - The database file does not shrink: freed pages are reused, so it stops growing. To return the
   space, stop the control plane and run `sqlite3 control-plane.db 'VACUUM'`, which needs as much free
   disk as the database itself. The control plane never vacuums automatically: on its single
@@ -139,10 +145,11 @@ history as it always has.
   relaxes at once; the environment default and organization overrides; the exact kept set, with
   search rows and payload artifacts of removed events gone and kept prompts still searchable;
   campaign proofs, accounting epoch, tool-call counts and the hydration cursor unchanged; no reused
-  seq after unarchiving; eligibility; bounded batches with rests between them; an interrupted run
+  seq after unarchiving; a campaign allowance granted after a prune; eligibility; bounded batches
+  with rests between them, and a long kept stretch read one window per batch; an interrupted run
   ending where an uninterrupted one does; unarchiving or turning retention off mid-run; reprocessing;
-  legacy and colliding search rows; and runners of protocol 53 and current never asked for pruned
-  events.
+  legacy and colliding search rows, including an older build's row numbered below a finished scan;
+  and runners of protocol 53 and current never asked for pruned events.
 - `archived-history-retention.size.test.ts`: over 40 create, archive and prune cycles of about 2,000
   events each, the file grows by under 10% of what an unpruned cycle adds (about 5% when measured),
   free pages are reused, and no search row, payload artifact or blob of a removed event remains.

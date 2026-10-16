@@ -340,6 +340,33 @@ test("a verified campaign child report stays verified when the child's history i
   }
 });
 
+test("a campaign root pruned before its allowance keeps counting its pruned tool calls", () => {
+  const db = openDb();
+  try {
+    createSession(db, "root");
+    for (const id of ["one", "two", "three"]) {
+      db.appendEvent("root", { kind: "tool_call", toolCallId: id, title: "Read", status: "completed" }, T0 + 1);
+    }
+    archive(db, "root", T0 + 2);
+    const input = { cutoff: T0 + 100, retentionDays: 7, now: T0 + 100, maxEvents: 500, maxPayloadBytes: 2 * 1024 * 1024,
+      maxSearchLength: 64 * 1024 };
+    while (!db.pruneArchivedHistoryBatch("root", input).finished) { /* batches */ }
+    assert.equal(db.countToolCalls("root"), 3);
+    // Unarchived and resumed, it is then granted its first campaign allowance.
+    db.setSessionArchived("root", false, T0 + 101);
+    db.updateSessionStatus("root", "running", T0 + 101);
+    db.campaignBudgets.authorize("root", { version: 1, accounting: "managed_workers_only", unpriced: "stop", toolCalls: 100,
+      concurrency: 1 });
+    assert.equal(db.campaignBudgets.view("root")!.actual.toolCalls, 3);
+    db.appendEvent("root", { kind: "tool_call", toolCallId: "four", title: "Read", status: "completed" }, T0 + 102);
+    db.appendEvent("root", { kind: "tool_call", toolCallId: "four", title: "Read", status: "completed" }, T0 + 103);
+    assert.equal(db.countToolCalls("root"), 4);
+    assert.equal(db.campaignBudgets.view("root")!.actual.toolCalls, 4, "a new call adds to the pruned ones, once");
+  } finally {
+    db.close();
+  }
+});
+
 test("prunes visit only archived, settled sessions past the threshold", async () => {
   const db = openDb();
   const clock = new Clock();
@@ -387,6 +414,43 @@ test("batches stay inside their budget and the sweeper rests between them", asyn
     assert.ok(sizes.length > 3, "a long transcript takes several batches");
     assert.ok(clock.sleeps.length >= sizes.length, "the sweeper rests after every batch");
     assert.ok(db.getSession("long")!.historyPruned);
+  } finally {
+    db.close();
+  }
+});
+
+test("a long kept stretch is read one window per batch, and every removable row around it still goes", () => {
+  const db = openDb();
+  try {
+    createSession(db, "kept");
+    const append = (payload: SessionEventPayload) => db.appendEvent("kept", payload, T0 + 1);
+    // Removable rows before, inside and after 2,500 kept prompts: windows end mid-batch, and at
+    // least one window holds only kept rows.
+    for (let index = 0; index < 5; index += 1) append({ kind: "stderr", text: `early-${index}` });
+    for (let index = 0; index < 2_500; index += 1) {
+      append({ kind: "user_message", text: `prompt-${index}` });
+      if (index === 600) append({ kind: "stderr", text: "middle" });
+    }
+    for (let index = 0; index < 5; index += 1) append({ kind: "stderr", text: `late-${index}` });
+    append({ kind: "agent_message", text: "the answer", messageId: "answer" });
+    archive(db, "kept", T0 + 2);
+    const input = { cutoff: T0 + 100, retentionDays: 7, now: T0 + 100, maxEvents: 2, maxPayloadBytes: 2 * 1024 * 1024,
+      maxSearchLength: 64 * 1024 };
+    let batches = 0;
+    let advances = 0;
+    for (;;) {
+      const batch = db.pruneArchivedHistoryBatch("kept", input);
+      batches += 1;
+      if (batch.finished) break;
+      if (batch.removed === 0) advances += 1;
+    }
+    assert.deepEqual(kinds(db, "kept").filter((kind) => kind !== "user_message"), ["agent_message"]);
+    assert.equal(kinds(db, "kept").length, 2_501);
+    assert.equal(db.getSession("kept")!.historyPruned!.eventCount, 11);
+    assert.ok(advances >= 1, "a window with nothing to remove still moves the run on");
+    assert.ok(batches <= Math.ceil(2_512 / 1_024) + Math.ceil(11 / 2) + 6, `${batches} batches`);
+    assert.equal((db.raw().prepare("SELECT history_prune_run_seq AS v FROM sessions WHERE id='kept'").get() as { v: number | null }).v,
+      null, "closing the run clears where it read through");
   } finally {
     db.close();
   }
@@ -580,6 +644,42 @@ test("a later legacy scan keeps a recorded fallback row and removes duplicates a
     assert.equal(searchHits(reopened, "kestrelprompt", "s1"), 1, "the recorded row stays, its duplicate goes");
     assert.equal(reopened.searchEvents("squatter", 10).length, 0, "an orphan goes");
     reopened.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an older build's search row numbered below a finished scan is mapped and leaves search with its event", () => {
+  const root = mkdtempSync(join(tmpdir(), "retention-rescan-reused-"));
+  try {
+    const path = join(root, "db.sqlite");
+    let db = openDb(path);
+    createSession(db, "s1");
+    db.appendEvent("s1", { kind: "user_message", text: "keep" }, T0 + 2);
+    db.appendEvent("s1", { kind: "stderr", text: "old output" }, T0 + 3);
+    archive(db, "s1", T0 + 4);
+    db.raw().exec("UPDATE fts_state SET keyed_through=NULL");
+    db.close();
+    db = ControlPlaneDb.open(path);
+    while (db.mapLegacySearchRows(100).pending) { /* paced steps */ }
+    const input = { cutoff: T0 + 100, retentionDays: 7, now: T0 + 100, maxEvents: 500, maxPayloadBytes: 2 * 1024 * 1024,
+      maxSearchLength: 64 * 1024 };
+    while (!db.pruneArchivedHistoryBatch("s1", input).finished) { /* batches */ }
+    // The prune removed the highest search row, so an older build numbers its next row below the
+    // finished scan's cursor.
+    const sql = db.raw();
+    sql.prepare("INSERT INTO session_events(session_id, seq, ts, kind, payload) VALUES (?, ?, ?, ?, ?)")
+      .run("s1", 3, T0 + 5, "stderr", JSON.stringify({ kind: "stderr", text: "rescansecret" }));
+    sql.prepare("INSERT INTO session_events_fts(text, session_id, seq) VALUES (?, ?, ?)").run("rescansecret", "s1", 3);
+    sql.exec("UPDATE fts_state SET last_rowid=(SELECT MAX(id) FROM session_events); UPDATE sessions SET message_count=message_count+1 WHERE id='s1'");
+    db.close();
+    db = ControlPlaneDb.open(path);
+    assert.equal(db.legacySearchRowsPending(), true);
+    while (db.mapLegacySearchRows(100).pending) { /* paced steps */ }
+    while (!db.pruneArchivedHistoryBatch("s1", input).finished) { /* batches */ }
+    assert.deepEqual(kinds(db, "s1"), ["user_message"]);
+    assert.equal(searchHits(db, "rescansecret", "s1"), 0);
+    db.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
