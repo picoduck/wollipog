@@ -307,7 +307,9 @@ $launcherArgs = @($env:WOLLIPOG_CLI_ARGS | ConvertFrom-Json)
 
 Claude Code and Codex sessions also receive a general `wollipog` MCP server with the same manager
 tool schemas. Prefer MCP tools when attached; use the CLI for scripts, CI, ACP, or when a session has
-no `wollipog` MCP server.
+no `wollipog` MCP server. A provider sandbox without network access, such as Codex's default
+sandbox, refuses the CLI's loopback connection; there the CLI works only when
+`WOLLIPOG_AGENT_CONTROL_RELAY_FIFO` is set, so otherwise use the MCP tools.
 
 The credential is scoped to the current live session and its ownership audience. It may manage
 only that session's worktrees. A command may

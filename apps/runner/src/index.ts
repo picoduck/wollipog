@@ -125,6 +125,7 @@ import {
   sweepAgentControlFiles,
 } from "./agent-control.js";
 import { AgentControlRelaySockets } from "./agent-control-relay.js";
+import { AgentControlFifoRelays, agentControlFifoRelayBase } from "./agent-control-fifo-relay.js";
 import {
   projectOrchestratorPresetForPeer,
   stripOrchestratorLaunchArgs,
@@ -421,22 +422,34 @@ const claudeHookHost = {
 };
 const agentControlHost = defaultAgentControlHost(config.dataDir);
 const agentControlRelays = new AgentControlRelaySockets(relayAgentControlRequest);
+// The same relay through FIFOs, for a CLI inside a provider sandbox that refuses every socket
+// (#3270). Measured only against Codex's Linux sandbox, so other hosts keep the loopback relay.
+const agentControlFifoRelays = process.platform === "linux"
+  ? new AgentControlFifoRelays(agentControlFifoRelayBase(agentControlHost.configDir), relayAgentControlRequest)
+  : undefined;
 sweepClaudeHookFiles(claudeHookHost.configDir);
 // Verdict sockets (#1336). A runner that sandboxes its providers serves a path socket inside the
 // hidden hook state directory. One that does not (`provider` mode) serves an abstract-namespace
 // socket on Linux and answers from its own memory; elsewhere the guard reads its file as before.
 const guardSockets = new ManagedWorktreeGuardSockets(claudeHookHost.configDir);
 
-async function providerAgentControlRelayEndpoint(
+async function providerAgentControlRelay(
   meta: Pick<SessionMeta, "sessionId" | "context" | "executionTarget">,
-): Promise<string | undefined> {
+): Promise<{ providerRelayEndpoint?: string; providerRelayFifo?: string }> {
   if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionAgentControl") ||
       config.executionIsolation.mode !== "provider" || meta.context.kind !== "native" ||
       (meta.executionTarget && meta.executionTarget.adapter !== "host")) {
-    await agentControlRelays.close(meta.sessionId);
-    return undefined;
+    await Promise.all([agentControlRelays.close(meta.sessionId), agentControlFifoRelays?.close(meta.sessionId)]);
+    return {};
   }
-  return agentControlRelays.ensure(meta.sessionId);
+  const providerRelayEndpoint = await agentControlRelays.ensure(meta.sessionId);
+  // Optional: without it the CLI keeps the loopback relay, and the guidance stops offering the CLI
+  // where a provider sandbox would refuse that.
+  const providerRelayFifo = await agentControlFifoRelays?.ensure(meta.sessionId).catch((error: unknown) => {
+    log(`agent control ${meta.sessionId}: FIFO relay unavailable (${errText(error)})`);
+    return undefined;
+  });
+  return { providerRelayEndpoint, ...(providerRelayFifo ? { providerRelayFifo } : {}) };
 }
 
 /**
@@ -952,7 +965,7 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
         registerCredentialAndWait: registerAgentControlCredentialAndWait,
         orchestratorAgent: localAgent,
         executionIsolationMode: config.executionIsolation.mode,
-        providerRelayEndpoint: await providerAgentControlRelayEndpoint(meta),
+        ...await providerAgentControlRelay(meta),
         orchestratorProjectPaths: config.workspaces.map((workspace) => workspace.path),
       },
       log,
@@ -1254,6 +1267,7 @@ function sendUp(msg: RunnerToControlPlane): void {
   if (msg.type === "session_status" && ["completed", "failed", "stopped"].includes(msg.status)) {
     removeAgentControlFiles(msg.sessionId, agentControlHost.configDir);
     void agentControlRelays.close(msg.sessionId);
+    void agentControlFifoRelays?.close(msg.sessionId);
     for (const [key, pending] of pendingAgentControlRegistrations) {
       if (!key.startsWith(`${msg.sessionId}\0`)) continue;
       clearTimeout(pending.timer);
@@ -2549,6 +2563,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       void guardSockets.close(msg.sessionId);
       removeAgentControlFiles(msg.sessionId, agentControlHost.configDir);
       void agentControlRelays.close(msg.sessionId);
+      void agentControlFifoRelays?.close(msg.sessionId);
       break;
     case "resolve_permission":
       sessions.resolvePermission(msg.sessionId, msg.requestId, msg.optionId, msg.resolvedByParentSessionId, msg.resolvedBy);
@@ -3207,7 +3222,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
               controlPlaneUrl: config.controlPlaneUrl, controlPlaneProtocolVersion,
               allowInsecureTransport, registerCredential: registerAgentControlCredential,
               executionIsolationMode: config.executionIsolation.mode,
-              providerRelayEndpoint: await providerAgentControlRelayEndpoint(prepared),
+              ...await providerAgentControlRelay(prepared),
               orchestratorProjectPaths: config.workspaces.map((workspace) => workspace.path),
             }, log, agentControlHost);
           },
@@ -3914,7 +3929,9 @@ function shutdown(exitCode = 0): void {
   });
   bestEffort("dispose shells", () => shells.dispose());
   bestEffort("close guard sockets", () => { void guardSockets.closeAll(); });
-  bestEffort("close Agent Control relays", () => { void agentControlRelays.closeAll(); });
+  // The FIFO channels close synchronously: their directories are unlistable, so one left behind
+  // would block an ordinary recursive delete of the data directory until the next startup sweep.
+  bestEffort("close Agent Control relays", () => { void agentControlRelays.closeAll(); agentControlFifoRelays?.closeAllNow(); });
   // Providers that exited normally may have intentional background descendants retained under
   // their session boundary. Runner shutdown is the final owner and must drain every such scope.
   bestEffort("register retained descendant cleanup", () => terminateDescendantBoundariesAfterPendingKills());
