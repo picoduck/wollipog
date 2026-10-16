@@ -153,6 +153,10 @@ wollipog worktree select [--session ID] --path PATH --json
 wollipog worktree discard [--session ID] --path PATH --json
 wollipog artifact attach --file PATH [--name NAME] [--session ID] --json
 wollipog pr wait PR [--repo OWNER/NAME] [--head SHA] [--timeout MS] [--interval MS] [--any-failure] --json
+wollipog review run --repo OWNER/NAME --pr N --head SHA [--brief-file PATH] [--scope delta|full] [--full-reason TEXT] --json
+wollipog review get JOB_ID --json
+wollipog review list [--limit N] [--cursor JOB_ID] --json
+wollipog review cancel JOB_ID --json
 wollipog decision request --request-id ID --resource-key KEY --snapshot JSON --json
 wollipog decision get OCCURRENCE_ID --json
 wollipog decision consume OCCURRENCE_ID --snapshot JSON [--action JSON] --json
@@ -162,7 +166,7 @@ wollipog service <install|status|restart|logs|upgrade|uninstall> [options]
 wollipog doctor
 wollipog update
 wollipog pair <create|list|revoke|url> [options]
-wollipog help [doctor|update|pair|service|admin|session|worktree|artifact|decision|pr]
+wollipog help [doctor|update|pair|service|admin|session|worktree|artifact|decision|pr|review]
 ```
 
 `wollipog pr wait` (MCP `wait_pull_request`, #3081) blocks until a GitHub pull request's required
@@ -191,6 +195,94 @@ checks only. Timeouts are clamped to 1 ms–3 hours (default 4 minutes); reads s
 starts more than 20 seconds past it and one still in flight then is abandoned. Resolving a bare
 number's repository is one of those reads, so `--timeout 1` still returns one snapshot. Polling is clamped to
 10 seconds–10 minutes (default 30 seconds); lists are capped at 30 required checks and 20 failed jobs.
+
+`wollipog review run` (MCP `request_cross_model_review`, #3306) asks the runner to run the installed
+cross-model review controller for the calling session's own pull request, outside the session's
+sandbox. A protected native Linux session cannot run the controller itself: its root is read-only and
+a reviewer's sandbox cannot nest inside the session's user namespace. The runner runs it instead, with
+the other model family as the reviewer (Codex for a Claude Code session, Claude Code for a Codex
+session) under that reviewer's normal read-only sandbox. The reviewer reads a snapshot checked out
+from a runner-owned mirror at the exact head, so nothing writes to the session's worktree or its Git
+metadata, and the session can keep working during the review. The runner refuses, and reports a fixed
+reason for, any request outside scope: the session must own a native managed worktree it created; the
+pull request must be open, from the same repository as the session's project (fork pull requests are
+refused), and on the worktree's branch; and `--head` must be its pushed head. The first round of a
+pull request needs `--brief-file` (MCP `brief`, at most 100 KiB: intent, acceptance criteria and
+verification); the runner keeps it, and later rounds review only the changes since the last valid
+round unless `--scope full` is given with `--full-reason`. The controller's limits apply per pull
+request: four valid rounds and two consumed attempts per round, with a rebase or force-push starting
+a new review epoch. A head that does not descend from the head the epoch was reviewed at (its last
+valid round's or, before any valid round, its most recent attempt's) counts as a rebase, so attempts
+spent before a rebase do not block the rebased head. One review runs per session at a time, and a runner at its review concurrency
+limit refuses a request as busy instead of queueing it.
+
+The request returns a job at once in state `requested`; the runner then reports `running` and finally
+`completed`, `failed`, or `not_launched` with a fixed reason. `review get` (`get_cross_model_review`)
+reads the job; once `terminal` is true it also returns the controller's one-line summary, its
+`report.json` and the tail of the runner-owned ledger (each at most 256 KiB, with `reportTruncated`
+and `ledgerTruncated`). Pass `include` to the MCP tool to fetch only the report or the ledger. The
+ledger is read-only to the session; adjudication stays in the pull request. `review list`
+(`list_cross_model_reviews`) pages the session's jobs newest first, and `review cancel`
+(`cancel_cross_model_review`) stops an unfinished one; a cancelled launched attempt still counts.
+Jobs are durable: a runner that reconnects receives every unfinished job again and reports its
+result, and it recovers a review that was running when it restarted.
+
+The routes are `/api/sessions/:id/cross-model-reviews` (POST to request, GET to list),
+`.../:jobId`, `.../:jobId/artifacts` and `.../:jobId/cancel` (POST). Only the session's own credential
+may request or cancel; the session and people with access to it may read. Orchestrator sessions do not
+have these tools. A session in a campaign with an allowance is refused, so the allowance cannot be
+bypassed: its Orchestrator runs the campaign's controlled review job (`run_campaign_review_job`,
+[campaign limits](./campaign-limits.md)) instead. The feature needs protocol 223 on both the control
+plane and the runner, and a Linux runner that advertises `runtime.sessionReview`.
+
+The runner discovers the installation at each registration and runs only files no session can
+change. The controller is read from its installed skill directory (`~/.devbox/skills/cross-model-review`,
+or `WOLLIPOG_SESSION_REVIEW_SKILL_DIR` in the runner's environment), never through a provider home's
+`skills` link. The controller, `python3`, `git`, `gh` (which the runner itself runs to read the pull
+request), and the `codex` and `claude` reviewer CLIs found on the runner's `PATH` must each be owned
+by the runner's user or root, have no path component writable by other users, and lie outside every
+root a session can write: provider credential homes (`~/.codex` and `~/.claude`, every configured
+provider account's directory, provider homes an agent's or a session's environment names, and each
+session's current and pending credential homes), the shared package caches, temporary directories,
+project checkouts and worktrees, and the runner's data directory. The first trusted candidate on
+`PATH` is used and an untrusted one earlier on it is skipped, never run; without a trusted
+`python3`, `git` and `gh` nothing is advertised. A reviewer installed under `~/.codex` or `~/.claude`
+is therefore refused; install it elsewhere, for example with npm into `~/.local` or a system prefix,
+and put that location on the runner's `PATH`. A reviewer that is a script run through `env` (npm's
+`#!/usr/bin/env node`, with Node from nvm or fnm, for example) also needs that program, `node`,
+on the runner's `PATH` and trusted by the same checks; otherwise the reviewer is unavailable and
+the reason says so. The runner advertises what it found and why anything is unavailable, and
+records a digest of the controller's files with each job. Reviewers use the runner's default Codex
+and Claude sign-ins.
+
+Nothing the runner runs for a review finds a program through the runner's own `PATH`, which could
+name a directory a session can write. The `git` and `gh` commands that read the pull request and
+build the snapshot, and the controller's recovery step, run with `PATH` set to a runner-private
+directory of links to the verified `git`, `gh` and `ssh`, followed by `/usr/bin:/bin`, and without
+the runner's `GIT_*` and `*ASKPASS` variables. `HOME` is kept, so your own git and GitHub CLI
+configuration and credentials still apply, but a credential helper must be named by an absolute
+path or live in a system directory. A fetch over SSH runs the verified `ssh` by its path
+(`GIT_SSH_COMMAND`); when no trusted `ssh` is found, the mirror is fetched over HTTPS only, whatever
+the origin's spelling. The controller's own `PATH` holds links to the verified reviewer, `git` and
+the reviewer's `env` program, then `/usr/bin:/bin`.
+
+The controller runs under `python3 -I`, with only its own installed directory added for its sibling
+modules. A controller preflight failure launches nothing and consumes no attempt: the job completes
+with the controller's summary (`attempt_consumed: false`, its `failure_class` and
+`validation_errors`), and the round's attempts are unchanged. A job stays running, with its snapshot
+and its share of the concurrency limit, until both the controller and the reviewer it started have
+exited, so a reviewer that outlives a killed controller is still supervised, cancelled through the
+controller's process group, and stopped by the time limit. When the controller dies without a
+result, its recovery step runs once; until it finishes, neither a repeated request nor a cancel
+ends the job, and its recovered result is what the job reports.
+
+Before the controller is spawned, the job is saved with a per-launch marker that the controller
+(and the reviewer it starts) carries in its environment. A runner that restarts before it recorded
+the controller's process looks for that marker: a live process is adopted and supervised as usual;
+an attempt directory or controller output with no live process is a controller that died, and is
+recovered; with neither, the job reports `not_launched` and the attempt is not charged. If the
+runner cannot record a controller it has just started, it stops that controller and reports the
+job failed.
 
 `wollipog session wait` (MCP `wait_session`) polls a session until its status is one of `--for`
 (default `input_required,completed,failed,stopped`) and returns `outcome: "reached"`, the status it

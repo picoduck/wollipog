@@ -678,12 +678,17 @@
 //      against a pre-v220 control plane instead of sending it.
 // 221: pre-acceptance background capacity retry exhaustion, separate from accepted missing results.
 // 222: CLI/MCP event readers never use the legacy unpaged hydration fallback.
-export const PROTOCOL_VERSION = 222;
+// 223: runner-mediated session cross-model review (#3306): `session_review_job` and
+//      `cancel_session_review_job` commands, the `session_review_job_update` reply, and
+//      `RunnerRuntimeInfo.sessionReview`. The control plane sends a job only to a v223+ runner that
+//      advertises the capability, and the session tools refuse against an older control plane.
+export const PROTOCOL_VERSION = 223;
 
 export * from "./campaign-authority.js";
 export * from "./campaign-issue-publication.js";
 export * from "./campaign-budget.js";
 export * from "./campaign-review-job.js";
+export * from "./session-review-job.js";
 export * from "./rate-priced-usage.js";
 export * from "./campaign-recovery.js";
 import type { CampaignControl, CampaignRequestSource, CampaignAuthorityEvaluation } from "./campaign-authority.js";
@@ -905,6 +910,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** CLI/MCP event reader keeps incomplete-cache reads paged. Older readers assume the unpaged
    * hydration fallback returns the whole log and can mislabel a bounded prefix as its newest tail. */
   boundedSessionEventReads: 222,
+  /** v223 runner runs a session's own cross-model review outside its sandbox (#3306); the session
+   * tools check the same floor against the connected control plane. */
+  sessionReviewJob: 223,
   authoritativeHistoryWindow: 213,
   promptImageReferences: 56,
   durableSessionShells: 57,
@@ -3312,6 +3320,8 @@ export interface RunnerRuntimeInfo {
   campaignReview?: import("./campaign-review-job.js").ControlledReviewCapability;
   /** Exact read-only workspace inspection path only; never Full Control readiness. */
   campaignLaunchInspection?: { version: 1 };
+  /** Runner-mediated cross-model review for sessions (#3306). Missing is unsupported. */
+  sessionReview?: import("./session-review-job.js").SessionReviewCapability;
   /** Native-host runner data root. WSL contexts use the same `.agent-manager` layout in-distro. */
   dataDir: string;
   worktreeRoot: string;
@@ -9023,6 +9033,7 @@ export interface SessionNamingCustomModelResultMessage {
 export type RunnerToControlPlane =
   | import("./campaign-control-launch.js").CampaignLaunchInspectionResult
   | import("./campaign-review-job.js").CampaignReviewJobUpdate
+  | import("./session-review-job.js").SessionReviewJobUpdate
   | RegisterMessage
   | HeartbeatMessage
   | SessionStatusMessage
@@ -10798,6 +10809,8 @@ export type ControlPlaneToRunner =
   | import("./campaign-control-launch.js").CampaignLaunchInspectionMessage
   | import("./campaign-review-job.js").CampaignReviewJobCommand
   | { type: "cancel_campaign_review_job"; jobId: string; nonce: string }
+  | import("./session-review-job.js").SessionReviewJobCommand
+  | import("./session-review-job.js").CancelSessionReviewJobCommand
   | RegisteredMessage
   | ConfigureHarnessInstallationChoicesMessage
   | RegisterRejectedMessage

@@ -1423,3 +1423,50 @@ test("CLI campaign ledger commands map to their tools and refuse other sessions 
   assert.equal(await invoke(["campaign","review","--input",JSON.stringify(review),"--json"]),1);
   assert.ok(calls.every((call)=>call.url.endsWith("/api/compatibility")));
 });
+
+test("review commands map to the session's own cross-model review tools (#3306)", async () => {
+  const calls: Array<{ url: string; method?: string; body?: string }> = [];
+  let version = PROTOCOL_VERSION;
+  const fetch: McpFetch = async (url, init) => {
+    calls.push({ url, method: init?.method, body: init?.body });
+    return { ok: true, status: 200, text: async () => JSON.stringify(url.endsWith("/api/compatibility")
+      ? { protocolVersion: version } : { jobId: "srj_abcdefgh", terminal: false }) };
+  };
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "test-token", WOLLIPOG_SESSION_ID: "self" };
+  const io = { stdout: () => {}, stderr: () => {} };
+  const invoke = (args: string[]) => runWollipogCli(["node", "cli.js", "--wollipog-cli", ...args], env, io, fetch);
+  const last = () => calls.filter((call) => !call.url.endsWith("/api/compatibility")).at(-1)!;
+  const root = mkdtempSync(join(tmpdir(), "wollipog-review-brief-"));
+  try {
+    const brief = join(root, "brief.md");
+    writeFileSync(brief, "# Intent\nFix #3306.\n");
+    const head = "c".repeat(40);
+    assert.equal(await invoke(["review", "run", "--repo", "picoduck/wollipog", "--pr", "3307", "--head", head, "--brief-file", brief, "--json"]), 0);
+    assert.equal(last().method, "POST");
+    assert.equal(last().url, "http://cp/api/sessions/self/cross-model-reviews");
+    assert.deepEqual(JSON.parse(last().body!), { pullRequest: { repository: "picoduck/wollipog", number: 3307 }, headSha: head, brief: "# Intent\nFix #3306.\n" });
+    assert.equal(await invoke(["review", "run", "--repo", "picoduck/wollipog", "--pr", "3307", "--head", head, "--scope", "full", "--full-reason", "rebased", "--json"]), 0);
+    assert.deepEqual(JSON.parse(last().body!), { pullRequest: { repository: "picoduck/wollipog", number: 3307 }, headSha: head, scope: "full", fullReason: "rebased" });
+    assert.equal(await invoke(["review", "get", "srj_abcdefgh", "--json"]), 0);
+    assert.equal(last().url, "http://cp/api/sessions/self/cross-model-reviews/srj_abcdefgh");
+    assert.equal(await invoke(["review", "list", "--limit", "5", "--cursor", "srj_abcdefgh", "--json"]), 0);
+    assert.equal(last().url, "http://cp/api/sessions/self/cross-model-reviews?limit=5&afterJobId=srj_abcdefgh");
+    assert.equal(await invoke(["review", "cancel", "srj_abcdefgh", "--json"]), 0);
+    assert.equal(last().url, "http://cp/api/sessions/self/cross-model-reviews/srj_abcdefgh/cancel");
+
+    calls.length = 0;
+    for (const args of [
+      ["review", "run", "--repo", "picoduck/wollipog", "--head", head],
+      ["review", "run", "--repo", "picoduck/wollipog", "--pr", "0", "--head", head],
+      ["review", "run", "--repo", "picoduck/wollipog", "--pr", "1", "--head", head, "--full-reason", "why"],
+      ["review", "run", "--repo", "picoduck/wollipog", "--pr", "1", "--head", head, "--brief-file", join(root, "missing.md")],
+      ["review", "get", "srj_abcdefgh", "--session", "other"],
+      ["review", "get"],
+    ]) assert.equal(await invoke([...args, "--json"]), 2, args.join(" "));
+    assert.equal(calls.length, 0);
+    version = RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob - 1;
+    assert.equal(await invoke(["review", "list", "--json"]), 1);
+    assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")));
+    assert.equal(resolveHelp(["help", "review"])?.ok, true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

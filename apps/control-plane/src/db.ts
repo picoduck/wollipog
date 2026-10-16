@@ -8,6 +8,7 @@ import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaus
 import { DatabaseSync } from "node:sqlite";
 import { CampaignBudgetLedger } from "./campaign-budget.js";
 import { CampaignReviewJobs } from "./campaign-review-jobs.js";
+import { SessionReviewJobs } from "./session-review-jobs.js";
 import { attentionRequestRank, parseRatePricedUsage, ratePricedUsageKey, ratePricedUsageRecord, RATE_PRICED_USAGE_BUCKETS, RATE_PRICED_USAGE_MAX_ENTRIES, type RatePricedUsageBucket, type RatePricedUsageTotal } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent } from "./campaign-authority.js";
@@ -5210,6 +5211,7 @@ function sessionHistoryRetentionView(
 export class ControlPlaneDb {
   readonly campaignBudgets: CampaignBudgetLedger;
   readonly campaignReviewJobs: CampaignReviewJobs;
+  readonly sessionReviewJobs: SessionReviewJobs;
   private constructor(
     private readonly db: DatabaseSync,
     private readonly artifactBlobs: ArtifactBlobStore,
@@ -5223,6 +5225,7 @@ export class ControlPlaneDb {
       const scope=this.sessionScope(rootId);
       return scope?.owner.kind==="user"?{organizationId:scope.organizationId,userId:scope.owner.userId}:null;
     });
+    this.sessionReviewJobs = new SessionReviewJobs(db);
     this.ingestRollback = hostRebooted && walPath !== null
       ? { settled: new Set(), runnerTails: new Map(), controlPlaneEvents: new Set() }
       : null;

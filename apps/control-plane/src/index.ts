@@ -6,7 +6,7 @@ import { registerCampaignIssueScopeRoutes } from "./campaign-issue-scope-routes.
  */
 
 import os from "node:os";
-import { handoffDestinationError, sessionRole, type SessionConfig } from "@wollipog/protocol";
+import { handoffDestinationError, sessionRole, type SessionConfig, type SessionReviewJobRequest } from "@wollipog/protocol";
 import { writeSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -1360,6 +1360,7 @@ app.register(async (instance) => {
         svc.recoverWorkflowRunner(runnerId);
         svc.recoverCampaignBudgetAllocations(runnerId);
         svc.recoverCampaignReviewJobs(runnerId);
+        svc.recoverSessionReviewJobs(runnerId);
         automations.tick(Date.now());
         automations.commandOutbox.flush(Date.now(), runnerId);
         hub.runnerChanged(runnerId);
@@ -1403,6 +1404,9 @@ app.register(async (instance) => {
         break;
       case "campaign_review_job_update":
         if(runnerId) svc.onCampaignReviewJobUpdate(runnerId,msg);
+        break;
+      case "session_review_job_update":
+        if (runnerId) svc.onSessionReviewJobUpdate(runnerId, msg);
         break;
       case "policy_hook_credential":
         {
@@ -4058,6 +4062,61 @@ app.get("/api/sessions/:id/orchestrator-campaign/review-jobs/:jobId/report",asyn
   const {id,jobId}=req.params as {id:string;jobId:string},principal=campaignLedgerPrincipal(req,reply,id);
   if(!principal) return reply;
   return respond(reply,svc.campaignReviewReport(id,jobId,(sessionId)=>db.canAccessSession(principal,sessionId)));
+});
+
+// A session's runner-mediated cross-model review of its own pull request (#3306). Only the
+// session's own credential may request or cancel one; a person with access to the session, or the
+// session itself, may read them.
+function sessionReviewRequester(req: FastifyRequest, reply: FastifyReply, id: string): AuthPrincipal | null {
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    void reply.code(403).send({ error: "a matching session credential is required" });
+    return null;
+  }
+  if (!db.canAccessSession(principal, id)) {
+    void reply.code(404).send({ error: "session not found" });
+    return null;
+  }
+  return principal;
+}
+function canReadSessionReviews(req: FastifyRequest, id: string): boolean {
+  const principal = requestPrincipal(req);
+  return Boolean(principal && db.canAccessSession(principal, id) &&
+    (principal.kind !== "agent" || principal.credentialSessionId === id));
+}
+app.post("/api/sessions/:id/cross-model-reviews", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = sessionReviewRequester(req, reply, id);
+  if (!principal) return reply;
+  return respond(reply, svc.requestSessionReviewJob(id, req.body as SessionReviewJobRequest,
+    (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+app.get("/api/sessions/:id/cross-model-reviews", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  if (!canReadSessionReviews(req, id)) return reply.code(404).send({ error: "session not found" });
+  const query = req.query as { limit?: string; afterJobId?: string };
+  reply.header("cache-control", "no-store");
+  return respond(reply, svc.sessionReviewJobs(id, {
+    ...(query.limit === undefined ? {} : { limit: Number(query.limit) }),
+    ...(query.afterJobId === undefined ? {} : { afterJobId: query.afterJobId }),
+  }));
+});
+app.get("/api/sessions/:id/cross-model-reviews/:jobId", async (req, reply) => {
+  const { id, jobId } = req.params as { id: string; jobId: string };
+  if (!canReadSessionReviews(req, id)) return reply.code(404).send({ error: "session not found" });
+  reply.header("cache-control", "no-store");
+  return respond(reply, svc.sessionReviewJob(id, jobId));
+});
+app.get("/api/sessions/:id/cross-model-reviews/:jobId/artifacts", async (req, reply) => {
+  const { id, jobId } = req.params as { id: string; jobId: string };
+  if (!canReadSessionReviews(req, id)) return reply.code(404).send({ error: "session not found" });
+  reply.header("cache-control", "no-store");
+  return respond(reply, svc.sessionReviewJobArtifacts(id, jobId));
+});
+app.post("/api/sessions/:id/cross-model-reviews/:jobId/cancel", async (req, reply) => {
+  const { id, jobId } = req.params as { id: string; jobId: string };
+  if (!sessionReviewRequester(req, reply, id)) return reply;
+  return respond(reply, svc.cancelSessionReviewJob(id, jobId));
 });
 
 // Budget minting shares the foundation's human-only CAS and revocation contract. No agent

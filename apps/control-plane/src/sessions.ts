@@ -10,6 +10,9 @@ import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compat
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
 import { issueBoundary, issueEvidenceDigest, issueWork, closureEvidence, publicationEvidence, reservedPublicationSlots } from "./campaign-issue-authority.js";
 import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe } from "@wollipog/protocol";
+import { SESSION_REVIEW_BRIEF_LIMIT_BYTES, SESSION_REVIEW_JOB_ID_PATTERN, type SessionReviewHarness, type SessionReviewJobArtifacts,
+  type SessionReviewJobCommand, type SessionReviewJobRequest, type SessionReviewJobView, type SessionReviewJobsPage,
+  type SessionReviewJobUpdate } from "@wollipog/protocol";
 import { normalizeCampaignIssueScopeSnapshot, titleFromPrompt, type CampaignIssueScopeRequest, type CampaignIssueScopeView, type CampaignIssueScopeSnapshot } from "@wollipog/protocol";
 import { normalizeIssueClosureSnapshot, issueClosureActiveChildren } from "./github-issue-closure.js";
 import { observeReconciliationSnapshot, reconciliationSnapshotAvailable, correctionFrame, latestReconciliationRepair, normalizeReconciledSnapshot, reconciliationRevision } from "./claude-cost-reconciliation.js";
@@ -8034,6 +8037,139 @@ export class SessionsService {
       // checks as first dispatch. Its durable request identity cannot admit another provider.
       const admitted=this.requestCampaignReviewJob(command.rootSessionId,command.request);
       if(!admitted.ok) this.hub.sendToRunner(runnerId,{type:"cancel_campaign_review_job",jobId:command.jobId,nonce:command.nonce});
+    }
+  }
+
+  /**
+   * #3306: a session asks its runner to run the installed cross-model review controller for the
+   * session's own open pull request at its pushed head, outside the session's sandbox. A session
+   * may request only its own review; the runner checks the worktree, pull request and head itself.
+   */
+  requestSessionReviewJob(callerSessionId: string, request: SessionReviewJobRequest,
+    canAccess: (id: string) => boolean = () => true): ServiceResult<SessionReviewJobView> {
+    const session = this.db.getSession(callerSessionId);
+    if (!session || !canAccess(session.id)) return fail("session not found", 404);
+    const pullRequest = request?.pullRequest;
+    if (!request || typeof request !== "object" || Array.isArray(request) ||
+        Object.keys(request).some((key) => !["pullRequest", "headSha", "brief", "scope", "fullReason"].includes(key)) ||
+        !pullRequest || typeof pullRequest !== "object" || Object.keys(pullRequest).some((key) => !["repository", "number"].includes(key)) ||
+        typeof pullRequest.repository !== "string" || !/^[A-Za-z0-9-]{1,39}\/(?!\.\.?$)[A-Za-z0-9._-]{1,100}$/u.test(pullRequest.repository) ||
+        !Number.isSafeInteger(pullRequest.number) || pullRequest.number <= 0) {
+      return fail("a review needs pullRequest {repository: \"owner/name\", number: a positive integer}", 400);
+    }
+    if (typeof request.headSha !== "string" || !/^[0-9a-f]{40}$/u.test(request.headSha)) {
+      return fail("headSha must be the pull request's full 40-character lowercase head commit", 400);
+    }
+    if (request.brief !== undefined && (typeof request.brief !== "string" || !request.brief.trim())) return fail("brief must be non-empty text", 400);
+    if (request.brief !== undefined && Buffer.byteLength(request.brief) > SESSION_REVIEW_BRIEF_LIMIT_BYTES) {
+      return fail(`the brief exceeds its ${SESSION_REVIEW_BRIEF_LIMIT_BYTES / 1024} KiB limit`, 400);
+    }
+    if (request.scope !== undefined && request.scope !== "delta" && request.scope !== "full") return fail("scope must be delta or full", 400);
+    if (request.fullReason !== undefined && (request.scope !== "full" || typeof request.fullReason !== "string" ||
+        !request.fullReason.trim() || request.fullReason.length > 500)) {
+      return fail("fullReason (up to 500 characters) is accepted only with scope full", 400);
+    }
+    if (session.archived || isTerminal(session.status)) return fail("an archived or finished session cannot request a review", 409);
+    // Decision for #3306: a campaign's allowance accounts for its reviews through the campaign's
+    // controlled review job, so no session under a campaign allowance can bypass it here.
+    if (this.db.campaignBudgets.root(session.id) !== null) {
+      return fail("This session is part of a campaign with an allowance, so its cross-model reviews run through the campaign's controlled review job (run_campaign_review_job, dispatched by the campaign's Orchestrator), which accounts for their cost. Ask the Orchestrator for that review.", 409);
+    }
+    const runner = this.db.getRunner(session.runnerId);
+    if (!runnerSupportsProtocol(runner?.protocolVersion, "sessionReviewJob")) {
+      return capabilityFail(runnerCapabilityRequirementError(runner?.protocolVersion, "sessionReviewJob", "cross-model review through the runner"));
+    }
+    const capability = runner?.runtime?.sessionReview;
+    if (!capability) {
+      return fail("This session's runner has no trusted cross-model review installation. It needs Linux and the cross-model review controller installed outside every directory a session can write.", 409);
+    }
+    const reviewer: SessionReviewHarness | null = session.driver === "claude-code" ? "codex"
+      : session.driver === "codex" || session.driver === "codex-app-server" ? "claude-code" : null;
+    if (!reviewer) return fail("this session's harness has no cross-model reviewer; reviews cover Claude Code and Codex sessions", 409);
+    if (!capability.reviewers.includes(reviewer)) {
+      const why = (capability.unavailable?.[reviewer] ?? capability.unavailable?.controller ?? "").slice(0, 300);
+      return fail(`The ${reviewer === "codex" ? "Codex" : "Claude Code"} reviewer is unavailable on this session's runner${why ? `: ${why}` : ""}.`, 409);
+    }
+    if (!this.hub.isRunnerOnline(session.runnerId)) return fail("this session's runner is offline; request the review again once it reconnects", 409);
+    let command: SessionReviewJobCommand;
+    try {
+      command = this.db.sessionReviewJobs.create(session.id, session.runnerId, {
+        pullRequest: { repository: pullRequest.repository, number: pullRequest.number }, headSha: request.headSha,
+        ...(request.brief !== undefined ? { brief: request.brief } : {}),
+        ...(request.scope !== undefined ? { scope: request.scope } : {}),
+        ...(request.fullReason !== undefined ? { fullReason: request.fullReason } : {}),
+      }, Date.now());
+    } catch (error) { return fail((error as Error).message, 409); }
+    // The job is durable; one the runner did not receive is sent again when it reconnects.
+    this.hub.sendToRunner(session.runnerId, command);
+    this.hub.sessionChangedById(session.id);
+    this.log.info(JSON.stringify({ event: "session_review_job_requested", sessionId: session.id, jobId: command.jobId,
+      repository: pullRequest.repository, number: pullRequest.number, headSha: request.headSha, scope: request.scope ?? "delta" }));
+    return ok(this.db.sessionReviewJobs.view(command.jobId)!, 201);
+  }
+
+  sessionReviewJob(sessionId: string, jobId: string): ServiceResult<SessionReviewJobView> {
+    const view = typeof jobId === "string" && SESSION_REVIEW_JOB_ID_PATTERN.test(jobId) ? this.db.sessionReviewJobs.view(jobId) : null;
+    return view && view.sessionId === sessionId ? ok(view) : fail("review job not found", 404);
+  }
+
+  sessionReviewJobArtifacts(sessionId: string, jobId: string): ServiceResult<SessionReviewJobArtifacts> {
+    const view = this.sessionReviewJob(sessionId, jobId);
+    if (!view.ok) return failAs(view);
+    return ok(this.db.sessionReviewJobs.artifacts(jobId)!);
+  }
+
+  sessionReviewJobs(sessionId: string, query: { limit?: number; afterJobId?: string }): ServiceResult<SessionReviewJobsPage> {
+    if (query.limit !== undefined && (!Number.isSafeInteger(query.limit) || query.limit < 1 || query.limit > 100) ||
+        query.afterJobId !== undefined && (typeof query.afterJobId !== "string" || !SESSION_REVIEW_JOB_ID_PATTERN.test(query.afterJobId))) {
+      return fail("invalid review job page: limit is 1-100 and afterJobId a review job id", 400);
+    }
+    const page = this.db.sessionReviewJobs.page(sessionId, query.afterJobId, query.limit ?? 25);
+    return page ? ok(page) : fail("review job not found", 404);
+  }
+
+  /** Cancel an unfinished review. The runner reports the outcome; a job it never received is sent
+   * first so the cancellation has something to stop, and settles as not launched. */
+  cancelSessionReviewJob(sessionId: string, jobId: string): ServiceResult<SessionReviewJobView> {
+    const view = this.sessionReviewJob(sessionId, jobId);
+    if (!view.ok || !view.data) return view;
+    if (view.data.terminal) return ok(view.data);
+    this.db.sessionReviewJobs.requestCancel(jobId, Date.now());
+    this.sendSessionReviewCancel(jobId);
+    this.hub.sessionChangedById(sessionId);
+    return ok(this.db.sessionReviewJobs.view(jobId)!, 202);
+  }
+
+  private sendSessionReviewCancel(jobId: string): void {
+    const command = this.db.sessionReviewJobs.command(jobId), runnerId = this.db.sessionReviewJobs.runnerId(jobId);
+    if (!command || !runnerId) return;
+    // Dispatch is idempotent on the runner, and a cancel that arrives while it prepares stops the
+    // launch; one that finds the job finished does nothing. An offline runner gets both on reconnect.
+    if (this.db.sessionReviewJobs.view(jobId)?.state === "requested" && !this.hub.sendToRunner(runnerId, command)) return;
+    this.hub.sendToRunner(runnerId, { type: "cancel_session_review_job", jobId, nonce: command.nonce });
+  }
+
+  onSessionReviewJobUpdate(runnerId: string, update: SessionReviewJobUpdate): void {
+    if (!this.db.sessionReviewJobs.accept(runnerId, update, Date.now())) return;
+    const view = this.db.sessionReviewJobs.view(update.jobId)!;
+    this.hub.sessionChangedById(view.sessionId);
+    this.log.info(JSON.stringify({ event: "session_review_job_update", sessionId: view.sessionId, jobId: view.jobId,
+      state: view.state, round: view.round, attempt: view.attempt, reviewer: view.reviewer, reason: view.reason }));
+  }
+
+  /** On registration, send every unfinished job again: the runner re-sends a finished job's result,
+   * resumes a running one, and starts one it never received. A runner without support cannot
+   * report, so its jobs finish here. */
+  recoverSessionReviewJobs(runnerId: string): void {
+    const supported = runnerSupportsProtocol(this.db.getRunner(runnerId)?.protocolVersion, "sessionReviewJob");
+    for (const job of this.db.sessionReviewJobs.unfinished(runnerId)) {
+      if (!supported) {
+        this.db.sessionReviewJobs.abandon(job.command.jobId, "the runner no longer supports session reviews", Date.now());
+        this.hub.sessionChangedById(job.command.sessionId);
+        continue;
+      }
+      if (!this.hub.sendToRunner(runnerId, job.command)) return;
+      if (job.cancelRequested) this.hub.sendToRunner(runnerId, { type: "cancel_session_review_job", jobId: job.command.jobId, nonce: job.command.nonce });
     }
   }
 

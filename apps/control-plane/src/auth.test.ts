@@ -259,3 +259,17 @@ test("shouldTouchDevice throttles last-seen writes to once a minute", () => {
   assert.equal(shouldTouchDevice(1000, 30_000), false);
   assert.equal(shouldTouchDevice(1000, 61_001), true);
 });
+
+test("a session's own cross-model review routes are open to general sessions, not Orchestrators (#3306)", () => {
+  for (const [method, route] of [
+    ["POST", "/api/sessions/:id/cross-model-reviews"],
+    ["GET", "/api/sessions/:id/cross-model-reviews"],
+    ["GET", "/api/sessions/:id/cross-model-reviews/:jobId"],
+    ["GET", "/api/sessions/:id/cross-model-reviews/:jobId/artifacts"],
+    ["POST", "/api/sessions/:id/cross-model-reviews/:jobId/cancel"],
+  ] as const) {
+    assert.equal(isAgentControlApiRouteAllowed(method, route), true, `${method} ${route}`);
+    assert.equal(isAgentControlApiRouteAllowed(method, route, "orchestrator"), false, `${method} ${route}`);
+  }
+  assert.equal(isAgentControlApiRouteAllowed("DELETE", "/api/sessions/:id/cross-model-reviews/:jobId"), false);
+});
