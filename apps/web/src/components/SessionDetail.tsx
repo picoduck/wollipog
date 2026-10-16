@@ -270,6 +270,7 @@ import {
   type FollowTailState,
   useFollowTail,
 } from "../useFollowTail.js";
+import { useMarkResultReviewed } from "../useMarkResultReviewed.js";
 import { useSessionReadingKeys, type SessionReadingKeyActions } from "../useSessionReadingKeys.js";
 import { VIRTUAL_VIEWPORT_INTENT_EVENT, virtualViewportIntentDirection } from "../viewport-intent.js";
 import { inTypingContext, isMacPlatform, matchesShortcut, shortcutDisplay, shortcutLayerActive } from "../shortcuts.js";
@@ -1165,6 +1166,7 @@ function SessionDetailLoaded({
   );
   const activeComposerMutation = useSyncExternalStore(subscribeMutation, readMutation, readMutation);
   const { confirm, showToast, showUndo } = useFeedback();
+  const markResultReviewed = useMarkResultReviewed();
   // Narrow selector subscriptions: this component must re-render for ITS session's events and
   // row, not for every token-usage upsert of every other session on the board.
   const {
@@ -4323,6 +4325,7 @@ function SessionDetailLoaded({
   // D does nothing, so it can never fall through to another request the dock or the Sessions list
   // holds. The question is dismissed from its card once Answer Mode is closed.
   const topQuestionInComposer = answeringInComposer && prioritizedRequests[0]?.requestId === pendingQuestion.requestId;
+  const reviewableResultRevision = outstandingSessionResult(session)?.revision;
   const readingActions = useMemo<SessionReadingKeyActions>(() => ({
     nextSession: () => onNextSession?.(),
     previousSession: () => onPreviousSession?.(),
@@ -4349,11 +4352,14 @@ function SessionDetailLoaded({
     },
     snooze: () => onSnooze?.(),
     fork: () => forkShortcutRef.current?.(),
+    markReviewed: () => {
+      if (reviewableResultRevision) markResultReviewed(session.id, reviewableResultRevision);
+    },
     reply: canAnswerPendingQuestion ? enterAnswerMode : focusComposerAtDraftEnd,
     pauseFollow: followTail.pause,
     resumeFollow: followTail.follow,
   }), [archiveRefusal, canAnswerPendingQuestion, enterAnswerMode, focusComposerAtDraftEnd, followTail.follow, followTail.pause, onApprove, onArchive, onDeny, onNextSession, onPreviousSession, onSnooze, responseRefusal,
-    session.id, topQuestionInComposer, topRequestDocked]);
+    markResultReviewed, reviewableResultRevision, session.id, topQuestionInComposer, topRequestDocked]);
   // The reader's keys (J/K, A/D, R…) act on the transcript and the request dock, so they are off
   // while an expanded side panel hides them (#2845).
   const sessionReadingKeys = mode === "expanded" && !isMobile && !(rightPanel.open && rightPanel.expanded);
@@ -6966,6 +6972,7 @@ function SessionDetailLoaded({
             if (latestForkAvailability.available) void onFork(latestForkAvailability.forkTurn);
           }}
           forkShortcutRef={sessionReadingKeys ? forkShortcutRef : undefined}
+          onMarkReviewed={(revision) => markResultReviewed(session.id, revision)}
           projectControl={<ProjectMenuButton session={session} />}
           projectName={currentProjectName ?? undefined}
           projectLabel={projectsSupported ? "Project" : "Workspace"}

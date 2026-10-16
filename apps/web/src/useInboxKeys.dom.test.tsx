@@ -50,7 +50,7 @@ test("the central Inbox layer handles bare keys but never steals typing or termi
     nextSplit: action("nextSplit"), previousSplit: action("previousSplit"),
     approve: action("approve"), deny: action("deny"), archive: action("archive"),
     snooze: action("snooze"),
-    pin: action("pin"), unread: action("unread"), reply: action("reply"),
+    pin: action("pin"), markReviewed: action("markReviewed"), unread: action("unread"), reply: action("reply"),
     pageDown: action("pageDown"), pageUp: action("pageUp"), resumeFollow: () => {
       if (!previewAvailable) return false;
       calls.push("resumeFollow");
@@ -97,18 +97,22 @@ test("the central Inbox layer handles bare keys but never steals typing or termi
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "F2", bubbles: true }));
   assert.deepEqual(calls.slice(9), ["toggleThread", "toggleAllThreads", "goToParent", "expandThread", "collapseThread", "openTopRequest"]);
   calls.length = 9;
+  domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "m", bubbles: true }));
+  assert.equal(calls.at(-1), "markReviewed");
+  calls.length = 9;
 
   const composer = container.querySelector<HTMLTextAreaElement>('[aria-label="Composer"]')!;
   composer.focus();
-  for (const key of ["j", "j", "j", "e", " ", "f"]) {
+  for (const key of ["j", "j", "j", "e", " ", "f", "m"]) {
     domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key, bubbles: true }));
   }
   const terminal = container.querySelector<HTMLTextAreaElement>('[aria-label="Terminal"]')!;
   terminal.focus();
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "k", bubbles: true }));
+  domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "m", bubbles: true }));
   const approval = container.querySelector<HTMLButtonElement>('[aria-label="Allow Once"]')!;
   approval.focus();
-  for (const key of ["Enter", " ", "Tab", "a", "d"]) {
+  for (const key of ["Enter", " ", "Tab", "a", "d", "m"]) {
     domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key, bubbles: true }));
   }
   assert.deepEqual(calls, ["next", "nextSplit", "pageUp", "resumeFollow", "last", "first", "next", "previous", "fork"],
@@ -121,6 +125,14 @@ test("the central Inbox layer handles bare keys but never steals typing or termi
   assert.deepEqual(calls, ["next", "nextSplit", "pageUp", "resumeFollow", "last", "first", "next", "previous", "fork"],
     "request disclosure summaries own their keys without running any row actions");
 
+  list.focus();
+  const dialog = domWindow.document.createElement("div");
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  domWindow.document.body.append(dialog);
+  domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "m", bubbles: true }));
+  dialog.remove();
+  assert.equal(calls.includes("markReviewed"), false, "an active dialog owns M even while list focus remains");
   const detail = container.querySelector<HTMLElement>(".detail-scroll")!;
   detail.focus();
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "End", bubbles: true }));

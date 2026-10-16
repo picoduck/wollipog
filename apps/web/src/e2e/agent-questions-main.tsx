@@ -418,7 +418,7 @@ function Fixture() {
   const readingActions = useMemo(() => {
     const noop = () => {};
     return { nextSession: noop, previousSession: noop, approve: noop, deny: noop, archive: noop,
-      snooze: noop, fork: noop, reply: noop, pauseFollow: followTail.pause, resumeFollow: followTail.follow };
+      snooze: noop, fork: noop, reply: noop, markReviewed: noop, pauseFollow: followTail.pause, resumeFollow: followTail.follow };
   }, [followTail.pause, followTail.follow]);
   useSessionReadingKeys({ enabled: params.get("shell") === "1", sessionId: SESSION_ID, scrollRef, actions: readingActions });
 

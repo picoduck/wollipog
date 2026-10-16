@@ -26,7 +26,8 @@ import { absoluteViewUrl, backLabel } from "../navigation.js";
 import { reminderMenuActionLabel } from "../session-reminders.js";
 import { requestTranscriptDownload } from "../transcript-download.js";
 import { DEVELOPMENT_BUILD } from "../config.js";
-import { shortcutDisplay } from "../shortcuts.js";
+import { outstandingSessionResult } from "../session-follow-up.js";
+import { shortcutAriaKeys, shortcutDisplay } from "../shortcuts.js";
 import { pendingQueuedPromptCount, type ConversationForkAvailability } from "../session-actions.js";
 import { backgroundWorkAccessibleName } from "./common.js";
 import {
@@ -79,6 +80,7 @@ export function SessionHeader({
   exportReady,
   onArchive,
   onSnooze,
+  onMarkReviewed,
   reminder,
   onDismissReminder,
   forkAvailability,
@@ -129,6 +131,8 @@ export function SessionHeader({
   exportReady: boolean;
   onArchive?: () => void;
   onSnooze?: () => void;
+  /** Acknowledge the exact result captured when More Actions opened. */
+  onMarkReviewed?: (revision: string) => void;
   reminder?: SessionReminderView;
   onDismissReminder?: () => void;
   forkAvailability?: ConversationForkAvailability;
@@ -176,6 +180,7 @@ export function SessionHeader({
   const { confirm, showToast, showUndo } = useFeedback();
   const [busy, setBusy] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [menuResultRevision, setMenuResultRevision] = useState<string | null>(null);
   const [shareMenuOpen, setShareMenuOpen] = useState(false);
   const [statusPopoverOpen, setStatusPopoverOpen] = useState(false);
   const [moveProjectOpen, setMoveProjectOpen] = useState(false);
@@ -404,6 +409,19 @@ export function SessionHeader({
         >
           Rename…
         </MenuItem>,
+        onMarkReviewed && menuResultRevision && outstandingSessionResult(session) && (
+          <MenuItem
+            key="mark-reviewed"
+            trail={forkShortcutRef && !coarsePointer ? <kbd>{shortcutDisplay("session-reading-mark-reviewed")}</kbd> : undefined}
+            aria-keyshortcuts={forkShortcutRef && !coarsePointer ? shortcutAriaKeys("session-reading-mark-reviewed") : undefined}
+            onClick={() => {
+              closeMenu(true);
+              onMarkReviewed(menuResultRevision);
+            }}
+          >
+            Mark Reviewed
+          </MenuItem>
+        ),
         <MenuItem key="role" disabled={!sessionRoleConversionSupported}
           description={!sessionRoleConversionSupported ? SESSION_ROLE_UPDATE_REQUIRED : undefined}
           onClick={() => { closeMenu(false); setRoleOpen(true); }}>
@@ -820,6 +838,7 @@ export function SessionHeader({
                   closeShareMenu(false);
                   closeStatusPopover(false);
                   setProjectInMenu(projectFolded());
+                  setMenuResultRevision(outstandingSessionResult(session)?.revision ?? null);
                 }
                 menu.toggle();
               }}
@@ -828,7 +847,10 @@ export function SessionHeader({
                   closeShareMenu(false);
                   closeStatusPopover(false);
                 }
-                if (!menuOpen) setProjectInMenu(projectFolded());
+                if (!menuOpen) {
+                  setProjectInMenu(projectFolded());
+                  setMenuResultRevision(outstandingSessionResult(session)?.revision ?? null);
+                }
                 menu.onTriggerKeyDown(event);
               }}
               disabled={busy}

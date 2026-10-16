@@ -23,6 +23,7 @@ export interface InboxKeyActions {
   archive: () => void;
   snooze: () => void;
   pin: () => void;
+  markReviewed: () => void;
   unread: () => void;
   reply: () => void;
   pageDown: () => void;
@@ -50,6 +51,7 @@ const BINDINGS: ReadonlyArray<[ShortcutId, keyof InboxKeyActions]> = [
   ["inbox-snooze", "snooze"],
   ["inbox-pin", "pin"],
   ["inbox-unread", "unread"],
+  ["inbox-mark-reviewed", "markReviewed"],
   ["inbox-reply", "reply"],
   ["inbox-page-down", "pageDown"],
   ["inbox-page-up", "pageUp"],

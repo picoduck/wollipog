@@ -22,6 +22,7 @@ export interface SessionReadingKeyActions {
   snooze: () => void;
   /** More Actions' Fork Conversation…, and only while that item is offered and enabled. */
   fork: () => void;
+  markReviewed: () => void;
   reply: () => void;
   pauseFollow: () => void;
   resumeFollow: () => void;
@@ -49,6 +50,7 @@ const ACTION_BINDINGS: ReadonlyArray<[
   ["session-reading-archive", "archive"],
   ["session-reading-snooze", "snooze"],
   ["session-reading-fork", "fork"],
+  ["session-reading-mark-reviewed", "markReviewed"],
   ["session-reading-reply", "reply"],
 ];
 
