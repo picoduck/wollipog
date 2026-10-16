@@ -38,11 +38,12 @@ let session = {
 if (scenario === "orchestrator" || scenario === "children") session = { ...session, role: "orchestrator", orchestratorPolicy: policy };
 if (scenario === "busy") session.status = "running";
 let calls = 0;
+let roleConversionSupported = scenario !== "older-control-plane";
 let push: ((message: ControlPlaneToUi) => void) | undefined;
 const snapshot = (): ControlPlaneToUi => ({
   type: "snapshot", capabilities: {
     sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false,
-    sessionRoleConversion: scenario !== "older-control-plane",
+    sessionRoleConversion: roleConversionSupported,
   }, runners: [], boxes: [], projects: [], sessions: [session], runs: [], pods: [],
 });
 class FixtureSocket implements UiSocket {
@@ -101,10 +102,13 @@ const client: ApiClient = {
 };
 declare global {
   interface Window {
-    __WOLLIPOG_ROLE_E2E__: { session(): SessionView; calls(): number; reconnect(): void };
+    __WOLLIPOG_ROLE_E2E__: { session(): SessionView; calls(): number; reconnect(): void; reconnectToOlderWollipog(): void };
   }
 }
-window.__WOLLIPOG_ROLE_E2E__ = { session: () => session, calls: () => calls, reconnect: () => push?.(snapshot()) };
+window.__WOLLIPOG_ROLE_E2E__ = {
+  session: () => session, calls: () => calls, reconnect: () => push?.(snapshot()),
+  reconnectToOlderWollipog: () => { roleConversionSupported = false; push?.(snapshot()); },
+};
 
 function Harness() {
   const current = useStoreSelector((state) => state.sessions.get(session.id));

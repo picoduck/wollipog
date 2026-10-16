@@ -192,6 +192,11 @@ const UPDATE_REQUIRED_COPY: ReadonlyArray<[string, string]> = [
   ["./components/SessionDetail.tsx",
     "Earlier activity isn't available from this version of Wollipog. Update Wollipog to load it."],
   ["./components/SessionDetail.tsx", "Pair this device with Wollipog to load this transcript."],
+  // The Change Session Role notice and its More Actions description share one constant (#3265).
+  ["./components/SessionRoleDialog.tsx",
+    "export const SESSION_ROLE_UPDATE_REQUIRED = \"Update Wollipog before changing an existing session's role.\";"],
+  ["./components/SessionRoleDialog.tsx", "<Notice tone=\"warning\">{SESSION_ROLE_UPDATE_REQUIRED}</Notice>"],
+  ["./components/SessionHeader.tsx", "description={!sessionRoleConversionSupported ? SESSION_ROLE_UPDATE_REQUIRED : undefined}"],
 ];
 
 const RETIRED_UPDATE_REQUIRED_COPY: ReadonlyArray<[string, RegExp]> = [
@@ -203,6 +208,8 @@ const RETIRED_UPDATE_REQUIRED_COPY: ReadonlyArray<[string, RegExp]> = [
   ["./runners.ts", /This control plane does not support/],
   ["./components/UsageView.tsx", /this control plane supports|newer control plane|Upgrade the control plane/],
   ["./components/SessionDetail.tsx", /unavailable from this control plane|needs access to the control plane/],
+  ["./components/SessionRoleDialog.tsx", /Update the control plane/],
+  ["./components/SessionHeader.tsx", /Update the control plane/],
 ];
 
 test("update-required copy names Wollipog, not the control plane", () => {

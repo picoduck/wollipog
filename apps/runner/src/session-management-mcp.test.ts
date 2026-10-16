@@ -114,7 +114,8 @@ test("decision inspection targets descendants without changing mutation identity
   for (const [name, args] of [["get_workflow_decision", { sessionId: "child", occurrenceId: "occ" }], ["list_workflow_decisions", {}]] as const) {
     const result = await callTool(deps, name, args);
     assert.equal(result.isError, true);
-    assert.match(resultText(result), /v214.*404 never proves consumption/);
+    assert.equal(resultJson(result).requiredControlPlaneProtocolVersion, 214);
+    assert.match(resultJson(result).error, /needs? a newer version of Wollipog.*404 never proves consumption/);
   }
   assert.equal(calls.length, before);
   assert.equal((await callTool(deps, "get_workflow_decision", { occurrenceId: "occ" })).isError, undefined, "old self read is preserved");
@@ -380,10 +381,7 @@ test("PR merge action admission fails closed against mixed-version control plane
     },
   });
   assert.equal(result.isError, true);
-  assert.match(resultText(result), new RegExp(
-    `protocol v${RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionAdmission}`,
-    "u",
-  ));
+  assert.equal(resultJson(result).requiredControlPlaneProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionAdmission);
   assert.equal(calls.length, 0, "an old peer never receives an action-bearing consume request");
 });
 
@@ -400,10 +398,7 @@ test("PR merge reconciliation fails closed against mixed-version control planes"
     },
   });
   assert.equal(result.isError, true);
-  assert.match(resultText(result), new RegExp(
-    `protocol v${RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation}`,
-    "u",
-  ));
+  assert.equal(resultJson(result).requiredControlPlaneProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation);
   assert.equal(calls.length, 0, "an old peer never receives a reconciliation request");
 });
 
@@ -428,9 +423,8 @@ test("a child-facing decision message is forwarded to a current control plane an
     sessionId: "child", occurrenceId: "workflow_2", outcome: "deny", childMessage: "Re-run review.",
   });
   assert.equal(refused.isError, true);
-  assert.match(resultText(refused), new RegExp(
-    `protocol v${RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionChildMessage}`, "u",
-  ));
+  assert.equal(resultJson(refused).requiredControlPlaneProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionChildMessage);
+  assert.match(resultJson(refused).error, /Resolve without childMessage/u);
   assert.equal(older.calls.length, 0,
     "an older control plane would drop the message and still resolve, so it is never asked to");
   await callTool(older.deps, "resolve_descendant_workflow_decision", {
@@ -1383,7 +1377,11 @@ test("discard_worktree refuses peers that cannot report deferred retirement", as
   deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRetirement - 1;
   const result = await callTool(deps, "discard_worktree", { path: "/repo/old" });
   assert.equal(result.isError, true);
-  assert.match(resultText(result), /requires control plane protocol v159/);
+  assert.deepEqual(resultJson(result), {
+    error: "Managed worktree retirement needs a newer version of Wollipog. Update Wollipog before discarding a runner-owned worktree.",
+    requiredControlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRetirement,
+    controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRetirement - 1,
+  });
   assert.equal(calls.length, 0);
 });
 
@@ -1593,8 +1591,11 @@ test("create_session fails closed on explicit effort with an older control plane
     runnerId: "r1", agentId: "claude-code", workspaceId: "ws", model: "opus", effort: "high",
   });
   assert.equal(rejected.isError, true);
-  assert.match(resultText(rejected), /requires control plane protocol v138/u);
-  assert.match(resultText(rejected), /omit effort to preserve default resolution/u);
+  assert.deepEqual(resultJson(rejected), {
+    error: "Reasoning effort selection needs a newer version of Wollipog. Update Wollipog, or omit effort to keep the default.",
+    requiredControlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControlReasoningEffort,
+    controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControlReasoningEffort - 1,
+  });
   assert.equal(older.calls.length, 1);
   assert.equal(older.calls[0]!.url, `${CP_URL}/api/compatibility`);
 
@@ -1616,8 +1617,11 @@ test("create_session sends a campaign work item only to a v220 control plane and
   }));
   const rejected = await callTool(older.deps, "create_session", args);
   assert.equal(rejected.isError, true);
-  assert.match(resultText(rejected), /requires control plane protocol v220/u);
-  assert.match(resultText(rejected), /no child was created/u);
+  assert.deepEqual(resultJson(rejected), {
+    error: "Naming a campaign work item at child creation needs a newer version of Wollipog. Update Wollipog and try again; no child was created.",
+    requiredControlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorkItemAtCreation,
+    controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorkItemAtCreation - 1,
+  });
   assert.deepEqual(older.calls.map((call) => call.url), [`${CP_URL}/api/compatibility`],
     "an older control plane would ignore the item, so nothing is sent");
 
@@ -1832,7 +1836,11 @@ test("stop_background_job -> POST /api/sessions/:id/background-jobs/:jobId/stop,
   const old = makeDeps(() => ({ status: 200, body: { protocolVersion: 189 } }));
   const refused = await callTool(old.deps, "stop_background_job", { sessionId: "s_child", jobId: "b1" });
   assert.equal(refused.isError, true);
-  assert.match(resultText(refused), /requires control plane protocol v190/);
+  assert.deepEqual(resultJson(refused), {
+    error: "Stopping one background job needs a newer version of Wollipog. Update Wollipog and try again.",
+    requiredControlPlaneProtocolVersion: 190,
+    controlPlaneProtocolVersion: 189,
+  });
   assert.equal(old.calls.some((call) => call.method === "POST"), false);
 
   const denied = makeDeps((call) => call.url.endsWith("/api/compatibility")
@@ -2276,9 +2284,11 @@ test("attach_session_artifact uploads video to the gated route without returning
       : { status: 201, body: {} });
     const refused = await callTool(old.deps, "attach_session_artifact", { path: file });
     assert.equal(refused.isError, true);
-    assert.match(resultText(refused), new RegExp(
-      `requires control plane protocol v${RUNNER_CAPABILITY_MIN_PROTOCOL.sessionVideoArtifactAttach}`, "u",
-    ));
+    assert.deepEqual(resultJson(refused), {
+      error: "Attaching a file needs a newer version of Wollipog. Update Wollipog, then attach again.",
+      requiredControlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionVideoArtifactAttach,
+      controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionVideoArtifactAttach - 1,
+    });
     assert.equal(old.calls.some((call) => call.method === "POST"), false);
 
     const current = makeDeps((call) => call.url.endsWith("/api/compatibility")
@@ -2318,7 +2328,11 @@ test("attach_session_artifact refuses before reading or uploading when the reque
     }));
     const outdated = await callTool(old.deps, "attach_session_artifact", { path: file });
     assert.equal(outdated.isError, true);
-    assert.match(resultText(outdated), /requires control plane protocol v\d+.*Update the Wollipog control plane/u);
+    assert.deepEqual(resultJson(outdated), {
+      error: "Attaching a file needs a newer version of Wollipog. Update Wollipog, then attach again.",
+      requiredControlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionArtifactFileAttach,
+      controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionArtifactFileAttach - 1,
+    });
     assert.deepEqual(old.calls.map((call) => call.url), [`${CP_URL}/api/compatibility`],
       "an older control plane is named, not probed with an upload and not worked around");
 
@@ -2514,5 +2528,93 @@ test("campaign work ledger tools require an Orchestrator and a v196 control plan
   });
   assert.deepEqual(current.calls.at(-1)?.body, {
     childSessionId: "child", reportEventSeq: 3, followUpsAccounted: true, workItem: { id: "cwi_1", outcome: "delivered" },
+  });
+});
+
+/* docs/design-system.md §17.2 retires protocol numbers and "control plane" from sentences agents relay
+ * to people. Each floor refuses with a sentence naming what to update, keeps its alternative, and
+ * returns the versions beside it as fields (#3265). The conditions are the existing floors. */
+const NEWER_WOLLIPOG_REFUSALS: ReadonlyArray<{
+  tool: string;
+  args: Record<string, unknown>;
+  floor: keyof typeof RUNNER_CAPABILITY_MIN_PROTOCOL;
+  error: string;
+}> = [
+  { tool: "get_campaign_issue_scope", args: {}, floor: "campaignIssueScopeChanges",
+    error: "Campaign issue scope changes need a newer version of Wollipog. Update Wollipog and try again." },
+  { tool: "list_workflow_decisions", args: {}, floor: "descendantWorkflowDecisionInspection",
+    error: "Descendant reads and decision lists need a newer version of Wollipog. Update Wollipog and try again. " +
+      "Self get_workflow_decision still works; list_descendant_requests shows pending requests only, and a 404 never proves consumption." },
+  { tool: "list_campaign_review_jobs", args: {}, floor: "campaignBudgetAdmission",
+    error: "Campaign budget and review jobs need a newer version of Wollipog. Update Wollipog and try again." },
+  { tool: "allocate_campaign_budget", args: { sessionId: "s_worker", costUsd: 10 }, floor: "campaignBudgetAdmission",
+    error: "Campaign allocations need a newer version of Wollipog. Update Wollipog and try again." },
+  { tool: "request_github_issue_closure", args: {}, floor: "orchestratorIssueClosure",
+    error: "Human-approved issue closure needs a newer version of Wollipog. Update Wollipog and try again." },
+  { tool: "record_campaign_plan", args: { items: [] }, floor: "campaignWorkLedger",
+    error: "The campaign work ledger needs a newer version of Wollipog. Update Wollipog and try again." },
+  { tool: "create_session", args: { runnerId: "r1", agentId: "claude-code", workspaceId: "ws", campaignWorkItemId: "cwi_1" },
+    floor: "campaignWorkItemAtCreation",
+    error: "Naming a campaign work item at child creation needs a newer version of Wollipog. Update Wollipog and try again; no child was created." },
+  { tool: "create_session", args: { runnerId: "r1", agentId: "claude-code", workspaceId: "ws", effort: "high" },
+    floor: "sessionAgentControlReasoningEffort",
+    error: "Reasoning effort selection needs a newer version of Wollipog. Update Wollipog, or omit effort to keep the default." },
+  { tool: "discard_worktree", args: { path: "/repo/old" }, floor: "sessionWorktreeRetirement",
+    error: "Managed worktree retirement needs a newer version of Wollipog. Update Wollipog before discarding a runner-owned worktree." },
+  { tool: "stop_background_job", args: { sessionId: "s_child", jobId: "b1" }, floor: "backgroundJobStop",
+    error: "Stopping one background job needs a newer version of Wollipog. Update Wollipog and try again." },
+  { tool: "consume_workflow_decision",
+    args: { occurrenceId: "o1", resourceSnapshot: { category: "pr_merge" }, action: { kind: "pr_merge_enqueue", command: "gh pr merge" } },
+    floor: "workflowDecisionActionAdmission",
+    error: "PR merge action admission needs a newer version of Wollipog. Update Wollipog before consuming this approval." },
+  { tool: "resolve_descendant_workflow_decision",
+    args: { sessionId: "s_child", occurrenceId: "o1", outcome: "approve", childMessage: "Go ahead." },
+    floor: "workflowDecisionChildMessage",
+    error: "A child-facing decision message needs a newer version of Wollipog. Resolve without childMessage and send it with prompt_session, or update Wollipog." },
+  { tool: "reconcile_workflow_decision", args: { occurrenceId: "o1", resourceSnapshot: { category: "pr_merge" } },
+    floor: "workflowDecisionActionReconciliation",
+    error: "PR merge reconciliation needs a newer version of Wollipog. Update Wollipog before reconciling this approval." },
+];
+
+test("version-floor refusals name Wollipog and return the versions as fields, not in the sentence (#3265)", async () => {
+  for (const { tool, args, floor, error } of NEWER_WOLLIPOG_REFUSALS) {
+    const required = RUNNER_CAPABILITY_MIN_PROTOCOL[floor];
+    const { deps, calls } = makeDeps();
+    deps.orchestrator = true;
+    deps.controlPlaneProtocolVersion = required - 1;
+    const refused = await callTool(deps, tool, args);
+    assert.equal(refused.isError, true, `${tool} refuses below ${floor}`);
+    assert.deepEqual(resultJson(refused), {
+      error, requiredControlPlaneProtocolVersion: required, controlPlaneProtocolVersion: required - 1,
+    }, `${tool} below ${floor}`);
+    assert.doesNotMatch(error, /control plane|protocol|v\d/iu);
+    assert.equal(calls.length, 0, `${tool} refuses before contacting Wollipog`);
+
+    // The floor itself is unchanged: one version newer passes this check and reaches Wollipog.
+    const current = makeDeps(() => ({ status: 200, body: {} }));
+    current.deps.orchestrator = true;
+    current.deps.controlPlaneProtocolVersion = required;
+    const admitted = await callTool(current.deps, tool, args);
+    assert.notDeepEqual(admitted.isError ? resultJson(admitted).requiredControlPlaneProtocolVersion : undefined, required,
+      `${tool} at ${floor} is admitted`);
+  }
+});
+
+test("a version-floor refusal whose Wollipog version is unknown omits it and keeps the cause (#3265)", async () => {
+  const { deps } = makeDeps(() => ({ status: 503, body: { error: "unavailable" } }));
+  const refused = await callTool(deps, "discard_worktree", { path: "/repo/old" });
+  assert.equal(refused.isError, true);
+  const body = resultJson(refused);
+  assert.deepEqual(Object.keys(body).sort(), ["error", "requiredControlPlaneProtocolVersion"]);
+  assert.equal(body.requiredControlPlaneProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRetirement);
+  assert.match(body.error, /^Could not check whether Wollipog supports managed worktree retirement: .*unavailable/u);
+  assert.doesNotMatch(body.error, /control plane|protocol v/iu);
+
+  const older = makeDeps(() => ({ status: 200, body: { protocolVersion: "unknown" } }));
+  older.deps.orchestrator = true;
+  const unreported = await callTool(older.deps, "allocate_campaign_budget", { sessionId: "s_worker", costUsd: 10 });
+  assert.deepEqual(resultJson(unreported), {
+    error: "Campaign allocations need a newer version of Wollipog. Update Wollipog and try again.",
+    requiredControlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.campaignBudgetAdmission,
   });
 });

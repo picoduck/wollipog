@@ -36,7 +36,7 @@ import {
 import { MenuItem, MenuNote, MenuSeparator, MenuSurface } from "./Menu.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { TranscriptShareDialog } from "./TranscriptShareDialog.js";
-import { SessionRoleDialog } from "./SessionRoleDialog.js";
+import { SESSION_ROLE_UPDATE_REQUIRED, SessionRoleDialog } from "./SessionRoleDialog.js";
 import { ChevronLeftIcon, DownloadIcon, LinkIcon, MoreVerticalIcon, RefreshIcon, ShareIcon } from "./Icons.js";
 import { useIsCoarsePointer, useIsMobile } from "./useIsMobile.js";
 import { windowDragRegion } from "../desktop-window.js";
@@ -405,7 +405,7 @@ export function SessionHeader({
           Rename…
         </MenuItem>,
         <MenuItem key="role" disabled={!sessionRoleConversionSupported}
-          description={!sessionRoleConversionSupported ? "Update the control plane before changing an existing session's role." : undefined}
+          description={!sessionRoleConversionSupported ? SESSION_ROLE_UPDATE_REQUIRED : undefined}
           onClick={() => { closeMenu(false); setRoleOpen(true); }}>
           Change Session Role…
         </MenuItem>,
