@@ -1116,6 +1116,27 @@ test("historical unknown-parent Result Blocked explains uncertainty and the appl
   } finally { await panel.dispose(); }
 });
 
+for (const parentTurnId of ["unknown", "known-parent"]) test(`historical ${parentTurnId} result without a continuation explains explicit recovery`, async () => {
+  const session = blockedSession("historical-finished", true);
+  session.status = "idle";
+  session.backgroundWorkState = undefined;
+  session.backgroundJobs = session.backgroundJobs!.map((job) => ({ ...job, parentTurnId,
+    terminalStatus: "completed", terminalObservedAt: 2_000 }));
+  session.backgroundDeliveries = [{ parentTurnId, jobCount: session.backgroundJobs.length,
+    terminalCount: session.backgroundJobs.length, watchdogState: "terminal_without_continuation" }];
+  const panel = await mountBackgroundWork({ session });
+  try {
+    const notice = panel.container.querySelector<HTMLElement>('.notice[data-state="terminal_without_continuation"]')!;
+    assert.ok(notice);
+    assert.match(notice.textContent!, /no recorded return step/);
+    assert.match(notice.textContent!, /will not resubmit them automatically/);
+    assert.match(notice.textContent!, /More Actions → Restart Session/);
+    assert.doesNotMatch(notice.textContent!, /Returning .* to this conversation/);
+    assert.doesNotMatch(panel.container.textContent!, /Returning Result/,
+      "the group badge must not contradict its explicit historical recovery notice");
+  } finally { await panel.dispose(); }
+});
+
 test("a lost job is one danger notice that names the job and the restart, with View Turn and no empty state (#2859)", async () => {
   const now = Date.now();
   const viewed: string[] = [];

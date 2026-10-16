@@ -2,10 +2,11 @@ import { expect, test } from "@playwright/test";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import { waitForSessionPreview } from "./session-readiness.js";
 
-test.use({ video: process.env.ISSUE_3280_RECORDING === "true" ? "on" : "off" });
+test.use({ video: process.env.ISSUE_3280_RECORDING === "true"
+  ? { mode: "on", size: { width: 1280, height: 1000 } } : "off" });
 
-for (const width of [390, 1280]) for (const theme of ["light", "dark"] as const) {
-  test(`historical unknown-parent recovery at ${width}px in ${theme}`, async ({ page }) => {
+for (const parentTurnId of ["unknown", "known-parent"]) for (const width of [390, 1280]) for (const theme of ["light", "dark"] as const) {
+  test(`historical ${parentTurnId} recovery at ${width}px in ${theme}`, async ({ page }) => {
     // Evidence-only pacing; ordinary regression runs have no recording delays.
     const hold = async (ms: number) => {
       if (process.env.ISSUE_3280_RECORDING === "true") await page.waitForTimeout(ms);
@@ -18,21 +19,24 @@ for (const width of [390, 1280]) for (const theme of ["light", "dark"] as const)
       document.documentElement.setAttribute("data-theme", value);
       document.documentElement.style.colorScheme = value;
     }, theme);
-    await page.evaluate((protocol) => {
+    await page.evaluate(({ protocol, parentTurnId }) => {
       const fixture = window.__WOLLIPOG_PROJECT_INBOX_E2E__;
       fixture.setRunnerProtocolVersion(protocol);
-      const job = { parentTurnId: "unknown", runnerId: "runner-main", workspaceId: null,
+      const job = { parentTurnId, runnerId: "runner-main", workspaceId: null,
         context: { kind: "native" as const }, launchType: "workflow" as const,
         registeredAt: Date.now() - 120_000, lastObservedAt: Date.now() - 60_000, sourcePresent: true };
       fixture.replaceSessionSnapshot("session-alpha", {
         driver: "claude-code", status: "idle", backgroundWorkState: undefined,
         backgroundWorkTracking: "managed", backgroundJobsAvailable: true, backgroundJobsTruncated: false,
-        backgroundJobs: [{ ...job, id: "unresolved-job" }, { ...job, id: "finished-job",
+        backgroundJobs: [{ ...job, id: "unresolved-job", ...(parentTurnId !== "unknown" ? {
+          terminalStatus: "killed", terminalObservedAt: Date.now() - 60_000,
+          continuationRequired: false, assistantResultPersistedAt: Date.now() - 60_000 } : {}) }, { ...job, id: "finished-job",
           terminalStatus: "completed", terminalObservedAt: Date.now() - 90_000, continuationRequired: true }],
-        backgroundDeliveries: [{ parentTurnId: "unknown", jobCount: 2, terminalCount: 1,
-          unfinishedSiblingJobs: 1, watchdogState: "continuation_blocked" }],
+        backgroundDeliveries: [{ parentTurnId, jobCount: 2, terminalCount: parentTurnId === "unknown" ? 1 : 2,
+          ...(parentTurnId === "unknown" ? { unfinishedSiblingJobs: 1 } : {}),
+          watchdogState: parentTurnId === "unknown" ? "continuation_blocked" : "terminal_without_continuation" }],
       });
-    }, PROTOCOL_VERSION);
+    }, { protocol: PROTOCOL_VERSION, parentTurnId });
     await page.getByRole("button", { name: /Alpha Session/ }).click();
     await waitForSessionPreview(page);
     const expand = page.getByRole("button", { name: "Open Session", exact: true });
@@ -41,16 +45,22 @@ for (const width of [390, 1280]) for (const theme of ["light", "dark"] as const)
     const status = page.getByRole("dialog", { name: "Session Status" });
     await status.getByRole("button", { name: "Open Background Work" }).click();
     const panel = page.locator('#right-panel[data-mode="background"]');
-    const notice = panel.locator('.notice[data-state="continuation_blocked"]');
-    await expect(notice).toContainText("parent turn is unknown");
-    await expect(notice).toContainText("cannot verify that the jobs are still running");
+    const notice = panel.locator(`.notice[data-state="${parentTurnId === "unknown" ? "continuation_blocked" : "terminal_without_continuation"}"]`);
+    if (parentTurnId === "unknown") {
+      await expect(notice).toContainText("parent turn is unknown");
+      await expect(notice).toContainText("cannot verify that the jobs are still running");
+    } else {
+      await expect(notice).toContainText("no recorded return step");
+      await expect(notice).toContainText("will not resubmit them automatically");
+      await expect(panel.locator(".background-work-turn-head")).not.toContainText("Returning Result");
+    }
     await expect(notice).toContainText("More Actions → Restart Session");
     await expect(notice).toContainText("Restart ends every job and reports held results; it does not rerun their original commands.");
     await expect(notice.getByRole("button", { name: /^Stop |Acknowledge/ })).toHaveCount(0);
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     if (process.env.ISSUE_3280_EVIDENCE_DIR) {
-      await page.screenshot({ path: `${process.env.ISSUE_3280_EVIDENCE_DIR}/after-${width}-${theme}.png`, fullPage: true });
+      await page.screenshot({ path: `${process.env.ISSUE_3280_EVIDENCE_DIR}/after-${parentTurnId}-${width}-${theme}.png`, fullPage: true });
     }
     await hold(3_000);
     await notice.getByRole("button", { name: "Show Details" }).click();
@@ -70,11 +80,13 @@ for (const width of [390, 1280]) for (const theme of ["light", "dark"] as const)
     await expect(confirmation.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
     await hold(4_000);
     if (process.env.ISSUE_3280_EVIDENCE_DIR) {
-      await page.screenshot({ path: `${process.env.ISSUE_3280_EVIDENCE_DIR}/confirm-${width}-${theme}.png`, fullPage: true });
+      await page.screenshot({ path: `${process.env.ISSUE_3280_EVIDENCE_DIR}/confirm-${parentTurnId}-${width}-${theme}.png`, fullPage: true });
     }
     await confirmation.getByRole("button", { name: "Cancel", exact: true }).click();
     await expect(confirmation).toHaveCount(0);
-    await expect(page.locator(".session-bar .session-status-button")).toHaveAccessibleName("Session Status: Result Blocked");
+    await expect(page.locator(".session-bar .session-status-button")).toHaveAccessibleName(
+      `Session Status: ${parentTurnId === "unknown" ? "Result Blocked" : "Awaiting Prompt"}`,
+    );
     await hold(4_000);
   });
 }

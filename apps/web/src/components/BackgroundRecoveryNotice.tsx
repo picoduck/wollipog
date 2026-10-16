@@ -77,7 +77,7 @@ export function BackgroundRecoveryNotice(props: BackgroundRecoveryNoticeProps) {
   const severity = BACKGROUND_DELIVERY_STATUS[state].severity;
   if (severity === "missing" || state === "capacity_retry_exhausted") return <ResultMissingNotice {...props} />;
   if (severity === "blocked") return <ResultBlockedNotice {...props} />;
-  if (props.historicalRecovery && props.unknownParentTurn && state === "terminal_without_continuation") {
+  if (props.historicalRecovery && state === "terminal_without_continuation") {
     return <ResultBlockedNotice {...props} />;
   }
   return (

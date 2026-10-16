@@ -4435,11 +4435,11 @@ test("runner snapshots ignore missing-result evidence until the continuation is 
   db.close();
 });
 
-test("historical stopped-job snapshots remove only confirmed Result Blocked siblings", () => {
+for (const parentTurnId of ["unknown", "known-parent"]) test(`historical ${parentTurnId} stopped-job snapshots remove only confirmed Result Blocked siblings`, () => {
   const db = ControlPlaneDb.open(":memory:");
   try {
     db.registerRunner(meta(), 500, PROTOCOL_VERSION);
-    const job = { parentTurnId: "unknown", runnerId: "runner-1", workspaceId: null,
+    const job = { parentTurnId, runnerId: "runner-1", workspaceId: null,
       launchType: "workflow" as const, registeredAt: 1_000 };
     const finished = { ...job, id: "finished", terminalStatus: "completed" as const,
       terminalObservedAt: 1_100, continuationRequired: true };
@@ -4460,6 +4460,10 @@ test("historical stopped-job snapshots remove only confirmed Result Blocked sibl
       { ...confirmed, id: "unresolved" }]), 4_000);
     assert.equal(db.getSession("historical-stops")?.backgroundDeliveries?.some((delivery) =>
       delivery.watchdogState === "continuation_blocked"), false);
+    const terminal = db.getSession("historical-stops")!;
+    assert.equal(terminal.backgroundWorkState, undefined);
+    assert.equal(terminal.backgroundDeliveries?.[0]?.watchdogState, "terminal_without_continuation");
+    assert.equal(terminal.backgroundDeliveries?.[0]?.continuationId, undefined);
   } finally { db.close(); }
 });
 

@@ -17539,13 +17539,14 @@ export class SessionManager {
   }
 
   /** Older ledgers can retain unfinished rows without aggregate state, pending ids, or task files.
-   * Repair only provider-confirmed model stops. This pass never queues or launches recovery work. */
+   * Repair only provider-confirmed model stops. Existing orphans belong to performOrphanRecovery,
+   * which also queues any finished siblings unblocked by the stop. This pass never launches work. */
   private scheduleHistoricalClaudeJobReconciliation(
     meta: SessionMeta,
     entryPoint: "startup" | "reconnect" | "recovery_request",
   ): void {
     if (this.shuttingDown || meta.driver !== "claude-code" || !meta.agentSessionId ||
-        meta.status === "stopped" || this.active.has(meta.sessionId) ||
+        meta.status === "stopped" || meta.orphanedWork || this.active.has(meta.sessionId) ||
         this.historicalJobInspections.has(meta.sessionId)) return;
     const ids = (meta.backgroundJobs ?? []).filter((job) => !job.terminalStatus &&
       job.restartedAt === undefined).map((job) => job.id);

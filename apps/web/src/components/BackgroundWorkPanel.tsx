@@ -346,7 +346,9 @@ export function BackgroundWorkPanel({
                 {/* Result Missing's notice says it; the badge returns once it is acknowledged. A turn
                     whose unfinished jobs were all lost is waiting for nothing: the Lost notice and the
                     rows say what happened. */}
-                {status.key !== "result_missing" && status.key !== "retry_exhausted" && !(status.key === "waiting" && lostCount >= status.unfinished) && (
+                {status.key !== "result_missing" && status.key !== "retry_exhausted" &&
+                  !(status.key === "returning" && historicalBackgroundResultRecovery(session)) &&
+                  !(status.key === "waiting" && lostCount >= status.unfinished) && (
                   <StatusBadge meta={backgroundJobGroupBadge(status)} inline />
                 )}
                 {turnViewable(group.parentTurnId) && (

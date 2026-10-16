@@ -37,6 +37,9 @@ test("historical recovery requires an idle Claude session without current runnin
   assert.equal(historicalBackgroundResultRecovery({ ...session, backgroundDeliveries: [
     { ...session.backgroundDeliveries[0]!, watchdogState: "terminal_without_continuation" },
   ] }), true, "an unknown-parent result without a recorded return step keeps explicit recovery");
+  assert.equal(historicalBackgroundResultRecovery({ ...session, backgroundDeliveries: [
+    { ...session.backgroundDeliveries[0]!, parentTurnId: "known-parent", watchdogState: "terminal_without_continuation" },
+  ] }), true, "a known parent cannot prove an unqueued historical result will return automatically");
 });
 
 test("delivery-watchdog copy stays compact, plain-language, and complete", () => {

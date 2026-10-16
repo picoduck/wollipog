@@ -367,9 +367,13 @@ test("historical idle-result recovery offers a confirmed restart and preserves c
   const session = { id: "historical", runnerId: "runner-1", title: "Historical", status: "idle",
     driver: "claude-code", backgroundDeliveries: [{ parentTurnId: "unknown", jobCount: 2,
       terminalCount: 1, watchdogState: "continuation_blocked" }] } as SessionView;
-  for (const accepted of [false, true]) {
+  const cases = [session, ...["unknown", "known-parent"].map((parentTurnId) => ({
+    ...session, backgroundDeliveries: [{ parentTurnId, jobCount: 2, terminalCount: 2,
+      watchdogState: "terminal_without_continuation" as const }],
+  }))];
+  for (const recovered of cases) for (const accepted of [false, true]) {
     const calls: string[] = [];
-    const header = await renderHeader(session, calls, false, {}, accepted);
+    const header = await renderHeader(recovered, calls, false, {}, accepted);
     try {
       await act(async () => { menuItem(page(), "Restart Session").click(); await tick(); });
       assert.deepEqual(calls, accepted ? ["confirm", "restart:historical"] : ["confirm"]);
