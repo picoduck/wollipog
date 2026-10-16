@@ -59,12 +59,12 @@ the code:
 A foreign-owner lease is still never taken over automatically. Its text names that cause and the
 safe options, instead of the generic "could not be proved" refusal.
 
-Callers that release before shutdown (skill transactions, and a launch or skill acquisition that
-became stale after its grant) use `acquire_reference`. The worker keeps the receipt's exact-entry
+Callers that release before shutdown (skill transactions, launch preparation, and a launch or skill
+acquisition that became stale after its grant) use `acquire_reference`. The worker keeps the receipt's exact-entry
 release for that completed acquisition, at most 1024 at once, and `release_reference` names the
 acquisition by its id. Every handle is settled: a consumer that keeps its reference until shutdown
-(an account launch, an Agent TUI or fork whose tree was not proven gone, or an unfinished adoption
-or restore) sends `retain_reference`, which frees only the handle. Only in-flight transactions and
+(a launch preparation, Agent TUI or fork whose processes were not proven gone, or an unfinished
+adoption or restore) sends `retain_reference`, which frees only the handle. Only in-flight transactions and
 open session, TUI and fork handles occupy the pool, however many launches a runner performs. Releasing by path would re-resolve the HOME, so a symlink retargeted in
 between could drop another HOME's reference. The handle cannot be redirected: it drops only the
 entry it joined, at most once. Path-based `release` remains only for the provider sign-in supervisor
@@ -102,7 +102,22 @@ A failed construction keeps the reference if a constructor ran, and releases it 
 
 Session and Agent TUI handles live as long as their sessions and terminals. A runner with 512 open session and TUI handles together gives later launches and TUIs a plain reference until shutdown, so the worker's 1024-handle pool stays free for transactions and probes.
 
-Codex exec, Pi, Codex app-server, Claude Code and ACP prove their trees. Launch preparation still keeps its reference until shutdown (part 3c of #3238 is pending).
+Codex exec, Pi, Codex app-server, Claude Code and ACP prove their trees.
+
+**Launch preparation** takes its account-HOME reference in the `index.ts` adapter, for a plugin-provider session with a credential home whose context is native and whose target is the host. The reference is a transaction-scoped handle, so it does not count against the 512-handle budget. The caller of `prepareLaunch` owns it and passes it as `providerHome`, next to `isCurrent` and `signal`. Everything that runs under it reports there: the adapter's plugin inheritance and Codex guard, the launch's authentication preflight, and the status command of each authentication caller, through the same process observer as the account probes. The handle is settled exactly once, on those proofs:
+
+- **Ordinary launch:** settled once the driver's own reference holds the HOME, just before the driver is constructed. That includes the null reference of a launch that needs no shared lease, or one past the handle budget, which holds a plain reference. Every earlier exit settles it on the way out: a stale launch, an authentication refusal, a failed transcript transfer, an isolation failure, a refused worktree lease and a failed driver acquisition.
+- **Authentication inspection, account selection, automatic revalidation and explicit recovery:** settled in a `finally` once their status command has finished, with its proofs. A revalidation that timed out still settles when its work ends. A sign-in during explicit recovery runs under the login supervisor's own lease.
+- **Recovery of another session sharing the scope:** settled right after its preparation, since nothing else runs under it.
+- **Temporary-provider and Pi forks:** settled once the temporary driver's own reference is held, or when the fork gives up before that.
+
+The reference is released only when nothing ran unprovably and every reported process tree is proven gone. A preparation that ran nothing, including one cancelled or gone stale after the grant, also releases. These keep it until shutdown:
+
+- A Codex launch that reached the guard. Its hook inventory spawns a real Codex app-server outside any boundary, so the adapter marks the preparation unprovable before it starts. Tracking that probe is deferred to #3340.
+- A plugin inheritance that threw partway, since the HOME may be half-written.
+- A status command whose tree was not proven gone, or one run by an injected command runner.
+
+Runner shutdown settles nothing per preparation; `close()` releases every reference after the global reaping proof. Sessions that take no preparation reference, because they have no credential home, are unchanged.
 
 **Agent TUIs** hold their reference from the grant until the TUI has ended. The launch preparation owns it first, then the shell open path, then the opened terminal:
 
@@ -177,7 +192,12 @@ cold/failure paths, actual fence contention and killed-runner recovery. Existing
 checkpoint and I/O suites retain the ownership, durability and private-token proofs.
 `session-manager-lease-preparation.test.ts` executes the production plugin ownership phase with
 isolated controllers, including stale card/account/epoch checks, recovery cancellation, the
-automatic timeout and unrelated-error preservation. The fork integration tests defer both
+automatic timeout and unrelated-error preservation. It also runs the production Codex guard phase,
+which marks the preparation unprovable before the hook inventory starts.
+`session-provider-lease-release.test.ts` and `provider-process-lease-release.test.ts` settle the
+preparation reference through the ordinary launch and the inspection, recheck, automatic revalidation
+and sibling recovery callers. The fork
+integration test settles it after the temporary driver's own reference. The fork integration tests defer both
 preparation paths and verify source/target deletion, epoch and credential replacement before any
 temporary provider is constructed; existing plugin argument assertions remain in place.
 

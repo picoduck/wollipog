@@ -375,10 +375,13 @@ test("an identity that changes after selection re-raises the card for the chosen
       { ok: true },
     );
     await h.manager.providerAuthSelections.get(SESSION);
+    // The retained prompt's relaunch runs asynchronously after the selection settles: the card is
+    // re-raised by its preflight, and the prompt returns to the card once that launch has failed.
     await waitFor(() => {
       const meta = h.store.readMeta(SESSION);
-      return meta?.pendingApproval?.kind === "authentication" && meta.providerAuthBlock?.identityMismatch === true;
-    }, "the swapped identity did not re-raise a recovery card");
+      return meta?.pendingApproval?.kind === "authentication" && meta.providerAuthBlock?.identityMismatch === true &&
+        meta.providerAuthBlock.retry !== undefined;
+    }, "the swapped identity did not re-raise a recovery card that retains the prompt");
 
     const meta = h.store.readMeta(SESSION)!;
     assert.deepEqual(h.prompts, [], "no provider work ran under the swapped identity");

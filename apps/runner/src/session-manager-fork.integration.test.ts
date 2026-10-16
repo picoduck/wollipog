@@ -8,7 +8,7 @@ import { PROTOCOL_VERSION, type AgentDefinition, type AgentDriverKind, type Runn
 import type { Driver, DriverCallbacks, DriverOptions } from "./drivers/driver.js";
 import { anchorForkRef, captureWorktreeTree } from "./git-ops.js";
 import { isolateFromAmbientIgnores } from "./git-test-repo.js";
-import { SessionManager } from "./session-manager.js";
+import { type LaunchPreparationCancellation, SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 import { ShellManager } from "./shell-manager.js";
 import { createWorktree } from "./worktree.js";
@@ -236,6 +236,8 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
     let racedPrompts = 0;
     let constructions = 0;
     let preparationWait: (() => Promise<void>) | undefined;
+    // Stands in for the `index.ts` adapter's account-HOME acquisition (#3238).
+    let preparationHook: ((cancellation?: LaunchPreparationCancellation) => Promise<void>) | undefined;
     // What the fake Claude fork reports to forkSession's process observer (#3238): a tree proof,
     // or nothing at all, as a driver without the observer would.
     let claudeForkProcessReport: boolean | "none" = "none";
@@ -323,8 +325,9 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
         verifiedForks.push(providerSessionId);
       },
       [],
-      async (launchMeta) => {
+      async (launchMeta, cancellation) => {
         await preparationWait?.();
+        await preparationHook?.(cancellation);
         if (launchMeta.driver === "codex-app-server") {
           return { codexLaunchArgs: ["-c", "plugins.review@local.enabled=true"] };
         }
@@ -834,6 +837,47 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
             `a fork reporting ${String(report)} ${released ? "releases" : "keeps"} its reference`);
         } finally {
           claudeForkProcessReport = "none";
+          if (store.has(targetId)) await manager.delete(targetId);
+        }
+      }
+
+      // The temporary source driver's launch preparation reference settles once that driver's own
+      // reference holds the HOME, on what ran under it (#3238).
+      for (const unprovable of [false, true]) {
+        const sequence: string[] = [];
+        const handle = (name: string) => ({
+          first: true,
+          release: async () => { sequence.push(`${name} released`); return true; },
+          retain: async () => { sequence.push(`${name} retained`); },
+        });
+        let driverHandles = 0;
+        leaseInternals.providerHomeLeases = {
+          acquire: async () => { throw new Error("no plain reference below the handle budget"); },
+          acquireReference: async () => {
+            const name = ++driverHandles === 1 ? "temporary driver" : "target fork";
+            sequence.push(`${name} acquired`);
+            return handle(name);
+          },
+          acquireHomeReference: async () => {
+            sequence.push("preparation acquired");
+            return handle("preparation");
+          },
+        } as typeof leaseInternals.providerHomeLeases;
+        preparationHook = async (cancellation) => {
+          await manager.acquireLaunchProviderHome("/accounts/work", cancellation);
+          if (unprovable) cancellation?.providerHome?.markUnprovable();
+        };
+        const targetId = `s_claude_fork_preparation_${String(unprovable)}`;
+        try {
+          const forked = await manager.forkConversation("s_claude_source", targetId, 2, "Fork Preparation");
+          assert.equal(forked.ok, true, forked.error);
+          assert.deepEqual(sequence.slice(0, 3), [
+            "preparation acquired",
+            "temporary driver acquired",
+            `preparation ${unprovable ? "retained" : "released"}`,
+          ], `the preparation settles after the temporary driver's reference is held: ${sequence.join(", ")}`);
+        } finally {
+          preparationHook = undefined;
           if (store.has(targetId)) await manager.delete(targetId);
         }
       }

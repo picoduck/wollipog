@@ -230,9 +230,11 @@ import {
 } from "./session-store.js";
 import { SessionCommandAuthorityRegistry } from "./session-command-authority.js";
 import type {
+  ProviderAuthIdentityInspection,
   ProviderAuthObservation,
   ProviderAuthRecoveryController,
   ProviderCredentialScope,
+  ProviderProcessObserver,
 } from "./provider-auth-recovery.js";
 import {
   compareProviderAuthIdentity,
@@ -301,6 +303,56 @@ export interface SkillProviderHomeScope {
   acquire(home: string): Promise<void>;
   release(): Promise<void>;
   retain(): Promise<void>;
+}
+
+/** Launch preparation's provider-HOME reference (#3238). The caller of `prepareLaunch` owns it and
+ * settles it once the preparation's work is done; the preparation adapter and the auth preflight
+ * only report what ran under it. Each process proof settles after that process finished and is
+ * true only when its complete tree is proven gone. */
+export interface LaunchProviderHome extends ProviderProcessObserver {
+  /** Something that may write the HOME ran outside any provable boundary (or a write failed
+   * partway): the reference is kept until runner shutdown whatever the proofs say. */
+  markUnprovable(): void;
+}
+
+/** The second argument of `prepareLaunch`: lease cancellation plus the caller's launch reference. */
+export interface LaunchPreparationCancellation extends LeaseCancellation {
+  providerHome?: LaunchProviderHome;
+}
+
+/** The settleable side of a `LaunchProviderHome`, held only by the session manager. */
+class LaunchProviderHomeScope implements LaunchProviderHome {
+  private readonly references: ProviderHomeReference[] = [];
+  private readonly proofs: Promise<boolean>[] = [];
+  private unprovable = false;
+  private settled = false;
+
+  constructor(private readonly settleReferences: (
+    references: ProviderHomeReference[],
+    proofs: readonly Promise<boolean>[],
+  ) => Promise<void>) {}
+
+  markUnprovable(): void { this.unprovable = true; }
+
+  onProcess(proof: Promise<boolean>): void { this.proofs.push(proof); }
+
+  /** False once settled: the caller then owns the reference itself. */
+  adopt(reference: ProviderHomeReference): boolean {
+    if (this.settled) return false;
+    this.references.push(reference);
+    return true;
+  }
+
+  /** Settle exactly once: release only when nothing ran unprovably and every reported process is
+   * proven gone (no process at all also qualifies); otherwise keep it until shutdown. */
+  async settle(): Promise<void> {
+    if (this.settled) return;
+    this.settled = true;
+    const references = this.references.splice(0);
+    if (references.length === 0) return;
+    // Never pass an empty list for an unprovable preparation: it would read as "nothing started".
+    await this.settleReferences(references, this.unprovable ? [Promise.resolve(false)] : [...this.proofs]);
+  }
 }
 
 export type AcpContextResolver = (spec: SessionLaunchSpec) => SessionLaunchSpec["acpSessionContext"];
@@ -1582,7 +1634,7 @@ export class SessionManager {
     /** Refresh runner-local launch material immediately before every provider process spawn. */
     private readonly prepareLaunch?: (
       meta: SessionMeta,
-      cancellation?: LeaseCancellation,
+      cancellation?: LaunchPreparationCancellation,
     ) => void | SessionLaunchPreparation | Promise<void | SessionLaunchPreparation>,
     /** Materialize verified references only at the provider edge. */
     private readonly resolvePromptImages?: PromptImageResolver,
@@ -4384,10 +4436,32 @@ export class SessionManager {
   }
 
   /** Launch preparation's account-HOME reference: same post-grant cancellation as skill
-   * acquisition, but a successful launch keeps the reference until shutdown. */
-  async acquireLaunchProviderHome(home: string, cancellation: LeaseCancellation = {}): Promise<void> {
-    const reference = await this.acquireSkillReconciliationProviderHome(home, cancellation);
-    if (reference) await this.retainProviderHomeReference(reference);
+   * acquisition. It joins the caller's `providerHome` (see `launchPreparationProviderHome`), which
+   * settles it on the preparation's proofs once the caller's work is done (#3238); it is a
+   * transaction-scoped handle, so it never counts against the driver handle budget. Returns that
+   * handle, or null when nothing was acquired. A caller without a handle keeps the reference until
+   * shutdown, as before #3238. */
+  async acquireLaunchProviderHome(
+    home: string,
+    cancellation: LaunchPreparationCancellation = {},
+  ): Promise<LaunchProviderHome | null> {
+    const { providerHome, ...lease } = cancellation;
+    const reference = await this.acquireSkillReconciliationProviderHome(home, lease);
+    if (!reference) return null;
+    if (providerHome instanceof LaunchProviderHomeScope && providerHome.adopt(reference)) return providerHome;
+    await this.retainProviderHomeReference(reference);
+    return null;
+  }
+
+  /** A launch preparation's provider-HOME handle for one `prepareLaunch` caller. The caller passes
+   * it as `providerHome` and settles it exactly once after everything that ran under it: once its
+   * own longer-lived reference (a driver's) holds the HOME, or when it gives up. During shutdown
+   * nothing is settled here: close() releases every reference after the global reaping proof. */
+  private launchPreparationProviderHome(): LaunchProviderHomeScope {
+    return new LaunchProviderHomeScope(async (references, proofs) => {
+      if (this.shuttingDown) return;
+      for (const reference of references) await this.settleProviderProcessReference(reference, proofs);
+    });
   }
 
   /** Skill links mutate the same native provider HOME as Claude and Codex launches. Acquire one
@@ -7810,6 +7884,23 @@ export class SessionManager {
     launchGeneration: number,
     approvedAuthentication?: ApprovedProviderAuthentication,
   ): Promise<boolean> {
+    // Launch preparation's provider-HOME reference (#3238). A launch that reaches its driver
+    // reference settles it there; every path that gives up earlier settles it on the way out.
+    const preparationHome = this.launchPreparationProviderHome();
+    try {
+      return await this.launchPrepared(meta, resumeId, launchGeneration, approvedAuthentication, preparationHome);
+    } finally {
+      await preparationHome.settle();
+    }
+  }
+
+  private async launchPrepared(
+    meta: SessionMeta,
+    resumeId: string | undefined,
+    launchGeneration: number,
+    approvedAuthentication: ApprovedProviderAuthentication | undefined,
+    preparationHome: LaunchProviderHomeScope,
+  ): Promise<boolean> {
     const launchStarted = Date.now();
     const sessionId = meta.sessionId;
     if (!this.launchIsCurrent(sessionId, launchGeneration)) return false;
@@ -7871,6 +7962,7 @@ export class SessionManager {
       const priorUnsupportedSlashCommands = meta.sessionUnsupportedSlashCommands;
       launchPreparation = await this.prepareLaunch?.(meta, {
         isCurrent: () => this.launchIsCurrent(sessionId, launchGeneration),
+        providerHome: preparationHome,
       });
       // Launch preparation may await filesystem/provider discovery. A restart can replace this
       // session with a new generation (and even a different provider) during that window; the old
@@ -7908,7 +8000,9 @@ export class SessionManager {
           !sameUnsupportedSlashCommands(priorUnsupportedSlashCommands, meta.sessionUnsupportedSlashCommands))) {
         this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
       }
-      if (!await this.preflightProviderAuthentication(meta, launchGeneration, approvedAuthentication)) return false;
+      if (!await this.preflightProviderAuthentication(meta, launchGeneration, approvedAuthentication, preparationHome)) {
+        return false;
+      }
       if (meta.executionTarget?.adapter !== "container" && meta.executionTarget?.adapter !== "cloud" &&
           this.executionIsolation.mode === "bwrap" &&
           meta.providerStateVersion !== (meta.context.kind === "wsl" ? 3 : 2)) {
@@ -8016,6 +8110,9 @@ export class SessionManager {
         isolation,
       }, { isCurrent: () => this.launchIsCurrent(sessionId, launchGeneration) });
       if (!this.launchIsCurrent(sessionId, launchGeneration)) throw new Error("session launch changed during provider-home acquisition");
+      // The driver's reference now holds the HOME (or the launch needs no shared one), so the
+      // preparation's reference covered only finished work: settle it on that work's proofs.
+      await preparationHome.settle();
       // A restart or fork may carry repository-bound authority into a changed launch directory.
       // Verify the actual origin before any provider can classify issue writes as routine.
       const preparedScope = this.store.readMeta(sessionId)?.orchestrator?.issueScope;
@@ -12027,7 +12124,8 @@ export class SessionManager {
   /** A provider-home probe must not mutate the persisted metadata object that readMeta caches. */
   private async providerAuthenticationProbeMeta(
     meta: SessionMeta,
-    account?: BoundProviderAccount,
+    account: BoundProviderAccount | undefined,
+    providerHome: LaunchProviderHome,
   ): Promise<SessionMeta> {
     const isCurrent = this.providerAuthenticationPreparationCurrent(meta);
     const probe = structuredClone(meta);
@@ -12037,7 +12135,7 @@ export class SessionManager {
       probe.providerAccountProvider = account.provider;
       probe.providerCredentialHome = account.credentialHome;
     }
-    await this.prepareLaunch?.(probe, { isCurrent });
+    await this.prepareLaunch?.(probe, { isCurrent, providerHome });
     if (!isCurrent()) throw new Error("authentication preparation was cancelled");
     return probe;
   }
@@ -12069,14 +12167,21 @@ export class SessionManager {
     const block = this.openProviderAuthenticationCard(meta, recoveryRequestId);
     if (!meta || !block) return { ok: false, error: "this Authentication Required card is no longer current" };
     if (!controller) return { ok: false, error: "authentication recovery is unavailable on this runner" };
-    const probe = await this.providerAuthenticationProbeMeta(meta);
-    const scope = controller.describe(probe);
-    if (!scope || scope.id !== block.credentialScopeId) {
-      return { ok: false, error: "the provider installation or credential context changed" };
+    // The preparation's reference also covers the inspection's status command (#3238).
+    const preparationHome = this.launchPreparationProviderHome();
+    let inspected: ProviderAuthIdentityInspection;
+    try {
+      const probe = await this.providerAuthenticationProbeMeta(meta, undefined, preparationHome);
+      const scope = controller.describe(probe);
+      if (!scope || scope.id !== block.credentialScopeId) {
+        return { ok: false, error: "the provider installation or credential context changed" };
+      }
+      inspected = controller.inspect
+        ? await controller.inspect(probe, preparationHome)
+        : { observation: await controller.revalidate(probe, preparationHome), emailSupported: false, email: null };
+    } finally {
+      await preparationHome.settle();
     }
-    const inspected = controller.inspect
-      ? await controller.inspect(probe)
-      : { observation: await controller.revalidate(probe), emailSupported: false, email: null };
     const status = inspected.observation.status;
     return {
       ok: true,
@@ -12155,42 +12260,53 @@ export class SessionManager {
     try {
       const preparationIsCurrent = this.providerAuthenticationPreparationCurrent(meta);
       let probe: SessionMeta;
-      try {
-        probe = await this.providerAuthenticationProbeMeta(meta, target);
-      } catch (error) {
-        if (!preparationIsCurrent() && this.isProviderPreparationCancellation(error)) {
-          return refuse("recovery_changed", "This Authentication Required card changed while ownership was checked. Review the latest card.");
-        }
-        throw error;
-      }
-      const targetScope = controller.describe(probe);
-      if (!targetScope) {
-        return refuse("account_unavailable", "Wollipog cannot check authentication for that account in this session's context.");
-      }
-      if (targetScope.id !== scopeId) {
-        if (this.providerAuthOperations.has(targetScope.id) || this.providerAuthRevalidations.has(targetScope.id)) {
-          return refuse("operation_in_progress", "Another authentication check is using that account. Try again in a moment.");
-        }
-        targetScopeId = targetScope.id;
-        this.providerAuthOperations.add(targetScopeId);
-      }
-      const probeHome = await this.providerHomeLeases?.acquireReference({
-        driver: probe.driver,
-        command: probe.command,
-        context: probe.context,
-        env: probe.env,
-      }, { isCurrent: () => !this.shuttingDown &&
-        this.openProviderAuthenticationCard(this.store.readMeta(sessionId), recoveryRequestId)?.recoveryId === block.recoveryId });
-      // The probe's reference covers only its status command; later steps take their own.
-      const probeProcesses: Promise<boolean>[] = [];
+      let targetScope: ProviderCredentialScope | null;
       let observation: ProviderAuthObservation;
+      // The target account's preparation reference (#3238): it covers the preparation and, with
+      // the probe's own reference, its status command; settled once that command is done.
+      const preparationHome = this.launchPreparationProviderHome();
       try {
-        if (this.shuttingDown || this.openProviderAuthenticationCard(this.store.readMeta(sessionId), recoveryRequestId)?.recoveryId !== block.recoveryId) {
-          return refuse("recovery_changed", "This Authentication Required card changed while ownership was checked. Review the latest card.");
+        try {
+          probe = await this.providerAuthenticationProbeMeta(meta, target, preparationHome);
+        } catch (error) {
+          if (!preparationIsCurrent() && this.isProviderPreparationCancellation(error)) {
+            return refuse("recovery_changed", "This Authentication Required card changed while ownership was checked. Review the latest card.");
+          }
+          throw error;
         }
-        observation = await controller.revalidate(probe, { onProcess: (proof) => probeProcesses.push(proof) });
+        targetScope = controller.describe(probe);
+        if (!targetScope) {
+          return refuse("account_unavailable", "Wollipog cannot check authentication for that account in this session's context.");
+        }
+        if (targetScope.id !== scopeId) {
+          if (this.providerAuthOperations.has(targetScope.id) || this.providerAuthRevalidations.has(targetScope.id)) {
+            return refuse("operation_in_progress", "Another authentication check is using that account. Try again in a moment.");
+          }
+          targetScopeId = targetScope.id;
+          this.providerAuthOperations.add(targetScopeId);
+        }
+        const probeHome = await this.providerHomeLeases?.acquireReference({
+          driver: probe.driver,
+          command: probe.command,
+          context: probe.context,
+          env: probe.env,
+        }, { isCurrent: () => !this.shuttingDown &&
+          this.openProviderAuthenticationCard(this.store.readMeta(sessionId), recoveryRequestId)?.recoveryId === block.recoveryId });
+        // The probe's reference covers only its status command; later steps take their own.
+        const probeProcesses: Promise<boolean>[] = [];
+        try {
+          if (this.shuttingDown || this.openProviderAuthenticationCard(this.store.readMeta(sessionId), recoveryRequestId)?.recoveryId !== block.recoveryId) {
+            return refuse("recovery_changed", "This Authentication Required card changed while ownership was checked. Review the latest card.");
+          }
+          observation = await controller.revalidate(probe, { onProcess: (proof) => {
+            probeProcesses.push(proof);
+            preparationHome.onProcess(proof);
+          } });
+        } finally {
+          await this.settleProviderProcessReference(probeHome, probeProcesses);
+        }
       } finally {
-        await this.settleProviderProcessReference(probeHome, probeProcesses);
+        await preparationHome.settle();
       }
       if (observation.status === "unauthenticated") {
         return refuse("sign_in_required", "The provider reports that this account is signed out. Sign in to it, then choose it again.");
@@ -14054,6 +14170,9 @@ export class SessionManager {
     let temporary: Driver | null = null;
     // Settled with the temporary driver; kept if its construction failed after starting.
     let forkHome: ProviderHomeReference | null = null;
+    // The temporary driver's launch preparation reference (#3238): settled once the temporary
+    // driver's own reference holds the HOME, or when the fork gives up before that.
+    const forkPreparationHome = this.launchPreparationProviderHome();
     let forkConstructionStarted = false;
     // The Claude target fork's reference: settled on the fork probe's own tree proof once
     // forkSession returns or throws; released unproven only if forkSession was never called.
@@ -14155,7 +14274,10 @@ export class SessionManager {
       if (!client && source.driver !== "pi") {
         const priorCapabilities = source.capabilities;
         const priorSessionSlashCommands = source.sessionSlashCommands;
-        const launchPreparation = await this.prepareLaunch?.(source, { isCurrent: forkIsCurrent });
+        const launchPreparation = await this.prepareLaunch?.(source, {
+          isCurrent: forkIsCurrent,
+          providerHome: forkPreparationHome,
+        });
         if (!forkIsCurrent()) throw new Error("conversation fork preparation was canceled");
         if (sameSlashCommandCatalog(priorSessionSlashCommands, source.sessionSlashCommands)) {
           source.sessionSlashCommands = priorSessionSlashCommands;
@@ -14198,6 +14320,8 @@ export class SessionManager {
           if (unused) await this.releaseProviderHomeReference(unused);
           throw new Error("source session changed during provider-home acquisition");
         }
+        // The temporary driver's reference now covers the HOME: the preparation's is settled.
+        await forkPreparationHome.settle();
         forkConstructionStarted = true;
         temporary = this.createDriver(
           source.driver,
@@ -14271,7 +14395,10 @@ export class SessionManager {
       if (source.driver === "pi") {
         const priorCapabilities = source.capabilities;
         const priorSessionSlashCommands = source.sessionSlashCommands;
-        const launchPreparation = this.prepareLaunch?.(source, { isCurrent: forkIsCurrent });
+        const launchPreparation = this.prepareLaunch?.(source, {
+          isCurrent: forkIsCurrent,
+          providerHome: forkPreparationHome,
+        });
         if (launchPreparation) await launchPreparation;
         if (!forkIsCurrent()) throw new Error("conversation fork preparation was canceled");
         if (sameSlashCommandCatalog(priorSessionSlashCommands, source.sessionSlashCommands)) {
@@ -14323,6 +14450,8 @@ export class SessionManager {
           if (unused) await this.releaseProviderHomeReference(unused);
           throw new Error("source session changed during provider-home acquisition");
         }
+        // The temporary driver's reference now covers the HOME: the preparation's is settled.
+        await forkPreparationHome.settle();
         forkConstructionStarted = true;
         temporary = this.createDriver(
           source.driver,
@@ -14591,6 +14720,7 @@ export class SessionManager {
         claudeForkHome = null;
         await this.releaseProviderHomeReference(unused);
       }
+      await forkPreparationHome.settle();
       clearInterval(forkLockRefresh);
       this.store.releaseLock(sourceSessionId, this.lockOwner);
       this.forking.delete(sourceSessionId);
@@ -18564,6 +18694,8 @@ export class SessionManager {
     meta: SessionMeta,
     launchGeneration: number,
     approvedAuthentication?: ApprovedProviderAuthentication,
+    /** Learns about the status command, which runs under the launch preparation's reference. */
+    observer?: ProviderProcessObserver,
   ): Promise<boolean> {
     // Provider-native status commands are themselves general provider executions. Direct WSL's
     // narrow launcher path must not run one outside the prepared boundary before isolation exists.
@@ -18573,7 +18705,7 @@ export class SessionManager {
     const scope = controller?.describe(meta);
     if (!controller || !scope) return true;
     this.store.patchMeta(meta.sessionId, { providerCredentialScopeId: scope.id });
-    const observation = await controller.revalidate(meta);
+    const observation = await controller.revalidate(meta, observer);
     if (!this.launchIsCurrent(meta.sessionId, launchGeneration)) return false;
     const current = this.store.readMeta(meta.sessionId);
     if (!current) return false;
@@ -19192,16 +19324,22 @@ export class SessionManager {
       try {
         observation = await Promise.race([
           (async (): Promise<ProviderAuthObservation> => {
+            // Settled when this work ends, even after the race's timeout answered (#3238).
+            const preparationHome = this.launchPreparationProviderHome();
             try {
-              await this.prepareLaunch?.(owner, { signal: preparation.signal, isCurrent });
-            } catch (error) {
-              if (!isCurrent() && this.isProviderPreparationCancellation(error)) return { status: "unknown" };
-              throw error;
+              try {
+                await this.prepareLaunch?.(owner, { signal: preparation.signal, isCurrent, providerHome: preparationHome });
+              } catch (error) {
+                if (!isCurrent() && this.isProviderPreparationCancellation(error)) return { status: "unknown" };
+                throw error;
+              }
+              if (!isCurrent() || this.providerAuthRecovery!.describe(owner)?.id !== scopeId) {
+                return { status: "unknown" };
+              }
+              return await this.providerAuthRecovery!.revalidate(owner, preparationHome);
+            } finally {
+              await preparationHome.settle();
             }
-            if (!isCurrent() || this.providerAuthRecovery!.describe(owner)?.id !== scopeId) {
-              return { status: "unknown" };
-            }
-            return this.providerAuthRecovery!.revalidate(owner);
           })(),
           new Promise<ProviderAuthObservation>((resolve) => {
             timer = setTimeout(() => {
@@ -19384,38 +19522,46 @@ export class SessionManager {
       const preparation = { sessionId, requestId, controller: new AbortController() };
       const cardIsCurrent = this.providerAuthenticationPreparationCurrent(meta);
       const isCurrent = () => !preparation.controller.signal.aborted && cardIsCurrent();
-      this.providerAuthPreparations.set(block.credentialScopeId, preparation);
+      // Covers the preparation and the recheck's status command; settled once that is done
+      // (#3238). A sign-in in between runs under the login supervisor's own lease.
+      const preparationHome = this.launchPreparationProviderHome();
+      let observation: ProviderAuthObservation;
       try {
-        await this.prepareLaunch?.(meta, { signal: preparation.controller.signal, isCurrent });
-      } catch (error) {
-        if (!isCurrent() && this.isProviderPreparationCancellation(error)) return;
-        throw error;
-      } finally {
-        if (this.providerAuthPreparations.get(block.credentialScopeId) === preparation) {
-          this.providerAuthPreparations.delete(block.credentialScopeId);
+        this.providerAuthPreparations.set(block.credentialScopeId, preparation);
+        try {
+          await this.prepareLaunch?.(meta, { signal: preparation.controller.signal, isCurrent, providerHome: preparationHome });
+        } catch (error) {
+          if (!isCurrent() && this.isProviderPreparationCancellation(error)) return;
+          throw error;
+        } finally {
+          if (this.providerAuthPreparations.get(block.credentialScopeId) === preparation) {
+            this.providerAuthPreparations.delete(block.credentialScopeId);
+          }
         }
-      }
-      if (!isCurrent()) return;
-      const currentScope = controller.describe(meta);
-      if (!currentScope || currentScope.id !== block.credentialScopeId) {
-        this.emitProviderAuthenticationCard(meta, block, "The provider installation or credential context changed. Start recovery from the current session card.");
-        return;
-      }
-      if (optionId === "auth:login") {
-        block = { ...block, loginOperationId: randomUUID() };
-        this.store.patchMeta(sessionId, { providerAuthBlock: block });
-        this.emitProviderAuthenticationCard(meta, block, "The provider owns this sign-in flow; authentication output remains on the runner.", true);
-        const login = await controller.startLogin(meta);
-        if (login !== "completed") {
-          block = { ...block, loginOperationId: undefined };
-          this.store.patchMeta(sessionId, { providerAuthBlock: block });
-          this.emitProviderAuthenticationCard(meta, block, login === "cancelled"
-            ? "The runner-owned sign-in was canceled."
-            : "The provider-native sign-in did not complete. Use the exact-context terminal command, then recheck.");
+        if (!isCurrent()) return;
+        const currentScope = controller.describe(meta);
+        if (!currentScope || currentScope.id !== block.credentialScopeId) {
+          this.emitProviderAuthenticationCard(meta, block, "The provider installation or credential context changed. Start recovery from the current session card.");
           return;
         }
+        if (optionId === "auth:login") {
+          block = { ...block, loginOperationId: randomUUID() };
+          this.store.patchMeta(sessionId, { providerAuthBlock: block });
+          this.emitProviderAuthenticationCard(meta, block, "The provider owns this sign-in flow; authentication output remains on the runner.", true);
+          const login = await controller.startLogin(meta);
+          if (login !== "completed") {
+            block = { ...block, loginOperationId: undefined };
+            this.store.patchMeta(sessionId, { providerAuthBlock: block });
+            this.emitProviderAuthenticationCard(meta, block, login === "cancelled"
+              ? "The runner-owned sign-in was canceled."
+              : "The provider-native sign-in did not complete. Use the exact-context terminal command, then recheck.");
+            return;
+          }
+        }
+        observation = await controller.revalidate(meta, preparationHome);
+      } finally {
+        await preparationHome.settle();
       }
-      const observation = await controller.revalidate(meta);
       if (observation.status !== "authenticated") {
         this.emitProviderAuthenticationCard(meta, block, observation.status === "unauthenticated"
           ? "The provider still reports that this credential scope is unauthenticated."
@@ -19505,11 +19651,15 @@ export class SessionManager {
       }
       if (meta.sessionId !== targetSessionId) {
         const isCurrent = this.providerAuthenticationPreparationCurrent(meta);
+        // Nothing but the preparation runs under this reference; its relaunch takes its own.
+        const preparationHome = this.launchPreparationProviderHome();
         try {
-          await this.prepareLaunch?.(meta, { isCurrent });
+          await this.prepareLaunch?.(meta, { isCurrent, providerHome: preparationHome });
         } catch (error) {
           if (!isCurrent() && this.isProviderPreparationCancellation(error)) continue;
           throw error;
+        } finally {
+          await preparationHome.settle();
         }
         if (!isCurrent()) continue;
         const currentScope = this.providerAuthRecovery?.describe(meta);

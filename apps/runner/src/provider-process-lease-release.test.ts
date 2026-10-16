@@ -9,7 +9,7 @@ import type { AgentDefinition, GenerateSessionTitleMessage } from "@wollipog/pro
 import { SESSION_NAMING_RUNNER_BUDGET_MS } from "@wollipog/protocol";
 import type { LeaseCancellation } from "./provider-home-lease-async.js";
 import { createTestProviderAuthRecovery, type ProviderAuthRecoveryController, type ProviderProcessObserver } from "./provider-auth-recovery.js";
-import { SessionManager } from "./session-manager.js";
+import { SessionManager, type LaunchPreparationCancellation } from "./session-manager.js";
 import { SessionNamingExecutor } from "./session-naming.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 import { provenProcessTreeExit, type AgentProcess } from "./spawn.js";
@@ -244,4 +244,120 @@ test("the naming executor passes every provider process it started to the author
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(cleaned.length, 1);
   assert.deepEqual(cleaned[0], [child]);
+});
+
+/** A session parked on an Authentication Required card. Its auth callers run launch preparation,
+ * where the `index.ts` adapter takes the account HOME's reference through the caller's handle, then
+ * a status command under that reference (#3238). */
+function authCallerFixture(proofs: boolean[], options: { cardChangesDuringPreparation?: boolean } = {}) {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-auth-caller-lease-"));
+  const home = join(root, "account-home");
+  const store = new SessionStore(join(root, "sessions"));
+  const block = { version: 1 as const, recoveryId: "recovery", credentialScopeId: "scope", detectedAt: 1,
+    phase: "turn" as const, delivery: "uncertain" as const, canStartLogin: false, configuredCredential: false,
+    expectedIdentityId: "identity" };
+  store.create({
+    sessionId: "s1", agentId: "claude", workspaceId: "repo", repoPath: root, worktreePath: null,
+    driver: "claude-code", command: "claude", args: [], env: {}, context: { kind: "native" },
+    agentSessionId: "thread", status: "input_required", title: "Fixture", config: {}, tokensIn: 0,
+    tokensOut: 0, costUsd: 0, preview: null, seq: 0, createdAt: 1, updatedAt: 1,
+    providerAccountId: "account", providerAccountProvider: "claude", providerCredentialHome: home,
+    providerCredentialIdentityId: "identity", providerCredentialScopeId: "scope", providerAuthBlock: block,
+    pendingApproval: { kind: "authentication", requestId: "provider-auth:recovery", title: "Authentication Required",
+      options: [{ optionId: "auth:revalidate", name: "Recheck", kind: "allow_once" }] },
+  });
+  const statusCommands: string[] = [];
+  const report = (observer?: ProviderProcessObserver) => {
+    for (const proof of proofs) observer?.onProcess(Promise.resolve(proof));
+  };
+  const controller: ProviderAuthRecoveryController = {
+    describe: () => ({ id: "scope", provider: "claude", canStartLogin: false, configuredCredential: false }),
+    revalidate: async (_meta, observer) => {
+      statusCommands.push("revalidate");
+      report(observer);
+      return { status: "authenticated" };
+    },
+    inspect: async (_meta, observer) => {
+      statusCommands.push("inspect");
+      report(observer);
+      return { observation: { status: "authenticated" }, emailSupported: true, email: "account@example.test" };
+    },
+    startLogin: async () => "failed",
+    cancel: () => false,
+  };
+  let manager!: SessionManager;
+  const prepareLaunch = async (_meta: SessionMeta, cancellation?: LaunchPreparationCancellation) => {
+    await manager.acquireLaunchProviderHome(home, cancellation);
+    if (options.cardChangesDuringPreparation) {
+      store.patchMeta("s1", { pendingApproval: null, providerAuthBlock: { ...block, recoveryId: "replacement" } });
+    }
+  };
+  manager = new SessionManager(() => {}, () => {}, store, "runner", undefined,
+    (() => { throw new Error("fixture provider must not start"); }) as never,
+    undefined, 4, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, [], prepareLaunch, undefined, undefined, undefined, undefined, undefined, controller);
+  const registry = new CountingRegistry();
+  const internals = manager as unknown as {
+    providerHomeLeases: CountingRegistry;
+    resolveProviderAuthentication(session: string, request: string, option: string): Promise<void>;
+    revalidateProviderAuthenticationSilently(scope: string): void;
+    providerAuthRevalidations: Map<string, Promise<void>>;
+    completeProviderAuthentication(session: string, block: NonNullable<SessionMeta["providerAuthBlock"]>,
+      observation: { status: "authenticated"; identityId: string }, targetOnly: boolean, option: string): Promise<void>;
+  };
+  internals.providerHomeLeases = registry;
+  return {
+    home, store, block, manager, internals, registry, statusCommands,
+    cleanup() { manager.shutdownAll(); rmSync(root, { recursive: true, force: true }); },
+  };
+}
+
+for (const [label, proofs, released] of [
+  ["a proven status-command tree", [true], true],
+  ["a surviving or unprobeable tree", [true, false], false],
+] as const) {
+  test(`authentication inspection settles its preparation reference with its status command: released only for ${label}`, async () => {
+    const h = authCallerFixture([...proofs]);
+    try {
+      const inspected = await h.manager.inspectProviderAuthentication("s1", "provider-auth:recovery");
+      assert.equal(inspected.ok, true);
+      assert.deepEqual(h.statusCommands, ["inspect"]);
+      assert.equal(h.registry.references.has(h.home), !released);
+      assert.equal(h.registry.openHandles, 0, "the handle is settled either way");
+    } finally { h.cleanup(); }
+  });
+
+  test(`an explicit authentication recheck settles its preparation reference: released only for ${label}`, async () => {
+    const h = authCallerFixture([...proofs]);
+    try {
+      await h.internals.resolveProviderAuthentication("s1", "provider-auth:recovery", "auth:revalidate");
+      assert.deepEqual(h.statusCommands, ["revalidate"]);
+      assert.equal(h.registry.references.has(h.home), !released);
+      assert.equal(h.registry.openHandles, 0);
+    } finally { h.cleanup(); }
+  });
+
+  test(`a silent authentication revalidation settles its preparation reference: released only for ${label}`, async () => {
+    const h = authCallerFixture([...proofs]);
+    try {
+      h.store.patchMeta("s1", { pendingApproval: null });
+      h.internals.revalidateProviderAuthenticationSilently("scope");
+      await h.internals.providerAuthRevalidations.get("scope");
+      assert.deepEqual(h.statusCommands, ["revalidate"]);
+      assert.equal(h.registry.references.has(h.home), !released);
+      assert.equal(h.registry.openHandles, 0);
+    } finally { h.cleanup(); }
+  });
+}
+
+test("a same-scope sibling's recovery preparation releases its reference when nothing ran under it", async () => {
+  const h = authCallerFixture([], { cardChangesDuringPreparation: true });
+  try {
+    await h.internals.completeProviderAuthentication("another-session", h.block,
+      { status: "authenticated", identityId: "identity" }, false, "auth:revalidate");
+    assert.deepEqual(h.statusCommands, []);
+    assert.equal(h.registry.references.has(h.home), false);
+    assert.deepEqual(h.registry.released, [h.home]);
+    assert.equal(h.registry.openHandles, 0);
+  } finally { h.cleanup(); }
 });
