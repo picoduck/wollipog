@@ -200,7 +200,8 @@ export class CodexDriver implements Driver {
       hookStateDir: this.opts.hookStateDir,
       cwd: this.cwd,
     }));
-    if (profile && (this.disposed || this.cancelled)) return "cancelled";
+    // Whenever the probe ran (even one that found no profile), a cancel or dispose during it wins.
+    if (this.opts.hookStateDir && (this.disposed || this.cancelled)) return "cancelled";
     return new Promise<StopReason>((resolve) => {
       this.seenItems.clear(); // dedup is per-turn; each turn re-emits item.started ids
       const taskText = slashCommand ? `/${slashCommand}${text ? " " + text : ""}`.trim() : text;

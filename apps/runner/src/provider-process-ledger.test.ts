@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { EventEmitter } from "node:events";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { promisify } from "node:util";
 import { ProviderProcessLedger, spawnAgent, type AgentProcess } from "./spawn.js";
 
 const posixOnly = { skip: process.platform === "win32", timeout: 20_000 };
@@ -92,4 +94,19 @@ test("no proof succeeds while untracked work may still be starting processes", a
   finish();
   await work;
   assert.equal(await ledger.prove({ terminate: true }), false, "a memoized proof does not change afterwards");
+});
+
+test("untracked work that has finished still leaves its survivors unproven", posixOnly, async (t) => {
+  const ledger = new ProviderProcessLedger();
+  let survivor = 0;
+  t.after(() => { if (survivor && alive(survivor)) process.kill(survivor, "SIGKILL"); });
+  // A probe that starts a helper in its own process group, then exits: the probe's group kill
+  // cannot reach the helper, and no boundary recorded it.
+  const { stdout } = await ledger.untracked(() => promisify(execFile)(process.execPath, ["-e", [
+    'const child = require("node:child_process").spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });',
+    "child.unref(); process.stdout.write(String(child.pid));",
+  ].join("\n")]));
+  survivor = Number(stdout.trim());
+  assert.equal(alive(survivor), true, "the helper outlived the probe");
+  assert.equal(await ledger.prove({ terminate: true }), false, "a finished probe's survivor is never proven gone");
 });

@@ -901,7 +901,6 @@ export class ProviderProcessLedger {
   readonly owner: object = {};
   private sealed = false;
   private unprovable = false;
-  private untrackedWork = 0;
   private readonly separate = new Set<AgentProcess>();
   private readonly proofs = new Map<boolean, Promise<boolean>>();
 
@@ -919,14 +918,12 @@ export class ProviderProcessLedger {
     return child;
   }
 
-  /** Run work that may start processes outside any boundary. While it runs, no proof can succeed. */
+  /** Run work that may start processes outside any boundary. Nothing can prove those processes
+   * gone, even after the work settles (a probe's group kill misses a descendant that left its
+   * group), so the instance stays unprovable for good and its references are retained. */
   async untracked<T>(work: () => Promise<T>): Promise<T> {
-    this.untrackedWork++;
-    try {
-      return await work();
-    } finally {
-      this.untrackedWork--;
-    }
+    this.unprovable = true;
+    return await work();
   }
 
   /** `terminate: true` after disposal (kills survivors, as disposal already started to); `false`
@@ -937,7 +934,7 @@ export class ProviderProcessLedger {
     const existing = this.proofs.get(options.terminate);
     if (existing) return existing;
     const proof = (async () => {
-      if (this.unprovable || this.untrackedWork > 0) return false;
+      if (this.unprovable) return false;
       const owned = options.terminate
         ? terminatePosixProcessBoundaries(this.owner)
         : releaseEmptyPosixProcessBoundaries(this.owner);

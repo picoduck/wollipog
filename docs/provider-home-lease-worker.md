@@ -88,7 +88,7 @@ The proof comes from `ProviderProcessLedger` (spawn.ts), which records every pro
 
 - A child spawned with the ledger's owner is covered by the owner's POSIX boundaries, which stay registered until proven gone.
 - Any other child is proven individually.
-- A child without a boundary, or untracked work still running (the Codex permission-profile probe), makes the proof false.
+- A child without a boundary, or any untracked work the instance has run, makes the proof false. The Codex MCP inventory and permission-profile probes run outside a boundary and kill only their own process group, so a descendant that left the group could outlive them. A driver that ran one keeps its reference until shutdown.
 - Proving seals the ledger, so the instance can start nothing afterwards.
 
 How an instance ended decides which proof it gets:

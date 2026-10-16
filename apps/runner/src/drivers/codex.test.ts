@@ -657,8 +657,32 @@ for (const probe of ["MCP inventory", "permission profile"] as const) {
     assert.equal(await driver.proveProcessTreeExit({ terminate: true }), false,
       "a probe may still be running provider processes outside any boundary");
     finish();
-    // The sealed ledger refuses any spawn after disposal, so the turn ends without a process.
-    assert.ok(["cancelled", "refusal"].includes(await turn));
+    assert.equal(await turn, "cancelled");
     assert.equal(spawns, 0, "a disposed driver never starts its turn process");
+  });
+
+  test(`a driver disposed after its ${probe} probe finished never proves its process tree gone`, async () => {
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => { finish = resolve; });
+    let spawns = 0;
+    const driver = new CodexDriver({
+      command: "codex", args: [], cwd: "/tmp/work", env: {}, context: { kind: "native" },
+      config: { permissionMode: probe === "MCP inventory" ? "orchestrator" : "on-request" },
+      ...(probe === "permission profile" ? { hookStateDir: "/tmp/hook-state" } : {}),
+    }, { onEvent() {}, onStderr() {}, onExit() {} }, {
+      spawn() { spawns++; return fakeAgentProcess(); }, kill() {},
+      orchestratorMcpArgs: async () => { if (probe === "MCP inventory") await pending; return []; },
+      permissionProfile: async () => { await pending; return null; },
+    });
+    const turn = driver.prompt("start a turn");
+    await nextTask();
+    // Cancelled before the turn process starts, so the probe is the only thing that ever ran.
+    driver.cancel();
+    finish();
+    await turn;
+    driver.dispose();
+    assert.equal(spawns, 0, "a turn cancelled during its probe never starts its process");
+    assert.equal(await driver.proveProcessTreeExit({ terminate: true }), false,
+      "a finished probe may have left a descendant no boundary covers");
   });
 }
