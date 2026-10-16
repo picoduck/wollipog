@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
+import { gracefulNamespaceExit } from "./claude-namespace-session.js";
 import { ProviderProcessLedger, spawnAgent, type AgentProcess } from "./spawn.js";
 
 const posixOnly = { skip: process.platform === "win32", timeout: 20_000 };
@@ -109,4 +110,156 @@ test("untracked work that has finished still leaves its survivors unproven", pos
   survivor = Number(stdout.trim());
   assert.equal(alive(survivor), true, "the helper outlived the probe");
   assert.equal(await ledger.prove({ terminate: true }), false, "a finished probe's survivor is never proven gone");
+});
+
+function separateChild(terminate: () => Promise<boolean>, owner?: object) {
+  let calls = 0;
+  const child = Object.assign(new EventEmitter(), {
+    pid: 9,
+    posixBoundary: { owner, terminate: () => { calls += 1; return terminate(); } },
+  }) as unknown as AgentProcess;
+  return { child, calls: () => calls };
+}
+
+function separateCount(ledger: ProviderProcessLedger): number {
+  return (ledger as unknown as { separate: Set<AgentProcess> }).separate.size;
+}
+
+function settled(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+test("a closed ownerless child proven gone is dropped, so per-turn probes do not accumulate", async () => {
+  const ledger = new ProviderProcessLedger();
+  const probes = Array.from({ length: 3 }, () => separateChild(async () => true));
+  for (const probe of probes) ledger.record(probe.child);
+  assert.equal(separateCount(ledger), 3, "a live probe stays recorded");
+  for (const probe of probes) probe.child.emit("close", 0);
+  await settled();
+  assert.equal(separateCount(ledger), 0, "proven probes are forgotten");
+  assert.equal(await ledger.prove({ terminate: true }), true);
+  for (const probe of probes) assert.equal(probe.calls(), 1, "a dropped probe is not proven again");
+});
+
+test("a real ownerless probe that exits is proven and dropped", posixOnly, async () => {
+  const ledger = new ProviderProcessLedger();
+  const child = ledger.record(spawnAgent({
+    command: process.execPath, args: ["-e", "process.exit(0)"], cwd: os.tmpdir(), windowsShell: false,
+  }));
+  child.stdin.end();
+  await closed(child);
+  for (let attempt = 0; attempt < 200 && separateCount(ledger) > 0; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(separateCount(ledger), 0);
+  assert.equal(await ledger.prove({ terminate: false }), true);
+});
+
+test("a closed ownerless child that failed its proof makes every later proof false", async () => {
+  const ledger = new ProviderProcessLedger();
+  let attempts = 0;
+  // PosixProcessBoundary retries a failed termination; a retry that succeeds must not count.
+  const probe = separateChild(async () => ++attempts > 1);
+  ledger.record(probe.child);
+  probe.child.emit("close", 0);
+  await settled();
+  assert.equal(separateCount(ledger), 1, "an unproven probe is never forgotten");
+  assert.equal(await ledger.prove({ terminate: true }), false, "the earlier failure is sticky");
+  assert.equal(await ledger.prove({ terminate: false }), false);
+});
+
+test("an already-closed ownerless child is settled at record time", async () => {
+  const ledger = new ProviderProcessLedger();
+  const probe = separateChild(async () => true);
+  (probe.child as { closeObserved?: boolean }).closeObserved = true;
+  ledger.record(probe.child);
+  await settled();
+  assert.equal(separateCount(ledger), 0);
+});
+
+test("a child whose boundary belongs to another owner is not ended when it closes", async () => {
+  const ledger = new ProviderProcessLedger();
+  const foreign = separateChild(async () => true, {});
+  ledger.record(foreign.child);
+  foreign.child.emit("close", 0);
+  await settled();
+  assert.equal(foreign.calls(), 0, "its retained work belongs to its owner until the instance ends");
+  assert.equal(await ledger.prove({ terminate: true }), true);
+  assert.equal(foreign.calls(), 1);
+});
+
+class FakeNamespace {
+  ended = false;
+  endedGracefully = false;
+  disposals = 0;
+  private disposal: Promise<boolean> | undefined;
+  constructor(private readonly outcome: { graceful: boolean; cleaned: boolean }) {}
+  dispose(): Promise<boolean> {
+    if (this.disposal) return this.disposal;
+    this.disposals += 1;
+    this.disposal = Promise.resolve().then(() => {
+      this.ended = true;
+      this.endedGracefully = this.outcome.graceful;
+      return this.outcome.cleaned;
+    });
+    return this.disposal;
+  }
+}
+
+function namespacedLedger(namespace: FakeNamespace) {
+  const virtual = Object.assign(new EventEmitter(), { pid: 10 }) as unknown as AgentProcess;
+  const ledger = new ProviderProcessLedger({ namespaceFor: (child) => child === virtual ? namespace : undefined });
+  ledger.record(virtual);
+  return ledger;
+}
+
+test("a Claude namespace is proven gone only after a graceful TERMINATE", async () => {
+  const graceful = new FakeNamespace({ graceful: true, cleaned: true });
+  assert.equal(await namespacedLedger(graceful).prove({ terminate: true }), true,
+    "a boundary-less virtual provider is covered by its namespace");
+  assert.equal(graceful.disposals, 1, "the killing proof disposes the namespace");
+
+  const killed = new FakeNamespace({ graceful: false, cleaned: true });
+  assert.equal(await namespacedLedger(killed).prove({ terminate: true }), false, "a SIGKILL fallback is never a proof");
+
+  const uncleaned = new FakeNamespace({ graceful: true, cleaned: false });
+  assert.equal(await namespacedLedger(uncleaned).prove({ terminate: true }), false,
+    "a failed or timed-out disposal is never a proof");
+});
+
+test("the non-killing proof never disposes a Claude namespace and requires it already ended gracefully", async () => {
+  const live = new FakeNamespace({ graceful: true, cleaned: true });
+  assert.equal(await namespacedLedger(live).prove({ terminate: false }), false, "a live namespace (retained tasks) is unproven");
+  assert.equal(live.disposals, 0);
+
+  const ended = new FakeNamespace({ graceful: true, cleaned: true });
+  await ended.dispose();
+  assert.equal(await namespacedLedger(ended).prove({ terminate: false }), true);
+  assert.equal(ended.disposals, 1, "only the earlier disposal ran");
+
+  const killed = new FakeNamespace({ graceful: false, cleaned: true });
+  await killed.dispose();
+  assert.equal(await namespacedLedger(killed).prove({ terminate: false }), false);
+});
+
+test("a Claude namespace is captured at record time, so a later lookup miss does not matter", async () => {
+  const namespace = new FakeNamespace({ graceful: true, cleaned: true });
+  let lookups = 0;
+  const virtual = Object.assign(new EventEmitter(), { pid: 11 }) as unknown as AgentProcess;
+  const ledger = new ProviderProcessLedger({ namespaceFor: () => (++lookups === 1 ? namespace : undefined) });
+  ledger.record(virtual);
+  assert.equal(await ledger.prove({ terminate: true }), true);
+  assert.equal(lookups, 1);
+});
+
+test("a namespace closes gracefully only after TERMINATE and a normal zero exit", () => {
+  const sent = { terminateSent: true, controlFailed: false };
+  assert.equal(gracefulNamespaceExit({ ...sent, code: 0, signal: null }), true);
+  assert.equal(gracefulNamespaceExit({ ...sent, code: null, signal: "SIGKILL" }), false,
+    "an outer killed from outside may close before the pid namespace is torn down");
+  assert.equal(gracefulNamespaceExit({ ...sent, code: null, signal: "SIGTERM" }), false);
+  assert.equal(gracefulNamespaceExit({ ...sent, code: 125, signal: null }), false, "a failed supervisor proves nothing");
+  assert.equal(gracefulNamespaceExit({ terminateSent: false, controlFailed: false, code: 0, signal: null }), false,
+    "a namespace that ended on its own was never told to stop its tasks");
+  assert.equal(gracefulNamespaceExit({ terminateSent: true, controlFailed: true, code: 0, signal: null }), false);
 });

@@ -530,6 +530,136 @@ test("explicit disposal escalates a transport already inside graceful retirement
   child.emit("close", 0);
 });
 
+/** A provider child whose tree proof is `terminate`. A foreign owner keeps it out of the ledger's
+ * owner proof, so the ledger proves it individually through this boundary. */
+function provableProcess(terminate: () => Promise<boolean>, owner: object | undefined = {}) {
+  const child = fakeProcess();
+  const calls: string[] = [];
+  child.posixBoundary = { owner, terminate: () => { calls.push("terminate"); return terminate(); } };
+  return { child, calls };
+}
+
+test("the killing process-tree proof waits for the graceful EOF window before ending survivors", async () => {
+  const { child, calls } = provableProcess(async () => true);
+  const killed: unknown[] = [];
+  const drainedOwners: object[] = [];
+  const driver = new ClaudeCodeDriver(
+    { ...baseOpts, config: { permissionMode: "acceptEdits" } },
+    noopCb,
+    {
+      spawn: () => child,
+      kill: (process: unknown) => { killed.push(process); },
+      trackKill: () => {},
+      terminateDescendants: (owner: object) => { drainedOwners.push(owner); },
+    } as any,
+  );
+  const turn = driver.prompt("one");
+  await nextTask();
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  await turn;
+
+  driver.dispose();
+  let proven: boolean | undefined;
+  void driver.proveProcessTreeExit({ terminate: true }).then((result) => { proven = result; });
+  await nextTask();
+  await nextTask();
+  assert.equal(proven, undefined, "the proof does not resolve inside the grace window");
+  assert.deepEqual(calls, [], "the proof does not end the provider's tree inside the grace window");
+  assert.deepEqual(killed, []);
+  assert.equal(drainedOwners.length, 0);
+
+  child.emit("close", 0);
+  assert.equal(await driver.proveProcessTreeExit({ terminate: true }), true);
+  assert.equal(proven, true);
+  assert.deepEqual(calls, ["terminate"]);
+  assert.equal(drainedOwners.length, 1, "the existing owner cleanup still runs after retirement");
+});
+
+test("a Claude provider is proven only through a POSIX boundary", async () => {
+  for (const [label, child, expected] of [
+    ["a child with a boundary", provableProcess(async () => true).child, true],
+    ["a child whose boundary found survivors", provableProcess(async () => false).child, false],
+    ["a child without a boundary (Windows, WSL, container, cloud, no pid)", fakeProcess(), false],
+  ] as const) {
+    const driver = new ClaudeCodeDriver(
+      { ...baseOpts, env: { [CLAUDE_PERSISTENT_FLAG]: "0" }, config: { permissionMode: "acceptEdits" } },
+      noopCb,
+      { spawn: () => child, kill: () => {}, trackKill: () => {}, terminateDescendants: () => {} } as any,
+    );
+    const turn = driver.prompt("one");
+    await nextTask();
+    child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+    child.emit("close", 0);
+    await turn;
+    driver.dispose();
+    assert.equal(await driver.proveProcessTreeExit({ terminate: true }), expected, label);
+  }
+});
+
+test("the Claude accounting probe is part of the instance's process-tree proof", async () => {
+  for (const [label, probeProven, expected] of [
+    ["a probe whose tree was proven gone", true, true],
+    ["a probe that left survivors", false, false],
+  ] as const) {
+    const spawned: string[] = [];
+    const driver = new ClaudeCodeDriver(
+      { ...baseOpts, agentVersion: "2.1.287", resumeId: "saved-session",
+        env: { [CLAUDE_PERSISTENT_FLAG]: "1" }, config: { permissionMode: "acceptEdits" } },
+      noopCb,
+      { spawn: (options: any) => {
+        assert.equal(options.descendantOwner, undefined, "the probe's boundary is terminated when it closes");
+        spawned.push(options.args.includes("--tools") ? "probe" : "provider");
+        // An ownerless boundary, as spawnAgent gives the probe.
+        const { child } = provableProcess(async () => probeProven, undefined);
+        child.stdin.on("data", () => {
+          child.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "saved-session" }) + "\n");
+          child.stdout.write(JSON.stringify({ type: "result", subtype: "success", session_id: "saved-session", total_cost_usd: 0, usage: {} }) + "\n");
+          setImmediate(() => child.emit("close", 0));
+        });
+        return child;
+      }, kill: () => {}, trackKill: () => {}, terminateDescendants: () => {} } as any,
+    );
+    await driver.initialize();
+    assert.deepEqual(spawned, ["probe"]);
+    await nextTask();
+    driver.dispose();
+    assert.equal(await driver.proveProcessTreeExit({ terminate: true }), expected, label);
+  }
+});
+
+test("a proven Claude instance refuses to start another process", async () => {
+  const spawned: unknown[] = [];
+  const events: SessionEventPayload[] = [];
+  const driver = new ClaudeCodeDriver(
+    { ...baseOpts, agentVersion: "2.1.287", resumeId: "saved-session", env: { [CLAUDE_PERSISTENT_FLAG]: "0" },
+      config: { permissionMode: "acceptEdits" }, capabilities: { supportsConversationFork: true } as any },
+    { ...noopCb, onEvent: (event) => events.push(event) },
+    { spawn: (options: unknown) => { spawned.push(options); return fakeProcess(); }, kill: () => {},
+      trackKill: () => {}, terminateDescendants: () => {} } as any,
+  );
+  assert.equal(await driver.proveProcessTreeExit({ terminate: false }), true, "nothing was started");
+  // A resumed one-shot turn starts with its accounting probe, which is refused like the provider.
+  assert.equal(await driver.prompt("too late"), "refusal");
+  assert.deepEqual(spawned, []);
+  assert.ok(events.some((event) => event.kind === "error"));
+  await assert.rejects(driver.forkSession("saved-session", "/tmp/work"), /already ended/);
+  assert.deepEqual(spawned, []);
+
+  const freshEvents: SessionEventPayload[] = [];
+  const fresh = new ClaudeCodeDriver(
+    { ...baseOpts, env: { [CLAUDE_PERSISTENT_FLAG]: "0" }, config: { permissionMode: "acceptEdits" } },
+    { ...noopCb, onEvent: (event) => freshEvents.push(event) },
+    { spawn: (options: unknown) => { spawned.push(options); return fakeProcess(); }, kill: () => {},
+      trackKill: () => {}, terminateDescendants: () => {} } as any,
+  );
+  assert.equal(await fresh.proveProcessTreeExit({ terminate: false }), true, "nothing was started");
+  assert.equal(await fresh.prompt("too late"), "refusal");
+  assert.deepEqual(spawned, []);
+  assert.ok(freshEvents.some((event) => event.kind === "error" && /already ended/.test(event.message)));
+  driver.dispose();
+  fresh.dispose();
+});
+
 test("zero idle TTL keeps a quiescent persistent process alive indefinitely", async () => {
   const child = fakeProcess();
   let scheduled = 0;
