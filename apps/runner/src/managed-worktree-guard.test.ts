@@ -1606,3 +1606,24 @@ test("injecting any forbidden character into a strippable shape falls back to sc
     assert.equal(commandTargetsGuardState(make("// a / b"), project, directory), null, make("// a / b"));
   }
 });
+
+test("a '#' inside a reaching path cannot slip the veto via the comment-escape (#1734 parser differential)", (t) => {
+  const { directory, project } = guardLayout(t);
+  // `prepareGuardStateCommand` escapes every `#` to `\#` so shell-quote cannot run a comment to the
+  // end of the command and swallow a later reach. Escaping only ADDS a backslash; a backslash is not
+  // special to path resolution, and the hook-state paths hold no `#`, so a reaching operand that
+  // carries a `#` (quoted, double-quoted, unquoted, or hidden behind a `..` pop) still resolves into
+  // the directory and is refused. These guard the escape against the parser-differential class.
+  const rel = "../.wollipog-data/hooks/s1.protections.json";
+  const absHash = join(directory, "x#y/../s1.protections.json"); // a `#` segment the `..` pops away
+  for (const command of [
+    `cat '${rel.replace("hooks/", "hooks/x#y/../")}'`, // single-quoted, `#` popped by `..`
+    `cat "${rel.replace("hooks/", "hooks/x#y/../")}"`, // double-quoted
+    `cat ${rel.replace("hooks/", "hooks/x#y/../")}`, // unquoted (bash: non-word-start `#` is literal)
+    `cat '${rel}/#/..'`, // the file reached as a dir through a `#` segment
+    `cat '${absHash}'`, // the same trick on the absolute path
+    `cat '${rel}#'`, // a sibling INSIDE the hook dir (its name ends in `#`) is still inside → refused
+  ]) {
+    assert.ok(commandTargetsGuardState(command, project, directory) !== null, command);
+  }
+});
