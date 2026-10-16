@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ARCHIVED_HISTORY_RETENTION_LIMITS } from "@wollipog/protocol";
 import {
-  historyPrunedSentence,
+  historyPrunedDetails,
+  historyPrunedSummary,
   historyPrunedTitle,
   historyPrunesAt,
   parseRetentionDays,
@@ -57,7 +58,10 @@ test("the confirmation names what goes, what stays, and when it starts", () => {
   assert.equal(on.confirmLabel, "Prune History");
   assert.equal(on.message, "History of sessions archived more than 30 days ago is permanently removed from this control plane, "
     + "starting Oct 16, 2026, 2:30 PM. Prompts, the final response, usage and cost, and attachments are kept. This cannot be undone here.");
-  assert.deepEqual(on.detailRows.map((row) => row.meta), ["3", "1,200"]);
+  assert.deepEqual(on.detailRows, [
+    { label: "Sessions to Prune", meta: "3" },
+    { label: "Events to Remove (Approx.)", meta: "1,200" },
+  ]);
   const shorter = retentionConfirmation(90, preview, "en-US", "UTC");
   assert.equal(shorter.title, "Shorten History Retention");
   assert.equal(shorter.confirmLabel, "Shorten Retention");
@@ -65,10 +69,10 @@ test("the confirmation names what goes, what stays, and when it starts", () => {
 
 test("a pruned session says when, under which threshold, and what was kept", () => {
   const pruned = { prunedAt: AT, eventCount: 12_345, retentionDays: 90 };
-  assert.equal(historyPrunedSentence(pruned, "en-US", "UTC"),
-    "On Oct 15, 2026, the retention policy for sessions archived more than 90 days removed 12,345 events: tool calls and "
-    + "their output, file edits, reasoning, and intermediate messages. Prompts, the final response, usage and cost, and "
-    + "attachments are kept.");
+  assert.equal(historyPrunedSummary(pruned, "en-US", "UTC"), "12,345 events removed Oct 15, 2026.");
+  assert.equal(historyPrunedDetails(pruned),
+    "The retention policy for sessions archived more than 90 days removed tool calls and their output, file edits, "
+    + "reasoning, and intermediate messages. Prompts, the final response, usage and cost, and attachments are kept.");
   assert.equal(historyPrunedTitle(pruned, "en-US", "UTC"), "Pruned Oct 15, 2026 by the 90-day retention policy");
 });
 

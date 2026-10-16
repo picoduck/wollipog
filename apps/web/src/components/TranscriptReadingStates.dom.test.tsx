@@ -50,13 +50,17 @@ test("a pruned transcript says what retention removed and kept, and an empty one
       </>,
     ));
     const notice = container.querySelector(".notice") as HTMLElement;
-    // A full notice, its title above the sentence: it stays for as long as the session is open.
-    assert.ok(notice.classList.contains("t-info") && !notice.classList.contains("compact"));
+    // One compact line, since it stays for as long as the session is open; the rest is on request.
+    assert.ok(notice.classList.contains("t-info") && notice.classList.contains("compact"));
     assert.equal(notice.getAttribute("role"), "note");
-    assert.match(notice.textContent ?? "", /^History Pruned/);
-    assert.match(notice.textContent ?? "", /archived more than 90 days removed 12,345 events: tool calls and their output/);
-    assert.match(notice.textContent ?? "", /Prompts, the final response, usage and cost, and attachments are kept\.$/);
-    assert.equal(notice.querySelectorAll("button").length, 0, "there is nothing to do about it here");
+    assert.equal(notice.querySelector(".notice-title")?.textContent, "History Pruned");
+    assert.equal(notice.querySelector(".notice-body")?.textContent, "12,345 events removed Oct 15, 2026.");
+    assert.doesNotMatch(notice.textContent ?? "", /tool calls/, "the details wait for Show Details");
+    const toggle = notice.querySelector("button") as HTMLButtonElement;
+    assert.equal(toggle.textContent, "Show Details");
+    await act(async () => { toggle.click(); });
+    assert.match(notice.textContent ?? "", /archived more than 90 days removed tool calls and their output/);
+    assert.match(notice.textContent ?? "", /Prompts, the final response, usage and cost, and attachments are kept\./);
     assert.match(container.textContent ?? "", /Nothing Kept/);
     assert.doesNotMatch(container.textContent ?? "", /ended before anything was sent/);
   } finally {

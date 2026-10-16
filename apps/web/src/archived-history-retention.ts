@@ -122,17 +122,21 @@ export function retentionConfirmation(
       + `${KEPT_CONTENT} This cannot be undone here.`,
     confirmLabel: turningOn ? "Prune History" : "Shorten Retention",
     detailRows: [
-      { label: "Sessions Pruned When It Starts", meta: preview.eligible.sessions.toLocaleString("en-US") },
-      { label: "Events Removed, About", meta: preview.eligible.events.toLocaleString("en-US") },
+      { label: "Sessions to Prune", meta: preview.eligible.sessions.toLocaleString("en-US") },
+      { label: "Events to Remove (Approx.)", meta: preview.eligible.events.toLocaleString("en-US") },
     ],
   };
 }
 
-/** The History Pruned notice's sentence above a pruned transcript. */
-export function historyPrunedSentence(pruned: SessionHistoryPruned, locale?: string, timeZone?: string): string {
-  return `On ${formatRetentionDate(pruned.prunedAt, locale, timeZone)}, the retention policy for sessions archived more than `
-    + `${retentionDaysLabel(pruned.retentionDays)} removed ${count(pruned.eventCount, "event", "events")}: ${PRUNED_CONTENT}. `
-    + KEPT_CONTENT;
+/** The History Pruned notice's one line above a pruned transcript: how much went, and when. */
+export function historyPrunedSummary(pruned: SessionHistoryPruned, locale?: string, timeZone?: string): string {
+  return `${count(pruned.eventCount, "event", "events")} removed ${formatRetentionDate(pruned.prunedAt, locale, timeZone)}.`;
+}
+
+/** The notice's details: under which policy, what kind of events went, and what was kept. */
+export function historyPrunedDetails(pruned: SessionHistoryPruned): string {
+  return `The retention policy for sessions archived more than ${retentionDaysLabel(pruned.retentionDays)} removed `
+    + `${PRUNED_CONTENT}. ${KEPT_CONTENT}`;
 }
 
 /** The History Pruned badge's tooltip in the archive. */

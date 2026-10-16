@@ -48,24 +48,35 @@ test("the archive marks pruned sessions and keeps them openable", async ({ page 
 });
 
 for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
-  test(`a pruned transcript says what was removed above the kept prompts and answers at ${viewport.width}px`, async ({ page }) => {
+  test(`a pruned transcript keeps its prompts and final response under a compact notice at ${viewport.width}px`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto("/transcript-states-e2e.html?state=pruned");
-    const notice = page.locator(".detail-reader .notice", { hasText: "History Pruned" });
+    const notice = page.getByRole("note", { name: "History Pruned" });
     await expect(notice).toBeVisible();
-    await expect(notice).toContainText("removed 1,284 events: tool calls and their output, file edits, reasoning, and intermediate messages.");
+    await expect(notice).toContainText(/1,284 events removed .+\./);
+    await expect(notice).not.toContainText("tool calls");
+    await notice.getByRole("button", { name: "Show Details" }).click();
+    await expect(notice).toContainText("removed tool calls and their output, file edits, reasoning, and intermediate messages.");
     await expect(page.getByText("Question 20:", { exact: false }).first()).toBeVisible();
+    await expect(page.getByText("Answer 20:", { exact: false })).toBeVisible();
+    // A streamed session keeps only its last answer.
+    await expect(page.getByText("Answer 19:", { exact: false })).toHaveCount(0);
     await expect(page.getByText("No Messages")).toHaveCount(0);
     await expect(page.getByText("Read File 20")).toHaveCount(0);
     // The kept window is below the History Pruned band, never under it.
+    await notice.getByRole("button", { name: "Hide Details" }).click();
     const scroller = (await page.locator(".detail-scroll").boundingBox())!;
     const box = (await notice.boundingBox())!;
     expect(scroller.y).toBeGreaterThanOrEqual(box.y + box.height);
+    // On a phone the band stays a line or two, so the transcript keeps the screen.
+    expect(box.height).toBeLessThan(viewport.height * 0.12);
   });
 }
 
-test("an archived session says when its history will be pruned", async ({ page }) => {
+test("an archived session says when its history will be pruned above its transcript", async ({ page }) => {
   await page.goto("/transcript-states-e2e.html?state=prune-scheduled");
   await expect(page.getByRole("status", { name: "Session Archived" }))
     .toContainText(/This session is archived and stopped\. Its history will be pruned on .+\./);
+  await expect(page.getByText("Answer 20:", { exact: false })).toBeVisible();
+  await expect(page.getByText("No Messages")).toHaveCount(0);
 });

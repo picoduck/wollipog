@@ -64,7 +64,9 @@ Kept as events, so the transcript still shows them and search still finds them:
 - every prompt (`user_message`);
 - the session's final response: every part of its last top-level agent message;
 - every turn completion and final-flagged report. Campaign report proofs and assignment checks read
-  exactly these, so a verified campaign child stays verified;
+  exactly these, so a verified campaign child stays verified. Live claude-code and codex-app-server
+  answers stream without the flag, so a live session keeps only its final response; an adopted
+  transcript flags every answer final, and keeps each one;
 - every `token_usage` event, the evidence Claude cost corrections are reconciled against;
 - control-plane attachment events, which no runner can supply again.
 
@@ -136,10 +138,10 @@ carries `historyPruned` (when, how many events, which threshold) and `archivedAt
 
 - **Archived Sessions** shows a neutral **History Pruned** badge beside its lifecycle; the badge's
   tooltip gives the date and the threshold.
-- **Opening it** shows a **History Pruned** notice above the transcript: when, under which threshold,
-  how many events went, what kind, and what was kept. The kept events follow. Load Earlier Activity
-  gives no count, since a pruned history has gaps, and a session with nothing kept says so instead
-  of "ended before anything was sent".
+- **Opening it** shows a compact **History Pruned** notice above the transcript, one line saying how
+  many events went and when; its Show Details says under which threshold, what kind went, and what
+  was kept. The kept events follow. Load Earlier Activity gives no count, since a pruned history
+  has gaps, and a session with nothing kept says so instead of "ended before anything was sent".
 - **Before it is pruned**, an archived session's Session Archived notice says on which date its
   history will be pruned under the current policy.
 - **Search** finds it by its metadata and its kept prompts and final response; a transcript hit

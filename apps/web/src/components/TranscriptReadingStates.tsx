@@ -1,6 +1,6 @@
 import React from "react";
 import type { SessionHistoryPruned, SessionStatus } from "@wollipog/protocol";
-import { historyPrunedSentence } from "../archived-history-retention.js";
+import { historyPrunedDetails, historyPrunedSummary } from "../archived-history-retention.js";
 import { Notice } from "./Notice.js";
 import { State } from "./State.js";
 import { Spinner } from "./common.js";
@@ -136,13 +136,15 @@ export function TranscriptHistoryNotice({
   );
 }
 
-/** A pruned transcript's notice, heading the reading column for as long as the session is open: what
- * archived-history retention removed, when, and what it kept (#2777). */
+/** A pruned transcript's notice, heading the reading column for as long as the session is open
+ * (#2777). One compact line says how much archived-history retention removed and when, so it costs a
+ * phone one or two lines; Show Details says under which policy, what went, and what was kept. */
 export function TranscriptPrunedNotice({ pruned }: { pruned: SessionHistoryPruned }) {
   return (
-    <Notice tone="info" role="note" className="transcript-history-notice" dataState="pruned"
-      title="History Pruned" ariaLabel="History Pruned">
-      {historyPrunedSentence(pruned)}
+    <Notice compact tone="info" role="note" className="transcript-history-notice" dataState="pruned"
+      title="History Pruned" ariaLabel="History Pruned"
+      details={<p>{historyPrunedDetails(pruned)}</p>}>
+      {historyPrunedSummary(pruned)}
     </Notice>
   );
 }

@@ -94,7 +94,7 @@ test("retention is off until confirmed, and turning it on shows what it prunes a
     assert.deepEqual(previews, [90]);
     assert.ok(ui.dialog(), "turning it on is confirmed in the app's dialog");
     assert.match(ui.dialog()!.textContent ?? "", /Prune Archived History[\s\S]*more than 90 days ago is permanently removed/);
-    assert.match(ui.dialog()!.textContent ?? "", /Sessions Pruned When It Starts[\s\S]*3/);
+    assert.match(ui.dialog()!.textContent ?? "", /Sessions to Prune[\s\S]*3[\s\S]*Events to Remove \(Approx\.\)[\s\S]*1,200/);
     assert.equal(ui.dialogButton("Prune History").className, "btn danger");
 
     await act(async () => { ui.dialogButton("Cancel").click(); });
