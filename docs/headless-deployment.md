@@ -152,6 +152,49 @@ Explicit `--url`, `--token-file`, or `CONTROL_PLANE_*` variables still take prec
 
 ## Exposure: Tailscale or HTTPS
 
+For guided setup on an installed host, run:
+
+```bash
+wollipog admin remote-access setup
+wollipog admin remote-access status
+```
+
+The first command asks before changing exposure, configures persistent Tailscale Serve, verifies the
+certificate and this exact instance, checks the dashboard/API/live connection, and remembers the
+complete HTTPS address. If Tailscale needs HTTPS authorization, it prints the consent link and
+offers to resume after authorization. Non-interactive callers pass `--yes --json`; an incomplete
+setup returns exit 3 with its next action. Tailscale must be installed, signed in, and manageable
+by the account running the control plane. Supported hosts have the Tailscale CLI on that account's
+PATH; missing tools and insufficient permissions are reported rather than installing software or
+elevating privileges silently.
+
+For an existing TLS reverse proxy, use
+`wollipog admin remote-access setup --origin https://wollipog.example.com`. The desktop app and a
+direct local administrator dashboard offer the same flow at **Settings → Network → Set Up Remote
+Access**. Remote browsers explain that configuration happens on the host.
+
+The guided setting is saved in a private `<CONTROL_PLANE_DB>.remote-access.json` beside the database;
+back it up with the host configuration. Its verified address takes precedence over the legacy
+public-origin environment setting for remote pairing. A restart rechecks the address before using
+it. The short-lived verification capability is held only in memory, permits only identity reads
+and a live-channel acknowledgement (without session data), and expires immediately afterward. Neither startup nor paired-device
+credentials are forwarded to an address under verification.
+
+Existing Serve listeners are reused without being adopted for removal. Occupied listeners are
+preserved; setup tries HTTPS ports 443, 8443, and 9443. The generated address includes the selected
+external port. Disabling guided access (`wollipog admin remote-access disable`) removes only an
+unchanged listener created by Wollipog; an external proxy or operator-managed listener remains.
+The app offers **Cancel Setup** for an incomplete attempt. Setup never enables Funnel. It does
+not change existing bind settings, so pre-existing direct HTTP exposure remains until the operator
+changes it.
+
+After setup, use **Pair a Device** to create the HTTPS pairing link and QR code, or
+`wollipog admin device create --name Phone --output <pairing-file>`. The other device must have
+Tailscale connected and permission to reach this host. A host-side verification cannot prove every
+other device's DNS or tailnet policy, so the final check is opening the pairing link there.
+
+Manual setup remains available:
+
 Keep the control plane bound to loopback and expose it through Tailscale or an HTTPS reverse proxy.
 Set `--public-origin https://...` so pairing links embed the address remote clients reach: both
 `wollipog admin device create` and the dashboard's People & Devices card then hand out

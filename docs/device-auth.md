@@ -105,6 +105,24 @@ removes associated push subscriptions, and immediately closes that device's live
 Role changes and membership suspension are resolved on every request. `lastSeenAt` is updated at
 most once per minute.
 
+## Secure Remote Addresses
+
+Use **Settings → Network → Set Up Remote Access** on the host's local administrator dashboard,
+or `wollipog admin remote-access setup` over SSH. Guided setup verifies and remembers the complete
+HTTPS address. **Pair a Device** then reuses the existing device-pairing flow and QR code.
+
+When guided access is configured but needs repair, pairing does not silently fall back to a raw
+HTTP address. Repair setup first. A browser using an old HTTP bookmark can choose **Open Secure
+Dashboard**; its selected session path is retained, but credentials, query strings, and pairing
+fragments are never carried to the new origin. The new origin may require a fresh pairing link
+created by an administrator on the host. Saved desktop instance credentials and origins are not
+rewritten automatically.
+
+Tailscale's HTTPS certificate names the host's tailnet DNS name. Merely changing
+`http://<tailnet-ip>:4317` to `https://<tailnet-ip>:4317` does not work: port 4317 still speaks HTTP,
+and the certificate is for the DNS name. That browser error happens before Wollipog can load.
+Always use the complete address or QR code supplied by setup.
+
 ## Serving the Web App
 
 The control plane serves the built dashboard from its own origin when a bundle is present. Bundle

@@ -275,6 +275,8 @@ test("on a control plane without projects the workspace menu files the session, 
 });
 
 test("a menu result is a toast, and the bar never shows a transient note", async ({ page, context }) => {
+  // The synthetic API must supply its own status, even with no real backend available.
+  await page.route("**/api/remote-access", (route) => route.abort());
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await openBar(page, 940);
   const bar = page.locator("header.session-bar");
@@ -655,6 +657,8 @@ test.describe("phone", () => {
 // The issue estimated 260px; the shared §9.1 described row (52px) and the specified copy measure 287px
 // here and 303px in CI's DejaVu Sans, against 410px for the old menu. The bound keeps that small margin.
 test("at 1440px Share holds four described items and one note in at most 310px", async ({ page }) => {
+  // The synthetic API must supply its own status, even with no real backend available.
+  await page.route("**/api/remote-access", (route) => route.abort());
   await openBar(page, 1440);
   await page.locator("header.session-bar").getByRole("button", { name: "Share" }).click();
   const menu = page.getByRole("menu", { name: "Share" });

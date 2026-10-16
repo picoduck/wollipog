@@ -11,7 +11,7 @@ const WORKSPACE_ID = "evidence-workspace";
 const AGENT_ID = "image-orchestrator";
 
 /** Seed a real control-plane database. The live HTTP routes and browser use it in the spec. */
-export function seedDelegatedUiEvidence(databasePath: string, workspacePath: string) {
+export function seedDelegatedUiEvidence(databasePath: string, workspacePath: string, authority: "human" | "orchestrator" = "orchestrator") {
   const db = ControlPlaneDb.open(databasePath);
   const runner: RunnerMetadata = {
     runnerId: RUNNER_ID,
@@ -46,7 +46,7 @@ export function seedDelegatedUiEvidence(databasePath: string, workspacePath: str
     db.updateSessionStatus(parent.data.id, "running", Date.now());
     const decisions = {
       implementation_question: "human", pr_merge: "human", merged_branch_deletion: "human",
-      follow_up_issue_publication: "human", ui_evidence_approval: "orchestrator",
+      follow_up_issue_publication: "human", ui_evidence_approval: authority,
     } as const;
     const policy = svc.setParentControlPolicy(parent.data.id, decisions, 0, { kind: "human", id: ownerUserId });
     if (!policy.ok) throw new Error(policy.error ?? "policy update failed");
@@ -68,7 +68,7 @@ export function seedDelegatedUiEvidence(databasePath: string, workspacePath: str
       resourceSnapshot: { category: "ui_evidence_approval", evidence: [evidence] },
     });
     if (!decision.ok || !decision.data) throw new Error(decision.error ?? "decision creation failed");
-    if (decision.data.authority !== "orchestrator") throw new Error(`unexpected authority: ${decision.data.authority}`);
+    if (decision.data.authority !== authority) throw new Error(`unexpected authority: ${decision.data.authority}`);
     const parentToken = "delegated-ui-evidence-parent-token";
     if (!db.setAgentControlCredential(parent.data.id, RUNNER_ID,
       createHash("sha256").update(parentToken).digest("hex"), Date.now())) {

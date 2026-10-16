@@ -844,6 +844,8 @@ export const WOLLIPOG_AUTOMATION_TRIGGER_HEADERS = {
 } as const;
 
 /** Capability identifiers returned by control planes that support saved remote-instance clients. */
+export type { RemoteAccessSetup, RemoteAccessView } from "./remote-access.js";
+
 export const CONTROL_PLANE_CAPABILITIES = ["remote-instance-v1"] as const;
 
 /** Authenticated identity and compatibility contract for one control-plane installation. */

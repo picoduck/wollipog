@@ -520,6 +520,9 @@ const reconciledReminder: SessionReminderView = {
 
 const client = {
   ...api,
+  // This synthetic Shell models an older server and must never query a real host.
+  // Guided HTTPS setup has its own suite backed by a disposable control plane.
+  remoteAccess: async () => { throw new ApiError("Remote access is not supported by this fixture.", 404); },
   dismissProviderLoginNotice: async (runnerId: string, operationId: string) => {
     window.__providerLoginCalls.push(`dismiss:${operationId}`);
     const result = await api.dismissProviderLoginNotice(runnerId, operationId);
