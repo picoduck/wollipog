@@ -943,7 +943,7 @@ test("Network in a browser names this window's server and where Tailnet access i
   await expect(panel.locator(".setting-row-value-text")).toHaveText(new URL(page.url()).origin);
   await expect(panel.getByRole("button", { name: "Copy Address" })).toBeVisible();
   await expect(panel.locator(".settings-group-foot"))
-    .toHaveText("Tailnet access is turned on in the Wollipog desktop app, on the machine that runs the server.");
+    .toHaveText("Set up secure remote access on the computer running this server.");
   await expect(panel.locator(".settings-group-title")).toHaveText(["Connection"]);
   await expect(panel).not.toContainText(/not built yet|instance menu|control plane/i);
 });

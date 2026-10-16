@@ -109,11 +109,12 @@ import {
   type ReadQueuedPromptResultMessage,
 } from "./index.js";
 
-test("private media compatibility stays unadvertised and cannot borrow public221 or222", () => {
+test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 222);
+  assert.equal(PROTOCOL_VERSION, 223);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
   assert.equal(PACED_VIDEO_REVIEW_MIN_PROTOCOL, 223);
   assert.ok(Object.values(RUNNER_CAPABILITY_MIN_PROTOCOL).every((value) => value <= PROTOCOL_VERSION));
   for (const version of [undefined, null, "223", NaN, Infinity, 223.5, 221, 222]) {
@@ -263,8 +264,10 @@ test("older peers never receive display-only live Claude usage, but still accoun
   assert.equal(projectSessionEventPayloadForProtocol(provisional, 216), provisional);
 });
 
-test("PROTOCOL_VERSION is 222", () => {
-  assert.equal(PROTOCOL_VERSION, 222);
+test("PROTOCOL_VERSION is 223", () => {
+  assert.equal(PROTOCOL_VERSION, 223);
+  assert.equal(runnerSupportsProtocol(222, "sessionReviewJob"), false);
+  assert.equal(runnerSupportsProtocol(223, "sessionReviewJob"), true);
   assert.equal(runnerSupportsProtocol(218, "ratePricedSnapshotUsage"), false);
   assert.equal(runnerSupportsProtocol(219, "ratePricedSnapshotUsage"), true);
   assert.equal(runnerSupportsProtocol(218, "boundedSessionEventReads"), false);

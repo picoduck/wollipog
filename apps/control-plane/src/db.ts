@@ -8,10 +8,11 @@ import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaus
 import { DatabaseSync } from "node:sqlite";
 import { CampaignBudgetLedger } from "./campaign-budget.js";
 import { CampaignReviewJobs } from "./campaign-review-jobs.js";
+import { SessionReviewJobs } from "./session-review-jobs.js";
 import { attentionRequestRank, parseRatePricedUsage, ratePricedUsageKey, ratePricedUsageRecord, RATE_PRICED_USAGE_BUCKETS, RATE_PRICED_USAGE_MAX_ENTRIES, type RatePricedUsageBucket, type RatePricedUsageTotal } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent } from "./campaign-authority.js";
-import { evaluateApprovalPolicies, sessionSpawnSafetyPolicy } from "./policy-engine.js";
+import { evaluateApprovalPolicies, evaluatePolicies, firstAsk, rulesFromSession, sessionSpawnSafetyPolicy } from "./policy-engine.js";
 import { validCampaignControl, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
 import { lookupRate, priceUsage, resolveCostSource, sameRequestInputTier, type RateTable } from "./usage-pricing.js";
@@ -306,6 +307,7 @@ import type { DurableBackgroundPushDelivery, PushAudience, PushServiceOutcome } 
 import { matchWorkspaceId, matchWorkspaceIds, workspacePathsEqual } from "./workspace-match.js";
 import { installMaintenanceIndexes } from "./maintenance-indexes.js";
 import { CAMPAIGN_WORK_LEDGER_SCHEMA, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
+import { CAMPAIGN_RECOVERY_SCHEMA, CampaignRecoveryStore, type CampaignRecoveryVerifiedReport } from "./campaign-recovery-store.js";
 import {
   CAMPAIGN_FORGE_OBSERVATION_SCHEMA,
   CampaignForgeObservationStore,
@@ -923,6 +925,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_orchestrator_follow_up_unique
 CREATE INDEX IF NOT EXISTS idx_orchestrator_follow_up_campaign
   ON orchestrator_campaign_follow_ups(campaign_session_id, created_at, id);
 ${CAMPAIGN_WORK_LEDGER_SCHEMA}
+${CAMPAIGN_RECOVERY_SCHEMA}
 ${CAMPAIGN_FORGE_OBSERVATION_SCHEMA}
 ${CAMPAIGN_WORK_ACCOUNTING_SCHEMA}
 
@@ -998,6 +1001,7 @@ CREATE TABLE IF NOT EXISTS orchestrator_campaign_continuations (
   event_from_seq      INTEGER NOT NULL,
   event_through_seq   INTEGER NOT NULL,
   observed_through_seq INTEGER NOT NULL,
+  authority_digest    TEXT,
   state               TEXT NOT NULL CHECK (state IN
                        ('pending','running','completed','failed','missing_result','acknowledged')),
   attempt_count       INTEGER NOT NULL DEFAULT 1,
@@ -3435,6 +3439,8 @@ export interface CampaignContinuationRecord {
   eventFromSeq: number;
   eventThroughSeq: number;
   observedThroughSeq: number;
+  /** CP-only Full Control admission binding. Never sent to a runner. */
+  authorityDigest?: string;
   state: "pending" | "running" | "completed" | "failed" | "missing_result" | "acknowledged";
   attemptCount: number;
   nextAttemptAt?: number;
@@ -5212,6 +5218,7 @@ function sessionHistoryRetentionView(
 export class ControlPlaneDb {
   readonly campaignBudgets: CampaignBudgetLedger;
   readonly campaignReviewJobs: CampaignReviewJobs;
+  readonly sessionReviewJobs: SessionReviewJobs;
   private constructor(
     private readonly db: DatabaseSync,
     private readonly artifactBlobs: ArtifactBlobStore,
@@ -5225,6 +5232,7 @@ export class ControlPlaneDb {
       const scope=this.sessionScope(rootId);
       return scope?.owner.kind==="user"?{organizationId:scope.organizationId,userId:scope.owner.userId}:null;
     });
+    this.sessionReviewJobs = new SessionReviewJobs(db);
     this.ingestRollback = hostRebooted && walPath !== null
       ? { settled: new Set(), runnerTails: new Map(), controlPlaneEvents: new Set() }
       : null;
@@ -5384,6 +5392,206 @@ export class ControlPlaneDb {
   }
 
   private campaignWorkLedgerStore: CampaignWorkLedgerStore | null = null;
+  private campaignRecoveryStore: CampaignRecoveryStore | null = null;
+
+  get campaignRecovery(): CampaignRecoveryStore {
+    this.campaignRecoveryStore ??= new CampaignRecoveryStore(this.db, work => this.atomic(work));
+    return this.campaignRecoveryStore;
+  }
+
+  /** A child's human gate cannot starve unrelated work, but only a current Full Control
+   * boundary permits that continuation. This never clears the child's gate. */
+  campaignMayContinueWhileHumanWaiting(campaignId: string): boolean {
+    // This predicate is also used while projecting a campaign. A SessionView embeds that
+    // projection, so read the authority/lifecycle row directly rather than recursively mapping it.
+    const row = this.stmt("SELECT * FROM sessions WHERE id=?").get(campaignId) as unknown as SessionRow | undefined;
+    const policy = row ? orchestratorCampaignPolicyFromJson(row.orchestrator_policy) : undefined;
+    return Boolean(row && policy?.control?.mode === "full_control" &&
+      this.campaignContinuationAdmission(campaignId).state === "available");
+  }
+
+  /** Bind a synthetic turn to its staged authority, including repository scope and fixed
+   * execution identity. A fresh human grant cannot make an old queued turn current again. */
+  campaignContinuationAuthorityDigest(campaignId: string): string | undefined {
+    const row = this.stmt("SELECT * FROM sessions WHERE id=?").get(campaignId) as unknown as SessionRow | undefined;
+    const policy = row ? orchestratorCampaignPolicyFromJson(row.orchestrator_policy) : undefined;
+    if (!row || policy?.control?.mode !== "full_control") return undefined;
+    return createHash("sha256").update(JSON.stringify([policy.control ?? { mode: "custom" }, policy.issueScope,
+      row.parent_control_policy_revision, row.runner_id, row.workspace_id, row.driver, row.model, row.effort])).digest("hex");
+  }
+
+  /** Shared live CP preflight for recovery, scheduler, projection and outbox. Read rows rather
+   * than SessionView: a view contains the projection which calls this predicate. */
+  campaignContinuationAdmission(campaignId: string): NonNullable<import("@wollipog/protocol").CampaignRecoveryProjection["automation"]> {
+    const row = this.stmt("SELECT * FROM sessions WHERE id=?").get(campaignId) as unknown as SessionRow | undefined;
+    const policy = row ? orchestratorCampaignPolicyFromJson(row.orchestrator_policy) : undefined;
+    if (!row || !policy || row.archived === 1 || this.sessionStopIntent(campaignId) ||
+        isTerminal(row.status as SessionStatus) || row.status === "input_required" || row.history_quarantine ||
+        row.worktree_recovery || row.queue_hold || pendingRequests(parseJson<PendingApproval>(row.pending_approval)).some(r => !r.async)) {
+      return { state: "lifecycle_held", reason: "Automatic continuation is held by the campaign's current lifecycle or pending recovery." };
+    }
+    const full = policy.control?.mode === "full_control";
+    if (full && !campaignBoundaryCurrent({ orchestratorPolicy: policy, parentControlPolicy: this.parentControlPolicy(campaignId) ?? undefined })) {
+      return { state: "authority_unavailable", reason: "The current authority boundary is unavailable; recovery cannot enlarge it." };
+    }
+    const completion = this.campaignRecoveryCompletion(campaignId);
+    if (completion.state === "complete" || completion.state === "recovery_held") {
+      return { state: "lifecycle_held", reason: completion.state === "complete"
+        ? "The campaign has no unfinished original scoped recovery obligation."
+        : "Original scoped work remains unfinished, but no current known recovery is eligible. Reconcile its original obligation before continuing." };
+    }
+    const active = this.activeCampaignContinuation(campaignId);
+    if (active) {
+      const binding = active.authorityDigest;
+      if ((full || binding !== undefined) && binding !== this.campaignContinuationAuthorityDigest(campaignId)) {
+        return { state: "authority_unavailable", reason: "The queued continuation belongs to an earlier authority or scope. Reconcile its original command before admitting current work." };
+      }
+    }
+    const runner = this.getRunner(row.runner_id);
+    if (!runnerSupportsProtocol(runner?.protocolVersion, "campaignContinuations") ||
+        full && !campaignAuthorityPreflight(policy.control, row.driver, runner?.protocolVersion).supported) {
+      return { state: "unsupported_capability", reason: "The current provider cannot enforce authorized recovery." };
+    }
+    const budget = this.campaignBudgets.view(campaignId);
+    const profile = budget?.authority.controlledReview;
+    if (profile && (!runner?.runtime?.campaignReview ||
+        controlledReviewCapabilityKey(profile) !== controlledReviewCapabilityKey(runner.runtime.campaignReview)) ||
+        budget && this.campaignBudgetAccountingError(row.driver, row.model, budget.authority.costUsd !== undefined)) {
+      return { state: "unsupported_capability", reason: "Required native accounting or reviewer capability is unavailable; recovery cannot bypass it." };
+    }
+    const owner = this.sessionOwnerUser(campaignId);
+    const daily = owner ? this.getUsageDailyBudget(owner.organizationId).perUserUsd : null;
+    const used = this.stmt(`SELECT MAX(cost_usd,usage_peak_cost_usd)+MAX(0,child_cost_reserved_usd) AS cost,
+      MAX(${toolCallCountSql("sessions.id")},usage_peak_tool_calls)+MAX(0,child_tool_calls_reserved) AS tools
+      FROM sessions WHERE id=?`).get(campaignId) as { cost: number; tools: number };
+    const rules = rulesFromSession({ costBudgetUsd: row.cost_budget_usd, maxToolCalls: row.max_tool_calls,
+      costCheckpointsUsd: ControlPlaneDb.parseCheckpoints(row.cost_checkpoints_usd),
+      costCheckpointApprovedUsd: row.cost_checkpoint_approved_usd, costUnpricedAcknowledged: row.cost_unpriced_ack === 1,
+      dailyBudget: owner && daily !== null && daily > 0
+        ? { budgetUsd: daily, spentUsd: this.userCostTodayUsd(owner.organizationId, owner.userId) } : null });
+    if (this.campaignBudgets.admissionError(campaignId) || firstAsk(evaluatePolicies({ status: row.status as SessionStatus,
+      costUsd: used.cost, toolCallCount: used.tools,
+      unpriced: rules.some(rule => rule.kind === "cost_unpriced") && this.sessionUsageUnpriced(campaignId) }, rules))) {
+      return { state: "budget_held", reason: "Automatic continuation is blocked by current accounting or an existing allowance. Recovery cannot reset spend or request an override." };
+    }
+    return { state: "available" };
+  }
+
+  /** Shared completion boundary for projection, recovery reservation, scheduler and outbox.
+   * No SessionView/projection reads: those contain this admission check. A child report cannot
+   * finish an original scoped PR. Agent stage prose/retained records alone cannot admit repair. */
+  campaignRecoveryCompletion(campaignId: string, now = Date.now()): {
+    state: "children_unfinished" | "complete" | "recovery_ready" | "recovery_held";
+    recoveryIds: string[];
+  } {
+    const row = this.stmt("SELECT * FROM sessions WHERE id=?").get(campaignId) as unknown as SessionRow | undefined;
+    const policy = row ? orchestratorCampaignPolicyFromJson(row.orchestrator_policy) : undefined;
+    const children = this.campaignDescendantIds(campaignId), verified = this.validCampaignChildReportIds(campaignId);
+    const childRows = children.map(id => this.stmt("SELECT archived FROM sessions WHERE id=?").get(id) as { archived: number });
+    if (!row || !policy || children.length === 0 || children.some((id, i) => !verified.has(id) ||
+        policy.behavior.completion !== "retain" && (childRows[i]!.archived !== 1 || this.campaignWorktreeCleanup(id).length > 0)) ||
+        pendingRequests(parseJson<PendingApproval>(row.pending_approval)).length > 0 ||
+        this.stmt("SELECT 1 FROM workflow_decisions WHERE controlling_session_id=? AND status='pending'").get(campaignId)) {
+      return { state: "children_unfinished", recoveryIds: [] };
+    }
+    const scope = policy.issueScope;
+    if (policy.control?.mode !== "full_control" || !scope) {
+      return { state: "complete", recoveryIds: [] };
+    }
+    const boundaryCurrent = campaignBoundaryCurrent({ orchestratorPolicy: policy,
+      parentControlPolicy: this.parentControlPolicy(campaignId) ?? undefined });
+    const records = this.campaignRecovery.activeRecords(campaignId);
+    const recoveryIds = new Set<string>();
+    let unfinished = false, cursor: string | undefined;
+    do {
+      const page = this.campaignWorkLedger.page(campaignId, { state: "unfinished", origin: "original", limit: 100,
+        ...(cursor ? { cursor } : {}) }, now);
+      if (!page.ok) return { state: "recovery_held", recoveryIds: [] };
+      for (const item of page.data.items) {
+        if (item.commitment !== "committed" || !item.issue || item.issue.repository.toLowerCase() !== scope.repository.toLowerCase() ||
+            !scope.issueNumbers.includes(item.issue.number) || !policy.issueNumbers?.includes(item.issue.number)) continue;
+        // These are trusted work-item attestations, not agent stage prose or session-report verification.
+        // Keep an unresolved incomplete attestation across new workers/heads. A legitimate later
+        // delivery supersedes it; insertion order, not tied timestamps or random UUIDs, is chronology.
+        const verification = this.stmt(`SELECT v.outcome FROM campaign_work_verifications v
+          JOIN campaign_work_attempts a ON a.id=v.attempt_id AND a.campaign_session_id=v.campaign_session_id
+            AND a.work_item_id=v.work_item_id AND a.session_id IS v.child_session_id
+          WHERE v.campaign_session_id=? AND v.work_item_id=? ORDER BY v.rowid DESC LIMIT 1`)
+          .get(campaignId, item.id) as { outcome: "delivered" | "incomplete" } | undefined;
+        if (verification?.outcome === "incomplete") unfinished = true;
+        // A stale grant cannot establish delivery or admit a forge/review repair.
+        // Only completion truth is retained; the existing admission still fences all effects.
+        if (!boundaryCurrent) continue;
+        const refs = item.stage?.pullRequests.filter(ref => ref.repository.toLowerCase() === scope.repository.toLowerCase()) ?? [];
+        if (refs.length === 0) { unfinished = true; continue; }
+        for (const { ref, fact } of this.campaignForgeObservations.facts(campaignId, refs, now)) {
+          if (fact.availability === "fresh" && fact.value.state === "merged" && fact.value.mergeCommitSha) continue;
+          unfinished = true;
+          if (fact.availability !== "fresh" || fact.value.state !== "open" ||
+              (this.stmt("SELECT runner_id FROM campaign_forge_observations WHERE campaign_session_id=? AND repository_key=? AND number=?")
+                .get(campaignId, ref.repository.toLowerCase(), ref.number) as { runner_id: string } | undefined)?.runner_id !== row.runner_id) continue;
+          for (const record of records) {
+            if (record.policyRevision !== row.parent_control_policy_revision || record.dispatchFenced ||
+                record.effectiveOwner !== "orchestrator" || !["ready", "backoff", "dispatched"].includes(record.state) ||
+                (record.attempts > record.maxAttempts || record.attempts === record.maxAttempts && record.state !== "dispatched") ||
+                record.resource.repository?.toLowerCase() !== ref.repository.toLowerCase() ||
+                record.resource.pullRequest !== ref.number) continue;
+            if (record.resource.kind === "pull_request" && record.resource.sessionId === campaignId &&
+                record.resource.occurrenceId === fact.value.headSha &&
+                (record.action === "repair_checks" && record.reason === "failed_checks" &&
+                  (fact.value.checks.state === "failing" || fact.value.requiredChecks.state === "failing") ||
+                 record.action === "rereview" && record.reason === "reviewer_objection" && fact.value.reviewDecision === "changes_requested")) {
+              recoveryIds.add(record.id);
+            } else if (record.resource.kind === "review_job" && record.action === "rereview") {
+              const job = this.campaignReviewJobs.view(record.resource.occurrenceId);
+              if (job?.rootSessionId === campaignId && job.request.workItemId === item.id &&
+                  job.worktreeSessionId === record.resource.sessionId && job.request.headSha === fact.value.headSha &&
+                  job.usageSettlement === "settled" &&
+                  (record.reason === "reviewer_objection" && job.attemptValid === true && job.vote === "DOWNVOTE" && job.round < 4 ||
+                   record.reason === "transient_failure" && job.attemptValid === false &&
+                    (job.attemptConsumed !== true || job.attempt < 2))) recoveryIds.add(record.id);
+            }
+          }
+        }
+      }
+      cursor = page.data.nextCursor ?? undefined;
+    } while (cursor);
+    return { state: recoveryIds.size ? "recovery_ready" : unfinished ? "recovery_held" : "complete", recoveryIds: [...recoveryIds] };
+  }
+
+  campaignRecoveryRequest(sessionId: string, request: PendingApproval): PendingApproval {
+    const { campaignRecovery: _derivedRecovery, ...stored } = request;
+    const rootId = this.campaignRootForMember(sessionId);
+    if (!rootId || !stored.occurrenceId || this.sessionOrchestratorPolicy(rootId)?.control?.mode !== "full_control") return stored;
+    const recovery = this.campaignRecovery.requestRecord(rootId, sessionId, stored.occurrenceId);
+    return recovery ? { ...stored, campaignRecovery: recovery } : stored;
+  }
+
+  /** Current denied occurrences and uncertain closure mutations require recovery bookkeeping
+   * after their request card settles. A newer resource occurrence supersedes the old exception. */
+  campaignRecoverySettledDecisions(campaignId: string): WorkflowDecisionView[] {
+    return (this.stmt(`SELECT decision.* FROM workflow_decisions decision
+      WHERE controlling_session_id=? AND (status='denied' OR
+        (status='consumed' AND json_extract(issue_closure_result,'$.outcome')='uncertain'))
+        AND NOT EXISTS (SELECT 1 FROM campaign_recovery_denial_settlements settled
+          WHERE decision.status='denied' AND settled.campaign_session_id=decision.controlling_session_id
+            AND settled.occurrence_id=decision.occurrence_id)
+        AND NOT EXISTS (SELECT 1 FROM workflow_decisions newer
+          WHERE newer.session_id=decision.session_id AND newer.resource_key=decision.resource_key
+          AND decision.status='denied' AND newer.rowid>decision.rowid)`).all(campaignId) as unknown[])
+      .map(workflowDecisionFromRow).filter((decision): decision is WorkflowDecisionView => decision !== null);
+  }
+
+  /** Exact current server report proof for recovery bookkeeping. Status/archive/ended-at alone
+   * cannot establish completion, and this proof never attests code or media review quality. */
+  campaignRecoveryVerifiedReport(campaignId: string, sessionId: string): CampaignRecoveryVerifiedReport | null {
+    if (!this.campaignChildReportVerified(campaignId, sessionId)) return null;
+    const row = this.stmt(`SELECT report_event_seq AS seq, report_event_epoch AS eventEpoch,
+      report_digest AS digest, report_ts AS ts, verified_at AS verifiedAt
+      FROM orchestrator_campaign_child_reports WHERE campaign_session_id=? AND child_session_id=?`)
+      .get(campaignId, sessionId) as CampaignRecoveryVerifiedReport | undefined;
+    return row && row.eventEpoch !== null && row.digest !== null && row.ts !== null ? row : null;
+  }
 
   /** The root-keyed campaign work ledger (#2417). Callers resolve the root campaign first. */
   get campaignWorkLedger(): CampaignWorkLedgerStore {
@@ -5627,6 +5835,9 @@ export class ControlPlaneDb {
         `UPDATE orchestrator_campaign_continuations SET observed_through_seq=event_through_seq
          WHERE observed_through_seq=0`,
       );
+    }
+    if (!campaignContinuationColumns.some((column) => column.name === "authority_digest")) {
+      db.exec("ALTER TABLE orchestrator_campaign_continuations ADD COLUMN authority_digest TEXT");
     }
     const namingPreferenceSchema = db.prepare(
       "SELECT sql FROM sqlite_master WHERE type='table' AND name='session_naming_preferences'",
@@ -17983,6 +18194,7 @@ export class ControlPlaneDb {
     ).get(campaignSessionId) as undefined | {
       continuation_id: string; campaign_session_id: string; command_id: string;
       event_from_seq: number; event_through_seq: number; observed_through_seq: number;
+      authority_digest: string | null;
       state: CampaignContinuationRecord["state"]; attempt_count: number;
       next_attempt_at: number | null; error: string | null; created_at: number; updated_at: number;
     };
@@ -18036,14 +18248,15 @@ export class ControlPlaneDb {
       this.stmt(
         `INSERT INTO orchestrator_campaign_continuations
          (continuation_id,campaign_session_id,command_id,event_from_seq,event_through_seq,
-          observed_through_seq,state,attempt_count,next_attempt_at,created_at,updated_at)
-         VALUES (?,?,?,?,?,?,'pending',?,?,?,?)`,
+          observed_through_seq,authority_digest,state,attempt_count,next_attempt_at,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,?,'pending',?,?,?,?)`,
       ).run(
         input.continuationId, input.campaignSessionId, input.commandId, input.eventFromSeq,
         input.eventThroughSeq,
         Number((this.stmt(
           "SELECT COALESCE(MAX(seq),0) AS seq FROM orchestrator_campaign_events WHERE campaign_session_id=?",
         ).get(input.campaignSessionId) as { seq: number }).seq),
+        this.campaignContinuationAuthorityDigest(input.campaignSessionId) ?? null,
         input.attemptCount, input.now, input.now, input.now,
       );
       this.db.exec("COMMIT");
@@ -18141,6 +18354,7 @@ export class ControlPlaneDb {
   private campaignContinuationRecord(row: {
     continuation_id: string; campaign_session_id: string; command_id: string;
     event_from_seq: number; event_through_seq: number; observed_through_seq: number;
+    authority_digest: string | null;
     state: CampaignContinuationRecord["state"]; attempt_count: number;
     next_attempt_at: number | null; error: string | null; created_at: number; updated_at: number;
   }): CampaignContinuationRecord {
@@ -18151,6 +18365,7 @@ export class ControlPlaneDb {
       eventFromSeq: row.event_from_seq,
       eventThroughSeq: row.event_through_seq,
       observedThroughSeq: row.observed_through_seq,
+      ...(row.authority_digest ? { authorityDigest: row.authority_digest } : {}),
       state: row.state,
       attemptCount: row.attempt_count,
       ...(row.next_attempt_at != null ? { nextAttemptAt: row.next_attempt_at } : {}),
@@ -18505,11 +18720,17 @@ export class ControlPlaneDb {
     }, effectiveOwners.ui_evidence_approval));
     effectiveOwners.ui_evidence_approval = uiEvidenceReview.effectiveOwner;
     const total = rows.length;
-    const childStatus = waitingHuman > 0 || (policy.control?.mode === "full_control" && (pendingHuman.length > 0 || pendingGenericHuman > 0)) ? "waiting_human" as const
+    let childStatus: OrchestratorCampaignProjection["status"] = waitingHuman > 0 || (policy.control?.mode === "full_control" && (pendingHuman.length > 0 || pendingGenericHuman > 0)) ? "waiting_human" as const
       : active > 0 || pendingOrchestrator.length > 0 || cleanupPending > 0 || total === 0 ? "active" as const
       : blocked > 0 ? "blocked" as const
       : fullyVerified === total ? "verified_complete" as const
       : "active" as const;
+    if (childStatus === "verified_complete") {
+      const completion = this.campaignRecoveryCompletion(resolvedCampaignId);
+      if (completion.state === "recovery_ready") childStatus = this.campaignContinuationAdmission(resolvedCampaignId).state === "available"
+        ? "active" : "blocked";
+      else if (completion.state === "recovery_held") childStatus = "blocked";
+    }
     // The continuation reads the child-derived status (its `held` state depends on it), and the
     // final status reads the continuation, so derive them in that order and never the reverse.
     const continuation = resolvedCampaignId === campaignSessionId
@@ -18542,6 +18763,11 @@ export class ControlPlaneDb {
         "Matching native reviewer capability is available; exact job admission and integrated live proof remain required.":
         "Required native reviewer admission is unsupported or blocked by an additional accounting boundary; this campaign is not unattended-ready for that path."};
     }
+    const recovery = policy.control?.mode === "full_control" ? this.campaignRecovery.projection(resolvedCampaignId) : undefined;
+    if (recovery) {
+      recovery.automation = this.campaignContinuationAdmission(resolvedCampaignId);
+      recovery.unattendedReady &&= recovery.automation.state === "available";
+    }
     return {
       status,
       policyRevision: campaign.parent_control_policy_revision,
@@ -18549,6 +18775,7 @@ export class ControlPlaneDb {
         ? { control: structuredClone(policy.control ?? { mode: "custom" as const }) } : {}),
       ...(budget && this.campaignBudgets.members(resolvedCampaignId).every((id) => !this.stmt("SELECT 1 FROM sessions WHERE id=?").get(id) || this.campaignRootAudienceCanSee(resolvedCampaignId)(id))
         ? { budget } : {}),
+      ...(recovery ? { recovery } : {}),
       decisionOwners: effectiveOwners,
       limits: {
         maximumConcurrentChildren: limit,
@@ -18640,7 +18867,9 @@ export class ControlPlaneDb {
       "campaignContinuations",
     );
     const held = campaign.archived === 1 || isTerminal(campaign.status as SessionStatus) ||
-      campaign.status === "input_required" || campaignStatus === "waiting_human" ||
+      this.campaignContinuationAdmission(campaign.id).state !== "available" ||
+      campaign.status === "input_required" || (campaignStatus === "waiting_human" &&
+        !this.campaignMayContinueWhileHumanWaiting(campaign.id)) ||
       campaignStatus === "verified_complete" || !runnerCompatible;
     const state = latest?.state === "missing_result" ? "missing_result" as const
       : latest?.state === "failed" ? "failed" as const
@@ -23397,7 +23626,11 @@ export class ControlPlaneDb {
       messageCount: count,
       eventEpoch: row.event_epoch ?? 0,
       preview: row.preview,
-      pendingApproval: pending,
+      pendingApproval: pending ? {
+        ...this.campaignRecoveryRequest(row.id, pending),
+        ...(pending.additionalRequests ? { additionalRequests: pending.additionalRequests.map(request =>
+          this.campaignRecoveryRequest(row.id, request)) } : {}),
+      } : pending,
       attention: (() => {
         const facts = this.stmt("SELECT * FROM session_attention WHERE session_id=?").get(row.id) as
           { revision: number; meaningful_at: number; result_revision: string | null; result_at: number | null; human_handoff_revision: string | null } | undefined;
@@ -29526,21 +29759,24 @@ function pendingApprovalWithOccurrenceIds(
   const priorByRequestId = new Map(
     pendingRequests(prior).map((request) => [request.requestId, request]),
   );
-  const identify = (request: PendingApproval): PendingApproval => ({
-    ...request,
-    occurrenceId: request.occurrenceId || priorByRequestId.get(request.requestId)?.occurrenceId ||
-      `request_${randomUUID().replace(/-/g, "")}`,
-    requestedAt: (!request.occurrenceId || request.occurrenceId === priorByRequestId.get(request.requestId)?.occurrenceId)
-      ? priorByRequestId.get(request.requestId)?.requestedAt ?? Date.now() : Date.now(),
-    ...((!request.occurrenceId || request.occurrenceId === priorByRequestId.get(request.requestId)?.occurrenceId) &&
-      priorByRequestId.get(request.requestId)?.standingAdmissionFailure
-      ? { standingAdmissionFailure: priorByRequestId.get(request.requestId)!.standingAdmissionFailure } : {}),
-    ...((!request.occurrenceId || request.occurrenceId === priorByRequestId.get(request.requestId)?.occurrenceId) &&
-      priorByRequestId.get(request.requestId)?.humanRequired ? { humanRequired: true } : {}),
-    ...(request.additionalRequests
-      ? { additionalRequests: request.additionalRequests.map(identify) }
-      : {}),
-  });
+  const identify = (request: PendingApproval): PendingApproval => {
+    const { campaignRecovery: _derivedRecovery, ...stored } = request;
+    return {
+      ...stored,
+      occurrenceId: request.occurrenceId || priorByRequestId.get(request.requestId)?.occurrenceId ||
+        `request_${randomUUID().replace(/-/g, "")}`,
+      requestedAt: (!request.occurrenceId || request.occurrenceId === priorByRequestId.get(request.requestId)?.occurrenceId)
+        ? priorByRequestId.get(request.requestId)?.requestedAt ?? Date.now() : Date.now(),
+      ...((!request.occurrenceId || request.occurrenceId === priorByRequestId.get(request.requestId)?.occurrenceId) &&
+        priorByRequestId.get(request.requestId)?.standingAdmissionFailure
+        ? { standingAdmissionFailure: priorByRequestId.get(request.requestId)!.standingAdmissionFailure } : {}),
+      ...((!request.occurrenceId || request.occurrenceId === priorByRequestId.get(request.requestId)?.occurrenceId) &&
+        priorByRequestId.get(request.requestId)?.humanRequired ? { humanRequired: true } : {}),
+      ...(request.additionalRequests
+        ? { additionalRequests: request.additionalRequests.map(identify) }
+        : {}),
+    };
+  };
   return identify(approval);
 }
 

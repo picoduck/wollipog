@@ -18885,6 +18885,19 @@ a.tab { text-decoration: none; }
 .session-role-settings p { grid-column: 1 / -1; margin: 0; }
 @media (max-width: 600px) { .session-role-settings { grid-template-columns: minmax(0, 1fr); padding: var(--space-3); } }
 
+/* Guided remote setup uses the shared field, notice, and dialog recipes. */
+.remote-access-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.remote-access-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.remote-access-address { overflow-wrap: anywhere; }
+
 /* --- COLOUR SCHEMES, GENERATED --- */
 /* ------------------------------------------------------------------------------------------------
  * Colour schemes (§6.5).

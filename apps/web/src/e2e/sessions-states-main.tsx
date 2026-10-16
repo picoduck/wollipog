@@ -9,7 +9,7 @@ import type {
   UiSnapshotMessage,
 } from "@wollipog/protocol";
 import { Shell } from "../App.js";
-import { api, type ApiClient } from "../api.js";
+import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { ThemeProvider } from "../components/ThemeProvider.js";
@@ -198,6 +198,9 @@ window.__deliverSessions = () => {
 
 const client = {
   ...api,
+  // This synthetic Shell models an older server and must never query a real host.
+  // Guided HTTPS setup has its own suite backed by a disposable control plane.
+  remoteAccess: async () => { throw new ApiError("Remote access is not supported by this fixture.", 404); },
   listSkills: async () => ({ skills: [] }),
   listSessions: async () => ({ sessions: structuredClone(sessions) }),
   session: async (id: string) => {

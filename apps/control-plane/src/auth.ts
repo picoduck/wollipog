@@ -146,6 +146,12 @@ const AGENT_CONTROL_API_ROUTES = new Set([
   "POST /api/artifacts/screenshots",
   "POST /api/sessions/:id/artifacts/screenshots",
   "POST /api/sessions/:id/artifacts/videos",
+  // A session's own runner-mediated cross-model review (#3306); the routes refuse other sessions.
+  "POST /api/sessions/:id/cross-model-reviews",
+  "GET /api/sessions/:id/cross-model-reviews",
+  "GET /api/sessions/:id/cross-model-reviews/:jobId",
+  "GET /api/sessions/:id/cross-model-reviews/:jobId/artifacts",
+  "POST /api/sessions/:id/cross-model-reviews/:jobId/cancel",
 ]);
 
 const ORCHESTRATOR_API_ROUTES = new Set([

@@ -199,3 +199,19 @@ For durable services, see [headless deployment](./headless-deployment.md): `woll
 installs the control plane and a colocated runner as Linux systemd units, and after an install
 `wollipog admin` finds the database and port from the installed `control-plane.env` automatically.
 `service upgrade` with rollback and the standalone control-plane release artifact are tracked separately.
+
+## Guided Remote Access
+
+`wollipog admin remote-access setup` confirms the exposure change, sets up private Tailscale HTTPS,
+and verifies this instance through the public address. The command guides any HTTPS consent step;
+`--origin <https-origin>` instead verifies an existing proxy. `status` reports readiness and the
+complete address, and `disable` confirms before removing only Wollipog-owned, unchanged listeners.
+`--yes --json` is available for automation, with exit 3 for a setup that needs attention. These
+commands retain the CLI's direct-loopback and protected-bootstrap-credential boundary. See
+[secure remote setup](headless-deployment.md#exposure-tailscale-or-https) for prerequisites and recovery.
+
+Operational questions are answered by the structured `remote_access_operation` event: `operationId`
+correlates an attempt, `entryPoint` distinguishes setup/status/cancellation/disable, `outcome` separates
+success, authorization required, and failure, and `durationMs` identifies slow operations. Events
+exclude command output, private hostnames, tokens, and pairing links. The API returns a specific
+next action; use `status` to distinguish an incomplete consent step from a broken HTTPS connection.

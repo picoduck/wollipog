@@ -635,6 +635,13 @@ export class AcpClient {
     this.kill(this.child);
   }
 
+  /** Whether every client terminal's process tree is proven gone. The terminal service is disposed
+   * by dispose() or when the agent's transport closes; before that the answer is false. Never kills
+   * anything itself. */
+  proveTerminalTreesGone(): Promise<boolean> {
+    return this.terminals.proveTreesGone().catch(() => false);
+  }
+
   private settlePendingPermissions(): void {
     for (const [, resolve] of this.permPending) resolve(null);
     this.permPending.clear();

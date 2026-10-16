@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { chmod, mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import test from "node:test";
 import {
   ACP_FILE_BYTE_LIMIT,
@@ -9,7 +11,7 @@ import {
   AcpTerminalService,
 } from "./acp-client-services.js";
 import { terminalOutputDelta } from "./acp.js";
-import { waitForPendingKills } from "./spawn.js";
+import { waitForPendingKills, type AgentProcess } from "./spawn.js";
 import { captureLiveProcess, runFixtureCleanup, terminateOriginalProcess, waitForOriginalProcessToStop, type PosixProcessIdentity } from "../test-support/posix-process.js";
 
 const NATIVE = { kind: "native" } as const;
@@ -192,6 +194,115 @@ test("ACP terminal preserves daemonized work until that terminal is released", {
   terminals.release("session-daemon", terminalId);
   assert.equal(await waitForPendingKills(8_000), true);
   assert.equal(await waitForOriginalProcessToStop(daemonIdentity), undefined, "terminal release stops its retained daemon");
+});
+
+test("ACP terminal trees are proven gone only once disposal has ended a daemonized descendant", {
+  skip: process.platform === "win32",
+  timeout: 15_000,
+}, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "wollipog-acp-terminal-proof-"));
+  const ready = join(root, "ready.json");
+  const daemon = join(root, "daemon.cjs");
+  const command = join(root, "command.cjs");
+  const fs = new AcpFilesystemService(root, NATIVE);
+  const terminals = new AcpTerminalService(fs, NATIVE);
+  let daemonPid: number | undefined;
+  let daemonIdentity: PosixProcessIdentity | undefined;
+  t.after(async () => {
+    await runFixtureCleanup([
+      ["terminal disposal", () => terminals.dispose()],
+      ["daemon termination", () => terminateOriginalProcess(daemonIdentity)],
+      ["temporary directory removal", () => rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })],
+    ], (message) => t.diagnostic(message));
+  });
+  await writeFile(daemon, [
+    'const fs = require("node:fs");',
+    `fs.writeFileSync(${JSON.stringify(ready)}, JSON.stringify({ pid: process.pid }));`,
+    "setInterval(() => {}, 1000);",
+  ].join("\n"), "utf8");
+  await writeFile(command, [
+    'const { spawn } = require("node:child_process");',
+    `spawn(process.execPath, [${JSON.stringify(daemon)}], { detached: true, stdio: "ignore" }).unref();`,
+    "process.exit(0);",
+  ].join("\n"), "utf8");
+
+  // A terminal whose command exits on its own, leaving a daemon in another process group.
+  const { terminalId } = await terminals.create({ sessionId: "session-proof", command: process.execPath, args: [command], cwd: root });
+  await terminals.wait("session-proof", terminalId);
+  for (let attempt = 0; attempt < 100 && !daemonPid; attempt++) {
+    try { daemonPid = (JSON.parse(await readFile(ready, "utf8")) as { pid: number }).pid; }
+    catch { await new Promise((resolve) => setTimeout(resolve, 25)); }
+  }
+  assert.ok(daemonPid, "daemonized terminal work became ready");
+  daemonIdentity = await captureLiveProcess(daemonPid!);
+  assert.ok(daemonIdentity, "daemon is running");
+  // A second terminal released while running is recorded as soon as it is ended.
+  const running = await terminals.create({
+    sessionId: "session-proof", command: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"], cwd: root,
+  });
+  terminals.release("session-proof", running.terminalId);
+
+  assert.equal(await terminals.proveTreesGone(), false, "nothing is proven before disposal");
+  assert.ok(await waitForOriginalProcessToStop(daemonIdentity, 0), "the proof itself never ends retained work");
+
+  terminals.dispose();
+  assert.equal(await terminals.proveTreesGone(), true, "disposal ended the daemon and proved every terminal tree gone");
+  assert.equal(await waitForOriginalProcessToStop(daemonIdentity, 0), undefined, "the proven daemon is gone");
+  assert.equal((terminals as unknown as { treeEndings: Set<unknown> }).treeEndings.size, 0, "proven endings are forgotten");
+});
+
+test("an ACP terminal whose tree termination found a survivor keeps the terminal proof false", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wollipog-acp-terminal-survivor-"));
+  let attempts = 0;
+  const terminals = new AcpTerminalService(new AcpFilesystemService(root, NATIVE), NATIVE, undefined, {
+    spawn: () => Object.assign(new EventEmitter(), {
+      pid: 4243, stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
+      // The first termination finds a survivor; PosixProcessBoundary would retry, and a retry that
+      // succeeds must not turn the recorded failure into a proof.
+      posixBoundary: { owner: {}, terminate: async () => ++attempts > 1 },
+    }) as unknown as AgentProcess,
+  });
+  try {
+    const { terminalId } = await terminals.create({ sessionId: "session-survivor", command: process.execPath, args: [], cwd: root });
+    terminals.kill("session-survivor", terminalId);
+    terminals.dispose();
+    assert.equal(await terminals.proveTreesGone(), false);
+    assert.equal(attempts, 2, "disposal ended the still-open terminal again");
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test("an ACP terminal without a POSIX boundary keeps every later terminal proof false", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wollipog-acp-terminal-unbounded-"));
+  const spawned: AgentProcess[] = [];
+  const terminals = new AcpTerminalService(new AcpFilesystemService(root, NATIVE), NATIVE, undefined, {
+    spawn: () => {
+      // As on Windows, WSL, a remote target, or a spawn without a pid: only the root is observable.
+      const child = Object.assign(new EventEmitter(), {
+        pid: 4242, stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
+      }) as unknown as AgentProcess;
+      spawned.push(child);
+      return child;
+    },
+  });
+  try {
+    const { terminalId } = await terminals.create({ sessionId: "session-unbounded", command: process.execPath, args: [], cwd: root });
+    const child = spawned[0]!;
+    (child.stdout as PassThrough).end();
+    (child.stderr as PassThrough).end();
+    (child as { closeObserved?: boolean }).closeObserved = true;
+    child.emit("exit", 0, null);
+    child.emit("close", 0, null);
+    await terminals.wait("session-unbounded", terminalId);
+    terminals.release("session-unbounded", terminalId);
+    terminals.dispose();
+    assert.equal(await terminals.proveTreesGone(), false);
+    assert.equal(await terminals.proveTreesGone(), false, "the failure is sticky");
+  } finally {
+    terminals.dispose();
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
 });
 
 test("ACP terminal IDs are session-scoped and kill preserves final output until release", async () => {

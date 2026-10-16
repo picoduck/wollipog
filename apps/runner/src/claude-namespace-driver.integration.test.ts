@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { after, test } from "node:test";
 import { claudeProjectPathKey } from "./claude-background-work.js";
 import { ClaudeCodeDriver } from "./drivers/claude-code.js";
@@ -26,6 +26,9 @@ const gatedScript = [
   `fs.writeFileSync(${JSON.stringify(gatedStart)}, 'started');`,
   `const timer = setInterval(() => { if (!fs.existsSync(${JSON.stringify(gatedRelease)})) return; fs.writeFileSync(output, 'complete'); clearInterval(timer); }, 10);`,
 ].join("\n");
+// A background task that never finishes on its own, found on the host by its unique argument.
+const lingerMarker = `wollipog-claude-linger-${basename(root)}`;
+const lingerStarted = join(worktree, "linger-task-started");
 const fakeProvider = join(worktree, "fake-claude.cjs");
 writeFileSync(fakeProvider, [
   "const fs = require('node:fs');",
@@ -55,6 +58,12 @@ writeFileSync(fakeProvider, [
   "      }, 10);",
   "      return;",
   "    }",
+  "  }",
+  "  if (text.includes('linger')) {",
+  `    cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', ${JSON.stringify(lingerMarker)}], {detached:true,stdio:'ignore'}).unref();`,
+  `    fs.writeFileSync(${JSON.stringify(lingerStarted)}, 'started');`,
+  "    process.stdout.write(JSON.stringify({type:'result',subtype:'success'})+'\\n');",
+  "    return;",
   "  }",
   "  if (text.includes('first')) {",
   "    cp.spawn('/bin/sh',['-c','sleep .2; echo complete > /tmp/claude/background-result'],{detached:true,stdio:'ignore'}).unref();",
@@ -101,6 +110,24 @@ function driver(persistent: boolean): { driver: ClaudeCodeDriver; stderr: string
     isolation,
   };
   return { driver: new ClaudeCodeDriver(options, callbacks), stderr, environment, background };
+}
+
+/** Host PIDs of the lingering task; the host sees processes inside the provider's PID namespace. */
+function lingeringTasks(): number[] {
+  const pids: number[] = [];
+  for (const name of readdirSync("/proc")) {
+    if (!/^\d+$/.test(name)) continue;
+    try {
+      if (readFileSync(`/proc/${name}/cmdline`, "utf8").split("\0").includes(lingerMarker)) pids.push(Number(name));
+    } catch { /* exited while scanning */ }
+  }
+  return pids;
+}
+
+function killLingeringTasks(): void {
+  for (const pid of lingeringTasks()) {
+    try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+  }
 }
 
 async function waitForFile(path: string): Promise<void> {
@@ -182,5 +209,45 @@ test("real bwrap Claude driver keeps persistent transport and safely resumes aft
   } finally {
     harness.driver.dispose({ forceImmediate: true });
     assert.equal(await waitForPendingKills(6_000), true);
+  }
+});
+
+test("real bwrap Claude driver proves its namespace gone after disposal ends a retained background task", {
+  skip: !available, timeout: 30_000,
+}, async () => {
+  rmSync(lingerStarted, { force: true });
+  const harness = driver(false);
+  try {
+    await harness.driver.newSession(worktree);
+    assert.equal(await harness.driver.prompt("linger"), "end_turn", harness.stderr.join("\n"));
+    await waitForFile(lingerStarted);
+    assert.notDeepEqual(lingeringTasks(), [], "the background task outlived its provider turn");
+
+    harness.driver.dispose();
+    assert.equal(await harness.driver.proveProcessTreeExit({ terminate: true }), true, harness.stderr.join("\n"));
+    assert.deepEqual(lingeringTasks(), [], "the proven namespace took its background task with it");
+  } finally {
+    harness.driver.dispose({ forceImmediate: true });
+    assert.equal(await waitForPendingKills(6_000), true);
+    killLingeringTasks();
+  }
+});
+
+test("real bwrap Claude driver never proves a live namespace without ending it", {
+  skip: !available, timeout: 30_000,
+}, async () => {
+  rmSync(lingerStarted, { force: true });
+  const harness = driver(false);
+  try {
+    await harness.driver.newSession(worktree);
+    assert.equal(await harness.driver.prompt("linger"), "end_turn", harness.stderr.join("\n"));
+    await waitForFile(lingerStarted);
+    assert.equal(await harness.driver.proveProcessTreeExit({ terminate: false }), false,
+      "a namespace that retains a background task is not proven gone");
+    assert.notDeepEqual(lingeringTasks(), [], "the non-killing proof left the background task running");
+  } finally {
+    harness.driver.dispose({ forceImmediate: true });
+    assert.equal(await waitForPendingKills(6_000), true);
+    killLingeringTasks();
   }
 });

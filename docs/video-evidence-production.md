@@ -52,10 +52,12 @@ separate gates from live acceptance.
 
 The reviewer modules currently have no hosting entry-point caller. Artifact maintenance is
 prepared in the source tree only; the hosting process has not been changed or restarted. They do not advertise a current runner
-protocol revision or activate production. Current main advertises public protocol222; public221
-describes background retry exhaustion and public222 describes bounded event reads. Scope uses217,
-native allowance uses218, accounting uses219 and child work-item creation uses220. Private media223
-is reserved for this campaign and remains unadvertised. Its separate compatibility metadata is
+protocol revision or activate production. Current main advertises public protocol223 for
+runner-mediated session cross-model review; public221 describes background retry exhaustion and
+public222 describes bounded event reads. Scope uses217, native allowance uses218, accounting uses219
+and child work-item creation uses220. The private media compatibility floor remains223, but that
+integer is not a private protocol allocation or a media capability claim: public223 session review
+does not advertise this media contract. Its separate, still-unadvertised compatibility metadata is
 exactly `{ id: "wollipog-paced-video-review-v1", revision: 1 }`; public or future protocol numbers
 alone cannot establish this private contract. No current discovery or compatibility response emits
 that metadata. Metadata itself is neither native isolation evidence nor admission, delivery,
@@ -311,7 +313,7 @@ provenance and image receipt consumption commit atomically; current source/frame
 and historical actor proof are checked again before consumption. Corrupt proof, expired/replaced
 image receipt, revoked authority, unsupported peer or an absent runtime refuses. Delegated tools
 require private223 and the exact separate identity from the authenticated current compatibility
-response; a cached integer, public221/222, or another installation's metadata cannot authorize a
+response; a cached integer, public221/222/223, or another installation's metadata cannot authorize a
 POST. Hosting registration remains absent.
 
 The existing human-only campaign control CAS can compose an evidence proposal only through trusted destination/provider disclosure lookups, deriving the authenticated author, revision and scope. Public, unknown, stale or agent-authored disclosure is refused. Budget and issue scope retain their existing contracts. No disclosure lookup is registered on the hosting service and no authority has been minted there.

@@ -35,7 +35,13 @@ import {
   type WslAgentControlLaunch,
 } from "./wsl-agent-control.js";
 import { buildWslBwrapRelayArgs } from "./wsl-bwrap-launcher.js";
-import { cancelClaudeNamespaceProvider, spawnClaudeNamespaceProvider, terminateClaudeNamespaces } from "./claude-namespace-session.js";
+import {
+  cancelClaudeNamespaceProvider,
+  claudeNamespaceFor,
+  spawnClaudeNamespaceProvider,
+  terminateClaudeNamespaces,
+  type ClaudeNamespaceLifetime,
+} from "./claude-namespace-session.js";
 
 const isWindows = process.platform === "win32";
 /** Runner credentials and policy switches are daemon input and must never become agent input. */
@@ -895,14 +901,24 @@ export function provenProcessTreeExit(child: AgentProcess): Promise<boolean> {
  * Children spawned with `owner` as their descendantOwner are covered by that owner's POSIX
  * boundaries, which stay registered until proven gone. A child without a POSIX boundary (Windows,
  * WSL, remote, or a spawn that never got a pid) can never be proven, so recording one makes every
- * proof false. Proving seals the ledger: the instance must not start anything afterwards. */
+ * proof false. A Claude virtual provider has no boundary of its own: the bwrap namespace it runs in
+ * is the unit of proof instead (see ClaudeNamespaceLifetime). Proving seals the ledger: the
+ * instance must not start anything afterwards. */
 export class ProviderProcessLedger {
   /** Pass as `descendantOwner` on every spawn the instance makes. */
   readonly owner: object = {};
   private sealed = false;
+  /** Sticky: once anything the instance started cannot be proven gone, no proof ever passes. */
   private unprovable = false;
   private readonly separate = new Set<AgentProcess>();
+  private readonly closedSeparate = new WeakSet<AgentProcess>();
+  private readonly namespaces = new Set<ClaudeNamespaceLifetime>();
   private readonly proofs = new Map<boolean, Promise<boolean>>();
+  private readonly namespaceFor: (child: AgentProcess) => ClaudeNamespaceLifetime | undefined;
+
+  constructor(options: { namespaceFor?: (child: AgentProcess) => ClaudeNamespaceLifetime | undefined } = {}) {
+    this.namespaceFor = options.namespaceFor ?? claudeNamespaceFor;
+  }
 
   /** Throws once the instance has ended; call before every spawn. */
   assertOpen(): void {
@@ -911,11 +927,45 @@ export class ProviderProcessLedger {
 
   /** Record a spawned process. A child whose boundary is not registered under `owner` (spawned
    * without it, or by a spawn function that ignored it) is proven individually instead, so the
-   * owner proof can never pass vacuously for it. */
+   * owner proof can never pass vacuously for it.
+   *
+   * The namespace of a Claude virtual provider is captured here, because the owner's namespace
+   * lookup forgets it once it closes. */
   record(child: AgentProcess): AgentProcess {
-    if (!child.posixBoundary) this.unprovable = true;
-    else if (child.posixBoundary.owner !== this.owner) this.separate.add(child);
+    const namespace = this.namespaceFor(child);
+    if (namespace) this.namespaces.add(namespace);
+    else if (!child.posixBoundary) this.unprovable = true;
+    else if (child.posixBoundary.owner !== this.owner) this.recordSeparate(child);
     return child;
+  }
+
+  /** A separate child without an owner (a per-turn probe, say) has its boundary terminated when it
+   * closes anyway, so its proof is settled then rather than letting such children accumulate for
+   * the instance's whole lifetime. Only a true result may forget the child: the boundary memoizes
+   * it, and a later proof would see the same answer. A false result is kept as a sticky failure,
+   * because PosixProcessBoundary retries a failed termination and a retry must not turn an earlier
+   * unproven tree into a proven one. A child whose boundary belongs to another owner keeps its
+   * survivors until that owner ends them, so it stays recorded and is proven at the end. */
+  private recordSeparate(child: AgentProcess): void {
+    this.separate.add(child);
+    const ownerless = child.posixBoundary?.owner === undefined;
+    const settle = () => {
+      this.closedSeparate.add(child);
+      if (!ownerless) return;
+      void provenProcessTreeExit(child).then((proven) => {
+        if (proven) this.separate.delete(child);
+        else this.unprovable = true;
+      });
+    };
+    if (child.closeObserved) settle();
+    else if (typeof child.once === "function") child.once("close", settle);
+  }
+
+  /** A separate child's proof terminates its boundary. The non-killing proof must not do that to a
+   * child that is still running, so a live one is simply unproven. */
+  private proveSeparate(child: AgentProcess, terminate: boolean): Promise<boolean> {
+    if (!terminate && !child.closeObserved && !this.closedSeparate.has(child)) return Promise.resolve(false);
+    return provenProcessTreeExit(child);
   }
 
   /** Run work that may start processes outside any boundary. Nothing can prove those processes
@@ -938,13 +988,26 @@ export class ProviderProcessLedger {
       const owned = options.terminate
         ? terminatePosixProcessBoundaries(this.owner)
         : releaseEmptyPosixProcessBoundaries(this.owner);
-      const results = await Promise.all([...owned, ...[...this.separate].map(provenProcessTreeExit)]
-        .map((work) => work.catch(() => false)));
-      return results.every(Boolean);
+      const namespaces = [...this.namespaces].map((namespace) => namespaceEnded(namespace, options.terminate));
+      const results = await Promise.all([
+        ...owned, ...[...this.separate].map((child) => this.proveSeparate(child, options.terminate)), ...namespaces,
+      ].map((work) => work.catch(() => false)));
+      return results.every(Boolean) && !this.unprovable;
     })().catch(() => false);
     this.proofs.set(options.terminate, proof);
     return proof;
   }
+}
+
+/** A Claude namespace is proven gone only when its in-namespace supervisor stopped every process
+ * after TERMINATE and the outer bwrap then closed without the SIGKILL fallback. The killing proof
+ * starts (or joins) that disposal; the non-killing one only inspects what already happened, so a
+ * live namespace (retained background tasks, for example) is unproven. */
+async function namespaceEnded(namespace: ClaudeNamespaceLifetime, terminate: boolean): Promise<boolean> {
+  if (!terminate && !namespace.endedGracefully) return false;
+  // Graceful implies disposal already ran, so this only reads its memoized result.
+  const disposed = await namespace.dispose();
+  return disposed && namespace.ended && namespace.endedGracefully;
 }
 
 /** Kill a process and all of its children, returning exact completion for callers that own one

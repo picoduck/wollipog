@@ -477,6 +477,10 @@ test("tools/list returns the curated session and workflow tools with schemas", a
       "get_session_events",
       "wait_session",
       "wait_pull_request",
+      "request_cross_model_review",
+      "get_cross_model_review",
+      "list_cross_model_reviews",
+      "cancel_cross_model_review",
       "list_runs",
       "list_governance_policies",
       "get_governance_policy",
@@ -2819,4 +2823,55 @@ test("a version-floor refusal whose Wollipog version is unknown omits it and kee
     error: "Campaign allocations need a newer version of Wollipog. Update Wollipog and try again.",
     requiredControlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.campaignBudgetAdmission,
   });
+});
+
+test("cross-model review tools are self-scoped session tools behind their own floor (#3306)", async () => {
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob;
+  const old = makeDeps();
+  old.deps.controlPlaneProtocolVersion = required - 1;
+  const refused = await callTool(old.deps, "request_cross_model_review", { repository: "o/r", number: 1, headSha: "a".repeat(40) });
+  assert.equal(refused.isError, true);
+  assert.deepEqual(resultJson(refused), {
+    error: "Cross-model review through the runner needs a newer version of Wollipog. Update Wollipog and try again.",
+    requiredControlPlaneProtocolVersion: required, controlPlaneProtocolVersion: required - 1,
+  });
+  assert.equal(old.calls.length, 0);
+
+  const orchestrator = makeDeps();
+  orchestrator.deps.orchestrator = true;
+  orchestrator.deps.controlPlaneProtocolVersion = required;
+  const listed = await dispatch({ jsonrpc: "2.0", id: 1, method: "tools/list" }, orchestrator.deps);
+  const names = (listed!.result as { tools: { name: string }[] }).tools.map((tool) => tool.name);
+  assert.equal(names.includes("request_cross_model_review"), false, "an Orchestrator coordinates; it does not review its own pull request here");
+  assert.equal((await callTool(orchestrator.deps, "request_cross_model_review", {})).isError, true);
+  assert.equal(orchestrator.calls.length, 0);
+
+  const job = { jobId: "srj_abcdefgh", terminal: false, state: "running" };
+  const { deps, calls } = makeDeps((call) => ({ status: 200, body: call.url.endsWith("/artifacts")
+    ? { jobId: "srj_abcdefgh", summary: "{}", report: "R", reportTruncated: false, ledger: "L", ledgerTruncated: true }
+    : job }));
+  deps.controlPlaneProtocolVersion = required;
+  const base = `${CP_URL}/api/sessions/${SELF_ID}/cross-model-reviews`;
+  await callTool(deps, "request_cross_model_review", { repository: "o/r", number: 7, headSha: "a".repeat(40), brief: "B", scope: "full", fullReason: "rebased" });
+  assert.equal(calls.at(-1)?.method, "POST");
+  assert.equal(calls.at(-1)?.url, base);
+  assert.deepEqual(calls.at(-1)?.body, { pullRequest: { repository: "o/r", number: 7 }, headSha: "a".repeat(40), brief: "B", scope: "full", fullReason: "rebased" });
+
+  assert.deepEqual(resultJson(await callTool(deps, "get_cross_model_review", { jobId: "srj_abcdefgh" })), { job });
+  assert.equal(calls.at(-1)?.url, `${base}/srj_abcdefgh`, "artifacts are read only once the job is terminal");
+  job.terminal = true;
+  job.state = "completed";
+  assert.deepEqual(resultJson(await callTool(deps, "get_cross_model_review", { jobId: "srj_abcdefgh" })), { job, artifacts: {
+    jobId: "srj_abcdefgh", summary: "{}", report: "R", reportTruncated: false, ledger: "L", ledgerTruncated: true } });
+  assert.equal(calls.at(-1)?.url, `${base}/srj_abcdefgh/artifacts`);
+  assert.deepEqual(resultJson(await callTool(deps, "get_cross_model_review", { jobId: "srj_abcdefgh", include: ["report"] })).artifacts,
+    { jobId: "srj_abcdefgh", summary: "{}", report: "R", reportTruncated: false });
+
+  await callTool(deps, "list_cross_model_reviews", { limit: 5, afterJobId: "srj_abcdefgh" });
+  assert.equal(calls.at(-1)?.url, `${base}?limit=5&afterJobId=srj_abcdefgh`);
+  await callTool(deps, "list_cross_model_reviews", {});
+  assert.equal(calls.at(-1)?.url, base);
+  await callTool(deps, "cancel_cross_model_review", { jobId: "srj_abcdefgh" });
+  assert.equal(calls.at(-1)?.method, "POST");
+  assert.equal(calls.at(-1)?.url, `${base}/srj_abcdefgh/cancel`);
 });

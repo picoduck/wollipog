@@ -1,3 +1,4 @@
+import { useDashboardPublicOrigin } from "../remote-access-context.js";
 import { memo, useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { Notice } from "./Notice.js";
 import { SegmentedControl } from "./ui/ChoiceControls.js";
@@ -40,7 +41,7 @@ import {
 } from "../files-panel.js";
 import { relativeTime } from "../format.js";
 import { absoluteViewUrl } from "../navigation.js";
-import { instancePublicOrigin, useInstances } from "../instances-context.js";
+import { useInstances } from "../instances-context.js";
 import { runnerDisplay } from "../runners.js";
 import { shortcutDisplay } from "../shortcuts.js";
 import { useOptionalStoreSelector, useStoreSelector } from "../store.js";
@@ -604,9 +605,10 @@ export function FilesBrowser({
     if (result) showToast(`Copied the ${what}.`, { tone: "success" });
     else showToast(`Couldn't copy the ${what}.`, { tone: "error" });
   };
+  const publicLinkOrigin = useDashboardPublicOrigin();
   const copyLink = () => {
     if (!file) return;
-    const publicOrigin = instancePublicOrigin(instances);
+    const publicOrigin = publicLinkOrigin;
     if (!publicOrigin) {
       showToast("Open this dashboard through a reachable address before copying a source link.", { tone: "error" });
       return;

@@ -14,12 +14,13 @@ import type { AgentContext } from "@wollipog/protocol";
 import { runContextCommand } from "./context-command.js";
 import { sensitiveEnvironmentName } from "./env-security.js";
 import {
-  killTree,
+  killTreeAndWait,
   spawnAgent,
-  terminateDescendantBoundaries,
+  trackPendingKill,
   type AgentProcess,
   type SpawnIsolation,
 } from "./spawn.js";
+import { terminatePosixProcessBoundaries } from "./posix-process-tree.js";
 
 export const ACP_FILE_BYTE_LIMIT = 8 * 1024 * 1024;
 export const ACP_TERMINAL_DEFAULT_OUTPUT_LIMIT = 1024 * 1024;
@@ -278,12 +279,20 @@ export class AcpTerminalService {
   private readonly sessionEpoch = new Map<string, number>();
   private sequence = 0;
   private disposed = false;
+  /** Tree-ending work for terminals not yet proven gone; a proven one is forgotten. */
+  private readonly treeEndings = new Set<Promise<boolean>>();
+  /** Sticky: some terminal's tree can never be proven gone. */
+  private treesUnprovable = false;
+  private readonly spawn: typeof spawnAgent;
 
   constructor(
     private readonly fs: AcpFilesystemService,
     private readonly context: AgentContext = nativeContext,
     private readonly isolation?: SpawnIsolation,
-  ) {}
+    deps: { spawn?: typeof spawnAgent } = {},
+  ) {
+    this.spawn = deps.spawn ?? spawnAgent;
+  }
 
   async create(params: CreateTerminalRequest): Promise<CreateTerminalResponse> {
     const sessionId = requiredId(params.sessionId, "session");
@@ -308,8 +317,9 @@ export class AcpTerminalService {
         throw new Error("ACP terminal arguments cannot contain newlines for Windows command shims");
       }
       const outputLimit = normalizeOutputLimit(params.outputByteLimit);
+      // One owner per terminal: releasing one terminal must not end another's retained work.
       const descendantOwner = {};
-      const child = spawnAgent({
+      const child = this.spawn({
         command: launch.command,
         args,
         cwd,
@@ -320,6 +330,8 @@ export class AcpTerminalService {
         isolation: this.isolation,
         descendantOwner,
       });
+      // Without a POSIX boundary (Windows, WSL, remote, no pid) the tree can never be proven gone.
+      if (!child.posixBoundary) this.treesUnprovable = true;
       let settle!: () => void;
       const wait = new Promise<void>((resolve) => { settle = resolve; });
       const live: LiveTerminal = {
@@ -377,14 +389,13 @@ export class AcpTerminalService {
 
   kill(sessionId: string, terminalId: string): void {
     const terminal = this.get(sessionId, terminalId);
-    if (!terminal.closed) killTree(terminal.child);
+    if (!terminal.closed) this.endTree(terminal);
   }
 
   release(sessionId: string, terminalId: string): void {
     const terminal = this.get(sessionId, terminalId);
     this.terminals.delete(terminalId);
-    if (!terminal.closed) killTree(terminal.child);
-    else terminateDescendantBoundaries(terminal.descendantOwner);
+    this.endTree(terminal);
   }
 
   releaseSession(sessionId: string): void {
@@ -396,13 +407,35 @@ export class AcpTerminalService {
 
   dispose(): void {
     this.disposed = true;
-    for (const terminal of this.terminals.values()) {
-      if (!terminal.closed) killTree(terminal.child);
-      else terminateDescendantBoundaries(terminal.descendantOwner);
-    }
+    for (const terminal of this.terminals.values()) this.endTree(terminal);
     this.terminals.clear();
     this.pendingBySession.clear();
     this.sessionEpoch.clear();
+  }
+
+  /** After disposal, true only when every terminal this service ever started has had its process
+   * tree proven gone. Every terminal is ended by kill, release or disposal (a terminal whose
+   * command exited on its own keeps its retained work until then), and each ending is recorded.
+   * Never kills anything itself; before disposal the answer is false. */
+  async proveTreesGone(): Promise<boolean> {
+    if (!this.disposed || this.treesUnprovable) return false;
+    const results = await Promise.all([...this.treeEndings]);
+    return results.every(Boolean) && !this.treesUnprovable;
+  }
+
+  /** End one terminal's tree: a live command is killed with its descendants; a closed one has the
+   * work it left behind terminated. Runner shutdown waits for the same work. */
+  private endTree(terminal: LiveTerminal): void {
+    const work = (terminal.closed
+      ? Promise.all(terminatePosixProcessBoundaries(terminal.descendantOwner)).then((results) => results.every(Boolean))
+      : killTreeAndWait(terminal.child)).catch(() => false);
+    trackPendingKill(work);
+    this.treeEndings.add(work);
+    void work.then((proven) => {
+      // Only a true result may be forgotten; a false one stays false for good.
+      if (proven) this.treeEndings.delete(work);
+      else this.treesUnprovable = true;
+    });
   }
 
   private count(sessionId: string): number {

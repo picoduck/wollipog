@@ -56,6 +56,7 @@ import { sessionAgentLabel } from "./agent-options.js";
 import { DetailSkeleton, Skeleton } from "./common.js";
 import { ChevronLeftIcon } from "./Icons.js";
 import { CampaignIssueScopePanel } from "./CampaignIssueScopePanel.js";
+import { CampaignRecoveryNotice } from "./CampaignRecoveryNotice.js";
 import { Notice } from "./Notice.js";
 import { StaleContent } from "./StaleContent.js";
 import { State } from "./State.js";
@@ -236,6 +237,15 @@ function AvailableCampaignStatus({
           <StaleContent stale={data.offline}>
             <div className="campaign-status-sections">
               <CampaignSummarySection data={data} now={now} />
+              {data.summary.campaign?.recovery?.automation?.reason && (
+                <Notice tone="warning" title="Authorized Recovery Unavailable">
+                  {data.summary.campaign.recovery.automation.reason}
+                </Notice>
+              )}
+              {data.summary.campaign?.recovery?.records.map(record => (
+                <CampaignRecoveryNotice key={record.id} record={record} />
+              ))}
+              {data.summary.campaign?.recovery?.truncated && <p>More recovery records are available through the campaign tools.</p>}
               <CampaignIssueScopePanel session={session} campaignId={availability.campaignSessionId} />
               <CampaignWorkList
                 data={data}

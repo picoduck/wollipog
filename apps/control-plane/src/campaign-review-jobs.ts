@@ -17,6 +17,7 @@ export class CampaignReviewJobs {
       valid INTEGER NOT NULL DEFAULT 0, consumed INTEGER NOT NULL DEFAULT 1, receipt TEXT, vote TEXT, reason TEXT,
       UNIQUE(root_id,request_id)
     );`);
+    sql.exec("CREATE INDEX IF NOT EXISTS campaign_review_jobs_target ON campaign_review_jobs(root_id,target)");
     sql.exec(`CREATE TABLE IF NOT EXISTS campaign_review_daily_cost (
       job_id TEXT NOT NULL, organization_id TEXT NOT NULL, user_id TEXT NOT NULL, day TEXT NOT NULL,
       cost REAL NOT NULL, PRIMARY KEY(job_id,day)
@@ -88,6 +89,17 @@ export class CampaignReviewJobs {
       (? IS NULL OR json_extract(command,'$.request.workItemId')=?) ORDER BY job_id LIMIT ?`).all(rootId,afterJobId??"",workItemId??null,workItemId??null,limit+1) as Array<{job_id:string}>;
     const visible=rows.slice(0,limit);
     return {jobs:visible.map((r)=>this.view(r.job_id)!),nextAfterJobId:rows.length>limit?visible.at(-1)!.job_id:null};
+  }
+
+  /** Server-owned recovery metadata, without provider output or a new priced admission. */
+  recoveryJobs(rootId: string): CampaignReviewJobView[] {
+    // Only the latest exact target's settled result can request repair. Every unknown outcome
+    // remains retained, including an earlier epoch: a newer review cannot settle its spend.
+    const rows = this.sql.prepare(`SELECT job_id FROM campaign_review_jobs job WHERE root_id=? AND
+      (state IN ('reserved','running','accounting_unavailable') OR NOT EXISTS (SELECT 1 FROM campaign_review_jobs newer
+        WHERE newer.root_id=job.root_id AND newer.target=job.target AND newer.rowid>job.rowid))
+      ORDER BY rowid`).all(rootId) as Array<{ job_id: string }>;
+    return rows.map(row => this.view(row.job_id)!);
   }
 
   /** Separate, authorized review-output access. Recovery metadata never includes provider output. */

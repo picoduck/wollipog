@@ -2076,6 +2076,9 @@ const listNoticeSkills = ["orchestrate-issues", "using-wollipog"].map((name) => 
 }));
 const client = {
   ...api,
+  // This synthetic Shell models an older server and must never query a real host.
+  // Guided HTTPS setup has its own suite backed by a disposable control plane.
+  remoteAccess: async () => { throw new ApiError("Remote access is not supported by this fixture.", 404); },
   ...shellSkillsApi,
   ...(REVIEW_DIFF ? {
     gitDiff: async (_id: string, scope: GitDiffScope) => ({ diff: { ...diffSectionsDiff(), scope } }),

@@ -28,6 +28,7 @@ export function rootHelp(): string {
     "  issue-closure       Request human approval and execute one campaign issue closure",
     "  campaign            Record and read an Orchestrator campaign's work ledger",
     "  pr                  Wait for a pull request's required checks or merge-queue outcome",
+    "  review              Run the cross-model review of this session's own pull request through the runner",
     "  admin               Administer a control plane from its host",
     "  service             Manage a headless Linux systemd deployment",
     "  help [topic]        Show root or topic-specific help",
@@ -51,7 +52,7 @@ export function rootHelp(): string {
     "  wollipog admin runner-credential rotate --runner RUNNER_ID --output ./runner.token",
     "  wollipog service uninstall  # preserves data by default",
     "",
-    "Topics: init, doctor, update, pair, service, admin, session, worktree, artifact, decision, campaign, pr",
+    "Topics: init, doctor, update, pair, service, admin, session, worktree, artifact, decision, campaign, pr, review",
     "Run `wollipog help <topic>` for complete commands and options. Help is always text; operational commands use --json for stable machine-readable output.",
   ].join("\n");
 }
@@ -228,6 +229,22 @@ export function pullRequestHelp(): string {
   ].join("\n");
 }
 
+export function reviewHelp(): string {
+  return [
+    "Usage: wollipog review <command> [options]",
+    "  review run --repo <owner/name> --pr <number> --head <sha> [--brief-file <path>]",
+    "             [--scope delta|full] [--full-reason <text>] [--json]",
+    "  review get <job-id> [--json]",
+    "  review list [--limit <1-100>] [--cursor <job-id>] [--json]",
+    "  review cancel <job-id> [--json]",
+    "Options: --url <control-plane-origin>, --token-file <credential-file>.",
+    "The runner runs the installed cross-model review controller for this session's own open pull request at its pushed head, outside the session's sandbox, with the other model family as a read-only reviewer. It reviews a runner-private snapshot and never writes to the session's worktree.",
+    "Push first: --head must be the pull request's current head. The first round of a pull request needs --brief-file (intent, acceptance criteria, verification); later rounds reuse it and review only the changes since the last valid round unless --scope full is given with --full-reason.",
+    "review run returns a job id at once. Poll review get until terminal is true; it then prints the controller's summary, report and the runner-owned ledger. One review runs per session at a time.",
+    "Sessions in a campaign with an allowance are refused; their Orchestrator runs the campaign's controlled review job. Tools: request_cross_model_review, get_cross_model_review, list_cross_model_reviews, cancel_cross_model_review.",
+  ].join("\n");
+}
+
 export function doctorHelp(): string {
   return [
     "Usage: wollipog doctor [--url <loopback-origin>] [--token-file <protected-local-credential>] [--json]",
@@ -269,6 +286,9 @@ function helpForTopic(topic: string): string | null {
     case "pr":
     case "pull-request":
       return pullRequestHelp();
+    case "review":
+    case "reviews":
+      return reviewHelp();
     case "decision":
     case "decisions":
     case "workflow-decision":
