@@ -1968,6 +1968,7 @@ kbd {
 .t-success { --tone: var(--green); --tone-text: var(--green-on-tint); }
 .t-warning { --tone: var(--amber); --tone-text: var(--amber-on-tint); }
 .t-danger { --tone: var(--red); --tone-text: var(--red-on-tint); }
+.t-review { --tone: var(--purple); --tone-text: var(--purple-on-tint); }
 .status {
   display: inline-flex;
   flex: none;
@@ -13126,6 +13127,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   cursor: pointer;
 }
 .inbox-thread-family.waiting { border-color: transparent; color: var(--accent-2-on-tint); background: color-mix(in srgb, var(--accent-2) 12%, transparent); }
+.inbox-thread-family.t-review { border-color: transparent; color: var(--tone-text); background: color-mix(in srgb, var(--tone) 12%, transparent); }
 .inbox-thread-family-text { overflow: hidden; text-overflow: ellipsis; }
 .inbox-thread-working { display: none; overflow: hidden; text-overflow: ellipsis; }
 .inbox-row-copy .inbox-thread-working { display: inline; flex: none; }

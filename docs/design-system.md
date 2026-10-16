@@ -142,7 +142,8 @@ correct in every scheme and theme without regeneration.
 | `--on-accent` | `#06231f` | `#ffffff` | Text on primary and accent fills (7.06:1 / 5.72:1). |
 | `--green` / `--amber` / `--red` / `--blue` | `#3fb950` / `#e3b341` / `#f85149` / `#58a6ff` | `#1a7f37` / `#9a6700` / `#cf222e` / `#0969da` | Status hues. Fills and dots only; text uses `*-on-tint`. |
 | `--accent-2` | `#ef8f3f` | `#bc4c00` | Brand orange. **No UI role** (logo, usage chart series only). |
-| `--purple`, `--agent-claude` | | | Retired from UI chrome. Agent identity uses the agent's brand icon, not a tinted tag. |
+| `--purple` | | | Ready for Review status hue. Text uses `--purple-on-tint`. |
+| `--agent-claude` | | | Retired from UI chrome. Agent identity uses the agent's brand icon, not a tinted tag. |
 
 ### 2.2 Color: Derived and Per-Theme Tokens
 
@@ -194,6 +195,7 @@ tinted component reads those:
 | `.t-success` | `--green` | `--green-on-tint` |
 | `.t-warning` | `--amber` | `--amber-on-tint` |
 | `.t-danger` | `--red` | `--red-on-tint` |
+| `.t-review` | `--purple` | `--purple-on-tint` |
 
 Tinted surfaces are always `color-mix(in srgb, var(--tone) var(--tint), transparent)` with text in
 `--tone-text`; the existing `--*-on-tint` tokens are already calibrated for 12–16% washes in every
@@ -1286,7 +1288,8 @@ Rules
   name and tooltip keep the full rollup. On narrow lists, dots give up space before the working
   count so a large family cannot hide ongoing work. List rollups count nested descendants; Board
   chips count direct children because Board cards remain flat. The list count remains visible
-  when collapsed. Available human-owned results use a neutral **Ready for Review** badge; questions
+  when collapsed. Available human-owned results use a purple **Ready for Review** badge and family
+  rollup; questions
   retain the amber **Answer Required** badge. A result is available for assessment independently of
   lifecycle and does not imply that the session or its campaign has finished.
   Children indent under a 2px `--border-strong` spine with a tick into each row. A stalled parent or
@@ -2189,6 +2192,7 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Session lifecycle | Stalled, Failed, Stop Failed | danger |
 | Session lifecycle | Stopped, Archived, Snoozed | neutral |
 | Session lifecycle | Completed | success |
+| Session result | Ready for Review | review (purple, no pulse) |
 | Machine / instance | Online | success |
 | Machine / instance | Connecting | info |
 | Machine / instance | Offline | neutral (hollow dot) |
@@ -2201,7 +2205,7 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Skill deployment | Error | danger |
 | Automation / run | Enabled | success · Paused: neutral · Running: info · Failed: danger |
 | Tool call | Running: info · Completed: success (inline, no pill) · Failed: danger |
-| Session family rollup chip | "N Awaiting Input" when a child waits on the user: warning. Otherwise neutral. The settled design's "tints orange" is implemented as the warning tone; `--accent-2` keeps no UI role. |
+| Session family rollup chip | Needs Your Input (or "N Awaiting Input") when a child waits on the user: warning. Ready for Review: review (purple). Otherwise neutral. Input takes priority over review. |
 | Subagent / background job | Queued, Canceled: neutral · Running: info (pulse) · Stalled: warning (still listed by its runner with no result past the stall bound) · Completed: success · Failed: danger · Unverified: neutral, hollow dot (its runner is offline) · Lost: danger (replaces Orphaned) · Result Missing: warning (finished, but the result never arrived) |
 | Background Work turn group (`jobGroup`, the group's inline badge, #2858) | Waiting for 1 Job, Waiting for N Jobs: info · N of M Finished: neutral · Returning Result: info · Result Returned: success (inline) · Result Missing: warning · Missing Result Acknowledged: neutral · Unverified: neutral, hollow dot |
 | Session header, background work | "Background Work Lost": danger (was "Background Work Orphaned") |

@@ -169,7 +169,7 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
     const resultBadge = parent.locator(".status");
     const answerBadge = row(page, input).locator(".status");
     await expect(resultBadge).toHaveText("Ready for Review");
-    await expect(resultBadge).toHaveClass(/t-neutral/);
+    await expect(resultBadge).toHaveClass(/t-review/);
     await expect(answerBadge).toHaveText("Answer Required");
     await expect(answerBadge).toHaveClass(/t-warning/);
     expect(await resultBadge.evaluate((badge) => getComputedStyle(badge).color))
