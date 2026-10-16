@@ -365,8 +365,10 @@ export class RemoteAccess {
   }
 
   async cancel(): Promise<RemoteAccessView> {
-    const done = this.operationDone;
-    if (done) {
+    // A setup queued behind a read may start before this waiter resumes. Follow it
+    // rather than attempting cancellation against the already-finished read.
+    while (this.operationDone) {
+      const done = this.operationDone;
       if (this.entryPoint !== "status") this.abort?.abort();
       await done;
     }

@@ -1923,7 +1923,8 @@ app.register(async (instance) => {
     socket.close(1008, "unauthorized — open the startup pairing URL or pair this device");
     return;
   }
-  if (remoteAccess.isProbeRequest(req)) {
+  if (authenticated.id === "remote-access-check") {
+    // Use the resolved authentication result, even if its capability expires now.
     // A verification capability proves forwarding only. It never joins the session-data hub.
     const timer = setTimeout(() => socket.terminate(), 1_000);
     timer.unref();

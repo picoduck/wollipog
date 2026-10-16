@@ -242,3 +242,27 @@ test("a failed replacement leaves the previous verified address available to eve
   assert.ok(view.setupMessage);
   assert.equal(f.service.view(false).setupMessage, undefined, "remote consumers see only active availability");
 });
+
+
+test("cancel follows a queued setup after a background status check without leaving it provisioning", async (t) => {
+  const f = fixture(t);
+  await f.service.setup({ provider: "https", origin: "https://working.example.test" });
+  f.tick();
+  let release!: () => void;
+  let arrived!: () => void;
+  const reached = new Promise<void>((resolve) => { arrived = resolve; });
+  let first = true;
+  f.deps.live = async () => {
+    if (first) { first = false; arrived(); await new Promise<void>((resolve) => { release = resolve; }); }
+  };
+  const reading = f.service.status(true);
+  await reached;
+  const changing = f.service.setup({ provider: "https", origin: "https://replacement.example.test" });
+  const closing = f.service.cancel();
+  const results = Promise.allSettled([reading, changing, closing]);
+  release();
+  const settled = await results;
+  assert.equal(settled[2]!.status, "fulfilled", "one Cancel Setup must wait and cancel the queued mutation");
+  assert.equal(f.service.publicOrigin(), "https://working.example.test", "the canceled replacement cannot become active");
+  assert.equal(f.service.view(true).phase, "ready");
+});
