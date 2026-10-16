@@ -72,8 +72,9 @@ may report `The address is not a Wollipog control plane.` and must be upgraded b
 - Sessions can request and inspect a cross-model review through their runner, including from
   provider sandboxes that cannot launch the review controller directly. Reviews bind the
   session's own open PR to its pushed head and return the report and ledger for adjudication.
-- Campaign Status exposes durable, bounded recovery instructions and actionable exceptions.
-  Unknown outcomes require inspection of the original receipt before retrying; recovery does
+- For Full Control campaigns, Campaign Status exposes durable, bounded recovery instructions
+  and actionable exceptions. Unknown outcomes require inspection of the original receipt before
+  retrying; recovery does
   not reset review limits, grant authority, or bypass human decisions.
 - Orchestrator families remain active while child work is unsettled. Full Control preferences
   and preflight explain missing prerequisites; production launch remains blocked until the
