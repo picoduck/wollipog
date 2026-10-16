@@ -2805,16 +2805,15 @@ const GUARD_STATE_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/u;
  * above for the three corrections; everything the scanner cannot parse with confidence is emitted
  * verbatim, so the result is never read MORE permissively than the raw command was.
  *
- * `$'...'` ANSI-C quoting (which shell-quote already models) and a bare carriage return are the two
- * places this scanner would risk a quote-state or line-boundary desync, so a command containing
- * either is handed back untouched — the old, stricter reading on the raw command.
+ * `$'...'` ANSI-C quoting is modelled (a backslash escapes the next character, so `\'` does not
+ * close the string), so a `#` or quote after one is read in the right state. A bare carriage return
+ * is treated as a line and command boundary — bash does not, but splitting more only scans more.
  */
 export function prepareGuardStateCommand(command: string): PreparedGuardStateCommand {
-  if (command.includes("$'") || command.includes("\r")) return { scan: command, parse: command };
   const n = command.length;
   let scan = "";                // raw text, minus only stripped heredoc bodies — for the text scan
   let out = "";                 // the bash-faithful rewrite — for the tokenizer
-  let quote: "'" | '"' | null = null;
+  let quote: "'" | '"' | "$'" | null = null;
   let inWord = false;           // inside a word: a `#` here is literal, not a comment
   let firstWord = "";           // the current simple command's first word, for consumer detection
   let firstWordComplete = false;
@@ -2862,12 +2861,17 @@ export function prepareGuardStateCommand(command: string): PreparedGuardStateCom
   while (i < n) {
     const c = command[i]!;
     if (quote === "'") { both(c); if (c === "'") quote = null; i += 1; continue; }
+    if (quote === "$'") { // ANSI-C: a backslash escapes the next char, so `\'` does not close
+      if (c === "\\") { both(c + (command[i + 1] ?? "")); i += 2; continue; }
+      both(c); if (c === "'") quote = null; i += 1; continue;
+    }
     if (quote === '"') {
       if (c === "\\") { both(c + (command[i + 1] ?? "")); i += 2; continue; }
       if (c === "$" && command[i + 1] === "{") { i = emitSubstitution(i); continue; }
       both(c); if (c === '"') quote = null; i += 1; continue;
     }
     if (c === "\\") { both(c + (command[i + 1] ?? "")); i += 2; addWordChar("\\"); continue; }
+    if (c === "$" && command[i + 1] === "'") { both("$'"); addWordChar("$"); quote = "$'"; i += 2; continue; }
     if (c === "'" || c === '"') { quote = c; both(c); addWordChar(c); i += 1; continue; }
     if (c === "#" && !inWord) { // a comment: `parse` drops it to end of line; `scan` keeps it, so a
       while (i < n && command[i] !== "\n" && command[i] !== "\r") { scan += command[i]; i += 1; } // literal path in a comment still refuses, as before

@@ -1410,6 +1410,9 @@ test("ordinary commands reaching nothing are allowed, and every real access stay
     "x=foo; echo ${x%% *}",
     // A comment that ends at its line leaves the real command on the next line intact.
     "echo done # a trailing note",
+    // ANSI-C `$'...'` is modelled, so a benign one with escapes and a following comment is allowed.
+    "printf $'a\\tb\\n'",
+    "echo $'hi' # a note",
   ]) {
     assert.equal(commandTargetsGuardState(command, project, directory), null, command);
   }
@@ -1431,6 +1434,11 @@ test("ordinary commands reaching nothing are allowed, and every real access stay
     `cat \${VAR:-${join(directory, "s1.protections.json")}}`,
     `cat \${VAR:=${join(directory, "s1.protections.json")}}`,
     `echo \${VAR:+${join(directory, "s1.protections.json")}}`,
+    // ANSI-C `$'...'` must not desync the comment or quote state around a reaching command, and a
+    // hook path inside one is still refused. A carriage return is a command boundary, not cover.
+    `echo $'x'#; cat ${into}`,
+    `cat $'${join(directory, "s1.protections.json")}'`,
+    `echo x#\rcat ${into}`,
     // An UNQUOTED heredoc expands, so its body is kept and scanned, conservatively.
     `cat > a.ts <<EOF\n${into}\nEOF`,
     // A body handed to a shell is executed, so it is kept and scanned.
