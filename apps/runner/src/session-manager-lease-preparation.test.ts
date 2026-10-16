@@ -9,7 +9,8 @@ import type { SessionLaunchSpec } from "@wollipog/protocol";
 import type { LeaseCancellation } from "./provider-home-lease-async.js";
 import { LEASE_WORKER_ERRORS } from "./provider-home-lease-worker-protocol.js";
 import type { ProviderAuthRecoveryController } from "./provider-auth-recovery.js";
-import { SessionManager } from "./session-manager.js";
+import { CODEX_GUARD_DRIVERS } from "./codex-managed-worktree-guard.js";
+import { SessionManager, type LaunchPreparationCancellation } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 
 function deferred() {
@@ -34,7 +35,7 @@ function fixture() {
       options: [{ optionId: "auth:login", name: "Sign In", kind: "allow_once" }] },
   };
   store.create(meta);
-  const effects = { plugins: 0, preparation: 0, drivers: 0, probes: 0, logins: 0 };
+  const effects = { plugins: 0, preparation: 0, drivers: 0, probes: 0, logins: 0, pluginFailure: false };
   const controller: ProviderAuthRecoveryController = {
     describe: () => ({ id: "scope", provider: "claude", canStartLogin: true, configuredCredential: false }),
     revalidate: async () => { effects.probes++; return { status: "unknown" }; },
@@ -47,7 +48,7 @@ function fixture() {
     undefined, 4, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
     undefined, undefined, [], undefined, undefined, undefined, undefined, undefined, undefined, controller);
   const internals = manager as unknown as {
-    prepareLaunch: (meta: SessionMeta, cancellation?: LeaseCancellation) => Promise<void>;
+    prepareLaunch: (meta: SessionMeta, cancellation?: LaunchPreparationCancellation) => Promise<void>;
     providerHomeLeases: { acquireHome(home: string, provider: string, cancellation: LeaseCancellation): Promise<boolean>;
       acquireHomeReference(home: string, provider: string, cancellation: LeaseCancellation): Promise<{ first: boolean; release(): Promise<boolean>; retain(): Promise<void> }>;
       stopAcquisitions(): void };
@@ -84,7 +85,12 @@ function fixture() {
     sessions: manager, effects,
     runnerLocalAgentEnv: () => ({}), adoptedLaunchEnvironment: () => ({}),
     providerAccountEnvironment: (account: { credentialHome: string }) => ({ CLAUDE_CONFIG_DIR: account.credentialHome }),
-    pluginProviderForDriver: () => "claude", inheritProviderPlugins: () => { effects.plugins++; }, log: () => {},
+    pluginProviderForDriver: () => "claude",
+    inheritProviderPlugins: () => {
+      effects.plugins++;
+      if (effects.pluginFailure) throw new Error("plugin inheritance failed partway");
+    },
+    log: () => {},
   }) as typeof internals.prepareLaunch;
   return { root, store, manager, internals, effects, entered, gate, cancellation: () => cancellation,
     cleanup() { manager.shutdownAll(); rmSync(root, { recursive: true, force: true }); } };
@@ -235,4 +241,54 @@ test("stop during normal launch ownership prevents plugin preparation and provid
     assert.equal(h.effects.plugins, 0); assert.equal(h.effects.preparation, 0); assert.equal(h.effects.drivers, 0);
     assert.equal(h.store.readMeta("s1")?.status, "stopped");
   } finally { h.gate.resolve(); h.cleanup(); }
+});
+
+/** Records what the adapter reports on the caller's launch preparation handle (#3238). */
+function recordingProviderHome() {
+  const marks: string[] = [];
+  return { marks, providerHome: { markUnprovable: () => { marks.push("unprovable"); }, onProcess: () => {} } };
+}
+
+test("a plugin inheritance that fails partway marks the launch preparation unprovable", async () => {
+  const h = fixture();
+  try {
+    h.gate.resolve();
+    const clean = recordingProviderHome();
+    await h.internals.prepareLaunch(h.store.readMeta("s1")!, clean);
+    assert.deepEqual(clean.marks, [], "a completed inheritance leaves the preparation provable");
+    h.effects.pluginFailure = true;
+    const failed = recordingProviderHome();
+    await assert.rejects(h.internals.prepareLaunch(h.store.readMeta("s1")!, failed), /failed partway/);
+    assert.deepEqual(failed.marks, ["unprovable"]);
+  } finally { h.gate.resolve(); h.cleanup(); }
+});
+
+test("the actual Codex guard phase marks the launch preparation unprovable before its hook inventory runs", async () => {
+  const index = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+  const start = index.indexOf("    if (CODEX_GUARD_DRIVERS.has(meta.driver)) {");
+  const end = index.indexOf("    const commandPreparation =", start);
+  assert.ok(start > 0 && end > start);
+  const order: string[] = [];
+  const phase = vm.runInNewContext(transformSync(
+    `(async (meta, cancellation) => { let codexLaunchArgs; ${index.slice(start, end)} return codexLaunchArgs; })`,
+    { loader: "ts" },
+  ).code, {
+    CODEX_GUARD_DRIVERS,
+    inheritProviderPlugins: () => { order.push("plugins"); return []; },
+    log: () => {},
+    memoryGuardSocket: async () => undefined,
+    sessions: { managedWorktreeGuardProtections: () => [] },
+    provisionCodexGuard: async () => { order.push("hook inventory"); return { args: ["guarded"], guardActive: true }; },
+    isOrchestratorLaunch: () => false,
+    claudeHookHost: undefined,
+  }) as (meta: Partial<SessionMeta>, cancellation?: LaunchPreparationCancellation) => Promise<string[] | undefined>;
+  const base = { sessionId: "s1", repoPath: "/repo", worktreePath: null, args: [] };
+  const codex = recordingProviderHome();
+  const providerHome = { ...codex.providerHome, markUnprovable: () => { order.push("unprovable"); } };
+  assert.deepEqual(await phase({ ...base, driver: "codex-app-server" }, { providerHome }), ["guarded"]);
+  assert.deepEqual(order, ["unprovable", "plugins", "hook inventory"],
+    "the Codex app-server it spawns runs outside any provable boundary (#3340)");
+  order.length = 0;
+  assert.equal(await phase({ ...base, driver: "claude-code" }, { providerHome }), undefined);
+  assert.deepEqual(order, [], "a launch without the Codex guard stays provable");
 });

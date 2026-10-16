@@ -146,18 +146,98 @@ test("a scope that never acquired does not release a reference it does not hold"
   } finally { h.cleanup(); }
 });
 
-test("launch preparation keeps its reference but settles its worker handle", async () => {
+type LaunchHome = {
+  markUnprovable(): void;
+  onProcess(proof: Promise<boolean>): void;
+  settle(): Promise<void>;
+};
+const launchHome = (h: ReturnType<typeof fixture>) =>
+  (h.manager as unknown as { launchPreparationProviderHome(): LaunchHome }).launchPreparationProviderHome();
+
+test("launch preparation releases its reference only when everything that ran under it is proven gone", async () => {
   const h = fixture();
   try {
-    for (let i = 0; i < 3; i++) await h.manager.acquireLaunchProviderHome(h.home);
-    assert.equal(h.registry.references.get(h.home), 3, "every launch preparation keeps its reference");
+    await h.registry.acquireHome(h.home, "claude"); // a running session's reference
+    const quiet = launchHome(h), proven = launchHome(h), unproven = launchHome(h), unprovable = launchHome(h);
+    for (const handle of [quiet, proven, unproven, unprovable]) {
+      assert.equal(await h.manager.acquireLaunchProviderHome(h.home, { providerHome: handle }), handle,
+        "the reference joins the caller's handle");
+    }
+    assert.equal(h.registry.references.get(h.home), 5);
+    assert.equal(h.registry.openHandles, 4, "each preparation holds a handle until it is settled");
+    proven.onProcess(Promise.resolve(true));
+    unproven.onProcess(Promise.resolve(true));
+    unproven.onProcess(Promise.resolve(false));
+    unprovable.onProcess(Promise.resolve(true));
+    unprovable.markUnprovable();
+    for (const handle of [quiet, proven, unproven, unprovable]) await handle.settle();
+    assert.equal(h.registry.references.get(h.home), 3,
+      "a preparation that started nothing or only proven trees releases; an unproven tree or an unprovable step keeps it");
+    assert.deepEqual(h.registry.releases, [h.home, h.home], "never the session's reference");
+    assert.equal(h.registry.openHandles, 0, "every handle is settled either way");
+    await quiet.settle();
+    assert.equal(h.registry.releases.length, 2, "settlement is idempotent");
+  } finally { h.cleanup(); }
+});
+
+test("launch preparation without a handle to settle keeps its reference but frees its worker handle", async () => {
+  const h = fixture();
+  try {
+    assert.equal(await h.manager.acquireLaunchProviderHome(h.home), null);
+    const settled = launchHome(h);
+    await settled.settle();
+    assert.equal(await h.manager.acquireLaunchProviderHome(h.home, { providerHome: settled }), null,
+      "a handle that already settled cannot adopt a later grant");
+    assert.equal(h.registry.references.get(h.home), 2, "both are kept until shutdown");
     assert.equal(h.registry.releases.length, 0);
     assert.equal(h.registry.openHandles, 0, "no handle stays occupied, so repeated launches cannot exhaust the pool");
     const scope = h.manager.skillProviderHomeScope();
     await scope.acquire(h.home);
     await scope.retain();
-    assert.equal(h.registry.references.get(h.home), 4, "an unfinished skill transaction keeps its reference");
+    assert.equal(h.registry.references.get(h.home), 3, "an unfinished skill transaction keeps its reference");
     assert.equal(h.registry.openHandles, 0);
+  } finally { h.cleanup(); }
+});
+
+test("launch preparation cancelled after its grant drops the reference before any write", async () => {
+  const h = fixture();
+  try {
+    let current = true;
+    h.registry.afterGrant = () => { current = false; };
+    const handle = launchHome(h);
+    await assert.rejects(h.manager.acquireLaunchProviderHome(h.home, { providerHome: handle, isCurrent: () => current }),
+      /provider-home acquisition was cancelled/);
+    await handle.settle();
+    assert.equal(h.registry.references.has(h.home), false);
+    assert.deepEqual(h.registry.releases, [h.home], "released exactly once");
+  } finally { h.cleanup(); }
+});
+
+test("runner shutdown settles nothing for launch preparation; the global shutdown release owns it", async () => {
+  const h = fixture();
+  try {
+    const handle = launchHome(h);
+    await h.manager.acquireLaunchProviderHome(h.home, { providerHome: handle });
+    h.internals.shuttingDown = true;
+    await handle.settle();
+    assert.equal(h.registry.references.get(h.home), 1);
+    assert.equal(h.registry.releases.length, 0, "nothing is released per preparation during shutdown");
+  } finally {
+    h.internals.shuttingDown = false;
+    h.cleanup();
+  }
+});
+
+test("launch preparation handles never count against the driver handle budget", async () => {
+  const h = fixture();
+  try {
+    for (let i = 0; i < 512; i++) h.internals.driverProviderHomes.set({}, {});
+    const handle = launchHome(h);
+    assert.equal(await h.manager.acquireLaunchProviderHome(h.home, { providerHome: handle }), handle);
+    assert.equal(h.registry.plainAcquires, 0, "a transaction-scoped reference is a settleable handle");
+    await handle.settle();
+    assert.equal(h.registry.references.has(h.home), false);
+    h.internals.driverProviderHomes.clear();
   } finally { h.cleanup(); }
 });
 

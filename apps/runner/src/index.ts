@@ -913,11 +913,18 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
       const accountHome = pluginProvider === "claude" ? meta.env.CLAUDE_CONFIG_DIR : meta.env.CODEX_HOME;
       if (meta.context.kind === "native" && accountHome &&
           (!meta.executionTarget || meta.executionTarget.adapter === "host")) {
+        // Joins the caller's launch handle, which settles it on what ran under it (#3238).
         await sessions.acquireLaunchProviderHome(accountHome, cancellation);
       }
       assertPreparationCurrent();
       if (pluginProvider === "claude") {
-        inheritProviderPlugins(meta, pluginProvider);
+        try {
+          inheritProviderPlugins(meta, pluginProvider);
+        } catch (error) {
+          // The HOME may be half-written: keep the launch reference until shutdown.
+          cancellation?.providerHome?.markUnprovable();
+          throw error;
+        }
         log(JSON.stringify({ event: "provider_plugin_inheritance_prepared", entryPoint: "session_launch",
           sessionId: meta.sessionId, provider: pluginProvider }));
       }
@@ -992,6 +999,10 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
     // proved before it would be a proof about a different argv than the one that launches.
     let codexLaunchArgs: string[] | undefined;
     if (CODEX_GUARD_DRIVERS.has(meta.driver)) {
+      // The guard's hook inventory spawns a real Codex app-server outside any provable boundary
+      // (tracking it is deferred to #3340), and a failed plugin inheritance may leave the HOME
+      // half-written: either way the launch keeps its provider-HOME reference until shutdown.
+      cancellation?.providerHome?.markUnprovable();
       // Prepare the exact plugin inventory before guard enumeration, without persisting default
       // plugin flags into the session (which would freeze them across subsequent launches).
       const inheritedPluginArgs = inheritProviderPlugins(meta, "codex");
