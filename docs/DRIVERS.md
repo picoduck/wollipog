@@ -523,11 +523,15 @@ The lifetime policy is quiescence-aware and fail-safe:
   a resume racing the stop response. Startup and reconnect inspect retained unfinished rows even
   without task artifacts or aggregate background state. Confirmed model stops become killed and
   settled without launching a recovery turn. Existing orphan markers stay with normal orphan
-  recovery, which queues any finished siblings released by the stop. Unresolved rows remain
-  unverified; a retained parent turn id alone never authorizes historical resubmission. Results
-  without a queued return step retain explicit recovery even when their parent turn is known.
-  The Background Work notice explains this uncertainty and exposes an explicit, confirmed Restart Session recovery through More Actions. Restart ends every
-  job and follows the existing result-carrying and at-most-once continuation rules. Repairs emit
+  recovery, which inspects both pending task ids and retained unfinished job rows, then queues any
+  finished siblings released by the stop. Unknown pending work stays unresolved until provider
+  evidence settles it. When automatic recovery is disabled or blocked, receipt repair still runs
+  read-only without queueing a return step or launching a provider. A retained parent turn id
+  alone never authorizes historical resubmission. Results without a queued return step retain
+  explicit recovery even when their parent turn is known. The Background Work notice explains
+  this uncertainty and exposes an explicit, confirmed Restart Session recovery through More Actions.
+  Restart ends every job and follows the existing result-carrying and at-most-once continuation
+  rules. Repairs emit
   `historical_claude_jobs_reconciled` with entry point, correlation id, and job counts, without
   transcript contents.
 - Eviction and runner-shutdown stops send EOF first and allow five seconds for a clean exit before

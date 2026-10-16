@@ -430,6 +430,78 @@ for (const entryPoint of ["startup", "reconnect", "recovery_request"] as const) 
   });
 }
 
+for (const mode of ["budget", "request", "adopted", "history", "auth", "explicit_read_only"] as const) {
+  for (const pendingCase of ["missing", "omitted", "covered"] as const) test(`${mode} repairs historical stops with ${pendingCase} pending ids without losing orphan ownership`, async () => {
+    const job = { id: "stopped", parentTurnId: "known-parent", runnerId: "runner", workspaceId: "workspace",
+      context: { kind: "native" as const }, launchType: "workflow" as const, registeredAt: 1 };
+    const pending = pendingCase === "missing" ? ["unknown"] : pendingCase === "covered" ? ["stopped"] : ["unresolved"];
+    const h = harness({ driver: "claude-code", agentId: "claude-code", command: "claude",
+      agentSessionId: "incomplete-history", backgroundWorkState: mode === "explicit_read_only" || mode === "request" ? "orphaned" : "running",
+      ...(mode === "explicit_read_only" || mode === "request" ? {
+        pendingBackgroundTaskIds: mode === "request" && pendingCase === "missing" ? [] : pending,
+        orphanedWork: { pendingTaskIds: pending, markedAt: 10, reason: "process_exit" as const },
+      } : pendingCase !== "missing" ? { pendingBackgroundTaskIds: pending } : {}),
+      ...(mode === "budget" || mode === "request" ? { config: { costBudgetUsd: 1 }, costUsd: 1 } : {}),
+      ...(mode === "adopted" ? { adopted: true } : {}),
+      ...(mode === "auth" ? { providerCredentialScopeId: "test-scope", providerAuthBlock: {
+        version: 1 as const, recoveryId: "auth-recovery", credentialScopeId: "test-scope", detectedAt: 1,
+        phase: "turn" as const, delivery: "uncertain" as const, canStartLogin: false, configuredCredential: false,
+      } } : {}),
+      ...(mode === "history" ? { providerHistoryBlock: { version: 1 as const,
+        reason: "oversized_tool_call" as const, detectedAt: 1, detail: { field: "arguments" } } } : {}),
+      backgroundJobs: [job, { ...job, id: "held", terminalStatus: "completed", terminalObservedAt: 2,
+        continuationRequired: true }, { ...job, id: "retired", parentTurnId: "retired-parent", restartedAt: 5 },
+        ...(pendingCase === "omitted" ? [{ ...job, id: "unresolved", parentTurnId: "other-parent" }] : [])] });
+    try {
+      h.store.patchMeta("resume-session", { env: { HOME: h.root, TMPDIR: h.root } });
+      const projects = join(h.root, ".claude", "projects", claudeProjectPathKey(h.root));
+      mkdirSync(projects, { recursive: true });
+      writeFileSync(join(projects, "incomplete-history.jsonl"), ["stopped", "retired"].flatMap((id) => [
+        { type: "assistant", message: { content: [
+          { type: "tool_use", id: `stop-${id}`, name: "TaskStop", input: { task_id: id } },
+        ] } },
+        { type: "user", message: { content: [
+          { type: "tool_result", tool_use_id: `stop-${id}`, content: JSON.stringify({
+            task_id: id, message: `Successfully stopped task: ${id}`,
+          }) },
+        ] } },
+      ]).map((record) => JSON.stringify(record)).join("\n"));
+      const recover = () => mode === "explicit_read_only"
+        ? h.manager.recoverOrphanedWork("resume-session", false)
+        : mode === "request" ? h.manager.recoverOrphanedWork("resume-session") : h.manager.reconcileStore();
+      recover();
+      await tick();
+      await shortDelay();
+      const current = h.store.readMeta("resume-session")!;
+      const stopped = current.backgroundJobs!.find((record) => record.id === "stopped")!;
+      const held = current.backgroundJobs!.find((record) => record.id === "held")!;
+      assert.equal(stopped.terminalStatus, "killed", "retained rows must be inspected even when absent from pending ids");
+      assert.equal(stopped.continuationRequired, false);
+      assert.ok(stopped.assistantResultPersistedAt);
+      assert.equal(stopped.continuationId, undefined);
+      assert.deepEqual(current.orphanedWork?.pendingTaskIds, pendingCase === "covered" ? undefined : pending,
+        "only confirmed stops leave orphan ownership; unknown or unresolved work remains");
+      assert.equal(current.backgroundJobs!.find((record) => record.id === "retired")!.terminalStatus, undefined,
+        "a replaced conversation's unfinished row is not reconciled");
+      if (mode === "budget" || mode === "request") {
+        assert.ok(held.continuationId, "normal recovery queues the sibling unblocked by authoritative stop proof");
+        assert.ok(held.continuationQueuedAt);
+      } else {
+        assert.equal(held.continuationId, undefined, "read-only repair cannot queue a return turn");
+        assert.equal(current.backgroundWorkState, pendingCase === "covered" ? undefined : "orphaned",
+          "read-only repair must not invent a pending return step");
+      }
+      recover();
+      await tick();
+      await shortDelay();
+      assert.equal(h.store.readMeta("resume-session")!.backgroundJobs!.find((record) => record.id === "held")!.continuationId,
+        held.continuationId, "repeat repair cannot duplicate the continuation");
+      assert.deepEqual(h.launches, [], "neither a spending hold nor read-only recovery permits paid replay");
+      assert.deepEqual(h.prompts, []);
+    } finally { h.manager.shutdownAll(); h.cleanup(); }
+  });
+}
+
 test("provider auth failure stops the turn, parks exact recovery context, and holds FIFO until explicit retry", async () => {
   let h!: ReturnType<typeof harness>;
   let attempts = 0;

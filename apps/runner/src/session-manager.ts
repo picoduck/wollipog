@@ -17530,8 +17530,8 @@ export class SessionManager {
     const meta = this.store.readMeta(sessionId);
     if (!meta) return;
     const discovered = this.discoverOrphanedClaudeWork(meta);
-    this.scheduleHistoricalClaudeJobReconciliation(discovered, "recovery_request");
     const allowed = automatic && automaticClaudeRecoveryAllowed(discovered);
+    this.scheduleHistoricalClaudeJobReconciliation(discovered, "recovery_request", allowed);
     if (allowed && discovered.orphanedWork) {
       this.scheduleOrphanRecovery(sessionId);
     }
@@ -17540,14 +17540,18 @@ export class SessionManager {
 
   /** Older ledgers can retain unfinished rows without aggregate state, pending ids, or task files.
    * Repair only provider-confirmed model stops. Existing orphans belong to performOrphanRecovery,
-   * which also queues any finished siblings unblocked by the stop. This pass never launches work. */
+   * which also queues any finished siblings unblocked by the stop. When automatic recovery is
+   * disabled or blocked, this pass still repairs receipts without queueing or launching work. */
   private scheduleHistoricalClaudeJobReconciliation(
     meta: SessionMeta,
     entryPoint: "startup" | "reconnect" | "recovery_request",
+    automatic = true,
   ): void {
     if (this.shuttingDown || meta.driver !== "claude-code" || !meta.agentSessionId ||
-        meta.status === "stopped" || meta.orphanedWork || this.active.has(meta.sessionId) ||
+        meta.status === "stopped" || this.active.has(meta.sessionId) ||
         this.historicalJobInspections.has(meta.sessionId)) return;
+    if (meta.orphanedWork && automatic && automaticClaudeRecoveryAllowed(meta) &&
+        !meta.providerAuthBlock && !meta.providerHistoryBlock && !meta.worktreeRecovery) return;
     const ids = (meta.backgroundJobs ?? []).filter((job) => !job.terminalStatus &&
       job.restartedAt === undefined).map((job) => job.id);
     if (ids.length === 0) return;
@@ -17575,9 +17579,10 @@ export class SessionManager {
         const updated = this.store.patchMeta(meta.sessionId, {
           backgroundJobs, pendingBackgroundTaskIds, orphanedWork,
           recoveredBackgroundTaskIds: mergeRecoveredBackgroundTaskIds(current.recoveredBackgroundTaskIds, [...stopped]),
-          // Absence of aggregate state is not proof that an unresolved historical row is running.
-          backgroundWorkState: orphanedWork ? "orphaned" : current.backgroundWorkState
-            ? managedBackgroundWorkState(backgroundJobs) : undefined,
+          // This read-only pass never queues a return step. Clearing its last orphan must not
+          // invent continuation_pending from held rows, nor running from unverified history.
+          backgroundWorkState: orphanedWork ? "orphaned" : current.orphanedWork ? undefined
+            : current.backgroundWorkState ? managedBackgroundWorkState(backgroundJobs) : undefined,
         });
         if (updated) {
           this.log(JSON.stringify({ event: "historical_claude_jobs_reconciled", entryPoint, correlationId,
@@ -18115,7 +18120,11 @@ export class SessionManager {
       try {
         const inspection = await inspectClaudeBackgroundWorkInContext(
           meta.context, meta.worktreePath ?? meta.repoPath, meta.agentSessionId,
-          meta.pendingBackgroundTaskIds ?? meta.orphanedWork.pendingTaskIds,
+          new Set([
+            ...(meta.pendingBackgroundTaskIds ?? []), ...meta.orphanedWork.pendingTaskIds,
+            ...(meta.backgroundJobs ?? []).filter((job) => !job.terminalStatus && job.restartedAt === undefined)
+              .map((job) => job.id),
+          ]),
           { env: meta.env, ...(this.executionIsolation.mode === "bwrap" ? {
             projectsRoot: join(this.stateDir, "provider-state", "claude", providerStateKey(sessionId), "projects"),
           } : {}) },
@@ -18136,8 +18145,9 @@ export class SessionManager {
               current.recoveredBackgroundTaskIds, [...inspection.terminalTaskIds],
             ),
           });
-          const pending = (current.pendingBackgroundTaskIds ?? current.orphanedWork!.pendingTaskIds)
-            .filter((id) => !inspection.terminalTaskIds.has(id));
+          const pending = [...new Set([
+            ...(current.pendingBackgroundTaskIds ?? []), ...current.orphanedWork!.pendingTaskIds,
+          ])].filter((id) => !inspection.terminalTaskIds.has(id));
           this.onDriverBackgroundWork(sessionId, {
             state: pending.length ? "orphaned" : null,
             pendingTaskIds: pending,
