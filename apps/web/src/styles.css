@@ -10842,7 +10842,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   background: var(--bg-elev);
 }
 
-/* The Sessions notice and quiet new-order/Reconnecting lines (#2221, §13.2, §6.3): inset at the
+/* The Sessions notice and Reconnecting line (#2221, §13.2, §6.3): inset at the
    list's edges and 8px from the top as the rows are. Together they take whole stacked-list rows. */
 .inbox-list-head,
 .inbox-list-notices {
@@ -10864,15 +10864,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
     overflow: auto;
     padding-bottom: var(--space-2);
   }
-}
-/* New activity would reorder the rows: one neutral line with Apply, never a notice. */
-.inbox-order-line {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-width: 0;
-  color: var(--text-dim);
-  font: var(--type-body);
 }
 /* Recommended Skills (#1768, #2221): each skill a link with its own Dismiss, then Dismiss All. Where
    the list is 600px or wider they share one line after the body; narrower, one skill per line. */

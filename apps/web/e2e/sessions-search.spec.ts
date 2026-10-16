@@ -313,13 +313,11 @@ for (const viewport of [
   });
 }
 
-// Only the desktop reorders live rows: a phone holds its order for the whole time the list is open.
-test("a live reorder keeps the reader's row where it was (#2804)", async ({ page }) => {
-  await page.setViewportSize({ width: 1440, height: 900 });
+for (const width of [1440, 390]) test(`an automatic priority reorder keeps the reader's row where it was at ${width}px (#2804, #3301)`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 900 });
   await openScrolling(page);
-  // The desktop holds its order while the window has focus; leaving it is the boundary at which
-  // live activity reorders the list (InboxView's browsing-order lease).
-  await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+  // Focus and an idle pointer do not defer priority changes on either viewport.
+  await page.mouse.move(0, 0);
   // The last row's session starts waiting on the user, which moves it above the reader's row.
   const lastKey = await grid(page).evaluate(async (list) => {
     list.scrollTop = list.scrollHeight;
@@ -345,4 +343,87 @@ test("a live reorder keeps the reader's row where it was (#2804)", async ({ page
   const after = await settled(page);
   expect(after, "the reader's row keeps its offset").toMatchObject({ key: reading.key, offset: reading.offset });
   expect(after.scrollTop).toBeGreaterThan(reading.scrollTop);
+});
+
+
+test("a native touch pan survives pointer cancellation and defers priorities until the gesture settles (#3301)", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 900 });
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });
+  await openScrolling(page);
+  const lastKey = await grid(page).evaluate(async (list) => {
+    list.scrollTop = list.scrollHeight;
+    for (let frame = 0; frame < 4; frame++) await new Promise(requestAnimationFrame);
+    return [...list.querySelectorAll<HTMLElement>("[data-virtual-row]")]
+      .sort((a, b) => Number(b.dataset.index) - Number(a.dataset.index))[0]!.dataset.virtualKey!;
+  });
+  await grid(page).evaluate((list) => { list.scrollTop = 500; });
+  const reading = await settled(page);
+  const index = () => grid(page).evaluate((list, key) =>
+    Number(list.querySelector<HTMLElement>(`[data-virtual-key="${key}"]`)?.dataset.index), reading.key);
+  const box = (await grid(page).boundingBox())!;
+  await page.evaluate(() => {
+    (window as typeof window & { __panCancels: number }).__panCancels = 0;
+    window.addEventListener("pointercancel", () => {
+      (window as typeof window & { __panCancels: number }).__panCancels++;
+    });
+  });
+  const point = { x: box.x + box.width / 2, y: box.y + Math.min(box.height - 20, 400) };
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ ...point, y: point.y - 40 }] });
+  await page.evaluate((id) => window.__updateSession(id, { status: "input_required",
+    pendingApproval: { requestId: "during-pan", title: "Approve Command", options: [] },
+    updatedAt: Date.now(), lastEventAt: Date.now() }), lastKey);
+  for (let step = 1; step <= 15; step++) {
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ ...point, y: point.y - 40 - step * 3 }] });
+    await page.waitForTimeout(50);
+  }
+  expect(await page.evaluate(() => (window as typeof window & { __panCancels: number }).__panCancels)).toBeGreaterThan(0);
+  expect(await index(), "the canonical priority change is held beyond 500 ms of native panning").toBe(reading.index);
+  expect(await grid(page).evaluate((list) => list.scrollTop)).toBeGreaterThan(reading.scrollTop);
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await expect.poll(index).toBe(reading.index + 1);
+});
+
+test("settled native scrolling and successive idle priorities preserve the reader's anchor (#3301)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.clock.install();
+  await openScrolling(page);
+  await page.mouse.move(0, 0);
+  // Scroll after the initial anchor window, when a parent commit can restore the old anchor.
+  await settled(page);
+  await grid(page).evaluate((list) => { list.scrollTop = 600; });
+  const reading = await settled(page);
+  expect(reading.scrollTop).toBe(600);
+  expect(reading.index).toBeGreaterThan(3);
+
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
+  await page.clock.runFor(600);
+  const promote = (id: string) => page.evaluate((sessionId) => (window as unknown as {
+    __updateSession: (id: string, change: object) => void;
+  }).__updateSession(sessionId, {
+    status: "input_required",
+    pendingApproval: { requestId: sessionId, title: "Approve Command", options: [] },
+    updatedAt: Date.now(),
+    lastEventAt: Date.now(),
+  }), id);
+  const readerIndex = () => grid(page).evaluate((list, key) =>
+    Number(list.querySelector<HTMLElement>(`[data-virtual-key="${key}"]`)?.dataset.index), reading.key);
+  await promote("s-running");
+  await page.clock.runFor(100);
+  expect(await readerIndex()).toBe(reading.index + 1);
+  // The first reorder's programmatic correction must not start another 500 ms hold.
+  await promote("s-queued");
+  await page.clock.runFor(100);
+  expect(await readerIndex()).toBe(reading.index + 2);
+  await page.clock.resume();
+  expect(await settled(page)).toMatchObject({ key: reading.key, offset: reading.offset });
+});
+
+test("native scrolling records a new anchor before holding row order (#3301)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openScrolling(page);
+  await settled(page);
+  await grid(page).evaluate((list) => { list.scrollTop = list.scrollHeight; });
+  expect((await settled(page)).scrollTop).toBeGreaterThan(100);
 });

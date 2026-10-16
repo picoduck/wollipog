@@ -144,11 +144,17 @@ test("ten nine-session production cycles release detached previews and keep DOM/
     });
     socket.on("close", () => { ui.closed++; });
   });
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Emulation.setCPUThrottlingRate", { rate: 4 });
   await page.goto(`${base}/#pair=${token}`);
   await expect(page.locator(".session-detail.preview")).toBeVisible({ timeout: 30_000 });
   await page.getByRole("radio", { name: "List", exact: true }).click();
-  const cdp = await page.context().newCDPSession(page);
   await cdp.send("Performance.enable");
+  // Beginning a short order hold must not replace identical virtualizer items and undo the
+  // browser's scroll-to-click while a slower device is still recording its visible anchor.
+  try { await select(page, 0); }
+  finally { await cdp.send("Emulation.setCPUThrottlingRate", { rate: 1 }); }
+
   const samples: Array<{ cycle: number; nodes: number; listeners: number; heapBytes: number; detachedWeakRoots: number }> = [];
   const navigateCycle = async () => {
     for (let index = 0; index < RETENTION_SESSION_COUNT; index++) await select(page, index);

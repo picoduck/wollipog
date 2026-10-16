@@ -489,23 +489,26 @@ for (const viewport of [
   });
 }
 
-test("desktop can apply a pending Inbox order without losing selection or scroll anchor", async ({ page }) => {
+test("desktop automatically adopts priority order without losing selection or scroll anchor", async ({ page }) => {
+  await page.clock.install();
   await page.setViewportSize({ width: 1280, height: 760 });
   await page.goto("/command-inbox-projects-e2e.html?scenario=inbox-live-scroll&reminders=1");
   const list = page.locator(".inbox-list");
   await expect(list.locator("[data-virtual-total='36']")).toBeVisible();
   await expect.poll(() => list.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
 
+  await waitForSessionPreview(page);
+  await settlePreviewLayout(page);
   await list.evaluate((element) => {
     element.scrollTop = Math.round((element.scrollHeight - element.clientHeight) * 0.55);
     element.dispatchEvent(new Event("scroll"));
   });
   await settlePreviewLayout(page);
+  expect((await inboxViewportAnchor(page)).scrollTop).toBeGreaterThan(100);
   const selectedKey = await list.locator('.inbox-row-shell[aria-selected="true"]').evaluate((row) =>
     row.closest<HTMLElement>("[data-virtual-row]")?.dataset.virtualKey ?? null);
   expect(selectedKey).not.toBeNull();
-  // The page header's controls and the tab row's search field. The pending-order line is
-  // conditional, so none of these may move when it appears or leaves (#1675, #2221).
+  // Neither a pending priority change nor its automatic adoption moves surrounding controls.
   const stationaryToolbar = () => page.locator(".page-header .page-actions > *, .tabs-tools > .inbox-search")
     .evaluateAll((elements) => elements.map((element) => {
       const rect = element.getBoundingClientRect();
@@ -516,6 +519,8 @@ test("desktop can apply a pending Inbox order without losing selection or scroll
     "page-controls", "btn ghost page-action", "overflow-menu page-more", "btn primary page-primary", "input-affix inbox-search",
   ]);
 
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1_000));
+  await list.hover();
   await page.evaluate(() => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-overflow-35", {
       lastEventAt: 2_000,
@@ -524,21 +529,22 @@ test("desktop can apply a pending Inbox order without losing selection or scroll
       status: "running",
     });
   });
-  // A quiet line above the rows, never a control in the header or the tab row (#2221).
-  const orderLine = page.locator(".inbox-list-pane > .inbox-list-head > .inbox-order-line");
-  await expect(orderLine).toHaveText("New activity changed the order.Apply");
-  const applyOrder = orderLine.getByRole("button", { name: "Apply", exact: true });
-  await expect(applyOrder).toBeVisible();
+  await page.clock.runFor(32);
+  await expect(page.locator(".inbox-order-line")).toHaveCount(0);
   expect(await stationaryToolbar()).toEqual(toolbarWithoutButton);
   const before = await inboxViewportAnchor(page);
   expect(before.key).not.toBeNull();
 
-  await applyOrder.click();
+  await page.mouse.move(0, 0);
+  await page.clock.runFor(500);
+  await page.clock.resume();
   await settlePreviewLayout(page);
-  await expect(applyOrder).toHaveCount(0);
+  await expect(page.locator(".inbox-order-line")).toHaveCount(0);
   expect(await stationaryToolbar()).toEqual(toolbarWithoutButton);
-  await expect(list).toBeFocused();
-  const after = await inboxViewportAnchor(page);
+  const after = await list.evaluate((element, key) => {
+    const row = element.querySelector<HTMLElement>(`[data-virtual-key="${key}"]`)!;
+    return { key: row?.dataset.virtualKey, offset: row ? row.getBoundingClientRect().top - element.getBoundingClientRect().top : null };
+  }, before.key);
   expect(after.key).toBe(before.key);
   expect(Math.abs((after.offset ?? 0) - (before.offset ?? 0))).toBeLessThan(2);
   expect(await list.locator('.inbox-row-shell[aria-selected="true"]').evaluate((row) =>

@@ -124,8 +124,11 @@ export function reconcileSessionActivity(
   }
   const nextBusy = isHeartbeatBusy(next.status);
   const wasBusy = previous ? isHeartbeatBusy(previous.status) : false;
+  // Waiting for a person is observable, but resuming execution is a new progress window.
+  // Unchanged busy metadata must still preserve the anchor so chatter cannot mask a real stall.
+  const resumedFromInput = previous?.status === "input_required" && next.status !== "input_required";
   const busySince = nextBusy
-    ? (wasBusy && base.busySince !== null
+    ? (wasBusy && !resumedFromInput && base.busySince !== null
         ? base.busySince
         : validTimestamp(next.updatedAt) ? next.updatedAt : null)
     : null;

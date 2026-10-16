@@ -2917,15 +2917,14 @@ action row.
   partial failure keeps what the server did not record and says "Could not dismiss {names}. Try
   again." in `--danger-text` with `role="alert"`. No confirmation: Show Recommendation in Skills undoes
   a dismissal.
-- **New order** is not a notice: when live activity would reorder the list, a neutral line above the
-  rows reads "New activity changed the order." with a ghost **Apply**, which the sentence describes.
-  It follows the notice slot on desktop/tablet; on phones the notice stays below the scroll area.
-  Nothing in the header or the tab row moves for it.
-- **Budget.** The slot, the order line and Reconnecting… are the list head. Stacked, the head takes
+- **Ordering.** Idle lists apply follow-up priorities automatically. Pointer movement, scrolling
+  and keyboard navigation defer ordering for 500 ms after the last interaction; a press, native
+  touch gesture or row menu holds until it ends, followed by the same settle interval. Focus and
+  a resting pointer do not renew it. No transient order line or Apply button shifts the rows.
+- **Budget.** The slot and Reconnecting… are the list head. Stacked, the head takes
   whole rows of the list's height (§6.3): the divider keeps its stored position, the rows start right
   under the head at the list's 8px pad, none is cut, and what the head leaves of its last row is space
-  under the last whole row, just above the divider. Nothing is reserved for the order line while it
-  is hidden: the rows move down when it appears, and no header or tab-row control does.
+  under the last whole row, just above the divider.
 
 **Request dock.** Pending permission requests and questions dock directly above the composer, in the
 notice slot, in attention priority order. The dock is the only amber surface for a request, and it
