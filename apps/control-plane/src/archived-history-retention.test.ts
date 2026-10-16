@@ -504,6 +504,49 @@ test("a final response that arrives after a run read past the earlier one sends 
   }
 });
 
+for (const when of ["mid-run", "after the run"] as const) {
+  test(`a later untagged response replaces an earlier one whose separator a prune removed (${when})`, () => {
+    const db = openDb();
+    try {
+      createSession(db, "untagged");
+      db.appendEvent("untagged", { kind: "agent_message", text: "earlier response" }, T0 + 1);
+      db.appendEvent("untagged", { kind: "stderr", text: "separator" }, T0 + 2);
+      archive(db, "untagged", T0 + 3);
+      const input = { cutoff: T0 + 100, retentionDays: 7, now: T0 + 100, maxEvents: 500, maxPayloadBytes: 2 * 1024 * 1024,
+        maxSearchLength: 64 * 1024 };
+      assert.equal(db.pruneArchivedHistoryBatch("untagged", input).removed, 1, "the separator goes, the response stays");
+      if (when === "after the run") assert.equal(db.pruneArchivedHistoryBatch("untagged", input).finished, true);
+      // Delayed history adds a later untagged response, with nothing left between the two.
+      db.appendEvent("untagged", { kind: "agent_message", text: "latest response" }, T0 + 4);
+      while (!db.pruneArchivedHistoryBatch("untagged", input).finished) { /* batches */ }
+      const answers = db.listEvents("untagged").flatMap((event) => event.payload.kind === "agent_message" ? [event.payload.text] : []);
+      assert.deepEqual(answers, ["latest response"]);
+    } finally {
+      db.close();
+    }
+  });
+}
+
+test("an untagged response that delayed history continues after a prune keeps both of its parts", () => {
+  const db = openDb();
+  try {
+    createSession(db, "continued");
+    db.appendEvent("continued", { kind: "user_message", text: "prompt" }, T0 + 1);
+    db.appendEvent("continued", { kind: "tool_call", toolCallId: "read", title: "Read", status: "completed" }, T0 + 2);
+    db.appendEvent("continued", { kind: "agent_message", text: "first part" }, T0 + 3);
+    archive(db, "continued", T0 + 4);
+    const input = { cutoff: T0 + 100, retentionDays: 7, now: T0 + 100, maxEvents: 500, maxPayloadBytes: 2 * 1024 * 1024,
+      maxSearchLength: 64 * 1024 };
+    while (!db.pruneArchivedHistoryBatch("continued", input).finished) { /* batches */ }
+    db.appendEvent("continued", { kind: "agent_message", text: " second part" }, T0 + 5);
+    while (!db.pruneArchivedHistoryBatch("continued", input).finished) { /* batches */ }
+    assert.deepEqual(kinds(db, "continued"), ["user_message", "agent_message", "agent_message"],
+      "the removed tool call came before the response, so both parts are one final response");
+  } finally {
+    db.close();
+  }
+});
+
 test("an interrupted run resumes after a restart and ends where an uninterrupted run does", async () => {
   const root = mkdtempSync(join(tmpdir(), "retention-resume-"));
   try {

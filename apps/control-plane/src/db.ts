@@ -5169,7 +5169,7 @@ const FOLD_LAST_EVENT_AT = `last_event_at=CASE WHEN COALESCE(message_count,0)=0
 /** A replacement history comes from the runner's full log, so it is no longer pruned (#2777). Its
  * tool calls return with it, so the pruned ones stop counting separately. */
 const CLEAR_HISTORY_PRUNE_SQL = `history_pruned_at=NULL, history_pruned_retention_days=NULL,
-  history_pruned_events=0, history_pruned_tool_calls=0, history_prune_through_seq=NULL,
+  history_pruned_events=0, history_pruned_tool_calls=0, history_prune_through_seq=NULL, history_prune_removed_seq=NULL,
   history_prune_run_events=NULL, history_prune_run_days=NULL, history_prune_run_seq=NULL,
   history_prune_run_response_seq=NULL`;
 
@@ -6641,6 +6641,8 @@ export class ControlPlaneDb {
       "history_pruned_tool_calls INTEGER NOT NULL DEFAULT 0",
       // Highest seq a prune has covered. New events are numbered above it, so no seq is reused.
       "history_prune_through_seq INTEGER",
+      // Highest seq a prune has removed: an agent response ended there, even once the row is gone.
+      "history_prune_removed_seq INTEGER",
       // Events removed so far by a prune still in progress, its threshold, the seq it has read
       // through (every row at or below it is kept), and the seq of the final response it keeps.
       // NULL when no prune is in progress.
@@ -16486,7 +16488,13 @@ export class ControlPlaneDb {
           AND json_type(payload, '$.messageId') IS NULL AND COALESCE(json_extract(payload, '$.final'), 0)=0)
         ORDER BY seq DESC LIMIT 1`,
     ).get(sessionId, last.seq) as { seq: number } | undefined;
-    return { messageId: null, afterSeq: boundary?.seq ?? 0, lastSeq: last.seq, seq: last.seq };
+    // A removed row below the response separated it from whatever came before, so an earlier
+    // response kept while it was final never joins this one. No row of the final response itself
+    // is ever removed, so the boundary never rises past the real one.
+    const removed = (this.stmt("SELECT history_prune_removed_seq AS seq FROM sessions WHERE id=?").get(sessionId) as
+      { seq: number | null } | undefined)?.seq ?? 0;
+    const afterSeq = Math.max(boundary?.seq ?? 0, removed < last.seq ? removed : 0);
+    return { messageId: null, afterSeq, lastSeq: last.seq, seq: last.seq };
   }
 
   /**
@@ -16600,9 +16608,11 @@ export class ControlPlaneDb {
           history_prune_run_events=history_prune_run_events+?,
           history_pruned_tool_calls=history_pruned_tool_calls+?,
           history_prune_through_seq=MAX(COALESCE(history_prune_through_seq, 0), ?),
+          history_prune_removed_seq=MAX(COALESCE(history_prune_removed_seq, 0), ?),
           history_prune_run_seq=?
         WHERE id=?`,
-    ).run(events.length, events.length, toolCallsBefore - this.storedToolCalls(sessionId), throughSeq, readThrough, sessionId);
+    ).run(events.length, events.length, toolCallsBefore - this.storedToolCalls(sessionId), throughSeq, throughSeq,
+      readThrough, sessionId);
     return { removed: events.length, searchLength };
   }
 
