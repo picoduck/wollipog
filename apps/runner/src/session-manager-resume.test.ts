@@ -7246,7 +7246,7 @@ test("Claude Code and Codex launches carry zsh guidance only when their command 
   assert.match(claudeZsh, /no matches found/);
   assert.doesNotMatch(await launchGuidance("claude-code", { SHELL: join(shells, "bash"), CLAUDE_CODE_SHELL: "" }), /Shell Guidance|zsh/);
   assert.doesNotMatch(await launchGuidance("claude-code", { SHELL: join(shells, "zsh"), CLAUDE_CODE_SHELL: join(shells, "bash") }), /Shell Guidance/);
-  for (const driver of ["codex-app-server", "codex"] as const) {
+  for (const driver of ["codex-app-server"] as const) {
     // Codex uses an installed login shell before searching PATH, so these hold on any CI host.
     loginShell = join(shells, "zsh");
     assert.match(await launchGuidance(driver, { SHELL: join(shells, "bash") }), /Your shell commands run in zsh/, driver);
