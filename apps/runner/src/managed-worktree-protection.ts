@@ -2231,6 +2231,11 @@ const MAX_ASSIGNED_SPELLINGS = 16;
 const UNMODELLED_SHAPE_REASON =
   "it uses a heredoc, newline, backtick, pipe, or subshell, which the guard does not model, and one of its words names a directory that contains that state";
 
+/** Reason for refusing a command whose tokenization still yields a comment the guard cannot separate
+ *  from an executable command (an unquoted `#` the escape pass could not neutralise). */
+const GUARD_STATE_COMMENT_REASON =
+  "it contains a comment the guard cannot separate from an executable command that could reach that state";
+
 /** The tokenizer's own complaint, without the command text it quotes back. */
 function tokenizerReason(error: unknown): string {
   const message = error instanceof Error ? error.message : "";
@@ -2837,24 +2842,33 @@ export interface PreparedGuardStateCommand { scan: string; parse: string }
  *
  * A `#` INSIDE single or double quotes is left untouched: `shell-quote` already keeps it literal, and
  * rewriting inside quotes would corrupt a quoted filename for realpath resolution (a quoted
- * `'alias#'` symlink into the state, Codex round 4 CR-4.1). The quote tracker only ever CLOSES a
- * quote no later than bash would (single/double quotes share bash's exit rules; a `$'…'` ANSI-C body
- * makes it close earlier, never later), so it never mistakes an unquoted `#` for a quoted one and can
- * never fail to escape a comment-starting `#`. There is no `${...}` reduction or content modelling.
+ * `'alias#'` symlink into the state, Codex round 4 CR-4.1). The tracker models the three bash quote
+ * forms that make a `#` literal — `'…'`, `"…"`, and ANSI-C `$'…'` (where `\'` is escaped so only an
+ * unescaped `'` closes) — so it does not desync on `$'\''` and wrongly skip an unquoted `#`. As a
+ * hard backstop, `commandTargetsGuardState` refuses outright if `shell-quote` still returns a comment
+ * token (an unquoted `#` this pass failed to neutralise), so any residual quoting it does not model
+ * fails closed rather than swallowing a later command. There is no `${...}` reduction or content
+ * modelling.
  */
 export function prepareGuardStateCommand(command: string): PreparedGuardStateCommand {
   const stripped = matchStrippableHeredoc(command);
   if (stripped !== null) return { scan: stripped, parse: stripped };
   let parse = "";
-  let quote: "'" | '"' | null = null;
+  let quote: "'" | '"' | "ansi" | null = null; // `ansi` = inside a `$'…'` ANSI-C string
   for (let i = 0; i < command.length; i += 1) {
     const c = command[i]!;
     if (quote === "'") { parse += c; if (c === "'") quote = null; continue; } // single quotes: all literal
+    if (quote === "ansi") {
+      // `$'…'`: a backslash escapes the next char (including `\'`), so only an UNESCAPED `'` closes.
+      if (c === "\\") { parse += c + (command[i + 1] ?? ""); i += 1; continue; }
+      parse += c; if (c === "'") quote = null; continue;
+    }
     if (quote === '"') {
       if (c === "\\") { parse += c + (command[i + 1] ?? ""); i += 1; continue; } // keep an escaped pair whole
       parse += c; if (c === '"') quote = null; continue;
     }
     if (c === "\\") { parse += c + (command[i + 1] ?? ""); i += 1; continue; } // keep an escaped pair whole
+    if (c === "$" && command[i + 1] === "'") { parse += "$'"; i += 1; quote = "ansi"; continue; } // enter $'…'
     if (c === "'" || c === '"') { quote = c; parse += c; continue; }
     parse += c === "#" ? "\\#" : c; // an unquoted `#` is neutralised; quoted `#` never reaches here
   }
@@ -2895,6 +2909,13 @@ export function commandTargetsGuardState(
     // Still refused: this is the state the veto itself depends on. The raw-text scan above has
     // already refused any command that names the hook directory outright.
     return guardStateUninspectableRefusal(tokenizerReason(error));
+  }
+  // A surviving comment token means `shell-quote` ran a comment to the end of the string past an
+  // UNQUOTED `#` that `prepareGuardStateCommand` did not neutralise — a quoting form the escape pass
+  // does not model. Its text can hide a reaching command bash would run, so fail closed rather than
+  // letting the tokenizer swallow it (#1734 Codex round 4; the ANSI-C `$'\''` desync class).
+  if (tokens.some((token) => token != null && typeof token === "object" && "comment" in token)) {
+    return guardStateUninspectableRefusal(GUARD_STATE_COMMENT_REASON);
   }
   // Each distinct reading is resolved once, and a bounded `find` reads its START depths back from here.
   const relations = new Map<string, GuardStateRelation | null>();

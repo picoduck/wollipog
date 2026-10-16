@@ -1664,3 +1664,24 @@ test("a quoted '#'-named symlink into the hook directory is refused despite the 
     assert.ok(commandTargetsGuardState(command, project, directory) !== null, command);
   }
 });
+
+test("an ANSI-C $'…' quote cannot desync the comment-escape to swallow a reaching command (#1734 Codex round 4)", (t) => {
+  const { project, directory } = guardLayout(t);
+  const into = "../.wollipog-data/hooks/s1.protections.json";
+  // bash closes `$'\''` only at the UNESCAPED `'`, so after it the `#` in `x#` is unquoted and the
+  // `; cat <state>` runs. A naive single-quote tracker reopens a quote at the stray `'` and skips
+  // escaping that `#`, letting shell-quote run a comment to the end of the string and hide the read.
+  // The tracker models `$'…'`, and a surviving comment token fails closed — both must refuse.
+  for (const command of [
+    `echo $'\\'' x#; cat ${into}; echo \\'`,
+    `echo $'\\n' x#; cat ${into}`,
+    `X=$'\\''; echo a#; cat ${into}`,
+  ]) {
+    assert.ok(commandTargetsGuardState(command, project, directory) !== null, command);
+  }
+  // Benign ANSI-C strings followed by a real comment stay allowed: the tracker closes `$'…'` where
+  // bash does, escapes the later `#`, and no comment token survives.
+  for (const command of ["echo $'hi' # a note", "echo $'a\\tb' # note"]) {
+    assert.equal(commandTargetsGuardState(command, project, directory), null, command);
+  }
+});
