@@ -96,6 +96,7 @@ export function sortSessionsForReminders(
   reminders: ReadonlyMap<string, SessionReminderView>,
   mode: ReminderInboxMode,
   pins: ReadonlySet<string> = new Set(),
+  familySessions: readonly SessionView[] = sessions,
 ): SessionView[] {
   if (mode === "ordinary") {
     const original = new Map(sessions.map((session) => [session.id, session]));
@@ -107,7 +108,7 @@ export function sortSessionsForReminders(
             result: { revision: "reminder", at: reminder.firedAt ?? session.createdAt, owner: "human" as const },
             acknowledgedRevision: null } } : session;
     });
-    return sortInboxSessions(withDueFollowUp, pins).map((session) => original.get(session.id)!);
+    return sortInboxSessions(withDueFollowUp, pins, new Set(), familySessions).map((session) => original.get(session.id)!);
   }
   return [...sessions].sort((left, right) => {
     const leftPinned = pins.has(left.id);

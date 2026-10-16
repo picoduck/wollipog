@@ -752,13 +752,14 @@ test.describe("Board cards at 1440×900 (#2222)", () => {
     for (const card of await cardGeometry(page)) expect(card.wrappedButtons, `${card.id}'s buttons`).toEqual([]);
     const narrow = await expectWholeStatusLines(page);
     expect(narrow.find((line) => line.parent)!.chipDotsOnly, "a 230px parent card keeps only the chip's dots").toBe(true);
-    // An idle parent draws no badge, so its chip has the whole line, which still cannot hold the
-    // rollup: measured uncapped, it keeps its dots rather than ellipsizing its words and calling that
-    // a fit (#2222's review CR-5.1), and is still named by the whole rollup.
+    // An idle parent surfaces its child's input request. Beside that badge, the chip keeps its
+    // dots rather than ellipsizing the rollup and calling that a fit, and retains its whole name.
     const idleParent = narrow.find((line) => line.id === "s-idle-parent")!;
+    await expect(page.locator('.board .card[data-session-id="s-idle-parent"] .status'))
+      .toHaveAccessibleName("Status: Needs Your Input");
     expect({ badge: idleParent.hasBadge, dotsOnly: idleParent.chipDotsOnly, name: idleParent.chipName },
-      "a 230px parent card with no badge keeps only the chip's dots")
-      .toEqual({ badge: false, dotsOnly: true, name: "4 Children · 1 Awaiting Input" });
+      "a 230px parent card keeps the child input badge and the chip's dots")
+      .toEqual({ badge: true, dotsOnly: true, name: "4 Children · 1 Awaiting Input" });
     // Nothing on a card's status line crosses the card's edge.
     const overflowing = await page.locator(".board .card").evaluateAll((cards) => cards.filter((card) => {
       const edge = card.getBoundingClientRect().right;

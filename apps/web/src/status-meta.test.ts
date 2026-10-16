@@ -173,7 +173,7 @@ test("statusMeta holds every row of the §11.2 vocabulary with its label and ton
 
 test("only actively progressing work pulses, and an unverified source draws a hollow dot", () => {
   const pulsing = (domain: StatusDomain) => statusValues(domain).filter((value) => statusMeta(domain, value).pulse);
-  assert.deepEqual(pulsing("session"), ["starting", "running", "stopping", "stop_pending"]);
+  assert.deepEqual(pulsing("session"), ["starting", "running", "stopping", "children_working", "stop_pending"]);
   // A Stop waiting on an offline runner is not being delivered, so it does not claim progress (#208).
   assert.equal(statusMeta("session", "stop_waiting_for_runner").pulse, false);
   assert.equal(statusMeta("job", "running").pulse, true);

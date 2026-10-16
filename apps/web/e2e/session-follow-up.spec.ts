@@ -172,8 +172,8 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
     const parent = row(page, result);
     const resultBadge = parent.locator(".status");
     const answerBadge = row(page, input).locator(".status");
-    await expect(resultBadge).toHaveText("Ready for Review");
-    await expect(resultBadge).toHaveClass(/t-review/);
+    await expect(resultBadge).toHaveText("Children Working");
+    await expect(resultBadge).toHaveClass(/t-info/);
     await expect(answerBadge).toHaveText("Answer Required");
     await expect(answerBadge).toHaveClass(/t-warning/);
     expect(await resultBadge.evaluate((badge) => getComputedStyle(badge).color))
@@ -196,7 +196,7 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.emulateMedia({ forcedColors: "active" });
     await expect(answerBadge).toHaveAccessibleName("Status: Answer Required");
-    await expect(resultBadge).toHaveAccessibleName("Status: Ready for Review");
+    await expect(resultBadge).toHaveAccessibleName("Status: Children Working");
     await expect(working).toBeVisible();
     await page.emulateMedia({ forcedColors: "none" });
     await page.evaluate(() => {
@@ -241,3 +241,33 @@ for (const width of [1440, 390]) test(`idle priorities and a resumed stalled row
   await expect(row(page, work)).not.toHaveClass(/stalled/);
   await expect(row(page, work).locator(".status")).toHaveText("Running");
 });
+for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
+  test(`background children stay visibly active until their work returns at ${width}px in ${theme} (#3328)`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await open(page);
+    await page.evaluate((theme) => {
+      document.documentElement.dataset.theme = theme;
+      const fixture = window.__WOLLIPOG_PROJECT_INBOX_E2E__;
+      fixture.replaceSessionSnapshot("session-working", { parentSessionId: "session-review", status: "idle", backgroundWorkState: "running" });
+      fixture.replaceSessionSnapshot("session-quiet", { parentSessionId: "session-review", status: "completed" });
+    }, theme);
+    const parent = row(page, result);
+    await expect(parent.locator(".status")).toHaveText("Children Working");
+    await expect(parent.locator(".inbox-thread-dot.running")).toHaveCount(1);
+    await expect(parent.locator('.inbox-thread-dot[title$="Waiting on External Job"]')).toHaveCount(1);
+    await expect(parent.locator(".inbox-thread-family")).toHaveAccessibleName("2 Children · 1 Working");
+    await parent.locator(".inbox-thread-toggle").click();
+    await expect(row(page, work)).toHaveCount(0);
+    await expect(parent.locator(".inbox-thread-working")).toHaveText("1 Working");
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-working", { backgroundWorkState: "continuation_pending" }));
+    await expect(parent.locator(".status")).toHaveText("Children Working");
+    await expect(parent.locator('.inbox-thread-dot[title$="Continuation Pending"]')).toHaveCount(1);
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-working", { backgroundWorkState: "resumed" }));
+    await expect(parent.locator(".status")).toHaveText("Ready for Review");
+    await expect(parent.locator(".inbox-thread-working")).toHaveCount(0);
+    await expect(parent.locator(".inbox-thread-dot.running")).toHaveCount(0);
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-working", { status: "running" }));
+    await expect(parent.locator(".status")).toHaveText("Children Working");
+    await expect(row(page, input).locator(".status")).toHaveText("Answer Required");
+  });
+}

@@ -156,8 +156,8 @@ test("agent-owned child results and requests stay unattended; handed-off results
   assert.deepEqual(sortInboxSessions([parent, child, human]).map(({ id }) => id), ["human", "parent", "child"]);
   const handedOff = { ...child, attention: { ...child.attention!, result: { ...child.attention!.result!, at: 4, owner: "human" as const } } };
   const rows = threadInboxRows(sortInboxSessions([parent, handedOff, human]).map((session) => ({ session })), new Set());
-  assert.deepEqual(rows.map(({ session }) => session.id), ["parent", "child", "human"]);
-  assert.match(inboxThreadChildrenLabel(rows[0]!.thread.children!), /Ready for Review/);
+  assert.deepEqual(rows.map(({ session }) => session.id), ["human", "parent", "child"]);
+  assert.doesNotMatch(inboxThreadChildrenLabel(rows[1]!.thread.children!), /Ready for Review/);
 });
 
 test("a family's Ready for Review counts only descendants at rest, and a working parent keeps its status (#3074)", () => {
@@ -178,7 +178,7 @@ test("a family's Ready for Review counts only descendants at rest, and a working
   assert.equal(sessionRowStatus(restingChild.session, { familyFollowUpLabel: "Ready for Review" }).badge?.meta.label, "Ready for Review");
   // Running parent, at-rest child with a result: the parent shows its working status.
   const runningParent = family("running", "idle");
-  assert.equal(runningParent.thread.children?.followUpLabel, "Ready for Review");
+  assert.equal(runningParent.thread.children?.followUpLabel, undefined);
   assert.equal(sessionRowStatus(runningParent.session, { familyFollowUpLabel: "Ready for Review" }).badge?.meta.label, "Running");
   // A family request that needs the person still shows on a working parent.
   const asking = threadInboxRows([{ session: session("parent", { status: "running" }) },
@@ -485,8 +485,9 @@ test("threadInboxRows nests children under a present parent and drops a collapse
   ]);
   const parent = expanded[0]!.thread;
   assert.equal(parent.collapsed, false);
-  assert.deepEqual(parent.children, { followUpLabel: "Needs Your Input", count: 2, working: 1, waiting: 1, children: [
-    { id: "a", title: "Child A", state: "stalled" }, { id: "b", title: "Child B", state: "done" },
+  assert.deepEqual(parent.children, { followUpLabel: "Needs Your Input", count: 2, visibleCount: 2, hasActiveWork: true, working: 1, waiting: 1, children: [
+    { id: "a", title: "Child A", state: "stalled", statusLabel: "Input Required" },
+    { id: "b", title: "Child B", state: "done", statusLabel: "Completed" },
   ] });
   assert.equal(inboxThreadChildrenLabel(parent.children!), "2 Children · Needs Your Input · 1 Working");
   assert.equal(expanded[2]!.thread.children?.count, 1, "a child with children carries its own rollup");
@@ -767,7 +768,7 @@ test("shouldRestoreInboxScroll only restores when collapsing out of the expanded
 });
 
 
-test("collapsed families retain working descendants alongside an available human result", () => {
+test("collapsed families keep working counts and defer review until all descendants finish", () => {
   const rows = [
     { session: session("parent") },
     { session: session("result", { parentSessionId: "parent", status: "completed", attention: {
@@ -779,11 +780,98 @@ test("collapsed families retain working descendants alongside an available human
   const collapsed = threadInboxRows(rows, new Set(["parent"]));
   assert.equal(collapsed.length, 1);
   assert.equal(collapsed[0]!.thread.children?.working, 2);
-  assert.match(inboxThreadChildrenLabel(collapsed[0]!.thread.children!), /Ready for Review.*2 Working/);
+  assert.match(inboxThreadChildrenLabel(collapsed[0]!.thread.children!), /^2 Children · 2 Working$/);
   const stalled = threadInboxRows(rows, new Set(["parent"]), new Set(["grandchild"]));
   assert.equal(stalled[0]!.thread.children?.working, 1, "a silent grandchild is not presented as working");
-  assert.match(inboxThreadChildrenLabel(stalled[0]!.thread.children!), /Ready for Review.*1 Working/);
+  assert.match(inboxThreadChildrenLabel(stalled[0]!.thread.children!), /^2 Children · 1 Working$/);
   const stopped = threadInboxRows(rows.map((row) => ({ session: { ...row.session,
     status: "completed" as const } })), new Set(["parent"]));
   assert.equal(stopped[0]!.thread.children?.working, 0);
+});
+
+
+test("family review readiness waits for every descendant, including background work (#3328)", () => {
+  const attention = { version: 1 as const, humanActions: [], meaningfulAt: 10,
+    result: { revision: "result", at: 10, owner: "human" as const }, acknowledgedRevision: null };
+  const parent = session("parent", { status: "idle", attention });
+  const finished = session("finished", { status: "completed", parentSessionId: parent.id, attention });
+  const nested = session("nested", { status: "idle", parentSessionId: parent.id });
+  const child = session("child", { status: "running", parentSessionId: nested.id });
+  const standalone = session("standalone", { status: "idle", attention: { ...attention,
+    result: { ...attention.result, at: 1 } } });
+  for (const work of [{ status: "running" as const }, { status: "idle" as const, backgroundWorkState: "running" as const },
+    { status: "idle" as const, backgroundWorkState: "continuation_pending" as const }]) {
+    const sessions = [parent, finished, nested, { ...child, ...work }, standalone];
+    const ordered = sortInboxSessions(sessions);
+    assert.equal(ordered[0]!.id, standalone.id, "an unfinished family is below a completed result");
+    const rows = threadInboxRows(sessions.map((session) => ({ session })), new Set([parent.id]));
+    const row = rows.find(({ session }) => session.id === parent.id)!;
+    const family = row.thread.children!;
+    assert.equal(family.hasActiveWork, true);
+    assert.equal(family.followUpLabel, undefined, "a finished sibling does not make the family ready");
+    assert.equal(family.working, 1);
+    assert.match(inboxThreadChildrenLabel(family), /1 Working/);
+    assert.equal(sessionRowStatus(parent, { familyWorking: family.hasActiveWork,
+      familyFollowUpLabel: family.followUpLabel }).badge?.meta.label, "Children Working");
+  }
+  const rows = threadInboxRows([parent, finished, nested, { ...child, status: "completed" as const }]
+    .map((session) => ({ session })), new Set());
+  const family = rows[0]!.thread.children!;
+  assert.equal(family.hasActiveWork, false);
+  assert.equal(sessionRowStatus(parent, { familyWorking: family.hasActiveWork }).badge?.meta.label, "Ready for Review");
+});
+
+test("background child dots and working counts follow job and continuation transitions (#3328)", () => {
+  for (const backgroundWorkState of ["running", "continuation_pending", "resumed", "orphaned", undefined] as const) {
+    const rows = threadInboxRows([{ session: session("parent") },
+      { session: session("child", { status: "idle", parentSessionId: "parent", backgroundWorkState }) }], new Set());
+    const family = rows[0]!.thread.children!;
+    const active = backgroundWorkState === "running" || backgroundWorkState === "continuation_pending";
+    assert.equal(family.children[0]!.state, active ? "running" : "idle", String(backgroundWorkState));
+    assert.equal(family.working, active ? 1 : 0, String(backgroundWorkState));
+    assert.equal(family.hasActiveWork, active, String(backgroundWorkState));
+    if (active) assert.match(family.children[0]!.statusLabel!, /Waiting on External Job|Continuation Pending/);
+  }
+});
+
+
+test("filtered-out descendants still prevent family review readiness (#3328)", () => {
+  const parent = session("parent");
+  const child = session("child", { parentSessionId: parent.id, status: "idle", backgroundWorkState: "running" });
+  const rows = threadInboxRows([{ session: parent }], new Set(), new Set(), [parent, child]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.thread.children!.hasActiveWork, true);
+  assert.equal(rows[0]!.thread.children!.working, 1);
+  assert.equal(rows[0]!.thread.children!.children[0]!.state, "running");
+});
+
+
+test("an archived child does not reappear in the full-inventory family summary (#3328)", () => {
+  const parent = session("parent");
+  const child = session("child", { parentSessionId: parent.id, status: "completed", archived: true });
+  assert.equal(threadInboxRows([{ session: parent }], new Set(), new Set(), [parent, child])[0]!.thread.children, null);
+});
+
+
+test("a hidden child contributes status without creating an expandable empty thread (#3328)", () => {
+  const parent = session("parent");
+  const child = session("child", { parentSessionId: parent.id, status: "running" });
+  const row = threadInboxRows([{ session: parent }], new Set([parent.id]), new Set(), [parent, child])[0]!;
+  assert.equal(row.thread.children!.visibleCount, 0);
+  assert.equal(row.thread.children!.hasActiveWork, true);
+  assert.equal(row.thread.collapsed, false);
+});
+
+test("project and reminder ordering use children outside the visible split (#3328)", () => {
+  const attention = { version: 1 as const, humanActions: [], meaningfulAt: 10,
+    result: { revision: "r", at: 10, owner: "human" as const }, acknowledgedRevision: null };
+  const parent = session("parent", { status: "idle", projectId: "alpha", attention });
+  const child = session("child", { status: "idle", projectId: "beta", parentSessionId: parent.id, backgroundWorkState: "running" });
+  const result = session("result", { status: "idle", projectId: "alpha", attention: { ...attention,
+    result: { ...attention.result, at: 1 } } });
+  const splits = deriveInboxSplits([parent, child, result], new Set(), new Set(), new Set(), [project("alpha"), project("beta")], true);
+  const alpha = splits.find((split) => split.name === "alpha")!;
+  assert.deepEqual(alpha.sessions.map(({ id }) => id), ["result", "parent"]);
+  assert.deepEqual(sortSessionsForReminders(alpha.sessions, new Map(), "ordinary", new Set(), [parent, child, result])
+    .map(({ id }) => id), ["result", "parent"]);
 });

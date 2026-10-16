@@ -492,7 +492,7 @@ test("the family chip after the badge is an image named by the whole rollup at e
   }
 });
 
-test("Board family review uses the review tone and yields to required input in either child order", async () => {
+test("Board holds family review while the parent runs and prioritizes input in either child order", async () => {
   const attention = { version: 1 as const, meaningfulAt: 10, humanActions: [],
     result: { revision: "r1", at: 10, owner: "human" as const }, acknowledgedRevision: null };
   const parent = session("parent", { status: "running" });
@@ -503,11 +503,10 @@ test("Board family review uses the review tone and yields to required input in e
     const board = await mount({ sessions: [parent, ...children] });
     try {
       const chip = board.card("parent").querySelector(".inbox-thread-family")!;
-      const reviewOnly = children.length === 1;
-      assert.equal(chip.classList.contains("t-review"), reviewOnly);
-      assert.equal(chip.classList.contains("waiting"), !reviewOnly);
-      assert.equal(chip.getAttribute("aria-label"), reviewOnly ? "1 Child · Ready for Review" : "2 Children · 1 Awaiting Input");
-      assert.equal(board.card("parent").querySelector(".status")?.textContent, "Running");
+      assert.equal(chip.classList.contains("t-review"), false);
+      assert.equal(chip.classList.contains("waiting"), children.length > 1);
+      assert.equal(chip.getAttribute("aria-label"), children.length === 1 ? "1 Child" : "2 Children · 1 Awaiting Input");
+      assert.equal(board.card("parent").querySelector(".status")?.textContent, children.length === 1 ? "Running" : "Needs Your Input");
     } finally {
       await board.unmount();
     }
@@ -551,4 +550,35 @@ test("Board family summaries do not call a stalled child working beside a waitin
   } finally {
     await board.unmount();
   }
+});
+
+
+test("Board defers an idle parent's result until background descendants finish (#3328)", async () => {
+  const attention = { version: 1 as const, meaningfulAt: 10, humanActions: [],
+    result: { revision: "r1", at: 10, owner: "human" as const }, acknowledgedRevision: null };
+  for (const backgroundWorkState of ["running", "continuation_pending", "resumed"] as const) {
+    const board = await mount({ sessions: [session("parent", { attention }),
+      session("child", { parentSessionId: "parent", backgroundWorkState })] });
+    try {
+      const card = board.card("parent");
+      assert.equal(card.querySelector(".status")?.textContent,
+        backgroundWorkState === "resumed" ? "Ready for Review" : "Children Working");
+      assert.equal(card.querySelectorAll(".inbox-thread-dot.running").length, backgroundWorkState === "resumed" ? 0 : 1);
+      if (backgroundWorkState !== "resumed") {
+        assert.match(card.querySelector(".inbox-thread-family")!.getAttribute("aria-label")!, /1 Working/);
+        assert.match(card.querySelector(".inbox-thread-dot")!.getAttribute("title")!, /Waiting on External Job|Continuation Pending/);
+      }
+    } finally { await board.unmount(); }
+  }
+});
+
+
+test("an at-rest Board family rolls up its available result with the review tone (#3328)", async () => {
+  const attention = { version: 1 as const, meaningfulAt: 10, humanActions: [],
+    result: { revision: "r1", at: 10, owner: "human" as const }, acknowledgedRevision: null };
+  const board = await mount({ sessions: [session("parent"), session("child", { parentSessionId: "parent", attention })] });
+  try {
+    assert.equal(board.card("parent").querySelector(".status")!.textContent, "Ready for Review");
+    assert.ok(board.card("parent").querySelector(".inbox-thread-family.t-review"));
+  } finally { await board.unmount(); }
 });

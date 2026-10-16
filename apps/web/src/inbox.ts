@@ -9,7 +9,8 @@ import type {
 } from "@wollipog/protocol";
 import { groupLegacySessionsByWorkspace, workspaceLocationKey } from "./projects.js";
 import type { ProjectSessionPreset } from "./project-session-selection.js";
-import { sessionFollowUp } from "./session-follow-up.js";
+import { sessionFollowUp, sessionWorking, sessionsWithWorkingDescendants } from "./session-follow-up.js";
+import { sessionStatusSummary } from "./status-meta.js";
 
 export const INBOX_ALL_SPLIT_KEY = null;
 export const INBOX_NO_PROJECT_SPLIT_KEY = " no-project";
@@ -136,8 +137,9 @@ function sessionOrderKey(
   session: SessionView,
   pinnedSessions: ReadonlySet<string>,
   _stalledSessionIds: ReadonlySet<string>,
+  familyWorking: boolean,
 ): InboxOrderKey {
-  const attention = sessionFollowUp(session);
+  const attention = sessionFollowUp(session, { familyWorking });
   return {
     pinned: pinnedSessions.has(session.id),
     urgency: attention.priority,
@@ -181,10 +183,12 @@ export function sortInboxSessions(
   sessions: Iterable<SessionView>,
   pinnedSessions: ReadonlySet<string> = new Set(),
   stalledSessionIds: ReadonlySet<string> = new Set(),
+  familySessions?: readonly SessionView[],
 ): SessionView[] {
   const all = [...sessions];
   const childrenByParent = inboxChildrenByParent(all);
-  const ownKeys = new Map(all.map((session) => [session.id, sessionOrderKey(session, pinnedSessions, stalledSessionIds)]));
+  const workingFamilies = sessionsWithWorkingDescendants((familySessions ?? all).filter((session) => !session.archived));
+  const ownKeys = new Map(all.map((session) => [session.id, sessionOrderKey(session, pinnedSessions, stalledSessionIds, workingFamilies.has(session.id))]));
   const familyKeys = new Map<string, InboxOrderKey>();
   const familyKey = (session: SessionView, trail: Set<string>): InboxOrderKey => {
     const cached = familyKeys.get(session.id);
@@ -195,6 +199,8 @@ export function sortInboxSessions(
       .filter((child) => !next.has(child.id))
       .map((child) => familyKey(child, next));
     const key = familyOrderKey(own, members);
+    // A completed sibling's result cannot promote an unfinished family above completed work.
+    if ((workingFamilies.has(session.id) || sessionWorking(session)) && key.urgency === 2) key.urgency = 1;
     familyKeys.set(session.id, key);
     return key;
   };
@@ -228,14 +234,19 @@ export interface InboxThreadChild {
   id: string;
   title: string;
   state: InboxThreadChildState;
+  statusLabel?: string;
 }
 
 /** What a parent card says about its thread, whether or not the thread is expanded. */
 export interface InboxThreadChildren {
   followUpLabel?: "Needs Your Input" | "Ready for Review";
   count: number;
+  /** Direct child rows available for expansion after filtering. */
+  visibleCount?: number;
   /** Working descendants, including those hidden by a collapsed nested thread. */
   working?: number;
+  /** Includes blocked or stalled descendants, whose work is still unfinished. */
+  hasActiveWork?: boolean;
   /** Children with a pending request. */
   waiting: number;
   children: InboxThreadChild[];
@@ -273,11 +284,11 @@ export function inboxPinnedAncestorIds(
 
 export function inboxThreadChildState(
   session: Pick<SessionView, "status" | "pendingApproval"> &
-    Partial<Pick<SessionView, "orchestratorCampaign" | "campaignRequests" | "pendingRequestOwners">>,
+    Partial<SessionView>,
   stalled: boolean,
 ): InboxThreadChildState {
   if (isInboxBlocked(session)) return stalled ? "stalled" : "blocked";
-  if (isInboxActiveStatus(session.status)) return "running";
+  if (isInboxActiveStatus(session.status) || sessionWorking(session)) return "running";
   if (session.status === "completed") return "done";
   return "idle";
 }
@@ -314,9 +325,13 @@ export function threadInboxRows<T extends { session: SessionView }>(
   rows: readonly T[],
   collapsedParents: ReadonlySet<string>,
   stalledSessionIds: ReadonlySet<string> = new Set(),
+  familySessions: readonly SessionView[] = rows.map((row) => row.session),
 ): Array<T & { thread: InboxThreadPosition }> {
   const sessions = rows.map((row) => row.session);
   const childrenByParent = inboxChildrenByParent(sessions);
+  const unarchivedFamily = familySessions.filter((session) => !session.archived);
+  const familyChildrenByParent = inboxChildrenByParent(unarchivedFamily);
+  const workingFamilies = sessionsWithWorkingDescendants(unarchivedFamily);
   const rowById = new Map(rows.map((row) => [row.session.id, row]));
   const present = new Set(sessions.map((session) => session.id));
   const out: Array<T & { thread: InboxThreadPosition }> = [];
@@ -327,24 +342,31 @@ export function threadInboxRows<T extends { session: SessionView }>(
     const next = new Set(trail).add(row.session.id);
     const children = (childrenByParent.get(row.session.id) ?? [])
       .filter((child) => !next.has(child.id) && !emitted.has(child.id));
+    const familyChildren = (familyChildrenByParent.get(row.session.id) ?? []).filter((child) => !next.has(child.id));
     const descendants = (members: SessionView[], seen: Set<string>): SessionView[] =>
       members.flatMap((child) => seen.has(child.id) ? [] : [child,
-        ...descendants(childrenByParent.get(child.id) ?? [], new Set(seen).add(child.id))]);
-    const members = descendants(children, next);
-    const strongest = members.map(sessionFollowUp).sort((a, b) => b.priority - a.priority)[0];
-    const summary: InboxThreadChildren | null = children.length === 0 ? null : {
+        ...descendants(familyChildrenByParent.get(child.id) ?? [], new Set(seen).add(child.id))]);
+    const members = descendants(familyChildren, next);
+    const hasActiveWork = workingFamilies.has(row.session.id);
+    const strongest = members.map((member) => sessionFollowUp(member, { familyWorking: workingFamilies.has(member.id) }))
+      .filter((followUp) => !(hasActiveWork || sessionWorking(row.session)) || followUp.group !== "ready_for_review")
+      .sort((a, b) => b.priority - a.priority)[0];
+    const summary: InboxThreadChildren | null = familyChildren.length === 0 ? null : {
       ...(strongest && strongest.priority >= 2 ? { followUpLabel: strongest.group === "needs_input"
         ? "Needs Your Input" as const : "Ready for Review" as const } : {}),
-      count: children.length,
+      count: familyChildren.length,
+      visibleCount: children.length,
+      hasActiveWork,
       working: members.filter((child) => !stalledSessionIds.has(child.id) && inboxThreadChildState(child, false) === "running").length,
-      waiting: children.filter((child) => isInboxBlocked(child)).length,
-      children: children.map((child) => ({
+      waiting: familyChildren.filter((child) => isInboxBlocked(child)).length,
+      children: familyChildren.map((child) => ({
         id: child.id,
         title: child.title,
         state: inboxThreadChildState(child, stalledSessionIds.has(child.id)),
+        statusLabel: sessionStatusSummary(child).primary.meta.label,
       })),
     };
-    const collapsed = summary !== null && collapsedParents.has(row.session.id);
+    const collapsed = children.length > 0 && collapsedParents.has(row.session.id);
     out.push({ ...row, thread: { depth, parentId, last, children: summary, collapsed } });
     if (collapsed) return;
     children.forEach((child, index) => {
@@ -452,7 +474,7 @@ export function deriveInboxSplits(
         group.key,
         group.id === null ? "no_project" : "project",
         group.name,
-        sortInboxSessions(group.sessions, pinnedSessions, stalledSessionIds),
+        sortInboxSessions(group.sessions, pinnedSessions, stalledSessionIds, visible),
         stalledSessionIds,
         descriptor,
       );
@@ -471,7 +493,7 @@ export function deriveInboxSplits(
     durableInboxProjectKey(project.id),
     "project",
     project.name,
-    sortInboxSessions(visible.filter((session) => session.projectId === project.id), pinnedSessions, stalledSessionIds),
+    sortInboxSessions(visible.filter((session) => session.projectId === project.id), pinnedSessions, stalledSessionIds, visible),
     stalledSessionIds,
     {
       kind: "durable",
@@ -485,6 +507,7 @@ export function deriveInboxSplits(
     visible.filter((session) => session.projectId == null),
     pinnedSessions,
     stalledSessionIds,
+    visible,
   );
   const noProject = [inboxSplit(
       INBOX_NO_PROJECT_SPLIT_KEY,
