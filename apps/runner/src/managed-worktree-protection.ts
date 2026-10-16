@@ -2713,6 +2713,210 @@ function inspectsAncestorOnly(
   }
 }
 
+/* ---------------------------------------------------------------------------------------------
+ * Reading a command the way bash does, not the way the tokenizer happens to (#1734).
+ *
+ * `shell-quote` diverges from bash in three ways that each turned into a wrong verdict here. The
+ * pre-pass below corrects all three, every correction fail-closed: anything it cannot parse with
+ * confidence it leaves untouched, so the fallback is the old, stricter reading.
+ *
+ *  - COMMENTS. Bash begins a comment only at the start of a word, and ends it at the newline. The
+ *    tokenizer treats ANY `#` as a comment and runs it to the end of the whole string, so every
+ *    command after the first `#` silently vanished — a real UNDER-refusal, since `echo x#; cat
+ *    <state>` then reached the state unseen. Comments are removed to the end of their LINE; a
+ *    mid-word `#` is kept (escaped, so the tokenizer keeps it too).
+ *  - QUOTED HEREDOC BODIES. A `<<'E'` body handed to a copy-only consumer (`cat`, `tee`) is inert
+ *    data: the consumer writes it to its operand or redirect target, both of which the classifier
+ *    still inspects, so the body provably cannot reach the state. Its `/`, `//`, and `${...}` no
+ *    longer read as paths. A body opened by an UNQUOTED delimiter (it expands), or handed to
+ *    anything that executes it (a shell, an unknown command), or spelled inside a pipe/subshell
+ *    where the consumer is not the command that wrote the `<<`, is kept and scanned exactly as
+ *    before — so a write INTO the state, or a read of it after the heredoc, is still refused.
+ *  - REJECTED `${...}`. A substitution bash accepts but the tokenizer rejects (an embedded space,
+ *    a `%`/`#`/`:` operator) was refused outright. It is reduced to a reference to its leading
+ *    name, so the command is classified on its merits; an assigned name still substitutes, so
+ *    nothing that reached the state through a variable stops being refused.
+ * ------------------------------------------------------------------------------------------ */
+
+/**
+ * Consumers that copy a heredoc body to a destination without executing it. Their write targets are
+ * ordinary operands or redirects, which the classifier inspects regardless, so a quoted body they
+ * receive is data that cannot itself reach the guard state. Anything else keeps its body.
+ */
+const GUARD_STATE_HEREDOC_DATA_CONSUMERS = new Set(["cat", "tee"]);
+
+/** The opaque name a `${...}` with no leading identifier is reduced to: unknown, never assigned. */
+const GUARD_STATE_OPAQUE_SUBSTITUTION = "__WOLLIPOG_GUARD_SUB__";
+
+/** The reference a `${...}` is reduced to: its leading identifier, or an opaque, never-assigned name
+ *  when it has none. Keeping the leading name means an assigned variable still substitutes. */
+function leadingSubstitutionName(inner: string): string {
+  return /^[A-Za-z_][A-Za-z0-9_]*/u.exec(inner)?.[0] ?? GUARD_STATE_OPAQUE_SUBSTITUTION;
+}
+
+/**
+ * Reduce every `${...}` in a span of LITERAL text (a heredoc body, which the delimiter quoting keeps
+ * unparsed) to `${leadingName}`, so a substitution the tokenizer would reject does not refuse the
+ * whole command. Braces are matched by depth, so an embedded space or `%`/`#`/`:` operator — the
+ * exact forms shell-quote rejects — is dropped rather than left to break tokenizing.
+ */
+function reduceBraceSubstitutions(text: string): string {
+  if (!text.includes("${")) return text;
+  let out = "";
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] === "$" && text[i + 1] === "{") {
+      let depth = 0;
+      let j = i + 1;
+      for (; j < text.length; j += 1) {
+        if (text[j] === "{" && text[j - 1] === "$") depth += 1;
+        else if (text[j] === "}") { depth -= 1; if (depth === 0) break; }
+      }
+      if (j < text.length) { out += `\${${leadingSubstitutionName(text.slice(i + 2, j))}}`; i = j; continue; }
+      out += text.slice(i); break; // unbalanced: leave verbatim
+    }
+    out += text[i];
+  }
+  return out;
+}
+
+interface PendingHeredoc { delimiter: string; dashStrip: boolean; strip: boolean }
+
+const GUARD_STATE_WORD_BOUNDARY = new Set([" ", "\t", "\n", "\r", ";", "&", "|", "<", ">", "(", ")"]);
+const GUARD_STATE_COMMAND_BOUNDARY = new Set([";", "&", "|", "\n", "\r", "(", ")"]);
+const GUARD_STATE_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/u;
+
+/**
+ * Rewrite a command so the guard-state classifier reads it as bash would. See the block comment
+ * above for the three corrections; everything the scanner cannot parse with confidence is emitted
+ * verbatim, so the result is never read MORE permissively than the raw command was.
+ */
+export function prepareGuardStateCommand(command: string): string {
+  const n = command.length;
+  let out = "";
+  let quote: "'" | '"' | null = null;
+  let inWord = false;           // inside a word: a `#` here is literal, not a comment
+  let firstWord = "";           // the current simple command's first word, for consumer detection
+  let firstWordComplete = false;
+  let segmentAmbiguous = false; // a leading redirect or an assignment first word: never a clean consumer
+  // A pipe, subshell, backtick, or command substitution in a COMMAND region (heredoc bodies are
+  // skipped) means a body's consumer is not the word that wrote the `<<`, so no body is stripped.
+  // Set persistently once seen; a quoted body full of these metacharacters never reaches here.
+  let routingSeen = false;
+  const pending: PendingHeredoc[] = [];
+  let i = 0;
+
+  const resetSegment = () => { firstWord = ""; firstWordComplete = false; segmentAmbiguous = false; };
+  const settleFirstWord = (isRedirect: boolean) => {
+    if (firstWord === "") { if (isRedirect) segmentAmbiguous = true; return; }
+    if (!firstWordComplete) {
+      firstWordComplete = true;
+      if (GUARD_STATE_ASSIGNMENT.test(firstWord)) segmentAmbiguous = true;
+    }
+  };
+  const addWordChar = (ch: string) => { if (!firstWordComplete) firstWord += ch; inWord = true; };
+  const strippableConsumer = () =>
+    !routingSeen && !segmentAmbiguous && GUARD_STATE_HEREDOC_DATA_CONSUMERS.has(firstWord);
+
+  // Drop the remaining body lines of `pending`, keeping the lines of a non-strip heredoc verbatim.
+  const consumeBodies = () => {
+    while (pending.length > 0 && i < n) {
+      let lineEnd = i;
+      while (lineEnd < n && command[lineEnd] !== "\n" && command[lineEnd] !== "\r") lineEnd += 1;
+      const line = command.slice(i, lineEnd);
+      const terminatorLine = pending[0]!.dashStrip ? line.replace(/^\t+/u, "") : line;
+      const sep = command.slice(lineEnd, Math.min(lineEnd + 1, n)); // the single \n or \r, if any
+      const isTerminator = terminatorLine === pending[0]!.delimiter;
+      // A kept body is still scanned (a shell executes it), but a `${...}` in it is literal data that
+      // must not break tokenizing, so it is reduced the same way a command-region one is (#1734).
+      if (!pending[0]!.strip) out += (isTerminator ? line : reduceBraceSubstitutions(line)) + sep;
+      if (isTerminator) pending.shift();
+      i = lineEnd + (sep ? 1 : 0);
+    }
+  };
+
+  while (i < n) {
+    const c = command[i]!;
+    if (quote === "'") { out += c; if (c === "'") quote = null; i += 1; continue; }
+    if (quote === '"') {
+      if (c === "\\") { out += c + (command[i + 1] ?? ""); i += 2; continue; }
+      if (c === "$" && command[i + 1] === "{") { i = emitSubstitution(i); continue; }
+      out += c; if (c === '"') quote = null; i += 1; continue;
+    }
+    if (c === "\\") { out += c + (command[i + 1] ?? ""); i += 2; addWordChar("\\"); continue; }
+    if (c === "'" || c === '"') { quote = c; out += c; addWordChar(c); i += 1; continue; }
+    if (c === "#" && !inWord) { // a comment: drop to end of line, leaving the newline itself
+      while (i < n && command[i] !== "\n" && command[i] !== "\r") i += 1;
+      continue;
+    }
+    if (c === "#") { out += "\\#"; addWordChar("#"); i += 1; continue; } // mid-word: literal, escaped
+    if (c === "`") { out += c; routingSeen = true; inWord = false; i += 1; continue; }
+    if (c === "$" && command[i + 1] === "{") { i = emitSubstitution(i); continue; }
+    // `<<<` is a here-string (its word is on the line, no body); emit it whole so its trailing `<<`
+    // is never mistaken for a heredoc operator.
+    if (c === "<" && command[i + 1] === "<" && command[i + 2] === "<") {
+      settleFirstWord(true); out += "<<<"; inWord = false; i += 3; continue;
+    }
+    if (c === "<" && command[i + 1] === "<") { i = handleHeredocOperator(i); continue; }
+    if (c === "\n" || c === "\r") {
+      out += c; inWord = false; resetSegment(); i += 1;
+      if (pending.length > 0) consumeBodies();
+      continue;
+    }
+    if (c === " " || c === "\t") { settleFirstWord(false); out += c; inWord = false; i += 1; continue; }
+    if (GUARD_STATE_WORD_BOUNDARY.has(c)) { // an operator: `;`, `&`, `|`, redirects, `(`, `)`
+      settleFirstWord(c === "<" || c === ">" || c === "&");
+      if (c === "|") for (const p of pending) p.strip = false; // this body feeds the pipeline
+      if (c === "(") routingSeen = true;
+      out += c; inWord = false;
+      if (GUARD_STATE_COMMAND_BOUNDARY.has(c)) resetSegment();
+      i += 1;
+      continue;
+    }
+    out += c; addWordChar(c); i += 1;
+  }
+  return out;
+
+  /** Emit a `${...}` as `${leadingName}`, dropping the operators the tokenizer chokes on. */
+  function emitSubstitution(start: number): number {
+    let depth = 0;
+    let j = start + 1; // at the `{`
+    for (; j < n; j += 1) {
+      if (command[j] === "{" && command[j - 1] === "$") depth += 1;
+      else if (command[j] === "}") { depth -= 1; if (depth === 0) break; }
+    }
+    if (j >= n) { out += command.slice(start); addWordChar("$"); return n; } // unbalanced: verbatim
+    out += `\${${leadingSubstitutionName(command.slice(start + 2, j))}}`;
+    addWordChar("$");
+    return j + 1;
+  }
+
+  /** Consume a `<<`/`<<-` operator and its delimiter; emit it unless this heredoc is strippable. */
+  function handleHeredocOperator(start: number): number {
+    settleFirstWord(true); // the `<<` ends the command word; a leading one marks the segment ambiguous
+    let j = start + 2;
+    const dashStrip = command[j] === "-";
+    if (dashStrip) j += 1;
+    while (j < n && (command[j] === " " || command[j] === "\t")) j += 1;
+    let delimiter = "";
+    let quoted = false;
+    let dq: "'" | '"' | null = null;
+    while (j < n) {
+      const ch = command[j]!;
+      if (dq) { if (ch === dq) { dq = null; } else { delimiter += ch; } j += 1; continue; }
+      if (ch === "'" || ch === '"') { dq = ch; quoted = true; j += 1; continue; }
+      if (ch === "\\") { quoted = true; delimiter += command[j + 1] ?? ""; j += 2; continue; }
+      if (GUARD_STATE_WORD_BOUNDARY.has(ch)) break;
+      delimiter += ch; j += 1;
+    }
+    if (delimiter === "") { out += command.slice(start, j); inWord = false; return j; }
+    const strip = quoted && strippableConsumer();
+    pending.push({ delimiter, dashStrip, strip });
+    if (!strip) out += command.slice(start, j);
+    inWord = false;
+    return j;
+  }
+}
+
 /**
  * Refuse a shell command that references the guard-state directory in any form. Unparsable input
  * is refused rather than allowed: this is the state the veto itself depends on. An operand that is
@@ -2726,8 +2930,11 @@ export function commandTargetsGuardState(
 ): string | null {
   if (!directory || !command || command.length > MAX_COMMAND_LENGTH || command.includes("\0")) return null;
   const root = resolve(directory);
+  // Read the command as bash would before matching: comments, quoted copy-only heredoc bodies, and
+  // substitutions the tokenizer rejects all turned into wrong verdicts otherwise (#1734).
+  const prepared = prepareGuardStateCommand(command);
   const foldCase = process.platform === "win32" || process.platform === "darwin";
-  const haystack = foldCase ? command.toLowerCase() : command;
+  const haystack = foldCase ? prepared.toLowerCase() : prepared;
   // Raw text first: concatenations, inline `--settings=<path>`, and quoting styles that tokenize
   // in ways a path comparison would miss still name the directory verbatim.
   for (const candidate of [root, root.split(sep).join("/")]) {
@@ -2738,7 +2945,7 @@ export function commandTargetsGuardState(
     // `$HOME` is as direct a spelling of the data directory's parent as `~`; every other variable
     // stays opaque, which is the documented limit of a command-text matcher. It is kept in place as
     // a reference so the word around it stays whole (see `guardStateReadings`).
-    tokens = parse(command, (name) => name === "HOME" ? homedir() : reference(name)) as ShellToken[];
+    tokens = parse(prepared, (name) => name === "HOME" ? homedir() : reference(name)) as ShellToken[];
   } catch (error) {
     // Still refused: this is the state the veto itself depends on. The raw-text scan above has
     // already refused any command that names the hook directory outright.
@@ -2797,11 +3004,12 @@ export function commandTargetsGuardState(
   };
   // A backtick nests a command the tokenizer does not separate, and a newline would silently join
   // two commands into one; nothing in either is inspectable.
-  const segments = /[`\n\r]/u.test(command) ? null : commandSegments(tokens);
+  const segments = /[`\n\r]/u.test(prepared) ? null : commandSegments(tokens);
   if (segments === null) {
     // Nothing here is an inspection, so any related word refuses. A word INSIDE the hook directory
     // names the guard state itself. One that only encloses it is refused because the command cannot
-    // be inspected, which is what the refusal then says: a quoted heredoc's data can read as `/`.
+    // be inspected, which is what the refusal then says: a kept heredoc's data can read as `/`
+    // (a copy-only quoted body is removed before this point and no longer reaches here — #1734).
     let enclosing = false;
     for (const token of tokens) {
       const value = tokenText(token);

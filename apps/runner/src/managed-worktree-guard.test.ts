@@ -16,6 +16,7 @@ import {
   guardStateClassifierWork,
   guardStateRelation,
   pathTargetsGuardState,
+  prepareGuardStateCommand,
 } from "./managed-worktree-protection.js";
 import { runnerReentryCommand } from "./runner-reentry.js";
 import {
@@ -1313,11 +1314,20 @@ test("a variable the command itself assigns is judged by its value (#1632 review
   assert.equal(commandTargetsGuardState("S=/tmp/x; for d in a b; do cat $S/$d/outdated.txt; done", project, directory), null);
 });
 
-test("a command the tokenizer cannot parse is refused for that reason, not blamed on guard state (#1632)", (t) => {
+test("a substitution the tokenizer cannot balance is refused for that reason, not blamed on guard state (#1632)", (t) => {
   const { project, directory } = guardLayout(t);
-  // A quoted heredoc is never expanded by the shell, but the tokenizer rejects a `${...}` holding a
-  // quote, which is what every JS template literal with a string argument looks like.
-  for (const command of ["node - <<'EOF'\nconsole.log(`${items.join(\", \")}`)\nEOF", "echo ${x"]) {
+  // A `${...}` bash accepts but the tokenizer once rejected — a template literal, an embedded space,
+  // a `%`/`#`/`:` operator — is now reduced to its leading name before parsing, so the command is
+  // judged on its merits instead of refused outright (#1734).
+  for (const command of [
+    "node - <<'EOF'\nconsole.log(`${items.join(\", \")}`)\nEOF",
+    "echo ${scrollHeight - 500}",
+    "echo ${r%% *}",
+  ]) {
+    assert.equal(commandTargetsGuardState(command, project, directory), null, command);
+  }
+  // A substitution the tokenizer cannot even balance stays refused, and says the tokenizer is why.
+  for (const command of ["echo ${x", "echo \"${y"]) {
     const verdict = commandTargetsGuardState(command, project, directory);
     assert.ok(verdict?.startsWith(GUARD_STATE_UNINSPECTABLE_PREFIX), `${command}: ${verdict}`);
     assert.ok(verdict?.includes("Bad substitution"), `${command}: ${verdict}`);
@@ -1333,21 +1343,20 @@ test("a command the tokenizer cannot parse is refused for that reason, not blame
 
 const REFUSED_IN_1696 = new URL("./fixtures/guard-refusals-1632/", import.meta.url);
 
-test("the heredocs refused while delivering #1696 are attributed to their real cause (#1632)", (t) => {
+test("the heredocs refused while delivering #1696 are now allowed, naming no hook state (#1734)", (t) => {
   const { project, directory } = guardLayout(t);
-  // Both carry a JS template literal inside a quoted heredoc, which the tokenizer rejects.
-  for (const name of ["heredoc-jsx-template.txt", "heredoc-js-template.txt"]) {
+  // Every one edits ordinary project files. The template literals' `${...}` once broke the tokenizer;
+  // the `// comment` body once read as the word `//`, the root directory. None names the hook state,
+  // so each is allowed now: the template substitutions are reduced before parsing, and the comment
+  // heredoc is a copy-only `cat >` whose quoted body is inert data (#1734).
+  for (const name of ["heredoc-jsx-template.txt", "heredoc-js-template.txt", "heredoc-js-comment.txt"]) {
     const command = readFileSync(new URL(name, REFUSED_IN_1696), "utf8").replaceAll("<session-worktree>", project);
-    const verdict = commandTargetsGuardState(command, project, directory);
-    assert.ok(verdict?.startsWith(GUARD_STATE_UNINSPECTABLE_PREFIX) && verdict.includes("Bad substitution"),
-      `${name}: ${verdict}`);
+    assert.equal(commandTargetsGuardState(command, project, directory), null, name);
   }
-  // This one parses, but its body's `// comment` reads as the word `//`: the root directory, which
-  // encloses the hook directory. A heredoc is not modelled, so it stays refused, and says why.
-  const comment = readFileSync(new URL("heredoc-js-comment.txt", REFUSED_IN_1696), "utf8")
-    .replaceAll("<session-worktree>", project);
-  const verdict = commandTargetsGuardState(comment, project, directory);
-  assert.ok(verdict?.startsWith(GUARD_STATE_UNINSPECTABLE_PREFIX) && verdict.includes("heredoc"), verdict ?? "");
+  // A heredoc whose BODY is executed and reaches the hook state is still refused — the quoted body of
+  // an interpreter is kept and scanned, so a Python edit that opens the protections file is caught.
+  const reaching = "python3 - <<'EOF'\nopen('../.wollipog-data/hooks/s1.protections.json').read()\nEOF";
+  assert.equal(commandTargetsGuardState(reaching, project, directory), GUARD_STATE_REFUSAL);
 });
 
 test("an unmodelled command naming a directory that holds the guard state stays refused (#1632)", (t) => {
@@ -1359,7 +1368,6 @@ test("an unmodelled command naming a directory that holds the guard state stays 
     `ls ${home} | xargs rm -rf`,
     `rm -rf \`echo ${data}\``,
     `python3 - <<'EOF'\nimport shutil\nshutil.rmtree('${data}')\nEOF`,
-    `cat > /tmp/x <<'EOF'\n// a comment\nEOF`,
   ]) {
     const verdict = commandTargetsGuardState(command, project, directory);
     assert.ok(verdict?.startsWith(GUARD_STATE_UNINSPECTABLE_PREFIX), `${command}: ${verdict}`);
@@ -1377,4 +1385,79 @@ test("an unmodelled command naming a directory that holds the guard state stays 
   // An unmodelled command that names nothing related is still allowed, as before.
   assert.equal(commandTargetsGuardState("cat > /tmp/x <<'EOF'\nhello\nEOF", project, directory), null);
   assert.equal(commandTargetsGuardState("ls /usr | wc -l", project, directory), null);
+  // A copy-only `cat >` writing a quoted heredoc body is now allowed even when the body holds `//`,
+  // `/`, or a `${...}` the tokenizer rejects: the body is inert data, not a path (#1734).
+  assert.equal(commandTargetsGuardState("cat > /tmp/x <<'EOF'\n// a comment\nEOF", project, directory), null);
+});
+
+test("ordinary commands reaching nothing are allowed, and every real access stays refused (#1734)", (t) => {
+  const { home, project, data, directory } = guardLayout(t);
+  const into = "../.wollipog-data/hooks/s1.protections.json"; // relative, so the raw-text scan cannot catch it
+  // ALLOWED: a quoted heredoc body written to a worktree path is inert data — its `/`, `//`, `${...}`,
+  // or even the hook directory's own path as text no longer read as a path the command touches.
+  for (const command of [
+    "cat > a.ts <<'EOF'\n// a / b\nEOF",
+    "cat >> x.test.ts <<'EOF'\nconst u = a//b; // c\nEOF",
+    "cat > a.ts <<'EOF'\nconst x = `${scrollHeight - 500}`;\nEOF",
+    "cat > a.ts <<'EOF'\nid = ${spec.sessionId}\nEOF",
+    "tee out.txt <<'EOF'\n/usr/bin\nEOF",
+    `cat > notes.md <<'EOF'\n${directory}\nEOF`,
+    "cat <<'EOF'\n/ // ${x}\nEOF",
+    "cat <<-'EOF'\n\t/ indented body\n\tEOF",
+    // A substitution bash accepts but the tokenizer rejects no longer refuses on its own.
+    "echo ${r%% *}",
+    "echo ${scrollHeight - 500}",
+    "x=foo; echo ${x%% *}",
+    // A comment that ends at its line leaves the real command on the next line intact.
+    "echo done # a trailing note",
+  ]) {
+    assert.equal(commandTargetsGuardState(command, project, directory), null, command);
+  }
+  // REFUSED: every real access to the hook state, including the shapes the tokenizer once mis-read.
+  for (const command of [
+    // A heredoc written INTO the hook directory, or read of it after a heredoc, is still refused.
+    `cat > ${join(directory, "s1.protections.json")} <<'EOF'\n{}\nEOF`,
+    `cat >> ${join(directory, "s1.protections.json")} <<'EOF'\nx\nEOF`,
+    `cat > a.ts <<'EOF'\nbody\nEOF\ncat ${into}`,
+    `cat ${into} <<'EOF'\nbody\nEOF`,
+    // A comment must not swallow the command that follows it (an under-refusal before #1734).
+    `echo x#; cat ${into}`,
+    `ls # a comment\ncat ${into}`,
+    `echo x#; echo y > ${into}`,
+    // An UNQUOTED heredoc expands, so its body is kept and scanned, conservatively.
+    `cat > a.ts <<EOF\n${into}\nEOF`,
+    // A body handed to a shell is executed, so it is kept and scanned.
+    `bash <<'EOF'\nrm -rf ${into}\nEOF`,
+    // The ancestor and root triggers the report lists.
+    "find / -name s1.protections.json",
+    `cd / && cat ${directory.slice(1)}/s1.protections.json`,
+    "rm -rf /",
+    `grep -r token ${home}`,
+  ]) {
+    assertGuardRefused(commandTargetsGuardState(command, project, directory), command);
+  }
+});
+
+test("the bash-faithful pre-pass never throws and opens no bypass under noise (#1734)", (t) => {
+  const { project, directory } = guardLayout(t);
+  // The scanner tolerates any input, and its rewrite never smuggles in a NUL (the one byte the
+  // classifier treats as an unresolved reference).
+  fc.assert(fc.property(fc.string({ maxLength: 160 }), (s) => {
+    commandTargetsGuardState(s, project, directory);
+    return !prepareGuardStateCommand(s).includes("\0");
+  }), { numRuns: 1500 });
+  // A command whose operand reads or writes the hook file is refused whatever comment, heredoc, or
+  // substitution noise precedes it: the pre-pass must never drop the reaching word.
+  const reaching = fc.constantFrom(
+    join(directory, "s1.protections.json"),
+    "../.wollipog-data/hooks/s1.protections.json",
+    join(directory, "sub", "..", "s1.protections.json"),
+  );
+  const verb = fc.constantFrom("cat", "rm -rf", "cp /tmp/x", "mv", "stat", "truncate -s0");
+  const noise = fc.constantFrom(
+    "", "echo hi; ", "echo a#; ", "ls # c\n", "x=1; ",
+    "cat > f.ts <<'EOF'\n// a / b ${x}\nEOF\n", "cat >> g.ts <<'EOF'\nconst z=`${a - 1}`//c\nEOF\n",
+  );
+  fc.assert(fc.property(reaching, verb, noise, (path, v, pre) =>
+    commandTargetsGuardState(`${pre}${v} ${path}`, project, directory) !== null), { numRuns: 2000 });
 });
