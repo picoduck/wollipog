@@ -78,6 +78,14 @@ See `docs/ci-aggregation.md` for the exact predicate and verification limits.
 `Browser End-to-End Tests` is the long pole at roughly 20–30 minutes, and the merge group re-runs it,
 so expect that wait twice: once on the branch and once after enqueueing.
 
+**A merge group that fails on a test your pull request does not touch usually means `main` is red.**
+Before investigating your change, check `main`'s own runs
+(`gh run list --workflow ci.yml --branch main --event push --limit 5`) and look for an open
+**Main CI Is Failing** issue. Admin bypasses and security-advisory merges reach `main` without the
+queue, so they can break it. If `main` fails the same test, wait for the fix and re-enqueue the
+unchanged head behind it. Never change your pull request to work around a red `main`. To land a
+change outside the queue, follow `docs/main-ci-health.md`.
+
 The `Platform Isolation` jobs are not required. A failure there does not block the merge, but it
 should be explained rather than ignored — check whether it reproduces on the base commit before
 attributing it to your change.
