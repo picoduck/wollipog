@@ -77,8 +77,9 @@ test("real WSL Direct launcher rejects aliases and Windows PE execution", {
       if (trace) outer.splice(outer.indexOf(WSL_BWRAP_LAUNCHER_PATH), 0,
         "/usr/bin/strace", "-f", "-e", "trace=execve,execveat,socket,connect", "-o", `${root}/interop.trace`);
       execFile("wsl.exe", outer, { timeout: 20_000, windowsHide: true }, (error, stdout, stderr) => {
-        if (error && typeof error.code !== "number") reject(error);
-        else resolve({ code: error?.code ?? 0, stdout, stderr });
+        if (!error) resolve({ code: 0, stdout, stderr });
+        else if (typeof error.code === "number") resolve({ code: error.code, stdout, stderr });
+        else reject(error);
       });
     });
     const smoke = await launch("/bin/true", []);
