@@ -2,6 +2,7 @@
 
 import type { PromptImage, SessionConfig } from "@wollipog/protocol";
 import { AcpClient } from "../acp.js";
+import { killTree, ProviderProcessLedger, spawnAgent } from "../spawn.js";
 import type {
   Driver,
   DriverCallbacks,
@@ -19,8 +20,17 @@ export class AcpDriver implements Driver {
   private readonly orchestrator: boolean;
   private readonly orchestratorRole: boolean;
   private readonly preparedCommands = new WeakSet<object>();
+  /** The agent process. It is spawned without a descendant owner, so its boundary terminates
+   * survivors when it closes and the ledger proves it individually. Terminals are proven by the
+   * client's terminal service. */
+  private readonly processes = new ProviderProcessLedger();
+  private readonly proofs = new Map<boolean, Promise<boolean>>();
 
-  constructor(opts: DriverOptions, cb: DriverCallbacks) {
+  constructor(
+    opts: DriverOptions,
+    cb: DriverCallbacks,
+    deps: { spawn?: typeof spawnAgent; kill?: typeof killTree } = {},
+  ) {
     this.orchestrator = opts.config.permissionMode === "orchestrator";
     // The coupled preset above is only one way to hold the Orchestrator role; runner-owned role
     // metadata is another, and it survives a session that does not carry the preset literal. The
@@ -46,6 +56,13 @@ export class AcpDriver implements Driver {
         descendantMarker: opts.descendantMarker,
       },
       cb,
+      {
+        spawn: (spawnOptions) => {
+          this.processes.assertOpen();
+          return this.processes.record((deps.spawn ?? spawnAgent)(spawnOptions));
+        },
+        kill: deps.kill ?? killTree,
+      },
     );
     this.resumeId = opts.resumeId;
     this.initialConfig = this.providerConfig(opts.config);
@@ -132,5 +149,16 @@ export class AcpDriver implements Driver {
 
   dispose(): void {
     this.client.dispose();
+  }
+
+  /** See Driver.proveProcessTreeExit: the agent's tree and every client terminal's tree. WSL and
+   * Windows launches, and spawns without a pid, have no POSIX boundary and stay unproven. */
+  proveProcessTreeExit(options: { terminate: boolean }): Promise<boolean> {
+    const existing = this.proofs.get(options.terminate);
+    if (existing) return existing;
+    const proof = Promise.all([this.processes.prove(options), this.client.proveTerminalTreesGone()])
+      .then((results) => results.every(Boolean), () => false);
+    this.proofs.set(options.terminate, proof);
+    return proof;
   }
 }

@@ -16,6 +16,7 @@ const TARGET = "/tmp/wollipog-claude-provider-pipe";
 const owners = new WeakMap<object, ClaudeNamespace>();
 const namespaces = new Set<ClaudeNamespace>();
 const virtualKills = new WeakMap<AgentProcess, () => Promise<boolean>>();
+const virtualNamespaces = new WeakMap<AgentProcess, ClaudeNamespace>();
 const TASK_PREFIX = "wollipog-claude-tasks-";
 
 function processStartTime(pid: number): string | undefined {
@@ -228,7 +229,21 @@ class VirtualProvider extends EventEmitter {
   }
 }
 
-class ClaudeNamespace {
+/** What a provider process ledger may observe about the namespace a virtual provider runs in. */
+export interface ClaudeNamespaceLifetime {
+  /** The outer bwrap process has closed. */
+  readonly ended: boolean;
+  /** The outer closed after this runner's TERMINATE frame without the SIGKILL fallback. Only then
+   * did the in-namespace supervisor stop every process itself. A SIGKILLed outer can close a moment
+   * before the kernel has finished tearing down its PID namespace, and an outer that closed on its
+   * own proves nothing about the work it hosted, so neither counts. */
+  readonly endedGracefully: boolean;
+  /** Memoized TERMINATE, bounded SIGKILL fallback and task-root cleanup; true when it closed and
+   * its task root was removed. */
+  dispose(): Promise<boolean>;
+}
+
+class ClaudeNamespace implements ClaudeNamespaceLifetime {
   readonly token = randomBytes(16);
   readonly outer: ChildProcessWithoutNullStreams;
   readonly tempRoot: string;
@@ -236,6 +251,10 @@ class ClaudeNamespace {
   ready = false;
   ended = false;
   cleaned = false;
+  private terminateSent = false;
+  private controlFailed = false;
+  private killed = false;
+  private closedAfterTerminate = false;
   generation = 0;
   private finishedGeneration = 0;
   active: VirtualProvider | undefined;
@@ -283,7 +302,10 @@ class ClaudeNamespace {
       throw error;
     }
     this.outer.stdout.on("data", (data: Buffer) => this.receive(data));
-    this.outer.stdin.on("error", (error) => this.fail(error));
+    this.outer.stdin.on("error", (error) => {
+      this.controlFailed = true;
+      this.fail(error);
+    });
     namespaces.add(this);
     this.outer.stderr.on("data", (data: Buffer) => {
       if (this.errorText.length < 8192) this.errorText += data.toString().slice(0, 8192 - this.errorText.length);
@@ -291,6 +313,7 @@ class ClaudeNamespace {
     this.outer.once("error", (error) => this.fail(error));
     this.outer.once("close", (code) => {
       this.ended = true;
+      this.closedAfterTerminate = this.terminateSent && !this.controlFailed;
       this.fail(new Error(`Claude namespace ended${code == null ? "" : ` with code ${code}`}: ${this.errorText.trim()}`));
       try {
         rmSync(this.tempRoot, { recursive: true, force: true });
@@ -320,6 +343,7 @@ class ClaudeNamespace {
     const generation = ++this.generation;
     const virtual = new VirtualProvider(this, generation);
     this.active = virtual;
+    virtualNamespaces.set(virtual as unknown as AgentProcess, this);
     virtualKills.set(virtual as unknown as AgentProcess, async () => {
       // Before READY, this namespace has never accepted a provider. There can
       // be no retained work in it, so a failed first launch may close it.
@@ -418,12 +442,17 @@ class ClaudeNamespace {
     if (!this.ended) void this.dispose();
   }
 
+  get endedGracefully(): boolean {
+    return this.ended && this.closedAfterTerminate && !this.killed;
+  }
+
   dispose(): Promise<boolean> {
     if (this.disposal) return this.disposal;
     this.disposal = new Promise<boolean>((resolve) => {
       if (this.ended) { resolve(this.cleaned); return; }
       const timer = setTimeout(() => {
         if (this.outer.pid) {
+          this.killed = true;
           try { process.kill(-this.outer.pid, "SIGKILL"); } catch { /* already dead */ }
         }
       }, 2000);
@@ -431,7 +460,10 @@ class ClaudeNamespace {
       this.outer.once("close", () => {
         clearTimeout(timer); clearTimeout(deadline); resolve(this.cleaned);
       });
-      try { this.send(6, 0); } catch { /* kill timer handles a broken pipe */ }
+      try {
+        this.send(6, 0);
+        this.terminateSent = true;
+      } catch { /* kill timer handles a broken pipe */ }
       try { this.outer.stdin.end(); } catch { /* kill timer handles a broken pipe */ }
     });
     return this.disposal;
@@ -476,6 +508,12 @@ export function claudeNamespaceHostTaskPath(owner: object, providerPath: string)
 
 export function cancelClaudeNamespaceProvider(child: AgentProcess): Promise<boolean> | undefined {
   return virtualKills.get(child)?.();
+}
+
+/** The namespace a virtual provider runs in. Non-destructive, and unlike the owner lookups it keeps
+ * answering after the namespace has closed. */
+export function claudeNamespaceFor(child: AgentProcess): ClaudeNamespaceLifetime | undefined {
+  return virtualNamespaces.get(child);
 }
 
 export function terminateClaudeNamespaces(owner?: object): Promise<boolean>[] {

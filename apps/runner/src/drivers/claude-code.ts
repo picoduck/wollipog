@@ -41,7 +41,16 @@ import {
   type ManagedWorktreeProtection,
 } from "../managed-worktree-protection.js";
 import { classifyRoutineClaudeOrchestratorPermission } from "../orchestrator-provider-permissions.js";
-import { killTree, spawnAgent, terminateDescendantBoundaries, trackPendingKill, type AgentProcess, type SpawnAgentOptions, type SpawnIsolation } from "../spawn.js";
+import {
+  killTree,
+  ProviderProcessLedger,
+  spawnAgent,
+  terminateDescendantBoundaries,
+  trackPendingKill,
+  type AgentProcess,
+  type SpawnAgentOptions,
+  type SpawnIsolation,
+} from "../spawn.js";
 import type {
   Driver,
   DriverBackgroundJob,
@@ -541,7 +550,11 @@ export class ClaudeCodeDriver implements Driver {
   private oneShotProbeAbort: AbortController | null = null;
   private config: SessionConfig;
   private readonly deps: ClaudeDriverDeps;
-  private readonly descendantOwner = {};
+  /** Every process this instance starts. Its owner is the descendant owner of the provider spawns
+   * and keys the Claude namespace those spawns share. */
+  private readonly processes = new ProviderProcessLedger();
+  /** Graceful EOF retirements started by dispose(); a terminating proof must not preempt them. */
+  private disposeBarrier: Promise<unknown> | null = null;
   private readonly persistentRequested: boolean;
   private readonly persistentIdleMs: number;
   private readonly pendingMaxMs: number;
@@ -953,7 +966,10 @@ export class ClaudeCodeDriver implements Driver {
     ];
     let child: AgentProcess;
     try {
-      child = this.deps.spawn({
+      this.processes.assertOpen();
+      // No descendantOwner: the probe's boundary is terminated when it closes, so the ledger proves
+      // it on its own.
+      child = this.processes.record(this.deps.spawn({
         command: this.opts.command,
         args,
         cwd,
@@ -973,7 +989,7 @@ export class ClaudeCodeDriver implements Driver {
         containerAgentLaunch: true,
         cloudAgentLaunch: true,
         descendantMarker: options?.descendantMarker ?? this.opts.descendantMarker,
-      });
+      }));
     } catch (err) {
       throw new Error(`Claude fork failed to spawn: ${(err as Error).message}`);
     }
@@ -1272,7 +1288,8 @@ export class ClaudeCodeDriver implements Driver {
 
       let child: AgentProcess;
       try {
-        child = this.deps.spawn({
+        this.processes.assertOpen();
+        child = this.processes.record(this.deps.spawn({
           command: this.opts.command,
           args,
           cwd: this.cwd,
@@ -1291,11 +1308,11 @@ export class ClaudeCodeDriver implements Driver {
           isolation: this.opts.isolation,
           containerAgentLaunch: true,
           cloudAgentLaunch: true,
-          descendantOwner: this.descendantOwner,
+          descendantOwner: this.processes.owner,
           claudeNamespaceProvider: true,
           claudeNamespaceSessionId: this.sessionId,
           descendantMarker: this.opts.descendantMarker,
-        });
+        }));
       } catch (err) {
         this.cb.onEvent({ kind: "error", message: (err as Error).message });
         return resolve("refusal");
@@ -1568,7 +1585,8 @@ export class ClaudeCodeDriver implements Driver {
 
       let child: AgentProcess;
       try {
-        child = this.deps.spawn({
+        this.processes.assertOpen();
+        child = this.processes.record(this.deps.spawn({
           command: this.opts.command,
           args,
           cwd: this.cwd,
@@ -1587,11 +1605,11 @@ export class ClaudeCodeDriver implements Driver {
           isolation: this.opts.isolation,
           containerAgentLaunch: true,
           cloudAgentLaunch: true,
-          descendantOwner: this.descendantOwner,
+          descendantOwner: this.processes.owner,
           claudeNamespaceProvider: true,
           claudeNamespaceSessionId: this.sessionId,
           descendantMarker: this.opts.descendantMarker,
-        });
+        }));
       } catch (err) {
         this.openPersistentCircuit(`persistent claude spawn failed: ${(err as Error).message}`, turn);
         return;
@@ -1948,7 +1966,7 @@ export class ClaudeCodeDriver implements Driver {
     launchType?: DriverBackgroundLaunchType,
     parentPersistentTurnId?: number,
   ): void {
-    if (outputFile) outputFile = claudeNamespaceHostTaskPath(this.descendantOwner, outputFile);
+    if (outputFile) outputFile = claudeNamespaceHostTaskPath(this.processes.owner, outputFile);
     // A task this driver ended stays ended (#1778, #1780). Claude may still report it afterwards:
     // its trailing `stopped` notification, or an async-launch tool result that trails a stop made
     // while the task was being launched.
@@ -2210,7 +2228,7 @@ export class ClaudeCodeDriver implements Driver {
 
   private nativeDiscoveryRoots() {
     return {
-      tempRoot: claudeNamespaceTempRoot(this.descendantOwner) ??
+      tempRoot: claudeNamespaceTempRoot(this.processes.owner) ??
         this.opts.env.TMPDIR ?? this.opts.env.TEMP ?? this.opts.env.TMP,
       claudeHome: this.opts.env.HOME ? join(this.opts.env.HOME, ".claude") : undefined,
       projectsRoot: this.providerProjectsRoot(),
@@ -2234,8 +2252,8 @@ export class ClaudeCodeDriver implements Driver {
       this.pendingBackgroundTasks.keys(),
       { env: {
         ...this.opts.env,
-        ...(claudeNamespaceTempRoot(this.descendantOwner)
-          ? { TMPDIR: claudeNamespaceTempRoot(this.descendantOwner) } : {}),
+        ...(claudeNamespaceTempRoot(this.processes.owner)
+          ? { TMPDIR: claudeNamespaceTempRoot(this.processes.owner) } : {}),
       }, projectsRoot: this.providerProjectsRoot() },
     ), continuationRequired);
   }
@@ -2774,10 +2792,29 @@ export class ClaudeCodeDriver implements Driver {
     // The owner drain must not preempt the persistent provider's five-second EOF window. The
     // pending-kill registry drains in waves, so cleanup registered by this continuation is still
     // included in runner shutdown.
+    // A terminating process-tree proof waits for the same retirements, plus one an earlier stop
+    // already started, and for any earlier dispose() call's.
+    this.disposeBarrier = Promise.allSettled([
+      this.disposeBarrier, this.retiringPersistentTransport, ...retirements,
+    ]);
     if (retirements.length > 0) {
-      void Promise.allSettled(retirements).then(() => this.deps.terminateDescendants(this.descendantOwner));
+      void Promise.allSettled(retirements).then(() => this.deps.terminateDescendants(this.processes.owner));
     } else {
-      this.deps.terminateDescendants(this.descendantOwner);
+      this.deps.terminateDescendants(this.processes.owner);
+    }
+  }
+
+  /** See Driver.proveProcessTreeExit. The terminating proof waits for dispose()'s graceful EOF
+   * retirements first: it ends survivors, and ending them inside the grace window would cut the
+   * provider's own shutdown short. A Claude namespace is proven only by a graceful TERMINATE
+   * (ProviderProcessLedger), and Windows, WSL, container and cloud launches have no boundary, so
+   * their references are kept. */
+  async proveProcessTreeExit(options: { terminate: boolean }): Promise<boolean> {
+    try {
+      if (options.terminate && this.disposeBarrier) await this.disposeBarrier;
+      return await this.processes.prove(options);
+    } catch {
+      return false;
     }
   }
 

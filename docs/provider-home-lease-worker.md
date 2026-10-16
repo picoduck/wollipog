@@ -87,7 +87,8 @@ Session providers and temporary fork providers work the same way per driver inst
 The proof comes from `ProviderProcessLedger` (spawn.ts), which records every process the instance starts:
 
 - A child spawned with the ledger's owner is covered by the owner's POSIX boundaries, which stay registered until proven gone.
-- Any other child is proven individually.
+- Any other child is proven individually. A child without an owner (a per-turn probe, say) has its boundary terminated when it closes, so its proof is settled then: a true result drops it from the ledger, and a false one makes every later proof false. Children therefore do not accumulate over a long session.
+- A Claude virtual provider (the protected `bwrap` launch) has no boundary of its own; its namespace is the unit of proof, described below.
 - A child without a boundary, or any untracked work the instance has run, makes the proof false. The Codex MCP inventory and permission-profile probes run outside a boundary and kill only their own process group, so a descendant that left the group could outlive them. A driver that ran one keeps its reference until shutdown.
 - Proving seals the ledger, so the instance can start nothing afterwards.
 
@@ -101,7 +102,17 @@ A failed construction keeps the reference if a constructor ran, and releases it 
 
 Session handles live as long as their sessions. A runner with 512 open session handles gives later launches a plain reference until shutdown, so the worker's 1024-handle pool stays free for transactions and probes.
 
-Codex exec, Pi and Codex app-server prove their trees. Claude Code and ACP do not yet, so they keep their references. Agent TUIs and launch preparation also still keep theirs until shutdown.
+Codex exec, Pi, Codex app-server, Claude Code and ACP prove their trees. Agent TUIs and launch preparation still keep their references until shutdown.
+
+**Claude Code** records its one-shot and persistent provider spawns under the ledger's owner, and its resume and fork accounting probe without one, so the probe is proven on its own.
+
+- **Graceful stop:** `dispose()` gives a persistent provider its EOF grace window, then kills it, and only then ends the owner's survivors. The killing proof waits for those same retirements first, so it never cuts the grace window short.
+- **Protected namespace:** when the provider runs inside its `bwrap` namespace, the namespace counts as gone only when it closed after the runner's TERMINATE frame, without the SIGKILL fallback, and its task root was removed. A SIGKILLed outer process can close a moment before the kernel has finished tearing down the PID namespace, and a namespace that closed on its own proves nothing about the work it hosted, so both keep the reference.
+- **Namespace disposal:** the killing proof starts or joins the namespace's disposal. The non-killing proof only checks that the namespace already ended that way, so a live namespace, such as one with retained background tasks, keeps the reference.
+
+**ACP** records its agent process without an owner, so the agent's survivors are still terminated when it closes and the agent is proven on its own. Each client terminal keeps its own owner, so releasing one terminal never ends another's retained work. The terminal service records how each terminal's tree ended, whether by kill, release or disposal (a command that exited on its own keeps its retained work until one of those). Once the service is disposed, the terminals count as gone only when every recorded ending proved its tree gone; a false result stays false. The ACP proof is the agent's proof and the terminals' proof together.
+
+Both drivers keep the reference for Windows, WSL, container and cloud launches, for a spawn without a pid, and for a terminal without a POSIX boundary.
 
 A missing, late, malformed, duplicate or mismatched completion, failed cancellation unwind, worker
 error or unexpected exit poisons the lane. It rejects further work, retains canonical evidence and
