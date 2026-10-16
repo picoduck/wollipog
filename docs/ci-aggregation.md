@@ -26,6 +26,31 @@ so unrelated PRs, main pushes, and distinct merge-group refs remain independent.
 Merge-group runs retain the same cancellation admission, dependency checks and required name.
 The separate obsolete-merge-group monitor and CI permissions are unchanged.
 
+## Same-Head Runs
+
+GitHub can start two `pull_request` runs for one head commit, for example when a
+pull request is retargeted and force-pushed within the same second (#3283). When
+both shared one lane with `cancel-in-progress: true`, one was cancelled, and its
+`cancelled` aggregator stayed on that head beside the other run's `success`. The
+head's check rollup then read `FAILURE` and the pull request stayed blocked until
+someone re-ran the cancelled run.
+
+Pull-request lanes therefore also include the head commit, and pull-request runs
+never cancel in progress (`cancel-in-progress` is `true` only for other events).
+A second run of the same head waits for the first and then runs to completion, so
+no cancelled required check is left on a head that is still current.
+
+Runs of an older head are cancelled by `.github/workflows/pr-ci-supersede.yml`
+instead. On `workflow_run` `in_progress` for a CI `pull_request` run, it runs the
+default branch's `scripts/pr-ci-supersede.mjs`, never the pull request's code. That
+script acts only when every open pull request from the run's head repository and
+branch is ready and has that run's head commit. It re-reads that just before
+cancelling, and then cancels only active CI `pull_request` runs of the same head
+repository and branch on other head commits. A draft head supersedes nothing, as
+draft events never displaced a ready run before. If the evidence is unavailable or
+a cancel is refused, older-head CI simply runs to completion: that costs runner
+time, never the current head's required check.
+
 ## Bounds and Evidence Limits
 
 The aggregator owns one shell step and retains a five-minute job budget, measured
@@ -53,7 +78,8 @@ same-head replacement, dependency-timeout, or cancellation interleaving.
 Run the dedicated source contract and aggregation fixtures:
 
 ```sh
-node --import tsx --test scripts/workflow-pr-event-contract.test.mjs scripts/workflow-ci-aggregation.test.mjs
+node --import tsx --test scripts/workflow-pr-event-contract.test.mjs scripts/workflow-ci-aggregation.test.mjs \
+  scripts/pr-ci-supersede.test.mjs
 ```
 
 The aggregation fixtures evaluate the actual job condition using inert status

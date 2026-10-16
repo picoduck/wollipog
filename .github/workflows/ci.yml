@@ -23,8 +23,11 @@ permissions:
 concurrency:
   # A draft synchronize event can be delivered after ready_for_review. Keep stale
   # draft events in a separate lane so they cannot evict the runnable ready event.
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.event.action != 'ready_for_review' && 'draft' || 'active' }}
-  cancel-in-progress: true
+  # Pull-request lanes are per head commit and never cancel in progress: two runs GitHub starts
+  # for one head would otherwise cancel each other and leave a cancelled required check on that
+  # head (#3283). The pr-ci-supersede workflow cancels runs of older heads instead.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.event.action != 'ready_for_review' && 'draft' || 'active' }}-${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || 'ref' }}
+  cancel-in-progress: ${{ github.event_name != 'pull_request' }}
 
 jobs:
   # The required status context "Typecheck, Test & Sidecar Bundle" is the `check` job below. It
