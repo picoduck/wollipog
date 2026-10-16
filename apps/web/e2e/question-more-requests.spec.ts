@@ -24,9 +24,8 @@ async function expectHeaderReachable(card: Locator) {
 }
 
 for (const viewport of [
-  { width: 844, height: 390 },
-  { width: 667, height: 375 },
-  { width: 390, height: 844 },
+  { width: 932, height: 430 },
+  { width: 1024, height: 600 },
   { width: 1440, height: 900 },
 ]) {
   for (const activation of ["pointer", "touch"] as const) {
@@ -67,7 +66,7 @@ for (const viewport of [
   }
 }
 
-for (const viewport of [{ width: 844, height: 390 }, { width: 667, height: 375 }]) {
+for (const viewport of [{ width: 932, height: 430 }]) {
   test(`wheel scrolling reaches the footer with More Requests open at ${viewport.width}×${viewport.height} (#2942)`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto("/agent-questions-e2e.html?set=long-text&more=1&after=40");
@@ -125,41 +124,28 @@ for (const viewport of [{ width: 844, height: 390 }, { width: 667, height: 375 }
 
 for (const viewport of [{ width: 667, height: 375 }, { width: 390, height: 500 }]) {
   for (const keyboardSignal of [false, true]) {
-    test(`touch collapse with More Requests open preserves a draft and reachable answers at ${viewport.width}×${viewport.height}, keyboard signal ${keyboardSignal} (#2942)`, async ({ page }) => {
+    test(`touch collapse with More Requests preserves the draft at ${viewport.width}×${viewport.height}, keyboard signal ${keyboardSignal} (#2942, #3308)`, async ({ page }) => {
       await page.setViewportSize(viewport);
       await page.goto("/agent-questions-e2e.html?set=long-text&more=1&after=40");
+      const expand = page.getByRole("button", { name: "Expand Request", exact: true });
+      await expand.tap();
       const card = page.locator(".request-dock .question-card");
       const more = page.locator(".request-dock-more .disclosure-trigger");
-      await more.click();
-      const toggle = card.locator(".question-reading-toggle");
-      await toggle.tap();
-      await expect(toggle).toHaveAttribute("aria-expanded", "true");
+      await more.tap();
       await card.getByRole("radio", { name: "Something Else…" }).check();
       const field = card.locator(".question-input");
       await field.fill("Preserve the open-list draft");
       if (keyboardSignal) await page.evaluate(() => window.setAgentQuestionKeyboard(true));
       await scrollToEnd(card);
-      await toggle.tap();
-      await expect(toggle).toHaveAttribute("aria-expanded", "false");
+      await card.getByRole("button", { name: "Collapse Question", exact: true }).tap();
+      await expect(expand).toBeFocused();
+      await expect(card).toBeHidden();
+      await expand.tap();
       await expect(field).toHaveValue("Preserve the open-list draft");
-      await expect(field).toBeFocused();
-      // The compact card keeps its existing layout; scroll its answers into reach without closing
-      // More Requests or moving focus out of the draft field.
-      const dock = page.locator(".request-dock");
-      const box = await dock.boundingBox();
-      if (!box) throw new Error("Missing dock bounds");
-      await page.mouse.move(box.x + box.width / 2, box.y + box.height - 15);
-      await page.mouse.wheel(0, 700);
-      await expect(card.getByRole("button", { name: "Submit Answers" })).toBeInViewport();
-      await expect(field).toBeFocused();
-      await page.mouse.wheel(0, -700);
-      await expect.poll(() => card.evaluate((element) => element.scrollTop)).toBe(0);
-      // Compact keyboard mode intentionally hides the header until the keyboard closes (#2205).
-      if (keyboardSignal) await page.evaluate(() => window.setAgentQuestionKeyboard(false));
-      await field.evaluate((element) => (element as HTMLTextAreaElement).blur());
-      await expect(card).not.toHaveAttribute("data-keyboard-open", "");
-      await expectHeaderReachable(card);
       await expect(more).toHaveAttribute("aria-expanded", "true");
+      await field.scrollIntoViewIfNeeded();
+      await expect(field).toBeInViewport();
+      await expect(card.getByRole("button", { name: "Submit Answers" })).toBeInViewport();
       expect(await page.evaluate(() => window.agentQuestionCalls)).toEqual([]);
     });
   }

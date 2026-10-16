@@ -13,6 +13,7 @@ import type { FollowTailState } from "../../useFollowTail.js";
 import { ChevronRightIcon, ChevronUpIcon } from "../Icons.js";
 import { SessionQuestionBanner } from "../SessionApproval.js";
 import { useRemovedFocus } from "../useRemovedFocus.js";
+import { useIsCoarsePointer, useIsMobile, useIsShortViewport } from "../useIsMobile.js";
 import { registerRequestIntent, registerRequestRevealer } from "./request-reveal.js";
 import { RequestCard, type RequestIntentHandler } from "./RequestCard.js";
 import { PreviewQuestionCard } from "./PreviewQuestionCard.js";
@@ -58,6 +59,11 @@ export interface DockWhereAsked {
  * arrives meanwhile is announced once. Returning to the tail restores the card and leaves focus where
  * it is; activating the strip restores it and moves focus to its heading, and it then stays expanded
  * until the reader is back at the tail.
+ *
+ * Mobile session questions (#3308) start in that strip, including at the live tail. Expanding
+ * opens full reading mode directly, and collapsing returns to the strip. A short coarse-pointer
+ * viewport keeps this behavior when the phone rotates. Desktop and Sessions previews retain
+ * the compact card.
  */
 export function RequestDock({
   session,
@@ -114,6 +120,13 @@ export function RequestDock({
    * `requests`, so the question shows once. */
   composerAnswer?: { requestId: string; onAnswer: () => void };
 }) {
+  const mobile = useIsMobile();
+  const coarsePointer = useIsCoarsePointer();
+  const shortViewport = useIsShortViewport();
+  // A phone on its side can be wider than the mobile breakpoint. Previews keep their
+  // own capped presentation; only a full session has a reading column to expand into.
+  const singleLineQuestions = readingAvailable && !onAnswerInSession &&
+    (mobile || (coarsePointer && shortViewport));
   const [selectedId, setSelectedId] = useState<string | null>(() => revealRequestId ?? null);
   const [moreOpen, setMoreOpen] = useState(false);
   const listId = useId();
@@ -129,10 +142,11 @@ export function RequestDock({
   // The question or workflow decision the person expanded to read (#2786, #2874). Expanding selects
   // it, as choosing it from "+N More" does, so a request that arrives ahead waits there before and after it collapses;
   // while it is read the dock does not shrink to its strip either.
-  const [readingId, setReadingId] = useState<string | null>(null);
+  const [readingRequest, setReadingRequest] = useState<PendingApproval | null>(() => singleLineQuestions
+    ? requests.find((request) => request.requestId === revealRequestId) ?? null : null);
   // Read when the card reports that reading ended, which runs after the render that ended it.
-  const readingIdRef = useRef<string | null>(null);
-  const reading = readingId !== null && expanded?.requestId === readingId;
+  const readingIdRef = useRef<string | null>(readingRequest?.requestId ?? null);
+  const reading = readingRequest !== null && expanded !== undefined && occurrenceKey(expanded) === occurrenceKey(readingRequest);
 
   // Reading back shrinks the dock to its strip, unless the person expanded it since leaving the tail.
   const readingBack = followTailState === "paused";
@@ -142,14 +156,16 @@ export function RequestDock({
     setHeldOpen(false);
     setShrunk(false);
   }
-  const collapsed = readingBack && !heldOpen && shrunk && !reading;
+  const collapsed = singleLineQuestions && expanded?.kind === "question"
+    ? !reading
+    : readingBack && !heldOpen && shrunk && !reading;
   // A question collapsed after reading stays up, as a card the person expanded from its strip does,
   // even if the reader left the tail while it was read.
   // Show Where Asked ends reading first, so the strip it asks for takes the card's place.
   const readingChange = (requestId: string, next: boolean) => {
     if (next) {
       readingIdRef.current = requestId;
-      setReadingId(requestId);
+      setReadingRequest(requestsRef.current.find((request) => request.requestId === requestId) ?? null);
       setSelectedId(requestId);
       return;
     }
@@ -157,11 +173,11 @@ export function RequestDock({
       readingIdRef.current = null;
       setHeldOpen(true);
     }
-    setReadingId((current) => current === requestId ? null : current);
+    setReadingRequest((current) => current?.requestId === requestId ? null : current);
   };
   const endReading = () => {
     readingIdRef.current = null;
-    setReadingId(null);
+    setReadingRequest(null);
   };
   const collapsedRef = useRef(collapsed);
   collapsedRef.current = collapsed;
@@ -170,6 +186,7 @@ export function RequestDock({
   const restore = () => {
     focusHeading.current = true;
     setHeldOpen(true);
+    if (singleLineQuestions && expanded?.kind === "question") readingChange(expanded.requestId, true);
   };
   // The strip waits until the reader is at least the height it gives back above the tail. Nearer, the
   // taller transcript would have nothing below its rows to fill, and the browser's clamp would move
@@ -217,13 +234,18 @@ export function RequestDock({
     focusHeading.current = true;
     setHeldOpen(true);
     setSelectedId(requestId);
+    if (singleLineQuestions && requestsRef.current.find((request) => request.requestId === requestId)?.kind === "question") {
+      readingChange(requestId, true);
+    }
     return true;
-  }), [session.id]);
+  }), [session.id, singleLineQuestions]);
 
   useLayoutEffect(() => {
     if (!focusHeading.current) return;
     focusHeading.current = false;
-    headingRef.current?.focus();
+    // A full-height question can have a heading taller than the viewport. Native focus
+    // scrolling would reveal its last lines after the card has positioned its first line.
+    headingRef.current?.focus({ preventScroll: reading });
   });
   // A decision removes the button that had focus. The next request's heading takes it, so a keyboard
   // stays in the dock; with nothing left, the request coordinator returns focus to the composer. A
@@ -337,6 +359,7 @@ export function RequestDock({
                       onClick={() => {
                         focusHeading.current = true;
                         setSelectedId(request.requestId);
+                        if (singleLineQuestions && request.kind === "question") readingChange(request.requestId, true);
                         setMoreOpen(false);
                       }}
                     >
@@ -400,6 +423,7 @@ export function RequestDock({
             keyboardOpen={keyboardOpen}
             intentRef={intentRef}
             topRequest={expanded === requests[0]}
+            readingExpanded={readingAvailable ? reading : undefined}
             onReadingChange={readingAvailable ? (next) => readingChange(expanded.requestId, next) : undefined}
             onAnswer={composerAnswer?.requestId === expanded.requestId ? composerAnswer.onAnswer : undefined}
             whereAsked={whereAsked && {

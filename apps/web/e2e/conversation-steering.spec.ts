@@ -926,7 +926,11 @@ test.describe("on a coarse pointer", () => {
           },
         });
       });
-      await expect(page.locator(".request-dock").getByRole("button", { name: "Answer", exact: true })).toBeVisible();
+      if (width <= 760) {
+        await expect(page.locator(".request-dock").getByRole("button", { name: "Expand Request", exact: true })).toBeVisible();
+      } else {
+        await expect(page.locator(".request-dock").getByRole("button", { name: "Answer", exact: true })).toBeVisible();
+      }
       await expect(page.locator(".composer-box > .composer-mode")).toBeVisible();
       await expectStripTouchAreasOwnTheirTaps(page);
     });

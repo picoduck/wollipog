@@ -42,7 +42,7 @@ async function expectReadingMode(page: Page) {
 test.describe("workflow decision reading mode (#2874)", () => {
   test.use({ hasTouch: true });
   for (const viewport of [
-    { width: 390, height: 844 }, { width: 844, height: 390 }, { width: 1440, height: 900 },
+    { width: 932, height: 430 }, { width: 1440, height: 900 },
   ]) {
     test(`the question header expands and collapses in place at ${viewport.width}px`, async ({ page }) => {
       await page.setViewportSize(viewport);
@@ -118,7 +118,7 @@ test.describe("workflow decision reading mode (#2874)", () => {
     await page.goto("/agent-questions-e2e.html?set=paragraph&style=composer");
     await page.getByRole("button", { name: "Exit Answer Mode", exact: true }).click();
     const question = page.locator(".request-dock .question-card");
-    await question.getByRole("button", { name: "Show Full Question" }).click();
+    await page.getByRole("button", { name: "Expand Request", exact: true }).click();
     await expect(page.locator(".request-dock")).toHaveAttribute("data-reading", "");
     const geometry = await page.evaluate(() => ({
       column: document.querySelector(".chat-reading")!.getBoundingClientRect().height,

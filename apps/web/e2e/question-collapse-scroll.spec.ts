@@ -25,7 +25,7 @@ async function expectHeaderVisible(card: Locator) {
   }), { message: "the entire collapsed header stays visible and its toggle is clickable" }).toBe(true);
 }
 
-for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }]) {
+for (const viewport of [{ width: 1024, height: 600 }, { width: 932, height: 430 }]) {
   for (const activation of ["focused click", "nonfocusing click", "touch"] as const) {
     test(`header collapse after scrolling preserves the answer and transcript at ${viewport.width}×${viewport.height} with ${activation} (#2928)`, async ({ page }) => {
       await page.setViewportSize(viewport);
@@ -69,7 +69,7 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
 }
 
 test("nonfocusing header collapse also reveals the header after inline expansion (#2928)", async ({ page }) => {
-  await page.setViewportSize({ width: 844, height: 390 });
+  await page.setViewportSize({ width: 932, height: 430 });
   await page.goto("/agent-questions-e2e.html?set=long-text&more=1&after=40");
   const card = page.locator(".request-dock .question-card");
   await card.getByRole("button", { name: "Show Full Question" }).click();
@@ -85,25 +85,22 @@ test("nonfocusing header collapse also reveals the header after inline expansion
   await expect(title).toBeFocused();
 });
 
-test("touch header collapse preserves a focused draft and reveals the header when the keyboard closes (#2928)", async ({ page }) => {
+test("touch header collapse returns a focused draft to the mobile strip (#2928, #3308)", async ({ page }) => {
   await page.setViewportSize({ width: 667, height: 375 });
   await page.goto("/agent-questions-e2e.html?set=long-text&more=1&after=40");
+  const expand = page.getByRole("button", { name: "Expand Request", exact: true });
+  await expand.tap();
   const card = page.locator(".request-dock .question-card");
-  const toggle = card.locator(".question-reading-toggle");
-  await toggle.tap();
-  await expect(toggle).toHaveAttribute("aria-expanded", "true");
   await card.getByRole("radio", { name: "Something Else…" }).check();
   const field = card.locator(".question-input");
   await field.fill("Keep this answer draft");
-  await card.evaluate((element) => { element.scrollTop = element.scrollHeight; });
-  await toggle.tap();
-  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await card.evaluate(element => { element.scrollTop = element.scrollHeight; });
+  await card.getByRole("button", { name: "Collapse Question", exact: true }).tap();
+  await expect(expand).toBeVisible();
+  await expect(expand).toBeFocused();
+  await expect(card).toBeHidden();
+  await expand.tap();
   await expect(field).toHaveValue("Keep this answer draft");
-  // holdFieldFocus preserves the phone's keyboard through the click; collapse must not steal it.
-  await expect(field).toBeFocused();
-  // Compact keyboard mode deliberately hides the header (#2205). Closing the keyboard reveals it.
-  await field.evaluate((element) => (element as HTMLTextAreaElement).blur());
-  await expect(card).not.toHaveAttribute("data-keyboard-open", "");
-  await expectHeaderVisible(card);
+  await expect(card.getByRole("button", { name: "Collapse Question", exact: true })).toBeInViewport();
   expect(await page.evaluate(() => window.agentQuestionCalls)).toEqual([]);
 });

@@ -1,3 +1,4 @@
+import { openMobileQuestion } from "./open-mobile-question.js";
 import { expect, test, type Page } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFile } from "node:fs/promises";
@@ -140,7 +141,9 @@ async function expectQuestionControlsInsideCard(page: Page): Promise<void> {
   // The question is the transcript's last row; the virtual list mounts it once the reader is there.
   await page.locator(".detail-scroll").evaluate((element) => { element.scrollTop = element.scrollHeight; });
   await expect(page.locator(".detail-scroll .ask-marker")).toHaveCount(1);
-  await expect(page.locator(".detail-scroll .ask-marker").getByRole("button", { name: "Jump to Question", exact: true })).toBeVisible();
+  const jump = page.locator(".detail-scroll .ask-marker").getByRole("button", { name: "Jump to Question", exact: true });
+  if (await card.getAttribute("data-question-expanded") === "") await expect(jump).toBeHidden();
+  else await expect(jump).toBeVisible();
   await expect(page.locator(".detail-scroll").getByRole("radio")).toHaveCount(0);
 
   const rects = await page.locator(
@@ -410,6 +413,8 @@ for (const style of ["interactive", "composer"] as const) test(`Claude AskUserQu
       localStorage.setItem("wollipog.question-response-style", responseStyle);
     }, style);
     await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
+    await page.locator(".request-dock, .composer-answer").first().waitFor();
+    await openMobileQuestion(page);
 
     // Composer Response shows the question once: Answer Mode opens on its own, and the card leaves
     // the dock (#2212).
@@ -481,6 +486,8 @@ for (const style of ["interactive", "composer"] as const) test(`Codex structured
       localStorage.setItem("wollipog.question-response-style", responseStyle);
     }, style);
     await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
+    await page.locator(".request-dock, .composer-answer").first().waitFor();
+    await openMobileQuestion(page);
 
     // Composer Response shows the question once: Answer Mode opens on its own, and the card leaves
     // the dock (#2212).
@@ -564,6 +571,8 @@ for (const viewport of [
     });
     await page.addInitScript(() => localStorage.setItem("wollipog.question-response-style", "interactive"));
     await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
+    await page.locator(".request-dock, .composer-answer").first().waitFor();
+    await openMobileQuestion(page);
     await expect(page.locator(".tl-agent-msg")).toHaveCount(1);
     await expect(page.locator(".tl-agent-msg")).toContainText("I will keep investigating.");
     if (evidenceDir) {
@@ -586,13 +595,15 @@ for (const viewport of [
     await expect(card.locator(".request-card-kind")).toHaveText("Async Question");
     await expect(card.locator(".question-text")).toContainText("End of Context. Choose the next action.");
     await page.reload();
+    await page.locator(".request-dock").waitFor();
+    await openMobileQuestion(page);
     await expect(card.locator(".request-card-kind")).toHaveText("Async Question");
     if (viewport.name === "desktop") {
       await stack.restart();
       await page.reload();
       await expect(card.locator(".request-card-kind")).toHaveText("Async Question");
     }
-    await card.getByRole("button", { name: "Show Full Question", exact: true }).click();
+    if (await card.getAttribute("data-question-expanded") !== "") await card.getByRole("button", { name: "Show Full Question", exact: true }).click();
     await card.getByText("End of Context. Choose the next action.", { exact: true }).scrollIntoViewIfNeeded();
     await beat(2_500);
     await card.getByRole("radio", { name: "Patch" }).click();
@@ -672,6 +683,8 @@ for (const viewport of [
           });
           await page.addInitScript(() => localStorage.setItem("wollipog.question-response-style", "composer"));
           await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
+          await page.locator(".request-dock, .composer-answer").first().waitFor();
+          await openMobileQuestion(page);
           const answer = page.locator(".composer-answer-input");
           await expect(answer).toBeVisible();
           await capture("before");
@@ -757,6 +770,8 @@ test("an async answer refused by a full queue can be resubmitted safely", async 
       sessionId: stack.sessionId, actualAsyncMessage: "1" });
     await page.addInitScript(() => localStorage.setItem("wollipog.question-response-style", "composer"));
     await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
+    await page.locator(".request-dock, .composer-answer").first().waitFor();
+    await openMobileQuestion(page);
     await page.locator(".composer-answer-input").fill("1");
     await page.getByRole("button", { name: "Submit Answers" }).click();
     await expect.poll(async () => (await fetchSession(stack)).pendingPrompts
@@ -815,6 +830,8 @@ for (const provider of ["claude", "codex"] as const) {
             localStorage.setItem("wollipog.question-response-style", responseStyle);
           }, style);
           await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
+          await page.locator(".request-dock, .composer-answer").first().waitFor();
+          await openMobileQuestion(page);
 
           // The card, or in Composer Response the composer alone (#2212), says the question was
           // recovered and that answering resumes the conversation once.
@@ -962,7 +979,11 @@ for (const viewport of [
           queued: "1",
         });
         await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
+        await page.locator(".request-dock, .composer-answer").first().waitFor();
+        await openMobileQuestion(page);
         await page.reload();
+        await page.locator(".request-dock").waitFor();
+        await openMobileQuestion(page);
 
         const submit = page.getByRole("button", { name: "Submit Answers" });
         const next = page.getByRole("button", { name: "Next", exact: true });
@@ -1066,6 +1087,8 @@ for (const provider of ["claude", "codex"] as const) {
         const fragment = new URLSearchParams({ origin: stack.httpBase, token: stack.ownerToken, sessionId: stack.sessionId });
         await page.addInitScript((value) => localStorage.setItem("wollipog.question-response-style", value), style);
         await page.goto(`/agent-questions-live-e2e.html#${fragment}`);
+        await page.locator(".request-dock, .composer-answer").first().waitFor();
+        await openMobileQuestion(page);
         const answers = provider === "claude" ? ["Regional canary", "Unit Tests"] : ["Canary", "Custom release note"];
         if (style === "interactive") {
           const input = page.locator(".question-input");

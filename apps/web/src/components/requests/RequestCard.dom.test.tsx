@@ -1665,3 +1665,45 @@ test("a question expanded to read keeps the dock: a request arriving ahead waits
     }
   }
 });
+
+test("mobile questions start as a strip, expand directly, and keep drafts through collapse (#3308)", async () => {
+  const priorSize = { width: domWindow.innerWidth, height: domWindow.innerHeight };
+  domWindow.happyDOM.setWindowSize({ width: 390, height: 844 });
+  const request: PendingApproval = {
+    requestId: "question:mobile", occurrenceId: "first", kind: "question", title: "Agent Questions", options: [],
+    questions: [{ id: "q", question: "Which option?", options: [{ label: "Yes" }, { label: "No" }] }],
+  };
+  const dock = (question = request, readingAvailable = true) => <RequestDock
+    session={sessionWith(question)} requests={[question]} runnerOnline followTailState="following" readingAvailable={readingAvailable}
+  />;
+  const view = await render(dock());
+  const click = async (selector: string) => {
+    await act(async () => { view.container.querySelector<HTMLButtonElement>(selector)!.click(); await tick(); });
+  };
+  try {
+    assert.ok(view.container.querySelector(".request-dock[data-collapsed] .dock-strip"));
+    const card = view.container.querySelector(".question-card");
+    await click('.dock-strip [aria-label="Expand Request"]');
+    assert.ok(view.container.querySelector(".request-dock[data-reading] .question-card[data-question-expanded]"));
+    await click('input[type="radio"]');
+    const choice = view.container.querySelector<HTMLInputElement>('input[type="radio"]')!;
+    await click('[aria-label="Collapse Question"]');
+    assert.ok(view.container.querySelector(".request-dock[data-collapsed] .dock-strip"));
+    assert.equal(view.container.querySelector(".question-card"), card, "the form stays mounted behind the strip");
+    await click('.dock-strip [aria-label="Expand Request"]');
+    assert.equal(choice.checked, true);
+    await view.rerender(dock({ ...request, occurrenceId: "second" }));
+    assert.ok(view.container.querySelector(".request-dock[data-collapsed]"), "a new occurrence starts collapsed");
+    assert.equal(view.container.querySelector<HTMLInputElement>('input[type="radio"]')!.checked, false);
+    await act(async () => {
+      assert.equal(revealDockedRequest(sessionWith(request).id, request.requestId), true);
+      await tick();
+    });
+    assert.ok(view.container.querySelector(".request-dock[data-reading]"), "a deliberate reveal opens full reading mode");
+    await view.rerender(dock(request, false));
+    assertNoDomNode(view.container.querySelector(".dock-strip"), "the Sessions preview retains its compact card");
+  } finally {
+    await view.unmount();
+    domWindow.happyDOM.setWindowSize(priorSize);
+  }
+});
