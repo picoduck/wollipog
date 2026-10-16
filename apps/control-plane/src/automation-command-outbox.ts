@@ -6,7 +6,12 @@ import type {
   DurableSessionCommandResultMessage,
   DurableSessionCommandUpdateMessage,
 } from "@wollipog/protocol";
-import { isDurableSessionCommandErrorCode, runnerSupportsProtocol } from "@wollipog/protocol";
+import {
+  CODEX_EXEC_RETIRED_REASON,
+  isDurableSessionCommandErrorCode,
+  isRetiredCodexExec,
+  runnerSupportsProtocol,
+} from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
 import { isTransientProviderError } from "./provider-error.js";
@@ -95,6 +100,15 @@ export class AutomationCommandOutbox {
       }
       if (automationCommandDigest(command) !== row.payloadSha256) {
         this.db.rejectAutomationCommand(row.commandId, "stored automation command digest does not match", now);
+        this.changed(row.executionId, now);
+        continue;
+      }
+      // A command staged before Codex exec was retired (#3259) never reaches a runner that may still
+      // launch it: a start on the exec driver, or a prompt or answer resuming an exec session.
+      const execSession = command.type === "start_session" ? undefined : this.db.getSession(command.sessionId);
+      if ((command.type === "start_session" && isRetiredCodexExec(command.spec)) ||
+          (execSession && isRetiredCodexExec(execSession))) {
+        this.db.rejectAutomationCommand(row.commandId, CODEX_EXEC_RETIRED_REASON, now);
         this.changed(row.executionId, now);
         continue;
       }

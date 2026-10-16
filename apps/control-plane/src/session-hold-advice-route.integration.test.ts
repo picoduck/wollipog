@@ -73,7 +73,7 @@ test("hold advice an agent credential reads names exactly the tools its routes a
     seed.registerRunner({ runnerId: "r", hostname: "test", os: "linux", version: "test", agents: [], workspaces: [] }, 1, PROTOCOL_VERSION);
     for (const [id, parentSessionId, orchestrator] of sessions) {
       seed.createSession({ id, parentSessionId, runnerId: "r", workspaceId: null, agentId: null, title: id,
-        useWorktree: false, driver: "codex", config: orchestrator ? { permissionMode: "orchestrator" } : {},
+        useWorktree: false, driver: "codex-app-server", config: orchestrator ? { permissionMode: "orchestrator" } : {},
         ...(orchestrator ? {
           orchestratorPolicy: resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default",
             { execution: { strictProjectIsolation: false } }),

@@ -249,15 +249,6 @@ test("a Codex TUI for a session with a managed worktree carries the guard hook a
   });
 });
 
-test("the plain codex driver is guarded the same way", async () => {
-  await withDir(async (dir) => {
-    const launch = await prepareAgentTuiLaunch(meta({ driver: "codex", args: [] }), dependencies(dir));
-    assert.ok(launch);
-    const override = overrideArgument(launch.args);
-    assert.ok(override && codexGuardArgsActive(launch.args, override));
-  });
-});
-
 test("a foreign enabled-but-untrusted hook refuses the Codex TUI and names the hook", async () => {
   await withDir(async (dir) => {
     const foreign = "/home/u/.codex/config.toml:pre_tool_use:0:0";

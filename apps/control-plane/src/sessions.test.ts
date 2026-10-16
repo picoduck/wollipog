@@ -36,6 +36,7 @@ import {
   POLICY_HOOK_ABANDONMENT_MS,
   PROTOCOL_VERSION,
   SPAWN_APPROVAL_ABANDONMENT_MS,
+  CODEX_EXEC_RETIRED_CONFIG_REASON,
   CODEX_EXEC_RETIRED_REASON,
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   CAMPAIGN_WORK_LEDGER_LIMITS,
@@ -17655,24 +17656,51 @@ test("restart refuses every persisted Codex exec session instead of launching Ap
   }
 });
 
-test("creating a session, run, or workflow on a Codex exec agent is refused with the retired reason (#3259)", () => {
-  const { db, svc } = makeHarness();
-  const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_AGENT_ID });
-  assert.equal(created.ok, false);
-  assert.equal(created.status, 409);
-  assert.equal(created.error, CODEX_EXEC_RETIRED_REASON);
-  const run = svc.createRun({
-    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID, CODEX_AGENT_ID], task: "Fan out",
+for (const runnerShape of ["older runner, exec available", "current runner, exec unavailable"] as const) {
+  test(`creating a session, run, or workflow on a Codex exec agent is refused with the retired reason: ${runnerShape} (#3259)`, () => {
+    const { db, hub, svc } = makeHarness();
+    if (runnerShape === "current runner, exec unavailable") {
+      db.updateRunnerAgents(RUNNER_ID, runnerMeta().agents.map((agent) => agent.id === CODEX_AGENT_ID
+        ? { ...agent, available: false, unavailableReason: CODEX_EXEC_RETIRED_CONFIG_REASON }
+        : agent), Date.now());
+    }
+    const startsBefore = hub.sentOfType("start_session").length;
+    const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_AGENT_ID });
+    assert.equal(created.ok, false);
+    assert.equal(created.status, 409);
+    assert.equal(created.error, CODEX_EXEC_RETIRED_REASON);
+    const run = svc.createRun({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID, CODEX_AGENT_ID], task: "Fan out",
+    });
+    assert.equal(run.status, 409);
+    assert.equal(run.error, `${CODEX_AGENT_ID}: ${CODEX_EXEC_RETIRED_REASON}`, "never a partial run without the exec member");
+    const workflow = svc.createWorkflowRun({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, workflowId: "builtin:build-review", task: "Build and review",
+      agentBindings: { claude: AGENT_ID, codex: CODEX_AGENT_ID },
+    });
+    assert.equal(workflow.status, 409);
+    assert.equal(workflow.error, `${CODEX_AGENT_ID}: ${CODEX_EXEC_RETIRED_REASON}`);
+    assert.equal(db.listRuns().length, 0, "nothing was created");
+    assert.equal(hub.sentOfType("start_session").length, startsBefore, "nothing reached the runner");
   });
-  assert.equal(run.status, 409);
-  assert.equal(run.error, `${CODEX_AGENT_ID}: ${CODEX_EXEC_RETIRED_REASON}`);
-  const workflow = svc.createWorkflowRun({
-    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, workflowId: "builtin:build-review", task: "Build and review",
-    agentBindings: { claude: AGENT_ID, codex: CODEX_AGENT_ID },
+}
+
+test("a persisted Codex exec session refuses prompts and submitted answers before anything reaches the runner (#3259)", () => {
+  const { db, hub, svc } = makeHarness();
+  hub.online = true;
+  db.createSession({
+    id: "legacy-exec", runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_AGENT_ID,
+    title: "Legacy Codex exec", useWorktree: false, driver: "codex", config: {}, now: Date.now(),
   });
-  assert.equal(workflow.status, 409);
-  assert.equal(workflow.error, `${CODEX_AGENT_ID}: ${CODEX_EXEC_RETIRED_REASON}`);
-  assert.equal(db.listRuns().length, 0, "nothing was created");
+  db.updateSessionStatus("legacy-exec", "idle", Date.now());
+  const prompted = svc.prompt("legacy-exec", "keep going");
+  assert.equal(prompted.status, 409);
+  assert.equal(prompted.error, CODEX_EXEC_RETIRED_REASON);
+  const answered = svc.answerQuestion("legacy-exec", "question-1", { choice: "yes" });
+  assert.equal(answered.status, 409);
+  assert.equal(answered.error, CODEX_EXEC_RETIRED_REASON);
+  assert.equal(hub.sentOfType("prompt_session").length, 0);
+  assert.equal(hub.sentOfType("durable_session_command").length, 0);
 });
 
 test("restart follows a current non-Codex driver reconfiguration", () => {

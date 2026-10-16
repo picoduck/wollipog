@@ -1379,6 +1379,13 @@ export function defaultPermissionModeForNewSession(
   return modes.includes("acceptEdits") ? "acceptEdits" : undefined;
 }
 
+/** Whether the runner's catalog names this agent as the retired Codex exec driver (#3259). A current
+ * runner marks a configured exec agent unavailable, and `getAgentLaunch` returns only available
+ * rows, so the catalog, not the launch, is what lets a refusal name the reason. */
+function retiredCodexExecAgent(db: ControlPlaneDb, runnerId: string, agentId: string): boolean {
+  return db.getRunner(runnerId)?.agents.some((agent) => agent.id === agentId && isRetiredCodexExec(agent)) ?? false;
+}
+
 function workflowMemberCapabilityError(
   agentId: string,
   config: SessionConfig | undefined,
@@ -3750,8 +3757,10 @@ export class SessionsService {
       version: snapshotSpec.agentVersion,
       capabilities: snapshotSpec.capabilities,
     } : this.db.getAgentLaunch(req.runnerId, req.agentId, targetBoundLaunch);
+    if (isRetiredCodexExec(launch ?? {}) || (!launch && retiredCodexExecAgent(this.db, req.runnerId, req.agentId))) {
+      return fail(CODEX_EXEC_RETIRED_REASON, 409);
+    }
     if (!launch) return fail(`unknown agent '${req.agentId}' on runner '${req.runnerId}'`, 404);
-    if (isRetiredCodexExec(launch)) return fail(CODEX_EXEC_RETIRED_REASON, 409);
     const launchHarness = agentHarnessIdentityFor({
       id: req.agentId,
       driver: launch.driver,
@@ -4796,6 +4805,8 @@ export class SessionsService {
     }
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    // An older runner would still resume a persisted exec session for this turn (#3259).
+    if (isRetiredCodexExec(session)) return fail(CODEX_EXEC_RETIRED_REASON, 409);
     const budgetError = this.db.campaignBudgets.admissionError(sessionId);
     if (budgetError) return fail(budgetError, 409);
     const requestedConfig = snapshotCommand?.type === "prompt_session" ? snapshotCommand.config : config;
@@ -10528,6 +10539,9 @@ export class SessionsService {
   ): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    // The exec driver never asked questions, so an answer here is to a recovered one, and submitting
+    // it would resume the retired driver (#3259). Dismissing it stays available.
+    if (action === "submit" && isRetiredCodexExec(session)) return fail(CODEX_EXEC_RETIRED_REASON, 409);
     const campaignBefore = session.parentSessionId
       ? this.campaignEventController(this.db.getSession(session.parentSessionId))
       : null;
@@ -11893,6 +11907,9 @@ export class SessionsService {
         version: snapshot.spec.agentVersion,
         capabilities: snapshot.spec.capabilities,
       } : this.db.getAgentLaunch(req.runnerId, agentId);
+      if (!launch && retiredCodexExecAgent(this.db, req.runnerId, agentId)) {
+        return fail(`${agentId}: ${CODEX_EXEC_RETIRED_REASON}`, 409);
+      }
       if (!launch) return fail(`workflow role '${roleId}' is bound to unknown agent '${agentId}'`, 404);
       const configError = workflowMemberCapabilityError(agentId, req.config, launch);
       if (configError) return fail(configError, 409);
@@ -11912,6 +11929,9 @@ export class SessionsService {
         version: snapshot.spec.agentVersion,
         capabilities: snapshot.spec.capabilities,
       } : this.db.getAgentLaunch(req.runnerId, req.orchestratorAgentId);
+      if (!launch && retiredCodexExecAgent(this.db, req.runnerId, req.orchestratorAgentId)) {
+        return fail(`${req.orchestratorAgentId}: ${CODEX_EXEC_RETIRED_REASON}`, 409);
+      }
       if (!launch) return fail(`unknown orchestrator agent '${req.orchestratorAgentId}'`, 404);
       const configError = workflowMemberCapabilityError(req.orchestratorAgentId, req.config, launch);
       if (configError) return fail(configError, 409);
@@ -12997,7 +13017,10 @@ export class SessionsService {
     const unknown: string[] = [];
     for (const agentId of req.agentIds) {
       const launch = this.db.getAgentLaunch(req.runnerId, agentId);
-      if (launch && isRetiredCodexExec(launch)) return fail(`${agentId}: ${CODEX_EXEC_RETIRED_REASON}`, 409);
+      // Checked against the catalog too, so a retired member never leaves a partial run behind.
+      if ((launch && isRetiredCodexExec(launch)) || retiredCodexExecAgent(this.db, req.runnerId, agentId)) {
+        return fail(`${agentId}: ${CODEX_EXEC_RETIRED_REASON}`, 409);
+      }
       const configCapabilityError = capabilityConfigError(req.config, launch?.capabilities);
       if (configCapabilityError) return fail(`${agentId}: ${configCapabilityError}`, 409);
       if (req.config?.serviceTier && launch?.driver !== "codex-app-server") {
