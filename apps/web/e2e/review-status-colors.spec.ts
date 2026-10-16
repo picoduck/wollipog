@@ -48,3 +48,20 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"]) for (con
     await expect(family).toHaveAttribute("aria-label", /Ready for Review/);
   });
 }
+
+for (const width of [1440, 390]) for (const theme of ["dark", "light"]) for (const mode of ["list", "board"]) {
+  test(`active families hold review colors at ${width}px in ${theme} ${mode} (#3328)`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.addInitScript((theme) => localStorage.setItem("wollipog.theme", theme), theme);
+    await page.goto(`/sessions-board-e2e.html?threads=1&family-follow-up=review-active&path=${encodeURIComponent(mode === "board" ? "/board" : "/")}`);
+    await expect(page.locator(".page-tabs .tabs-bar, .sessions-app-bar")).toBeVisible();
+    if (mode === "board" && width === 390) await page.getByRole("tab", { name: /^Running/ }).click();
+    const parent = page.locator(mode === "list" ? ".inbox-row-shell" : ".card", { hasText: "Ship the usage and cost overhaul" });
+    const family = parent.locator(".inbox-thread-family");
+    await expect(family).toHaveAttribute("aria-label", /Working/);
+    await expect(family).not.toHaveAttribute("aria-label", /Ready for Review/);
+    await expect(family).not.toHaveClass(/t-review/);
+    await expect(parent.locator(".status")).toHaveClass(/t-info/);
+    await expect(parent.locator(".status")).toHaveAccessibleName("Status: Children Working");
+  });
+}
