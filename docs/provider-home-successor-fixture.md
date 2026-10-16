@@ -40,7 +40,12 @@ retains the full ten-second reporting allowance. `verify-successor-readiness-reg
 a temporary copy beside the test, removes only the parent readiness wait, and requires the exact
 focused test to fail at the reporting deadline with both contenders closed and no retained fixture
 state. Platform Isolation runs this check on Linux, both Windows images, and macOS, after the
-unmodified lease suite. The temporary copy is removed even if verification fails.
+unmodified lease suite. The temporary copy is removed on normal completion or handled failure.
+An external interruption may leave its uniquely named `provider-home-lease.readiness-*.mutation.ts`
+copy behind. These scratch copies do not match normal test discovery and are explicitly excluded
+from production TypeScript compilation. After the interrupted validation has exited, inspect and
+remove its untracked copy; never commit it. The test-only typecheck may still check its types,
+without executing or emitting it.
 
 Normal readiness is ten seconds: Windows PR validation at head `7ba963e4` failed a post-report fault regression
 before reaching that fault, with both contenders still initializing when the prior five-second
