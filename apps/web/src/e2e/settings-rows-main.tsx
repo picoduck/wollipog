@@ -10,8 +10,15 @@ import {
   NotificationsPanel,
   SettingsView,
 } from "../components/SettingsView.js";
-import { DEFAULT_ORCHESTRATOR_DEFAULTS, type AgentHarnessDefaultConfig, type AgentHarnessDefaultsView } from "@wollipog/protocol";
+import {
+  ARCHIVED_HISTORY_RETENTION_LIMITS,
+  DEFAULT_ORCHESTRATOR_DEFAULTS,
+  type AgentHarnessDefaultConfig,
+  type AgentHarnessDefaultsView,
+  type ArchivedHistoryRetentionView,
+} from "@wollipog/protocol";
 import { AgentDefaultsPanel } from "../components/AgentDefaultsPanel.js";
+import { ArchivedHistoryRetentionPanel } from "../components/ArchivedHistoryRetentionPanel.js";
 import { OrchestratorSettingsPanel } from "../components/OrchestratorSettingsPanel.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { interceptLeave, interceptTraversal } from "../leave-guard.js";
@@ -212,6 +219,32 @@ let artifactUploadPreference = "manual";
 /** What a save in Settings › Orchestrator stored, for as long as the page is open. */
 let orchestratorSaved: typeof DEFAULT_ORCHESTRATOR_DEFAULTS | null = null;
 
+/**
+ * Settings › Storage (#2777): `retention=off` starts with it off, `environment` with the host's
+ * default in effect, `viewer` read-only. A save is kept for the page's life, so it reads back.
+ */
+const retentionMode = new URLSearchParams(window.location.search).get("retention");
+let retentionState: Pick<ArchivedHistoryRetentionView, "retentionDays" | "source" | "prunesFrom"> = {
+  retentionDays: retentionMode === "off" ? null : retentionMode === "environment" ? 180 : 90,
+  source: retentionMode === "off" ? "default" : retentionMode === "environment" ? "environment" : "organization",
+  prunesFrom: retentionMode === "off" ? null : Date.UTC(2026, 8, 2, 15, 0),
+};
+const RETENTION_ARMED_AT = Date.UTC(2026, 9, 17, 9, 30);
+
+function retentionView(previewDays: number | null): ArchivedHistoryRetentionView {
+  const counts = (days: number) => days >= 180 ? { sessions: 41, events: 182_340 } : { sessions: 128, events: 604_115 };
+  return {
+    ...retentionState,
+    environmentDays: retentionMode === "environment" ? 180 : null,
+    canManage: retentionMode !== "viewer",
+    nextRunAt: Date.UTC(2026, 9, 16, 10, 0),
+    eligible: retentionState.retentionDays === null ? { sessions: 0, events: 0 } : counts(retentionState.retentionDays),
+    lastRun: retentionMode === "off" ? null : { finishedAt: Date.UTC(2026, 9, 16, 9, 0), sessions: 12, events: 58_204 },
+    limits: ARCHIVED_HISTORY_RETENTION_LIMITS,
+    ...(previewDays === null ? {} : { preview: { retentionDays: previewDays, eligible: counts(previewDays), prunesFrom: RETENTION_ARMED_AT } }),
+  };
+}
+
 const harnessDefaultsTransport: ApiTransport = {
   instanceId: "settings-fixture",
   publicOrigin: window.location.origin,
@@ -226,6 +259,20 @@ const harnessDefaultsTransport: ApiTransport = {
         artifactUploadPreference = (JSON.parse(String(init.body)) as { preference: string }).preference;
       }
       return Response.json({ preference: artifactUploadPreference });
+    }
+    if (path.startsWith("/api/archived-history-retention")) {
+      if (init?.method === "PUT") {
+        const { retentionDays } = JSON.parse(String(init.body)) as { retentionDays: number | null };
+        retentionState = {
+          retentionDays,
+          source: "organization",
+          prunesFrom: retentionDays === null ? null
+            : retentionState.retentionDays === null || retentionDays < retentionState.retentionDays ? RETENTION_ARMED_AT
+            : retentionState.prunesFrom,
+        };
+      }
+      const previewDays = new URL(path, window.location.origin).searchParams.get("previewDays");
+      return Response.json(retentionView(previewDays === null ? null : Number(previewDays)));
     }
     if (path === "/api/instance") {
       return new Response(JSON.stringify({
@@ -584,6 +631,11 @@ function Harness() {
                   }}
                   onNavigate={navigate}
                 />
+              ),
+              storage: (
+                <FeedbackProvider>
+                  <ApiProvider client={harnessDefaultsApi}><ArchivedHistoryRetentionPanel /></ApiProvider>
+                </FeedbackProvider>
               ),
               // The production panel with injected state, like Notifications above. Storage is
               // deliberately not touched.

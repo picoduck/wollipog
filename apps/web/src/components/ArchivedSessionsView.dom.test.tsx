@@ -592,6 +592,26 @@ test("Stop Failed sessions disclose bounded failure detail and expose Retry Stop
   await fixture.unmount();
 });
 
+test("a pruned session keeps its row and says its history was pruned, when and by which policy (#2777)", async () => {
+  const prunedAt = Date.UTC(2026, 9, 15, 12);
+  const pruned = session(4, { archived: true, status: "completed",
+    historyPruned: { prunedAt, eventCount: 2_400, retentionDays: 90 } });
+  const kept = session(5, { archived: true, status: "completed" });
+  const fixture = await mount([pruned, kept]);
+  const badges = (title: string) => {
+    const row = [...fixture.container.querySelectorAll<HTMLTableRowElement>("tbody tr")]
+      .find((candidate) => candidate.querySelector(".archive-session-cell a")?.textContent === title)!;
+    return [...row.querySelectorAll<HTMLElement>(".archive-state-badges .status")];
+  };
+  const badge = badges(pruned.title).find((candidate) => candidate.textContent?.trim() === "History Pruned");
+  assert.ok(badge, "the pruned row carries History Pruned beside its lifecycle");
+  assert.match(badge.title, /^Pruned .* by the 90-day retention policy$/);
+  assert.equal(badges(kept.title).some((candidate) => candidate.textContent?.trim() === "History Pruned"), false);
+  assert.ok(hasButton(fixture.container, "Unarchive") || buttons(fixture.container, "Unarchive and Restart").length > 0,
+    "a pruned session can still be unarchived");
+  await fixture.unmount();
+});
+
 test("a successful deletion cannot be resurrected by the live session overlay", async () => {
   const archived = session(4);
   const deleted: string[] = [];

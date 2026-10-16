@@ -90,7 +90,9 @@ import { SessionPlaceholder } from "./SessionPlaceholder.js";
 import { sessionArchiveControlLabel, sessionUnarchiveRestarts } from "../archive-actions.js";
 import { unarchiveSession } from "../session-unarchive.js";
 import { TranscriptSkeleton, transcriptLoadingSentence } from "./TranscriptSkeleton.js";
-import { TranscriptEmptyState, TranscriptHistoryNotice, transcriptEmptyKind } from "./TranscriptReadingStates.js";
+import { TranscriptEmptyState, TranscriptHistoryNotice, TranscriptPrunedNotice, transcriptEmptyKind } from "./TranscriptReadingStates.js";
+import { formatRetentionDate, historyPrunesAt } from "../archived-history-retention.js";
+import { useArchivedHistoryRetention } from "./useArchivedHistoryRetention.js";
 import { clearRoutedSessionLookup, setRoutedSessionLookup, useRoutedSessionLookup } from "../routed-session-lookup.js";
 import { runnerDisplay } from "../runners.js";
 import { MoveToProjectDialog, MoveToWorkspaceDialog, NewWorkspaceDialog } from "./SessionMoveDialogs.js";
@@ -3677,6 +3679,9 @@ function SessionDetailLoaded({
   const archivedOrder = sessionArchivedAtRest(session) ? {
     key: "archived", severity: "info", rank: SESSION_NOTICE_RANK.archived,
   } as const : undefined;
+  // Under an archived-history retention policy, the notice also says when the history goes (#2777).
+  const retention = useArchivedHistoryRetention(archivedOrder !== undefined && !session.historyPruned);
+  const historyPrunedOn = historyPrunesAt(session, retention);
   const sessionNoticeReason = [
     worktreeMissingOrder && { ...worktreeMissingOrder, reason: "Worktree recovery is required before sending another message." },
     historyQuarantineOrder && { ...historyQuarantineOrder, reason: "Conversation quarantined. Recover this session to continue." },
@@ -5121,7 +5126,10 @@ function SessionDetailLoaded({
               {unarchiveRestarts ? "Unarchive and Restart" : "Unarchive"}
             </BusyButton>
           )}>
-          <p>This session is archived and stopped.</p>
+          <p>
+            This session is archived and stopped.
+            {historyPrunedOn !== null && ` Its history will be pruned on ${formatRetentionDate(historyPrunedOn)}.`}
+          </p>
           {unarchiveRefusal !== null && <p className="notice-meta" id="session-archived-refusal">{unarchiveRefusal}</p>}
         </Notice>
       ),
@@ -7121,6 +7129,11 @@ function SessionDetailLoaded({
             {/* The history notice heads the reading column in its own band above the scroller
                 (#2172): it takes its height, so it never covers a row, and it stays in view while
                 the reader is at the tail. */}
+            {session.historyPruned && (
+              <div className="transcript-history-band">
+                <TranscriptPrunedNotice pruned={session.historyPruned} />
+              </div>
+            )}
             {historyPreview.active && (
               <div className="transcript-history-band" role="status">
                 Recent activity is readable as a snapshot while full history loads. Refresh to check for new activity.
@@ -7218,8 +7231,9 @@ function SessionDetailLoaded({
                   loading={eventWindow?.loadingOlder === true}
                   error={eventWindow?.error ?? null}
                   // Seqs count from 1 without gaps within an epoch, so the loaded window's base
-                  // says how many events sit above it.
-                  olderCount={eventWindow ? eventWindow.baseSeq - 1 : undefined}
+                  // says how many events sit above it. A pruned history keeps only some of them, so
+                  // its count is unknown (#2777).
+                  olderCount={eventWindow && !session.historyPruned ? eventWindow.baseSeq - 1 : undefined}
                   onLoad={loadEarlierFromControl}
                   fallbackFocusRef={scrollRef}
                 />

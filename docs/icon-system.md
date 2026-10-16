@@ -177,6 +177,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ExperimentIcon` | Lucide | `FlaskConical` | An experimental feature, on the page a turned-off experiment's route shows, and Settings › Experimental. |
 | `AppearanceIcon` | Lucide | `Palette` | Settings › Appearance: theme, color scheme, density and navigation. |
 | `NotificationsIcon` | Lucide | `Bell` | Settings › Notifications: alerts when a session needs you. |
+| `StorageIcon` | Lucide | `Database` | Settings › Storage: how long archived sessions keep their history. |
 | `NetworkIcon` | Lucide | `Wifi` | Settings › Network: reaching this machine from other devices. `Network` already means child session requests, and `Globe` a remote host. |
 | `VersionIcon` | Lucide | `Tag` | A numbered version ("v3") in a meta row. |
 | `UpdatedIcon` | Lucide | `Clock` | When something last changed, in a meta row. |

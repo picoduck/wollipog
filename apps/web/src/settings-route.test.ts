@@ -80,7 +80,8 @@ test("every section has an icon-free one-line description and at most one scope 
     if (section.panelDescription !== undefined) {
       assert.match(section.panelDescription, /^[A-Z].*\.$/, `${section.title}: the panel head's sentences end with a period`);
     }
-    assert.ok(section.scope === undefined || section.scope === "This Device" || section.scope === "Your Account");
+    assert.ok(section.scope === undefined || section.scope === "This Device" || section.scope === "Your Account"
+      || section.scope === "Your Organization");
   }
   // Sections whose groups are kept in different places say so per group, never as a whole.
   for (const mixed of ["behavior", "approvals", "network"]) {

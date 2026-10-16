@@ -127,6 +127,8 @@ import type {
   UsageAggregationResponse,
   SubscriptionUsageResponse,
   UsageRetentionPolicy,
+  ArchivedHistoryRetentionView,
+  UpdateArchivedHistoryRetentionRequest,
   UsagePricingStatus,
   SessionUsageResponse,
   UsageDailyBudgetPolicy,
@@ -393,6 +395,18 @@ export function createApiClient(transport: ApiTransport) {
   usageUsers: () => req<{ users: UserCostWindows[] }>("/api/usage/users"),
   updateUsageRetention: (body: Pick<UsageRetentionPolicy, "hourlyDays" | "dailyDays">) =>
     req<{ retention: UsageRetentionPolicy }>("/api/usage/retention", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+
+  /** The organization's archived-history retention (#2777). `previewDays` adds what that threshold
+   * would prune, for confirming a change before it is saved. */
+  archivedHistoryRetention: (previewDays?: number) => req<ArchivedHistoryRetentionView>(
+    `/api/archived-history-retention${previewDays === undefined ? "" : `?previewDays=${previewDays}`}`,
+  ),
+
+  updateArchivedHistoryRetention: (body: UpdateArchivedHistoryRetentionRequest) =>
+    req<ArchivedHistoryRetentionView>("/api/archived-history-retention", {
       method: "PUT",
       body: JSON.stringify(body),
     }),

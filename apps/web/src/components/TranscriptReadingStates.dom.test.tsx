@@ -5,7 +5,9 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import {
+  TranscriptEmptyState,
   TranscriptHistoryNotice,
+  TranscriptPrunedNotice,
   transcriptEmptyKind,
   transcriptHistoryLoadedSentence,
   transcriptReadySentence,
@@ -32,6 +34,35 @@ test("each session status maps to one empty transcript", () => {
   assert.equal(transcriptEmptyKind({ status: "failed" }), "ended");
   assert.equal(transcriptEmptyKind({ status: "stopped" }), "ended");
   assert.equal(transcriptEmptyKind({ status: "idle", archived: true }), "ended", "an archived session has ended");
+  assert.equal(transcriptEmptyKind({ status: "completed", archived: true, historyPruned: { prunedAt: 1, eventCount: 3, retentionDays: 90 } }),
+    "pruned", "a pruned session never claims nothing was sent (#2777)");
+});
+
+test("a pruned transcript says what retention removed and kept, and an empty one says nothing was kept", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(
+      <>
+        <TranscriptPrunedNotice pruned={{ prunedAt: Date.UTC(2026, 9, 15, 12), eventCount: 12_345, retentionDays: 90 }} />
+        <TranscriptEmptyState kind="pruned" agent="Codex" />
+      </>,
+    ));
+    const notice = container.querySelector(".notice") as HTMLElement;
+    // A full notice, its title above the sentence: it stays for as long as the session is open.
+    assert.ok(notice.classList.contains("t-info") && !notice.classList.contains("compact"));
+    assert.equal(notice.getAttribute("role"), "note");
+    assert.match(notice.textContent ?? "", /^History Pruned/);
+    assert.match(notice.textContent ?? "", /archived more than 90 days removed 12,345 events: tool calls and their output/);
+    assert.match(notice.textContent ?? "", /Prompts, the final response, usage and cost, and attachments are kept\.$/);
+    assert.equal(notice.querySelectorAll("button").length, 0, "there is nothing to do about it here");
+    assert.match(container.textContent ?? "", /Nothing Kept/);
+    assert.doesNotMatch(container.textContent ?? "", /ended before anything was sent/);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
 });
 
 test("the ready sentence leaves out whichever place is unknown", () => {

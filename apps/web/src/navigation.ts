@@ -33,7 +33,7 @@ export type View =
  * section is deep-linkable, which is what makes "see Settings → Appearance" a thing you can send
  * someone.
  */
-export type SettingsSection = "appearance" | "notifications" | "behavior" | "approvals" | "orchestrator" | "network" | "experimental" | "about";
+export type SettingsSection = "appearance" | "notifications" | "behavior" | "approvals" | "orchestrator" | "network" | "storage" | "experimental" | "about";
 
 /**
  * A control a redirect lands on, so an old link arrives where its setting went (#3023):
@@ -58,7 +58,7 @@ export function isSettingsAlias(path: string): boolean {
 }
 
 /** Where a section's settings are kept, when every one of them is kept in the same place. */
-export type SettingsScope = "This Device" | "Your Account";
+export type SettingsScope = "This Device" | "Your Account" | "Your Organization";
 
 export interface SettingsSectionEntry {
   id: SettingsSection;
@@ -98,6 +98,13 @@ export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSectionEntry> = [
   // Defaults", once it has loaded them (#3026).
   { id: "orchestrator", title: "Orchestrator", description: "Defaults for sessions that run others." },
   { id: "network", title: "Network", description: "Reach this machine from other devices." },
+  {
+    id: "storage",
+    title: "Storage",
+    description: "History kept for archived sessions.",
+    panelDescription: "How long archived sessions keep their full history in this control plane.",
+    scope: "Your Organization",
+  },
   {
     id: "experimental",
     title: "Experimental",
@@ -461,7 +468,7 @@ export function viewFromPath(pathname: string, search = ""): View | null {
   if (path === "/settings") return { name: "settings" };
   // Keep old bookmarks useful: a copy, so a caller that annotates the view cannot change the table.
   if (isSettingsAlias(path)) return structuredClone(SETTINGS_ALIASES[path]!);
-  const settingsMatch = /^\/settings\/(appearance|notifications|behavior|approvals|orchestrator|network|experimental|about)$/.exec(path);
+  const settingsMatch = /^\/settings\/(appearance|notifications|behavior|approvals|orchestrator|network|storage|experimental|about)$/.exec(path);
   if (settingsMatch) return { name: "settings", section: settingsMatch[1] as SettingsSection };
   const approvalsPolicyMatch = /^\/settings\/approvals\/~([^/]+)$/.exec(path);
   if (approvalsPolicyMatch) {

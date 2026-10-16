@@ -1425,7 +1425,8 @@ variant by default and offers side by side as a user preference (§6.3).
   `.surface` groups, each with its one-line description and a chevron), and a section opens under a
   `DetailBar` with "Back to Settings". `/settings` keeps no section, so wider layouts open the first
   one (§6.1 rule 2). The panel's head is the section title, its description and, when every setting
-  in it is kept in one place, "This Device" or "Your Account" as §11.3 meta; the title is hidden
+  in it is kept in one place, "This Device", "Your Account" or "Your Organization" (Storage, whose
+  policy an organization's owners and admins set) as §11.3 meta; the title is hidden
   where the current tab or the detail bar already names the section. A section with more to say in
   its head than an index row holds gives the head its own sentence (`panelDescription`, #3022); the
   head hides its description on phones, so the index line stays the one a phone reads.
@@ -1845,8 +1846,8 @@ alike.
 
 **Group.** `SettingsGroup` (also in `ui/SettingsRows.tsx`, exported for any screen) is a §5.1
 section: an optional head (the title in `--type-section`, written in Title Case with no
-`text-transform`; an optional scope label as §11.3 meta, such as "This Device", "Your Account", "This
-Window" or "This Machine"; at most one head action), an optional one-sentence description in
+`text-transform`; an optional scope label as §11.3 meta, such as "This Device", "Your Account", "Your
+Organization", "This Window" or "This Machine"; at most one head action), an optional one-sentence description in
 `--type-small` `--text-dim`, one `.surface` (`.settings-group-surface`) with hairlines between its
 rows, and an optional foot line, or a §5.5 disclosure where the group needs more than one line
 (Behavior's About Artifact Uploads, #3023). The surface is the size container for the 560px rule. A

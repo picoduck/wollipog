@@ -19,6 +19,7 @@ import {
   OrchestratorControlsIcon,
   ResetIcon,
   ShieldCheckIcon,
+  StorageIcon,
   TuningIcon,
 } from "./Icons.js";
 import { VIEW_ICONS } from "./Rail.js";
@@ -109,6 +110,7 @@ const SECTION_ICONS: Record<SettingsSection, (props: { size?: number }) => React
   approvals: ShieldCheckIcon,
   orchestrator: OrchestratorControlsIcon,
   network: NetworkIcon,
+  storage: StorageIcon,
   experimental: ExperimentIcon,
   about: InfoIcon,
 };

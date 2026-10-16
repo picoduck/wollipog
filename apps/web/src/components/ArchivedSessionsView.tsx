@@ -15,6 +15,7 @@ import {
   type ArchiveBrowserFilters,
 } from "../archive-browser.js";
 import { discardComposerDraft } from "../composer-drafts.js";
+import { historyPrunedTitle } from "../archived-history-retention.js";
 import { formatRecordedRelativeTime, formatRecordedTimestamp } from "../format.js";
 import { statusMeta } from "../status-meta.js";
 import { useInstanceScope } from "../instance-scope.js";
@@ -625,6 +626,8 @@ export function ArchivedSessionsView() {
                         ? <StatusBadge meta={statusMeta("session", "archived")} />
                         : <StatusBadge tone="neutral" noDot label="Not Archived" />}
                       <LifecycleBadge status={session.status} />
+                      {session.historyPruned && <StatusBadge tone="neutral" noDot label="History Pruned"
+                        title={historyPrunedTitle(session.historyPruned)} />}
                       {stopFailed && <StatusBadge meta={statusMeta("session", "stop_failed")}
                         title={session.archiveOperation?.failure?.message} />}
                       {stopPending && <StatusBadge meta={statusMeta("session", runners.get(session.runnerId)?.status === "offline"

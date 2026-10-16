@@ -1,15 +1,19 @@
 import React from "react";
-import type { SessionStatus } from "@wollipog/protocol";
+import type { SessionHistoryPruned, SessionStatus } from "@wollipog/protocol";
+import { historyPrunedSentence } from "../archived-history-retention.js";
 import { Notice } from "./Notice.js";
 import { State } from "./State.js";
 import { Spinner } from "./common.js";
 
-export type TranscriptEmptyKind = "awaiting" | "starting" | "ended";
+export type TranscriptEmptyKind = "awaiting" | "starting" | "ended" | "pruned";
 
 /** Which empty transcript a session with no activity shows (#2172): one that is starting says so, one
- * that ended before anything was sent says that, and every other session is waiting for its first
- * message. */
-export function transcriptEmptyKind(session: { status: SessionStatus; archived?: boolean }): TranscriptEmptyKind {
+ * that ended before anything was sent says that, one whose history retention pruned says that
+ * instead (#2777), and every other session is waiting for its first message. */
+export function transcriptEmptyKind(
+  session: { status: SessionStatus; archived?: boolean; historyPruned?: SessionHistoryPruned },
+): TranscriptEmptyKind {
+  if (session.historyPruned) return "pruned";
   if (session.archived) return "ended";
   if (session.status === "queued" || session.status === "starting") return "starting";
   if (session.status === "completed" || session.status === "failed" || session.status === "stopped") return "ended";
@@ -45,6 +49,14 @@ export function TranscriptEmptyState({
     return (
       <State compact title="No Messages">
         This session ended before anything was sent.
+      </State>
+    );
+  }
+  if (kind === "pruned") {
+    // The History Pruned notice above says what was removed and when.
+    return (
+      <State compact title="Nothing Kept">
+        This session had no prompts or final response to keep.
       </State>
     );
   }
@@ -120,6 +132,17 @@ export function TranscriptHistoryNotice({
       details={error ? <code className="transcript-history-error">{error}</code> : undefined}
     >
       {transcriptHistoryLoadedSentence(loaded, total, machine, machineOffline)}
+    </Notice>
+  );
+}
+
+/** A pruned transcript's notice, heading the reading column for as long as the session is open: what
+ * archived-history retention removed, when, and what it kept (#2777). */
+export function TranscriptPrunedNotice({ pruned }: { pruned: SessionHistoryPruned }) {
+  return (
+    <Notice tone="info" role="note" className="transcript-history-notice" dataState="pruned"
+      title="History Pruned" ariaLabel="History Pruned">
+      {historyPrunedSentence(pruned)}
     </Notice>
   );
 }

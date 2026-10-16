@@ -25,6 +25,9 @@ import "../styles.css";
  * - `loading`: the opening read never answers. `?count=<n>` is the snapshot's event count (`messageCount`).
  * - `awaiting`, `starting`, `stopped`, `archived`: the history loads empty for a session in that
  *   status (`archived` is archived and stopped).
+ * - `pruned`: archived-history retention kept only the prompts and answers (#2777), so the history
+ *   loads with gaps under the History Pruned notice. `prune-scheduled`: archived under a 90-day
+ *   policy that has not pruned it yet, so the Session Archived notice says when it will.
  * - `history-error`: the opening read fails with nothing cached; `history-partial` fails after
  *   cached rows were delivered.
  * - `earlier`: a bounded opening window with older activity above it. `?older=hold` keeps the
@@ -63,8 +66,14 @@ const statusByState: Record<string, SessionStatus> = {
   archived: "stopped",
   incomplete: "stopped",
   "agent-logs": "stopped",
+  pruned: "stopped",
+  "prune-scheduled": "stopped",
 };
 const status: SessionStatus = statusByState[state] ?? "idle";
+/** `pruned`: archived-history retention kept only the prompts and answers (#2777). `prune-scheduled`:
+ * archived under a 90-day policy that has not reached it yet. */
+const archivedState = state === "archived" || state === "pruned" || state === "prune-scheduled";
+const ARCHIVED_AT = Date.UTC(2026, 8, 20, 12);
 
 const runner = {
   runnerId: "runner-1",
@@ -112,6 +121,8 @@ const events: SessionEvent[] = payloads.map((payload, index) => ({
   id: index + 1, sessionId: SESSION_ID, seq: index + 1, ts: 1_760_000_000_000 + index * 1000, payload,
 }));
 const hasEvents = state === "earlier" || state === "history-partial";
+// The prompts and final answers a prune keeps, with the gaps the removed tool calls left.
+const keptEvents = events.filter((event) => event.payload.kind !== "tool_call");
 const agentLog: SessionEvent = {
   id: 1, sessionId: SESSION_ID, seq: 1, ts: 1_760_000_000_000, payload: { kind: "stderr", text: "[agent] ready\n" },
 };
@@ -131,11 +142,13 @@ const session = {
   runId: null,
   useWorktree: false,
   worktreePath: null,
-  archived: state === "archived",
+  archived: archivedState,
+  ...(archivedState ? { archivedAt: ARCHIVED_AT } : {}),
+  ...(state === "pruned" ? { historyPruned: { prunedAt: Date.UTC(2026, 9, 2, 9), eventCount: 1_284, retentionDays: 90 } } : {}),
   createdAt: 1,
   updatedAt: 1,
   lastEventAt: null,
-  messageCount: hasEvents ? events.length : count,
+  messageCount: hasEvents ? events.length : state === "pruned" ? keptEvents.length : count,
   eventEpoch: 0,
   preview: null,
   pendingApproval: null,
@@ -254,6 +267,11 @@ const client = {
     return page;
   },
   session: never,
+  archivedHistoryRetention: async () => ({
+    retentionDays: 90, source: "organization", environmentDays: null, canManage: true,
+    prunesFrom: Date.UTC(2026, 6, 15, 9), nextRunAt: null, eligible: { sessions: 0, events: 0 }, lastRun: null,
+    limits: { minDays: 7, maxDays: 3650, suggestedDays: 90 },
+  }),
   resolvePendingPrompt: async (_id: string, commandId: string, action: string) => {
     pendingPromptActions.push(`${action}:${commandId}`);
     document.body.dataset.pendingPromptActions = pendingPromptActions.join(" ");
@@ -269,6 +287,12 @@ const client = {
       return Promise.resolve({
         events: [agentLog], eventEpoch, nextBefore: 1, hasMoreOlder: false, cacheComplete: state === "agent-logs",
       });
+    }
+    if (state === "pruned") {
+      const window = before === undefined ? keptEvents.slice(-16)
+        : keptEvents.filter((event) => event.seq < before).slice(-16);
+      return Promise.resolve({ events: window, eventEpoch, nextBefore: window[0]?.seq ?? 0,
+        hasMoreOlder: (window[0]?.seq ?? 0) > keptEvents[0]!.seq, turnAligned: true, cacheComplete: true });
     }
     if (state === "history-error" || state === "history-partial") {
       return Promise.reject(new Error("GET /api/sessions/transcript-states-session/events/tail failed: 502 Bad Gateway"));
