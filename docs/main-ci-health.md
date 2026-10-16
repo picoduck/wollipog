@@ -13,7 +13,9 @@ This page covers how to land such a change safely, and how a red `main` gets not
 `Main CI Health` (`.github/workflows/main-ci-health.yml`) runs after each CI run for a push to
 `main` completes. It checks out trusted default-branch code without persisted credentials, never
 reads the triggering commit or its artifacts, and runs `scripts/main-ci-health.mjs`. One
-reconciliation runs at a time.
+reconciliation runs at a time. That limit sits on the eligible job, not the workflow: every CI
+completion starts the workflow, and a skipped pull-request invocation must never replace a pending
+`main` reconciliation.
 
 The script ignores the triggering run's own result. It reads the newest completed `main` push CI run
 with a verdict (`success`, `failure`, `timed_out` or `startup_failure`). Cancelled and skipped runs
@@ -56,8 +58,14 @@ public before it lands, which in practice means a security fix prepared in a tem
 
 1. Fetch `origin/main` and apply the fork's changes on top, as the merge will (a squash merge
    applies them as one commit).
-2. Run `pnpm install --frozen-lockfile`, `pnpm typecheck` and `pnpm test` on that tree, on Linux with
-   `bubblewrap` installed, as CI is.
+2. On that tree, on Linux with `bubblewrap` installed as CI is, run what the required check's jobs
+   run (`.github/workflows/ci.yml` is the authority):
+   `pnpm install --frozen-lockfile`, `pnpm typecheck`, `pnpm test`,
+   `pnpm --filter @wollipog/web build`,
+   `pnpm --filter @wollipog/runner exec node scripts/build-binary.mjs --bundle-only`,
+   `pnpm --filter @wollipog/desktop exec node scripts/build-sidecar.mjs --bundle-only`
+   and `pnpm test:e2e`. The required check also covers the Node engine boundary and WebKit, which a
+   local run rarely reproduces. A local run narrows the risk; it does not replace CI.
 3. Run the tests without your own Git identity. CI has none, and that difference broke `main` once:
    a test that committed with an unset identity passed on every developer machine.
 
@@ -69,13 +77,18 @@ public before it lands, which in practice means a security fix prepared in a tem
 
    `user.useConfigOnly` stops Git guessing an identity from the host name, so a test that relies on
    one fails here as it does in CI. Tests that set their own identity are unaffected.
-4. Run the browser specs for any area the change touches (`npx playwright test <spec>`).
-
-**Right after merging**, watch `main`'s CI run to completion:
+**Right after merging**, watch CI for the commit that landed, not just the newest run. GitHub can
+take a moment to list the push's run, and until then the newest run is the previous commit's:
 
 ```bash
-gh run watch "$(gh run list --workflow ci.yml --branch main --event push --limit 1 --json databaseId --jq '.[0].databaseId')"
+sha=$(git ls-remote origin refs/heads/main | cut -f1)   # the commit the merge produced
+until run=$(gh run list --workflow ci.yml --branch main --event push --commit "$sha" \
+    --json databaseId --jq '.[0].databaseId // empty') && [ -n "$run" ]; do sleep 15; done
+gh run watch "$run" --exit-status
 ```
+
+`--exit-status` makes the watch fail when the run fails. A cancelled run is not a pass either: if a
+later push cancelled it, watch that push's run instead.
 
 **If it fails**, fix forward. Open a pull request with the fix and put it at the front of the queue,
 so the entries already waiting test on top of it:

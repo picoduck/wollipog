@@ -186,7 +186,10 @@ test("the workflow runs trusted default-branch code on main push CI only, serial
   assert.match(text, /ref: \$\{\{ github.sha \}\}/);
   assert.match(text, /persist-credentials: false/);
   assert.doesNotMatch(text, /workflow_run\.(head_sha)|download-artifact|pull_request_target|pnpm install/);
-  assert.match(text, /group: main-ci-health\n\s+cancel-in-progress: false/);
+  // Every CI completion starts this workflow. Concurrency belongs to the eligible job: at workflow
+  // level, a skipped pull-request invocation could replace a pending main reconciliation.
+  assert.doesNotMatch(text, /^concurrency:/m);
+  assert.match(text, /\n {4}concurrency:\n {6}group: main-ci-health\n {6}cancel-in-progress: false/);
   assert.match(text, /contents: read\s+actions: read\s+issues: write/);
   assert.match(text, /workflow_run.event == 'push'/);
   assert.match(text, /workflow_run.head_branch == 'main'/);
