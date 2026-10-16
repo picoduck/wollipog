@@ -1,6 +1,7 @@
 import { forwardRef, useCallback, useMemo, useRef, type MutableRefObject } from "react";
 import type { SessionReminderView, SessionView } from "@wollipog/protocol";
 import { hasRecentActivity, type SessionActivity } from "../activity.js";
+import { VIRTUAL_VIEWPORT_CORRECTION_EVENT } from "../viewport-intent.js";
 import { encodeResourceId } from "../navigation.js";
 import type { InboxThreadPosition } from "../inbox.js";
 import { useStoreSelector } from "../store.js";
@@ -84,7 +85,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
   onSelect: (sessionId: string) => void;
   onExpand: (sessionId: string) => void;
   onToggleThread?: (sessionId: string) => void;
-  onScrollPosition: (scrollTop: number) => void;
+  onScrollPosition: (scrollTop: number, layoutCorrection?: boolean) => void;
   onTouchGestureChange?: (active: boolean) => void;
   onPointerTargetChange?: (pointerId: number, targeting: boolean, pointerType: string) => void;
   onPointerPressChange?: (pointerId: number, active: boolean, pointerType: string) => void;
@@ -138,11 +139,18 @@ export const InboxList = forwardRef<HTMLDivElement, {
   // empty state that returned before attaching anything, so the forwarded ref stayed null forever.
   // A callback ref fires only when the NODE changes, which is the actual event both sides want.
   const listRef = useRef<HTMLDivElement | null>(null);
+  const correctedScrollTopRef = useRef<number | null>(null);
+  const recordCorrection = useCallback(() => {
+    correctedScrollTopRef.current = listRef.current?.scrollTop ?? null;
+  }, []);
   const attachList = useCallback((node: HTMLDivElement | null) => {
+    listRef.current?.removeEventListener(VIRTUAL_VIEWPORT_CORRECTION_EVENT, recordCorrection);
     listRef.current = node;
+    correctedScrollTopRef.current = null;
+    node?.addEventListener(VIRTUAL_VIEWPORT_CORRECTION_EVENT, recordCorrection);
     if (typeof ref === "function") ref(node);
     else if (ref) (ref as MutableRefObject<HTMLDivElement | null>).current = node;
-  }, [ref]);
+  }, [recordCorrection, ref]);
   // Deliberately no scroll-into-view effect here. Keyboard navigation owns that:
   // moveSelection() in InboxView scrolls the newly selected row. A generic effect keyed on
   // selectedSessionId would also fire for mouse selection and on mount, fighting the scroll
@@ -156,7 +164,13 @@ export const InboxList = forwardRef<HTMLDivElement, {
       aria-rowcount={entries.length}
       tabIndex={0}
       aria-activedescendant={selectedSessionId ? `inbox-session-${encodeResourceId(selectedSessionId)}` : undefined}
-      onScroll={(event) => onScrollPosition(event.currentTarget.scrollTop)}
+      onScroll={(event) => {
+        const scrollTop = event.currentTarget.scrollTop;
+        const corrected = correctedScrollTopRef.current;
+        const layoutCorrection = corrected !== null && Math.abs(corrected - scrollTop) < 0.5;
+        if (!layoutCorrection) correctedScrollTopRef.current = null;
+        onScrollPosition(scrollTop, layoutCorrection);
+      }}
       onTouchStart={() => onTouchGestureChange?.(true)}
       onTouchEnd={(event) => onTouchGestureChange?.(event.touches.length > 0)}
       onTouchCancel={(event) => onTouchGestureChange?.(event.touches.length > 0)}

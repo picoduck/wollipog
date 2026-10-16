@@ -384,3 +384,46 @@ test("a native touch pan survives pointer cancellation and defers priorities unt
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
   await expect.poll(index).toBe(reading.index + 1);
 });
+
+test("settled native scrolling and successive idle priorities preserve the reader's anchor (#3301)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.clock.install();
+  await openScrolling(page);
+  await page.mouse.move(0, 0);
+  // Scroll after the initial anchor window, when a parent commit can restore the old anchor.
+  await settled(page);
+  await grid(page).evaluate((list) => { list.scrollTop = 600; });
+  const reading = await settled(page);
+  expect(reading.scrollTop).toBe(600);
+  expect(reading.index).toBeGreaterThan(3);
+
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
+  await page.clock.runFor(600);
+  const promote = (id: string) => page.evaluate((sessionId) => (window as unknown as {
+    __updateSession: (id: string, change: object) => void;
+  }).__updateSession(sessionId, {
+    status: "input_required",
+    pendingApproval: { requestId: sessionId, title: "Approve Command", options: [] },
+    updatedAt: Date.now(),
+    lastEventAt: Date.now(),
+  }), id);
+  const readerIndex = () => grid(page).evaluate((list, key) =>
+    Number(list.querySelector<HTMLElement>(`[data-virtual-key="${key}"]`)?.dataset.index), reading.key);
+  await promote("s-running");
+  await page.clock.runFor(100);
+  expect(await readerIndex()).toBe(reading.index + 1);
+  // The first reorder's programmatic correction must not start another 500 ms hold.
+  await promote("s-queued");
+  await page.clock.runFor(100);
+  expect(await readerIndex()).toBe(reading.index + 2);
+  await page.clock.resume();
+  expect(await settled(page)).toMatchObject({ key: reading.key, offset: reading.offset });
+});
+
+test("native scrolling records a new anchor before holding row order (#3301)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openScrolling(page);
+  await settled(page);
+  await grid(page).evaluate((list) => { list.scrollTop = list.scrollHeight; });
+  expect((await settled(page)).scrollTop).toBeGreaterThan(100);
+});

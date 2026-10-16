@@ -3605,14 +3605,30 @@ test("scrolling renews the hold through wheel or momentum movement (#3301, CR-1.
   mobileViewport = false;
   const tick = orderClock(t);
   const { container, socket, grid } = await mountOrderingTest();
-  const scroll = () => grid.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as unknown as Event);
+  const scroll = async () => {
+    grid.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as unknown as Event);
+    await new Promise(domWindow.requestAnimationFrame.bind(domWindow));
+  };
   await act(async () => scroll());
   await act(async () => socket.push({ type: "session_upsert", session: session("B", 40, { status: "input_required" }) }));
   for (let frame = 0; frame < 4; frame++) {
-    await act(async () => { tick(400); scroll(); });
+    await act(async () => { tick(400); await scroll(); });
     assert.deepEqual(rowTitles(container), ["Session A", "Session B"]);
   }
   assertNoDomNode(container.querySelector(".inbox-order-line"), "a short hold must not insert a line that moves its targets");
   await act(async () => tick(500));
   assert.deepEqual(rowTitles(container), ["Session B", "Session A"]);
+});
+
+test("virtualizer corrections do not hold idle priority changes (#3301, CR-2.1)", async () => {
+  mobileViewport = false;
+  const { container, socket, grid } = await mountOrderingTest();
+  await act(async () => {
+    grid.scrollTop = 100;
+    grid.dispatchEvent(new domWindow.Event("wollipog:virtual-viewport-correction") as unknown as Event);
+    grid.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as unknown as Event);
+    await new Promise(domWindow.requestAnimationFrame.bind(domWindow));
+  });
+  await act(async () => socket.push({ type: "session_upsert", session: session("B", 40, { status: "input_required" }) }));
+  assert.deepEqual(rowTitles(container), ["Session B", "Session A"], "layout movement is not reader intent");
 });

@@ -1895,12 +1895,13 @@ export function InboxView({
                 onSelect={handleSelect}
                 onExpand={expand}
                 onToggleThread={toggleThread}
-                onScrollPosition={(scrollTop) => {
+                onScrollPosition={(scrollTop, layoutCorrection) => {
                   inboxScrollPositions.set(instanceScope, scrollTop);
+                  if (layoutCorrection) return;
                   // Native pans cancel pointer events; wheel and momentum scrolling have no press.
-                  // Keep the current rows until scrolling itself has been quiet for 500 ms.
-                  // Let the virtualizer observe the new scroll anchor before holding entries.
-                  queueMicrotask(() => { if (mountedRef.current) holdOrderAfterNavigation(); });
+                  // Wait until all native scroll listeners record the anchor before a parent commit.
+                  // Browser-dispatched events can run microtasks between those listeners.
+                  window.requestAnimationFrame(() => { if (mountedRef.current) holdOrderAfterNavigation(); });
                 }}
                 onTouchGestureChange={handleTouchGestureChange}
                 onPointerTargetChange={handlePointerTargetChange}
