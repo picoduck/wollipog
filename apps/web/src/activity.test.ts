@@ -137,3 +137,21 @@ test("the activity strip shows while Running or Starting, or for ten minutes aft
   assert.equal(hasRecentActivity(recordSessionActivity(undefined, 10), 0), false);
   assert.equal(showsActivityStrip("idle", recordSessionActivity(undefined, 10), 0), false);
 });
+
+
+test("resuming from input starts a fresh stall window without treating metadata as progress (#3302)", () => {
+  const waiting = session({ status: "input_required", updatedAt: 0, lastEventAt: 0 });
+  const prior = reconcileSessionActivity(undefined, undefined, waiting);
+  for (const status of ["queued", "starting", "running"] as const) {
+    const resumed = session({ status, updatedAt: 700_000, lastEventAt: 0 });
+    const activity = reconcileSessionActivity(prior, waiting, resumed);
+    assert.equal(activity.busySince, 700_000, status);
+    assert.equal(isSessionStalled(resumed, activity, 700_000), false, status);
+    const repeated = reconcileSessionActivity(activity, resumed, { ...resumed, updatedAt: 1_299_999 });
+    assert.equal(repeated.busySince, 700_000, "metadata cannot extend the resumed window");
+    assert.equal(isSessionStalled(resumed, repeated, 1_299_999), false);
+    assert.equal(isSessionStalled(resumed, repeated, 1_300_000), true);
+    const cold = reconcileSessionActivity(undefined, undefined, resumed);
+    assert.equal(isSessionStalled(resumed, cold, 700_000), isSessionStalled(resumed, activity, 700_000));
+  }
+});

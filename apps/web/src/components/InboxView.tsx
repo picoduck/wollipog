@@ -250,32 +250,13 @@ export function InboxView({
   // Preview Right applies in windows 1100px and wider only (§6.3, #2219): the compact tier stacks.
   const isCompact = useIsCompact();
   const [previewLayout, setPreviewLayout] = useSessionsPreviewLayout();
-  // Rows must not move while the user is reading or aiming at the list, and neither breakpoint can
-  // key that on live input: touch has no pre-contact hover signal, and a desktop pointer rests
-  // still for long stretches while its owner scans the Inbox. So the collapsed Inbox holds its
-  // displayed order for the whole browsing interval on both. Mobile retains that lease for the
-  // whole collapsed interval: browsers can emit transient blur/visibility changes while their
-  // chrome or OS surfaces move without ending the user's visual targeting. Treating those as a
-  // safe boundary let live activity reorder an open phone Inbox and made the virtualizer preserve
-  // the old logical anchor by changing scrollTop. Desktop can reliably use leaving the tab/window
-  // (`inboxAway`) as a boundary. Both breakpoints also reconcile when a session expands and after
-  // the deliberate structural actions folded into structuralOrderKey below.
-  // Focus and visibility are tracked apart, not folded into one flag: a page can be made visible
-  // again while its window stays unfocused, and a shared flag would let that visibility event
-  // re-arm the lease and turn the eventual focus into a no-op, stranding a stale order.
-  const [windowBlurred, setWindowBlurred] = useState(() => !document.hasFocus());
-  const [documentHidden, setDocumentHidden] = useState(() => document.visibilityState === "hidden");
-  const inboxAway = windowBlurred || documentHidden;
-  // Board mode renders no list rows, so the browsing-order lease has nothing to protect there —
-  // and a hold captured on the board would present a stale "Apply New Order" back in list mode.
+  // Only active interactions hold the list. Follow-up priorities change infrequently, so a
+  // focused window or a resting pointer must not keep actionable sessions in an old position.
   const boardMode = viewMode === "board" && expandedSessionId === null;
   // The phone Board's column (#2216) lives here rather than in the Board, which No Matches replaces
   // while a search finds nothing; it is forgotten when the Board closes.
   const [boardColumn, setBoardColumn] = useState<BoardColumn | null>(null);
   if (!boardMode && boardColumn !== null) setBoardColumn(null);
-  const browsingOrderLease = expandedSessionId === null && !boardMode && (isMobile || !inboxAway);
-  const browsingOrderLeaseRef = useRef(browsingOrderLease);
-  browsingOrderLeaseRef.current = browsingOrderLease;
   const [seen, setSeen] = useState(() => loadSeen(instanceScope));
   const seenRef = useRef(seen);
   seenRef.current = seen;
@@ -324,8 +305,9 @@ export function InboxView({
   const listRef = useRef<HTMLDivElement | null>(null);
   const seenTimerRef = useRef<number | null>(null);
   const settleTimerRef = useRef<number | null>(null);
-  const targetPointerIdsRef = useRef(new Set<number>());
   const activePointerIdsRef = useRef(new Set<number>());
+  const sessionMenuOpenRef = useRef(false);
+  sessionMenuOpenRef.current = sessionMenu !== null;
   const structuralOrderKeyRef = useRef<string | null>(null);
   const liveIdsRef = useRef<string[]>([]);
   const displayedIdsRef = useRef<string[]>([]);
@@ -532,9 +514,14 @@ export function InboxView({
     () => (activeSplit?.sessions ?? []).map((session) => session.id),
     [activeSplit?.sessions],
   );
-  const repairedSelection = heldOrder
+  // Even an idle list repairs a deleted selection against the last visible order (#187).
+  // Filtering a still-existing session out continues to choose the first matching result.
+  const selectedWasRemoved = inbox.selectedSessionId !== null &&
+    (!sessions.has(inbox.selectedSessionId) || sessions.get(inbox.selectedSessionId)?.archived === true);
+  const selectionOrder = heldOrder ?? (selectedWasRemoved ? displayedIdsRef.current : null);
+  const repairedSelection = selectionOrder
     ? repairInboxSelectionForHeldOrder(
-        snapshotLoaded, activeSessionIds, heldOrder, inbox.selectedSessionId, inbox.selectionCleared,
+        snapshotLoaded, activeSessionIds, selectionOrder, inbox.selectedSessionId, inbox.selectionCleared,
       )
     : repairInboxSelectionAfterSnapshot(snapshotLoaded, activeSplit, inbox.selectedSessionId);
 
@@ -614,24 +601,22 @@ export function InboxView({
     structuralOrderKeyRef.current = structuralOrderKey;
     if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
     settleTimerRef.current = null;
-    setHeldOrder(browsingOrderLease
-      || targetPointerIdsRef.current.size > 0 || activePointerIdsRef.current.size > 0
+    setHeldOrder(activePointerIdsRef.current.size > 0 || sessionMenuOpenRef.current
       ? liveIdsRef.current
       : null);
-  }, [browsingOrderLease, structuralOrderKey]);
+  }, [structuralOrderKey]);
 
   useLayoutEffect(() => {
     setHeldOrder((current) => {
-      // Capture the order the browsing interval starts with. Every later live update is projected
-      // through it, so incoming activity changes row content without moving rows. Deliberate
-      // group, filter, and pin changes still replace the lease through structuralOrderKey above.
-      if (!current) return browsingOrderLease ? liveIds : current;
+      // During an interaction, keep current targets while updating their content and appending
+      // new arrivals. Otherwise use canonical follow-up order immediately (#3301).
+      if (!current) return current;
       const extended = extendInboxHeldOrder(current, liveIds, selectedSessionIdRef.current);
       return extended.length === current.length && extended.every((id, index) => id === current[index])
         ? current
         : extended;
     });
-  }, [liveIds, browsingOrderLease]);
+  }, [liveIds]);
 
   // Until the layout effect above renders its replacement, the held order belongs to the previous
   // structural key. Projecting a new search's rows through it led the first commit with the old
@@ -782,12 +767,9 @@ export function InboxView({
 
   const expanded = expandedSessionId !== null;
   useEffect(() => {
-    // Board mode clears like expansion does: unmounting the list can swallow pointerleave, and a
-    // stranded pointer id would block the lease release while liveIds kept extending the hold —
-    // activity received on the board would then resurface in stale list order.
+    // Unmounting the list can swallow pointerup. Do not carry an interaction into another surface.
     if (!expanded && !boardMode) return;
     activePointerIdsRef.current.clear();
-    targetPointerIdsRef.current.clear();
     clearHeldOrder();
   }, [boardMode, clearHeldOrder, expanded]);
   const surfaceSessionId = expandedSessionId ?? selectedSession?.id ?? null;
@@ -861,34 +843,11 @@ export function InboxView({
   const scheduleOrderRelease = useCallback(() => {
     if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
     settleTimerRef.current = window.setTimeout(() => {
-      if (browsingOrderLeaseRef.current) {
-        settleTimerRef.current = null;
-        return;
-      }
-      if (targetPointerIdsRef.current.size > 0 || activePointerIdsRef.current.size > 0) {
-        settleTimerRef.current = null;
-        return;
-      }
-      setHeldOrder(null);
       settleTimerRef.current = null;
+      if (activePointerIdsRef.current.size > 0 || sessionMenuOpenRef.current) return;
+      setHeldOrder(null);
     }, INBOX_REORDER_SETTLE_MS);
   }, []);
-
-  useLayoutEffect(() => {
-    if (browsingOrderLease) return;
-    // Leaving ends pointer ownership outright. A pointer resting over the list keeps its entry
-    // until a pointerout that a backgrounded page never delivers, and platforms that hide a page
-    // without a window blur would otherwise strand the hold and skip the boundary entirely.
-    if (inboxAway) {
-      activePointerIdsRef.current.clear();
-      targetPointerIdsRef.current.clear();
-      clearHeldOrder();
-      return;
-    }
-    if (targetPointerIdsRef.current.size > 0 || activePointerIdsRef.current.size > 0) return;
-    clearHeldOrder();
-  }, [clearHeldOrder, browsingOrderLease, inboxAway]);
-
 
   const holdDisplayedOrder = useCallback(() => {
     if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
@@ -904,67 +863,47 @@ export function InboxView({
   const applyCanonicalOrder = useCallback(() => {
     if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
     settleTimerRef.current = null;
-    setHeldOrder([...liveIdsRef.current]);
+    setHeldOrder(null);
     window.requestAnimationFrame(() => listRef.current?.focus({ preventScroll: true }));
   }, []);
 
-  const handlePointerTargetChange = useCallback((pointerId: number, targeting: boolean) => {
-    if (targeting) {
-      targetPointerIdsRef.current.add(pointerId);
-      holdDisplayedOrder();
-      return;
-    }
-    targetPointerIdsRef.current.delete(pointerId);
-    if (targetPointerIdsRef.current.size === 0 && activePointerIdsRef.current.size === 0) scheduleOrderRelease();
+  const handlePointerTargetChange = useCallback((_pointerId: number, targeting: boolean) => {
+    if (targeting) holdDisplayedOrder();
+    // Entry/movement protects someone aiming at a row, but a stationary hover expires in 500 ms.
+    scheduleOrderRelease();
   }, [holdDisplayedOrder, scheduleOrderRelease]);
 
-  const handlePointerPressChange = useCallback((pointerId: number, active: boolean, pointerType: string) => {
+  const handlePointerPressChange = useCallback((pointerId: number, active: boolean) => {
     if (active) {
       activePointerIdsRef.current.add(pointerId);
       holdDisplayedOrder();
-      return;
+    } else if (activePointerIdsRef.current.delete(pointerId)) {
+      scheduleOrderRelease();
     }
-    if (!activePointerIdsRef.current.delete(pointerId)) return;
-    if (pointerType === "touch") targetPointerIdsRef.current.delete(pointerId);
-    if (targetPointerIdsRef.current.size === 0 && activePointerIdsRef.current.size === 0) scheduleOrderRelease();
   }, [holdDisplayedOrder, scheduleOrderRelease]);
 
-  // A hidden tab or an unfocused window is not a browsing interval, so it is the desktop Inbox's
-  // safe boundary: the hold is dropped there and re-established on return, which is when canonical
-  // recency ordering is re-adopted. Nothing snaps out from under a returning click, because a
-  // pointer entering the list re-holds the order at `pointerover`, before focus follows the press.
   useEffect(() => {
-    const leaveInbox = () => setWindowBlurred(true);
-    const enterInbox = () => setWindowBlurred(false);
-    const trackVisibility = () => setDocumentHidden(document.visibilityState === "hidden");
-    // Seed from the document as well as the events: a window reloaded in the background, or one
-    // hidden before this mounted, gets no blur or hidden event to announce the state it is in.
-    setWindowBlurred(!document.hasFocus());
-    trackVisibility();
-    window.addEventListener("blur", leaveInbox);
-    window.addEventListener("focus", enterInbox);
-    document.addEventListener("visibilitychange", trackVisibility);
-    return () => {
-      window.removeEventListener("blur", leaveInbox);
-      window.removeEventListener("focus", enterInbox);
-      document.removeEventListener("visibilitychange", trackVisibility);
-    };
-  }, []);
+    if (sessionMenu) holdDisplayedOrder();
+    else scheduleOrderRelease();
+  }, [holdDisplayedOrder, scheduleOrderRelease, sessionMenu]);
 
   useEffect(() => {
     const finishPointer = (event: PointerEvent) => {
-      handlePointerPressChange(event.pointerId, false, event.pointerType);
+      handlePointerPressChange(event.pointerId, false);
     };
     const finishAllPointers = () => {
-      if (activePointerIdsRef.current.size === 0 && targetPointerIdsRef.current.size === 0) return;
       activePointerIdsRef.current.clear();
-      targetPointerIdsRef.current.clear();
       scheduleOrderRelease();
     };
+    const trackVisibility = () => {
+      if (document.visibilityState === "hidden") finishAllPointers();
+    };
+    document.addEventListener("visibilitychange", trackVisibility);
     window.addEventListener("pointerup", finishPointer);
     window.addEventListener("pointercancel", finishPointer);
     window.addEventListener("blur", finishAllPointers);
     return () => {
+      document.removeEventListener("visibilitychange", trackVisibility);
       window.removeEventListener("pointerup", finishPointer);
       window.removeEventListener("pointercancel", finishPointer);
       window.removeEventListener("blur", finishAllPointers);
@@ -974,7 +913,6 @@ export function InboxView({
   useEffect(() => {
     if (liveIds.length > 0) return;
     activePointerIdsRef.current.clear();
-    targetPointerIdsRef.current.clear();
     scheduleOrderRelease();
   }, [liveIds.length, scheduleOrderRelease]);
 
@@ -1008,6 +946,8 @@ export function InboxView({
       document.getElementById("page-title");
     // A supplied target that is gone by then (a preview's ⋯ whose session left) falls back the same way.
     const target = sessionsRef.current.get(sessionId);
+    holdDisplayedOrder();
+    sessionMenuOpenRef.current = true;
     setSessionMenu({
       sessionId,
       anchor,
@@ -1015,7 +955,7 @@ export function InboxView({
       reviewedResultRevision: target?.attention?.result?.revision,
       restoreTarget: restoreTarget ? () => restoreTarget() ?? listRestore() : listRestore,
     });
-  }, []);
+  }, [holdDisplayedOrder]);
   // A desktop row's menu (its ⋯, right-click or Shift+F10) selects the row first (#2214), so the
   // menu, the preview and the list's keys all act on one session, and Fork Conversation reads the
   // preview's own availability. The displayed order is held first, as keyboard navigation holds
@@ -1881,11 +1821,11 @@ export function InboxView({
         </div>
         {/* The quiet order and reconnecting lines stay above the rows in every layout. */}
         <div className="inbox-list-head" ref={listHeadRef}>
-          {/* Live activity would reorder the rows. Neutral and outside the slot, so no notice ever
+          {/* Follow-up priorities changed during an interaction. Neutral and outside the slot, so no notice ever
               waits behind it, and nothing in the header or the tab row moves for it. */}
           {orderUpdateAvailable && (
             <div className="inbox-order-line">
-              <span id={orderLineId}>New activity changed the order.</span>
+              <span id={orderLineId}>Session priorities changed the order.</span>
               <button type="button" className="btn sm ghost" aria-describedby={orderLineId} onClick={applyCanonicalOrder}>
                 Apply
               </button>
@@ -1894,7 +1834,7 @@ export function InboxView({
           {listOffline && !pageState && <p className="inbox-list-status" role="status">Reconnecting…</p>}
         </div>
         <span className="sr-only" data-live="order" aria-live="polite" aria-atomic="true">
-          {orderUpdateAvailable ? "New activity changed the order." : ""}
+          {orderUpdateAvailable ? "Session priorities changed the order." : ""}
         </span>
         {pageState ? (
           // One state in both panes' place (§6.1), on the page grid. It is the list zone's landing

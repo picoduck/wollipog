@@ -165,6 +165,7 @@ test.describe("at 1440×900, stacked", () => {
   });
 
   test("new activity shows one quiet line under the slot, and Apply reorders without moving a control", async ({ page }) => {
+    await page.clock.install();
     await open(page, "skills");
     await page.locator(".inbox-row").first().click();
     const stationary = () => page.locator(".page-header .page-actions > *, .tabs-tools > *, .master-detail-resize")
@@ -176,15 +177,18 @@ test.describe("at 1440×900, stacked", () => {
     const rowIndex = () => page.locator(".inbox-row-shell").evaluateAll((rows) =>
       rows.findIndex((row) => row.textContent?.includes("Review Pull Request 20")));
     const indexBefore = await rowIndex();
+    await page.clock.pauseAt(Date.now());
+    await page.locator(".inbox-row").first().hover();
     await page.evaluate(() => {
       window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-fill-20", {
         lastEventAt: Date.now() + 60_000,
         status: "running",
       });
     });
+    await page.clock.runFor(32);
     const line = page.locator(".inbox-list-head > .inbox-order-line");
     await expect(line).toBeVisible();
-    await expect(line.locator("span")).toHaveText("New activity changed the order.");
+    await expect(line.locator("span")).toHaveText("Session priorities changed the order.");
     expect(await line.evaluate((element) => {
       const slotElement = element.closest(".inbox-list-pane")!.querySelector(".list-notice-slot")!;
       return slotElement.getBoundingClientRect().bottom <= element.getBoundingClientRect().top;
@@ -193,6 +197,7 @@ test.describe("at 1440×900, stacked", () => {
     await expectWholeRowsAt(page, (await split(page)).line);
 
     await line.getByRole("button", { name: "Apply" }).click();
+    await page.clock.resume();
     await expect(line).toHaveCount(0);
     // The session was far down the list, past what is rendered; applying brings it up among the first.
     await expect.poll(rowIndex, { message: "the newest activity moves up" }).toBeGreaterThanOrEqual(0);

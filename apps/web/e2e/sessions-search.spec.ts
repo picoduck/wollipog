@@ -313,13 +313,11 @@ for (const viewport of [
   });
 }
 
-// Only the desktop reorders live rows: a phone holds its order for the whole time the list is open.
-test("a live reorder keeps the reader's row where it was (#2804)", async ({ page }) => {
-  await page.setViewportSize({ width: 1440, height: 900 });
+for (const width of [1440, 390]) test(`an automatic priority reorder keeps the reader's row where it was at ${width}px (#2804, #3301)`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 900 });
   await openScrolling(page);
-  // The desktop holds its order while the window has focus; leaving it is the boundary at which
-  // live activity reorders the list (InboxView's browsing-order lease).
-  await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+  // Focus and an idle pointer do not defer priority changes on either viewport.
+  await page.mouse.move(0, 0);
   // The last row's session starts waiting on the user, which moves it above the reader's row.
   const lastKey = await grid(page).evaluate(async (list) => {
     list.scrollTop = list.scrollHeight;

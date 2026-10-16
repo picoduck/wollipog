@@ -156,6 +156,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
       aria-activedescendant={selectedSessionId ? `inbox-session-${encodeResourceId(selectedSessionId)}` : undefined}
       onScroll={(event) => onScrollPosition(event.currentTarget.scrollTop)}
       onPointerEnter={(event) => onPointerTargetChange?.(event.pointerId, true, event.pointerType)}
+      onPointerMove={(event) => onPointerTargetChange?.(event.pointerId, true, event.pointerType)}
       onPointerLeave={(event) => onPointerTargetChange?.(event.pointerId, false, event.pointerType)}
       onPointerDown={(event) => onPointerPressChange?.(event.pointerId, true, event.pointerType)}
       onPointerUp={(event) => onPointerPressChange?.(event.pointerId, false, event.pointerType)}

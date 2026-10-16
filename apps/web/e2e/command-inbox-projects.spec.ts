@@ -490,6 +490,7 @@ for (const viewport of [
 }
 
 test("desktop can apply a pending Inbox order without losing selection or scroll anchor", async ({ page }) => {
+  await page.clock.install();
   await page.setViewportSize({ width: 1280, height: 760 });
   await page.goto("/command-inbox-projects-e2e.html?scenario=inbox-live-scroll&reminders=1");
   const list = page.locator(".inbox-list");
@@ -516,6 +517,8 @@ test("desktop can apply a pending Inbox order without losing selection or scroll
     "page-controls", "btn ghost page-action", "overflow-menu page-more", "btn primary page-primary", "input-affix inbox-search",
   ]);
 
+  await page.clock.pauseAt(Date.now());
+  await list.hover();
   await page.evaluate(() => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-overflow-35", {
       lastEventAt: 2_000,
@@ -524,9 +527,10 @@ test("desktop can apply a pending Inbox order without losing selection or scroll
       status: "running",
     });
   });
+  await page.clock.runFor(32);
   // A quiet line above the rows, never a control in the header or the tab row (#2221).
   const orderLine = page.locator(".inbox-list-pane > .inbox-list-head > .inbox-order-line");
-  await expect(orderLine).toHaveText("New activity changed the order.Apply");
+  await expect(orderLine).toHaveText("Session priorities changed the order.Apply");
   const applyOrder = orderLine.getByRole("button", { name: "Apply", exact: true });
   await expect(applyOrder).toBeVisible();
   expect(await stationaryToolbar()).toEqual(toolbarWithoutButton);
@@ -534,6 +538,7 @@ test("desktop can apply a pending Inbox order without losing selection or scroll
   expect(before.key).not.toBeNull();
 
   await applyOrder.click();
+  await page.clock.resume();
   await settlePreviewLayout(page);
   await expect(applyOrder).toHaveCount(0);
   expect(await stationaryToolbar()).toEqual(toolbarWithoutButton);

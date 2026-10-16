@@ -10,7 +10,12 @@ The default order is Needs Your Input, Ready for Review, Working, then Quiet. Re
 priority and oldest occurrence first; results use newest result first; Working and Quiet use newest
 meaningful work time and session ID. Pins lead within a group. Families stay parent first and use
 their strongest human follow-up; due reminders surface below concrete human input. Existing snooze
-visibility, wake rules, and interaction-held ordering remain in force.
+visibility and wake rules remain in force. List priority changes apply immediately when idle.
+Pointer movement and keyboard navigation hold the displayed order for 500 ms after the last
+interaction; an active press, touch gesture or row menu keeps its targets until it ends, followed
+by the same settle interval. Focus and a resting pointer do not hold order indefinitely, and
+streaming-only updates never renew the hold. Selection and the virtual list's scroll anchor stay
+attached to session identity when canonical order is applied.
 
 Only a successful response-completed boundary following live top-level output creates a result.
 An individually completed message can still be intermediate commentary; older peers without an
