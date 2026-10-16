@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -327,6 +327,42 @@ test("a failed local journal transition relinquishes replay-safe work for retry"
   }
 });
 
+for (const liveOwner of [false, true]) {
+  test(`a stale durable command lock ${liveOwner ? "preserves its live owner" : "is reclaimed after its owner expires"}`, () => {
+    const root = mkdtempSync(join(tmpdir(), "wollipog-command-stale-lock-"));
+    let now = 1;
+    try {
+      new DurableCommandStore(root, { ownerId: "lock-owner", now: () => now, ownerStaleMs: 10 });
+      if (!liveOwner) now = 20;
+      const store = new DurableCommandStore(root, { ownerId: "claimant", now: () => now, ownerStaleMs: 10 });
+      const digest = createHash("sha256").update("cmd_test", "utf8").digest("hex");
+      const shard = join(root, digest.slice(0, 2));
+      const record = join(shard, `${digest}.json`);
+      const lock = `${record}.lock`;
+      mkdirSync(shard, { recursive: true });
+      const token = JSON.stringify({ ownerId: "lock-owner", nonce: "original-lock" });
+      writeFileSync(lock, token);
+      const staleTime = new Date(Date.now() - 60_000);
+      utimesSync(lock, staleTime, staleTime);
+      const before = statSync(lock);
+
+      const claimed = store.claim(message());
+      if (liveOwner) {
+        assert.equal(claimed.kind, "busy");
+        assert.equal(readFileSync(lock, "utf8"), token, "the live owner's lock remains unchanged");
+        assert.equal(statSync(lock).mtimeMs, before.mtimeMs);
+        assert.equal(existsSync(record), false, "no command is admitted behind the live owner's lock");
+      } else {
+        assert.equal(claimed.kind, "new");
+        assert.equal(existsSync(lock), false, "the reclaimed lock is released by claim");
+        assert.equal(store.read("cmd_test")?.ownerId, "claimant");
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
 test("malformed durable envelopes fail closed without throwing", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-command-malformed-envelope-"));
   try {
@@ -426,6 +462,26 @@ test("durable command payload digests reject invalid shapes before comparison", 
       assert.equal(rejected.receipt.code, "INVALID_COMMAND");
       assert.match(rejected.receipt.error ?? "", /digest is invalid/);
     }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("durable command payload digest mismatch is refused without recording the altered command", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-command-mismatched-digest-"));
+  try {
+    const store = new DurableCommandStore(root, { ownerId: "owner-a", now: () => 1 });
+    const original: DurableSessionCommand = { type: "prompt_session", sessionId: "s_test", text: "original prompt" };
+    const altered: DurableSessionCommand = { ...original, text: "altered prompt" };
+    const before = files(root);
+    const rejected = store.claim(message(altered, { payloadDigest: durableCommandPayloadDigest(original) }));
+    assert.equal(rejected.kind, "conflict");
+    if (rejected.kind !== "conflict") return assert.fail("mismatched digest was not refused");
+    assert.equal(rejected.receipt.code, "INVALID_COMMAND");
+    assert.match(rejected.receipt.error ?? "", /digest does not match/);
+    assert.deepEqual(files(root), before, "refusal writes no record file");
+    assert.equal(store.read("cmd_test"), null);
+    assert.equal(store.claim(message(original)).kind, "new", "the genuine command identity remains available");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
