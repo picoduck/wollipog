@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import os, { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
@@ -7276,6 +7276,38 @@ test("artifact preference refresh reaches the next provider launch and resume wi
     assert.match(h.launches[1]!.options.artifactGuidance!, /Use External Hosting/);
     assert.equal(h.store.readMeta("resume-session")!.artifactUploads, "external_hosting");
   } finally { h.manager.shutdownAll(); h.cleanup(); }
+});
+
+test("Claude Code and Codex launches carry zsh guidance only when their command shell is zsh (#3272)", { skip: process.platform === "win32" }, async (t) => {
+  const shells = mkdtempSync(join(tmpdir(), "wollipog-shells-"));
+  t.after(() => rmSync(shells, { recursive: true, force: true }));
+  for (const name of ["zsh", "bash"]) writeFileSync(join(shells, name), "#!/bin/sh\n", { mode: 0o755 });
+  let loginShell = join(shells, "bash");
+  t.mock.method(os, "userInfo", () => ({ username: "agent", uid: 1, gid: 1, homedir: "/home/agent", shell: loginShell }));
+  const launchGuidance = async (driver: AgentDriverKind, env: Record<string, string>) => {
+    const h = harness({ driver, env: { ...env, WOLLIPOG_CLI: "/runner-private/cli" } });
+    try {
+      h.manager.prompt("resume-session", "task");
+      for (let i = 0; i < 100 && !h.prompts.length; i++) await shortDelay();
+      assert.deepEqual(h.prompts, ["task"], "the user's task is unchanged");
+      const guidance = h.launches[0]!.options.artifactGuidance!;
+      assert.match(guidance, /^\[Wollipog Artifact Guidance\]/, "artifact guidance is kept");
+      return guidance;
+    } finally { h.manager.shutdownAll(); h.cleanup(); }
+  };
+  // Claude Code's Bash tool uses SHELL (or CLAUDE_CODE_SHELL); Codex uses the passwd login shell.
+  const claudeZsh = await launchGuidance("claude-code", { SHELL: join(shells, "zsh"), CLAUDE_CODE_SHELL: "" });
+  assert.match(claudeZsh, /\[Wollipog Shell Guidance\] Your shell commands run in zsh/);
+  assert.match(claudeZsh, /no matches found/);
+  assert.doesNotMatch(await launchGuidance("claude-code", { SHELL: join(shells, "bash"), CLAUDE_CODE_SHELL: "" }), /Shell Guidance|zsh/);
+  assert.doesNotMatch(await launchGuidance("claude-code", { SHELL: join(shells, "zsh"), CLAUDE_CODE_SHELL: join(shells, "bash") }), /Shell Guidance/);
+  for (const driver of ["codex-app-server", "codex"] as const) {
+    // Codex uses an installed login shell before searching PATH, so these hold on any CI host.
+    loginShell = join(shells, "zsh");
+    assert.match(await launchGuidance(driver, { SHELL: join(shells, "bash") }), /Your shell commands run in zsh/, driver);
+    loginShell = join(shells, "bash");
+    assert.doesNotMatch(await launchGuidance(driver, { SHELL: join(shells, "zsh") }), /Shell Guidance|zsh/, driver);
+  }
 });
 
 test("an async answer admitted while the provider launch is still starting waits for that launch (#3085)", async () => {
