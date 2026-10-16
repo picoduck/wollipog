@@ -10,6 +10,7 @@ import { test } from "node:test";
 import type { AgentDriverKind, RunnerToControlPlane, SessionConfig, SessionEventPayload, SessionLaunchSpec } from "@wollipog/protocol";
 import type { Driver, DriverCallbacks, DriverOptions } from "./drivers/driver.js";
 import { ClaudeCodeDriver } from "./drivers/claude-code.js";
+import { claudeProjectPathKey } from "./claude-background-work.js";
 import { CodexAppServerResumeError } from "./drivers/codex-app-server.js";
 import { setGitRunnerForTests } from "./git-ops.js";
 import type { ProviderAuthRecoveryController } from "./provider-auth-recovery.js";
@@ -324,6 +325,181 @@ function exitActive(manager: SessionManager, sessionId: string, code: number | n
   const client = internals.active.get(sessionId)?.client;
   assert.ok(client, `expected an active provider for ${sessionId}`);
   internals.onExit(sessionId, code, client);
+}
+
+test("startup repairs historical TaskStop rows without artifacts, aggregate state, or paid recovery", async () => {
+  const job = { id: "historical", parentTurnId: "unknown", runnerId: "runner", workspaceId: "workspace",
+    context: { kind: "native" as const }, launchType: "workflow" as const, registeredAt: 1 };
+  const h = harness({ driver: "claude-code", agentId: "claude-code", command: "claude",
+    agentSessionId: "provider-history", backgroundJobs: [job, { ...job, id: "unresolved" }, {
+      ...job, id: "already-submitted", terminalStatus: "completed", terminalObservedAt: 2,
+      continuationRequired: true, continuationId: "old-continuation", continuationSubmittedAt: 3,
+    }] });
+  try {
+    h.store.patchMeta("resume-session", { env: { HOME: h.root, TMPDIR: h.root } });
+    const projects = join(h.root, ".claude", "projects", claudeProjectPathKey(h.root));
+    mkdirSync(projects, { recursive: true });
+    writeFileSync(join(projects, "provider-history.jsonl"), [
+      { type: "assistant", message: { content: [
+        { type: "tool_use", id: "stop", name: "TaskStop", input: { task_id: "historical" } },
+      ] } },
+      { type: "user", message: { content: [
+        { type: "tool_result", tool_use_id: "stop", content: JSON.stringify({
+          task_id: "historical", message: "Successfully stopped task: historical",
+        }) },
+      ] } },
+    ].map((record) => JSON.stringify(record)).join("\n"));
+    h.manager.reconcileStore();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const first = h.store.readMeta("resume-session")!;
+    assert.equal(first.backgroundJobs?.[0]?.terminalStatus, "killed");
+    assert.equal(first.backgroundJobs?.[0]?.continuationRequired, false);
+    assert.ok(first.backgroundJobs?.[0]?.assistantResultPersistedAt);
+    assert.equal(first.backgroundJobs?.[1]?.terminalStatus, undefined, "unresolved work survives");
+    assert.equal(first.backgroundJobs?.[2]?.continuationSubmittedAt, 3);
+    assert.equal(first.backgroundWorkState, undefined, "unverified history is not live running proof");
+    assert.equal(first.orphanedWork, undefined);
+    assert.deepEqual(h.prompts, []);
+    assert.deepEqual(h.launches, []);
+    assert.ok(h.sent.some((message) => message.type === "session_runtime_updated" &&
+      message.snapshot.backgroundJobs?.some((record) => record.id === "historical" && record.terminalStatus === "killed")));
+    const log = h.logs.map((line) => { try { return JSON.parse(line); } catch { return null; } })
+      .find((record) => record?.event === "historical_claude_jobs_reconciled");
+    assert.equal(log?.entryPoint, "startup");
+    assert.equal(log?.reconciledJobs, 1);
+    assert.equal(log?.unresolvedJobs, 1);
+    assert.equal(typeof log?.correlationId, "string");
+    h.manager.reconcileStore();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(h.store.readMeta("resume-session")?.backgroundJobs?.[0]?.terminalObservedAt,
+      first.backgroundJobs?.[0]?.terminalObservedAt, "repeated inspection is idempotent");
+    assert.deepEqual(h.prompts, [], "no automatic resubmission");
+  } finally { h.manager.shutdownAll(); h.cleanup(); }
+});
+
+for (const entryPoint of ["startup", "reconnect", "recovery_request"] as const) {
+  for (const unresolved of ["none", "orphan", "historical"] as const) test(`${entryPoint} preserves orphan recovery for a stopped task and held sibling (${unresolved} unresolved work)`, async () => {
+    const job = { id: "stopped", parentTurnId: "known-parent", runnerId: "runner", workspaceId: "workspace",
+      context: { kind: "native" as const }, launchType: "workflow" as const, registeredAt: 1 };
+    const pending = unresolved === "orphan" ? ["stopped", "unresolved"] : ["stopped"];
+    const h = harness({ driver: "claude-code", agentId: "claude-code", command: "claude",
+      agentSessionId: "mixed-history", backgroundWorkState: "orphaned", pendingBackgroundTaskIds: pending,
+      orphanedWork: { pendingTaskIds: pending, markedAt: 10, reason: "process_exit" },
+      config: { costBudgetUsd: 1 }, costUsd: 1,
+      backgroundJobs: [job, { ...job, id: "held", terminalStatus: "completed", terminalObservedAt: 2,
+        continuationRequired: true }, ...(unresolved !== "none" ? [{ ...job, id: "unresolved" }] : [])] });
+    try {
+      h.store.patchMeta("resume-session", { env: { HOME: h.root, TMPDIR: h.root } });
+      const projects = join(h.root, ".claude", "projects", claudeProjectPathKey(h.root));
+      mkdirSync(projects, { recursive: true });
+      writeFileSync(join(projects, "mixed-history.jsonl"), [
+        { type: "assistant", message: { content: [
+          { type: "tool_use", id: "stop", name: "TaskStop", input: { task_id: "stopped" } },
+        ] } },
+        { type: "user", message: { content: [
+          { type: "tool_result", tool_use_id: "stop", content: JSON.stringify({
+            task_id: "stopped", message: "Successfully stopped task: stopped",
+          }) },
+        ] } },
+      ].map((record) => JSON.stringify(record)).join("\n"));
+      if (entryPoint === "startup") h.manager.reconcileStore();
+      else if (entryPoint === "reconnect") h.manager.recoverAllOrphanedWork();
+      else h.manager.recoverOrphanedWork("resume-session");
+      await tick();
+      await shortDelay();
+      const current = h.store.readMeta("resume-session")!;
+      const stopped = current.backgroundJobs!.find((record) => record.id === "stopped")!;
+      const held = current.backgroundJobs!.find((record) => record.id === "held")!;
+      assert.equal(stopped.terminalStatus, "killed");
+      assert.equal(stopped.continuationRequired, false);
+      assert.ok(stopped.assistantResultPersistedAt);
+      if (unresolved !== "none") {
+        assert.equal(current.backgroundWorkState, unresolved === "orphan" ? "orphaned" : undefined,
+          "unresolved work must retain honest recovery ownership, without invented running proof");
+        assert.deepEqual(current.orphanedWork?.pendingTaskIds, unresolved === "orphan" ? ["unresolved"] : undefined);
+        assert.equal(held.continuationId, undefined, "unfinished siblings still hold delivery");
+      } else {
+        assert.ok(held.continuationId, "a pending result must have a real queued continuation");
+        assert.ok(held.continuationQueuedAt);
+        assert.equal(current.backgroundWorkState, "continuation_pending");
+        assert.equal(current.orphanedWork, undefined);
+      }
+      assert.deepEqual(h.prompts, [], "receipt repair never bypasses the spending hold");
+      assert.deepEqual(h.launches, []);
+    } finally { h.manager.shutdownAll(); h.cleanup(); }
+  });
+}
+
+for (const mode of ["budget", "request", "adopted", "history", "auth", "explicit_read_only"] as const) {
+  for (const pendingCase of ["missing", "omitted", "covered"] as const) test(`${mode} repairs historical stops with ${pendingCase} pending ids without losing orphan ownership`, async () => {
+    const job = { id: "stopped", parentTurnId: "known-parent", runnerId: "runner", workspaceId: "workspace",
+      context: { kind: "native" as const }, launchType: "workflow" as const, registeredAt: 1 };
+    const pending = pendingCase === "missing" ? ["unknown"] : pendingCase === "covered" ? ["stopped"] : ["unresolved"];
+    const h = harness({ driver: "claude-code", agentId: "claude-code", command: "claude",
+      agentSessionId: "incomplete-history", backgroundWorkState: mode === "explicit_read_only" || mode === "request" ? "orphaned" : "running",
+      ...(mode === "explicit_read_only" || mode === "request" ? {
+        pendingBackgroundTaskIds: mode === "request" && pendingCase === "missing" ? [] : pending,
+        orphanedWork: { pendingTaskIds: pending, markedAt: 10, reason: "process_exit" as const },
+      } : pendingCase !== "missing" ? { pendingBackgroundTaskIds: pending } : {}),
+      ...(mode === "budget" || mode === "request" ? { config: { costBudgetUsd: 1 }, costUsd: 1 } : {}),
+      ...(mode === "adopted" ? { adopted: true } : {}),
+      ...(mode === "auth" ? { providerCredentialScopeId: "test-scope", providerAuthBlock: {
+        version: 1 as const, recoveryId: "auth-recovery", credentialScopeId: "test-scope", detectedAt: 1,
+        phase: "turn" as const, delivery: "uncertain" as const, canStartLogin: false, configuredCredential: false,
+      } } : {}),
+      ...(mode === "history" ? { providerHistoryBlock: { version: 1 as const,
+        reason: "oversized_tool_call" as const, detectedAt: 1, detail: { field: "arguments" } } } : {}),
+      backgroundJobs: [job, { ...job, id: "held", terminalStatus: "completed", terminalObservedAt: 2,
+        continuationRequired: true }, { ...job, id: "retired", parentTurnId: "retired-parent", restartedAt: 5 },
+        ...(pendingCase === "omitted" ? [{ ...job, id: "unresolved", parentTurnId: "other-parent" }] : [])] });
+    try {
+      h.store.patchMeta("resume-session", { env: { HOME: h.root, TMPDIR: h.root } });
+      const projects = join(h.root, ".claude", "projects", claudeProjectPathKey(h.root));
+      mkdirSync(projects, { recursive: true });
+      writeFileSync(join(projects, "incomplete-history.jsonl"), ["stopped", "retired"].flatMap((id) => [
+        { type: "assistant", message: { content: [
+          { type: "tool_use", id: `stop-${id}`, name: "TaskStop", input: { task_id: id } },
+        ] } },
+        { type: "user", message: { content: [
+          { type: "tool_result", tool_use_id: `stop-${id}`, content: JSON.stringify({
+            task_id: id, message: `Successfully stopped task: ${id}`,
+          }) },
+        ] } },
+      ]).map((record) => JSON.stringify(record)).join("\n"));
+      const recover = () => mode === "explicit_read_only"
+        ? h.manager.recoverOrphanedWork("resume-session", false)
+        : mode === "request" ? h.manager.recoverOrphanedWork("resume-session") : h.manager.reconcileStore();
+      recover();
+      await tick();
+      await shortDelay();
+      const current = h.store.readMeta("resume-session")!;
+      const stopped = current.backgroundJobs!.find((record) => record.id === "stopped")!;
+      const held = current.backgroundJobs!.find((record) => record.id === "held")!;
+      assert.equal(stopped.terminalStatus, "killed", "retained rows must be inspected even when absent from pending ids");
+      assert.equal(stopped.continuationRequired, false);
+      assert.ok(stopped.assistantResultPersistedAt);
+      assert.equal(stopped.continuationId, undefined);
+      assert.deepEqual(current.orphanedWork?.pendingTaskIds, pendingCase === "covered" ? undefined : pending,
+        "only confirmed stops leave orphan ownership; unknown or unresolved work remains");
+      assert.equal(current.backgroundJobs!.find((record) => record.id === "retired")!.terminalStatus, undefined,
+        "a replaced conversation's unfinished row is not reconciled");
+      if (mode === "budget" || mode === "request") {
+        assert.ok(held.continuationId, "normal recovery queues the sibling unblocked by authoritative stop proof");
+        assert.ok(held.continuationQueuedAt);
+      } else {
+        assert.equal(held.continuationId, undefined, "read-only repair cannot queue a return turn");
+        assert.equal(current.backgroundWorkState, pendingCase === "covered" ? undefined : "orphaned",
+          "read-only repair must not invent a pending return step");
+      }
+      recover();
+      await tick();
+      await shortDelay();
+      assert.equal(h.store.readMeta("resume-session")!.backgroundJobs!.find((record) => record.id === "held")!.continuationId,
+        held.continuationId, "repeat repair cannot duplicate the continuation");
+      assert.deepEqual(h.launches, [], "neither a spending hold nor read-only recovery permits paid replay");
+      assert.deepEqual(h.prompts, []);
+    } finally { h.manager.shutdownAll(); h.cleanup(); }
+  });
 }
 
 test("provider auth failure stops the turn, parks exact recovery context, and holds FIFO until explicit retry", async () => {

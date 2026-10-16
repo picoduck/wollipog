@@ -1294,6 +1294,7 @@ export class SessionManager {
   private readonly backgroundContinuationWakeAfterRepair = new Set<string>();
   private readonly backgroundContinuationTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly orphanDiscoveryLaunching = new Set<string>();
+  private readonly historicalJobInspections = new Set<string>();
   private lastOrphanRecoveryScanAt = 0;
   private orphanRecoveryScanTimer: ReturnType<typeof setTimeout> | null = null;
   /** Provider logout is asynchronous; fence prompts and other provider/worktree operations. */
@@ -4692,6 +4693,7 @@ export class SessionManager {
       this.upgradeLegacyBackgroundDeliveryEvidence(stored);
       if (stored.status === "stopped") continue;
       const meta = this.discoverOrphanedClaudeWork(stored);
+      this.scheduleHistoricalClaudeJobReconciliation(meta, "reconnect");
       const automatic = automaticClaudeRecoveryAllowed(meta);
       if (automatic && meta.orphanedWork) {
         this.scheduleOrphanRecovery(meta.sessionId);
@@ -5185,6 +5187,7 @@ export class SessionManager {
           this.log(`failed worktree recovery reconciliation failed for ${boundedSessionIdForLog(m.sessionId)}: ${errText(error)}`);
         });
       }
+      this.scheduleHistoricalClaudeJobReconciliation(this.store.readMeta(m.sessionId) ?? reconciled, "startup");
     }
     // Register every known-session namespace synchronization before replaying cleanup records.
     // Otherwise a reaper invoked at the top of this method could capture an empty promise slot,
@@ -17528,10 +17531,69 @@ export class SessionManager {
     if (!meta) return;
     const discovered = this.discoverOrphanedClaudeWork(meta);
     const allowed = automatic && automaticClaudeRecoveryAllowed(discovered);
+    this.scheduleHistoricalClaudeJobReconciliation(discovered, "recovery_request", allowed);
     if (allowed && discovered.orphanedWork) {
       this.scheduleOrphanRecovery(sessionId);
     }
     else this.scheduleContextOrphanDiscovery(discovered, allowed);
+  }
+
+  /** Older ledgers can retain unfinished rows without aggregate state, pending ids, or task files.
+   * Repair only provider-confirmed model stops. Existing orphans belong to performOrphanRecovery,
+   * which also queues any finished siblings unblocked by the stop. When automatic recovery is
+   * disabled or blocked, this pass still repairs receipts without queueing or launching work. */
+  private scheduleHistoricalClaudeJobReconciliation(
+    meta: SessionMeta,
+    entryPoint: "startup" | "reconnect" | "recovery_request",
+    automatic = true,
+  ): void {
+    if (this.shuttingDown || meta.driver !== "claude-code" || !meta.agentSessionId ||
+        meta.status === "stopped" || this.active.has(meta.sessionId) ||
+        this.historicalJobInspections.has(meta.sessionId)) return;
+    if (meta.orphanedWork && automatic && automaticClaudeRecoveryAllowed(meta) &&
+        !meta.providerAuthBlock && !meta.providerHistoryBlock && !meta.worktreeRecovery) return;
+    const ids = (meta.backgroundJobs ?? []).filter((job) => !job.terminalStatus &&
+      job.restartedAt === undefined).map((job) => job.id);
+    if (ids.length === 0) return;
+    const correlationId = randomUUID();
+    this.historicalJobInspections.add(meta.sessionId);
+    void inspectClaudeBackgroundWorkInContext(meta.context, meta.worktreePath ?? meta.repoPath,
+      meta.agentSessionId, ids, { env: meta.env, ...(this.executionIsolation.mode === "bwrap" ? {
+        projectsRoot: join(this.stateDir, "provider-state", "claude", providerStateKey(meta.sessionId), "projects"),
+      } : {}) })
+      .then((inspection) => {
+        const stopped = inspection.modelStoppedTaskIds;
+        if (this.shuttingDown || !stopped?.size || this.active.has(meta.sessionId)) return;
+        const current = this.store.readMeta(meta.sessionId);
+        // Never apply a historical observation across a prompt, stop, restart, or competing repair.
+        if (!current || JSON.stringify(current) !== JSON.stringify(meta)) return;
+        const now = Date.now();
+        const backgroundJobs = (current.backgroundJobs ?? []).map((job) => stopped.has(job.id)
+          ? { ...job, terminalStatus: "killed" as const, terminalObservedAt: now,
+              continuationRequired: false, assistantResultPersistedAt: now }
+          : job);
+        const pendingBackgroundTaskIds = current.pendingBackgroundTaskIds?.filter((id) => !stopped.has(id));
+        const orphanIds = current.orphanedWork?.pendingTaskIds.filter((id) => !stopped.has(id));
+        const orphanedWork = current.orphanedWork && orphanIds?.length
+          ? { ...current.orphanedWork, pendingTaskIds: orphanIds } : undefined;
+        const updated = this.store.patchMeta(meta.sessionId, {
+          backgroundJobs, pendingBackgroundTaskIds, orphanedWork,
+          recoveredBackgroundTaskIds: mergeRecoveredBackgroundTaskIds(current.recoveredBackgroundTaskIds, [...stopped]),
+          // This read-only pass never queues a return step. Clearing its last orphan must not
+          // invent continuation_pending from held rows, nor running from unverified history.
+          backgroundWorkState: orphanedWork ? "orphaned" : current.orphanedWork ? undefined
+            : current.backgroundWorkState ? managedBackgroundWorkState(backgroundJobs) : undefined,
+        });
+        if (updated) {
+          this.log(JSON.stringify({ event: "historical_claude_jobs_reconciled", entryPoint, correlationId,
+            sessionId: meta.sessionId, reconciledJobs: stopped.size,
+            unresolvedJobs: backgroundJobs.filter((job) => !job.terminalStatus).length }));
+          this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+        }
+      })
+      .catch(() => this.log(JSON.stringify({ event: "historical_claude_job_inspection_failed",
+        entryPoint, correlationId, sessionId: meta.sessionId })))
+      .finally(() => this.historicalJobInspections.delete(meta.sessionId));
   }
 
   private discoverOrphanedClaudeWork(meta: SessionMeta): SessionMeta {
@@ -18058,7 +18120,11 @@ export class SessionManager {
       try {
         const inspection = await inspectClaudeBackgroundWorkInContext(
           meta.context, meta.worktreePath ?? meta.repoPath, meta.agentSessionId,
-          meta.pendingBackgroundTaskIds ?? meta.orphanedWork.pendingTaskIds,
+          new Set([
+            ...(meta.pendingBackgroundTaskIds ?? []), ...meta.orphanedWork.pendingTaskIds,
+            ...(meta.backgroundJobs ?? []).filter((job) => !job.terminalStatus && job.restartedAt === undefined)
+              .map((job) => job.id),
+          ]),
           { env: meta.env, ...(this.executionIsolation.mode === "bwrap" ? {
             projectsRoot: join(this.stateDir, "provider-state", "claude", providerStateKey(sessionId), "projects"),
           } : {}) },
@@ -18079,8 +18145,9 @@ export class SessionManager {
               current.recoveredBackgroundTaskIds, [...inspection.terminalTaskIds],
             ),
           });
-          const pending = (current.pendingBackgroundTaskIds ?? current.orphanedWork!.pendingTaskIds)
-            .filter((id) => !inspection.terminalTaskIds.has(id));
+          const pending = [...new Set([
+            ...(current.pendingBackgroundTaskIds ?? []), ...current.orphanedWork!.pendingTaskIds,
+          ])].filter((id) => !inspection.terminalTaskIds.has(id));
           this.onDriverBackgroundWork(sessionId, {
             state: pending.length ? "orphaned" : null,
             pendingTaskIds: pending,
@@ -18091,7 +18158,9 @@ export class SessionManager {
                 id: job.id, toolUseId: job.toolUseId, launchType: job.launchType,
                 startedAt: job.registeredAt, outputFile: job.outputReference,
                 status: inspection.terminalTaskStatuses?.get(job.id) ?? job.terminalStatus ?? "completed",
-                terminalAt: Date.now(), continuationRequired: job.continuationRequired ?? false,
+                terminalAt: Date.now(),
+                continuationRequired: inspection.modelStoppedTaskIds?.has(job.id) ? false : job.continuationRequired ?? false,
+                ...(inspection.modelStoppedTaskIds?.has(job.id) ? { stoppedByModel: true } : {}),
               })),
           });
         }

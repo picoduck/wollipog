@@ -4461,6 +4461,38 @@ test("runner snapshots ignore missing-result evidence until the continuation is 
   db.close();
 });
 
+for (const parentTurnId of ["unknown", "known-parent"]) test(`historical ${parentTurnId} stopped-job snapshots remove only confirmed Result Blocked siblings`, () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    db.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    const job = { parentTurnId, runnerId: "runner-1", workspaceId: null,
+      launchType: "workflow" as const, registeredAt: 1_000 };
+    const finished = { ...job, id: "finished", terminalStatus: "completed" as const,
+      terminalObservedAt: 1_100, continuationRequired: true };
+    const stopped = { ...job, id: "stopped" };
+    const unresolved = { ...job, id: "unresolved" };
+    const state = (jobs: typeof stopped[]) => snapshot({ id: "historical-stops", driver: "claude_code",
+      backgroundJobs: jobs });
+    db.createSessionFromSnapshot(state([finished, stopped, unresolved]), "runner-1", 2_000);
+    assert.equal(db.getSession("historical-stops")?.backgroundDeliveries?.[0]?.unfinishedSiblingJobs, 2);
+    const confirmed = { ...stopped, terminalStatus: "killed" as const, terminalObservedAt: 3_000,
+      continuationRequired: false, assistantResultPersistedAt: 3_000 };
+    db.updateSessionFromSnapshot("historical-stops", state([finished, confirmed, unresolved]), 3_000);
+    const partial = db.getSession("historical-stops")!;
+    assert.equal(partial.backgroundDeliveries?.[0]?.watchdogState, "continuation_blocked");
+    assert.equal(partial.backgroundDeliveries?.[0]?.unfinishedSiblingJobs, 1);
+    assert.equal(partial.backgroundJobs?.find((row) => row.id === "stopped")?.terminalStatus, "killed");
+    db.updateSessionFromSnapshot("historical-stops", state([finished, confirmed,
+      { ...confirmed, id: "unresolved" }]), 4_000);
+    assert.equal(db.getSession("historical-stops")?.backgroundDeliveries?.some((delivery) =>
+      delivery.watchdogState === "continuation_blocked"), false);
+    const terminal = db.getSession("historical-stops")!;
+    assert.equal(terminal.backgroundWorkState, undefined);
+    assert.equal(terminal.backgroundDeliveries?.[0]?.watchdogState, "terminal_without_continuation");
+    assert.equal(terminal.backgroundDeliveries?.[0]?.continuationId, undefined);
+  } finally { db.close(); }
+});
+
 test("a finished job whose sibling never finishes is a blocked delivery, and a listed job past the bound is reported as stalled (#1651)", () => {
   const db = ControlPlaneDb.open(":memory:");
   try {

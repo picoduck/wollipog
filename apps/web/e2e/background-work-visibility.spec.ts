@@ -153,7 +153,7 @@ for (const width of [320, 1280]) {
     const header = page.locator(".session-bar");
     const cases = [
       ["terminal_without_continuation", "Result Pending", "A background job finished, but its result has not yet been returned to this conversation."],
-      ["continuation_blocked", "Result Blocked", "A background job finished, but its result cannot be returned while another job from the same turn is still running."],
+      ["continuation_blocked", "Result Blocked", "A background job finished, but its result is held because another job has no confirmed end."],
       ["accepted_without_result", "Result Missing", "A background job finished, but its result is missing after Wollipog accepted the return step."],
       ["result_not_projected", "Transcript Delayed", "A background result reached Wollipog, but it has not appeared in this conversation yet."],
       ["dashboard_observation_pending", "Notification Pending", "A background result reached the conversation, but this dashboard has not yet confirmed the update."],
@@ -340,7 +340,7 @@ for (const width of [320, 1280]) {
     const notice = panel.locator('.notice[data-state="continuation_blocked"]');
     await expect(notice.locator(".notice-title")).toHaveText("Result Blocked");
     await expect(notice).toContainText(
-      "Agent job 04d2e1 finished, but its result can't be returned while another job from the same turn is still running.");
+      "Agent job 04d2e1 finished, but its result is held because another job has no confirmed end.");
     const noticeStop = notice.getByRole("button", { name: "Stop Monitor Job 7be210…" });
     await expect(noticeStop).toBeDisabled();
     await expect(noticeStop).toHaveAccessibleDescription(
@@ -430,7 +430,7 @@ for (const width of [390, 1440]) {
     const row = page.getByRole("dialog", { name: "Session Status" }).locator(".session-status-row")
       .filter({ hasText: "Result Blocked" });
     await expect(row.locator(".session-status-text")).toHaveText(
-      "A background job finished, but its result cannot be returned while another job from the same turn is still running.");
+      "A background job finished, but its result is held because another job has no confirmed end.");
     await row.getByRole("button", { name: "Stop Job…" }).click();
 
     const confirmation = page.getByRole("alertdialog").or(page.getByRole("dialog", { name: "Stop Job" }));

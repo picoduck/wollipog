@@ -13,6 +13,7 @@ import {
   shownWatchdogDelivery,
   backgroundDeliveryAcknowledgement,
   requestBackgroundDeliveryAcknowledgement,
+  historicalBackgroundResultRecovery,
 } from "./background-delivery-status.js";
 
 const states: BackgroundDeliveryWatchdogState[] = [
@@ -23,6 +24,23 @@ const states: BackgroundDeliveryWatchdogState[] = [
   "result_not_projected",
   "dashboard_observation_pending",
 ];
+
+test("historical recovery requires an idle Claude session without current running-work proof", () => {
+  const session = { driver: "claude-code" as const, status: "idle" as const,
+    backgroundDeliveries: [{ parentTurnId: "unknown", jobCount: 2, terminalCount: 1,
+      watchdogState: "continuation_blocked" as const }] };
+  assert.equal(historicalBackgroundResultRecovery(session), true);
+  assert.equal(historicalBackgroundResultRecovery({ ...session, backgroundWorkState: "running" }), false);
+  assert.equal(historicalBackgroundResultRecovery({ ...session, status: "running" }), false);
+  assert.equal(historicalBackgroundResultRecovery({ ...session, driver: "codex-app-server" }), false);
+  assert.equal(historicalBackgroundResultRecovery({ ...session, backgroundDeliveries: [] }), false);
+  assert.equal(historicalBackgroundResultRecovery({ ...session, backgroundDeliveries: [
+    { ...session.backgroundDeliveries[0]!, watchdogState: "terminal_without_continuation" },
+  ] }), true, "an unknown-parent result without a recorded return step keeps explicit recovery");
+  assert.equal(historicalBackgroundResultRecovery({ ...session, backgroundDeliveries: [
+    { ...session.backgroundDeliveries[0]!, parentTurnId: "known-parent", watchdogState: "terminal_without_continuation" },
+  ] }), true, "a known parent cannot prove an unqueued historical result will return automatically");
+});
 
 test("delivery-watchdog copy stays compact, plain-language, and complete", () => {
   assert.deepEqual(states.map((state) => BACKGROUND_DELIVERY_STATUS[state].label), [
@@ -139,7 +157,7 @@ test("a recovery notice's one sentence names its job, or counts them (#2859)", (
     "2 background jobs finished, but their result never reached this conversation. Wollipog won't retry on its own, " +
     "so the step can't run twice.");
   assert.equal(backgroundRecoverySentence("continuation_blocked", job),
-    "Shell job a1f3c9 finished, but its result can't be returned while another job from the same turn is still running.");
+    "Shell job a1f3c9 finished, but its result is held because another job has no confirmed end.");
   assert.equal(backgroundRecoverySentence("terminal_without_continuation", job),
     "Returning shell job a1f3c9's result to this conversation.");
   assert.equal(backgroundRecoverySentence("terminal_without_continuation", { count: 1 }),
