@@ -172,7 +172,8 @@ export class CodexDriver implements Driver {
     // but Wollipog's entry survives.
     const preset = this.config.permissionMode === "orchestrator";
     if (preset || this.opts.orchestrator?.integrationIsolation === true) {
-      try { isolationArgs = await this.deps.orchestratorMcpArgs(this.opts, this.cwd, {}, !preset); }
+      // MCP inventory probing starts provider processes outside any boundary: no proof while it runs.
+      try { isolationArgs = await this.processes.untracked(() => this.deps.orchestratorMcpArgs(this.opts, this.cwd, {}, !preset)); }
       catch (err) {
         this.cb.onEvent({ kind: "error", message: (err as Error).message });
         return "refusal";
@@ -187,7 +188,8 @@ export class CodexDriver implements Driver {
     // A fresh thread passes `-s <mode>` (explicit). A resumed non-Orchestrator thread has always
     // passed NO `-s` and let Codex resolve its own default (implicit), so that is what it is
     // compared against — never the session's structured mode.
-    const profile = !this.opts.hookStateDir ? null : await this.deps.permissionProfile({
+    // The probe runs outside any process boundary, so no proof can succeed while it runs.
+    const profile = !this.opts.hookStateDir ? null : await this.processes.untracked(() => this.deps.permissionProfile({
       command: this.opts.command,
       args: [...this.opts.args, ...isolationArgs],
       legacy: this.threadId && !preset
@@ -197,7 +199,7 @@ export class CodexDriver implements Driver {
       nativeHostLaunch: this.opts.context.kind === "native" && !this.opts.isolation,
       hookStateDir: this.opts.hookStateDir,
       cwd: this.cwd,
-    });
+    }));
     if (profile && (this.disposed || this.cancelled)) return "cancelled";
     return new Promise<StopReason>((resolve) => {
       this.seenItems.clear(); // dedup is per-turn; each turn re-emits item.started ids
