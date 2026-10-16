@@ -241,7 +241,9 @@ export class AgentControlFifoRelays {
   }
 
   async closeAll(): Promise<void> {
-    await Promise.all([...this.channels.keys()].map((sessionId) => this.close(sessionId)));
+    // A channel still being created is only in `pending`; its close queues behind that creation.
+    const sessionIds = new Set([...this.channels.keys(), ...this.pending.keys()]);
+    await Promise.all([...sessionIds].map((sessionId) => this.close(sessionId)));
   }
 
   private closeNow(sessionId: string): void {
@@ -478,6 +480,13 @@ async function fifoRoundTrip(
       else resolvePromise(result!);
     };
     const aborted = () => finish(new Error("Agent Control relay request aborted"));
+    // An abort during channel setup has already fired and is not replayed: refuse before the frame
+    // is written, or a cancelled request would still reach the control plane. Closing both ends
+    // unsent tells the runner the client went away.
+    if (signal?.aborted) {
+      aborted();
+      return;
+    }
     signal?.addEventListener("abort", aborted, { once: true });
     response.on("data", (chunk: Buffer) => {
       total += chunk.length;

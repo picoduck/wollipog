@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import {
   chmodSync,
   closeSync,
@@ -309,6 +311,46 @@ test("the client going away cancels the relayed request, like a closed socket", 
   } finally {
     await channel.closeAll();
   }
+});
+
+test("a request cancelled while its channel was being set up is never sent (review CR-1.1)", { skip: SKIP }, async () => {
+  let calls = 0;
+  const channel = relays(async () => { calls++; return { status: 200, body: "{}" }; });
+  const controller = new AbortController();
+  const originalOpen = fs.openSync;
+  try {
+    const directory = await channel.ensure("s_fifo_setup_abort");
+    // Abort at the last setup step, after the request FIFO is open and before anything is written:
+    // the abort event has fired by the time the client could listen for it.
+    fs.openSync = ((path: fs.PathLike, flags: fs.OpenMode = "r", mode?: fs.Mode | null) => {
+      const fd = originalOpen(path, flags, mode);
+      if (String(path).endsWith(".req") && typeof flags === "number" && (flags & constants.O_WRONLY) !== 0) controller.abort();
+      return fd;
+    }) as typeof fs.openSync;
+    syncBuiltinESMExports();
+    await assert.rejects(() => agentControlFifoRelayFetch(directory, KEY)("http://127.0.0.1:1/api/mutate", {
+      method: "POST", headers: { "content-type": "application/json" }, body: "{}", signal: controller.signal,
+    }), /aborted/);
+    fs.openSync = originalOpen;
+    syncBuiltinESMExports();
+    // The runner sees the client close without a frame and drops the exchange at once.
+    await until(() => entries(directory).length === 1, 2_000);
+    assert.equal(calls, 0, "a cancelled request must not reach the control plane");
+  } finally {
+    fs.openSync = originalOpen;
+    syncBuiltinESMExports();
+    await channel.closeAll();
+  }
+});
+
+test("closeAll also removes a channel that was still being created (review CR-1.2)", { skip: SKIP }, async () => {
+  const channel = relays(async () => ({ status: 200, body: "{}" }));
+  const creating = channel.ensure("s_fifo_pending_close");
+  await channel.closeAll();
+  const directory = await creating;
+  assert.equal(existsSync(directory), false, "shutdown leaves no channel behind");
+  await assert.rejects(() => agentControlFifoRelayFetch(directory, KEY)("http://127.0.0.1:1/api/x"),
+    /relay is not running for this session/);
 });
 
 test("an exchange that outlives its deadline is abandoned and its handler cancelled", { skip: SKIP }, async () => {
