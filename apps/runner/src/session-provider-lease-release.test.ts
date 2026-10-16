@@ -24,6 +24,8 @@ class CountingRegistry {
   readonly log: string[] = [];
   openHandles = 0;
   plainAcquires = 0;
+  /** Holds a release of `home` until `open` resolves; `started` once one is waiting. */
+  releaseGate?: { home: string; open: Promise<void>; started: boolean };
 
   private add(home: string): void {
     this.references.set(home, (this.references.get(home) ?? 0) + 1);
@@ -44,14 +46,19 @@ class CountingRegistry {
     this.log.push(`reference:${home}`);
     this.openHandles++;
     let settled: Promise<boolean> | undefined;
-    const settle = (release: boolean) => settled ??= (() => {
+    const settle = (release: boolean) => settled ??= (async () => {
+      const gate = this.releaseGate;
+      if (release && gate?.home === home) {
+        gate.started = true;
+        await gate.open;
+      }
       this.openHandles--;
       this.log.push(`${release ? "release" : "retain"}:${home}`);
       if (release) {
         const count = this.references.get(home) ?? 0;
         if (count <= 1) this.references.delete(home); else this.references.set(home, count - 1);
       }
-      return Promise.resolve(true);
+      return true;
     })();
     return { first: true, release: () => settle(true), retain: async () => { await settle(false); } };
   }
@@ -256,6 +263,24 @@ for (const [label, preparation, released] of [
     } finally { h.cleanup(); }
   });
 }
+
+test("a launch stopped while its preparation reference settles never constructs its provider", async () => {
+  const h = fixture({ proof: true }, { statusProofs: [true] });
+  let open!: () => void;
+  h.registry.releaseGate = { home: ACCOUNT_HOME, open: new Promise<void>((resolve) => { open = resolve; }), started: false };
+  try {
+    const started = h.manager.start(h.spec("s1"));
+    await until(() => h.registry.releaseGate!.started, "the preparation settlement to wait on the lease worker");
+    assert.ok(h.registry.references.has(h.home), "the driver's reference is held while settlement waits");
+    h.manager.stop("s1");
+    open();
+    assert.equal(await started, false);
+    assert.equal(h.state.constructions, 0, "a stale launch constructs no driver after settlement");
+    assert.equal(h.registry.references.has(h.home), false, "the unused driver reference is released");
+    assert.equal(h.registry.references.has(ACCOUNT_HOME), false, "the preparation reference is released");
+    assert.equal(h.registry.openHandles, 0);
+  } finally { open(); h.cleanup(); }
+});
 
 test("a launch that goes stale during preparation releases the preparation reference", async () => {
   const h = fixture({ proof: true }, { statusProofs: [true], stopDuringPreparation: true });

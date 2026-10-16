@@ -8113,6 +8113,9 @@ export class SessionManager {
       // The driver's reference now holds the HOME (or the launch needs no shared one), so the
       // preparation's reference covered only finished work: settle it on that work's proofs.
       await preparationHome.settle();
+      // Settlement can wait on a proof or the lease worker: a stop, delete, restart or shutdown in
+      // that window must not go on to construct and start the provider.
+      if (!this.launchIsCurrent(sessionId, launchGeneration)) throw new Error("session launch changed during provider-home settlement");
       // A restart or fork may carry repository-bound authority into a changed launch directory.
       // Verify the actual origin before any provider can classify issue writes as routine.
       const preparedScope = this.store.readMeta(sessionId)?.orchestrator?.issueScope;
@@ -14322,6 +14325,14 @@ export class SessionManager {
         }
         // The temporary driver's reference now covers the HOME: the preparation's is settled.
         await forkPreparationHome.settle();
+        // Settlement can wait on a proof or the lease worker; the fork may have been cancelled or
+        // the runner may be shutting down by then, so nothing is constructed for a stale fork.
+        if (this.shuttingDown || !forkIsCurrent()) {
+          const unused = forkHome;
+          forkHome = null;
+          if (unused) await this.releaseProviderHomeReference(unused);
+          throw new Error("source session changed during provider-home settlement");
+        }
         forkConstructionStarted = true;
         temporary = this.createDriver(
           source.driver,
@@ -14452,6 +14463,14 @@ export class SessionManager {
         }
         // The temporary driver's reference now covers the HOME: the preparation's is settled.
         await forkPreparationHome.settle();
+        // Settlement can wait on a proof or the lease worker; the fork may have been cancelled or
+        // the runner may be shutting down by then, so nothing is constructed for a stale fork.
+        if (this.shuttingDown || !forkIsCurrent()) {
+          const unused = forkHome;
+          forkHome = null;
+          if (unused) await this.releaseProviderHomeReference(unused);
+          throw new Error("source session changed during provider-home settlement");
+        }
         forkConstructionStarted = true;
         temporary = this.createDriver(
           source.driver,

@@ -881,6 +881,55 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
           if (store.has(targetId)) await manager.delete(targetId);
         }
       }
+      // A fork that goes stale while the preparation settles constructs no temporary driver, and the
+      // temporary driver's unused reference is released.
+      {
+        const sequence: string[] = [];
+        let open!: () => void;
+        const gate = new Promise<void>((resolve) => { open = resolve; });
+        let gateStarted = false;
+        const targetId = "s_claude_fork_settlement_race";
+        const handle = (name: string) => ({
+          first: true,
+          release: async () => {
+            if (name === "preparation") {
+              gateStarted = true;
+              await gate;
+            }
+            sequence.push(`${name} released`);
+            return true;
+          },
+          retain: async () => { sequence.push(`${name} retained`); },
+        });
+        leaseInternals.providerHomeLeases = {
+          acquire: async () => { throw new Error("no plain reference below the handle budget"); },
+          acquireReference: async () => { sequence.push("temporary driver acquired"); return handle("temporary driver"); },
+          acquireHomeReference: async () => { sequence.push("preparation acquired"); return handle("preparation"); },
+        } as typeof leaseInternals.providerHomeLeases;
+        preparationHook = async (cancellation) => {
+          await manager.acquireLaunchProviderHome("/accounts/work", cancellation);
+        };
+        try {
+          const forking = manager.forkConversation("s_claude_source", targetId, 2, "Fork Settlement Race");
+          for (let i = 0; i < 400 && !gateStarted; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+          assert.ok(gateStarted, "the preparation settlement waits on the lease worker");
+          // The fork's target is withdrawn while the settlement waits.
+          (manager as unknown as { forkingTargets: Set<string> }).forkingTargets.delete(targetId);
+          open();
+          const forked = await forking;
+          assert.equal(forked.ok, false, "a stale fork does not proceed");
+          assert.deepEqual(sequence, [
+            "preparation acquired",
+            "temporary driver acquired",
+            "preparation released",
+            "temporary driver released",
+          ], `no temporary driver is constructed after a stale settlement: ${sequence.join(", ")}`);
+        } finally {
+          open();
+          preparationHook = undefined;
+          if (store.has(targetId)) await manager.delete(targetId);
+        }
+      }
     } finally {
       leaseInternals.providerHomeLeases = originalLeases;
     }
