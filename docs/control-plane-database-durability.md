@@ -19,15 +19,22 @@ recovers it.
 - `secure_delete=ON`: SQLite overwrites deleted ordinary-table content with zeros rather than
   leaving session text, credentials or decision content recoverable from free pages in the main
   database file. The extra delete I/O is an intentional privacy tradeoff; reducing maintenance
-  scans does not relax it. This is not complete storage erasure: WAL/journal files, backups,
-  external artifact blobs, and FTS virtual-table shadow storage need their own retention handling.
+  scans does not relax it. The transcript search index also has FTS5's own `secure-delete` option
+  set, so a deleted row's terms leave the index instead of remaining as delete markers (#2777). This
+  is still not complete storage erasure: WAL/journal files, backups, and external artifact blobs
+  need their own retention handling.
   See [SQLite's secure-delete documentation](https://sqlite.org/pragma.html#pragma_secure_delete)
   and the [index/sweep measurements](./session-event-index-and-sweep-performance.md).
-- Runner-replayable event ingest is the one exception. `appendEvent` called with a runner sequence
+- Runner-replayable event ingest is one exception. `appendEvent` called with a runner sequence
   number and `appendHydratedPage` switch the connection to `synchronous=NORMAL` for their own
   transaction and back to `FULL` afterwards (`replayableCommit`). They are relaxed only in WAL mode
   (outside WAL, `NORMAL` can corrupt the file), and never for a transaction that carries a
   `token_usage` event (see below).
+- [Archived-history retention](./archived-history-retention.md) removal batches are the other
+  (`relaxedCommit` in `pruneArchivedHistoryBatch`). A removal is idempotent, so one an OS crash
+  rolls back is removed again by the next pass. The step that closes a session's prune is `FULL`,
+  and payload blob files are deleted only after it, so a restored artifact row never points at a
+  missing blob.
 - Checkpoints run on a worker thread (`WalCheckpointer` in `apps/control-plane/src/wal-checkpointer.ts`),
   started by the control plane after it opens the database. About every 250 ms the worker runs
   `wal_checkpoint(PASSIVE)` on its own connection, which uses `synchronous=FULL`. PASSIVE never
@@ -83,8 +90,9 @@ events, 10 streaming sessions and 6 dashboards:
 are already in the operating system's page cache.
 
 **An OS crash or power loss never corrupts the database.** WAL frames are checksummed, and recovery
-discards an incomplete tail. It can roll back exactly one kind of commit: a relaxed event-ingest
-transaction that no later flush has covered.
+discards an incomplete tail. It can roll back only relaxed commits that no later flush has covered:
+an event-ingest transaction, or a retention removal batch, whose events then reappear until the next
+retention pass removes them again.
 
 The WAL is flushed by every `FULL` commit (that is, any other write: a status change, a prompt, a
 decision) and by every checkpoint that copies frames: a worker pass, about every 250 ms while the
@@ -224,7 +232,8 @@ Limits:
 
 - `db.test.ts`, test "only runner-replayable event ingest commits without a per-commit WAL flush":
   records the `synchronous` level at every commit. It fails if ingest flushes again, or if the
-  relaxation leaks to the connection or to control-plane writes.
+  relaxation leaks to the connection or to control-plane writes. The test "archived-history prune
+  removals commit without a WAL flush, and closing a run flushes" does the same for retention.
 - `wal-checkpointer.test.ts`: the worker checkpoints while the connection stays `FULL` in WAL mode;
   only PASSIVE checkpoints exist; main-connection writes with no busy timeout never meet a lock
   while the worker runs, even beside a long-lived reader; a dead worker leaves the log bounded by

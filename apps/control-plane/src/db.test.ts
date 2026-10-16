@@ -405,6 +405,32 @@ test("only runner-replayable event ingest commits without a per-commit WAL flush
   }
 });
 
+test("archived-history prune removals commit without a WAL flush, and closing a run flushes", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-prune-durability-"));
+  let db: ControlPlaneDb | undefined;
+  try {
+    db = ControlPlaneDb.open(join(root, "control-plane.db"));
+    db.registerRunner(meta(), 1);
+    db.createSession(newSession());
+    for (let seq = 1; seq <= 3; seq += 1) {
+      db.appendEvent("sess-1", { kind: "stderr", text: `noise ${seq}` }, seq + 1, { runnerSeq: seq, historyEpoch: null });
+    }
+    db.updateSessionStatus("sess-1", "completed", 10);
+    db.setSessionArchived("sess-1", true, 10);
+    const levels = recordCommitSynchronousLevels(db);
+    const input = { cutoff: 100, retentionDays: 30, now: 100, maxEvents: 2, maxPayloadBytes: 1 << 20, maxSearchLength: 1 << 20 };
+    while (!db.pruneArchivedHistoryBatch("sess-1", input).finished) { /* one bounded batch at a time */ }
+    // A removal is idempotent, so the next pass repeats one an OS crash rolls back. The close records
+    // the prune and advances the event epoch, and payload blobs are deleted only after it is durable.
+    assert.deepEqual(levels, [1, 1, 1, 2]);
+    assert.equal(Object.values(db.raw().prepare("PRAGMA synchronous").get()!)[0], 2);
+    assert.equal(db.getSession("sess-1")!.historyPruned?.eventCount, 3);
+  } finally {
+    db?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("startup indexes prompt-image references from previously committed user messages", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-steering-image-backfill-"));
   const path = join(root, "control-plane.db");

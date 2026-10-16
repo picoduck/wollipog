@@ -147,7 +147,8 @@ startup migration; repeated maintenance gradually converts an oversized active f
 ## Audit retention
 
 Session-event compaction never rewrites or filters an event, including approval, review, workflow,
-automation, provenance, and usage events. Control-plane `governance_audit` remains append-only and
+automation, provenance, and usage events. The runner's log stays complete even when the control plane prunes an
+archived session's cached transcript ([archived-history retention](./archived-history-retention.md)). Control-plane `governance_audit` remains append-only and
 independent of the session foreign-key lifecycle.
 
 Mutation attribution has a bounded hot table and an indexed append-only archive. Before completed
