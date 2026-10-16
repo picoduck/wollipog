@@ -211,7 +211,9 @@ pull request needs `--brief-file` (MCP `brief`, at most 100 KiB: intent, accepta
 verification); the runner keeps it, and later rounds review only the changes since the last valid
 round unless `--scope full` is given with `--full-reason`. The controller's limits apply per pull
 request: four valid rounds and two consumed attempts per round, with a rebase or force-push starting
-a new review epoch. One review runs per session at a time, and a runner at its review concurrency
+a new review epoch. A head that does not descend from the head the epoch was reviewed at (its last
+valid round's or, before any valid round, its most recent attempt's) counts as a rebase, so attempts
+spent before a rebase do not block the rebased head. One review runs per session at a time, and a runner at its review concurrency
 limit refuses a request as busy instead of queueing it.
 
 The request returns a job at once in state `requested`; the runner then reports `running` and finally
@@ -246,9 +248,23 @@ project checkouts and worktrees, and the runner's data directory. The first trus
 `PATH` is used and an untrusted one earlier on it is skipped, never run; without a trusted
 `python3`, `git` and `gh` nothing is advertised. A reviewer installed under `~/.codex` or `~/.claude`
 is therefore refused; install it elsewhere, for example with npm into `~/.local` or a system prefix,
-and put that location on the runner's `PATH`. The runner advertises what it found and why anything
-is unavailable, and records a digest of the controller's files with each job. Reviewers use the
-runner's default Codex and Claude sign-ins.
+and put that location on the runner's `PATH`. A reviewer that is a script run through `env` (npm's
+`#!/usr/bin/env node`, with Node from nvm or fnm, for example) also needs that program, `node`,
+on the runner's `PATH` and trusted by the same checks; otherwise the reviewer is unavailable and
+the reason says so. The runner advertises what it found and why anything is unavailable, and
+records a digest of the controller's files with each job. Reviewers use the runner's default Codex
+and Claude sign-ins.
+
+Nothing the runner runs for a review finds a program through the runner's own `PATH`, which could
+name a directory a session can write. The `git` and `gh` commands that read the pull request and
+build the snapshot, and the controller's recovery step, run with `PATH` set to a runner-private
+directory of links to the verified `git`, `gh` and `ssh`, followed by `/usr/bin:/bin`, and without
+the runner's `GIT_*` and `*ASKPASS` variables. `HOME` is kept, so your own git and GitHub CLI
+configuration and credentials still apply, but a credential helper must be named by an absolute
+path or live in a system directory. A fetch over SSH runs the verified `ssh` by its path
+(`GIT_SSH_COMMAND`); when no trusted `ssh` is found, the mirror is fetched over HTTPS only, whatever
+the origin's spelling. The controller's own `PATH` holds links to the verified reviewer, `git` and
+the reviewer's `env` program, then `/usr/bin:/bin`.
 
 The controller runs under `python3 -I`, with only its own installed directory added for its sibling
 modules. A controller preflight failure launches nothing and consumes no attempt: the job completes
@@ -256,7 +272,17 @@ with the controller's summary (`attempt_consumed: false`, its `failure_class` an
 `validation_errors`), and the round's attempts are unchanged. A job stays running, with its snapshot
 and its share of the concurrency limit, until both the controller and the reviewer it started have
 exited, so a reviewer that outlives a killed controller is still supervised, cancelled through the
-controller's process group, and stopped by the time limit.
+controller's process group, and stopped by the time limit. When the controller dies without a
+result, its recovery step runs once; until it finishes, neither a repeated request nor a cancel
+ends the job, and its recovered result is what the job reports.
+
+Before the controller is spawned, the job is saved with a per-launch marker that the controller
+(and the reviewer it starts) carries in its environment. A runner that restarts before it recorded
+the controller's process looks for that marker: a live process is adopted and supervised as usual;
+an attempt directory or controller output with no live process is a controller that died, and is
+recovered; with neither, the job reports `not_launched` and the attempt is not charged. If the
+runner cannot record a controller it has just started, it stops that controller and reports the
+job failed.
 
 `wollipog session wait` (MCP `wait_session`) polls a session until its status is one of `--for`
 (default `input_required,completed,failed,stopped`) and returns `outcome: "reached"`, the status it

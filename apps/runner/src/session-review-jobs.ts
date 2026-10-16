@@ -14,7 +14,15 @@
  * shared caches, temporary directories, project checkouts, worktrees and runner state). A session
  * could otherwise plant or repoint a binary the runner then runs unsandboxed.
  * The controller is looked up only in its installed location, never through a provider home's
- * skills directory, which sessions can write.
+ * skills directory, which sessions can write. Nothing the runner runs looks a program up on the
+ * runner's own PATH: git, gh and recovery run with PATH set to runner-private links to the verified
+ * git, gh and ssh followed by the system directories, SSH runs by its verified path (or not at
+ * all), and the controller's PATH links the verified reviewer, git and the interpreter a reviewer
+ * script names through `env` (an npm install's `node`).
+ *
+ * Durability: a job is saved as `launching`, with a per-launch marker the controller carries in
+ * its environment, before the controller is spawned, so a runner that stops before recording the
+ * process finds it again by that marker rather than leaving it unsupervised.
  *
  * Integrity: the reviewed snapshot comes from a runner-owned mirror filled over the pack protocol,
  * which names every object by the hash it computes, so a session that rewrites its own object
@@ -22,13 +30,13 @@
  * repository name; no remote string from session-writable configuration reaches git.
  */
 import { execFile, spawn as spawnProcess, type ChildProcess } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
-  closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync,
-  rmSync, statSync, symlinkSync, writeFileSync,
+  closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync,
+  renameSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, isAbsolute, join, relative } from "node:path";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { promisify } from "node:util";
 import {
   SESSION_REVIEW_ARTIFACT_LIMIT_BYTES, SESSION_REVIEW_BRIEF_LIMIT_BYTES, SESSION_REVIEW_SUMMARY_LIMIT_BYTES,
@@ -69,11 +77,17 @@ const SESSION_IDENTITY = /^[A-Za-z0-9_-]{1,128}$/u;
 /** Flags for every git command the runner runs against a session's repository. The session can
  * write its worktree's git config, and these commands run outside its sandbox. */
 const SAFE_GIT = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"] as const;
-/** Transports a mirror fetch may use, and full object checks on everything it receives. */
-const FETCH_GIT = [
-  "-c", "protocol.allow=never", "-c", "protocol.file.allow=always", "-c", "protocol.https.allow=always",
-  "-c", "protocol.ssh.allow=always", "-c", "transfer.fsckObjects=true",
-] as const;
+/** Transports a mirror fetch may use, and full object checks on everything it receives. SSH is
+ * allowed only with a verified `ssh`, which every fetch then runs by its absolute path. */
+function fetchGit(ssh: boolean): string[] {
+  return [
+    "-c", "protocol.allow=never", "-c", "protocol.file.allow=always", "-c", "protocol.https.allow=always",
+    "-c", `protocol.ssh.allow=${ssh ? "always" : "never"}`, "-c", "transfer.fsckObjects=true",
+  ];
+}
+/** Names the controller's process (and the reviewer it starts) so a restarted runner can find a
+ * controller it spawned but never recorded. The value is a per-launch secret in runner state. */
+const SESSION_REVIEW_JOB_VARIABLE = "WOLLIPOG_SESSION_REVIEW_JOB";
 const MIRROR_FETCH_TIMEOUT_MS = 600_000;
 
 function sha256(bytes: string | Buffer): string {
@@ -239,6 +253,47 @@ function trustedExecutable(name: string, pathEnv: string | undefined, roots: rea
   throw new Error(refusal ?? `${name} is not installed`);
 }
 
+/** The interpreter line of a script (after `#!`), or undefined for anything else. */
+function interpreterLine(path: string): string | undefined {
+  const fd = openSync(path, "r");
+  try {
+    const head = Buffer.alloc(256);
+    const text = head.subarray(0, readSync(fd, head, 0, head.length, 0)).toString("latin1");
+    if (!text.startsWith("#!")) return undefined;
+    const end = text.indexOf("\n");
+    return (end < 0 ? text : text.slice(0, end)).slice(2).trim();
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Verify the interpreter a reviewer script runs under. An absolute interpreter must itself be
+ * trusted; `env <program>` (how npm installs Node CLIs, `#!/usr/bin/env node`) looks the program
+ * up on PATH, which for the controller holds only its private links and the system directories, so
+ * the program is resolved here like every other executable and returned for linking there.
+ */
+function reviewerInterpreter(
+  script: string, pathEnv: string | undefined, roots: readonly string[], uid: number, rootUid?: number,
+): { name: string; path: string } | undefined {
+  const line = interpreterLine(script);
+  if (line === undefined) return undefined;
+  const words = line.split(/\s+/u).filter(Boolean);
+  const interpreter = words[0];
+  if (!interpreter || !isAbsolute(interpreter)) throw new Error(`${script} names an interpreter that is not an absolute path`);
+  trustedPath(interpreter, roots, uid, rootUid);
+  if (basename(interpreter) !== "env") return undefined;
+  const program = words.slice(1).find((word) => !word.startsWith("-") && !word.includes("="));
+  if (!program) throw new Error(`${script} names no program for env to run`);
+  if (isAbsolute(program)) { trustedPath(program, roots, uid, rootUid); return undefined; }
+  if (!/^[A-Za-z0-9_+-][A-Za-z0-9._+-]{0,63}$/u.test(program)) throw new Error(`${script} names an unsupported interpreter`);
+  try {
+    return { name: program, path: trustedExecutable(program, pathEnv, roots, uid, rootUid) };
+  } catch (error) {
+    throw new Error(`${script} runs under ${program}, which is unavailable: ${(error as Error).message}`);
+  }
+}
+
 export interface SessionReviewInstallation {
   controller: string;
   controllerDigest: string;
@@ -246,7 +301,12 @@ export interface SessionReviewInstallation {
   git: string;
   /** The verified GitHub CLI the runner reads pull request facts with. */
   gh: string;
+  /** The verified `ssh` git fetches over SSH with; without one, mirror fetches use HTTPS only. */
+  ssh?: string;
   reviewers: Partial<Record<SessionReviewHarness, string>>;
+  /** The verified interpreter a reviewer script runs under through `env` (an npm CLI's `node`),
+   * linked into the controller's private PATH under its own name. */
+  reviewerInterpreters?: Partial<Record<SessionReviewHarness, { name: string; path: string }>>;
   capability: SessionReviewCapability;
 }
 
@@ -299,13 +359,21 @@ export function discoverSessionReviewInstallation(env: InstallationEnvironment):
       capability: { reviewers: [], unavailable: { controller: (error as Error).message } },
     };
   }
+  // Optional: without a trusted ssh, the mirror is filled over HTTPS only.
+  let ssh: string | undefined;
+  try { ssh = trustedExecutable("ssh", env.pathEnv, roots, env.uid, env.rootUid); } catch { ssh = undefined; }
   const reviewers: SessionReviewInstallation["reviewers"] = {};
+  const reviewerInterpreters: NonNullable<SessionReviewInstallation["reviewerInterpreters"]> = {};
   for (const [harness, command] of [["codex", "codex"], ["claude-code", "claude"]] as const) {
-    try { reviewers[harness] = trustedExecutable(command, env.pathEnv, roots, env.uid, env.rootUid); }
-    catch (error) { unavailable[harness] = (error as Error).message; }
+    try {
+      const path = trustedExecutable(command, env.pathEnv, roots, env.uid, env.rootUid);
+      const interpreter = reviewerInterpreter(path, env.pathEnv, roots, env.uid, env.rootUid);
+      reviewers[harness] = path;
+      if (interpreter) reviewerInterpreters[harness] = interpreter;
+    } catch (error) { unavailable[harness] = (error as Error).message; }
   }
   return {
-    controller, controllerDigest, python, git, gh, reviewers,
+    controller, controllerDigest, python, git, gh, ...(ssh ? { ssh } : {}), reviewers, reviewerInterpreters,
     capability: {
       controllerDigest,
       reviewers: (Object.keys(reviewers) as SessionReviewHarness[]).sort(),
@@ -346,7 +414,9 @@ interface PullRequestState {
 
 interface JobState {
   command: SessionReviewJobCommand;
-  phase: "prepared" | "running" | "finished";
+  /** `launching` is saved before the controller is spawned and `running` once its process is
+   * recorded, so a restart in between can still find the controller by its marker. */
+  phase: "prepared" | "launching" | "running" | "finished";
   prDir: string;
   attemptDir?: string;
   checkout?: string;
@@ -357,6 +427,9 @@ interface JobState {
   args?: string[];
   /** Runner-owned file holding the controller's stdout, where a preflight failure reports. */
   stdoutPath?: string;
+  /** The per-launch value of `WOLLIPOG_SESSION_REVIEW_JOB` in the controller's environment. */
+  marker?: string;
+  controllerDigest?: string;
   /** The controller's process: also its process group, since it is spawned detached. */
   pid?: number;
   startIdentity?: string;
@@ -393,6 +466,37 @@ function processGroup(pid: number): number | null {
   const group = Number(processStat(pid)?.[2]);
   return Number.isSafeInteger(group) ? group : null;
 }
+
+/**
+ * Live processes started with `WOLLIPOG_SESSION_REVIEW_JOB=<marker>`. `/proc/<pid>/environ` is
+ * readable only for the runner's own processes, which is every controller it spawned.
+ */
+function markedProcesses(marker: string): number[] {
+  const entry = `${SESSION_REVIEW_JOB_VARIABLE}=${marker}`;
+  let names: string[];
+  try { names = readdirSync("/proc"); } catch { return []; }
+  const found: number[] = [];
+  for (const name of names) {
+    if (!/^[0-9]+$/u.test(name) || Number(name) === process.pid) continue;
+    let environ: string;
+    try { environ = readFileSync(`/proc/${name}/environ`, "latin1"); } catch { continue; }
+    if (environ.split("\0").includes(entry) && processIdentity(Number(name)) !== null) found.push(Number(name));
+  }
+  return found;
+}
+
+/** The runner's environment without anything that can make git or ssh run another program or
+ * read another repository; the callers set PATH and the SSH command themselves. */
+function helperEnvironmentBase(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(process.env)) {
+    if (name.startsWith("GIT_") || name.endsWith("ASKPASS") || name === SESSION_REVIEW_JOB_VARIABLE) continue;
+    env[name] = value;
+  }
+  return env;
+}
+
+const shellQuote = (value: string) => `'${value.replace(/'/gu, `'\\''`)}'`;
 
 function readBounded(path: string, limit: number, tail = false): { text: string; truncated: boolean } | undefined {
   try {
@@ -432,10 +536,10 @@ export function sessionReviewLaunchArgs(controllerArgs: readonly string[]): stri
 }
 
 export interface SessionReviewDependencies {
-  /** Run a short command and return stdout (git, the controller's recovery). */
-  exec(command: string, args: string[], options?: { cwd?: string; timeoutMs?: number }): Promise<string>;
+  /** Run a short command and return stdout (git, the controller's recovery), with `env` when given. */
+  exec(command: string, args: string[], options?: { cwd?: string; timeoutMs?: number; env?: NodeJS.ProcessEnv }): Promise<string>;
   /** Open pull request facts from the forge, read with the verified GitHub CLI `gh`. */
-  pullRequest(gh: string, repository: string, number: number): Promise<PullRequestFacts>;
+  pullRequest(gh: string, repository: string, number: number, env?: NodeJS.ProcessEnv): Promise<PullRequestFacts>;
   /** Start the controller; `args` begins with the controller's path. `stdout` is a file descriptor. */
   spawnController(python: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; stdout: number }): ChildProcess;
   installation(): SessionReviewInstallation | null;
@@ -454,13 +558,13 @@ export function defaultSessionReviewDependencies(
     exec: async (command, args, options = {}) => (await execFileAsync(command, args, {
       encoding: "utf8", timeout: options.timeoutMs ?? 30_000, maxBuffer: 8_000_000,
       ...(options.cwd ? { cwd: options.cwd } : {}),
-      env: { ...process.env, GH_PROMPT_DISABLED: "1", GH_PAGER: "cat", GIT_OPTIONAL_LOCKS: "0" },
+      env: options.env ?? { ...process.env, GH_PROMPT_DISABLED: "1", GH_PAGER: "cat", GIT_OPTIONAL_LOCKS: "0" },
     })).stdout,
-    pullRequest: async (gh, repository, number) => {
+    pullRequest: async (gh, repository, number, env) => {
       if (!isAbsolute(gh)) throw new Error("the GitHub CLI path is not verified");
       const raw = (await execFileAsync(gh, ["api", `repos/${repository}/pulls/${number}`], {
         encoding: "utf8", timeout: 30_000, maxBuffer: 2_000_000,
-        env: { ...process.env, GH_PROMPT_DISABLED: "1", GH_PAGER: "cat" },
+        env: env ?? { ...process.env, GH_PROMPT_DISABLED: "1", GH_PAGER: "cat" },
       })).stdout;
       const pr = JSON.parse(raw) as {
         state?: string; base?: { sha?: string; repo?: { full_name?: string } };
@@ -500,6 +604,8 @@ export class SessionReviewJobs {
   private readonly states = new Map<string, JobState>();
   /** One mirror fetch at a time per repository. */
   private readonly mirrorQueues = new Map<string, Promise<void>>();
+  /** Jobs whose controller recovery is in flight; only its completion may finish them. */
+  private readonly recovering = new Set<string>();
 
   constructor(
     private readonly root: string,
@@ -517,6 +623,8 @@ export class SessionReviewJobs {
         if (state.phase !== "finished") this.states.set(state.command.jobId, state);
         if (state.phase === "prepared") {
           this.finish(state, { state: "not_launched", reason: "the review process ended without a result" });
+        } else if (state.phase === "launching") {
+          this.reconcileLaunch(state);
         } else if (state.phase === "running") {
           this.active.add(state.command.sessionId);
           this.poll(state);
@@ -529,6 +637,86 @@ export class SessionReviewJobs {
 
   capability(): SessionReviewCapability | undefined {
     return this.deps.installation()?.capability;
+  }
+
+  /**
+   * A job the runner restarted during: saved as `launching`, but its controller's process was never
+   * recorded. A live process carrying the job's marker is adopted (the controller, or the reviewer
+   * it started, in the controller's process group); an attempt directory or controller output with
+   * no live process is a launched controller that died, which the normal poll recovers; with
+   * neither, nothing launched and the attempt is returned.
+   */
+  private reconcileLaunch(state: JobState): void {
+    const marked = state.marker ? markedProcesses(state.marker) : [];
+    const leader = marked.find((pid) => processGroup(pid) === pid);
+    const member = leader ?? marked[0];
+    const group = member === undefined ? null : processGroup(member);
+    const launched = Boolean(state.attemptDir && existsSync(state.attemptDir)) ||
+      Boolean(state.stdoutPath && (statSync(state.stdoutPath, { throwIfNoEntry: false })?.size ?? 0) > 0);
+    if (member !== undefined && group !== null && group > 1) {
+      state.pid = group;
+      if (leader !== undefined) {
+        state.startIdentity = processIdentity(leader) ?? undefined;
+      } else {
+        state.reviewerPid = member;
+        state.reviewerIdentity = processIdentity(member) ?? undefined;
+      }
+    } else if (!launched) {
+      this.releaseAttempt(state);
+      this.finish(state, { state: "not_launched", reason: "the review process ended without a result" });
+      return;
+    }
+    state.phase = "running";
+    this.save(state);
+    this.active.add(state.command.sessionId);
+    this.emit(state, { state: "running", ...(state.controllerDigest ? { controllerDigest: state.controllerDigest } : {}) });
+    this.poll(state);
+  }
+
+  /** Remove the attempt a job recorded but never launched, so it is not charged. */
+  private releaseAttempt(state: JobState): void {
+    const prStatePath = join(state.prDir, "attempts.json");
+    try {
+      if (!existsSync(prStatePath)) return;
+      const prState = JSON.parse(readFileSync(prStatePath, "utf8")) as PullRequestState;
+      const attempts = prState.attempts.filter((attempt) => attempt.dir !== state.attemptDir);
+      if (attempts.length === prState.attempts.length) return;
+      writeFileSync(`${prStatePath}.next`, JSON.stringify({ ...prState, attempts }), { mode: 0o600 });
+      renameSync(`${prStatePath}.next`, prStatePath);
+    } catch (error) {
+      this.deps.log(`session review attempt record could not be released: ${(error as Error).message}`);
+    }
+  }
+
+  /**
+   * The environment for every git, gh and recovery command the runner runs for a review. PATH
+   * holds only a runner-private directory of links to the verified git, gh and ssh, then the system
+   * directories, so no program that git or a credential helper looks up by name (`ssh` for an SSH
+   * fetch above all) can come from a directory a session can write; SSH runs by its verified path.
+   * HOME stays, so the user's own git and gh configuration and credentials keep working.
+   */
+  private helperEnvironment(install: SessionReviewInstallation): NodeJS.ProcessEnv {
+    const links: Record<string, string> = {
+      git: install.git, ...(install.gh ? { gh: install.gh } : {}), ...(install.ssh ? { ssh: install.ssh } : {}),
+    };
+    const bin = join(this.root, "tools", sha256(JSON.stringify(links)).slice(0, 24));
+    if (!existsSync(bin)) {
+      // Built aside and renamed into place, so a directory that exists is always complete.
+      const staging = `${bin}.${process.pid}.${randomBytes(6).toString("hex")}`;
+      mkdirSync(staging, { recursive: true, mode: 0o700 });
+      for (const [name, target] of Object.entries(links)) symlinkSync(target, join(staging, name));
+      try { renameSync(staging, bin); } catch (error) {
+        rmSync(staging, { recursive: true, force: true });
+        if (!existsSync(bin)) throw error;
+      }
+    }
+    return {
+      ...helperEnvironmentBase(),
+      PATH: `${bin}:/usr/bin:/bin`,
+      GH_PROMPT_DISABLED: "1", GH_PAGER: "cat", GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0",
+      // Overrides any `core.sshCommand`; without a verified ssh no fetch is allowed SSH at all.
+      GIT_SSH_COMMAND: install.ssh ? shellQuote(install.ssh) : "/bin/false",
+    };
   }
 
   private jobPath(jobId: string): string {
@@ -635,17 +823,18 @@ export class SessionReviewJobs {
     const reviewerPath = install!.reviewers[reviewer!];
     if (!reviewerPath) refuse("the reviewer for this session's harness is unavailable on this runner");
     state.reviewer = reviewer!;
+    const helperEnv = this.helperEnvironment(install!);
 
     // Scope: the session's own open pull request, from its own repository, at its pushed head. The
     // repository is read from the runner-recorded project checkout, never through the worktree's
     // own `.git` pointer, which the session can rewrite.
     const repoPath = realpathSync(meta!.repoPath);
-    const origin = (await this.deps.exec(install!.git, [...SAFE_GIT, "-C", repoPath, "remote", "get-url", "origin"])).trim();
+    const origin = (await this.deps.exec(install!.git, [...SAFE_GIT, "-C", repoPath, "remote", "get-url", "origin"], { env: helperEnv })).trim();
     const repository = request.pullRequest.repository;
     if (githubSlug(origin)?.toLowerCase() !== repository.toLowerCase()) {
       refuse("the pull request is not this session's open, same-repository pull request");
     }
-    const pr = await this.deps.pullRequest(install!.gh, repository, request.pullRequest.number);
+    const pr = await this.deps.pullRequest(install!.gh, repository, request.pullRequest.number, helperEnv);
     if (pr.state !== "open" || pr.baseRepository.toLowerCase() !== repository.toLowerCase() ||
         pr.headRepository.toLowerCase() !== repository.toLowerCase() || pr.headRef !== worktree!.branch) {
       refuse("the pull request is not this session's open, same-repository pull request");
@@ -675,14 +864,19 @@ export class SessionReviewJobs {
     if (!lstatSync(commonDir, { throwIfNoEntry: false })?.isDirectory() || existsSync(join(commonDir, "commondir"))) {
       refuse("the review snapshot could not be prepared");
     }
-    // Built here from the verified name; the origin's spelling only chooses SSH or HTTPS.
-    const forgeUrl = /^https:\/\//iu.test(origin) ? `https://github.com/${pr.baseRepository}.git` : `git@github.com:${pr.baseRepository}.git`;
+    // Built here from the verified name; the origin's spelling only chooses SSH or HTTPS, and SSH
+    // only with a verified ssh.
+    const forgeUrl = /^https:\/\//iu.test(origin) || !install!.ssh
+      ? `https://github.com/${pr.baseRepository}.git` : `git@github.com:${pr.baseRepository}.git`;
     const mirror = join(this.root, "mirrors", `${repositoryKey(repository)}.git`);
-    await this.syncMirror(install!.git, mirror, commonDir, worktree!.branch, forgeUrl, [pr.baseSha, request.headSha]);
+    await this.syncMirror(install!.git, helperEnv, Boolean(install!.ssh), mirror, commonDir, worktree!.branch, forgeUrl, [pr.baseSha, request.headSha]);
     let epochAttempts = prState.attempts.filter((attempt) => attempt.epoch === prState.epoch);
-    const lastValid = [...epochAttempts].reverse().find((attempt) => attempt.valid);
-    if (lastValid && lastValid.head !== request.headSha) {
-      const ancestor = await this.deps.exec(install!.git, [...SAFE_GIT, "--git-dir", mirror, "merge-base", "--is-ancestor", "--end-of-options", lastValid.head, request.headSha])
+    // The head the epoch was reviewed at: its last valid round's, or before any valid round, its
+    // most recent attempt's (valid or not).
+    const reference = [...epochAttempts].reverse().find((attempt) => attempt.valid) ?? epochAttempts.at(-1);
+    if (reference && reference.head !== request.headSha) {
+      // Objects missing from the mirror fail the check, which counts as a rewrite.
+      const ancestor = await this.deps.exec(install!.git, [...SAFE_GIT, "--git-dir", mirror, "merge-base", "--is-ancestor", "--end-of-options", reference.head, request.headSha], { env: helperEnv })
         .then(() => true, () => false);
       if (!ancestor) { // A rebase or force-push starts a new review epoch with a full round.
         prState.epoch += 1;
@@ -713,8 +907,8 @@ export class SessionReviewJobs {
     // Snapshot: a checkout of the runner-owned mirror at the exact head. Nothing touches the
     // session's worktree or its git metadata, and the session may keep working during the review.
     state.checkout = join(state.prDir, `checkout-${command.jobId}`);
-    await this.deps.exec(install!.git, [...SAFE_GIT, "clone", "--quiet", "--shared", "--no-checkout", "--end-of-options", mirror, state.checkout], { timeoutMs: 120_000 });
-    await this.deps.exec(install!.git, [...SAFE_GIT, "-C", state.checkout, "checkout", "--quiet", "--detach", request.headSha], { timeoutMs: 120_000 });
+    await this.deps.exec(install!.git, [...SAFE_GIT, "clone", "--quiet", "--shared", "--no-checkout", "--end-of-options", mirror, state.checkout], { timeoutMs: 120_000, env: helperEnv });
+    await this.deps.exec(install!.git, [...SAFE_GIT, "-C", state.checkout, "checkout", "--quiet", "--detach", request.headSha], { timeoutMs: 120_000, env: helperEnv });
 
     const ledger = join(state.prDir, "ledger.md");
     if (!existsSync(ledger)) {
@@ -744,39 +938,73 @@ export class SessionReviewJobs {
         : previous ? ["--previous-attempt", previous.dir] : []),
     ];
 
-    // Only the verified reviewer, python and git are on PATH; the controller resolves them by name.
+    // Only the verified reviewer (with the interpreter its script names through env) and git are
+    // on PATH ahead of the system directories; the controller resolves them by name.
     const bin = join(state.prDir, `bin-${command.jobId}`);
     mkdirSync(bin, { mode: 0o700 });
-    symlinkSync(reviewerPath!, join(bin, reviewer === "codex" ? "codex" : "claude"));
+    const reviewerCommand = reviewer === "codex" ? "codex" : "claude";
+    symlinkSync(reviewerPath!, join(bin, reviewerCommand));
     symlinkSync(install!.git, join(bin, "git"));
-    const env: NodeJS.ProcessEnv = { ...process.env, PATH: `${bin}:/usr/bin:/bin`, GIT_OPTIONAL_LOCKS: "0" };
+    const interpreter = install!.reviewerInterpreters?.[reviewer!];
+    if (interpreter && interpreter.name !== reviewerCommand && interpreter.name !== "git") {
+      symlinkSync(interpreter.path, join(bin, interpreter.name));
+    }
+    const env: NodeJS.ProcessEnv = { ...helperEnvironmentBase(), PATH: `${bin}:/usr/bin:/bin`, GIT_OPTIONAL_LOCKS: "0" };
     // The controller identifies the implementer from CLAUDECODE; keep it consistent with the
     // session so its self-review refusal and reviewer choice agree with the runner's.
     if (meta!.driver === "claude-code") env.CLAUDECODE = "1"; else delete env.CLAUDECODE;
 
     // Last point a cancel can still stop the launch without consuming an attempt.
     if (state.cancelled) refuse("the review was cancelled");
+
+    // The controller's stdout goes to a runner-owned file, not a pipe, so it survives a runner
+    // restart: a preflight failure reports only there, with no attempt directory.
+    state.stdoutPath = join(state.prDir, `stdout-${command.jobId}.jsonl`);
+    // Durable before the spawn: a restart before `running` is saved finds the controller by this
+    // marker in its environment (see `reconcileLaunch`).
+    state.marker = `${command.jobId}:${sha256(`${command.nonce}\0${randomBytes(16).toString("hex")}`).slice(0, 32)}`;
+    env[SESSION_REVIEW_JOB_VARIABLE] = state.marker;
+    state.controllerDigest = install!.controllerDigest;
+    state.startedAt = this.deps.now();
+    state.phase = "launching";
+    this.save(state);
     prState.attempts.push({
       epoch: prState.epoch, round, attempt, dir: state.attemptDir, head: request.headSha, valid: false, consumed: true,
     });
     writeFileSync(`${prStatePath}.next`, JSON.stringify(prState), { mode: 0o600 });
     renameSync(`${prStatePath}.next`, prStatePath);
 
-    // The controller's stdout goes to a runner-owned file, not a pipe, so it survives a runner
-    // restart: a preflight failure reports only there, with no attempt directory.
-    state.stdoutPath = join(state.prDir, `stdout-${command.jobId}.jsonl`);
-    const stdout = openSync(state.stdoutPath, "w", 0o600);
     let child: ChildProcess;
     try {
-      child = this.deps.spawnController(install!.python, state.args, { cwd: state.prDir, env, stdout });
-    } finally {
-      closeSync(stdout);
+      const stdout = openSync(state.stdoutPath, "w", 0o600);
+      try {
+        child = this.deps.spawnController(install!.python, state.args, { cwd: state.prDir, env, stdout });
+      } finally {
+        closeSync(stdout);
+      }
+    } catch (error) {
+      this.releaseAttempt(state); // nothing started
+      throw error;
     }
     state.pid = child.pid;
     state.startIdentity = child.pid ? processIdentity(child.pid) ?? undefined : undefined;
-    state.startedAt = this.deps.now();
     state.phase = "running";
-    this.save(state);
+    try {
+      this.save(state);
+    } catch (error) {
+      // An unrecorded controller would run unsupervised: stop it (it cannot have been reaped yet,
+      // so its group is still its own) and report the job failed.
+      this.deps.log(`session review ${command.jobId} could not record its controller: ${(error as Error).message}`);
+      if (child.pid) {
+        try { process.kill(-child.pid, "SIGKILL"); } catch { /* already gone */ }
+      }
+      try {
+        this.finish(state, { state: "failed", reason: "the review process ended without a result" });
+      } catch {
+        if (state.update) this.send(state.update);
+      }
+      return;
+    }
     child.on("error", () => this.poll(state));
     child.on("exit", () => this.poll(state));
     this.emit(state, { state: "running", controllerDigest: install!.controllerDigest });
@@ -788,30 +1016,32 @@ export class SessionReviewJobs {
    * protocol, which hashes everything it receives, so rewritten objects there are refused rather
    * than reviewed; anything still missing comes from the forge.
    */
-  private async syncMirror(git: string, mirror: string, commonDir: string, branch: string, forgeUrl: string, commits: string[]): Promise<void> {
+  private async syncMirror(
+    git: string, env: NodeJS.ProcessEnv, ssh: boolean, mirror: string, commonDir: string, branch: string, forgeUrl: string, commits: string[],
+  ): Promise<void> {
     const previous = this.mirrorQueues.get(mirror) ?? Promise.resolve();
     const run = previous.then(async () => {
       if (!existsSync(join(mirror, "HEAD"))) {
         mkdirSync(dirname(mirror), { recursive: true, mode: 0o700 });
-        await this.deps.exec(git, [...SAFE_GIT, "init", "--quiet", "--bare", "--end-of-options", mirror]);
+        await this.deps.exec(git, [...SAFE_GIT, "init", "--quiet", "--bare", "--end-of-options", mirror], { env });
       }
-      const has = (sha: string) => this.deps.exec(git, [...SAFE_GIT, "--git-dir", mirror, "cat-file", "-e", `${sha}^{commit}`])
+      const has = (sha: string) => this.deps.exec(git, [...SAFE_GIT, "--git-dir", mirror, "cat-file", "-e", `${sha}^{commit}`], { env })
         .then(() => true, () => false);
       const missing = async () => (await Promise.all(commits.map(async (sha) => (await has(sha)) ? null : sha)))
         .filter((sha): sha is string => sha !== null);
       if ((await missing()).length) {
         await this.deps.exec(git, [
-          ...SAFE_GIT, ...FETCH_GIT, "--git-dir", mirror, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
+          ...SAFE_GIT, ...fetchGit(ssh), "--git-dir", mirror, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
           // Only the session's own branch: nothing else in the checkout reaches the reviewer.
           "--end-of-options", `file://${commonDir}`, `+refs/heads/${branch}:refs/session/heads/${branch}`,
-        ], { timeoutMs: MIRROR_FETCH_TIMEOUT_MS }).catch((error: Error) => this.deps.log(`session review mirror could not read the project repository: ${error.message}`));
+        ], { timeoutMs: MIRROR_FETCH_TIMEOUT_MS, env }).catch((error: Error) => this.deps.log(`session review mirror could not read the project repository: ${error.message}`));
       }
       const still = await missing();
       if (still.length) {
         await this.deps.exec(git, [
-          ...SAFE_GIT, ...FETCH_GIT, "--git-dir", mirror, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
+          ...SAFE_GIT, ...fetchGit(ssh), "--git-dir", mirror, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
           "--end-of-options", forgeUrl, ...still,
-        ], { timeoutMs: MIRROR_FETCH_TIMEOUT_MS });
+        ], { timeoutMs: MIRROR_FETCH_TIMEOUT_MS, env });
       }
     });
     const settledRun = run.then(() => {}, () => {});
@@ -874,6 +1104,8 @@ export class SessionReviewJobs {
     const previous = this.polling.get(key);
     if (previous) clearTimeout(previous);
     this.polling.delete(key);
+    // A recovery in flight decides the result and polls again once it settles.
+    if (this.recovering.has(key)) return;
     const controllerAlive = this.controllerAlive(state);
     let summary: Record<string, unknown> | undefined;
     try { summary = JSON.parse(readFileSync(join(state.attemptDir, "summary.json"), "utf8")) as Record<string, unknown>; } catch { /* not yet */ }
@@ -881,9 +1113,15 @@ export class SessionReviewJobs {
     const alive = controllerAlive || this.reviewerAlive(state);
     // A preflight failure creates no attempt directory; the controller reports it on stdout only.
     let stdoutSummary: string | undefined;
-    if (!summary && !alive) {
+    // Only a genuine preflight failure is read from stdout: no attempt directory, no reviewer ever
+    // started, and a summary that says it never launched. Anything else falls through to recovery.
+    if (!summary && !alive && !state.reviewerPid && !existsSync(state.attemptDir)) {
       const output = this.controllerOutput(state);
-      if (output) { summary = output.value; stdoutSummary = output.text; }
+      if (output && output.value.phase === "preflight" && output.value.launched === false &&
+          output.value.attempt_valid === false) {
+        summary = output.value;
+        stdoutSummary = output.text;
+      }
     }
     const complete = summary?.status === "complete" || summary?.attempt_valid !== undefined;
     if (alive) {
@@ -902,21 +1140,28 @@ export class SessionReviewJobs {
       return;
     }
     if (!complete && !state.timedOut && !state.recoveryAttempted && state.args) {
-      // The controller died before writing its result: let it reconcile the attempt once.
-      state.recoveryAttempted = true;
-      this.save(state);
-      const install = this.deps.installation();
+      // The controller died before writing its result: let it reconcile the attempt once. While
+      // that runs, no other poll (a redispatch, a cancel, a timer) may finish the job; it is marked
+      // attempted only once it has settled, so a restart in the meantime runs it again.
+      this.recovering.add(key);
       const round = state.args[state.args.indexOf("--round") + 1]!;
       const ledger = state.args[state.args.indexOf("--ledger") + 1]!;
-      void (install?.controller
-        ? this.deps.exec(install.python, sessionReviewLaunchArgs([install.controller, "recover", "--attempt-dir", state.attemptDir, "--ledger", ledger, "--round", round]), { timeoutMs: 120_000 })
-        : Promise.reject(new Error("no installation")))
+      const attemptDir = state.attemptDir;
+      void (async () => {
+        const install = this.deps.installation();
+        if (!install?.controller) throw new Error("no installation");
+        await this.deps.exec(install.python, sessionReviewLaunchArgs([install.controller, "recover", "--attempt-dir", attemptDir, "--ledger", ledger, "--round", round]),
+          { timeoutMs: 120_000, env: this.helperEnvironment(install) });
+      })()
         .catch(() => {})
         .finally(() => {
+          this.recovering.delete(key);
           // A reviewer that turned out to be running refuses recovery; try again once it is gone.
-          if (this.alive(state)) {
-            state.recoveryAttempted = false;
-            this.save(state);
+          if (!this.alive(state)) {
+            state.recoveryAttempted = true;
+            try { this.save(state); } catch (error) {
+              this.deps.log(`session review job ${key} could not be saved: ${(error as Error).message}`);
+            }
           }
           this.poll(state);
         });
@@ -978,7 +1223,9 @@ export class SessionReviewJobs {
     if (!state || state.command.nonce !== nonce || state.phase === "finished") return;
     state.cancelled = true;
     this.save(state);
-    if (state.phase === "prepared") return; // preparation refuses before it would spawn
+    // Preparation refuses before it would spawn. A recovery in flight is not interrupted; the
+    // job finishes once it settles.
+    if (state.phase === "prepared" || state.phase === "launching") return;
     this.signalGroup(state, "SIGTERM");
     this.poll(state);
   }

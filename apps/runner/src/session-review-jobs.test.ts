@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { spawn as spawnProcess, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn as spawnProcess, type ChildProcess } from "node:child_process";
 import { EventEmitter, once } from "node:events";
 import {
-  chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, statSync,
-  symlinkSync, writeFileSync, writeSync,
+  chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync,
+  renameSync, rmSync, statSync, symlinkSync, writeFileSync, writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -142,8 +142,12 @@ interface Harness {
   updates: SessionReviewJobUpdate[];
   spawned: Array<{ args: string[]; env: NodeJS.ProcessEnv }>;
   execs: string[][];
+  /** The environment each exec ran with, in the same order as `execs`. */
+  execEnvs: Array<NodeJS.ProcessEnv | undefined>;
   /** The gh path each pull request read used. */
   ghCalls: string[];
+  /** The environment each pull request read ran with. */
+  ghEnvs: Array<NodeJS.ProcessEnv | undefined>;
   root: string;
   deps: SessionReviewDependencies;
   meta: SessionMeta;
@@ -163,6 +167,16 @@ function harness(t: { after(fn: () => void): void }, options: {
   preflightFailures?: number;
   /** Start a real controller process instead of the in-process fake. */
   controller?: (args: string[], options: { stdout: number }) => ChildProcess;
+  /** Overrides of the trusted installation. */
+  install?: Partial<SessionReviewInstallation>;
+  /** The project checkout's origin URL. */
+  origin?: string;
+  /** The controller's recovery step. */
+  recover?: (args: string[]) => Promise<string>;
+  /** No earlier head is an ancestor of a later one (a rebase). */
+  notAncestor?: boolean;
+  /** Replace the fake exec entirely (a real git). */
+  exec?: SessionReviewDependencies["exec"];
 } = {}): Harness {
   const root = mkdtempSync(join(tmpdir(), "wollipog-review-jobs-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -178,26 +192,33 @@ function harness(t: { after(fn: () => void): void }, options: {
   const updates: SessionReviewJobUpdate[] = [];
   const spawned: Harness["spawned"] = [];
   const execs: string[][] = [];
+  const execEnvs: Harness["execEnvs"] = [];
   const ghCalls: string[] = [];
+  const ghEnvs: Harness["ghEnvs"] = [];
   let preflightFailures = options.preflightFailures ?? 0;
   const install: SessionReviewInstallation = {
     controller: "/trusted/review.py", controllerDigest: "d".repeat(64), python: "/usr/bin/python3", git: "/usr/bin/git",
     gh: "/trusted/gh",
     reviewers: options.reviewers ?? { codex: "/trusted/codex", "claude-code": "/trusted/claude" },
     capability: { reviewers: ["claude-code", "codex"] },
+    ...options.install,
   };
   const deps: SessionReviewDependencies = {
-    exec: async (_command, args) => {
+    exec: async (command, args, execOptions) => {
       execs.push(args);
-      if (args.includes("get-url")) return "https://github.com/acme/widget.git\n";
+      execEnvs.push(execOptions?.env);
+      if (options.exec) return options.exec(command, args, execOptions);
+      if (args.includes("recover") && options.recover) return options.recover(args);
+      if (args.includes("get-url")) return `${options.origin ?? "https://github.com/acme/widget.git"}\n`;
       if (args.includes("clone")) { mkdirSync(args.at(-1)!, { recursive: true }); return ""; }
       if (args.includes("cat-file") && options.missing?.has(args.at(-1)!.slice(0, 40))) throw new Error("missing");
-      if (args.includes("fetch") && args.some((arg) => arg.startsWith("https://"))) {
+      if (args.includes("merge-base") && options.notAncestor) throw new Error("not an ancestor");
+      if (args.includes("fetch") && args.some((arg) => arg.startsWith("https://") || arg.startsWith("git@"))) {
         for (const sha of args.slice(args.indexOf("--end-of-options") + 2)) options.missing?.delete(sha);
       }
       return "";
     },
-    pullRequest: async (gh) => (ghCalls.push(gh), {
+    pullRequest: async (gh, _repository, _number, env) => (ghCalls.push(gh), ghEnvs.push(env), {
       state: "open", baseRepository: "acme/widget", headRepository: "acme/widget", headRef: "fix/feature",
       headSha: HEAD, baseSha: BASE, ...options.pr,
     }),
@@ -228,7 +249,7 @@ function harness(t: { after(fn: () => void): void }, options: {
   const jobs = new SessionReviewJobs(join(root, "reviews"), { readMeta: () => meta }, (update) => updates.push(update), deps);
   t.after(() => jobs.close());
   return {
-    jobs, updates, spawned, execs, ghCalls, root, deps, meta,
+    jobs, updates, spawned, execs, execEnvs, ghCalls, ghEnvs, root, deps, meta,
     command: (overrides = {}, jobId = "srj_00000001") => ({
       type: "session_review_job", jobId, nonce: "nonce-1", sessionId: "s_review",
       request: { pullRequest: { repository: "acme/widget", number: 7 }, headSha: HEAD, brief: "Intent and checks.", ...overrides },
@@ -607,6 +628,22 @@ test("preflight failures consume no attempt and return the controller's diagnost
   assert.deepEqual(attemptRecords(h).map((attempt) => [attempt.consumed, attempt.valid]), [[false, false], [false, false], [true, true]]);
 });
 
+test("only a genuine preflight summary on stdout can refund an attempt", posixOnly, async (t) => {
+  const h = harness(t, {
+    controller: (args, { stdout }) => {
+      // A launched attempt that died, plus a line claiming nothing was consumed: not a preflight.
+      mkdirSync(args[args.indexOf("--attempt-dir") + 1]!, { recursive: true });
+      writeSync(stdout, `${JSON.stringify({ phase: "execution", launched: true, attempt_consumed: false, attempt_valid: false })}\n`);
+      return Object.assign(new EventEmitter(), { pid: undefined }) as unknown as ChildProcess;
+    },
+  });
+  await h.jobs.dispatch(h.command());
+  const done = await settled(h, "srj_00000001");
+  assert.equal(done.state, "failed");
+  assert.match(done.reason ?? "", /ended without a result/);
+  assert.deepEqual(attemptRecords(h).map((attempt) => attempt.consumed), [true], "the attempt stays charged");
+});
+
 /** Alive and not a zombie. */
 function processRunning(pid: number): boolean {
   try {
@@ -673,4 +710,284 @@ test("a reviewer that outlives its controller keeps the job supervised, across a
   assert.match(done?.reason ?? "", /cancelled/);
   assert.equal(processRunning(reviewer), false, "cancel ended the reviewer through the controller's process group");
   assert.equal(existsSync(job.checkout!), false, "the snapshot is removed once nothing runs");
+});
+
+const PR_DIR = ["reviews", "sessions", "s_review", "acme__widget", "pr-7"] as const;
+
+test("snapshot and pull request commands find helpers only through verified links, and SSH runs the verified ssh", posixOnly, async (t) => {
+  const h = harness(t, { origin: "git@github.com:acme/widget.git", missing: new Set([HEAD]), install: { ssh: "/trusted/ssh" } });
+  await h.jobs.dispatch(h.command());
+  assert.equal((await settled(h, "srj_00000001")).state, "completed");
+  const forge = h.execs.find((args) => args.includes("fetch") && args.includes(HEAD))!;
+  assert.equal(forge[forge.indexOf("--end-of-options") + 1], "git@github.com:acme/widget.git");
+  assert.ok(forge.includes("protocol.ssh.allow=always"));
+  const envs = [...h.execEnvs, ...h.ghEnvs];
+  assert.equal(envs.length, h.execs.length + h.ghCalls.length);
+  const bins = new Set<string>();
+  for (const env of envs) {
+    const match = /^(.+\/reviews\/tools\/[0-9a-f]{24}):\/usr\/bin:\/bin$/u.exec(env?.PATH ?? "");
+    assert.ok(match, `PATH holds only the runner's links and the system directories: ${env?.PATH}`);
+    bins.add(match[1]!);
+    assert.equal(env?.GIT_SSH_COMMAND, "'/trusted/ssh'", "git runs the verified ssh by its path");
+    assert.equal(Object.keys(env ?? {}).some((name) => name.endsWith("ASKPASS")), false);
+  }
+  assert.equal(bins.size, 1);
+  const [bin] = [...bins];
+  assert.deepEqual(readdirSync(bin!).sort(), ["gh", "git", "ssh"]);
+  assert.equal(readlinkSync(join(bin!, "ssh")), "/trusted/ssh");
+  assert.equal(readlinkSync(join(bin!, "git")), "/usr/bin/git");
+});
+
+test("without a verified ssh the mirror is filled over HTTPS only, whatever the origin's spelling", posixOnly, async (t) => {
+  const h = harness(t, { origin: "git@github.com:acme/widget.git", missing: new Set([HEAD]) });
+  await h.jobs.dispatch(h.command());
+  assert.equal((await settled(h, "srj_00000001")).state, "completed");
+  const fetches = h.execs.filter((args) => args.includes("fetch"));
+  assert.equal(fetches[1]![fetches[1]!.indexOf("--end-of-options") + 1], "https://github.com/acme/widget.git");
+  assert.ok(fetches.every((args) => args.includes("protocol.ssh.allow=never")));
+  assert.ok(h.execEnvs.every((env) => env?.GIT_SSH_COMMAND === "/bin/false"));
+  const bin = /^([^:]+):/u.exec(h.execEnvs[0]?.PATH ?? "")![1]!;
+  assert.deepEqual(readdirSync(bin).sort(), ["gh", "git"]);
+});
+
+test("an ssh planted on the runner's PATH never runs for an SSH-origin fetch with a real git", { skip: process.platform !== "linux" }, async (t) => {
+  let git: string;
+  try { git = realpathSync(execFileSync("/bin/sh", ["-c", "command -v git"], { encoding: "utf8" }).trim()); }
+  catch { t.skip("git is not installed"); return; }
+  const fixture = mkdtempSync(join(tmpdir(), "wollipog-review-ssh-"));
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  const planted = join(fixture, "session-bin"); mkdirSync(planted);
+  const plantedRan = join(fixture, "planted-ssh-ran");
+  executable(join(planted, "ssh"), `#!/bin/sh\ntouch '${plantedRan}'\nexit 255\n`);
+  const trusted = join(fixture, "trusted"); mkdirSync(trusted);
+  const trustedRan = join(fixture, "trusted-ssh-ran");
+  const ssh = executable(join(trusted, "ssh"), `#!/bin/sh\necho "$@" > '${trustedRan}'\nexit 255\n`);
+  // An isolated HOME keeps the user's own git configuration (url rewrites) out of the test.
+  const home = join(fixture, "home"); mkdirSync(home);
+  const saved = { PATH: process.env.PATH, HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME };
+  process.env.PATH = `${planted}:${saved.PATH ?? "/usr/bin:/bin"}`;
+  process.env.HOME = home;
+  process.env.XDG_CONFIG_HOME = join(home, ".config");
+  t.after(() => {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+  });
+  const repo = join(fixture, "repo");
+  const run = (...args: string[]) => execFileSync(git, args, { cwd: repo, env: { ...process.env, PATH: "/usr/bin:/bin" } });
+  mkdirSync(repo);
+  run("init", "--quiet", "-b", "fix/feature");
+  run("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "--quiet", "--allow-empty", "-m", "c");
+  run("remote", "add", "origin", "git@github.com:acme/widget.git");
+  const real = defaultSessionReviewDependencies(join(fixture, "data"), () => {});
+  const h = harness(t, { meta: { repoPath: repo }, install: { git, ssh }, exec: real.exec });
+  await h.jobs.dispatch(h.command());
+  const done = await settled(h, "srj_00000001", 30_000);
+  assert.equal(done.state, "not_launched", "the head exists nowhere, so the fetch fails");
+  assert.match(readFileSync(trustedRan, "utf8"), /git@github\.com git-upload-pack 'acme\/widget\.git'/u, "the verified ssh ran");
+  assert.equal(existsSync(plantedRan), false, "the planted ssh never ran");
+});
+
+test("a reviewer npm installs with an env node shebang runs under a verified node linked into the controller's PATH", posixOnly, async (t) => {
+  if (!existsSync("/usr/bin/env")) { t.skip("/usr/bin/env is not installed"); return; }
+  const f = fakeHome(t);
+  mkdirSync(f.dataDir);
+  executable(join(f.bin, "claude"), "#!/usr/bin/env node\nconsole.log('claude');\n");
+  const nodeBin = join(f.root, "nvm", "versions", "node", "v24", "bin"); mkdirSync(nodeBin, { recursive: true });
+  const node = executable(join(nodeBin, "node"));
+  const discover = (pathEnv: string) =>
+    discoverSessionReviewInstallation({ home: f.home, dataDir: f.dataDir, uid, rootUid, pathEnv, temporaryRoots });
+  const install = discover(`${f.bin}:${nodeBin}:${f.codexBin}`);
+  assert.equal(install?.reviewers["claude-code"], realpathSync(join(f.bin, "claude")));
+  assert.deepEqual(install?.reviewerInterpreters?.["claude-code"], { name: "node", path: realpathSync(node) });
+
+  const h = harness(t, {
+    meta: { driver: "codex" },
+    install: { reviewers: install!.reviewers, reviewerInterpreters: install!.reviewerInterpreters },
+  });
+  await h.jobs.dispatch(h.command());
+  const done = await settled(h, "srj_00000001");
+  assert.equal(done.state, "completed");
+  assert.equal(done.reviewer, "claude-code");
+  const bin = join(h.root, ...PR_DIR, "bin-srj_00000001");
+  assert.equal(readlinkSync(join(bin, "node")), realpathSync(node), "env finds the verified node first");
+  assert.equal(readlinkSync(join(bin, "claude")), realpathSync(join(f.bin, "claude")));
+
+  // A node only a session could have planted makes the reviewer unavailable, with the reason.
+  rmSync(node);
+  executable(join(f.codexBin, "node"));
+  const untrusted = discover(`${f.bin}:${f.codexBin}`);
+  assert.equal(untrusted?.reviewers["claude-code"], undefined);
+  assert.match(untrusted?.capability.unavailable?.["claude-code"] ?? "", /runs under node, which is unavailable: .*a session can write/u);
+  const missing = discover(f.bin);
+  assert.match(missing?.capability.unavailable?.["claude-code"] ?? "", /runs under node, which is unavailable: node is not installed/u);
+});
+
+test("a recovery in flight is not cut short by a redispatch or a cancel, and its result is published", posixOnly, async (t) => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const h = harness(t, {
+    complete: false,
+    recover: async (args) => {
+      await gate;
+      const attemptDir = args[args.indexOf("--attempt-dir") + 1]!;
+      mkdirSync(attemptDir, { recursive: true });
+      writeFileSync(join(attemptDir, "summary.json"), JSON.stringify({ status: "complete", attempt_valid: true, attempt_consumed: true }));
+      writeFileSync(join(attemptDir, "report.json"), JSON.stringify({ findings: ["recovered"] }));
+      return "";
+    },
+  });
+  await h.jobs.dispatch(h.command());
+  for (let i = 0; i < 200 && !h.execs.some((args) => args.includes("recover")); i++) await delay(10);
+  assert.ok(h.execs.some((args) => args.includes("recover")), "recovery started");
+  await h.jobs.dispatch(h.command());
+  h.jobs.cancel("srj_00000001", "nonce-1");
+  await delay(100);
+  assert.equal(h.updates.some((update) => update.state !== "running"), false, "nothing finishes the job while recovery runs");
+  release();
+  const done = await settled(h, "srj_00000001");
+  assert.equal(done.state, "completed");
+  assert.match(done.report ?? "", /recovered/);
+  assert.equal(h.execs.filter((args) => args.includes("recover")).length, 1);
+  assert.deepEqual(attemptRecords(h).map((attempt) => [attempt.consumed, attempt.valid]), [[true, true]]);
+  assert.equal(h.updates.filter((update) => update.state !== "running").length, 1);
+});
+
+/** A job saved as `launching` by a runner that stopped before recording its controller. */
+function launchingJob(h: Harness, marker: string, attempt: "none" | "complete"): void {
+  const prDir = join(h.root, ...PR_DIR);
+  mkdirSync(prDir, { recursive: true });
+  const attemptDir = join(prDir, "e1-r1-a1");
+  const ledger = join(prDir, "ledger.md");
+  writeFileSync(ledger, "# Cross-Model Review: acme/widget#7\n");
+  const stdoutPath = join(prDir, "stdout-srj_00000009.jsonl");
+  writeFileSync(stdoutPath, "");
+  writeFileSync(join(prDir, "attempts.json"), JSON.stringify({
+    epoch: 1, attempts: [{ epoch: 1, round: 1, attempt: 1, dir: attemptDir, head: HEAD, valid: false, consumed: true }],
+  }));
+  if (attempt === "complete") {
+    mkdirSync(attemptDir);
+    writeFileSync(join(attemptDir, "summary.json"), JSON.stringify({ status: "complete", attempt_valid: true, attempt_consumed: true }));
+  }
+  writeFileSync(join(h.root, "reviews", "jobs", "srj_00000009.json"), JSON.stringify({
+    command: h.command({}, "srj_00000009"), phase: "launching", prDir, attemptDir, epoch: 1, round: 1, attempt: 1, reviewer: "codex",
+    args: ["/trusted/review.py", "run", "--attempt-dir", attemptDir, "--ledger", ledger, "--round", "1"],
+    stdoutPath, marker, startedAt: Date.now(), controllerDigest: "d".repeat(64),
+  }));
+}
+
+function restart(h: Harness, t: { after(fn: () => void): void }): { jobs: SessionReviewJobs; updates: SessionReviewJobUpdate[] } {
+  h.jobs.close();
+  const updates: SessionReviewJobUpdate[] = [];
+  const jobs = new SessionReviewJobs(join(h.root, "reviews"), { readMeta: () => h.meta }, (update) => updates.push(update), h.deps);
+  t.after(() => jobs.close());
+  return { jobs, updates };
+}
+
+test("a restart between the spawn and the running record adopts the controller found by its marker", { skip: process.platform !== "linux" }, async (t) => {
+  const h = harness(t);
+  const marker = "srj_00000009:0123456789abcdef0123456789abcdef";
+  const controller = spawnProcess("sleep", ["300"], {
+    detached: true, stdio: "ignore", env: { ...process.env, WOLLIPOG_SESSION_REVIEW_JOB: marker },
+  });
+  t.after(() => { try { process.kill(-controller.pid!, "SIGKILL"); } catch { /* gone */ } });
+  const exited = once(controller, "exit");
+  await delay(100); // the marker is in /proc once sleep has been exec'd
+  launchingJob(h, marker, "none");
+  const { jobs, updates } = restart(h, t);
+  const job = JSON.parse(readFileSync(join(h.root, "reviews", "jobs", "srj_00000009.json"), "utf8")) as { phase: string; pid?: number };
+  assert.equal(job.phase, "running");
+  assert.equal(job.pid, controller.pid, "the marked process group leader is the controller");
+  await delay(200);
+  assert.deepEqual(updates.map((update) => update.state), ["running"], "the adopted job stays supervised");
+  assert.deepEqual(attemptRecords(h).map((attempt) => attempt.consumed), [true]);
+
+  jobs.cancel("srj_00000009", "nonce-1");
+  await exited;
+  for (let i = 0; i < 500 && updates.length < 2; i++) await delay(10);
+  const done = updates.at(-1);
+  assert.equal(done?.state, "failed");
+  assert.match(done?.reason ?? "", /cancelled/);
+  assert.equal(processRunning(controller.pid!), false, "cancel signalled the adopted controller's group");
+});
+
+test("a restart finds no controller and no attempt for a launching job: not launched, and the attempt is returned", posixOnly, (t) => {
+  const h = harness(t);
+  launchingJob(h, "srj_00000009:fedcba9876543210fedcba9876543210", "none");
+  const { updates } = restart(h, t);
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0]?.state, "not_launched");
+  assert.match(updates[0]?.reason ?? "", /ended without a result/);
+  assert.deepEqual(attemptRecords(h), [], "an attempt that never launched is not charged");
+});
+
+test("a restart finds an attempt directory but no controller for a launching job: its result is reported", posixOnly, async (t) => {
+  const h = harness(t);
+  launchingJob(h, "srj_00000009:00112233445566778899aabbccddeeff", "complete");
+  const { updates } = restart(h, t);
+  for (let i = 0; i < 200 && !updates.some((update) => update.state !== "running"); i++) await delay(10);
+  const done = updates.find((update) => update.state !== "running");
+  assert.equal(done?.state, "completed");
+  assert.match(done?.summary ?? "", /"attempt_valid":true/);
+  assert.deepEqual(attemptRecords(h).map((attempt) => [attempt.consumed, attempt.valid]), [[true, true]]);
+});
+
+test("a controller whose running record cannot be saved is stopped and reported failed", { skip: process.platform !== "linux" || uid === 0 }, async (t) => {
+  const children: ChildProcess[] = [];
+  let jobsDir = "";
+  const h = harness(t, {
+    controller: () => {
+      chmodSync(jobsDir, 0o500); // the next save fails
+      const child = spawnProcess("sleep", ["300"], { detached: true, stdio: "ignore" });
+      children.push(child);
+      return child;
+    },
+  });
+  jobsDir = join(h.root, "reviews", "jobs");
+  t.after(() => {
+    for (const child of children) { try { process.kill(-child.pid!, "SIGKILL"); } catch { /* gone */ } }
+  });
+  try {
+    await h.jobs.dispatch(h.command());
+  } finally {
+    chmodSync(jobsDir, 0o700); // before the harness removes its directory
+  }
+  const done = await settled(h, "srj_00000001");
+  assert.equal(done.state, "failed");
+  assert.match(done.reason ?? "", /ended without a result/);
+  const [child] = children;
+  if (child!.exitCode === null && child!.signalCode === null) await once(child!, "exit");
+  assert.equal(child!.signalCode, "SIGKILL", "the unrecorded controller was stopped");
+});
+
+test("a rebase before any valid round starts a new epoch instead of charging the old round", posixOnly, async (t) => {
+  const OTHER = "c".repeat(40);
+  const seed = (h: Harness) => {
+    const prDir = join(h.root, ...PR_DIR);
+    mkdirSync(prDir, { recursive: true });
+    writeFileSync(join(prDir, "attempts.json"), JSON.stringify({
+      epoch: 1, attempts: [1, 2].map((attempt) => ({
+        epoch: 1, round: 1, attempt, dir: join(prDir, `e1-r1-a${attempt}`), head: HEAD, valid: false, consumed: true,
+      })),
+    }));
+  };
+  const rebased = harness(t, { pr: { headSha: OTHER }, notAncestor: true });
+  seed(rebased);
+  await rebased.jobs.dispatch(rebased.command({ headSha: OTHER }));
+  const done = await settled(rebased, "srj_00000001");
+  assert.equal(done.state, "completed");
+  assert.equal(done.round, 1);
+  assert.equal(done.attempt, 1);
+  const args = rebased.spawned[0]!.args;
+  assert.match(args[args.indexOf("--attempt-dir") + 1]!, /e2-r1-a1$/u);
+  const mergeBase = rebased.execs.find((call) => call.includes("merge-base"))!;
+  assert.deepEqual(mergeBase.slice(-2), [HEAD, OTHER], "the reference is the most recent attempt's head");
+
+  // A descendant head stays in the epoch, whose round has used its attempts.
+  const descendant = harness(t, { pr: { headSha: OTHER } });
+  seed(descendant);
+  await descendant.jobs.dispatch(descendant.command({ headSha: OTHER }));
+  const refused = await settled(descendant, "srj_00000001");
+  assert.equal(refused.state, "not_launched");
+  assert.match(refused.reason ?? "", /used its attempts/);
 });
