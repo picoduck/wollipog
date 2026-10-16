@@ -1108,7 +1108,7 @@ test("historical unknown-parent Result Blocked explains uncertainty and the appl
     assert.ok(notice);
     assert.match(notice.textContent!, /parent turn is unknown/);
     assert.match(notice.textContent!, /cannot verify that the jobs are still running/);
-    assert.match(notice.textContent!, /More Actions → Restart Session/);
+    assert.match(notice.textContent!, /Open More Actions and choose Restart Session/);
     assert.match(notice.textContent!, /Restart ends every job and reports held results; it does not rerun their original commands/);
     assert.equal([...notice.querySelectorAll("button")].some((button) => /^(Stop |Acknowledge)/.test(button.textContent!)), false);
     await panel.render({ session, runnerProtocolVersion: 190 });
@@ -1130,7 +1130,7 @@ for (const parentTurnId of ["unknown", "known-parent"]) test(`historical ${paren
     assert.ok(notice);
     assert.match(notice.textContent!, /no recorded return step/);
     assert.match(notice.textContent!, /will not resubmit them automatically/);
-    assert.match(notice.textContent!, /More Actions → Restart Session/);
+    assert.match(notice.textContent!, /Open More Actions and choose Restart Session/);
     assert.doesNotMatch(notice.textContent!, /Returning .* to this conversation/);
     assert.doesNotMatch(panel.container.textContent!, /Returning Result/,
       "the group badge must not contradict its explicit historical recovery notice");

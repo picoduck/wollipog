@@ -575,11 +575,11 @@ export function SessionHeader({
               void run(async () => {
                 if (historicalResultRecovery && !await confirm({
                   title: "Restart Session",
-                  message: "This starts a new conversation and ends every background job. " +
+                  message: "This starts a new conversation and ends every background job; " +
                     (runnerSupportsProtocol(runnerProtocolVersion, "restartKeepsQueuedWork")
-                      ? "Finished results are reported to the new conversation."
-                      : "Held results are discarded.") +
-                    " The original job commands are not rerun. Review the conversation before continuing.",
+                      ? "finished results are reported to the new conversation."
+                      : "held results are discarded.") +
+                    " The original job commands are not rerun; review the conversation before continuing.",
                   confirmLabel: "Restart Session",
                   tone: "danger",
                 })) return;

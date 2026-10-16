@@ -54,13 +54,13 @@ for (const parentTurnId of ["unknown", "known-parent"]) for (const width of [390
       await expect(notice).toContainText("will not resubmit them automatically");
       await expect(panel.locator(".background-work-turn-head")).not.toContainText("Returning Result");
     }
-    await expect(notice).toContainText("More Actions → Restart Session");
+    await expect(notice).toContainText("Open More Actions and choose Restart Session");
     await expect(notice).toContainText("Restart ends every job and reports held results; it does not rerun their original commands.");
     await expect(notice.getByRole("button", { name: /^Stop |Acknowledge/ })).toHaveCount(0);
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     if (process.env.ISSUE_3280_EVIDENCE_DIR) {
-      await page.screenshot({ path: `${process.env.ISSUE_3280_EVIDENCE_DIR}/after-${parentTurnId}-${width}-${theme}.png`, fullPage: true });
+      await page.screenshot({ path: `${process.env.ISSUE_3280_EVIDENCE_DIR}/after-${parentTurnId}-${width}-${theme}.png`, fullPage: true, animations: "disabled" });
     }
     await hold(3_000);
     await notice.getByRole("button", { name: "Show Details" }).click();
@@ -80,7 +80,7 @@ for (const parentTurnId of ["unknown", "known-parent"]) for (const width of [390
     await expect(confirmation.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
     await hold(4_000);
     if (process.env.ISSUE_3280_EVIDENCE_DIR) {
-      await page.screenshot({ path: `${process.env.ISSUE_3280_EVIDENCE_DIR}/confirm-${parentTurnId}-${width}-${theme}.png`, fullPage: true });
+      await page.screenshot({ path: `${process.env.ISSUE_3280_EVIDENCE_DIR}/confirm-${parentTurnId}-${width}-${theme}.png`, fullPage: true, animations: "disabled" });
     }
     await confirmation.getByRole("button", { name: "Cancel", exact: true }).click();
     await expect(confirmation).toHaveCount(0);
