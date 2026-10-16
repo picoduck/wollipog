@@ -592,6 +592,24 @@ test("a same-owner lease with an unprobeable pid fails closed instead of reading
   assert.deepEqual(readdirSync(leasePaths(home).lock), ["lease.json"]);
 });
 
+test("a version-2 released legacy marker is rejected as fabricated handoff state", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-released-legacy-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const lock = writeLegacyLease(home, {
+    version: 2,
+    state: "released",
+    ownerHash: OWNER_B,
+    hostname: "host-b",
+    previousLeaseId: null,
+    previousRecordHash: null,
+  });
+  const registry = new ProviderHomeLeaseRegistry(OWNER_A, {
+    pid: 202, hostname: "host-a", isProcessAlive: () => true,
+  });
+  assert.throws(() => registry.acquire(request(home)), /unexpected entries/);
+  assert.deepEqual(readdirSync(lock), ["lease.json"]);
+});
+
 test("a released genesis record is rejected as fabricated handoff state", (t) => {
   const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-released-genesis-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
