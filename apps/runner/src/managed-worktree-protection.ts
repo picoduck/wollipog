@@ -2862,7 +2862,10 @@ export function prepareGuardStateCommand(command: string): PreparedGuardStateCom
       if (heredoc.strip && terminated) continue; // drop body and terminator
       for (const { line, sep, isTerminator } of lines) {
         scan += line + sep;
-        out += (isTerminator ? line : reduceBraceSubstitutions(line)) + sep;
+        // A kept body line is still scanned (a shell executes it). Reduce its `${...}` so a literal
+        // substitution does not break tokenizing, and blank its `#` so the tokenizer's comment rule
+        // cannot run from a body `#` to the end of the command and swallow what follows the heredoc.
+        out += (isTerminator ? line : reduceBraceSubstitutions(line)).replaceAll("#", " ") + sep;
       }
     }
   };
@@ -2963,7 +2966,9 @@ export function prepareGuardStateCommand(command: string): PreparedGuardStateCom
     const strip = quoted && !dollar && strippableConsumer();
     pending.push({ delimiter, dashStrip, strip });
     scan += command.slice(start, j);
-    if (!strip) out += command.slice(start, j);
+    // Blank any `#` in the operator/delimiter for the tokenizer: an unquoted `<<E#F` would otherwise
+    // read as a comment there. The delimiter is never a path, so blanking it changes no verdict.
+    if (!strip) out += command.slice(start, j).replaceAll("#", " ");
     inWord = false;
     return j;
   }

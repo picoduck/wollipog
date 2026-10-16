@@ -1413,6 +1413,8 @@ test("ordinary commands reaching nothing are allowed, and every real access stay
     // ANSI-C `$'...'` is modelled, so a benign one with escapes and a following comment is allowed.
     "printf $'a\\tb\\n'",
     "echo $'hi' # a note",
+    // A benign kept heredoc with a comment in its body does not refuse the command after it.
+    "bash <<'EOF'\necho hi # a note\nEOF\necho done",
   ]) {
     assert.equal(commandTargetsGuardState(command, project, directory), null, command);
   }
@@ -1445,6 +1447,11 @@ test("ordinary commands reaching nothing are allowed, and every real access stay
     `cat > f.ts <<$'EOF'\nbody\nEOF\ncat ${into}`,
     `cat > f.ts <<'EOF'\nbody\ncat ${into}`,
     `cat > f.ts <<'EOF'\nbody\nEOF\rcat ${into}`,
+    // A `#` in a KEPT body, or in a heredoc delimiter, must not run the tokenizer's comment to the
+    // end of the command and swallow the read that follows the heredoc.
+    `bash <<'EOF'\n# only a comment\nEOF\ncat ${into}`,
+    `python3 - <<'EOF'\nx = 1  # c\nEOF\ncat ${into}`,
+    `cat <<E#F\nbody\nE#F\ncat ${into}`,
     // An UNQUOTED heredoc expands, so its body is kept and scanned, conservatively.
     `cat > a.ts <<EOF\n${into}\nEOF`,
     // A body handed to a shell is executed, so it is kept and scanned.
