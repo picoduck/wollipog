@@ -308,6 +308,18 @@ async function campaignBudgetCompatibilityError(deps:McpDeps):Promise<ToolResult
   return Number.isInteger(actual) && actual!>=required?null:controlPlaneUpdateRequired(needsNewerWollipog("Campaign budget and review jobs need"),required,actual);
 }
 
+async function sessionReviewCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const compatibility = await cpFetch(deps, "GET", "/api/compatibility");
+    if (!compatibility.ok) return errorResult(wollipogSupportUnverified("cross-model review through the runner", compatibility.message));
+    actual = compatibility.data?.protocolVersion;
+  }
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob;
+  return Number.isInteger(actual) && actual! >= required ? null
+    : controlPlaneUpdateRequired(needsNewerWollipog("Cross-model review through the runner needs"), required, actual);
+}
+
 async function issueClosureCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
   let actual = deps.controlPlaneProtocolVersion;
   if (!Number.isInteger(actual)) {
@@ -2100,6 +2112,82 @@ export const TOOLS: McpTool[] = [
         ...(deps.pullRequestReadGraceMs !== undefined ? { readGraceMs: deps.pullRequestReadGraceMs } : {}),
       });
       return result.ok ? textResult(result.summary) : errorResult(result.error);
+    },
+  },
+  {
+    name: "request_cross_model_review",
+    description: "Ask the runner to run the installed cross-model review controller for this session's own open pull request, at its pushed head, outside this session's sandbox. The reviewer is the other model family (Codex for a Claude Code session, Claude Code for a Codex session) with its own read-only sandbox; it reads a runner-private snapshot and never touches your worktree. The pull request must be open, from this repository, on this session's managed worktree branch, and headSha must be its current pushed head: push first. The first round of a pull request needs a brief (intent, acceptance criteria, verification); later rounds reuse it and review only the changes since the last valid round, unless scope is full with a fullReason. One review runs per session at a time. Returns a jobId at once: poll get_cross_model_review until terminal is true, then read its summary, report and ledger. Campaign sessions with an allowance use their Orchestrator's run_campaign_review_job instead.",
+    inputSchema: { type: "object", properties: {
+      repository: { type: "string", description: "The pull request's GitHub repository, owner/name." },
+      number: { type: "integer", minimum: 1 },
+      headSha: { type: "string", pattern: "^[0-9a-f]{40}$", description: "The pull request's current pushed head commit." },
+      brief: { type: "string", minLength: 1, description: "Required for the first round of a pull request; optional afterwards (replaces the stored brief)." },
+      scope: { type: "string", enum: ["delta", "full"], description: "Later rounds default to delta." },
+      fullReason: { type: "string", maxLength: 500, description: "Why a full re-review is needed; only with scope full." },
+    }, required: ["repository", "number", "headSha"], additionalProperties: false },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
+      const incompatible = await sessionReviewCompatibilityError(deps);
+      if (incompatible) return incompatible;
+      const { repository, number, ...rest } = args as Record<string, unknown>;
+      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/cross-model-reviews`,
+        { pullRequest: { repository, number }, ...rest });
+      return r.ok ? textResult(r.data) : errorResult(r.message);
+    },
+  },
+  {
+    name: "get_cross_model_review",
+    description: "Read one of this session's cross-model review jobs: state (requested, running, completed, failed, not_launched), round, attempt, reviewer and reason. Once terminal is true it also returns the controller's summary, its report.json and the runner-owned ledger (read-only; record adjudication in the pull request). A completed job is a finished review attempt; read the summary and report to see whether the round was valid and what it found. Each artifact is up to 256 KiB: pass include to fetch only what you need, or use the wollipog review get CLI and redirect it to a file.",
+    inputSchema: { type: "object", properties: {
+      jobId: { type: "string" },
+      include: { type: "array", items: { type: "string", enum: ["report", "ledger"] }, uniqueItems: true,
+        description: "Artifacts to return beside the summary once the job is terminal; default both." },
+    }, required: ["jobId"], additionalProperties: false },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId || typeof args?.jobId !== "string") return errorResult("jobId and a session identity are required");
+      const incompatible = await sessionReviewCompatibilityError(deps);
+      if (incompatible) return incompatible;
+      const base = `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/cross-model-reviews/${encodeURIComponent(args.jobId)}`;
+      const job = await cpFetch(deps, "GET", base);
+      if (!job.ok) return errorResult(job.message);
+      if (job.data?.terminal !== true) return textResult({ job: job.data });
+      const artifacts = await cpFetch(deps, "GET", `${base}/artifacts`);
+      if (!artifacts.ok) return errorResult(artifacts.message);
+      const include = Array.isArray(args.include) ? new Set(args.include) : new Set(["report", "ledger"]);
+      const { report, reportTruncated, ledger, ledgerTruncated, ...rest } = artifacts.data ?? {};
+      return textResult({ job: job.data, artifacts: {
+        ...rest,
+        ...(include.has("report") ? { report, reportTruncated } : {}),
+        ...(include.has("ledger") ? { ledger, ledgerTruncated } : {}),
+      } });
+    },
+  },
+  {
+    name: "list_cross_model_reviews",
+    description: "List this session's cross-model review jobs, newest first, without their report or ledger. Continue with nextAfterJobId.",
+    inputSchema: { type: "object", properties: { limit: { type: "integer", minimum: 1, maximum: 100 }, afterJobId: { type: "string" } }, additionalProperties: false },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
+      const incompatible = await sessionReviewCompatibilityError(deps);
+      if (incompatible) return incompatible;
+      const params = new URLSearchParams();
+      for (const key of ["limit", "afterJobId"]) if (args?.[key] !== undefined) params.set(key, String(args[key]));
+      const query = params.toString();
+      const r = await cpFetch(deps, "GET", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/cross-model-reviews${query ? `?${query}` : ""}`);
+      return r.ok ? textResult(r.data) : errorResult(r.message);
+    },
+  },
+  {
+    name: "cancel_cross_model_review",
+    description: "Cancel one of this session's unfinished cross-model review jobs. The runner stops the review and reports it as failed or not launched; poll get_cross_model_review for the final state. A cancelled launched attempt still counts toward the round's attempts.",
+    inputSchema: { type: "object", properties: { jobId: { type: "string" } }, required: ["jobId"], additionalProperties: false },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId || typeof args?.jobId !== "string") return errorResult("jobId and a session identity are required");
+      const incompatible = await sessionReviewCompatibilityError(deps);
+      if (incompatible) return incompatible;
+      const r = await cpFetch(deps, "POST",
+        `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/cross-model-reviews/${encodeURIComponent(args.jobId)}/cancel`, {});
+      return r.ok ? textResult(r.data) : errorResult(r.message);
     },
   },
   {

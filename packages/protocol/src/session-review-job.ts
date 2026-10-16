@@ -68,6 +68,47 @@ export interface SessionReviewJobUpdate {
   reason?: string;
 }
 
+/** A session's review job as the control plane records it. `requested` is durable intent the
+ * runner has not reported on yet; every other state is the runner's latest update. */
+export interface SessionReviewJobView {
+  jobId: string;
+  sessionId: string;
+  pullRequest: { repository: string; number: number };
+  headSha: string;
+  scope: "delta" | "full";
+  state: SessionReviewJobState | "requested";
+  /** True once `state` can no longer change. */
+  terminal: boolean;
+  round: number | null;
+  attempt: number | null;
+  reviewer: SessionReviewHarness | null;
+  controllerDigest: string | null;
+  /** The controller's one-line JSON summary, when the attempt wrote one. */
+  summary: string | null;
+  reason: string | null;
+  cancelRequested: boolean;
+  hasReport: boolean;
+  reportTruncated: boolean;
+  hasLedger: boolean;
+  ledgerTruncated: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** A job's review artifacts, read separately from its metadata. */
+export interface SessionReviewJobArtifacts {
+  jobId: string;
+  summary: string | null;
+  report: string | null;
+  reportTruncated: boolean;
+  ledger: string | null;
+  ledgerTruncated: boolean;
+}
+
+export interface SessionReviewJobsPage { jobs: SessionReviewJobView[]; nextAfterJobId: string | null }
+
+export const SESSION_REVIEW_JOB_ID_PATTERN = /^srj_[A-Za-z0-9_-]{8,64}$/u;
+
 export const SESSION_REVIEW_ARTIFACT_LIMIT_BYTES = 256 * 1024;
 export const SESSION_REVIEW_SUMMARY_LIMIT_BYTES = 2 * 1024;
 export const SESSION_REVIEW_BRIEF_LIMIT_BYTES = 100 * 1024;

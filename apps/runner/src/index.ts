@@ -1,5 +1,6 @@
 import { projectMemoryAgentVersion } from "./project-memory.js";
 import { ControlledCampaignReviewer, discoverControlledReview } from "./campaign-review-jobs.js";
+import { SessionReviewJobs, defaultSessionReviewDependencies } from "./session-review-jobs.js";
 /**
  * Runner daemon: connects outbound to the control plane, advertises this host's
  * workspaces + agents, sends heartbeats, reconnects automatically, and manages
@@ -45,6 +46,7 @@ import {
   type RegisterMessage,
   type ReprocessSessionMessage,
   type RunnerMetadata,
+  type SessionReviewCapability,
   type RunnerToControlPlane,
   type SessionCommandInvocationResultMessage,
   type SessionCommandInvocationUpdateMessage,
@@ -1434,6 +1436,25 @@ function recoverStaleSessionCommands(): void {
 sessions.setSend(sendUp);
 const campaignReviewer = new ControlledCampaignReviewer(resolve(config.dataDir,"campaign-review-jobs"),store,sendUp,
   (jobId,agentId)=>sessions.reserveControlledReviewAdmission(jobId,agentId),(jobId)=>sessions.releaseControlledReviewAdmission(jobId));
+// A session's own cross-model review, run outside its sandbox (#3306). Linux only: job liveness is
+// read from /proc, and the protected session namespace it works around exists only there.
+const sessionReviewJobs = new SessionReviewJobs(resolve(config.dataDir, "session-review-jobs"), store, sendUp,
+  defaultSessionReviewDependencies(config.dataDir, log, () => config.workspaces.map((workspace) => workspace.path)));
+/** Discovery runs at every registration so an installed or removed controller is advertised. */
+function sessionReviewCapability(): SessionReviewCapability | undefined {
+  if (process.platform !== "linux") return undefined;
+  try {
+    return sessionReviewJobs.capability();
+  } catch (error) {
+    log(`session review discovery failed: ${errText(error)}`);
+    return undefined;
+  }
+}
+function withSessionReviewRuntime(runtime: NonNullable<RunnerMetadata["runtime"]>): NonNullable<RunnerMetadata["runtime"]> {
+  const { sessionReview: _previous, ...rest } = runtime;
+  const sessionReview = sessionReviewCapability();
+  return { ...rest, ...(sessionReview ? { sessionReview } : {}) };
+}
 
 function startTrackedSession(
   command: StartSessionMessage,
@@ -2555,6 +2576,12 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       break;
     case "cancel_campaign_review_job":
       campaignReviewer.cancel(msg.jobId,msg.nonce);
+      break;
+    case "session_review_job":
+      runCommandTask("session_review_job", sessionReviewJobs.dispatch(msg));
+      break;
+    case "cancel_session_review_job":
+      sessionReviewJobs.cancel(msg.jobId, msg.nonce);
       break;
     case "priced_session_cost":
       sessions.syncPricedSessionCost(msg.sessionId, msg.costUsd, msg.costReconciliationRevision, msg.costReconciliationDeltaUsd, msg);
@@ -3842,7 +3869,10 @@ function connect(): void {
     const register: RegisterMessage = {
       type: "register",
       token: config.token,
-      runner: { ...metadata, agents: agentsForControlPlane(), providerAccounts: providerAccountsForControlPlane() },
+      runner: {
+        ...metadata, agents: agentsForControlPlane(), providerAccounts: providerAccountsForControlPlane(),
+        ...(metadata.runtime ? { runtime: withSessionReviewRuntime(metadata.runtime) } : {}),
+      },
       // Lets the dashboard flag this runner as outdated when its own PROTOCOL_VERSION is newer.
       protocolVersion: PROTOCOL_VERSION,
       liveSessions: sessions.liveSessionIds(),
@@ -3926,6 +3956,8 @@ function shutdown(exitCode = 0): void {
   });
   bestEffort("stop subscription usage", () => subscriptionUsage.shutdown());
   bestEffort("stop provider sign-ins", () => providerLoginSupervisor.shutdown());
+  // Running reviews continue detached and are recovered from their job files on restart.
+  bestEffort("stop session review polling", () => sessionReviewJobs.close());
   // Track whether every provider driver was disposed. If not (a dispose threw), a provider may still
   // be alive with no registered kill, so we must NOT release its provider-home lease below even if
   // waitForPendingKills reports "reaped" — releasing it could let a replacement runner share the HOME.

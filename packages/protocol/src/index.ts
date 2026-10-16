@@ -678,7 +678,11 @@
 //      against a pre-v220 control plane instead of sending it.
 // 221: pre-acceptance background capacity retry exhaustion, separate from accepted missing results.
 // 222: CLI/MCP event readers never use the legacy unpaged hydration fallback.
-export const PROTOCOL_VERSION = 222;
+// 223: runner-mediated session cross-model review (#3306): `session_review_job` and
+//      `cancel_session_review_job` commands, the `session_review_job_update` reply, and
+//      `RunnerRuntimeInfo.sessionReview`. The control plane sends a job only to a v223+ runner that
+//      advertises the capability, and the session tools refuse against an older control plane.
+export const PROTOCOL_VERSION = 223;
 
 export * from "./campaign-authority.js";
 export * from "./campaign-issue-publication.js";
@@ -903,6 +907,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** CLI/MCP event reader keeps incomplete-cache reads paged. Older readers assume the unpaged
    * hydration fallback returns the whole log and can mislabel a bounded prefix as its newest tail. */
   boundedSessionEventReads: 222,
+  /** v223 runner runs a session's own cross-model review outside its sandbox (#3306); the session
+   * tools check the same floor against the connected control plane. */
+  sessionReviewJob: 223,
   authoritativeHistoryWindow: 213,
   promptImageReferences: 56,
   durableSessionShells: 57,

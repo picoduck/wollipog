@@ -5,6 +5,8 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, st
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import vm from "node:vm";
+import { transformSync } from "esbuild";
 import type { SessionReviewJobCommand, SessionReviewJobUpdate } from "@wollipog/protocol";
 import {
   discoverSessionReviewInstallation, reviewerForDriver, SessionReviewJobs, trustedPath,
@@ -328,4 +330,35 @@ test("a job restored after a runner restart in `prepared` reports that it never 
   });
   t.after(() => restored.close());
   assert.equal(updates[0]?.state, "not_launched");
+});
+
+/** Run the runner's own advertisement functions from index.ts without booting a runner. */
+function advertisedRuntime(platform: string, capability: () => unknown, runtime: Record<string, unknown>): Record<string, unknown> {
+  const index = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+  const start = index.indexOf("function sessionReviewCapability(");
+  const end = index.indexOf("\nfunction startTrackedSession(", start);
+  assert.ok(start > 0 && end > start, "index.ts defines the session review advertisement");
+  const context = vm.createContext({ process: { platform }, sessionReviewJobs: { capability }, log: () => {},
+    errText: (error: unknown) => String(error) });
+  vm.runInContext(`${transformSync(index.slice(start, end), { loader: "ts", format: "cjs" }).code}
+    globalThis.result = withSessionReviewRuntime(${JSON.stringify(runtime)});`, context);
+  return JSON.parse(JSON.stringify(context.result)) as Record<string, unknown>;
+}
+
+test("the runner advertises session review on Linux only and wires its commands (#3306)", () => {
+  const capability = { controllerDigest: "d".repeat(64), reviewers: ["codex"] };
+  const base = { dataDir: "/runner", maxConcurrentSessions: 2 };
+  assert.deepEqual(advertisedRuntime("linux", () => capability, base), { ...base, sessionReview: capability });
+  assert.deepEqual(advertisedRuntime("darwin", () => capability, base), base, "job liveness reads /proc");
+  assert.deepEqual(advertisedRuntime("win32", () => capability, base), base);
+  assert.deepEqual(advertisedRuntime("linux", () => undefined, { ...base, sessionReview: capability }), base,
+    "a removed installation stops being advertised at the next registration");
+  assert.deepEqual(advertisedRuntime("linux", () => { throw new Error("boom"); }, base), base);
+
+  const index = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+  assert.match(index, /new SessionReviewJobs\(resolve\(config\.dataDir, "session-review-jobs"\), store, sendUp,/u);
+  assert.match(index, /case "session_review_job":\s+runCommandTask\("session_review_job", sessionReviewJobs\.dispatch\(msg\)\);/u);
+  assert.match(index, /case "cancel_session_review_job":\s+sessionReviewJobs\.cancel\(msg\.jobId, msg\.nonce\);/u);
+  assert.match(index, /runtime: withSessionReviewRuntime\(metadata\.runtime\)/u);
+  assert.match(index, /bestEffort\("stop session review polling", \(\) => sessionReviewJobs\.close\(\)\)/u);
 });
