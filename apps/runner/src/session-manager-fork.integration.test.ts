@@ -236,6 +236,10 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
     let racedPrompts = 0;
     let constructions = 0;
     let preparationWait: (() => Promise<void>) | undefined;
+    // What the fake Claude fork reports to forkSession's process observer (#3238): a tree proof,
+    // or nothing at all, as a driver without the observer would.
+    let claudeForkProcessReport: boolean | "none" = "none";
+    const claudeForkObserverOffered: boolean[] = [];
     const claudeForkBoundaries: Array<{ sourceSessionId: string; cwd: string; protectedPath?: string }> = [];
     const claudeIsolationState: Array<{ sessionId: string; cwd: string; protectedPath?: string }> = [];
     let manager!: SessionManager;
@@ -254,6 +258,8 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
         forkCwd = cwd;
         forkSources.push(_turn);
         if (kind === "claude-code") {
+          claudeForkObserverOffered.push(typeof forkOptions?.onProcess === "function");
+          if (claudeForkProcessReport !== "none") forkOptions?.onProcess?.(Promise.resolve(claudeForkProcessReport));
           assert.equal(forkOptions?.isolation?.backend, "bwrap");
           if (forkOptions?.isolation?.backend === "bwrap") {
             assert.equal(forkOptions.isolation.protectedWorktree?.path,
@@ -699,22 +705,28 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
     await manager.delete("s_claude_target");
     await manager.delete("s_pi_target");
     assert.deepEqual(stateRemovals, ["s_clone_fail", "s_post_anchor_fail", "s_target", "s_claude_target", "s_pi_target"]);
+    type LeaseReference = { first: boolean; release(): Promise<boolean>; retain(): Promise<void> };
     const leaseInternals = manager as unknown as {
       providerHomeLeases?: {
         acquire(request: unknown, cancellation?: { isCurrent?: () => boolean }): Promise<void>;
-        acquireReference(request: unknown, cancellation?: { isCurrent?: () => boolean }): Promise<null>;
+        acquireReference(request: unknown, cancellation?: { isCurrent?: () => boolean }): Promise<LeaseReference | null>;
       };
     };
     const originalLeases = leaseInternals.providerHomeLeases;
     const forksBeforeLeaseFailure = forkSources.length;
     const protectedLeasePath = (request: unknown) =>
       (request as { isolation?: { protectedWorktree?: { path: string } } }).isolation?.protectedWorktree?.path;
-    // The temporary source driver takes a per-instance handle; the Claude target fork still takes a
-    // plain reference. Both draw from one acquisition sequence.
+    // The temporary source driver and the Claude target fork each take an exact-entry handle
+    // (#3238). Both draw from one acquisition sequence.
     type LeaseStub = (request: unknown, cancellation?: { isCurrent?: () => boolean }) => Promise<void>;
+    const leaseMethods: string[] = [];
     const leaseStub = (acquire: LeaseStub) => ({
-      acquire,
+      acquire: async (request: unknown, cancellation?: { isCurrent?: () => boolean }) => {
+        leaseMethods.push("acquire");
+        await acquire(request, cancellation);
+      },
       acquireReference: async (request: unknown, cancellation?: { isCurrent?: () => boolean }) => {
+        leaseMethods.push("acquireReference");
         await acquire(request, cancellation);
         return null;
       },
@@ -744,6 +756,8 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
       assert.equal(refusedLease.ok, false);
       assert.match(refusedLease.error ?? "", /lease refused/);
       assert.equal(rejectedLeasePaths.length, 2);
+      assert.deepEqual(leaseMethods, ["acquireReference", "acquireReference"],
+        "the Claude target fork takes an exact-entry reference, never a plain one");
       assert.equal(store.has("s_claude_lease_refused"), false);
       assert.equal(forkSources.length, forksBeforeLeaseFailure,
         "a rejected provider-home lease must stop before Claude forks its transcript");
@@ -785,6 +799,43 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
           "a cancelled lease wait must stop before Claude forks its transcript");
       } finally {
         internals.deleted.delete(cancelledTarget);
+      }
+
+      // The Claude target fork's reference settles on the fork bootstrap's own tree proof once
+      // forkSession returns: released only for a reported true proof (#3238).
+      for (const [report, released] of [[true, true], [false, false], ["none", false]] as const) {
+        const outcomes: Array<{ path: string | undefined; outcome?: "released" | "retained" }> = [];
+        leaseInternals.providerHomeLeases = {
+          acquire: async () => { throw new Error("no plain reference below the handle budget"); },
+          acquireReference: async (request: unknown) => {
+            const entry: { path: string | undefined; outcome?: "released" | "retained" } = { path: protectedLeasePath(request) };
+            outcomes.push(entry);
+            return {
+              first: true,
+              release: async () => { entry.outcome ??= "released"; return true; },
+              retain: async () => { entry.outcome ??= "retained"; },
+            };
+          },
+        };
+        claudeForkProcessReport = report;
+        const offeredBefore = claudeForkObserverOffered.length;
+        const targetId = `s_claude_fork_proof_${String(report)}`;
+        try {
+          const forked = await manager.forkConversation("s_claude_source", targetId, 2, "Fork Proof");
+          assert.equal(forked.ok, true, forked.error);
+          assert.deepEqual(claudeForkObserverOffered.slice(offeredBefore), [true],
+            "the fork is offered a process observer whenever it holds a reference handle");
+          assert.equal(outcomes.length, 2, "the temporary source driver and the target fork each hold one handle");
+          if (process.platform === "linux") {
+            assert.equal(outcomes[1]!.path, store.readMeta(targetId)?.worktreePath,
+              "the second handle is the target fork's, bound to the new worktree");
+          }
+          assert.equal(outcomes[1]!.outcome, released ? "released" : "retained",
+            `a fork reporting ${String(report)} ${released ? "releases" : "keeps"} its reference`);
+        } finally {
+          claudeForkProcessReport = "none";
+          if (store.has(targetId)) await manager.delete(targetId);
+        }
       }
     } finally {
       leaseInternals.providerHomeLeases = originalLeases;

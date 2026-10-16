@@ -12,8 +12,12 @@ import {
   posixPtyCommandLaunch,
   resizeScriptArgs,
   shellLaunchFor,
+  shellProcessTreeProof,
   type ShellCallbacks,
 } from "./shell-manager.js";
+import { EventEmitter } from "node:events";
+import type { AgentProcess } from "./spawn.js";
+import { WindowsConptyProcess } from "./windows-conpty.js";
 
 const NATIVE = { kind: "native" } as const;
 const ENTER = process.platform === "win32" ? "\r" : "\n";
@@ -215,6 +219,68 @@ test("orchestrator Stop can close its TUI without closing human shells", {
     mgr.dispose();
     await waitFor(() => mgr.count("parent") === 0);
   }
+});
+
+test("an agent TUI reports its process-tree proof exactly once when it ends, however it ends (#3238)", {
+  skip: !agentTuiPlatformSupported(process.platform, NATIVE) || process.platform === "win32",
+}, async () => {
+  const { exits, cb } = collector();
+  const mgr = new ShellManager(cb);
+  const ended = new Map<string, boolean[]>();
+  const open = (shellId: string, script: string) => {
+    ended.set(shellId, []);
+    mgr.open(shellId, `session-${shellId}`, tmpdir(), NATIVE, undefined, {
+      kind: "agent_tui",
+      launch: { command: process.execPath, args: ["-e", script] },
+      onEnded: (proven) => ended.get(shellId)!.push(proven),
+    });
+  };
+  try {
+    open("natural", "process.exit(0)");
+    open("closed", "setInterval(() => {}, 1000)");
+    open("session", "setInterval(() => {}, 1000)");
+    await waitFor(() => ended.get("natural")!.length === 1);
+    mgr.close("closed");
+    mgr.closeForSession("session-session", "agent_tui");
+    await waitFor(() => ended.get("closed")!.length === 1 && ended.get("session")!.length === 1);
+    // Forgetting an already-exited TUI emits another exit frame but is not a second ending.
+    mgr.close("natural");
+    await waitFor(() => exits.filter((exit) => exit.shellId === "natural").length === 2);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.deepEqual(Object.fromEntries(ended), { natural: [true], closed: [true], session: [true] },
+      "a spawned TUI's ownerless boundary proves its tree gone, and each ending is reported once");
+  } finally {
+    mgr.dispose();
+  }
+});
+
+test("runner shutdown reports no agent TUI ending, so it settles no provider-HOME reference", {
+  skip: !agentTuiPlatformSupported(process.platform, NATIVE) || process.platform === "win32",
+}, async () => {
+  const { exits, cb } = collector();
+  const mgr = new ShellManager(cb);
+  const ended: boolean[] = [];
+  mgr.open("tui", "parent", tmpdir(), NATIVE, undefined, {
+    kind: "agent_tui",
+    launch: { command: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"] },
+    onEnded: (proven) => ended.push(proven),
+  });
+  mgr.dispose();
+  await waitFor(() => exits.some((exit) => exit.shellId === "tui"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.deepEqual(ended, []);
+});
+
+test("only a spawned process's POSIX boundary proves a shell tree gone; ConPTY never does", async () => {
+  const spawned = (terminate?: () => Promise<boolean>) => Object.assign(new EventEmitter(), {
+    ...(terminate ? { posixBoundary: { terminate } } : {}),
+  }) as unknown as AgentProcess;
+  assert.equal(await shellProcessTreeProof(spawned(async () => true)), true);
+  assert.equal(await shellProcessTreeProof(spawned(async () => false)), false, "a surviving descendant");
+  assert.equal(await shellProcessTreeProof(spawned(async () => { throw new Error("unreadable"); })), false);
+  assert.equal(await shellProcessTreeProof(spawned()), false, "a boundary-less spawn, such as WSL");
+  const conpty = Object.create(WindowsConptyProcess.prototype) as WindowsConptyProcess;
+  assert.equal(await shellProcessTreeProof(conpty), false, "a ConPTY root exit is not a tree proof");
 });
 
 test("agent TUI launch uses its private scratch cwd instead of the session project root", {

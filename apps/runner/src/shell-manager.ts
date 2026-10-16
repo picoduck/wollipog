@@ -9,7 +9,7 @@
 import { StringDecoder } from "node:string_decoder";
 import type { AgentContext, ShellKind, ShellOutputChunk, ShellSnapshotMessage } from "@wollipog/protocol";
 import { run } from "./discovery/resolve.js";
-import { killTree, killTreeAndWait, spawnAgent, type AgentProcess } from "./spawn.js";
+import { killTree, killTreeAndWait, provenProcessTreeExit, spawnAgent, type AgentProcess } from "./spawn.js";
 import { openWindowsConpty, WindowsConptyProcess } from "./windows-conpty.js";
 import { sameWorktreePath } from "./worktree.js";
 
@@ -70,6 +70,22 @@ export interface ShellProcessLaunch {
    * so the runner remembers it and says so when the session acquires a worktree (#1438).
    */
   managedWorktreeGuard?: { active: boolean; reason?: string };
+  /**
+   * For an agent TUI: the provider-HOME reference its launch holds (#3238). Whoever owns the launch
+   * settles it exactly once — the preparation and the open path when no TUI process was started,
+   * the TUI's ended callback otherwise. ShellManager itself never reads it.
+   */
+  providerHome?: AgentTuiProviderHome;
+}
+
+/** The provider-HOME reference one Agent TUI launch holds (#3238). */
+export interface AgentTuiProviderHome {
+  /** The preparation is about to start a provider process outside any provable boundary (a Codex
+   * probe), so the settlement keeps the reference until shutdown whatever the TUI's own proof. */
+  markUnprovable(): void;
+  /** Settle once: `true`/`false` is the TUI's own process-tree proof after it ended, `null` means no
+   * TUI process was started. Releases only when everything the launch started is proven gone. */
+  settle(tuiProven: boolean | null): Promise<void>;
 }
 
 export function agentTuiPlatformSupported(platform: NodeJS.Platform, context: AgentContext): boolean {
@@ -156,8 +172,19 @@ export function resizeScriptArgs(ttyFile: string, cols: number, rows: number): s
   return ["-c", script, "sh", ttyFile, String(rows), String(cols)];
 }
 
+/** Whether an ended shell process's complete tree is proven gone (#3238). A ConPTY process has no
+ * process-tree boundary, so only its root's exit is observable, which is never a tree proof; a
+ * spawned process is proven by its POSIX boundary, and one without a boundary (WSL) is not. */
+export function shellProcessTreeProof(child: AgentProcess | WindowsConptyProcess): Promise<boolean> {
+  return child instanceof WindowsConptyProcess
+    ? Promise.resolve(false)
+    : provenProcessTreeExit(child).catch(() => false);
+}
+
 export class ShellManager {
   private readonly shells = new Map<string, LiveShell>();
+  /** Set by runner shutdown; ended callbacks are not reported after it. */
+  private disposed = false;
 
   constructor(private readonly cb: ShellCallbacks) {}
 
@@ -182,6 +209,13 @@ export class ShellManager {
       launch?: ShellProcessLaunch;
       cleanupOwnsDescendants?: boolean;
       cleanupDescendantMarker?: string;
+      /**
+       * Called once after the shell's process ended (closed, or failed to start), outside runner
+       * shutdown, with whether its complete process tree is proven gone: the POSIX boundary's
+       * proof for a spawned process, always false for a Windows ConPTY process (and for spawns
+       * without a boundary, such as WSL). Not called when `open` throws.
+       */
+      onEnded?: (proven: boolean) => void;
     },
   ): { pty: boolean } {
     if (this.shells.has(shellId)) throw new Error("shell already exists");
@@ -289,7 +323,24 @@ export class ShellManager {
     child.stdin.on("error", () => {
       /* surfaced via exit below */
     });
+    // Reported once, for whichever of error and close comes first. Runner shutdown reports
+    // nothing: its own global reaping proof settles everything the runner still holds.
+    let endReported = false;
+    const reportEnded = () => {
+      const onEnded = meta?.onEnded;
+      if (!onEnded || endReported || this.disposed) return;
+      endReported = true;
+      void shellProcessTreeProof(child).then((proven) => {
+        if (this.disposed) return;
+        try {
+          onEnded(proven);
+        } catch {
+          /* the observer owns its own failures; a shell exit must never crash the runner */
+        }
+      });
+    };
     const onError = (err: Error) => {
+      reportEnded();
       // spawn failure (ENOENT etc.) — surface as stderr then a null exit.
       if (live.exited) return;
       live.exited = true;
@@ -301,6 +352,7 @@ export class ShellManager {
     // "close", not "exit": close fires only after stdio has fully drained, so no output chunk
     // can arrive after the exit notification (exit can fire with data still buffered).
     const onClose = (code: number | null) => {
+      reportEnded();
       if (live.exited) return;
       live.exited = true;
       flushDecoders(); // a trailing partial character must land before the exit
@@ -440,6 +492,7 @@ export class ShellManager {
 
   /** Kill everything (runner shutdown). */
   dispose(): void {
+    this.disposed = true;
     for (const s of this.shells.values()) this.kill(s);
   }
 

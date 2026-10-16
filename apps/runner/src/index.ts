@@ -3295,6 +3295,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           ),
         }),
         open: (message, target, launch, cleanupBoundary) => {
+          // Once the TUI process exists it owns the launch's provider-HOME reference (#3238): the
+          // reference settles on the TUI tree's proof when the TUI ends, however it ends.
+          const providerHome = launch?.providerHome;
           const opened = shells.open(
             message.shellId,
             message.sessionId,
@@ -3307,6 +3310,13 @@ function handleCommand(msg: ControlPlaneToRunner): void {
               kind: message.kind,
               launch,
               ...cleanupBoundary,
+              ...(providerHome ? {
+                onEnded: (proven: boolean) => {
+                  void providerHome.settle(proven).catch((error) => {
+                    log(`Agent TUI provider-home settlement failed: ${errText(error)}`);
+                  });
+                },
+              } : {}),
             },
           );
           // Recorded only once the TUI really is running. The protection set is read NOW, not from

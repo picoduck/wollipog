@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { prepareAgentTuiLaunch } from "./agent-tui.js";
 import type { LeaseCancellation } from "./provider-home-lease-async.js";
 import { LEASE_WORKER_ERRORS } from "./provider-home-lease-worker-protocol.js";
 import { SessionManager } from "./session-manager.js";
@@ -40,6 +41,15 @@ class CountingRegistry {
     return home ? this.acquireHomeReference(home, "claude", cancellation) : null;
   }
 
+  /** A plain reference, kept until shutdown (the past-the-handle-budget fallback). */
+  plainAcquires = 0;
+  async acquire(request: { env?: Record<string, string> }, cancellation: LeaseCancellation = {}): Promise<void> {
+    const home = request.env?.HOME;
+    if (!home) return;
+    this.plainAcquires++;
+    await this.acquireHome(home, "claude", cancellation);
+  }
+
   async releaseHome(home: string): Promise<boolean> {
     this.releases.push(home);
     const count = this.references.get(home) ?? 0;
@@ -69,7 +79,11 @@ function fixture() {
   const manager = new SessionManager(() => {}, () => {}, store, "runner", undefined,
     (() => { throw new Error("fixture provider must not start"); }) as never);
   const registry = new CountingRegistry();
-  const internals = manager as unknown as { providerHomeLeases: CountingRegistry; shuttingDown: boolean };
+  const internals = manager as unknown as {
+    providerHomeLeases: CountingRegistry;
+    shuttingDown: boolean;
+    driverProviderHomes: Map<unknown, unknown>;
+  };
   internals.providerHomeLeases = registry;
   return {
     home, manager, registry, internals, meta,
@@ -132,21 +146,146 @@ test("a scope that never acquired does not release a reference it does not hold"
   } finally { h.cleanup(); }
 });
 
-test("process-lifetime acquisitions keep their reference but settle their worker handle", async () => {
+test("launch preparation keeps its reference but settles its worker handle", async () => {
   const h = fixture();
   try {
-    for (let i = 0; i < 3; i++) {
-      await h.manager.acquireLaunchProviderHome(h.home);
-      await h.manager.acquireAgentTuiProviderHome(h.meta);
-    }
-    assert.equal(h.registry.references.get(h.home), 6, "every launch and TUI keeps its reference");
+    for (let i = 0; i < 3; i++) await h.manager.acquireLaunchProviderHome(h.home);
+    assert.equal(h.registry.references.get(h.home), 3, "every launch preparation keeps its reference");
     assert.equal(h.registry.releases.length, 0);
     assert.equal(h.registry.openHandles, 0, "no handle stays occupied, so repeated launches cannot exhaust the pool");
     const scope = h.manager.skillProviderHomeScope();
     await scope.acquire(h.home);
     await scope.retain();
-    assert.equal(h.registry.references.get(h.home), 7, "an unfinished skill transaction keeps its reference");
+    assert.equal(h.registry.references.get(h.home), 4, "an unfinished skill transaction keeps its reference");
     assert.equal(h.registry.openHandles, 0);
+  } finally { h.cleanup(); }
+});
+
+/** The `index.ts` wiring of `prepareAgentTuiLaunch`, with every probe and file write stubbed. */
+function tuiDependencies(
+  h: ReturnType<typeof fixture>,
+  overrides: Partial<Parameters<typeof prepareAgentTuiLaunch>[1]> = {},
+): Parameters<typeof prepareAgentTuiLaunch>[1] {
+  return {
+    controlPlaneProtocolVersion: null,
+    provision: () => {},
+    acquireProviderHome: (meta) => h.manager.acquireAgentTuiProviderHome(meta),
+    assertSessionNotDeleted: () => {},
+    provisionManagedWorktreeGuard: (spec) => ({ protections: [], args: spec.args, guardActive: true }),
+    prepareScratch: async () => h.home,
+    permissionProfile: async () => ({ active: false, reason: "fixture" }),
+    ...overrides,
+  };
+}
+
+function codexMeta(h: ReturnType<typeof fixture>) {
+  return { ...h.meta, driver: "codex-app-server" as const, command: "codex", agentId: "codex" };
+}
+
+test("each Agent TUI holds its own reference handle until it is settled", async () => {
+  const h = fixture();
+  try {
+    const launches = [];
+    for (let i = 0; i < 3; i++) launches.push(await prepareAgentTuiLaunch(h.meta, tuiDependencies(h)));
+    assert.equal(h.registry.references.get(h.home), 3);
+    assert.equal(h.registry.openHandles, 3, "a running TUI's reference is still settleable");
+    for (const launch of launches) await launch?.providerHome?.settle(true);
+    assert.equal(h.registry.references.has(h.home), false);
+    assert.equal(h.registry.openHandles, 0);
+  } finally { h.cleanup(); }
+});
+
+test("a Claude TUI whose process tree is proven gone releases its reference", async () => {
+  const h = fixture();
+  try {
+    await h.registry.acquireHome(h.home, "claude"); // a running session's reference
+    const launch = await prepareAgentTuiLaunch(h.meta, tuiDependencies(h));
+    assert.ok(launch?.providerHome, "the launch carries its reference to the shell that runs it");
+    assert.equal(h.registry.references.get(h.home), 2);
+    await launch.providerHome.settle(true);
+    assert.equal(h.registry.references.get(h.home), 1, "only the TUI's own reference is dropped");
+    assert.deepEqual(h.registry.releases, [h.home]);
+    await launch.providerHome.settle(true);
+    assert.equal(h.registry.releases.length, 1, "settlement is idempotent");
+    assert.equal(h.registry.openHandles, 0);
+  } finally { h.cleanup(); }
+});
+
+test("an unproven or boundary-less (ConPTY, WSL) TUI keeps its reference until shutdown", async () => {
+  const h = fixture();
+  try {
+    const launch = await prepareAgentTuiLaunch(h.meta, tuiDependencies(h));
+    await launch?.providerHome?.settle(false);
+    assert.equal(h.registry.references.get(h.home), 1, "the reference is retained");
+    assert.equal(h.registry.releases.length, 0);
+    assert.equal(h.registry.openHandles, 0, "only the worker handle is freed");
+  } finally { h.cleanup(); }
+});
+
+test("a Codex TUI keeps its reference even when its own tree is proven gone", async () => {
+  const h = fixture();
+  try {
+    const launch = await prepareAgentTuiLaunch(codexMeta(h), tuiDependencies(h));
+    assert.ok(launch?.providerHome);
+    await launch.providerHome.settle(true);
+    assert.equal(h.registry.references.get(h.home), 1,
+      "its permission-profile and hook-inventory probes ran outside any provable boundary");
+    assert.equal(h.registry.releases.length, 0);
+    assert.equal(h.registry.openHandles, 0);
+  } finally { h.cleanup(); }
+});
+
+test("a TUI preparation that fails after the grant releases unless a probe already ran", async () => {
+  const h = fixture();
+  try {
+    await assert.rejects(prepareAgentTuiLaunch(h.meta, tuiDependencies(h, {
+      assertLaunchCurrent: () => { throw new Error("session launch changed"); },
+    })), /session launch changed/);
+    assert.equal(h.registry.references.has(h.home), false, "nothing was started, so the reference is dropped");
+    assert.equal(h.registry.openHandles, 0);
+
+    await assert.rejects(prepareAgentTuiLaunch(codexMeta(h), tuiDependencies(h, {
+      provisionManagedWorktreeGuard: () => { throw new Error("hook inventory failed"); },
+    })), /hook inventory failed/);
+    assert.equal(h.registry.references.get(h.home), 1, "a Codex probe may have started, so it is kept");
+    assert.equal(h.registry.openHandles, 0);
+
+    // A Codex launch refused before any probe ran (its session was deleted meanwhile) releases.
+    await assert.rejects(prepareAgentTuiLaunch(codexMeta(h), tuiDependencies(h, {
+      assertSessionNotDeleted: () => { throw new Error("session is being deleted"); },
+    })), /being deleted/);
+    assert.equal(h.registry.references.get(h.home), 1, "only the probed launch's reference remains");
+    assert.equal(h.registry.openHandles, 0);
+  } finally { h.cleanup(); }
+});
+
+test("runner shutdown settles nothing for a TUI; the global shutdown release owns it", async () => {
+  const h = fixture();
+  try {
+    const launch = await prepareAgentTuiLaunch(h.meta, tuiDependencies(h));
+    h.internals.shuttingDown = true;
+    await launch?.providerHome?.settle(true);
+    assert.equal(h.registry.references.get(h.home), 1);
+    assert.equal(h.registry.releases.length, 0, "nothing is released per TUI during shutdown");
+  } finally {
+    h.internals.shuttingDown = false;
+    h.cleanup();
+  }
+});
+
+test("Agent TUI handles share the driver handle budget and fall back to a plain reference past it", async () => {
+  const h = fixture();
+  try {
+    for (let i = 0; i < 511; i++) h.internals.driverProviderHomes.set({}, {});
+    const counted = await h.manager.acquireAgentTuiProviderHome(h.meta);
+    assert.ok(counted, "the last handle below the budget");
+    const fallback = await h.manager.acquireAgentTuiProviderHome(h.meta);
+    assert.equal(fallback, null, "past the budget a TUI keeps a plain reference until shutdown");
+    assert.equal(h.registry.plainAcquires, 1);
+    assert.equal(h.registry.openHandles, 1, "no handle is taken past the budget");
+    await counted.settle(true);
+    assert.ok(await h.manager.acquireAgentTuiProviderHome(h.meta), "a settled TUI handle frees its budget slot");
+    h.internals.driverProviderHomes.clear();
   } finally { h.cleanup(); }
 });
 

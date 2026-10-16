@@ -194,6 +194,7 @@ import {
   type UsageWindowRejection,
 } from "./automatic-provider-account-switch.js";
 import { AsyncProviderHomeLeaseRegistry, type LeaseCancellation, type ProviderHomeReference } from "./provider-home-lease-async.js";
+import type { AgentTuiProviderHome } from "./shell-manager.js";
 import type { ProviderHomeLeaseRequest } from "./provider-home-lease.js";
 import { LEASE_WORKER_ERRORS } from "./provider-home-lease-worker-protocol.js";
 import { cleanupPiExternalSession } from "./external/sources.js";
@@ -859,8 +860,9 @@ function withHookElicitation(capabilities?: AgentCapabilities): AgentCapabilitie
 
 /** Refresh a held lock well within its stale window so a long turn never looks abandoned. */
 const LOCK_REFRESH_MS = 20_000;
-/** Session handles stay open as long as their session. Half of the worker's 1024-handle pool;
- * launches beyond it keep a plain reference until shutdown, as before #3238. */
+/** Session and Agent TUI handles stay open as long as their session or terminal. Half of the
+ * worker's 1024-handle pool; acquisitions beyond it keep a plain reference until shutdown, as
+ * before #3238. */
 const DRIVER_PROVIDER_HOME_HANDLE_BUDGET = 512;
 
 /** Static guidance for a quarantined conversation. It names no provider text, no prompt content
@@ -1517,6 +1519,8 @@ export class SessionManager {
   /** The provider-HOME reference each live driver instance took at launch (see
    * settleDriverProviderHome). An instance launched past the handle budget has no entry. */
   private readonly driverProviderHomes = new Map<Driver, ProviderHomeReference>();
+  /** Agent TUI reference handles not yet settled; they share the driver handle budget. */
+  private agentTuiProviderHomeHandles = 0;
   private readonly providerAuthOperations = new Set<string>();
   private readonly providerAuthPreparations = new Map<string, {
     sessionId: string; requestId: string; controller: AbortController;
@@ -4336,10 +4340,14 @@ export class SessionManager {
     await this.replayRetainedRefReclaims();
   }
 
-  /** A standalone Agent TUI bypasses structured-driver isolation but shares provider HOME. */
-  async acquireAgentTuiProviderHome(meta: SessionMeta): Promise<void> {
+  /** A standalone Agent TUI bypasses structured-driver isolation but shares provider HOME. The
+   * returned reference belongs to the caller, which settles it exactly once: with the TUI's tree
+   * proof once the TUI has ended, or with no TUI process when the launch never opened (#3238).
+   * Null when nothing was acquired as a handle: no lease registry, a launch that needs no lease, or
+   * one past the handle budget, which keeps a plain reference until shutdown instead. */
+  async acquireAgentTuiProviderHome(meta: SessionMeta): Promise<AgentTuiProviderHome | null> {
     const epoch = this.agentTuiLaunchEpoch(meta.sessionId);
-    const reference = await this.providerHomeLeases?.acquireReference({
+    const reference = await this.acquireDriverProviderHome({
       driver: meta.driver,
       command: meta.command,
       context: meta.context,
@@ -4351,8 +4359,28 @@ export class SessionManager {
       if (reference) await this.releaseProviderHomeReference(reference);
       throw new Error("Agent TUI launch changed while waiting for provider-home ownership");
     }
-    // A launched TUI keeps its reference until runner shutdown, as provider processes do.
-    if (reference) await this.retainProviderHomeReference(reference);
+    if (!reference) return null;
+    // Counted against the same handle budget as driver instances until it settles: a TUI can stay
+    // open for as long as a session does.
+    this.agentTuiProviderHomeHandles++;
+    let unprovable = false;
+    let settled = false;
+    return {
+      markUnprovable: () => { unprovable = true; },
+      settle: async (tuiProven) => {
+        if (settled) return;
+        settled = true;
+        this.agentTuiProviderHomeHandles--;
+        // During shutdown nothing is settled here: close() releases every reference after the
+        // global reaping proof.
+        if (this.shuttingDown) return;
+        // A preparation probe outside any boundary makes the whole launch unprovable; otherwise
+        // the TUI's own tree proof decides, and a launch that started no TUI process at all
+        // releases. Never pass an empty list for an unprovable launch: it would read as proven.
+        const proofs = unprovable ? [Promise.resolve(false)] : tuiProven === null ? [] : [Promise.resolve(tuiProven)];
+        await this.settleProviderProcessReference(reference, proofs);
+      },
+    };
   }
 
   /** Launch preparation's account-HOME reference: same post-grant cancellation as skill
@@ -4427,15 +4455,16 @@ export class SessionManager {
     }
   }
 
-  /** Acquire the provider-HOME reference for one driver instance. Session handles live as long as
-   * their session, so past a fixed budget a launch falls back to a reference kept until shutdown
-   * (null here), which leaves the worker's bounded handle pool for transactions and probes. */
+  /** Acquire the provider-HOME reference for one driver instance, Agent TUI, or provider fork.
+   * Driver and TUI handles live as long as their session or terminal, so past a fixed budget an
+   * acquisition falls back to a reference kept until shutdown (null here), which leaves the
+   * worker's bounded handle pool for transactions and probes. */
   private async acquireDriverProviderHome(
     request: ProviderHomeLeaseRequest,
     cancellation: LeaseCancellation,
   ): Promise<ProviderHomeReference | null> {
     if (!this.providerHomeLeases) return null;
-    if (this.driverProviderHomes.size >= DRIVER_PROVIDER_HOME_HANDLE_BUDGET) {
+    if (this.driverProviderHomes.size + this.agentTuiProviderHomeHandles >= DRIVER_PROVIDER_HOME_HANDLE_BUDGET) {
       await this.providerHomeLeases.acquire(request, cancellation);
       return null;
     }
@@ -14026,6 +14055,9 @@ export class SessionManager {
     // Settled with the temporary driver; kept if its construction failed after starting.
     let forkHome: ProviderHomeReference | null = null;
     let forkConstructionStarted = false;
+    // The Claude target fork's reference: settled on the fork probe's own tree proof once
+    // forkSession returns or throws; released unproven only if forkSession was never called.
+    let claudeForkHome: ProviderHomeReference | null = null;
     let client: Driver | undefined;
     let worktree: WorktreeHandle | null = null;
     let forkedThreadId: string | null = null;
@@ -14318,7 +14350,8 @@ export class SessionManager {
       } else if (source.driver === "claude-code") {
         forkIsolation = await this.resolveLaunchIsolation(forkMeta, worktree.path);
         await this.proveGuardInsideSandbox(forkMeta, forkIsolation, worktree.path);
-        await this.providerHomeLeases?.acquire({
+        // Past the handle budget this is a plain reference kept until shutdown (null here).
+        claudeForkHome = await this.acquireDriverProviderHome({
           driver: source.driver,
           command: source.command,
           context: source.context,
@@ -14328,10 +14361,24 @@ export class SessionManager {
         if (!forkIsCurrent()) throw new Error("source session changed during provider-home acquisition");
       }
       if (!client?.forkSession) throw new Error("this driver build does not support provider forks");
-      forkedThreadId = await client.forkSession(point.agentTurnId, worktree.path, {
-        isolation: forkIsolation,
-        descendantMarker: targetDescendantMarker,
-      });
+      // The fork probe is recorded in whichever client's ledger spawned it, the live driver's
+      // included, so its proof comes from the probe itself: proving the live client would seal it.
+      const forkProofs: Promise<boolean>[] = [];
+      const settlingForkHome = claudeForkHome;
+      claudeForkHome = null;
+      try {
+        forkedThreadId = await client.forkSession(point.agentTurnId, worktree.path, {
+          isolation: forkIsolation,
+          descendantMarker: targetDescendantMarker,
+          ...(settlingForkHome ? { onProcess: (proof: Promise<boolean>) => { forkProofs.push(proof); } } : {}),
+        });
+      } finally {
+        // A driver that never reported its fork process proves nothing: keep the reference.
+        if (settlingForkHome && !this.shuttingDown) {
+          await this.settleProviderProcessReference(settlingForkHome,
+            forkProofs.length > 0 ? forkProofs : [Promise.resolve(false)]);
+        }
+      }
       await this.verifyIsolationForkState(
         this.executionIsolation,
         source.context,
@@ -14537,6 +14584,12 @@ export class SessionManager {
         forkHome = null;
         if (forkConstructionStarted) await this.retainProviderHomeReference(unused);
         else await this.releaseProviderHomeReference(unused);
+      }
+      if (claudeForkHome) {
+        // Acquired but forkSession was never called: no fork process exists.
+        const unused = claudeForkHome;
+        claudeForkHome = null;
+        await this.releaseProviderHomeReference(unused);
       }
       clearInterval(forkLockRefresh);
       this.store.releaseLock(sourceSessionId, this.lockOwner);

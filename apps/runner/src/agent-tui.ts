@@ -4,7 +4,7 @@
 import { existsSync } from "node:fs";
 import type { AgentTuiGuardProvisioning } from "./agent-tui-guard.js";
 import type { SessionMeta } from "./session-store.js";
-import type { ShellProcessLaunch } from "./shell-manager.js";
+import type { AgentTuiProviderHome, ShellProcessLaunch } from "./shell-manager.js";
 import { windowsCommandLine } from "./windows-conpty.js";
 import { CODEX_EXEC_RETIRED_REASON, isOrchestratorLaunch, isRetiredCodexExec, runnerSupportsProtocol, usesOrchestratorPresetPermissions } from "@wollipog/protocol";
 import {
@@ -21,6 +21,14 @@ import { decideCodexPermissionProfile } from "./codex-permission-profile.js";
 // The retired Codex exec driver (#3259) has no Native TUI either: its persisted launch may be `codex exec`.
 const TUI_DRIVERS = new Set(["claude-code", "codex-app-server"]);
 
+/** What the launch preparation does with the provider-HOME reference it acquires. */
+interface AgentTuiProviderHomeTracking {
+  acquireProviderHome(meta: SessionMeta): Promise<void>;
+  /** A Codex probe (permission profile, hook inventory, MCP inventory) is about to run outside
+   * any process boundary the runner can prove gone; the reference must then be kept. */
+  markUnprovable(): void;
+}
+
 /** Durable metadata intentionally omits credentials. Rebuild runner-owned launch state for
  * each TUI and probe at its exact cwd, including manual attachment after a runner restart. */
 export async function prepareAgentTuiLaunch(
@@ -28,8 +36,12 @@ export async function prepareAgentTuiLaunch(
   dependencies: {
     controlPlaneProtocolVersion: number | null;
     provision(meta: SessionMeta): Promise<void> | void;
-    /** Plugin reconciliation mutates the native account home before any guard or provider probe runs. */
-    acquireProviderHome?(meta: SessionMeta): Promise<void> | void;
+    /** Plugin reconciliation mutates the native account home before any guard or provider probe
+     * runs. A returned reference is owned by the launch from then on (#3238): this preparation
+     * settles it when it fails or yields no launch, and otherwise hands it on as the launch's
+     * `providerHome`. */
+    acquireProviderHome?(meta: SessionMeta):
+      Promise<AgentTuiProviderHome | null | void> | AgentTuiProviderHome | null | void;
     /** Recheck cancellation, launch epoch and target identity after ownership awaits. */
     assertLaunchCurrent?(): Promise<void> | void;
     /**
@@ -63,8 +75,38 @@ export async function prepareAgentTuiLaunch(
 ): Promise<ShellProcessLaunch | null> {
   // Before any provider home, provisioning, or guard work for a session that can no longer run.
   if (isRetiredCodexExec(meta)) throw new Error(CODEX_EXEC_RETIRED_REASON);
+  const held: { home: AgentTuiProviderHome | null } = { home: null };
+  const tracking: AgentTuiProviderHomeTracking = {
+    acquireProviderHome: async (prepared) => {
+      held.home = (await dependencies.acquireProviderHome?.(prepared)) ?? null;
+    },
+    markUnprovable: () => held.home?.markUnprovable(),
+  };
+  let launch: ShellProcessLaunch | null;
+  try {
+    launch = await prepareAgentTuiLaunchHoldingProviderHome(meta, dependencies, tracking);
+  } catch (error) {
+    // No TUI process was started. The reference is released unless a probe ran outside a boundary.
+    await held.home?.settle(null);
+    throw error;
+  }
+  if (!held.home) return launch;
+  if (!launch) {
+    await held.home.settle(null);
+    return null;
+  }
+  return { ...launch, providerHome: held.home };
+}
+
+type AgentTuiLaunchDependencies = Parameters<typeof prepareAgentTuiLaunch>[1];
+
+async function prepareAgentTuiLaunchHoldingProviderHome(
+  meta: SessionMeta,
+  dependencies: AgentTuiLaunchDependencies,
+  tracking: AgentTuiProviderHomeTracking,
+): Promise<ShellProcessLaunch | null> {
   if (!isOrchestratorLaunch(meta)) {
-    await dependencies.acquireProviderHome?.(meta);
+    await tracking.acquireProviderHome(meta);
     dependencies.assertSessionNotDeleted(meta.sessionId);
     await dependencies.assertLaunchCurrent?.();
     // An ordinary TUI is not provisioned with Agent Control, so the structured launch's persisted
@@ -76,9 +118,9 @@ export async function prepareAgentTuiLaunch(
     if (pluginProviderForDriver(meta.driver)) {
       meta = { ...meta, args: inheritProviderPlugins(meta) };
     }
-    const guarded = await withManagedWorktreeGuard(meta, dependencies);
+    const guarded = await withManagedWorktreeGuard(meta, dependencies, tracking);
     return withGuardState(
-      agentTuiLaunch(await withCodexPermissionProfile(guarded.meta, dependencies)),
+      agentTuiLaunch(await withCodexPermissionProfile(guarded.meta, dependencies, tracking)),
       guarded.guard,
     );
   }
@@ -108,7 +150,7 @@ export async function prepareAgentTuiLaunch(
   dependencies.assertSessionNotDeleted(meta.sessionId);
   const prepared = { ...meta, args: [...meta.args], env: { ...meta.env } };
   await dependencies.provision(prepared);
-  await dependencies.acquireProviderHome?.(prepared);
+  await tracking.acquireProviderHome(prepared);
   dependencies.assertSessionNotDeleted(meta.sessionId);
   await dependencies.assertLaunchCurrent?.();
   if (pluginProviderForDriver(prepared.driver)) {
@@ -121,11 +163,12 @@ export async function prepareAgentTuiLaunch(
     };
   }
   if (prepared.driver !== "claude-code") {
+    tracking.markUnprovable();
     prepared.args.push(...await (dependencies.probe ?? codexOrchestratorMcpArgs)(
       prepared, cwd,
     ));
   }
-  const guarded = await withManagedWorktreeGuard(prepared, dependencies, cwd);
+  const guarded = await withManagedWorktreeGuard(prepared, dependencies, tracking, cwd);
   const launch = withGuardState(
     agentTuiLaunch(guarded.meta, { platform, comspec: process.env.ComSpec }),
     guarded.guard,
@@ -162,8 +205,11 @@ async function withCodexPermissionProfile(
     hookStateDir?: string;
     permissionProfile?: typeof decideCodexPermissionProfile;
   },
+  tracking: Pick<AgentTuiProviderHomeTracking, "markUnprovable">,
 ): Promise<SessionMeta> {
   if (!CODEX_TUI_DRIVERS.has(meta.driver) || !meta.command) return meta;
+  // The profile proof runs the Codex CLI itself, outside any boundary the runner can prove gone.
+  tracking.markUnprovable();
   const decide = dependencies.permissionProfile ?? decideCodexPermissionProfile;
   const profile = await decide({
     command: meta.command,
@@ -203,12 +249,14 @@ const GUARDED_TUI_DRIVERS: ReadonlySet<string> = new Set(["claude-code", "codex"
  */
 async function withManagedWorktreeGuard(
   meta: SessionMeta,
-  dependencies: Pick<
-    Parameters<typeof prepareAgentTuiLaunch>[1], "provisionManagedWorktreeGuard"
-  >,
+  dependencies: Pick<AgentTuiLaunchDependencies, "provisionManagedWorktreeGuard">,
+  tracking: Pick<AgentTuiProviderHomeTracking, "markUnprovable">,
   cwd?: string,
 ): Promise<{ meta: SessionMeta; guard?: ShellProcessLaunch["managedWorktreeGuard"] }> {
   if (!GUARDED_TUI_DRIVERS.has(meta.driver) || !meta.command) return { meta };
+  // A Codex guard enumerates the launch's hook inventory by running the Codex CLI, outside any
+  // boundary the runner can prove gone.
+  if (CODEX_TUI_DRIVERS.has(meta.driver)) tracking.markUnprovable();
   // Provisioning rewrites the launch arguments; durable metadata must not move under it.
   const prepared = { ...meta, args: [...meta.args] };
   const guard = await dependencies.provisionManagedWorktreeGuard(prepared, cwd);
