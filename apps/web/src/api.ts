@@ -733,6 +733,14 @@ export function createApiClient(transport: ApiTransport) {
         : ((payload as ReportedSkillsState | null) ?? {}),
     ),
 
+  getSessionPromptHistory: (id: string, before: number | undefined, eventEpoch: number, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ eventEpoch: String(eventEpoch), limit: "100" });
+    if (before !== undefined) query.set("before", String(before));
+    return req<import("@wollipog/protocol").SessionPromptHistoryPage>(
+      `/api/sessions/${encodeURIComponent(id)}/prompt-history?${query}`, { signal },
+    );
+  },
+
   sideChat: (id: string) =>
     req<SideChatResponse>(`/api/sessions/${encodeURIComponent(id)}/side-chat`),
 

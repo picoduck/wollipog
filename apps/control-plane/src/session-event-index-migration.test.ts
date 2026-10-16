@@ -95,7 +95,8 @@ for (const includeWider of [false, true]) {
       const db = ControlPlaneDb.open(location);
       try {
         assert.deepEqual(indexDefinitions(db.raw()), expected, "only the legacy prefix is retired");
-        assert.equal(Object.keys(expected).length, 7);
+        assert.equal(Object.keys(expected).length, 8);
+        assert.ok(expected.idx_session_events_user_message, "prompt recall keeps its user-only index");
         assert.equal(db.countToolCalls("s0"), 4);
         assertCounts(db);
         assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM session_events").get()!.n, 9);

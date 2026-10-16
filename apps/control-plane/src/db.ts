@@ -1454,6 +1454,8 @@ CREATE TABLE IF NOT EXISTS session_events (
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events(session_id, seq);
+CREATE INDEX IF NOT EXISTS idx_session_events_user_message ON session_events(session_id, seq)
+  WHERE kind='user_message';
 CREATE INDEX IF NOT EXISTS idx_session_events_turn_start ON session_events(session_id, seq)
   WHERE kind='user_message' AND COALESCE(json_extract(payload, '$.deliveryIntent'), '')!='steer'
     AND json_type(payload, '$.commandInvocation') IS NULL;
@@ -24023,6 +24025,32 @@ export class ControlPlaneDb {
       throw error;
     }
     return appliedResult;
+  }
+
+  /** Only user text/identity crosses this boundary; images and agent/tool payloads stay in SQLite. */
+  listPromptHistoryPage(sessionId: string, before: number | undefined, limit: number): {
+    prompts: import("@wollipog/protocol").SessionPromptHistoryEntry[];
+    nextBefore?: number;
+    hasMore: boolean;
+  } {
+    if ((before !== undefined && (!Number.isSafeInteger(before) || before < 1)) ||
+        !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new RangeError("invalid prompt history page");
+    }
+    const rows = this.stmt(
+      `SELECT seq, json_extract(payload,'$.text') AS text,
+              json_extract(payload,'$.turnId') AS turnId,
+              json_extract(payload,'$.submissionId') AS submissionId
+         FROM session_events INDEXED BY idx_session_events_user_message
+        WHERE session_id=? AND kind='user_message' AND seq<?
+        ORDER BY seq DESC LIMIT ?`,
+    ).all(sessionId, before ?? Number.MAX_SAFE_INTEGER, limit + 1) as unknown as Array<{
+      seq: number; text: string; turnId: string | null; submissionId: string | null;
+    }>;
+    const prompts = rows.slice(0, limit).reverse().map(({ seq, text, turnId, submissionId }) => ({
+      seq, text, ...(turnId ? { turnId } : {}), ...(submissionId ? { submissionId } : {}),
+    }));
+    return { prompts, nextBefore: prompts[0]?.seq, hasMore: rows.length > limit };
   }
 
   listEvents(sessionId: string, afterSeq = 0): SessionEvent[] {

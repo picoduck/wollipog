@@ -11474,6 +11474,22 @@ export interface ArchiveProjectSessionsResponse {
   failedSessionIds?: string[];
 }
 
+/** Text-only composer recall, independent of the transcript window. Entries are chronological. */
+export interface SessionPromptHistoryEntry {
+  seq: number;
+  text: string;
+  turnId?: string;
+  submissionId?: string;
+}
+
+export interface SessionPromptHistoryPage {
+  prompts: SessionPromptHistoryEntry[];
+  eventEpoch: number;
+  nextBefore?: number;
+  hasMore: boolean;
+  cacheComplete: boolean;
+}
+
 export interface SessionEventsResponse {
   events: SessionEvent[];
   /** Opt-in current-turn opening: the visible prefix starts here, never at the tail. Zero means
