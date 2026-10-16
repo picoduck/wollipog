@@ -1,6 +1,6 @@
 import { projectMemoryAgentVersion } from "./project-memory.js";
 import { ControlledCampaignReviewer, discoverControlledReview } from "./campaign-review-jobs.js";
-import { SessionReviewJobs, defaultSessionReviewDependencies } from "./session-review-jobs.js";
+import { SessionReviewJobs, configuredSessionWritablePaths, defaultSessionReviewDependencies } from "./session-review-jobs.js";
 /**
  * Runner daemon: connects outbound to the control plane, advertises this host's
  * workspaces + agents, sends heartbeats, reconnects automatically, and manages
@@ -1438,8 +1438,13 @@ const campaignReviewer = new ControlledCampaignReviewer(resolve(config.dataDir,"
   (jobId,agentId)=>sessions.reserveControlledReviewAdmission(jobId,agentId),(jobId)=>sessions.releaseControlledReviewAdmission(jobId));
 // A session's own cross-model review, run outside its sandbox (#3306). Linux only: job liveness is
 // read from /proc, and the protected session namespace it works around exists only there.
+// Nothing it runs may live where a session can write: project checkouts, provider account homes,
+// provider homes an agent's or session's environment names, and every session's provider homes.
 const sessionReviewJobs = new SessionReviewJobs(resolve(config.dataDir, "session-review-jobs"), store, sendUp,
-  defaultSessionReviewDependencies(config.dataDir, log, () => config.workspaces.map((workspace) => workspace.path)));
+  defaultSessionReviewDependencies(config.dataDir, log, () => configuredSessionWritablePaths({
+    workspaces: config.workspaces, providerAccounts: config.providerAccounts, agents: config.agents,
+    sessions: store.listSessions(), hostEnv: process.env,
+  })));
 /** Discovery runs at every registration so an installed or removed controller is advertised. */
 function sessionReviewCapability(): SessionReviewCapability | undefined {
   if (process.platform !== "linux") return undefined;

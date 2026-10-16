@@ -236,15 +236,27 @@ plane and the runner, and a Linux runner that advertises `runtime.sessionReview`
 The runner discovers the installation at each registration and runs only files no session can
 change. The controller is read from its installed skill directory (`~/.devbox/skills/cross-model-review`,
 or `WOLLIPOG_SESSION_REVIEW_SKILL_DIR` in the runner's environment), never through a provider home's
-`skills` link. The controller, `python3`, `git`, and the `codex` and `claude` reviewer CLIs found on the
-runner's `PATH` must each be owned by the runner's user or root, have no path component writable by
-other users, and lie outside every root a session can write: provider credential homes such as
-`~/.codex` and `~/.claude`, the shared package caches, temporary directories, project checkouts and
-worktrees, and the runner's data directory. A reviewer installed under `~/.codex` or `~/.claude` is
-therefore refused; install it elsewhere, for example with npm into `~/.local` or a system prefix, and
-put that location on the runner's `PATH`. The runner advertises what it found and why anything is
-unavailable, and records a digest of the controller's files with each job. Reviewers use the runner's
-default Codex and Claude sign-ins.
+`skills` link. The controller, `python3`, `git`, `gh` (which the runner itself runs to read the pull
+request), and the `codex` and `claude` reviewer CLIs found on the runner's `PATH` must each be owned
+by the runner's user or root, have no path component writable by other users, and lie outside every
+root a session can write: provider credential homes (`~/.codex` and `~/.claude`, every configured
+provider account's directory, provider homes an agent's or a session's environment names, and each
+session's current and pending credential homes), the shared package caches, temporary directories,
+project checkouts and worktrees, and the runner's data directory. The first trusted candidate on
+`PATH` is used and an untrusted one earlier on it is skipped, never run; without a trusted
+`python3`, `git` and `gh` nothing is advertised. A reviewer installed under `~/.codex` or `~/.claude`
+is therefore refused; install it elsewhere, for example with npm into `~/.local` or a system prefix,
+and put that location on the runner's `PATH`. The runner advertises what it found and why anything
+is unavailable, and records a digest of the controller's files with each job. Reviewers use the
+runner's default Codex and Claude sign-ins.
+
+The controller runs under `python3 -I`, with only its own installed directory added for its sibling
+modules. A controller preflight failure launches nothing and consumes no attempt: the job completes
+with the controller's summary (`attempt_consumed: false`, its `failure_class` and
+`validation_errors`), and the round's attempts are unchanged. A job stays running, with its snapshot
+and its share of the concurrency limit, until both the controller and the reviewer it started have
+exited, so a reviewer that outlives a killed controller is still supervised, cancelled through the
+controller's process group, and stopped by the time limit.
 
 `wollipog session wait` (MCP `wait_session`) polls a session until its status is one of `--for`
 (default `input_required,completed,failed,stopped`) and returns `outcome: "reached"`, the status it

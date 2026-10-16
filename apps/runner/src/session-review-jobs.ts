@@ -7,11 +7,12 @@
  * session's own pull request at its exact pushed head, from a runner-private snapshot. The reviewer
  * keeps its own read-only sandbox; nothing is written to the session's worktree or git metadata.
  *
- * Trust: the runner runs only a controller and reviewer CLIs that no session can modify. Each is
- * resolved one symlink at a time, and refused when the path or any directory holding a link on the
- * way is owned by another user, writable by other users, or inside any root a session can write
- * (provider credential homes, shared caches, temporary directories, project checkouts and runner
- * state). A session could otherwise plant or repoint a binary the runner then runs unsandboxed.
+ * Trust: the runner runs only a controller, interpreter, git, gh and reviewer CLIs that no session
+ * can modify. Each is resolved one symlink at a time, and refused when the path or any directory
+ * holding a link on the way is owned by another user, writable by other users, or inside any root a
+ * session can write (provider credential homes, including configured account and per-session ones,
+ * shared caches, temporary directories, project checkouts, worktrees and runner state). A session
+ * could otherwise plant or repoint a binary the runner then runs unsandboxed.
  * The controller is looked up only in its installed location, never through a provider home's
  * skills directory, which sessions can write.
  *
@@ -23,8 +24,8 @@
 import { execFile, spawn as spawnProcess, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync,
-  statSync, symlinkSync, writeFileSync,
+  closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync,
+  rmSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
@@ -34,14 +35,21 @@ import {
   sanitizedSessionReviewReason,
   type SessionReviewCapability, type SessionReviewHarness, type SessionReviewJobCommand, type SessionReviewJobUpdate,
 } from "@wollipog/protocol";
+import {
+  resolveAgentEnvironmentValue, type RunnerConfigAgent, type RunnerConfigWorkspace, type RunnerProviderAccount,
+} from "./config.js";
 import { githubSlug } from "./git-ops.js";
-import type { SessionStore } from "./session-store.js";
+import type { SessionMeta, SessionStore } from "./session-store.js";
 
 const execFileAsync = promisify(execFile);
 
 /** Per-attempt controller timeout; the runner's watchdog adds a margin before it intervenes. */
 export const SESSION_REVIEW_TIMEOUT_SECONDS = 1800;
 const WATCHDOG_MARGIN_MS = 5 * 60_000;
+/** How long a signalled process group gets to exit on SIGTERM before it is killed. */
+const KILL_GRACE_MS = 30_000;
+/** How much of the controller's stdout is read back for its final summary line. */
+const CONTROLLER_STDOUT_TAIL_BYTES = 64 * 1024;
 const MAX_VALID_ROUNDS = 4;
 const MAX_CONSUMED_ATTEMPTS_PER_ROUND = 2;
 const DEFAULT_MAX_CONCURRENT = 2;
@@ -77,10 +85,21 @@ function within(parent: string, path: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
+/** The roots below one HOME that a session using it can write: its default provider homes, the
+ * runner's legacy state and the shared package caches. */
+export function homeWritableRoots(home: string): string[] {
+  return [
+    join(home, ".codex"),
+    join(home, ".claude"),
+    join(home, ".agent-manager"),
+    ...SESSION_WRITABLE_CACHE_PATHS.map((path) => join(home, path)),
+  ];
+}
+
 /**
  * Every root a session can write, so nothing the runner runs may live there. `extra` carries the
- * configured project checkouts (their git directories are writable) and any provider homes set
- * through the runner's environment.
+ * configured project checkouts (their git directories are writable), provider account and
+ * session provider homes, and any provider homes set through the runner's environment.
  */
 export function sessionWritableRoots(
   home: string,
@@ -89,10 +108,7 @@ export function sessionWritableRoots(
   temporary: readonly string[] = [tmpdir(), ...SESSION_WRITABLE_TEMPORARY_ROOTS],
 ): string[] {
   const roots = [
-    join(home, ".codex"),
-    join(home, ".claude"),
-    join(home, ".agent-manager"),
-    ...SESSION_WRITABLE_CACHE_PATHS.map((path) => join(home, path)),
+    ...homeWritableRoots(home),
     dataDir,
     ...temporary,
     ...extra,
@@ -157,16 +173,70 @@ export function trustedPath(path: string, roots: readonly string[], uid: number,
   return resolved;
 }
 
-function whichExecutable(name: string, pathEnv: string | undefined): string | null {
+/** Provider home variables a session's environment can point at a writable directory. */
+const PROVIDER_HOME_VARIABLES = ["CODEX_HOME", "CLAUDE_CONFIG_DIR"] as const;
+
+/** Where the runner's configuration and its sessions say provider state lives. */
+export interface SessionWritableSources {
+  workspaces?: ReadonlyArray<Pick<RunnerConfigWorkspace, "path" | "additionalDirectoryGrants">>;
+  providerAccounts?: ReadonlyArray<Pick<RunnerProviderAccount, "directory">>;
+  agents?: ReadonlyArray<Pick<RunnerConfigAgent, "id" | "env">>;
+  sessions?: Iterable<Pick<SessionMeta, "repoPath" | "worktreePath" | "worktrees" | "env" | "providerCredentialHome" |
+    "providerConversationHome" | "pendingProviderCredentialHome" | "adoptedProviderState">>;
+  hostEnv?: NodeJS.ProcessEnv;
+}
+
+/**
+ * The session-writable directories the runner's configuration and persisted sessions name:
+ * project checkouts and their directory grants, every provider account's credential directory,
+ * provider homes (and HOME-derived provider directories) set in an agent's or a session's
+ * environment, each session's worktrees, and each session's current, transcript-source and
+ * pending provider credential homes. Relative and unresolvable values are dropped.
+ */
+export function configuredSessionWritablePaths(sources: SessionWritableSources): string[] {
+  const paths: Array<string | null | undefined> = [];
+  const fromEnvironment = (read: (name: string) => string | undefined) => {
+    for (const name of PROVIDER_HOME_VARIABLES) paths.push(read(name));
+    const home = read("HOME");
+    if (home && isAbsolute(home)) paths.push(...homeWritableRoots(home));
+  };
+  const hostEnv = sources.hostEnv ?? {};
+  fromEnvironment((name) => hostEnv[name]);
+  for (const workspace of sources.workspaces ?? []) paths.push(workspace.path, ...(workspace.additionalDirectoryGrants ?? []));
+  for (const account of sources.providerAccounts ?? []) paths.push(account.directory);
+  for (const agent of sources.agents ?? []) {
+    fromEnvironment((name) => {
+      try { return resolveAgentEnvironmentValue(agent, name, hostEnv); } catch { return undefined; }
+    });
+  }
+  for (const meta of sources.sessions ?? []) {
+    paths.push(meta.providerCredentialHome, meta.providerConversationHome, meta.pendingProviderCredentialHome,
+      meta.repoPath, meta.worktreePath, ...(meta.worktrees ?? []).map((worktree) => worktree.path),
+      meta.adoptedProviderState?.sessionDir);
+    const env = meta.env ?? {};
+    fromEnvironment((name) => env[name]);
+  }
+  return [...new Set(paths.filter((path): path is string => typeof path === "string" && isAbsolute(path)))];
+}
+
+/**
+ * The first `name` on `pathEnv` that passes `trustedPath`. A candidate a session could have
+ * planted earlier on PATH is skipped, never run; when no candidate is trusted the first refusal
+ * is reported.
+ */
+function trustedExecutable(name: string, pathEnv: string | undefined, roots: readonly string[], uid: number, rootUid?: number): string {
+  let refusal: string | undefined;
   for (const dir of (pathEnv ?? "").split(":")) {
     if (!dir || !isAbsolute(dir)) continue;
     const candidate = join(dir, name);
     try {
       const info = statSync(candidate);
-      if (info.isFile() && (info.mode & 0o111)) return candidate;
-    } catch { /* not here */ }
+      if (!info.isFile() || !(info.mode & 0o111)) continue;
+    } catch { continue; }
+    try { return trustedPath(candidate, roots, uid, rootUid); }
+    catch (error) { refusal ??= (error as Error).message; }
   }
-  return null;
+  throw new Error(refusal ?? `${name} is not installed`);
 }
 
 export interface SessionReviewInstallation {
@@ -174,6 +244,8 @@ export interface SessionReviewInstallation {
   controllerDigest: string;
   python: string;
   git: string;
+  /** The verified GitHub CLI the runner reads pull request facts with. */
+  gh: string;
   reviewers: Partial<Record<SessionReviewHarness, string>>;
   capability: SessionReviewCapability;
 }
@@ -185,7 +257,8 @@ export interface InstallationEnvironment {
   /** The uid root-owned files show; 0 except inside a user namespace (tests). */
   rootUid?: number;
   pathEnv: string | undefined;
-  /** Further session-writable roots: configured project checkouts and env-set provider homes. */
+  /** Further session-writable roots: project checkouts, provider account and session provider
+   * homes, and env-set provider homes (see `configuredSessionWritablePaths`). */
   extraRoots?: readonly string[];
   /** Session-writable temporary directories; defaults to the system's. */
   temporaryRoots?: readonly string[];
@@ -204,6 +277,7 @@ export function discoverSessionReviewInstallation(env: InstallationEnvironment):
   let controllerDigest: string;
   let python: string;
   let git: string;
+  let gh: string;
   try {
     const skillDir = trustedPath(skill, roots, env.uid, env.rootUid);
     controller = trustedPath(join(skillDir, "scripts", "review.py"), roots, env.uid, env.rootUid);
@@ -215,26 +289,23 @@ export function discoverSessionReviewInstallation(env: InstallationEnvironment):
     const contract = JSON.parse(readFileSync(join(skillDir, "workflow-contract.json"), "utf8")) as { contract_version?: unknown };
     if (contract.contract_version !== 1) throw new Error("the installed review controller has an unsupported contract");
     controllerDigest = sha256(files.map((file) => `${relative(skillDir, trustedPath(file, roots, env.uid, env.rootUid))}\0${sha256(readFileSync(file))}\n`).join(""));
-    const pythonPath = whichExecutable("python3", env.pathEnv);
-    const gitPath = whichExecutable("git", env.pathEnv);
-    if (!pythonPath || !gitPath) throw new Error("python3 and git are required");
-    python = trustedPath(pythonPath, roots, env.uid, env.rootUid);
-    git = trustedPath(gitPath, roots, env.uid, env.rootUid);
+    // All three are required: the runner runs gh and git itself, outside every sandbox.
+    python = trustedExecutable("python3", env.pathEnv, roots, env.uid, env.rootUid);
+    git = trustedExecutable("git", env.pathEnv, roots, env.uid, env.rootUid);
+    gh = trustedExecutable("gh", env.pathEnv, roots, env.uid, env.rootUid);
   } catch (error) {
     return {
-      controller: "", controllerDigest: "", python: "", git: "", reviewers: {},
+      controller: "", controllerDigest: "", python: "", git: "", gh: "", reviewers: {},
       capability: { reviewers: [], unavailable: { controller: (error as Error).message } },
     };
   }
   const reviewers: SessionReviewInstallation["reviewers"] = {};
   for (const [harness, command] of [["codex", "codex"], ["claude-code", "claude"]] as const) {
-    const found = whichExecutable(command, env.pathEnv);
-    if (!found) { unavailable[harness] = `${command} is not installed`; continue; }
-    try { reviewers[harness] = trustedPath(found, roots, env.uid, env.rootUid); }
+    try { reviewers[harness] = trustedExecutable(command, env.pathEnv, roots, env.uid, env.rootUid); }
     catch (error) { unavailable[harness] = (error as Error).message; }
   }
   return {
-    controller, controllerDigest, python, git, reviewers,
+    controller, controllerDigest, python, git, gh, reviewers,
     capability: {
       controllerDigest,
       reviewers: (Object.keys(reviewers) as SessionReviewHarness[]).sort(),
@@ -284,19 +355,43 @@ interface JobState {
   epoch?: number;
   reviewer?: SessionReviewHarness;
   args?: string[];
+  /** Runner-owned file holding the controller's stdout, where a preflight failure reports. */
+  stdoutPath?: string;
+  /** The controller's process: also its process group, since it is spawned detached. */
   pid?: number;
   startIdentity?: string;
+  /** The reviewer the controller started (from its running summary), proven to be in the
+   * controller's process group; it can outlive the controller. */
+  reviewerPid?: number;
+  reviewerIdentity?: string;
   startedAt?: number;
+  /** When the process group was first signalled; SIGKILL follows after a grace period. */
+  signalledAt?: number;
+  timedOut?: boolean;
   recoveryAttempted?: boolean;
   cancelled?: boolean;
   update?: SessionReviewJobUpdate;
 }
 
-function processIdentity(pid: number): string | null {
+/** The fields of /proc/<pid>/stat after the command name (field 3 onwards), or null. */
+function processStat(pid: number): string[] | null {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] ?? null;
+    return stat.slice(stat.lastIndexOf(")") + 2).split(" ");
   } catch { return null; }
+}
+
+/** A live process's start time, which with its pid identifies it across pid reuse. A zombie has
+ * already exited and is not alive. */
+function processIdentity(pid: number): string | null {
+  const fields = processStat(pid);
+  if (!fields || fields[0] === "Z" || fields[0] === "X") return null;
+  return fields[19] ?? null;
+}
+
+function processGroup(pid: number): number | null {
+  const group = Number(processStat(pid)?.[2]);
+  return Number.isSafeInteger(group) ? group : null;
 }
 
 function readBounded(path: string, limit: number, tail = false): { text: string; truncated: boolean } | undefined {
@@ -317,12 +412,32 @@ export interface PullRequestFacts {
   baseSha: string;
 }
 
+/**
+ * Runs the controller under `python3 -I`, which keeps the environment, user site-packages and the
+ * working directory out of `sys.path`, but also drops the script's own directory, so the
+ * controller's sibling modules would not import. The bootstrap puts back exactly the verified
+ * scripts directory, then runs the controller as `__main__` with its own argv.
+ */
+const CONTROLLER_BOOTSTRAP = [
+  "import os, runpy, sys",
+  "controller = sys.argv[1]",
+  "sys.argv = sys.argv[1:]",
+  "sys.path.insert(0, os.path.dirname(controller))",
+  "runpy.run_path(controller, run_name='__main__')",
+].join("\n");
+
+/** Interpreter arguments for `controllerArgs` (the controller's path, then its own arguments). */
+export function sessionReviewLaunchArgs(controllerArgs: readonly string[]): string[] {
+  return ["-I", "-B", "-c", CONTROLLER_BOOTSTRAP, ...controllerArgs];
+}
+
 export interface SessionReviewDependencies {
-  /** Run a short command and return stdout (git, gh). */
+  /** Run a short command and return stdout (git, the controller's recovery). */
   exec(command: string, args: string[], options?: { cwd?: string; timeoutMs?: number }): Promise<string>;
-  /** Open pull request facts from the forge. */
-  pullRequest(repository: string, number: number): Promise<PullRequestFacts>;
-  spawnController(python: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv }): ChildProcess;
+  /** Open pull request facts from the forge, read with the verified GitHub CLI `gh`. */
+  pullRequest(gh: string, repository: string, number: number): Promise<PullRequestFacts>;
+  /** Start the controller; `args` begins with the controller's path. `stdout` is a file descriptor. */
+  spawnController(python: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; stdout: number }): ChildProcess;
   installation(): SessionReviewInstallation | null;
   now(): number;
   log(message: string): void;
@@ -331,8 +446,9 @@ export interface SessionReviewDependencies {
 export function defaultSessionReviewDependencies(
   dataDir: string,
   log: (message: string) => void,
-  /** Configured project checkouts, read at each discovery so configuration changes apply. */
-  projectPaths: () => readonly string[] = () => [],
+  /** Directories sessions can write (see `configuredSessionWritablePaths`), read at each
+   * discovery so configuration and session changes apply. */
+  sessionWritablePaths: () => readonly string[] = () => [],
 ): SessionReviewDependencies {
   return {
     exec: async (command, args, options = {}) => (await execFileAsync(command, args, {
@@ -340,8 +456,9 @@ export function defaultSessionReviewDependencies(
       ...(options.cwd ? { cwd: options.cwd } : {}),
       env: { ...process.env, GH_PROMPT_DISABLED: "1", GH_PAGER: "cat", GIT_OPTIONAL_LOCKS: "0" },
     })).stdout,
-    pullRequest: async (repository, number) => {
-      const raw = (await execFileAsync("gh", ["api", `repos/${repository}/pulls/${number}`], {
+    pullRequest: async (gh, repository, number) => {
+      if (!isAbsolute(gh)) throw new Error("the GitHub CLI path is not verified");
+      const raw = (await execFileAsync(gh, ["api", `repos/${repository}/pulls/${number}`], {
         encoding: "utf8", timeout: 30_000, maxBuffer: 2_000_000,
         env: { ...process.env, GH_PROMPT_DISABLED: "1", GH_PAGER: "cat" },
       })).stdout;
@@ -358,13 +475,13 @@ export function defaultSessionReviewDependencies(
         baseSha: String(pr.base?.sha ?? ""),
       };
     },
-    spawnController: (python, args, options) => spawnProcess(python, ["-I", ...args], {
-      cwd: options.cwd, env: options.env, stdio: "ignore", detached: true,
+    spawnController: (python, args, options) => spawnProcess(python, sessionReviewLaunchArgs(args), {
+      cwd: options.cwd, env: options.env, stdio: ["ignore", options.stdout, "ignore"], detached: true,
     }),
     installation: () => discoverSessionReviewInstallation({
       home: homedir(), dataDir, uid: process.getuid?.() ?? -1, pathEnv: process.env.PATH,
       extraRoots: [
-        ...projectPaths(),
+        ...sessionWritablePaths(),
         ...[process.env.CODEX_HOME, process.env.CLAUDE_CONFIG_DIR].filter((value): value is string => Boolean(value)),
       ],
       ...(process.env.WOLLIPOG_SESSION_REVIEW_SKILL_DIR ? { skillDirectory: process.env.WOLLIPOG_SESSION_REVIEW_SKILL_DIR } : {}),
@@ -528,7 +645,7 @@ export class SessionReviewJobs {
     if (githubSlug(origin)?.toLowerCase() !== repository.toLowerCase()) {
       refuse("the pull request is not this session's open, same-repository pull request");
     }
-    const pr = await this.deps.pullRequest(repository, request.pullRequest.number);
+    const pr = await this.deps.pullRequest(install!.gh, repository, request.pullRequest.number);
     if (pr.state !== "open" || pr.baseRepository.toLowerCase() !== repository.toLowerCase() ||
         pr.headRepository.toLowerCase() !== repository.toLowerCase() || pr.headRef !== worktree!.branch) {
       refuse("the pull request is not this session's open, same-repository pull request");
@@ -645,7 +762,16 @@ export class SessionReviewJobs {
     writeFileSync(`${prStatePath}.next`, JSON.stringify(prState), { mode: 0o600 });
     renameSync(`${prStatePath}.next`, prStatePath);
 
-    const child = this.deps.spawnController(install!.python, state.args, { cwd: state.prDir, env });
+    // The controller's stdout goes to a runner-owned file, not a pipe, so it survives a runner
+    // restart: a preflight failure reports only there, with no attempt directory.
+    state.stdoutPath = join(state.prDir, `stdout-${command.jobId}.jsonl`);
+    const stdout = openSync(state.stdoutPath, "w", 0o600);
+    let child: ChildProcess;
+    try {
+      child = this.deps.spawnController(install!.python, state.args, { cwd: state.prDir, env, stdout });
+    } finally {
+      closeSync(stdout);
+    }
     state.pid = child.pid;
     state.startIdentity = child.pid ? processIdentity(child.pid) ?? undefined : undefined;
     state.startedAt = this.deps.now();
@@ -697,8 +823,49 @@ export class SessionReviewJobs {
     }
   }
 
-  private alive(state: JobState): boolean {
+  private controllerAlive(state: JobState): boolean {
     return Boolean(state.pid && state.startIdentity && processIdentity(state.pid) === state.startIdentity);
+  }
+
+  /** The recorded reviewer is the same process and still in the controller's process group. */
+  private reviewerAlive(state: JobState): boolean {
+    return Boolean(state.pid && state.reviewerPid && state.reviewerIdentity &&
+      processIdentity(state.reviewerPid) === state.reviewerIdentity && processGroup(state.reviewerPid) === state.pid);
+  }
+
+  /** The controller or the reviewer it started is still running. */
+  private alive(state: JobState): boolean {
+    return this.controllerAlive(state) || this.reviewerAlive(state);
+  }
+
+  /**
+   * Record the reviewer named by the controller's running summary, once it is proven to be the
+   * controller's: in its process group and started no earlier than it. The controller starts the
+   * reviewer in its own group, so the reviewer outlives a controller that is killed.
+   */
+  private trackReviewer(state: JobState, summary: Record<string, unknown> | undefined): void {
+    if (state.reviewerPid !== undefined || !state.pid || !state.startIdentity) return;
+    const pid = summary?.status === "running" ? summary.pid : undefined;
+    if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 1 || pid === state.pid) return;
+    const identity = processIdentity(pid);
+    if (!identity || processGroup(pid) !== state.pid || Number(identity) < Number(state.startIdentity)) return;
+    state.reviewerPid = pid;
+    state.reviewerIdentity = identity;
+    this.save(state);
+  }
+
+  /** The controller's last JSON line on stdout: its summary when it wrote no attempt directory. */
+  private controllerOutput(state: JobState): { value: Record<string, unknown>; text: string } | undefined {
+    if (!state.stdoutPath) return undefined;
+    const tail = readBounded(state.stdoutPath, CONTROLLER_STDOUT_TAIL_BYTES, true);
+    const lines = tail?.text.split("\n").map((line) => line.trim()).filter(Boolean) ?? [];
+    for (const line of lines.reverse()) {
+      try {
+        const value = JSON.parse(line) as unknown;
+        if (value && typeof value === "object" && !Array.isArray(value)) return { value: value as Record<string, unknown>, text: line };
+      } catch { /* not a summary line */ }
+    }
+    return undefined;
   }
 
   private poll(state: JobState): void {
@@ -706,11 +873,35 @@ export class SessionReviewJobs {
     const key = state.command.jobId;
     const previous = this.polling.get(key);
     if (previous) clearTimeout(previous);
+    this.polling.delete(key);
+    const controllerAlive = this.controllerAlive(state);
     let summary: Record<string, unknown> | undefined;
     try { summary = JSON.parse(readFileSync(join(state.attemptDir, "summary.json"), "utf8")) as Record<string, unknown>; } catch { /* not yet */ }
+    this.trackReviewer(state, summary);
+    const alive = controllerAlive || this.reviewerAlive(state);
+    // A preflight failure creates no attempt directory; the controller reports it on stdout only.
+    let stdoutSummary: string | undefined;
+    if (!summary && !alive) {
+      const output = this.controllerOutput(state);
+      if (output) { summary = output.value; stdoutSummary = output.text; }
+    }
     const complete = summary?.status === "complete" || summary?.attempt_valid !== undefined;
-    const alive = this.alive(state);
-    if (!complete && !alive && !state.recoveryAttempted && state.args) {
+    if (alive) {
+      // Nothing is released while the controller or its reviewer still runs.
+      const now = this.deps.now();
+      if (!state.timedOut && state.startedAt !== undefined &&
+          now - state.startedAt > SESSION_REVIEW_TIMEOUT_SECONDS * 1000 + WATCHDOG_MARGIN_MS) {
+        state.timedOut = true;
+        this.signalGroup(state, "SIGTERM");
+      } else if (state.signalledAt !== undefined && now - state.signalledAt > KILL_GRACE_MS) {
+        this.signalGroup(state, "SIGKILL");
+      }
+      const timer = setTimeout(() => this.poll(state), 2_000);
+      timer.unref?.();
+      this.polling.set(key, timer);
+      return;
+    }
+    if (!complete && !state.timedOut && !state.recoveryAttempted && state.args) {
       // The controller died before writing its result: let it reconcile the attempt once.
       state.recoveryAttempted = true;
       this.save(state);
@@ -718,28 +909,25 @@ export class SessionReviewJobs {
       const round = state.args[state.args.indexOf("--round") + 1]!;
       const ledger = state.args[state.args.indexOf("--ledger") + 1]!;
       void (install?.controller
-        ? this.deps.exec(install.python, ["-I", install.controller, "recover", "--attempt-dir", state.attemptDir, "--ledger", ledger, "--round", round], { timeoutMs: 120_000 })
+        ? this.deps.exec(install.python, sessionReviewLaunchArgs([install.controller, "recover", "--attempt-dir", state.attemptDir, "--ledger", ledger, "--round", round]), { timeoutMs: 120_000 })
         : Promise.reject(new Error("no installation")))
         .catch(() => {})
-        .finally(() => this.poll(state));
+        .finally(() => {
+          // A reviewer that turned out to be running refuses recovery; try again once it is gone.
+          if (this.alive(state)) {
+            state.recoveryAttempted = false;
+            this.save(state);
+          }
+          this.poll(state);
+        });
       return;
     }
-    if (!complete && alive && state.startedAt !== undefined &&
-        this.deps.now() - state.startedAt > SESSION_REVIEW_TIMEOUT_SECONDS * 1000 + WATCHDOG_MARGIN_MS) {
-      this.killGroup(state);
-      this.finish(state, { state: "failed", reason: "the review exceeded its time limit", ...this.artifacts(state) });
-      return;
-    }
-    if (complete || !alive) {
-      this.recordAttempt(state, summary);
-      this.finish(state, complete
-        ? { state: "completed", ...this.artifacts(state) }
-        : { state: "failed", reason: state.cancelled ? "the review was cancelled" : "the review process ended without a result", ...this.artifacts(state) });
-      return;
-    }
-    const timer = setTimeout(() => this.poll(state), 2_000);
-    timer.unref?.();
-    this.polling.set(key, timer);
+    this.recordAttempt(state, summary);
+    const reason = state.timedOut ? "the review exceeded its time limit"
+      : state.cancelled ? "the review was cancelled" : "the review process ended without a result";
+    this.finish(state, complete
+      ? { state: "completed", ...this.artifacts(state, stdoutSummary) }
+      : { state: "failed", reason, ...this.artifacts(state) });
   }
 
   private recordAttempt(state: JobState, summary: Record<string, unknown> | undefined): void {
@@ -757,9 +945,11 @@ export class SessionReviewJobs {
     }
   }
 
-  private artifacts(state: JobState): Partial<SessionReviewJobUpdate> {
+  private artifacts(state: JobState, stdoutSummary?: string): Partial<SessionReviewJobUpdate> {
     if (!state.attemptDir) return {};
-    const summary = readBounded(join(state.attemptDir, "summary.json"), SESSION_REVIEW_SUMMARY_LIMIT_BYTES);
+    const summary = stdoutSummary !== undefined
+      ? { text: stdoutSummary, truncated: Buffer.byteLength(stdoutSummary) > SESSION_REVIEW_SUMMARY_LIMIT_BYTES }
+      : readBounded(join(state.attemptDir, "summary.json"), SESSION_REVIEW_SUMMARY_LIMIT_BYTES);
     const report = readBounded(join(state.attemptDir, "report.json"), SESSION_REVIEW_ARTIFACT_LIMIT_BYTES);
     const ledger = readBounded(join(state.prDir, "ledger.md"), SESSION_REVIEW_ARTIFACT_LIMIT_BYTES, true);
     return {
@@ -769,19 +959,27 @@ export class SessionReviewJobs {
     };
   }
 
-  private killGroup(state: JobState): void {
+  /**
+   * Signal the job's process group, and only while a member is proven alive by identity: the
+   * controller (the group leader), or the recorded reviewer still in that group. A group cannot be
+   * reused while a live member is in it, and nothing is signalled once neither is alive.
+   */
+  private signalGroup(state: JobState, signal: NodeJS.Signals): void {
     if (!state.pid || !this.alive(state)) return;
-    try { process.kill(-state.pid, "SIGTERM"); } catch { /* already gone */ }
+    try { process.kill(-state.pid, signal); } catch { /* already gone */ }
+    state.signalledAt ??= this.deps.now();
+    this.save(state);
   }
 
-  /** Cancel a running job; only its own recorded process group is signalled. */
+  /** Cancel a running job; only its own recorded process group is signalled. The job ends once
+   * the controller and its reviewer are both gone. */
   cancel(jobId: string, nonce: string): void {
     const state = this.states.get(jobId);
     if (!state || state.command.nonce !== nonce || state.phase === "finished") return;
     state.cancelled = true;
     this.save(state);
     if (state.phase === "prepared") return; // preparation refuses before it would spawn
-    this.killGroup(state);
+    this.signalGroup(state, "SIGTERM");
     this.poll(state);
   }
 
