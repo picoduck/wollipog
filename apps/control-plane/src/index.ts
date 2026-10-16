@@ -228,6 +228,7 @@ import {
   SOMEDAY_REMINDER_CLIENT_UPDATE_REQUIRED,
 } from "./hub.js";
 import { HistoryPreviewReader } from "./history-preview.js";
+import { registerPromptHistoryRoute } from "./prompt-history-route.js";
 import {
   buildRunnerWsUrl,
   isAllowedOrigin,
@@ -4370,6 +4371,12 @@ registerSideChatRoutes(app, {
   permissions: db,
   requestPrincipal: (req) => requestPrincipals.get(req) ?? requestPrincipal(req),
   withQueue: (session) => hub.withQueue(session, true),
+});
+
+registerPromptHistoryRoute(app, {
+  db,
+  hydrateHistory: (id) => svc.hydrateHistory(id),
+  requestPrincipal: (req) => requestPrincipals.get(req) ?? requestPrincipal(req),
 });
 
 app.get("/api/sessions/:id/retained-attachment-events", async (req, reply) => {

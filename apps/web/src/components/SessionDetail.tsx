@@ -102,6 +102,7 @@ import {
   type TimelineItem,
 } from "../timeline.js";
 import { useTimeline } from "./useTimeline.js";
+import { ComposerHistory, type ComposerHistoryPrompt } from "../composer-history.js";
 import { onlyContinuesTrailingText, useLiveTimelineTail } from "./live-timeline-tail.js";
 import type { SessionActivity } from "../activity.js";
 import {
@@ -1584,8 +1585,16 @@ function SessionDetailLoaded({
   // items, or null when nothing is being dragged over it.
   const [dropImageCount, setDropImageCount] = useState<number | null>(null);
   const dragActive = dropImageCount !== null;
-  // Up-arrow history recall (-1 = editing/not browsing). Prior prompts come from the timeline.
-  const [histIdx, setHistIdx] = useState(-1);
+  // The marker controls keyboard engagement; actual recall uses stable identities and its own pages.
+  const promptHistory = useMemo(() => new ComposerHistory(), [sessionId, recoveryEventEpoch, instanceScope]);
+  useEffect(() => () => promptHistory.reset(), [promptHistory]);
+  const promptHistoryRef = useRef(promptHistory);
+  promptHistoryRef.current = promptHistory;
+  const [histIdx, setHistoryIndex] = useState(-1);
+  const setHistIdx = useCallback((value: number) => {
+    if (value === -1) promptHistoryRef.current.reset();
+    setHistoryIndex(value);
+  }, []);
   // Optimistic just-sent message: renders immediately so the send feels instant, then yields to the
   // real user_message event the runner echoes back (deduped by user-message count, see below).
   const [pending, setPending] = useState<{ text: string; images: PromptImageInput[] } | null>(null);
@@ -3519,9 +3528,10 @@ function SessionDetailLoaded({
     () =>
       items
         .filter((i): i is Extract<TimelineItem, { kind: "user_message" }> => i.kind === "user_message")
-        .map((i) => i.text)
-        .filter(Boolean),
-    [items],
+        .filter((i) => Boolean(i.text) && !historyPreview.active)
+        .map((i): ComposerHistoryPrompt => ({ key: `event:${i.id}`, seq: i.id, text: i.text,
+          queueId: i.turnId, submissionId: i.submissionId })),
+    [items, historyPreview.active],
   );
   const queuedPromptHistoryRef = useRef<{ sessionId: string; prompts: Map<string, string> }>({
     sessionId,
@@ -3551,7 +3561,10 @@ function SessionDetailLoaded({
     else if (item.turnId) queuedPromptHistoryRef.current.prompts.delete(item.turnId);
   }
   const userPrompts = useMemo(
-    () => [...timelineUserPrompts, ...queuedPromptHistoryRef.current.prompts.values()],
+    () => [...timelineUserPrompts.map(prompt => ({ ...prompt,
+      queueId: (prompt.submissionId && promotedQueueBySubmission.get(prompt.submissionId)) || prompt.queueId,
+    })), ...[...queuedPromptHistoryRef.current.prompts].map(([id, text]) =>
+      ({ key: `queue:${id}`, queueId: id, text }))],
     // Queue changes drive recomputation; the ref deliberately retains removed entries for recall.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [timelineUserPrompts, session.queued, session.steeringAttempts],
@@ -6711,25 +6724,42 @@ function SessionDetailLoaded({
     // ↑/↓ recall previous prompts (palette closed, no modifiers). ↑ engages only when the box is
     // empty or already browsing history, so a multi-line draft's caret navigation isn't hijacked.
     // Alt+↑/↓ is Session Reading's Previous/Next Session, never a recall.
-    if (!queuedEdit && !paletteOpen && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && userPrompts.length) {
+    if (!queuedEdit && !paletteOpen && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
       if (e.key === "ArrowUp" && (histIdx !== -1 || composerText.text === "")) {
         e.preventDefault();
-        const idx = histIdx === -1 ? userPrompts.length - 1 : Math.max(0, histIdx - 1);
-        setHistIdx(idx);
-        markDraftDirty();
-        setProgrammaticComposerText(userPrompts[idx]!);
+        setHistIdx(0);
+        const apply = (text: string | undefined) => {
+          if (text === undefined) return;
+          markDraftDirty();
+          setProgrammaticComposerText(text);
+        };
+        const recalled = promptHistory.previous(userPrompts, async (before, signal) => {
+          try {
+            const page = await api.getSessionPromptHistory(sessionId, before, recoveryEventEpoch, signal);
+            if (page.eventEpoch !== recoveryEventEpoch) throw new Error("Message history changed. Reopen the session to try again.");
+            return page;
+          } catch (cause) {
+            // Older servers still provide ordinary recall over their loaded transcript. A missing
+            // endpoint must not turn already available messages into a broken keyboard shortcut.
+            if (!(cause instanceof ApiError) || cause.status !== 404) throw cause;
+            return { prompts: timelineUserPrompts.map(prompt => ({ seq: prompt.seq!, text: prompt.text })),
+              eventEpoch: recoveryEventEpoch, hasMore: false, cacheComplete: true };
+          }
+        }, promotedQueueBySubmission);
+        if (recalled instanceof Promise) void recalled.then(apply).catch((cause: unknown) => {
+          if (cause instanceof DOMException && cause.name === "AbortError") return;
+          showToast("Could not load older messages. Press Up to try again.", { tone: "error" });
+        });
+        else apply(recalled);
         return;
       }
       if (e.key === "ArrowDown" && histIdx !== -1) {
         e.preventDefault();
-        const idx = histIdx + 1;
-        markDraftDirty();
-        if (idx >= userPrompts.length) {
-          setHistIdx(-1);
-          setProgrammaticComposerText("", 0);
-        } else {
-          setHistIdx(idx);
-          setProgrammaticComposerText(userPrompts[idx]!);
+        const text = promptHistory.next(userPrompts);
+        if (text !== undefined) {
+          markDraftDirty();
+          if (text === "") setHistIdx(-1);
+          setProgrammaticComposerText(text);
         }
         return;
       }
