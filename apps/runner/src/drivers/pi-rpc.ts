@@ -22,7 +22,7 @@ import {
   PI_SECURITY_REQUEST_PREFIX,
   PI_SECURITY_REQUEST_TITLE,
 } from "../pi-agent-control-extension.js";
-import { killTree, spawnAgent, terminateDescendantBoundaries, type AgentProcess } from "../spawn.js";
+import { killTree, ProviderProcessLedger, spawnAgent, terminateDescendantBoundaries, type AgentProcess } from "../spawn.js";
 import type {
   Driver,
   DriverCallbacks,
@@ -157,7 +157,8 @@ export class PiRpcDriver implements Driver {
   private readonly pendingQuestions = new Map<string, PendingPiQuestion>();
   private readonly pendingPermissions = new Map<string, PendingPiPermission>();
   private readonly forkedSessionFiles = new Map<string, string>();
-  private readonly descendantOwner = {};
+  /** Every process this instance starts; its owner is each spawn's descendantOwner. */
+  private readonly processes = new ProviderProcessLedger();
   private agentControlBridge: PendingAgentControlBridge | null = null;
   private startupStateTimer: NodeJS.Timeout | undefined;
   private startupStatePending = false;
@@ -217,7 +218,8 @@ export class PiRpcDriver implements Driver {
       ...(!trustBridgeReady || this.config.permissionMode === "orchestrator" ? ["--no-approve"] : []),
       ...(this.opts.resumeId ? ["--session", this.opts.resumeId] : []),
     ];
-    const child = this.spawn({
+    this.processes.assertOpen();
+    const child = this.processes.record(this.spawn({
       command: this.opts.command,
       args,
       cwd: this.cwd,
@@ -226,9 +228,9 @@ export class PiRpcDriver implements Driver {
       isolation: this.opts.isolation,
       containerAgentLaunch: true,
       cloudAgentLaunch: true,
-      descendantOwner: this.descendantOwner,
+      descendantOwner: this.processes.owner,
       descendantMarker: this.opts.descendantMarker,
-    });
+    }));
     this.child = child;
     const peer = new PiRpcPeer(
       child.stdin,
@@ -324,7 +326,8 @@ export class PiRpcDriver implements Driver {
     }
 
     const expectedForkSessionId = randomUUID();
-    const child = this.spawn({
+    this.processes.assertOpen();
+    const child = this.processes.record(this.spawn({
       command: this.opts.command,
       args: [
         ...this.opts.args,
@@ -339,9 +342,9 @@ export class PiRpcDriver implements Driver {
       isolation: options.isolation ?? this.opts.isolation,
       containerAgentLaunch: true,
       cloudAgentLaunch: true,
-      descendantOwner: this.descendantOwner,
+      descendantOwner: this.processes.owner,
       descendantMarker: options.descendantMarker ?? this.opts.descendantMarker,
-    });
+    }));
     const forkPeer = new PiRpcPeer(child.stdin, child.stdout, () => {}, () => {
       if (child.exitCode == null) this.kill(child);
     });
@@ -548,7 +551,11 @@ export class PiRpcDriver implements Driver {
     this.peer = null;
     if (this.child) this.kill(this.child);
     this.child = null;
-    terminateDescendantBoundaries(this.descendantOwner);
+    terminateDescendantBoundaries(this.processes.owner);
+  }
+
+  proveProcessTreeExit(options: { terminate: boolean }): Promise<boolean> {
+    return this.processes.prove(options);
   }
 
   private async applyConfig(config: SessionConfig): Promise<void> {

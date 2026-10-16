@@ -193,6 +193,7 @@ import {
   type UsageWindowRejection,
 } from "./automatic-provider-account-switch.js";
 import { AsyncProviderHomeLeaseRegistry, type LeaseCancellation, type ProviderHomeReference } from "./provider-home-lease-async.js";
+import type { ProviderHomeLeaseRequest } from "./provider-home-lease.js";
 import { LEASE_WORKER_ERRORS } from "./provider-home-lease-worker-protocol.js";
 import { cleanupPiExternalSession } from "./external/sources.js";
 import {
@@ -857,6 +858,9 @@ function withHookElicitation(capabilities?: AgentCapabilities): AgentCapabilitie
 
 /** Refresh a held lock well within its stale window so a long turn never looks abandoned. */
 const LOCK_REFRESH_MS = 20_000;
+/** Session handles stay open as long as their session. Half of the worker's 1024-handle pool;
+ * launches beyond it keep a plain reference until shutdown, as before #3238. */
+const DRIVER_PROVIDER_HOME_HANDLE_BUDGET = 512;
 
 /** Static guidance for a quarantined conversation. It names no provider text, no prompt content
  * and no thread identifier, so it is safe on every surface that shows a rejected submission. */
@@ -1508,6 +1512,9 @@ export class SessionManager {
   private discoverClaudeTasksInContext: typeof discoverIncompleteClaudeTasksInContext = discoverIncompleteClaudeTasksInContext;
   private readonly sessionCommandAuthority = new SessionCommandAuthorityRegistry();
   private readonly providerHomeLeases?: AsyncProviderHomeLeaseRegistry;
+  /** The provider-HOME reference each live driver instance took at launch (see
+   * settleDriverProviderHome). An instance launched past the handle budget has no entry. */
+  private readonly driverProviderHomes = new Map<Driver, ProviderHomeReference>();
   private readonly providerAuthOperations = new Set<string>();
   private readonly providerAuthPreparations = new Map<string, {
     sessionId: string; requestId: string; controller: AbortController;
@@ -4418,6 +4425,54 @@ export class SessionManager {
     }
   }
 
+  /** Acquire the provider-HOME reference for one driver instance. Session handles live as long as
+   * their session, so past a fixed budget a launch falls back to a reference kept until shutdown
+   * (null here), which leaves the worker's bounded handle pool for transactions and probes. */
+  private async acquireDriverProviderHome(
+    request: ProviderHomeLeaseRequest,
+    cancellation: LeaseCancellation,
+  ): Promise<ProviderHomeReference | null> {
+    if (!this.providerHomeLeases) return null;
+    if (this.driverProviderHomes.size >= DRIVER_PROVIDER_HOME_HANDLE_BUDGET) {
+      await this.providerHomeLeases.acquire(request, cancellation);
+      return null;
+    }
+    return this.providerHomeLeases.acquireReference(request, cancellation);
+  }
+
+  /** Dispose one driver instance outside runner shutdown and settle its provider-HOME reference. */
+  private disposeDriver(client: Driver, options?: { forceImmediate?: boolean }): void {
+    try {
+      client.dispose(options);
+    } catch (error) {
+      this.settleDriverProviderHome(client, "unproven");
+      throw error;
+    }
+    this.settleDriverProviderHome(client, "disposed");
+  }
+
+  /** Settle the provider-HOME reference a driver instance took at launch, exactly once (the map
+   * entry is removed first). It is released only when the instance proves its complete process
+   * tree gone: `disposed` uses the killing proof, `exited` the non-killing one, and a driver
+   * without a proof, or `unproven`, keeps the reference until shutdown. During shutdown nothing is
+   * settled here: close() releases every reference after the global reaping proof. */
+  private settleDriverProviderHome(client: Driver, ended: "disposed" | "exited" | "unproven"): void {
+    const reference = this.driverProviderHomes.get(client);
+    if (!reference) return;
+    this.driverProviderHomes.delete(client);
+    if (this.shuttingDown) return;
+    // Never pass an empty proof list for a driver that cannot prove: that would read as "nothing
+    // was started" and release.
+    const proof = ended === "unproven" || !client.proveProcessTreeExit
+      ? Promise.resolve(false)
+      : client.proveProcessTreeExit({ terminate: ended === "disposed" });
+    void (async () => {
+      const proven = await proof.catch(() => false);
+      if (this.shuttingDown) return;
+      await this.settleProviderProcessReference(reference, [Promise.resolve(proven)]);
+    })();
+  }
+
   /** Settle a reference that covered short-lived provider processes. It is released only when every
    * process the work started has a proven complete tree exit (no process at all also qualifies);
    * an unproven, failed, or unprobeable tree keeps the reference until runner shutdown. */
@@ -5794,7 +5849,7 @@ export class SessionManager {
     this.discardRecovery(spec.sessionId);
     // Restart: a start for a session we already run replaces the old process.
     if (existing) {
-      existing.client.dispose({ forceImmediate: true });
+      this.disposeDriver(existing.client, { forceImmediate: true });
       // Keep the durable worktree lease until the provider has been told to terminate. Releasing
       // it first would briefly let a sibling runner clean the provider's still-live cwd.
       this.deleteActiveSession(spec.sessionId, existing);
@@ -7918,8 +7973,12 @@ export class SessionManager {
     }
 
     let client: Driver;
+    // The launch's provider-HOME reference belongs to the driver instance it creates; until then
+    // it is settled here: released if no constructor ran, kept if one may have started a process.
+    let launchHome: ProviderHomeReference | null = null;
+    let driverConstructionStarted = false;
     try {
-      await this.providerHomeLeases?.acquire({
+      launchHome = await this.acquireDriverProviderHome({
         driver: meta.driver,
         command: meta.command,
         context: meta.context,
@@ -7942,6 +8001,7 @@ export class SessionManager {
         meta.orchestrator.issueNumbers = [...authoritativeScope.issueNumbers];
         meta.orchestrator.issueScope = authoritativeScope;
       }
+      driverConstructionStarted = true;
       client = this.createDriver(
         meta.driver,
         {
@@ -8183,6 +8243,10 @@ export class SessionManager {
       }),
       );
     } catch (error) {
+      if (launchHome) {
+        if (driverConstructionStarted) await this.retainProviderHomeReference(launchHome);
+        else await this.releaseProviderHomeReference(launchHome);
+      }
       if (worktreeLeaseOwner) this.store.releaseWorktreeLease(sessionId, worktreeLeaseOwner);
       if (!this.launchIsCurrent(sessionId, launchGeneration)) {
         await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "session launch was cancelled during provider-home acquisition", launchGeneration);
@@ -8193,6 +8257,7 @@ export class SessionManager {
       this.emitStatus(sessionId, "failed", errText(error));
       return false;
     }
+    if (launchHome) this.driverProviderHomes.set(client, launchHome);
 
     const retainedPromotions = new Map<string, SteeringOperation>();
     for (const operation of this.steeringRegistry.get(sessionId)?.values() ?? []) {
@@ -8272,7 +8337,7 @@ export class SessionManager {
     // A launch that ends before establishing the provider session never sent the prompts admitted
     // while it was starting. Settle them rather than strand their receipts in a retired FIFO.
     const retireUnlaunched = () => {
-      client.dispose();
+      this.disposeDriver(client);
       this.deleteActiveSession(sessionId, entry);
       this.rejectQueued(entry.queue.splice(0), "the provider launch ended before this message was sent");
     };
@@ -13955,6 +14020,9 @@ export class SessionManager {
     );
 
     let temporary: Driver | null = null;
+    // Settled with the temporary driver; kept if its construction failed after starting.
+    let forkHome: ProviderHomeReference | null = null;
+    let forkConstructionStarted = false;
     let client: Driver | undefined;
     let worktree: WorktreeHandle | null = null;
     let forkedThreadId: string | null = null;
@@ -14082,7 +14150,7 @@ export class SessionManager {
         const isolation = await this.resolveLaunchIsolation(source, source.worktreePath);
         // The temporary provider is a provider like any other: its guard is proven first too.
         await this.proveGuardInsideSandbox(source, isolation, source.worktreePath);
-        await this.providerHomeLeases?.acquire({
+        forkHome = await this.acquireDriverProviderHome({
           driver: source.driver,
           command: source.command,
           context: source.context,
@@ -14090,8 +14158,12 @@ export class SessionManager {
           isolation,
         }, { isCurrent: forkIsCurrent });
         if (!forkIsCurrent()) {
+          const unused = forkHome;
+          forkHome = null;
+          if (unused) await this.releaseProviderHomeReference(unused);
           throw new Error("source session changed during provider-home acquisition");
         }
+        forkConstructionStarted = true;
         temporary = this.createDriver(
           source.driver,
           {
@@ -14203,7 +14275,7 @@ export class SessionManager {
         providerStatePrecloned = this.executionIsolation.mode === "bwrap";
         if (providerStatePrecloned) forkStateOwner = targetSessionId;
         forkIsolation = await this.resolveLaunchIsolation(forkMeta, worktree.path);
-        await this.providerHomeLeases?.acquire({
+        forkHome = await this.acquireDriverProviderHome({
           driver: source.driver,
           command: source.command,
           context: source.context,
@@ -14211,8 +14283,12 @@ export class SessionManager {
           isolation: forkIsolation,
         }, { isCurrent: forkIsCurrent });
         if (!forkIsCurrent()) {
+          const unused = forkHome;
+          forkHome = null;
+          if (unused) await this.releaseProviderHomeReference(unused);
           throw new Error("source session changed during provider-home acquisition");
         }
+        forkConstructionStarted = true;
         temporary = this.createDriver(
           source.driver,
           {
@@ -14449,7 +14525,16 @@ export class SessionManager {
       await this.cleanupProviderState(targetSessionId, source.driver, source.context, providerStateJournaled);
       return { ok: false, error: errText(err) };
     } finally {
-      temporary?.dispose();
+      if (temporary) {
+        if (forkHome) this.driverProviderHomes.set(temporary, forkHome);
+        forkHome = null;
+        this.disposeDriver(temporary);
+      } else if (forkHome) {
+        const unused = forkHome;
+        forkHome = null;
+        if (forkConstructionStarted) await this.retainProviderHomeReference(unused);
+        else await this.releaseProviderHomeReference(unused);
+      }
       clearInterval(forkLockRefresh);
       this.store.releaseLock(sourceSessionId, this.lockOwner);
       this.forking.delete(sourceSessionId);
@@ -14834,7 +14919,7 @@ export class SessionManager {
     this.closing.set(sessionId, retirement);
     if (!entry.client.close) {
       try {
-        entry.client.dispose({ forceImmediate: true });
+        this.disposeDriver(entry.client, { forceImmediate: true });
         this.completeProviderRetirement(sessionId, retirement);
       } catch (error) {
         retirement.unconfirmed = true;
@@ -15149,7 +15234,7 @@ export class SessionManager {
 
   private async closeAndDispose(sessionId: string, client: Driver, forceImmediate = false): Promise<void> {
     if (!client.close) {
-      client.dispose({ forceImmediate });
+      this.disposeDriver(client, { forceImmediate });
       return;
     }
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -15164,7 +15249,7 @@ export class SessionManager {
       this.log(`session ${sessionId} provider close incomplete; disposing process`);
     } finally {
       if (timer) clearTimeout(timer);
-      client.dispose({ forceImmediate });
+      this.disposeDriver(client, { forceImmediate });
     }
   }
 
@@ -16202,6 +16287,8 @@ export class SessionManager {
       } catch (statusError) {
         this.log(`agent exit failure status could not be persisted for ${sessionId}: ${errText(statusError)}`);
       }
+    } finally {
+      if (this.active.get(sessionId)?.client !== expectedClient) this.settleDriverProviderHome(expectedClient, "exited");
     }
   }
 
@@ -16287,7 +16374,7 @@ export class SessionManager {
           this.recoveryQueues.delete(sessionId);
         }
         if (recoveryEntry && this.active.get(sessionId) === recoveryEntry) {
-          recoveryEntry.client.dispose({ forceImmediate: true });
+          this.disposeDriver(recoveryEntry.client, { forceImmediate: true });
           this.deleteActiveSession(sessionId, recoveryEntry);
           this.releaseAdmission(sessionId);
           this.releaseResumeLock(sessionId, launchGeneration);
