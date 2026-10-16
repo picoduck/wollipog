@@ -303,12 +303,12 @@ test("a scope removal during provider preparation reaches the driver launch poli
   const gate = new Promise<void>((resolve) => { release=resolve; });
   let launched: import("./drivers/driver.js").DriverOptions["orchestrator"];
   const manager = f.manager() as unknown as {
-    providerHomeLeases: { acquire(): Promise<void>; stopAcquisitions(): void };
+    providerHomeLeases: { acquireReference(): Promise<null>; stopAcquisitions(): void };
     createDriver: (kind: string, options: import("./drivers/driver.js").DriverOptions) => never;
     beginLaunchGeneration(id: string): number;
     launch(meta: SessionMeta, resume: undefined, generation: number): Promise<boolean>;
   };
-  manager.providerHomeLeases = { acquire: async () => { enter(); await gate; }, stopAcquisitions() {} };
+  manager.providerHomeLeases = { acquireReference: async () => { enter(); await gate; return null; }, stopAcquisitions() {} };
   manager.createDriver = (_kind, options) => { launched=options.orchestrator; throw new Error("capture-only driver"); };
   const launching = manager.launch(f.store().readMeta(sessionId)!,undefined,manager.beginLaunchGeneration(sessionId));
   try {

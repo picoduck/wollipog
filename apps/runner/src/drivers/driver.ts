@@ -366,4 +366,9 @@ export interface Driver {
   /** Dispose the process tree and reject in-flight work. Explicit user lifecycle actions request
    * an immediate kill; runner shutdown may allow a provider-specific graceful interval. */
   dispose(options?: { forceImmediate?: boolean }): void;
+  /** After dispose() (`terminate: true`) or after this instance reported its own exit
+   * (`terminate: false`): true only when every process the instance started, with all their
+   * descendants, is proven gone (see ProviderProcessLedger). Memoized and never rejects. A driver
+   * that cannot prove this omits the method, and its provider-HOME reference is kept. */
+  proveProcessTreeExit?(options: { terminate: boolean }): Promise<boolean>;
 }

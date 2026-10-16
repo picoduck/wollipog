@@ -30,6 +30,7 @@ import { campaignOperationEvidence } from "../campaign-operation-evidence.js";
 import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
 import {
   killTree,
+  ProviderProcessLedger,
   spawnAgent,
   terminateDescendantBoundaries,
   type AgentProcess,
@@ -584,7 +585,8 @@ export class CodexAppServerDriver implements Driver {
   private readonly spawn: typeof spawnAgent;
   private readonly kill: typeof killTree;
   private readonly readRolloutProof: typeof readCodexRolloutCompletedCommand;
-  private readonly descendantOwner = {};
+  /** Every process this instance starts; its owner is each spawn's descendantOwner. */
+  private readonly processes = new ProviderProcessLedger();
   private readonly deps: { permissionProfile: typeof decideCodexPermissionProfile };
   private readonly initializationRequestTimeoutMs: number;
   private readonly forkRequestTimeoutMs: number;
@@ -866,8 +868,9 @@ export class CodexAppServerDriver implements Driver {
     // shape exempts servers the agent definition's own launch arguments declare (ADR 0011); the
     // preset's audited boundary keeps nothing but Wollipog's entry.
     const presetPermissions = this.config.permissionMode === "orchestrator";
+    // MCP inventory probing starts provider processes outside any boundary: no proof while it runs.
     const isolationArgs = presetPermissions || this.opts.orchestrator?.integrationIsolation === true
-      ? await codexOrchestratorMcpArgs(this.opts, this.cwd, {}, !presetPermissions) : [];
+      ? await this.processes.untracked(() => codexOrchestratorMcpArgs(this.opts, this.cwd, {}, !presetPermissions)) : [];
     if (this.disposed) throw new Error("session disposed before provider launch");
     // #1336: bind the permission profile to the mode this app-server starts under. A profile is
     // selected by config, and `turn/start` carries no per-turn selection, so the base is fixed for
@@ -881,7 +884,8 @@ export class CodexAppServerDriver implements Driver {
     // `cancel()` advances `promptGeneration`; the per-prompt `cancelled` flag is NOT used, because
     // it can still be set from an earlier turn.
     const generationBeforeProof = this.promptGeneration;
-    const profile = !this.opts.hookStateDir ? null : await this.deps.permissionProfile({
+    // The probe runs outside any process boundary, so no proof can succeed while it runs.
+    const profile = !this.opts.hookStateDir ? null : await this.processes.untracked(() => this.deps.permissionProfile({
       command: this.opts.command,
       args: [...this.opts.args, ...isolationArgs],
       // Every turn sends its policy explicitly, so that is the legacy launch to reproduce.
@@ -890,14 +894,15 @@ export class CodexAppServerDriver implements Driver {
       nativeHostLaunch: this.opts.context.kind === "native" && !this.opts.isolation,
       hookStateDir: this.opts.hookStateDir,
       cwd: this.cwd,
-    });
+    }));
     if (profile && (this.disposed || this.promptGeneration !== generationBeforeProof)) {
       throw new Error("session disposed before provider launch");
     }
     this.permissionProfileBase = profile?.active ? profile.base : null;
     const launchArgs = profile?.active ? profile.args : [...this.opts.args, ...isolationArgs];
     this.managedWorktreeGuardActive = codexGuardActiveInArgs(launchArgs);
-    const child = this.spawn({
+    this.processes.assertOpen();
+    const child = this.processes.record(this.spawn({
       command: this.opts.command,
       args: codexAppServerArgs(launchArgs, enableDefaultModeQuestions),
       cwd: this.cwd,
@@ -909,9 +914,9 @@ export class CodexAppServerDriver implements Driver {
       isolation: this.opts.isolation,
       containerAgentLaunch: true,
       cloudAgentLaunch: true,
-      descendantOwner: this.descendantOwner,
+      descendantOwner: this.processes.owner,
       descendantMarker: this.opts.descendantMarker,
-    });
+    }));
     this.child = child;
     const peer = new JsonRpcPeer(child.stdin, child.stdout, (err) => this.emitProviderStderr(`transport: ${err.message}`));
     this.peer = peer;
@@ -1589,7 +1594,11 @@ export class CodexAppServerDriver implements Driver {
     this.peer?.dispose("disposed");
     if (this.child) this.kill(this.child);
     this.child = null;
-    terminateDescendantBoundaries(this.descendantOwner);
+    terminateDescendantBoundaries(this.processes.owner);
+  }
+
+  proveProcessTreeExit(options: { terminate: boolean }): Promise<boolean> {
+    return this.processes.prove(options);
   }
 
   private declinePendingRequests(resolutionReason?: "replaced" | "provider_resolved", preserveChildren = false): void {

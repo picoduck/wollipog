@@ -80,7 +80,28 @@ Each process reports a proof when it finishes. The proof is true only when the p
 
 This is the same proof runner shutdown already relies on before releasing every lease, so early release is exactly as strong as shutdown release. It shares one known limit. A helper that detaches with a scrubbed environment before its parent link is observed, or whose environment cannot be read, is invisible to the boundary. Closing that gap needs kernel containment, such as a Linux subreaper or cgroup.
 
-A surviving, unknown or unprobeable descendant keeps the reference until shutdown. So does a spawn without a POSIX boundary, where only the root's exit is observable: native Windows (whose kill-on-close Job is not verified), WSL, and remote spawns. Session providers, temporary fork providers, Agent TUIs and launch preparation still keep their references until shutdown.
+A surviving, unknown or unprobeable descendant keeps the reference until shutdown. So does a spawn without a POSIX boundary, where only the root's exit is observable: native Windows (whose kill-on-close Job is not verified), WSL, and remote spawns.
+
+Session providers and temporary fork providers work the same way per driver instance. Each launch takes its own handle, kept in a map keyed by the driver instance, and the instance settles it exactly once when it ends. Every path that ends an instance outside runner shutdown settles it: stop, idle parking, restart, delete, recovery, role conversion, account switch, worktree rebind, a failed initialization and fork cleanup.
+
+The proof comes from `ProviderProcessLedger` (spawn.ts), which records every process the instance starts:
+
+- A child spawned with the ledger's owner is covered by the owner's POSIX boundaries, which stay registered until proven gone.
+- Any other child is proven individually.
+- A child without a boundary, or any untracked work the instance has run, makes the proof false. The Codex MCP inventory and permission-profile probes run outside a boundary and kill only their own process group, so a descendant that left the group could outlive them. A driver that ran one keeps its reference until shutdown.
+- Proving seals the ledger, so the instance can start nothing afterwards.
+
+How an instance ended decides which proof it gets:
+
+- **Disposed:** the killing proof, which ends survivors as disposal already started to.
+- **Exited on its own:** the non-killing proof, so live background work is left for orphan recovery and the reference is kept.
+- **Disposal threw:** kept.
+
+A failed construction keeps the reference if a constructor ran, and releases it otherwise. During shutdown nothing is settled per instance; `close()` releases every reference after the global reaping proof.
+
+Session handles live as long as their sessions. A runner with 512 open session handles gives later launches a plain reference until shutdown, so the worker's 1024-handle pool stays free for transactions and probes.
+
+Codex exec, Pi and Codex app-server prove their trees. Claude Code and ACP do not yet, so they keep their references. Agent TUIs and launch preparation also still keep theirs until shutdown.
 
 A missing, late, malformed, duplicate or mismatched completion, failed cancellation unwind, worker
 error or unexpected exit poisons the lane. It rejects further work, retains canonical evidence and

@@ -23,6 +23,7 @@ import { encodeWindowsJobSpec, materializeWindowsJobLauncher } from "./windows-j
 import {
   DESCENDANT_MARKER_ENV,
   PosixProcessBoundary,
+  releaseEmptyPosixProcessBoundaries,
   terminatePosixProcessBoundaries,
   WORKTREE_DESCENDANT_MARKER_ENV,
 } from "./posix-process-tree.js";
@@ -886,6 +887,64 @@ export function terminateDescendantBoundariesAfterPendingKills(): void {
  * observable, which is not a tree proof, so the answer is false. */
 export function provenProcessTreeExit(child: AgentProcess): Promise<boolean> {
   return child.posixBoundary ? child.posixBoundary.terminate().catch(() => false) : Promise.resolve(false);
+}
+
+/** Every process one provider instance starts, so the instance can prove its complete process
+ * tree gone when it ends (same standard and known limit as provenProcessTreeExit).
+ *
+ * Children spawned with `owner` as their descendantOwner are covered by that owner's POSIX
+ * boundaries, which stay registered until proven gone. A child without a POSIX boundary (Windows,
+ * WSL, remote, or a spawn that never got a pid) can never be proven, so recording one makes every
+ * proof false. Proving seals the ledger: the instance must not start anything afterwards. */
+export class ProviderProcessLedger {
+  /** Pass as `descendantOwner` on every spawn the instance makes. */
+  readonly owner: object = {};
+  private sealed = false;
+  private unprovable = false;
+  private readonly separate = new Set<AgentProcess>();
+  private readonly proofs = new Map<boolean, Promise<boolean>>();
+
+  /** Throws once the instance has ended; call before every spawn. */
+  assertOpen(): void {
+    if (this.sealed) throw new Error("provider instance already ended; refusing to start another process");
+  }
+
+  /** Record a spawned process. A child whose boundary is not registered under `owner` (spawned
+   * without it, or by a spawn function that ignored it) is proven individually instead, so the
+   * owner proof can never pass vacuously for it. */
+  record(child: AgentProcess): AgentProcess {
+    if (!child.posixBoundary) this.unprovable = true;
+    else if (child.posixBoundary.owner !== this.owner) this.separate.add(child);
+    return child;
+  }
+
+  /** Run work that may start processes outside any boundary. Nothing can prove those processes
+   * gone, even after the work settles (a probe's group kill misses a descendant that left its
+   * group), so the instance stays unprovable for good and its references are retained. */
+  async untracked<T>(work: () => Promise<T>): Promise<T> {
+    this.unprovable = true;
+    return await work();
+  }
+
+  /** `terminate: true` after disposal (kills survivors, as disposal already started to); `false`
+   * after the instance exited on its own (never kills; live work makes the answer false).
+   * Memoized per mode and never rejects. */
+  prove(options: { terminate: boolean }): Promise<boolean> {
+    this.sealed = true;
+    const existing = this.proofs.get(options.terminate);
+    if (existing) return existing;
+    const proof = (async () => {
+      if (this.unprovable) return false;
+      const owned = options.terminate
+        ? terminatePosixProcessBoundaries(this.owner)
+        : releaseEmptyPosixProcessBoundaries(this.owner);
+      const results = await Promise.all([...owned, ...[...this.separate].map(provenProcessTreeExit)]
+        .map((work) => work.catch(() => false)));
+      return results.every(Boolean);
+    })().catch(() => false);
+    this.proofs.set(options.terminate, proof);
+    return proof;
+  }
 }
 
 /** Kill a process and all of its children, returning exact completion for callers that own one

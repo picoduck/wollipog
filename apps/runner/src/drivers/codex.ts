@@ -19,7 +19,7 @@ import { unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentContext, PlanEntry, PromptImage, SessionConfig } from "@wollipog/protocol";
-import { killTree, spawnAgent, terminateDescendantBoundaries, type AgentProcess } from "../spawn.js";
+import { killTree, ProviderProcessLedger, spawnAgent, terminateDescendantBoundaries, type AgentProcess } from "../spawn.js";
 import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
 import type { Driver, DriverCallbacks, DriverOptions, StopReason } from "./driver.js";
 import { isProviderAuthenticationFailure } from "./provider-auth-failure.js";
@@ -95,7 +95,8 @@ export class CodexDriver implements Driver {
   private responseHasText = false;
   private config: SessionConfig;
   private readonly deps: CodexDriverDeps;
-  private readonly descendantOwner = {};
+  /** Every process this instance starts; its owner is each spawn's descendantOwner. */
+  private readonly processes = new ProviderProcessLedger();
   /** track tool items we've announced so updates map to the same toolCallId */
   private readonly seenItems = new Set<string>();
   /** temp image files staged for the in-flight turn, removed when it ends. */
@@ -171,7 +172,8 @@ export class CodexDriver implements Driver {
     // but Wollipog's entry survives.
     const preset = this.config.permissionMode === "orchestrator";
     if (preset || this.opts.orchestrator?.integrationIsolation === true) {
-      try { isolationArgs = await this.deps.orchestratorMcpArgs(this.opts, this.cwd, {}, !preset); }
+      // MCP inventory probing starts provider processes outside any boundary: no proof while it runs.
+      try { isolationArgs = await this.processes.untracked(() => this.deps.orchestratorMcpArgs(this.opts, this.cwd, {}, !preset)); }
       catch (err) {
         this.cb.onEvent({ kind: "error", message: (err as Error).message });
         return "refusal";
@@ -186,7 +188,8 @@ export class CodexDriver implements Driver {
     // A fresh thread passes `-s <mode>` (explicit). A resumed non-Orchestrator thread has always
     // passed NO `-s` and let Codex resolve its own default (implicit), so that is what it is
     // compared against — never the session's structured mode.
-    const profile = !this.opts.hookStateDir ? null : await this.deps.permissionProfile({
+    // The probe runs outside any process boundary, so no proof can succeed while it runs.
+    const profile = !this.opts.hookStateDir ? null : await this.processes.untracked(() => this.deps.permissionProfile({
       command: this.opts.command,
       args: [...this.opts.args, ...isolationArgs],
       legacy: this.threadId && !preset
@@ -196,8 +199,9 @@ export class CodexDriver implements Driver {
       nativeHostLaunch: this.opts.context.kind === "native" && !this.opts.isolation,
       hookStateDir: this.opts.hookStateDir,
       cwd: this.cwd,
-    });
-    if (profile && (this.disposed || this.cancelled)) return "cancelled";
+    }));
+    // Whenever the probe ran (even one that found no profile), a cancel or dispose during it wins.
+    if (this.opts.hookStateDir && (this.disposed || this.cancelled)) return "cancelled";
     return new Promise<StopReason>((resolve) => {
       this.seenItems.clear(); // dedup is per-turn; each turn re-emits item.started ids
       const taskText = slashCommand ? `/${slashCommand}${text ? " " + text : ""}`.trim() : text;
@@ -238,7 +242,8 @@ export class CodexDriver implements Driver {
         // Subscription auth comes from ~/.codex/auth.json; a stray OPENAI_API_KEY in the
         // daemon's environment would silently switch billing to the API. An explicit
         // agent-config env entry still wins (a deliberately API-keyed agent keeps working).
-        child = this.deps.spawn({
+        this.processes.assertOpen();
+        child = this.processes.record(this.deps.spawn({
           command: this.opts.command,
           args,
           cwd: this.cwd,
@@ -248,9 +253,9 @@ export class CodexDriver implements Driver {
           isolation: this.opts.isolation,
           containerAgentLaunch: true,
           cloudAgentLaunch: true,
-          descendantOwner: this.descendantOwner,
+          descendantOwner: this.processes.owner,
           descendantMarker: this.opts.descendantMarker,
-        });
+        }));
       } catch (err) {
         this.cleanupImages();
         this.cb.onEvent({ kind: "error", message: (err as Error).message });
@@ -347,9 +352,13 @@ export class CodexDriver implements Driver {
     this.disposed = true;
     if (this.child) this.deps.kill(this.child);
     this.child = null;
-    terminateDescendantBoundaries(this.descendantOwner);
+    terminateDescendantBoundaries(this.processes.owner);
     // Synchronous cleanup so files are gone before a shutdown process.exit().
     this.cleanupImages();
+  }
+
+  proveProcessTreeExit(options: { terminate: boolean }): Promise<boolean> {
+    return this.processes.prove(options);
   }
 
   private handleEvent(msg: Json): StopReason | null {
