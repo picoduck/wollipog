@@ -3,7 +3,8 @@ import { State, useSnapshotState } from "./State.js";
 import { TabList } from "./Tabs.js";
 import {
   agentContextKey,
-  isRestartOnlyCodexExec,
+  CODEX_EXEC_RETIRED_CONFIG_REASON,
+  isRetiredCodexExec,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   type AgentContext,
@@ -100,7 +101,7 @@ export function agentAvailabilityLabel(agent: AgentDefinition): "Available" | "U
 }
 
 export function availableAgentCount(agents: AgentDefinition[]): number {
-  return agents.filter((agent) => agent.available === true).length;
+  return agents.filter((agent) => agent.available === true && !isRetiredCodexExec(agent)).length;
 }
 
 function acpCapabilitySummary(a: AgentDefinition): string {
@@ -290,19 +291,18 @@ function AgentRow({
         {a.source === "discovered" && <span className="atag discovered">Discovered</span>}
         {a.source === "registry" && <span className="atag discovered">ACP Registry</span>}
         {online && a.update?.status === "update_available" && <span className="atag" role="status">New Release Published</span>}
-        {a.available !== true && <span className="atag broken">{agentAvailabilityLabel(a)}</span>}
+        {a.available !== true && !isRetiredCodexExec(a) && <span className="atag broken">{agentAvailabilityLabel(a)}</span>}
         {a.registry && <span className="atag">{a.registry.transport}</span>}
         {!a.registry && a.acpTransport && <span className="atag">{a.acpTransport}</span>}
         {a.registry && <span className="atag">Adapter v{a.registry.adapterVersion}</span>}
-        {isRestartOnlyCodexExec(a) && (
-          <span className="atag" title="Restarts sessions that already use it. New sessions use Codex App Server.">
-            Existing Sessions Only
-          </span>
+        {/* An older runner still advertises discovery's exec row as available, with no reason. */}
+        {isRetiredCodexExec(a) && (
+          <span className="atag broken" title={CODEX_EXEC_RETIRED_CONFIG_REASON}>No Longer Supported</span>
         )}
         {driver === "codex-app-server" && a.codexAppServer?.status === "supported" && a.authStatus !== "unauthenticated" && (
           <span className="atag">Interactive Ready</span>
         )}
-        {(driver === "codex" || driver === "codex-app-server") && a.authStatus === "unauthenticated" && (
+        {driver === "codex-app-server" && a.authStatus === "unauthenticated" && (
           <span className="atag broken" title="Run `codex login`, then rediscover.">Not Signed In</span>
         )}
         {driver === "codex-app-server" && a.codexAppServer?.status === "unsupported" && (

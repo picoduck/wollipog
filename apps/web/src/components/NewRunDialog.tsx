@@ -3,13 +3,7 @@ import { type BoxView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useStore } from "../store.js";
 import { AgentIcon } from "./AgentIcon.js";
-import {
-  advancedAgentOptions,
-  agentOptions,
-  defaultRunAgentIds,
-  primaryAgentOptions,
-  runnableAgentIds,
-} from "./agent-options.js";
+import { agentOptions, runnableAgentIds } from "./agent-options.js";
 import { Modal } from "./common.js";
 import {
   defaultWorkflowBindings,
@@ -73,11 +67,10 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
   const [runnerId, setRunnerId] = useState(projectsSupported ? "" : online[0]?.runnerId ?? "");
   const runner = runners.get(runnerId);
   const options = useMemo(() => agentOptions(runner?.agents ?? []), [runner?.agents]);
-  const primaryOptions = useMemo(() => primaryAgentOptions(options).filter((option) => !option.disabled), [options]);
-  const advancedOptions = useMemo(() => advancedAgentOptions(options).filter((option) => !option.disabled), [options]);
+  const enabledOptions = useMemo(() => options.filter((option) => !option.disabled), [options]);
   const runnableIds = useMemo(() => runnableAgentIds(runner?.agents ?? []), [runner?.agents]);
   const [workspaceId, setWorkspaceId] = useState(runner?.workspaces[0]?.id ?? "");
-  const [agentIds, setAgentIds] = useState<string[]>(() => defaultRunAgentIds(runner?.agents ?? []));
+  const [agentIds, setAgentIds] = useState<string[]>(() => runnableAgentIds(runner?.agents ?? []));
   const [mode, setMode] = useState<RunWorkMode>("parallel");
   const [workflows, setWorkflows] = useState<Awaited<ReturnType<typeof api.workflowDefinitions>>>([]);
   const [workflowId, setWorkflowId] = useState("builtin:build-review");
@@ -92,7 +85,7 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
     setRunnerId(id);
     const r = runners.get(id);
     setWorkspaceId(r?.workspaces[0]?.id ?? "");
-    setAgentIds(defaultRunAgentIds(r?.agents ?? []));
+    setAgentIds(runnableAgentIds(r?.agents ?? []));
   };
 
   const pickProjectLocation = (locationId: string) => {
@@ -374,29 +367,12 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
                 label="Agents"
                 value={agentIds}
                 onChange={toggleAgent}
-                options={primaryOptions.map(({ agent: a, label }) => ({
+                options={enabledOptions.map(({ agent: a, label }) => ({
                   value: a.id,
                   title: label,
                   icon: <AgentIcon driver={a.driver ?? "acp"} agentName={a.name} size={16} />,
                 }))}
               />
-              {advancedOptions.length > 0 && (
-                <details className="advanced-agents">
-                  <summary>Advanced Agents</summary>
-                  <p className="muted">Non-interactive targets are not selected by default.</p>
-                  <ChoiceRows<string>
-                    multiple
-                    label="Advanced Agents"
-                    value={agentIds}
-                    onChange={toggleAgent}
-                    options={advancedOptions.map(({ agent: a, label }) => ({
-                      value: a.id,
-                      title: label,
-                      icon: <AgentIcon driver={a.driver ?? "acp"} agentName={a.name} size={16} />,
-                    }))}
-                  />
-                </details>
-              )}
             </div>
           ) : (
             <>

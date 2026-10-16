@@ -542,7 +542,7 @@ test("a restart onto another provider records the Claude jobs it ended and the r
   const f = fixture("driver-change");
   let manager: SessionManager | undefined;
   try {
-    const spec = { ...claudeSpec("s_restart_driver_change", f.repo), driver: "codex" as const, command: "codex" };
+    const spec = { ...claudeSpec("s_restart_driver_change", f.repo), driver: "codex-app-server" as const, command: "codex" };
     f.store.create(storedClaudeSession(spec.sessionId, f.repo, {
       backgroundWorkState: "running",
       backgroundJobs: [
@@ -562,7 +562,7 @@ test("a restart onto another provider records the Claude jobs it ended and the r
 
     assert.deepEqual(fake.prompts, [], "a Claude result is never handed to another provider");
     const meta = f.store.readMeta(spec.sessionId)!;
-    assert.equal(meta.driver, "codex");
+    assert.equal(meta.driver, "codex-app-server");
     assert.equal(meta.backgroundJobs?.find((job) => job.id === "monitor-1")?.endedBy?.reason, "session_restart");
     assert.ok(meta.backgroundJobs?.find((job) => job.id === "agent-1")?.continuationMissingResultAt,
       "the owed result is recorded as missing rather than pending");

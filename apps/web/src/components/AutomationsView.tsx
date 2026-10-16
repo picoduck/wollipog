@@ -20,7 +20,7 @@ import {
   AUTOMATION_SAVED_ALTERNATE_INSTALLATION_UNAVAILABLE, AUTOMATION_SAVED_ALTERNATE_ORCHESTRATOR_INSTALLATION_UNAVAILABLE,
   AUTOMATION_SAVED_ALTERNATE_ROLE_INSTALLATION_UNAVAILABLE, AUTOMATION_SAVED_INSTALLATION_UNAVAILABLE,
   AUTOMATION_SAVED_ORCHESTRATOR_INSTALLATION_UNAVAILABLE, AUTOMATION_SAVED_ROLE_INSTALLATION_UNAVAILABLE,
-  automationChooseWorkflowInstallation, isRestartOnlyCodexExec, runnerSupportsProtocol,
+  automationChooseWorkflowInstallation, isRetiredCodexExec, runnerSupportsProtocol,
 } from "@wollipog/protocol";
 import { AutomationsIcon } from "./Icons.js";
 import { useApi } from "../api-context.js";
@@ -154,11 +154,11 @@ export function AutomationsView() {
   const multiAgentEnabled = useExperiments().flags.multiAgent;
   const defaultAgentId = (agents: readonly AgentDefinition[] | undefined) =>
     agentOptions([...(agents ?? [])]).find((option) => !option.disabled)?.agent.id ??
-      agents?.find((agent) => !isRestartOnlyCodexExec(agent))?.id ?? "";
+      agents?.find((agent) => !isRetiredCodexExec(agent))?.id ?? "";
   // An automation already bound to discovery's restart-only exec row keeps it listed so editing
   // renders truthfully; it is never offered to a new or rebound automation.
   const offeredAgents = (agents: readonly AgentDefinition[] | undefined, current: string) =>
-    (agents ?? []).filter((agent) => !isRestartOnlyCodexExec(agent) || agent.id === current);
+    (agents ?? []).filter((agent) => !isRetiredCodexExec(agent) || agent.id === current);
   const runners = useStoreSelector((state) => state.runners);
   const boxes = useStoreSelector((state) => state.boxes);
   // Passing the correlated Box matters for an SSH Machine left unnamed: runnerDisplay falls back

@@ -3,7 +3,7 @@ import { artifactGuidance } from "./artifact-guidance.js";
 import { shellGuidance } from "./shell-guidance.js";
 import { campaignOperationEvidenceCurrent } from "./campaign-operation-evidence.js";
 import { effectiveProjectMemoryKey, prepareProjectMemory, prepareProjectMemoryArgs, projectMemoryKey, projectMemoryUnavailable } from "./project-memory.js";
-import { isTerminal } from "@wollipog/protocol";
+import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, isTerminal } from "@wollipog/protocol";
 import { inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
 import { boundedIssueNumbers, titleFromPrompt, validCampaignControl } from "@wollipog/protocol";
 import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
@@ -5970,7 +5970,6 @@ export class SessionManager {
         : undefined,
       sessionUnsupportedSlashCommands: carrySlashCommandCatalog ? prior?.sessionUnsupportedSlashCommands : undefined,
       claudeSlashCatalogInputs: carrySlashCommandCatalog ? prior?.claudeSlashCatalogInputs : undefined,
-      codexExecFallbackReason: spec.codexExecFallbackReason ?? prior?.codexExecFallbackReason,
       workspaceId: spec.workspaceId,
       repoPath,
       worktreePath: null,
@@ -6175,18 +6174,13 @@ export class SessionManager {
       return false;
     }
     durable?.queued();
-    if (launchAssertionError) {
-      this.emitEvent(spec.sessionId, { kind: "error", message: launchAssertionError });
-      this.emitStatus(spec.sessionId, "failed", launchAssertionError);
-      durable?.failed(launchAssertionError, "INVALID_COMMAND");
+    // A session persisted on the retired exec driver stays readable but never starts again (#3259).
+    const launchRefusal = launchAssertionError ?? (isRetiredCodexExec(meta) ? CODEX_EXEC_RETIRED_REASON : undefined);
+    if (launchRefusal) {
+      this.emitEvent(spec.sessionId, { kind: "error", message: launchRefusal });
+      this.emitStatus(spec.sessionId, "failed", launchRefusal);
+      durable?.failed(launchRefusal, "INVALID_COMMAND");
       return false;
-    }
-    if (meta.driver === "codex") {
-      this.emitTelemetry(meta, {
-        metric: "fallback",
-        outcome: "observed",
-        reason: meta.codexExecFallbackReason ?? "compatibility_exec",
-      });
     }
 
     // Worktree setup is part of durable session materialization. It must finish before the initial
@@ -7812,6 +7806,9 @@ export class SessionManager {
       // This must precede discovery, authentication, provider-state migration, and worktree-boundary
       // preparation. Unsupported contexts fail without touching target-local paths or providers.
       this.assertHostIsolationContextSupported(meta);
+      // Every launch path crosses here, so a session persisted on the retired exec driver (#3259)
+      // fails before any provider, lease, or worktree work.
+      if (isRetiredCodexExec(meta)) throw new Error(CODEX_EXEC_RETIRED_REASON);
       // Every launch that carries a persisted worktree re-proves it here, immediately before any
       // discovery, isolation binding, lease, or provider process exists. start() validates its own
       // prior selection earlier, and worktree rebind validates the replacement it is about to
@@ -11272,6 +11269,8 @@ export class SessionManager {
           `${blocked.worktreeRecovery.detail}; this message was not sent`,
           "WORKTREE_RECOVERY_REQUIRED",
         );
+      } else if (blocked && isRetiredCodexExec(blocked)) {
+        durable?.failed(CODEX_EXEC_RETIRED_REASON, "INVALID_COMMAND");
       } else {
         durable?.failed("provider session could not be resumed", "INVALID_COMMAND");
       }

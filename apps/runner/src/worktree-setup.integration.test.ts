@@ -29,7 +29,7 @@ async function repository(root: string): Promise<string> {
 function meta(store: SessionStore, sessionId: string, repo: string): void {
   store.create({
     sessionId, agentId: "codex", workspaceId: "repo", repoPath: repo,
-    worktreePath: null, driver: "codex", command: process.execPath, args: [], env: {},
+    worktreePath: null, driver: "codex-app-server", command: process.execPath, args: [], env: {},
     context: { kind: "native" }, agentSessionId: null, status: "idle", title: "setup",
     config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
     seq: 0, createdAt: 1, updatedAt: 1,
@@ -161,7 +161,7 @@ test("new session setup finishes before provider launch and injects runner-owned
   t.after(() => manager.shutdownAll());
   const started = await manager.start({
     sessionId: "s_start_setup", workspaceId: "repo", workspacePath: repo, agentId: "codex",
-    command: process.execPath, args: [], env: {}, useWorktree: true, driver: "codex",
+    command: process.execPath, args: [], env: {}, useWorktree: true, driver: "codex-app-server",
     context: { kind: "native" },
   });
   assert.equal(started, true);
@@ -189,7 +189,7 @@ test("new session setup finishes before provider launch and injects runner-owned
   }, (line) => restartLogs.push(line), store, "runner-restarted", undefined, factory as never, dataDir);
   const restarted = await manager.start({
     sessionId: "s_start_setup", workspaceId: "repo", workspacePath: repo, agentId: "codex",
-    command: process.execPath, args: [], env: {}, useWorktree: true, driver: "codex",
+    command: process.execPath, args: [], env: {}, useWorktree: true, driver: "codex-app-server",
     context: { kind: "native" },
   });
   assert.equal(restarted, true, `${restartLogs.join("\n")}\n${JSON.stringify(store.readMeta("s_start_setup"))}`);
@@ -248,7 +248,7 @@ test("declining setup retains the worktree while applying no copies, environment
     message.payload.text.includes("created without copy, environment, or setup hooks")));
   assert.equal(await manager.start({
     sessionId: "s_decline_setup", workspaceId: "repo", workspacePath: repo, agentId: "codex",
-    command: process.execPath, args: [], env: {}, useWorktree: true, driver: "codex",
+    command: process.execPath, args: [], env: {}, useWorktree: true, driver: "codex-app-server",
     context: { kind: "native" },
   }), true);
   assert.equal(launchEnvironment?.DECLINED_VALUE, undefined);
@@ -334,7 +334,7 @@ test("setup environment is bound to the exact selected worktree", async (t) => {
   await manager.selectWorktree("s_switch_setup", legacy.worktree.path);
   assert.equal(await manager.start({
     sessionId: "s_switch_setup", workspaceId: "repo", workspacePath: repo, agentId: "codex",
-    command: process.execPath, args: [], env: {}, useWorktree: true, driver: "codex",
+    command: process.execPath, args: [], env: {}, useWorktree: true, driver: "codex-app-server",
     context: { kind: "native" },
   }), true);
   assert.equal(launch?.cwd, legacy.worktree.path);
@@ -467,7 +467,7 @@ test("stopping while trust is pending cancels instead of persisting a decline an
   t.after(() => manager.shutdownAll());
   const spec = {
     sessionId: "s_cancel_trust", workspaceId: "repo", workspacePath: repo, agentId: "codex",
-    command: process.execPath, args: [] as string[], env: {}, useWorktree: true, driver: "codex" as const,
+    command: process.execPath, args: [] as string[], env: {}, useWorktree: true, driver: "codex-app-server" as const,
     context: { kind: "native" as const },
   };
   assert.equal(await manager.start(spec), false);
@@ -510,7 +510,7 @@ test("stopping a running initial setup kills the step and cannot overwrite stopp
 
   assert.equal(await manager.start({
     sessionId: "s_cancel_running", workspaceId: "repo", workspacePath: repo, agentId: "codex",
-    command: process.execPath, args: [], env: {}, useWorktree: true, driver: "codex",
+    command: process.execPath, args: [], env: {}, useWorktree: true, driver: "codex-app-server",
     context: { kind: "native" },
   }), false);
   assert.equal(cancelled, true);
@@ -552,7 +552,7 @@ test("deleting during setup waits for the child to close before reclaiming the w
 
   assert.equal(await manager.start({
     sessionId: "s_delete_running", workspaceId: "repo", workspacePath: repo, agentId: "codex",
-    command: process.execPath, args: [], env: {}, useWorktree: true, driver: "codex",
+    command: process.execPath, args: [], env: {}, useWorktree: true, driver: "codex-app-server",
     context: { kind: "native" },
   }), false);
   assert.ok(deletion);
@@ -606,7 +606,7 @@ test("a pre-v141 worktree with baseCommit never discovers setup retroactively", 
 
   assert.equal(await manager.start({
     sessionId: "s_legacy_setup", workspaceId: "repo", workspacePath: repo, agentId: "codex",
-    command: process.execPath, args: [], env: {}, useWorktree: true, driver: "codex",
+    command: process.execPath, args: [], env: {}, useWorktree: true, driver: "codex-app-server",
     context: { kind: "native" },
   }), true);
   assert.equal(trustRequests, 0);
@@ -685,7 +685,7 @@ test("session deletion retires provider and terminals before frozen teardown, th
     "runner-private descendant ownership is durable before provider launch");
   assert.equal(await manager.start({
     sessionId: "s_teardown", workspaceId: "repo", workspacePath: repo, agentId: "codex",
-    command: process.execPath, args: [], env: {}, useWorktree: true, driver: "codex",
+    command: process.execPath, args: [], env: {}, useWorktree: true, driver: "codex-app-server",
     context: { kind: "native" },
   }), true);
   assert.equal(store.readMeta("s_teardown")?.worktreeProcessMarkers?.[created.worktree.id], processMarker,
@@ -825,7 +825,7 @@ test("an automatic malformed setup remains invalid across later launches", async
   t.after(() => manager.shutdownAll());
   const spec = {
     sessionId: "s_invalid_launch", workspaceId: "repo", workspacePath: repo, agentId: "codex",
-    command: process.execPath, args: [] as string[], env: {}, useWorktree: true, driver: "codex" as const,
+    command: process.execPath, args: [] as string[], env: {}, useWorktree: true, driver: "codex-app-server" as const,
     context: { kind: "native" as const },
   };
 

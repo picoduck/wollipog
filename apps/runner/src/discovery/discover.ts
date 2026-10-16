@@ -9,7 +9,7 @@ import { readdirSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { agentContextKey } from "@wollipog/protocol";
+import { agentContextKey, CODEX_EXEC_RETIRED_CONFIG_REASON, isRetiredCodexExec } from "@wollipog/protocol";
 import type {
   AcpRuntimeCapabilities,
   AgentCapabilities,
@@ -444,13 +444,8 @@ function installationId(context: AgentContext, bin: ResolvedBinary): string {
   return createHash("sha256").update(JSON.stringify([agentContextKey(context), bin.path])).digest("hex").slice(0, 16);
 }
 
-function codexExecId(primaryId: string): string {
-  if (primaryId === "codex") return "codex-exec";
-  const wsl = primaryId.replace(/^codex-wsl-/, "codex-exec-wsl-");
-  return wsl === primaryId ? `${primaryId}-exec` : wsl;
-}
-
-/** One resolved Codex launch becomes an app-server primary plus an explicit non-interactive row. */
+/** One resolved Codex launch becomes its App Server row. The `codex exec` row discovery used to
+ * pair with it is retired (#3259). */
 export function codexAgentDefinitions(
   base: AgentDefinition,
   compatibility: NonNullable<AgentDefinition["codexAppServer"]>,
@@ -461,25 +456,14 @@ export function codexAgentDefinitions(
   // OpenAI 401 behind a reconnect loop, so it is not ready — mirror Claude, whose readiness
   // already folds auth in. "unknown" stays selectable: only a confirmed missing login gates.
   const signedIn = base.authStatus !== "unauthenticated";
-  const primary: AgentDefinition = {
+  return [{
     ...base,
     driver: "codex-app-server",
     available: supported && signedIn,
     capabilities: verifiedCodexAppServerCapabilities(slashCommands, compatibility),
     codexAppServer: compatibility,
     ...(base.authStatus === "authenticated" ? { codexBillingSource: "provider_account" as const } : {}),
-  };
-  const exec: AgentDefinition = {
-    ...base,
-    id: codexExecId(base.id),
-    name: `${base.name} (Non-Interactive)`,
-    driver: "codex",
-    available: signedIn,
-    capabilities: withSlashCommands("codex", slashCommands),
-    codexAppServer: compatibility,
-    ...(base.authStatus === "authenticated" ? { codexBillingSource: "provider_account" as const } : {}),
-  };
-  return [primary, exec];
+  }];
 }
 
 /** A replacement during native probes cannot inherit their version or a different driver row. */
@@ -883,8 +867,7 @@ function isDefaultDiscoveredInstallation(agent: AgentDefinition): boolean {
   if (!agent.installation) return false;
   const base = agent.driver === "claude-code" ? "claude-code"
     : agent.driver === "codex-app-server" ? "codex"
-      : agent.driver === "codex" ? "codex-exec"
-        : agent.driver === "pi" ? "pi" : null;
+      : agent.driver === "pi" ? "pi" : null;
   if (!base) return false;
   return agent.id === (agent.context?.kind === "wsl" ? `${base}-wsl-${agent.context.distro}` : base);
 }
@@ -1049,5 +1032,9 @@ export function mergeAgents(
     usedIds.add(id);
     extras.push(id === d.id ? d : { ...d, id });
   }
-  return [...enriched, ...extras];
+  // A configured `driver: "codex"` entry stays listed so Machine Settings can name the fix, but it
+  // never launches (#3259).
+  return [...enriched, ...extras].map((agent) => isRetiredCodexExec(agent)
+    ? { ...agent, available: false, unavailableReason: CODEX_EXEC_RETIRED_CONFIG_REASON }
+    : agent);
 }

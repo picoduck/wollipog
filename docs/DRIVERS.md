@@ -976,11 +976,12 @@ conversation coordinate, anchored checkpoint tree, independent provider id, and 
 
 ---
 
-## 3. CodexDriver — native `codex app-server` (with `codex exec` fallback)
+## 3. CodexDriver — native `codex app-server`
 
 `codex app-server` is the JSON-RPC manager protocol (NDJSON over stdio, `"jsonrpc"` omitted on the
-wire). It is the only surface with **interactive approvals**, so it is the default. `codex exec
---json` is a no-approval batch fallback.
+wire). It is the only surface with **interactive approvals**, and the only Codex driver. The `codex
+exec --json` batch fallback (driver `codex`) is retired (#3259); §3.5 records it for sessions that
+used it.
 
 ### 3.0 Compatibility discovery
 
@@ -1206,7 +1207,11 @@ false from `resolvePermission`/`answerQuestion`, so the runner emits a delivery 
 inventing a resolution. Runner-offline cards remain visible for context but their response controls
 are disabled until the authenticated runner is available.
 
-### 3.5 `codex exec --json` fallback (no approvals)
+### 3.5 `codex exec --json` fallback (retired)
+
+Retired in #3259: discovery no longer emits an exec row, a configured `driver: "codex"` agent is
+unavailable with a configuration fix, and the control plane and runner refuse to create, start, or
+restart an exec session. Persisted exec sessions stay readable. The protocol it used was:
 
 ```
 codex exec --json -m <model> -c model_reasoning_effort="<effort>" \

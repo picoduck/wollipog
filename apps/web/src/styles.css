@@ -12217,21 +12217,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .agent-default-warning .btn {
   flex: none;
 }
-.advanced-agents {
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-}
-.advanced-agents summary {
-  cursor: pointer;
-  color: var(--text-dim);
-  font-size: 13px;
-  font-weight: 600;
-}
-.advanced-agents > p {
-  margin: 7px 0;
-  font-size: 12px;
-}
 /* New-Session "Location" quick-pick — a project's machines/directories (Q2a). */
 .new-session-project-actions {
   display: flex;

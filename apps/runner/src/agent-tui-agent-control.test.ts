@@ -35,7 +35,7 @@ function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
     worktreePath: "/repo-wt",
     // A Codex Orchestrator: its configuration probe is what makes TUI preparation slow enough for
     // a delete to land inside the window this fence covers.
-    driver: "codex",
+    driver: "codex-app-server",
     command: "codex",
     args: [],
     env: {},

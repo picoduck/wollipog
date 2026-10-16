@@ -1,4 +1,6 @@
 import {
+  CODEX_EXEC_RETIRED_REASON,
+  isRetiredCodexExec,
   nativeTuiHasTrackedGuardrails,
   runnerSupportsProtocol,
   sessionRole,
@@ -10,7 +12,8 @@ import {
 import type { ControlPlaneDb } from "./db.js";
 import { capabilityRefusal } from "./capability-refusal.js";
 
-const TUI_DRIVERS = new Set(["claude-code", "codex", "codex-app-server"]);
+// The retired Codex exec driver (#3259) is not a Native TUI driver; an older runner would still run it.
+const TUI_DRIVERS = new Set(["claude-code", "codex-app-server"]);
 
 export const NATIVE_TUI_TRACKED_GUARDRAILS_ERROR =
   "Native TUI cannot run with a session cost budget, cost checkpoints, or tool-call limit because provider TUI activity is not reported to Wollipog. Use Direct for tracked usage and guardrails.";
@@ -156,6 +159,7 @@ export function nativeTuiSessionError(
   session: SessionView,
   requireStartFence = false,
 ): NativeTuiLaunchError | null {
+  if (isRetiredCodexExec(session)) return { status: 409, error: CODEX_EXEC_RETIRED_REASON };
   const unavailable = runnerError(db, online, session.runnerId);
   if (unavailable) return unavailable;
   if (nativeTuiHasTrackedGuardrails(session)) {

@@ -4,7 +4,7 @@ import {
   builtInAgentHarnessName,
   canonicalAgentHarnessIdentity,
   exactAgentHarnessIdentityKey,
-  isRestartOnlyCodexExec,
+  isRetiredCodexExec,
   modelResolutionDrift,
   resolveAgentHarnessRow,
   type AgentCapabilities,
@@ -306,7 +306,7 @@ export class OrchestratorSettings {
     const onlineRunners = this.db.listRunnersForPrincipal(principal).filter((runner) => runner.status === "online");
     const installations = onlineRunners.flatMap((runner) =>
       // A saved child harness on the restart-only exec row still renders through the stale entry below.
-      runner.agents.filter((agent) => agent.available === true && agent.capabilities && !isRestartOnlyCodexExec(agent))
+      runner.agents.filter((agent) => agent.available === true && agent.capabilities && !isRetiredCodexExec(agent))
         .map((agent) => ({
           runnerId: runner.runnerId,
           machineName: machineName(runner),
@@ -474,7 +474,7 @@ export function childModelMachines(
     machineName: machineName(runner),
     supported: runner.agents.some((agent) => {
       // A row the Machine's installation choice excludes cannot launch (getAgentLaunch refuses it).
-      if (agent.available !== true || !agent.capabilities || isRestartOnlyCodexExec(agent) ||
+      if (agent.available !== true || !agent.capabilities || isRetiredCodexExec(agent) ||
           agent.installation?.selection === "other" || agent.harnessSelectionBlocked === true) return false;
       const identity = agentHarnessIdentityFor(agent);
       return childHarnessAdmits(policy, identity) &&

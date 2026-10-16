@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { DurableSessionCommand, DurableSessionCommandErrorCode } from "@wollipog/protocol";
+import {
+  CODEX_EXEC_RETIRED_REASON,
+  PROTOCOL_VERSION,
+  type DurableSessionCommand,
+  type DurableSessionCommandErrorCode,
+} from "@wollipog/protocol";
 import { durableCommandPayloadDigest } from "../../runner/src/durable-command-store.js";
 import { AutomationCommandOutbox, automationCommandDigest } from "./automation-command-outbox.js";
 import type { ControlPlaneDb } from "./db.js";
@@ -81,4 +86,39 @@ test("automation receipts accept every protocol error code and reject unknown va
   } as never), false);
   assert.equal(writes.length, writeCount, "unknown codes never reach storage");
   assert.match(warnings.at(-1) ?? "", /malformed durable command receipt/u);
+});
+
+test("commands staged before Codex exec was retired are rejected instead of reaching a runner (#3259)", () => {
+  const commands: Record<string, DurableSessionCommand> = {
+    "exec-start": { type: "start_session", spec: { sessionId: "new-exec", driver: "codex", command: "codex" } } as DurableSessionCommand,
+    "exec-prompt": { type: "prompt_session", sessionId: "legacy-exec", text: "continue" } as DurableSessionCommand,
+    "exec-answer": { type: "answer_recovered_question", sessionId: "legacy-exec", requestId: "q-1" } as DurableSessionCommand,
+    "app-server-start": { type: "start_session", spec: { sessionId: "new-app", driver: "codex-app-server", command: "codex" } } as DurableSessionCommand,
+  };
+  const rejected: Array<[string, string]> = [];
+  const sent: string[] = [];
+  const db = {
+    getRunner: () => ({ protocolVersion: PROTOCOL_VERSION }),
+    getSession: (id: string) => id === "legacy-exec" ? { id, driver: "codex" } : undefined,
+    expireAutomationCommands: () => [],
+    dueAutomationCommands: () => Object.entries(commands).map(([commandId, command]) => ({
+      commandId, executionId: `execution-${commandId}`, runnerId: "runner-1", attemptCount: 0, expiresAt: null,
+      payloadJson: JSON.stringify(command), payloadSha256: automationCommandDigest(command),
+    })),
+    rejectAutomationCommand: (commandId: string, error: string) => { rejected.push([commandId, error]); },
+    markAutomationCommandSent: () => true,
+  } as unknown as ControlPlaneDb;
+  const hub = {
+    isRunnerOnline: () => true,
+    sendToRunner: (_runnerId: string, message: { commandId: string }) => { sent.push(message.commandId); return true; },
+  } as unknown as Hub;
+  const outbox = new AutomationCommandOutbox(db, hub, { warn: () => {} }, () => undefined);
+
+  assert.equal(outbox.flush(1_000), 1);
+  assert.deepEqual(rejected, [
+    ["exec-start", CODEX_EXEC_RETIRED_REASON],
+    ["exec-prompt", CODEX_EXEC_RETIRED_REASON],
+    ["exec-answer", CODEX_EXEC_RETIRED_REASON],
+  ]);
+  assert.deepEqual(sent, ["app-server-start"]);
 });

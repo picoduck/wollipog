@@ -377,7 +377,7 @@ test("an unguardable Codex TUI for a session with no managed worktree opens unch
   try {
     const deps = dependencies(dir, []);
     const launch = await prepareAgentTuiLaunch(
-      meta({ sessionId: "s1337cdx", driver: "codex", command: "codex", args: ["--profile", "team"] }),
+      meta({ sessionId: "s1337cdx", driver: "codex-app-server", command: "codex", args: ["--profile", "team"] }),
       {
         ...deps,
         provisionManagedWorktreeGuard: (spec: SessionMeta, cwd?: string) => provisionAgentTuiManagedWorktreeGuard(
