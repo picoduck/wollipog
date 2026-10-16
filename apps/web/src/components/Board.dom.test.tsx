@@ -294,6 +294,7 @@ test("a returned result keeps one review badge and meaningful time despite newer
   try {
     const card = board.card("result");
     assert.deepEqual([...card.querySelectorAll(".status")].map((badge) => badge.textContent), ["Ready for Review"]);
+    assert.ok(card.querySelector(".status.t-review"));
     // A session still working shows its working status, not its earlier result (#3074).
     assert.deepEqual([...board.card("working").querySelectorAll(".status")].map((badge) => badge.textContent), ["Running"]);
     assert.equal(card.querySelector("time.card-time")?.getAttribute("datetime"), new Date(meaningfulAt).toISOString());
@@ -488,6 +489,42 @@ test("the family chip after the badge is an image named by the whole rollup at e
     assert.equal(chip.getAttribute("title"), "2 Children · 1 Awaiting Input · 1 Working", "and a tooltip with the whole rollup");
   } finally {
     await board.unmount();
+  }
+});
+
+test("Board family review uses the review tone and yields to required input in either child order", async () => {
+  const attention = { version: 1 as const, meaningfulAt: 10, humanActions: [],
+    result: { revision: "r1", at: 10, owner: "human" as const }, acknowledgedRevision: null };
+  const parent = session("parent", { status: "running" });
+  const review = session("review", { parentSessionId: "parent", attention });
+  const input = session("input", { parentSessionId: "parent", status: "input_required",
+    pendingApproval: { requestId: "q", kind: "question", title: "Choose", options: [] } });
+  for (const children of [[review], [review, input], [input, review]]) {
+    const board = await mount({ sessions: [parent, ...children] });
+    try {
+      const chip = board.card("parent").querySelector(".inbox-thread-family")!;
+      const reviewOnly = children.length === 1;
+      assert.equal(chip.classList.contains("t-review"), reviewOnly);
+      assert.equal(chip.classList.contains("waiting"), !reviewOnly);
+      assert.equal(chip.getAttribute("aria-label"), reviewOnly ? "1 Child · Ready for Review" : "2 Children · 1 Awaiting Input");
+      assert.equal(board.card("parent").querySelector(".status")?.textContent, "Running");
+    } finally {
+      await board.unmount();
+    }
+  }
+  for (const overrides of [
+    { status: "running" as const },
+    { attention: { ...attention, acknowledgedRevision: "r1" } },
+    { attention: { ...attention, result: { ...attention.result, owner: "orchestrator" as const } } },
+  ]) {
+    const board = await mount({ sessions: [parent, { ...review, ...overrides }] });
+    try {
+      const chip = board.card("parent").querySelector(".inbox-thread-family")!;
+      assert.equal(chip.classList.contains("t-review"), false);
+      assert.doesNotMatch(chip.getAttribute("aria-label") ?? "", /Ready for Review/);
+    } finally {
+      await board.unmount();
+    }
   }
 });
 

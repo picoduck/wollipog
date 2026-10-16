@@ -178,7 +178,7 @@ function InboxRowInner({
      clicking here merely forwards to it. */
   const familyChip = children && childrenLabel ? (
     <span
-      className={`inbox-thread-family${children.waiting > 0 ? " waiting" : ""}`}
+      className={`inbox-thread-family${children.waiting > 0 ? " waiting" : children.followUpLabel === "Ready for Review" ? " t-review" : ""}`}
       role="img"
       aria-label={childrenLabel}
       title={childrenLabel}
