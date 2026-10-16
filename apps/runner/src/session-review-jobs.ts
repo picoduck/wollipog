@@ -552,11 +552,16 @@ export class SessionReviewJobs {
     const prState: PullRequestState = existsSync(prStatePath)
       ? JSON.parse(readFileSync(prStatePath, "utf8")) as PullRequestState
       : { epoch: 1, attempts: [] };
-    const commonDir = realpathSync((await this.deps.exec(install!.git, [...SAFE_GIT, "-C", repoPath, "rev-parse", "--path-format=absolute", "--git-common-dir"])).trim());
+    // The checkout's own `.git` directory, never a gitdir file or link that could name another
+    // repository; and no `commondir` indirection inside it.
+    const commonDir = join(repoPath, ".git");
+    if (!lstatSync(commonDir, { throwIfNoEntry: false })?.isDirectory() || existsSync(join(commonDir, "commondir"))) {
+      refuse("the review snapshot could not be prepared");
+    }
     // Built here from the verified name; the origin's spelling only chooses SSH or HTTPS.
     const forgeUrl = /^https:\/\//iu.test(origin) ? `https://github.com/${pr.baseRepository}.git` : `git@github.com:${pr.baseRepository}.git`;
     const mirror = join(this.root, "mirrors", `${repositoryKey(repository)}.git`);
-    await this.syncMirror(install!.git, mirror, commonDir, forgeUrl, [pr.baseSha, request.headSha]);
+    await this.syncMirror(install!.git, mirror, commonDir, worktree!.branch, forgeUrl, [pr.baseSha, request.headSha]);
     let epochAttempts = prState.attempts.filter((attempt) => attempt.epoch === prState.epoch);
     const lastValid = [...epochAttempts].reverse().find((attempt) => attempt.valid);
     if (lastValid && lastValid.head !== request.headSha) {
@@ -657,7 +662,7 @@ export class SessionReviewJobs {
    * protocol, which hashes everything it receives, so rewritten objects there are refused rather
    * than reviewed; anything still missing comes from the forge.
    */
-  private async syncMirror(git: string, mirror: string, commonDir: string, forgeUrl: string, commits: string[]): Promise<void> {
+  private async syncMirror(git: string, mirror: string, commonDir: string, branch: string, forgeUrl: string, commits: string[]): Promise<void> {
     const previous = this.mirrorQueues.get(mirror) ?? Promise.resolve();
     const run = previous.then(async () => {
       if (!existsSync(join(mirror, "HEAD"))) {
@@ -671,7 +676,8 @@ export class SessionReviewJobs {
       if ((await missing()).length) {
         await this.deps.exec(git, [
           ...SAFE_GIT, ...FETCH_GIT, "--git-dir", mirror, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
-          "--end-of-options", `file://${commonDir}`, "+refs/heads/*:refs/session/heads/*", "+refs/remotes/*:refs/session/remotes/*",
+          // Only the session's own branch: nothing else in the checkout reaches the reviewer.
+          "--end-of-options", `file://${commonDir}`, `+refs/heads/${branch}:refs/session/heads/${branch}`,
         ], { timeoutMs: MIRROR_FETCH_TIMEOUT_MS }).catch((error: Error) => this.deps.log(`session review mirror could not read the project repository: ${error.message}`));
       }
       const still = await missing();

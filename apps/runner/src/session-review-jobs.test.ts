@@ -162,7 +162,6 @@ function harness(t: { after(fn: () => void): void }, options: {
     exec: async (_command, args) => {
       execs.push(args);
       if (args.includes("get-url")) return "https://github.com/acme/widget.git\n";
-      if (args.includes("--git-common-dir")) return `${join(repo, ".git")}\n`;
       if (args.includes("clone")) { mkdirSync(args.at(-1)!, { recursive: true }); return ""; }
       if (args.includes("cat-file") && options.missing?.has(args.at(-1)!.slice(0, 40))) throw new Error("missing");
       if (args.includes("fetch") && args.some((arg) => arg.startsWith("https://"))) {
@@ -239,7 +238,7 @@ test("the snapshot comes from a runner-owned mirror, never from session-controll
   const h = harness(t, { missing: new Set([HEAD]) });
   await h.jobs.dispatch(h.command());
   assert.equal((await settled(h, "srj_00000001")).state, "completed");
-  const location = h.execs.filter((args) => args.includes("get-url") || args.includes("--git-common-dir"));
+  const location = h.execs.filter((args) => args.includes("get-url"));
   assert.ok(location.length && location.every((args) => args[args.indexOf("-C") + 1] === join(h.root, "repo")),
     "the repository is read from the runner-recorded checkout, not the worktree");
   const fetches = h.execs.filter((args) => args.includes("fetch"));
@@ -248,10 +247,27 @@ test("the snapshot comes from a runner-owned mirror, never from session-controll
     `file://${join(h.root, "repo", ".git")}`, "https://github.com/acme/widget.git",
   ], "local objects pass through the pack protocol; the forge URL is built by the runner");
   assert.ok(fetches.every((args) => args.includes("protocol.allow=never") && args.includes("transfer.fsckObjects=true")));
+  assert.deepEqual(fetches[0]!.slice(fetches[0]!.indexOf("--end-of-options") + 2), ["+refs/heads/fix/feature:refs/session/heads/fix/feature"],
+    "only the session's own branch is read from the checkout");
   assert.equal(fetches[1]!.at(-1), HEAD);
   const clone = h.execs.find((args) => args.includes("clone"))!;
   assert.match(clone.at(-2)!, /reviews\/mirrors\/acme__widget\.git$/u);
 });
+
+for (const [label, redirect] of [
+  ["a gitdir file", (git: string) => { rmSync(git, { recursive: true }); writeFileSync(git, "gitdir: /elsewhere/.git\n"); }],
+  ["a commondir indirection", (git: string) => writeFileSync(join(git, "commondir"), "/elsewhere/.git\n")],
+] as const) {
+  test(`a project checkout whose git directory is redirected through ${label} is never read`, posixOnly, async (t) => {
+    const h = harness(t);
+    redirect(join(h.root, "repo", ".git"));
+    await h.jobs.dispatch(h.command());
+    const done = await settled(h, "srj_00000001");
+    assert.equal(done.state, "not_launched");
+    assert.match(done.reason ?? "", /snapshot could not be prepared/);
+    assert.equal(h.execs.some((args) => args.includes("fetch")), false);
+  });
+}
 
 test("repository names map to one review directory whatever their case", posixOnly, async (t) => {
   const h = harness(t);
