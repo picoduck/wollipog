@@ -122,6 +122,8 @@ function ArchivedHistoryRetentionEditor() {
           ...copy,
           tone: "danger",
           progress: "Saving archived history retention…",
+          // A sent policy change cannot be withdrawn, so the dialog waits for its answer.
+          cancelWhileRunning: false,
           onConfirm: async () => {
             const next = await api.updateArchivedHistoryRetention({ retentionDays: days });
             if (current()) apply(next, row);

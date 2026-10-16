@@ -147,7 +147,8 @@ export function historyPrunedTitle(pruned: SessionHistoryPruned, locale?: string
 
 /** When an archived session's history will be pruned under the policy, or null when it will not
  * be: retention is off, the session is not archived, or it was already pruned. A session already
- * past its threshold goes at the next pass, never on a date that has gone by. */
+ * past its threshold goes at the next pass, and never on a date that has gone by, even when a cached
+ * policy's next pass has. */
 export function historyPrunesAt(
   session: Pick<SessionView, "archived" | "archivedAt" | "historyPruned">,
   view: Pick<ArchivedHistoryRetentionView, "retentionDays" | "prunesFrom" | "nextRunAt"> | null,
@@ -155,5 +156,5 @@ export function historyPrunesAt(
 ): number | null {
   if (!view || view.retentionDays === null || view.prunesFrom === null) return null;
   if (!session.archived || session.archivedAt === undefined || session.historyPruned) return null;
-  return Math.max(session.archivedAt + view.retentionDays * DAY_MS, view.prunesFrom, view.nextRunAt ?? now);
+  return Math.max(session.archivedAt + view.retentionDays * DAY_MS, view.prunesFrom, view.nextRunAt ?? 0, now);
 }

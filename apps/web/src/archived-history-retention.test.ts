@@ -83,6 +83,8 @@ test("an archived session is pruned at its threshold, never before the policy ar
   assert.equal(historyPrunesAt(archived, policy, AT + 5 * DAY), AT + 5 * DAY, "past both: now, not a date gone by");
   assert.equal(historyPrunesAt(archived, { ...policy, nextRunAt: AT + 6 * DAY }, AT + 5 * DAY), AT + 6 * DAY,
     "past both with a pass scheduled: at that pass");
+  assert.equal(historyPrunesAt(archived, { ...policy, nextRunAt: AT + 4 * DAY }, AT + 5 * DAY), AT + 5 * DAY,
+    "past all three, with a cached pass that has gone by: now");
   assert.equal(historyPrunesAt({ archived: true, archivedAt: AT }, policy, AT), AT + 90 * DAY);
   assert.equal(historyPrunesAt({ ...archived, historyPruned: { prunedAt: AT, eventCount: 1, retentionDays: 90 } }, policy), null);
   assert.equal(historyPrunesAt({ archived: false, archivedAt: undefined }, policy), null);

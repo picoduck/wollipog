@@ -116,6 +116,38 @@ test("retention is off until confirmed, and turning it on shows what it prunes a
   }
 });
 
+test("once a confirmed change is saving it cannot be cancelled, and it settles the dialog itself", async () => {
+  const { client, saves } = server(view());
+  let finishSave!: () => void;
+  const update = client.updateArchivedHistoryRetention.bind(client);
+  const slow = {
+    ...client,
+    updateArchivedHistoryRetention: (input: UpdateArchivedHistoryRetentionRequest) =>
+      new Promise<ArchivedHistoryRetentionView>((resolve) => { finishSave = () => void update(input).then(resolve); }),
+  } as ApiClient;
+  const ui = await render(slow);
+  try {
+    await act(async () => { ui.toggle().click(); });
+    await ui.settle();
+    await act(async () => { ui.dialogButton("Prune History").click(); });
+    await ui.settle();
+    const cancel = ui.dialogButton("Cancel");
+    assert.ok(cancel.disabled, "a policy change cannot be withdrawn once it is sent");
+    await act(async () => { cancel.click(); });
+    await act(async () => { domWindow.document.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true })); });
+    await ui.settle();
+    assert.ok(ui.dialog(), "Cancel and Escape leave the dialog open while it saves");
+
+    finishSave();
+    await ui.settle();
+    assertNoDomNode(ui.dialog());
+    assert.deepEqual(saves, [90]);
+    assert.equal(ui.toggle().getAttribute("aria-checked"), "true");
+  } finally {
+    await ui.unmount();
+  }
+});
+
 test("lengthening and turning it off save at once, while shortening is confirmed", async () => {
   const { client, saves } = server(view({ retentionDays: 90, source: "organization", prunesFrom: NOW - 1_000,
     eligible: { sessions: 4, events: 9_000 } }));
