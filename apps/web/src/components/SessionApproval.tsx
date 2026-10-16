@@ -325,6 +325,7 @@ export function SessionQuestionBanner({
   presentation,
   onAnswer,
   onReadingChange,
+  readingExpanded,
 }: {
   sessionId: string;
   requestId: string;
@@ -362,6 +363,8 @@ export function SessionQuestionBanner({
   onAnswer?: () => void;
   /** Whether the person has expanded the question (#2786): the dock then keeps this card up. */
   onReadingChange?: (reading: boolean) => void;
+  /** Controlled reading mode on the full session dock, shared with its single-line strip. */
+  readingExpanded?: boolean;
 }) {
   const api = useApi();
   const storedRefusal = useSessionResponseRefusal(sessionId);
@@ -492,7 +495,13 @@ export function SessionQuestionBanner({
   const step = Math.min(Math.max(ownDrafts ? drafts.step : 0, 0), Math.max(stepCount - 1, 0));
   const question = questions[step];
   const lastStep = step >= stepCount - 1;
-  const titleExpanded = question !== undefined && expandedQuestion === question.id;
+  // Keep the local per-step disclosure ready for a mobile-to-desktop resize. Mobile's
+  // dock owns reading mode; desktop resumes the existing per-question disclosure.
+  if (readingExpanded !== undefined) {
+    const nextExpanded = readingExpanded ? question?.id ?? null : null;
+    if (expandedQuestion !== nextExpanded) setExpandedQuestion(nextExpanded);
+  }
+  const titleExpanded = readingExpanded ?? (question !== undefined && expandedQuestion === question.id);
 
   // Whether the clamp hides any of the question is measured, never guessed from its length: against
   // the clamp every time, expanded or not, and again whenever the title or the card is resized. The
@@ -566,17 +575,24 @@ export function SessionQuestionBanner({
       : titleToggleRef.current ?? headerToggleRef.current ?? titleRef.current)?.focus({ preventScroll: true });
   }, [titleExpanded]);
   const reading = titleExpanded;
+  const reportedReading = useRef(false);
   useEffect(() => {
-    if (!reading) return;
-    onReadingChangeRef.current?.(true);
-    return () => onReadingChangeRef.current?.(false);
+    if (reportedReading.current === reading) return;
+    reportedReading.current = reading;
+    onReadingChangeRef.current?.(reading);
   }, [reading]);
+  useEffect(() => () => {
+    if (!reportedReading.current) return;
+    reportedReading.current = false;
+    onReadingChangeRef.current?.(false);
+  }, []);
   const toggleQuestion = (event: React.MouseEvent<HTMLButtonElement>) => {
-    if (!question) return;
+    if (!question && !titleExpanded) return;
     headerCollapsePending.current = titleExpanded && event.currentTarget === headerToggleRef.current;
     if (!titleExpanded) expandedFromHeader.current = event.currentTarget === headerToggleRef.current;
     toggleFocusPending.current = event.currentTarget === event.currentTarget.ownerDocument.activeElement;
-    setExpandedQuestion(titleExpanded ? null : question.id);
+    if (readingExpanded !== undefined) onReadingChange?.(!titleExpanded);
+    else setExpandedQuestion(titleExpanded ? null : question?.id ?? null);
   };
   // The whole question is read from its first line: a card scrolled down to reach Show Full Question
   // brings the question's start back into view, within the card alone, below the head line that now
@@ -909,7 +925,7 @@ export function SessionQuestionBanner({
   const navigateOnly = !answerable;
   // The compact card's foot-note; a person who may not answer reads the refusal in its place.
   const draftKept = compact && questions.length > 0 && !recoveryRequiresDismiss && responseRefusal === null;
-  const canExpandQuestion = question !== undefined && (titleExpanded || titleTruncates || onReadingChange !== undefined);
+  const canExpandQuestion = titleExpanded || (question !== undefined && (titleTruncates || onReadingChange !== undefined));
 
   return (
     <section

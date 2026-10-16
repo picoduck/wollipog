@@ -98,6 +98,14 @@ export function useIsMobile(): boolean {
   return useMediaQuery(MOBILE_QUERY);
 }
 
+/** Phone-width layouts in either orientation. The landscape extension is touch-only and
+ * stays below the compact-tier ceiling, so a wide desktop window keeps its desktop behavior. */
+export function useIsMobileInEitherOrientation(): boolean {
+  const mobile = useIsMobile();
+  const landscape = useMediaQuery(`(max-width: ${COMPACT_BREAKPOINT_PX - 1}px) and (max-height: ${MOBILE_BREAKPOINT_PX}px) and (pointer: coarse)`);
+  return mobile || landscape;
+}
+
 /** Live compact-tier flag (COMPACT_QUERY): the rail stays while bars and panes tighten (§15.2). */
 export function useIsCompact(): boolean {
   return useMediaQuery(COMPACT_QUERY);
