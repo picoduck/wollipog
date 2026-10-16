@@ -243,6 +243,20 @@ export interface ClaudeNamespaceLifetime {
   dispose(): Promise<boolean>;
 }
 
+/** Whether an outer bwrap close proves the namespace's teardown completed: TERMINATE reached the
+ * supervisor over an intact control pipe, and bwrap then exited normally with the supervisor's 0
+ * (it reports pid 1's status). A signaled outer — an external SIGKILL, say — can close before the
+ * kernel has torn the pid namespace down, exactly like the runner's own SIGKILL fallback, so it never
+ * counts as graceful. */
+export function gracefulNamespaceExit(exit: {
+  terminateSent: boolean;
+  controlFailed: boolean;
+  code: number | null;
+  signal: NodeJS.Signals | null;
+}): boolean {
+  return exit.terminateSent && !exit.controlFailed && exit.signal === null && exit.code === 0;
+}
+
 class ClaudeNamespace implements ClaudeNamespaceLifetime {
   readonly token = randomBytes(16);
   readonly outer: ChildProcessWithoutNullStreams;
@@ -311,9 +325,11 @@ class ClaudeNamespace implements ClaudeNamespaceLifetime {
       if (this.errorText.length < 8192) this.errorText += data.toString().slice(0, 8192 - this.errorText.length);
     });
     this.outer.once("error", (error) => this.fail(error));
-    this.outer.once("close", (code) => {
+    this.outer.once("close", (code, signal) => {
       this.ended = true;
-      this.closedAfterTerminate = this.terminateSent && !this.controlFailed;
+      this.closedAfterTerminate = gracefulNamespaceExit({
+        terminateSent: this.terminateSent, controlFailed: this.controlFailed, code, signal,
+      });
       this.fail(new Error(`Claude namespace ended${code == null ? "" : ` with code ${code}`}: ${this.errorText.trim()}`));
       try {
         rmSync(this.tempRoot, { recursive: true, force: true });

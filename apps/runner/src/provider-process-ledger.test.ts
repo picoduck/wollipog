@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
+import { gracefulNamespaceExit } from "./claude-namespace-session.js";
 import { ProviderProcessLedger, spawnAgent, type AgentProcess } from "./spawn.js";
 
 const posixOnly = { skip: process.platform === "win32", timeout: 20_000 };
@@ -249,4 +250,16 @@ test("a Claude namespace is captured at record time, so a later lookup miss does
   ledger.record(virtual);
   assert.equal(await ledger.prove({ terminate: true }), true);
   assert.equal(lookups, 1);
+});
+
+test("a namespace closes gracefully only after TERMINATE and a normal zero exit", () => {
+  const sent = { terminateSent: true, controlFailed: false };
+  assert.equal(gracefulNamespaceExit({ ...sent, code: 0, signal: null }), true);
+  assert.equal(gracefulNamespaceExit({ ...sent, code: null, signal: "SIGKILL" }), false,
+    "an outer killed from outside may close before the pid namespace is torn down");
+  assert.equal(gracefulNamespaceExit({ ...sent, code: null, signal: "SIGTERM" }), false);
+  assert.equal(gracefulNamespaceExit({ ...sent, code: 125, signal: null }), false, "a failed supervisor proves nothing");
+  assert.equal(gracefulNamespaceExit({ terminateSent: false, controlFailed: false, code: 0, signal: null }), false,
+    "a namespace that ended on its own was never told to stop its tasks");
+  assert.equal(gracefulNamespaceExit({ terminateSent: true, controlFailed: true, code: 0, signal: null }), false);
 });
