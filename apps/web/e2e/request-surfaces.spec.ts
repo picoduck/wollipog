@@ -329,6 +329,20 @@ test("the session's notices wait behind the card's +N More and the request comes
   await expect(card(page).getByRole("heading")).toBeFocused();
 });
 
+for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+  test(`a daily budget card says when today's spend includes running turns' estimates at ${viewport.width}`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/request-surfaces-e2e.html?scenario=daily-budget-estimate");
+    await expect(card(page).locator(".request-card-title")).toHaveText("Daily budget reached — $20.04 of $20.00 today across your sessions, " +
+      "including an estimate for running turns. New turns pause until the day rolls over or an owner or admin raises it.");
+    await expect(footButton(page, "Check Again")).toBeVisible();
+    await assertNoHorizontalOverflow(page, ".request-dock");
+    if (process.env.REQUEST_SURFACES_EVIDENCE_DIR) {
+      await page.screenshot({ path: `${process.env.REQUEST_SURFACES_EVIDENCE_DIR}/daily-budget-estimate-${viewport.width}.png` });
+    }
+  });
+}
+
 test("a decision that fails is a danger notice above the footer, and the choice can be retried", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/request-surfaces-e2e.html?scenario=budget");

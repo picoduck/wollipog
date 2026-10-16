@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, truncateSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { claudeProjectPathKey, discoverClaudeTaskLifecycle, discoverIncompleteClaudeTasks, discoverIncompleteClaudeTasksInContext } from "./claude-background-work.js";
+import { claudeProjectPathKey, discoverClaudeTaskLifecycle, discoverIncompleteClaudeTasks, discoverIncompleteClaudeTasksInContext, inspectClaudeBackgroundWork, inspectClaudeBackgroundWorkInContext } from "./claude-background-work.js";
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "wollipog-claude-tasks-"));
@@ -23,6 +23,29 @@ test("Claude project keys match the provider's Windows path encoding", () => {
   assert.equal(claudeProjectPathKey("C:\\Users\\misko\\repo.with spaces"), "C--Users-misko-repo-with-spaces");
 });
 
+test("historical successful TaskStop receipts settle only the correlated background job", () => {
+  const f = fixture();
+  try {
+    for (const id of ["workflow-1", "unresolved"]) writeFileSync(join(f.tasks, `${id}.output`), "partial");
+    writeFileSync(f.transcript, [
+      JSON.stringify({ type: "assistant", message: { content: [
+        { type: "tool_use", id: "stop-1", name: "TaskStop", input: { task_id: "workflow-1" } },
+      ] } }),
+      JSON.stringify({ type: "user", message: { content: [
+        { type: "tool_result", tool_use_id: "stop-1", content: JSON.stringify({
+          message: "Successfully stopped task: workflow-1", task_id: "workflow-1",
+        }) },
+      ] } }),
+    ].join("\n"));
+    const inspection = inspectClaudeBackgroundWork(f.cwd, f.sessionId, ["workflow-1", "unresolved"], f);
+    assert.equal(inspection.terminalTaskStatuses?.get("workflow-1"), "killed");
+    assert.deepEqual(inspection.incompleteArtifacts.map((task) => task.id), ["unresolved"]);
+    assert.equal(inspection.terminalTaskIds.has("unresolved"), false);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
 test("task discovery returns artifacts without a completion record and ignores completed work", () => {
   const f = fixture();
   try {
@@ -39,6 +62,26 @@ test("task discovery returns artifacts without a completion record and ignores c
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }
+});
+
+test("WSL known historical TaskStop receipts reconcile without any remaining task artifact", async () => {
+  const transcript = [
+    { type: "assistant", message: { content: [
+      { type: "tool_use", id: "stop", name: "TaskStop", input: { task_id: "stopped" } },
+    ] } },
+    { type: "user", message: { content: [
+      { type: "tool_result", tool_use_id: "stop", content: JSON.stringify({
+        task_id: "stopped", message: "Successfully stopped task: stopped (workflow)",
+      }) },
+    ] } },
+  ].map((record) => JSON.stringify(record)).join("\n");
+  const inspection = await inspectClaudeBackgroundWorkInContext({ kind: "wsl", distro: "test" },
+    "/repo", "provider", ["stopped", "unresolved"], {
+      run: async (_context, _command, args) => ({ stdout: args[1]?.includes("find") ? "" : transcript, stderr: "" }),
+    });
+  assert.deepEqual([...inspection.terminalTaskIds], ["stopped"]);
+  assert.deepEqual([...inspection.modelStoppedTaskIds!], ["stopped"]);
+  assert.equal(inspection.terminalTaskStatuses?.get("stopped"), "killed");
 });
 
 test("stopped, resumed-after-completion, and unreadable-ledger tasks remain recoverable", () => {

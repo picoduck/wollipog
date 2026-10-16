@@ -2,7 +2,7 @@
  * credential fences, and role authority are exercised by the control-plane and runner tests. */
 import { createRoot } from "react-dom/client";
 import {
-  DEFAULT_ORCHESTRATOR_DEFAULTS, PROTOCOL_VERSION, sessionRole,
+  DEFAULT_ORCHESTRATOR_DEFAULTS, PROTOCOL_VERSION, sessionRole, sessionRoleConversionRequirement,
   type ControlPlaneToUi, type OrchestratorCampaignPolicy, type OrchestratorSettingsCapabilities, type SessionView,
 } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
@@ -38,11 +38,12 @@ let session = {
 if (scenario === "orchestrator" || scenario === "children") session = { ...session, role: "orchestrator", orchestratorPolicy: policy };
 if (scenario === "busy") session.status = "running";
 let calls = 0;
+let roleConversionSupported = scenario !== "older-control-plane";
 let push: ((message: ControlPlaneToUi) => void) | undefined;
 const snapshot = (): ControlPlaneToUi => ({
   type: "snapshot", capabilities: {
     sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false,
-    sessionRoleConversion: scenario !== "older-control-plane",
+    sessionRoleConversion: roleConversionSupported,
   }, runners: [], boxes: [], projects: [], sessions: [session], runs: [], pods: [],
 });
 class FixtureSocket implements UiSocket {
@@ -65,7 +66,7 @@ const navigation: ViewNavigation = { current: () => ({ name: "inbox" }), push() 
 const reasons: Record<string, string> = {
   busy: "Resume this session and wait until it is idle before changing its role. Finish or stop active work first.",
   children: "Finish or stop the live child sessions before changing this role. Completed children keep their links and remain accessible to you.",
-  "older-runner": "Update this Machine's runner to protocol v203 or later before changing the session role.",
+  "older-runner": sessionRoleConversionRequirement(202).error,
   strict: "Strict Project Isolation requires the coupled preset. Disable it here to preserve these provider permissions.",
   viewer: "Your Viewer role is read-only.",
 };
@@ -101,10 +102,13 @@ const client: ApiClient = {
 };
 declare global {
   interface Window {
-    __WOLLIPOG_ROLE_E2E__: { session(): SessionView; calls(): number; reconnect(): void };
+    __WOLLIPOG_ROLE_E2E__: { session(): SessionView; calls(): number; reconnect(): void; reconnectToOlderWollipog(): void };
   }
 }
-window.__WOLLIPOG_ROLE_E2E__ = { session: () => session, calls: () => calls, reconnect: () => push?.(snapshot()) };
+window.__WOLLIPOG_ROLE_E2E__ = {
+  session: () => session, calls: () => calls, reconnect: () => push?.(snapshot()),
+  reconnectToOlderWollipog: () => { roleConversionSupported = false; push?.(snapshot()); },
+};
 
 function Harness() {
   const current = useStoreSelector((state) => state.sessions.get(session.id));

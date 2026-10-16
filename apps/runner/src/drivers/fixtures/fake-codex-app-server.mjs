@@ -32,6 +32,7 @@ let dogfoodTurnCount = 0;
 let asyncTurnCount = 0;
 let rootCwd;
 const asyncDelivery = process.env.WOLLIPOG_FAKE_CODEX_ASYNC_DELIVERY;
+const asyncQuestionTitle = process.env.WOLLIPOG_FAKE_CODEX_ASYNC_TITLE ?? "Which path should I use?";
 const asyncReceiptPath = process.env.WOLLIPOG_FAKE_CODEX_RECEIPT;
 const asyncReleasePath = process.env.WOLLIPOG_FAKE_CODEX_ASYNC_RELEASE;
 const expectedQueuedDogfoodPrompts = [
@@ -127,7 +128,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   }
   if (scenario === "async-question" && asyncDelivery && message.method === "turn/steer") {
     const text = message.params?.input?.find((input) => input?.type === "text")?.text;
-    if (!text?.includes("Question: Which path should I use?") || !text?.includes("Answer: Patch")) {
+    if (!text?.includes(`Question: ${asyncQuestionTitle}`) || !text?.includes("Answer: Patch")) {
       send({ id: message.id, error: { code: -32602, message: "uncorrelated async answer" } });
       return;
     }
@@ -160,7 +161,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     if (scenario === "async-question") {
       const text = message.params?.input?.find((input) => input?.type === "text")?.text;
       if (typeof text === "string" && text.includes("Answer: Patch")) {
-        if (!text.includes("Question: Which path should I use?")) {
+        if (!text.includes(`Question: ${asyncQuestionTitle}`)) {
           process.stderr.write("async answer was not correlated with its question\n");
           process.exitCode = 2;
           return;
@@ -176,7 +177,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       } else {
         send({ method: "item/completed", params: { threadId, turnId, item: {
           type: "agentMessage", id: "async-ask", text: "I will keep investigating.",
-          delivery: "async", questions: [{ title: "Which path should I use?", options: ["Patch", "Replace"] }],
+          delivery: "async", questions: [{ title: asyncQuestionTitle, options: ["Patch", "Replace"] }],
         } } });
         send({ method: "item/completed", params: { threadId, turnId, item: {
           type: "commandExecution", id: "continued-work", command: "inspect files", status: "completed", exitCode: 0,

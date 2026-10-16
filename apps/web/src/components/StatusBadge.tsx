@@ -64,7 +64,8 @@ export function StatusBadge({
           : tone === "success" ? "t-success"
             : tone === "warning" ? "t-warning"
               : tone === "danger" ? "t-danger"
-                : "t-neutral",
+                : tone === "review" ? "t-review"
+                  : "t-neutral",
         inline ? "inline" : "",
         noDot ? "no-dot" : pulse ? "pulse" : hollow ? "hollow" : "",
         className ?? "",
@@ -91,7 +92,8 @@ export function statusToneClass(tone: StatusTone): string {
     : tone === "success" ? "t-success"
       : tone === "warning" ? "t-warning"
         : tone === "danger" ? "t-danger"
-          : "t-neutral";
+          : tone === "review" ? "t-review"
+            : "t-neutral";
 }
 
 /** A count inside a status badge ("Answer Required 2"). The badge's accessible name says it in words. */

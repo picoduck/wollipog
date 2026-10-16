@@ -236,7 +236,7 @@ test("toggling shows the restart while the switch keeps its confirmed value", as
     const control = view.switch()!;
     assert.equal(control.getAttribute("aria-checked"), "false", "the switch keeps its confirmed value");
     assert.equal(control.getAttribute("aria-busy"), "true");
-    assert.ok(control.disabled, "a busy switch cannot be pressed again");
+    assert.equal(control.getAttribute("aria-disabled"), "true", "a busy switch cannot be pressed again");
     const busyLine = control.querySelector(".setting-row-desc-slot.is-busy > .setting-row-desc:last-child");
     assert.equal(busyLine?.textContent, "Restarting Wollipog on this machine…");
     // What a screen reader hears is the restart, not the hidden on/off sentence it covers.
@@ -268,6 +268,34 @@ test("a failed write shows the failure in place of the description with Try Agai
     assert.equal(retries, 1);
   } finally {
     await view.unmount();
+  }
+});
+
+test("Try Again on a failed write keeps focus on the switch while it saves and once it settles", async () => {
+  // As the shell's hook does: a write retry clears the error and is busy until the write settles.
+  const failed = tailnet({ error: "Tailscale refused the change." });
+  for (const settled of [
+    tailnet({ status: { available: true, enabled: true, managed: true } }),
+    failed,
+  ]) {
+    let retries = 0;
+    const view = await render({ ...failed, retry: () => { retries += 1; } });
+    try {
+      const tryAgain = view.button("Try Again")!;
+      tryAgain.focus();
+      await act(async () => { tryAgain.click(); });
+      assert.equal(retries, 1);
+      await view.rerender(tailnet({ busy: true }));
+      assert.equal(tryAgain.isConnected, false);
+      const saving = view.switch()!;
+      assert.equal(saving.getAttribute("aria-busy"), "true");
+      assert.ok(document.activeElement === saving, "the busy switch holds focus while the write runs, not <body>");
+      await view.rerender(settled);
+      const outcome = settled.error ? "a second failure" : "a write that succeeds";
+      assert.ok(document.activeElement === view.switch(), `focus stays on the switch after ${outcome}`);
+    } finally {
+      await view.unmount();
+    }
   }
 });
 

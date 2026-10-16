@@ -1,1 +1,0 @@
-|.rail-order-state|gap|8px

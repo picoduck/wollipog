@@ -8,9 +8,9 @@ export const THEME_OPTIONS: ReadonlyArray<{
   label: string;
   description: string;
 }> = [
-  { value: "system", label: "System", description: "Follow this device's appearance" },
-  { value: "light", label: "Light", description: "Always use the light palette" },
-  { value: "dark", label: "Dark", description: "Always use the dark palette" },
+  { value: "system", label: "System", description: "Follows your system's light or dark setting." },
+  { value: "light", label: "Light", description: "Always light." },
+  { value: "dark", label: "Dark", description: "Always dark." },
 ];
 
 /**
@@ -29,11 +29,11 @@ export const COLOR_SCHEMES: ReadonlyArray<{
   label: string;
   description: string;
 }> = [
-  { value: "wollipog", label: "Wollipog", description: "The logo's teal and orange on slate" },
-  { value: "github", label: "GitHub", description: "Primer's canvas and blue" },
-  { value: "one-dark", label: "One Dark", description: "Atom's original, and VS Code's most installed" },
-  { value: "dracula", label: "Dracula", description: "Purple and pink on charcoal" },
-  { value: "monokai", label: "Monokai", description: "The Sublime classic" },
+  { value: "wollipog", label: "Wollipog", description: "The logo's teal and orange on slate." },
+  { value: "github", label: "GitHub", description: "Primer's canvas and blue." },
+  { value: "one-dark", label: "One Dark", description: "Atom's original, and VS Code's most installed." },
+  { value: "dracula", label: "Dracula", description: "Purple and pink on charcoal." },
+  { value: "monokai", label: "Monokai", description: "The Sublime classic." },
 ];
 
 /**
@@ -109,8 +109,8 @@ export function applySchemeToDocument(document: Document, scheme: ColorScheme): 
 export type Density = "compact" | "comfortable";
 
 export const DENSITY_OPTIONS: ReadonlyArray<{ value: Density; label: string; description: string }> = [
-  { value: "compact", label: "Compact", description: "More on screen at once" },
-  { value: "comfortable", label: "Comfortable", description: "More room around each row" },
+  { value: "compact", label: "Compact", description: "Fits more on screen." },
+  { value: "comfortable", label: "Comfortable", description: "Adds space between rows." },
 ];
 
 export const DENSITY_STORAGE_KEY = "wollipog.density";

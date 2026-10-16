@@ -16,6 +16,7 @@ import {
   guardStateClassifierWork,
   guardStateRelation,
   pathTargetsGuardState,
+  prepareGuardStateCommand,
 } from "./managed-worktree-protection.js";
 import { runnerReentryCommand } from "./runner-reentry.js";
 import {
@@ -1313,14 +1314,23 @@ test("a variable the command itself assigns is judged by its value (#1632 review
   assert.equal(commandTargetsGuardState("S=/tmp/x; for d in a b; do cat $S/$d/outdated.txt; done", project, directory), null);
 });
 
-test("a command the tokenizer cannot parse is refused for that reason, not blamed on guard state (#1632)", (t) => {
+test("a ${...} the tokenizer cannot parse is refused as a documented residual, not blamed on guard state (#1734)", (t) => {
   const { project, directory } = guardLayout(t);
-  // A quoted heredoc is never expanded by the shell, but the tokenizer rejects a `${...}` holding a
-  // quote, which is what every JS template literal with a string argument looks like.
-  for (const command of ["node - <<'EOF'\nconsole.log(`${items.join(\", \")}`)\nEOF", "echo ${x"]) {
+  // The `${...}` reduction was removed (it caused the round-2/round-3 bypasses CR-2.6 and CR-3.2), so
+  // a substitution the tokenizer rejects outside a heredoc — an embedded space, a `%`/`#`/`:`
+  // operator, an executable inner, an unbalanced brace, or a kept interpreter heredoc body — is
+  // refused. That is an accepted residual (the issue's `${...}` cases live inside heredoc bodies).
+  for (const command of [
+    "echo ${r%% *}", "echo ${scrollHeight - 500}", "echo ${x", "echo \"${y",
+    "echo ${X:-$(cat ../.wollipog-data/hooks/s1.protections.json)}",
+    "node - <<'EOF'\nconsole.log(`${items.join(\", \")}`)\nEOF",
+  ]) {
+    assert.ok(commandTargetsGuardState(command, project, directory) !== null, command);
+  }
+  // A balance failure names the tokenizer as the reason, not the guard state.
+  for (const command of ["echo ${x", "echo \"${y"]) {
     const verdict = commandTargetsGuardState(command, project, directory);
-    assert.ok(verdict?.startsWith(GUARD_STATE_UNINSPECTABLE_PREFIX), `${command}: ${verdict}`);
-    assert.ok(verdict?.includes("Bad substitution"), `${command}: ${verdict}`);
+    assert.ok(verdict?.startsWith(GUARD_STATE_UNINSPECTABLE_PREFIX) && verdict.includes("Bad substitution"), `${command}: ${verdict}`);
     assert.notEqual(verdict, GUARD_STATE_REFUSAL);
   }
   // An unparsable command that names the hook directory outright keeps the guard-state refusal.
@@ -1333,21 +1343,25 @@ test("a command the tokenizer cannot parse is refused for that reason, not blame
 
 const REFUSED_IN_1696 = new URL("./fixtures/guard-refusals-1632/", import.meta.url);
 
-test("the heredocs refused while delivering #1696 are attributed to their real cause (#1632)", (t) => {
+test("a single-command cat heredoc writing a worktree file is allowed; #1696 multi-command wrappers stay refused (#1734)", (t) => {
   const { project, directory } = guardLayout(t);
-  // Both carry a JS template literal inside a quoted heredoc, which the tokenizer rejects.
-  for (const name of ["heredoc-jsx-template.txt", "heredoc-js-template.txt"]) {
+  // The core #1734 allow: one `cat > file <<'EOF'` whose quoted body holds `/`, `//`, and `${...}`
+  // as text is inert data copied to a worktree file — stripped and allowed.
+  assert.equal(commandTargetsGuardState(
+    "cat > SkillsView.tsx <<'EOF'\n<button onClick={() => setDialog(\"git-update\")} />\nconst u = a // b / c\nEOF",
+    project, directory), null);
+  // The #1696 fixtures are NOT that narrow shape — they are `python3 - <<'EOF'` scripts or
+  // `cd && mkdir && cat > … && node … | grep` pipelines — so the body is kept and scanned, and the
+  // command is refused when it names an ancestor (acceptable under the user's constraint: only the
+  // exact single-command `cat`/`tee` heredoc shape is stripped).
+  for (const name of ["heredoc-js-template.txt", "heredoc-js-comment.txt"]) {
     const command = readFileSync(new URL(name, REFUSED_IN_1696), "utf8").replaceAll("<session-worktree>", project);
-    const verdict = commandTargetsGuardState(command, project, directory);
-    assert.ok(verdict?.startsWith(GUARD_STATE_UNINSPECTABLE_PREFIX) && verdict.includes("Bad substitution"),
-      `${name}: ${verdict}`);
+    assert.ok(commandTargetsGuardState(command, project, directory) !== null, name);
   }
-  // This one parses, but its body's `// comment` reads as the word `//`: the root directory, which
-  // encloses the hook directory. A heredoc is not modelled, so it stays refused, and says why.
-  const comment = readFileSync(new URL("heredoc-js-comment.txt", REFUSED_IN_1696), "utf8")
-    .replaceAll("<session-worktree>", project);
-  const verdict = commandTargetsGuardState(comment, project, directory);
-  assert.ok(verdict?.startsWith(GUARD_STATE_UNINSPECTABLE_PREFIX) && verdict.includes("heredoc"), verdict ?? "");
+  // A heredoc whose body reaches the hook state is refused: the quoted body of an interpreter is kept
+  // and scanned, so a Python edit that opens the protections file is caught.
+  const reaching = "python3 - <<'EOF'\nopen('../.wollipog-data/hooks/s1.protections.json').read()\nEOF";
+  assert.equal(commandTargetsGuardState(reaching, project, directory), GUARD_STATE_REFUSAL);
 });
 
 test("an unmodelled command naming a directory that holds the guard state stays refused (#1632)", (t) => {
@@ -1359,7 +1373,6 @@ test("an unmodelled command naming a directory that holds the guard state stays 
     `ls ${home} | xargs rm -rf`,
     `rm -rf \`echo ${data}\``,
     `python3 - <<'EOF'\nimport shutil\nshutil.rmtree('${data}')\nEOF`,
-    `cat > /tmp/x <<'EOF'\n// a comment\nEOF`,
   ]) {
     const verdict = commandTargetsGuardState(command, project, directory);
     assert.ok(verdict?.startsWith(GUARD_STATE_UNINSPECTABLE_PREFIX), `${command}: ${verdict}`);
@@ -1377,4 +1390,298 @@ test("an unmodelled command naming a directory that holds the guard state stays 
   // An unmodelled command that names nothing related is still allowed, as before.
   assert.equal(commandTargetsGuardState("cat > /tmp/x <<'EOF'\nhello\nEOF", project, directory), null);
   assert.equal(commandTargetsGuardState("ls /usr | wc -l", project, directory), null);
+  // A copy-only `cat >` writing a quoted heredoc body is now allowed even when the body holds `//`,
+  // `/`, or a `${...}` the tokenizer rejects: the body is inert data, not a path (#1734).
+  assert.equal(commandTargetsGuardState("cat > /tmp/x <<'EOF'\n// a comment\nEOF", project, directory), null);
+});
+
+test("ordinary commands reaching nothing are allowed, and every real access stays refused (#1734)", (t) => {
+  const { home, project, data, directory } = guardLayout(t);
+  const into = "../.wollipog-data/hooks/s1.protections.json"; // relative, so the raw-text scan cannot catch it
+  // ALLOWED: a quoted heredoc body written to a worktree path is inert data — its `/`, `//`, `${...}`,
+  // or even the hook directory's own path as text no longer read as a path the command touches.
+  for (const command of [
+    "cat > a.ts <<'EOF'\n// a / b\nEOF",
+    "cat >> x.test.ts <<'EOF'\nconst u = a//b; // c\nEOF",
+    "cat > a.ts <<'EOF'\nconst x = `${scrollHeight - 500}`;\nEOF",
+    "cat > a.ts <<'EOF'\nid = ${spec.sessionId}\nEOF",
+    "tee out.txt <<'EOF'\n/usr/bin\nEOF",
+    `cat > notes.md <<'EOF'\n${directory}\nEOF`,
+    "cat > scratch.ts <<'EOF'\n/ // ${x}\nEOF",
+    // A `#` that is escaped (not dropped) keeps the real command intact; a body `#` does not swallow.
+    "echo done # a trailing note",
+    "echo $'hi' # a note",
+    "bash <<'EOF'\necho hi # a note\nEOF\necho done",
+    "bash <<'EOF'\nx=a#/b\nEOF\necho done",
+    "bash <<'EOF'\n#!/bin/sh\necho hi\nEOF\necho done",
+    // AC1: a SINGLE simple command that NAMES `/`, `//`, or `~` but cannot reach is allowed — a pure
+    // builtin (echo/true/false/:) opens none of its operands. (grep/sed/awk were dropped from AC1 as
+    // they could not be made whitelist-tight, and `printf` because `printf -v 'arr[$(cmd)]'` executes
+    // a substitution — CR-4.2; `grep '//'`, `printf … //`, `true /`, `: /` are documented residuals.)
+    // Round 4 (user scope): the exemption is the literal, unquoted `echo` ALONE.
+    "echo /", "echo // ~", "  echo /",
+    // sed/awk with the slash embedded in the script word (not a standalone ancestor) still allow.
+    "sed 's|/|_|g' file", "awk '/\\//{print}' file",
+  ]) {
+    assert.equal(commandTargetsGuardState(command, project, directory), null, command);
+  }
+  // REFUSED: every real access to the hook state, including the shapes the tokenizer once mis-read.
+  for (const command of [
+    // A heredoc written INTO the hook directory, or read of it after a heredoc, is still refused.
+    `cat > ${join(directory, "s1.protections.json")} <<'EOF'\n{}\nEOF`,
+    `cat >> ${join(directory, "s1.protections.json")} <<'EOF'\nx\nEOF`,
+    `cat > a.ts <<'EOF'\nbody\nEOF\ncat ${into}`,
+    `cat ${into} <<'EOF'\nbody\nEOF`,
+    // A comment must not swallow the command that follows it (an under-refusal before #1734), and a
+    // literal hook path in a comment is still refused (the text scan keeps comments).
+    `echo x#; cat ${into}`,
+    `ls # a comment\ncat ${into}`,
+    `echo x#; echo y > ${into}`,
+    `# cat ${join(directory, "s1.protections.json")}`,
+    // A `${...}` default value is text bash substitutes, so a hook path in one is still refused: the
+    // reduction that makes it tokenize must not hide the path from the text scan.
+    `cat \${VAR:-${join(directory, "s1.protections.json")}}`,
+    `cat \${VAR:=${join(directory, "s1.protections.json")}}`,
+    `echo \${VAR:+${join(directory, "s1.protections.json")}}`,
+    // ANSI-C `$'...'` must not desync the comment or quote state around a reaching command, and a
+    // hook path inside one is still refused. A carriage return is a command boundary, not cover.
+    `echo $'x'#; cat ${into}`,
+    `cat $'${join(directory, "s1.protections.json")}'`,
+    `echo x#\rcat ${into}`,
+    `echo $$'x'#; cat ${into}`,
+    // A heredoc whose body is never stripped-and-swallowed: a mis-read `$`-delimiter, an
+    // unterminated body, or a CR before the terminator must not hide the command that follows.
+    `cat > f.ts <<$'EOF'\nbody\nEOF\ncat ${into}`,
+    `cat > f.ts <<'EOF'\nbody\ncat ${into}`,
+    `cat > f.ts <<'EOF'\nbody\nEOF\rcat ${into}`,
+    // A `#` in a KEPT body, or in a heredoc delimiter, must not run the tokenizer's comment to the
+    // end of the command and swallow the read that follows the heredoc.
+    `bash <<'EOF'\n# only a comment\nEOF\ncat ${into}`,
+    `python3 - <<'EOF'\nx = 1  # c\nEOF\ncat ${into}`,
+    `cat <<E#F\nbody\nE#F\ncat ${into}`,
+    // A `#` in a kept body must not drop the rest of the line: a reach after a quoted `#` on the
+    // same body line is still scanned (the `#` is escaped, not used to truncate).
+    `bash <<'EOF'\nrm "a # b" ${into}\nEOF`,
+    `bash <<'EOF'\necho "x # y" && cat ${into}\nEOF`,
+    // An UNQUOTED heredoc expands, so its body is kept and scanned, conservatively.
+    `cat > a.ts <<EOF\n${into}\nEOF`,
+    // A body handed to a shell is executed, so it is kept and scanned.
+    `bash <<'EOF'\nrm -rf ${into}\nEOF`,
+    // Codex round-1 class: an earlier command that can rebind the consumer, a delimiter whose
+    // quote-removed terminator the tokenizer would mismatch, or a bare CR, must all keep the body —
+    // otherwise a stripped body swallows the read that follows it (#1734).
+    `hash -p /bin/bash cat; cat <<'EOF'\n/bin/cat ${join(directory, "s1.protections.json")}\nEOF`,
+    `alias cat=rm; cat > f <<'EOF'\n${into}\nEOF`,
+    `function cat { rm; }; cat > f <<'EOF'\n${into}\nEOF`,
+    `source ./x; cat > f <<'EOF'\n${into}\nEOF`,
+    `export PATH=/x; cat > f <<'EOF'\n${into}\nEOF`,
+    `PATH=/x; cat > f <<'EOF'\n${into}\nEOF`,
+    `cat <<"E\\OF"\nbody\nE\\OF\ncat ${join(directory, "s1.protections.json")}`,
+    `cat > f <<\\EOF\n${into}\nEOF`,
+    `echo hi # ignored\rcat <<'EOF'\ncat ${join(directory, "s1.protections.json")}\nEOF`,
+    // Codex round-2 class: only the exact single-command `cat`/`tee` heredoc shape strips, so a
+    // quoted/escaped/leading-redirect rebind, a process substitution, and a staged script run after
+    // the terminator all keep the body; an executable `${...}` is kept verbatim for the tokenizer.
+    `"hash" -p /bin/bash cat; cat <<'EOF'\n/bin/cat ${join(directory, "s1.protections.json")}\nEOF`,
+    `\\hash -p /bin/bash cat; cat <<'EOF'\n${into}\nEOF`,
+    `>x hash -p /bin/bash cat; cat <<'EOF'\n${into}\nEOF`,
+    `cat <<'EOF' > >(bash)\n${into}\nEOF`,
+    `cat > payload.sh <<'EOF'\n${into}\nEOF\nbash payload.sh`,
+    `grep / -R ${home}`,
+    `unset X; : \${X:-$(cat ${into})}`,
+    // Narrow-shape residuals (conservative, acceptable): a heredoc with no redirect or `<<-`, and a
+    // pure builtin with a redirect, are not the exact strippable shape, so a reach is still refused.
+    `cat <<'EOF'\n${into}\nEOF`,
+    `cat <<-'EOF'\n${into}\nEOF`,
+    `echo / > ${join(directory, "x")}`,
+    // Codex round-3 class: a `#` comment or an escaped `<` before the `<<`, an ANSI-C quote that
+    // desyncs a modeller, and brace expansion before the ancestor exemption — all closed by the
+    // whitelist (the first line / every word must be whitelist-clean), so each keeps the reach.
+    `tee # <<'EOF'\ncat ${join(directory, "s1.protections.json")}\nEOF`,
+    `cat > f\\<<'EOF'\ncat ${join(directory, "s1.protections.json")}\nEOF`,
+    `echo $'\\'\${X'; cat ${into}; echo '}'`,
+    `grep / {-R,${into}}`,
+    // Documented residuals now refused: a `${...}` the tokenizer rejects outside a heredoc, a
+    // grep/sed/awk pattern naming a standalone ancestor, and — the round-4 user scope — every builtin
+    // but the literal, unquoted `echo` (printf/true/false/: dropped from AC1).
+    "echo ${r%% *}",
+    "grep '//' file.ts",
+    "printf '%s\\n' //",
+    "true /",
+    ": /",
+    // A command word that only TOKENIZES to `echo` (quoted, escaped) is not the literal spelling the
+    // whitelist can reason about, so it does not get the exemption (CR-4.2 hardening).
+    "'echo' /",
+    "ec\\ho /",
+    // CR-4.2: `printf -v` evaluates an array subscript and executes a substitution even from a
+    // single-quoted argument the whitelist treats as opaque, so the standalone `/` stays refused —
+    // including the `-vX`, attached `-v'…'`, and `-- -v` spellings.
+    `printf -v 'slot[$(cat ${into} >&2)]' /`,
+    `printf -vX 'slot[$(cat ${into} >&2)]' /`,
+    `printf -v'slot[$(cat ${into} >&2)]' /`,
+    `printf -- -v 'slot[$(cat ${into} >&2)]' /`,
+    // The ancestor and root triggers the report lists.
+    "find / -name s1.protections.json",
+    `cd / && cat ${directory.slice(1)}/s1.protections.json`,
+    "rm -rf /",
+    `grep -r token ${home}`,
+    // AC1 must-refuse: recursion, an option that moves/takes the positional, a file-position
+    // ancestor, a non-pure command, a write into the state, or a pipe out of a pure command all keep
+    // the ancestor a reaching path.
+    `grep -R x ${home}`,
+    `grep -e / file`,
+    `grep -f / file`,
+    `rg x ${home}`,
+    `sed -i 's/a/b/' ${home}`,
+    `awk -f / file`,
+    `grep x ${home}`,
+    "cat /",
+    `echo / > ${join(directory, "x")}`,
+    "printf %s / | xargs cat",
+  ]) {
+    assertGuardRefused(commandTargetsGuardState(command, project, directory), command);
+  }
+});
+
+test("the bash-faithful pre-pass never throws and opens no bypass under noise (#1734)", (t) => {
+  const { project, directory } = guardLayout(t);
+  // The scanner tolerates any input, and its rewrite never INTRODUCES a NUL (the one byte the
+  // classifier treats as an unresolved reference) — a NUL in the output only ever came from the input
+  // (which `commandTargetsGuardState` already rejects before preparing).
+  fc.assert(fc.property(fc.string({ maxLength: 160 }), (s) => {
+    commandTargetsGuardState(s, project, directory);
+    if (s.includes("\0")) return true;
+    const prepared = prepareGuardStateCommand(s);
+    return !prepared.scan.includes("\0") && !prepared.parse.includes("\0");
+  }), { numRuns: 1500 });
+  // A command whose operand reads or writes the hook file is refused whatever comment, heredoc, or
+  // substitution noise precedes it: the pre-pass must never drop the reaching word.
+  const reaching = fc.constantFrom(
+    join(directory, "s1.protections.json"),
+    "../.wollipog-data/hooks/s1.protections.json",
+    join(directory, "sub", "..", "s1.protections.json"),
+  );
+  const verb = fc.constantFrom("cat", "rm -rf", "cp /tmp/x", "mv", "stat", "truncate -s0");
+  const noise = fc.constantFrom(
+    "", "echo hi; ", "echo a#; ", "ls # c\n", "x=1; ", "printf $'x\\n'; ", "echo $$'q'; ",
+    "cat > f.ts <<'EOF'\n// a / b ${x}\nEOF\n", "cat >> g.ts <<'EOF'\nconst z=`${a - 1}`//c\nEOF\n",
+    "cat > f.ts <<'EOF'\nbody\n", "cat > f.ts <<$'EOF'\nbody\nEOF\n", // unterminated / `$`-delimiter
+  );
+  fc.assert(fc.property(reaching, verb, noise, (path, v, pre) =>
+    commandTargetsGuardState(`${pre}${v} ${path}`, project, directory) !== null), { numRuns: 2000 });
+});
+
+test("a heredoc never strips the command that follows it, whatever precedes it (#1734 Codex round 1)", (t) => {
+  const { project, directory } = guardLayout(t);
+  const abs = join(directory, "s1.protections.json");
+  // [prefix] + heredoc + [read of the state]. The read sits AFTER the heredoc, so bash executes it
+  // (or, for an unterminated heredoc, treats it as body the guard keeps and scans). Either way the
+  // read is still seen: no prefix that rebinds the consumer, no delimiter form, and no carriage
+  // return may let the body strip remove it from both readings.
+  const prefix = fc.constantFrom(
+    "", "cd x && ", "mkdir -p y && ", "git stash && ",
+    "hash -p /bin/bash cat; ", "alias cat=rm; ", "function cat { rm; }; ", "cat() { rm; }; ",
+    "PATH=/x ", "export PATH=/x; ", "source ./z; ", "eval foo; ", "echo hi # c\n",
+  );
+  const heredoc = fc.constantFrom(
+    "cat > f <<'EOF'\nb\nEOF\n", "cat > f <<\"EOF\"\nb\nEOF\n", "tee f <<'EOF'\nb\nEOF\n",
+    "cat > f <<\\EOF\nb\nEOF\n", "cat > f <<\"E\\OF\"\nb\nE\\OF\n", "cat > f <<$'EOF'\nb\nEOF\n",
+    "cat > f <<'EOF'\nb\n", "cat > f <<'EOF'\nb\nEOF\r", "cat <<'EOF' | sh\nb\nEOF\n",
+  );
+  const read = fc.constantFrom(`cat ${abs}`, `/bin/cat ${abs}`, `head ${abs}`, `rm -rf ${abs}`);
+  fc.assert(fc.property(prefix, heredoc, read, (p, h, r) =>
+    commandTargetsGuardState(`${p}${h}${r}\n`, project, directory) !== null), { numRuns: 3000 });
+});
+
+test("injecting any forbidden character into a strippable shape falls back to scanning the body (#1734 Codex round 3)", (t) => {
+  const { project, directory } = guardLayout(t);
+  const abs = join(directory, "s1.protections.json");
+  // A character the whitelist does not recognise anywhere in the command line must disqualify the
+  // strip, so the body — here a read of the hook file — is kept and scanned, and refused. This is
+  // the regression guard for the "syntax the pre-pass doesn't model" class (comments, escapes,
+  // substitutions, braces, globs, extra quotes/operators).
+  // `<`/`>` are deliberately excluded: they are structural operators the whitelist DOES model, so an
+  // injected `>` can form a valid `>>` append rather than breaking the shape. Everything here is a
+  // character no whitelisted shape recognises (comment, escape, substitution, brace, glob, operator,
+  // quote, odd whitespace, tilde) — exactly the syntax classes that produced the round 1–3 bypasses.
+  const forbidden = fc.constantFrom("#", "\\", "$", "`", "(", ")", "{", "}", "*", "?", "[", "]",
+    ";", "&", "|", '"', "  ", "\t", "\r", "~");
+  const shape = fc.constantFrom(
+    (x: string) => `cat > t${x}gt <<'EOF'\n/bin/cat ${abs}\nEOF`,
+    (x: string) => `cat ${x}> tgt <<'EOF'\n/bin/cat ${abs}\nEOF`,
+    (x: string) => `tee tgt${x} <<'EOF'\n/bin/cat ${abs}\nEOF`,
+    (x: string) => `cat > tgt <<'EOF${x}'\n/bin/cat ${abs}\nEOF`,
+  );
+  fc.assert(fc.property(forbidden, shape, (ch, make) =>
+    commandTargetsGuardState(make(ch), project, directory) !== null), { numRuns: 2000 });
+  // Control: the same shapes WITHOUT a forbidden character strip the body (a worktree file write),
+  // so a benign body is allowed — confirming the fallback above is caused by the injected character.
+  for (const make of [
+    (b: string) => `cat > tgt <<'EOF'\n${b}\nEOF`,
+    (b: string) => `tee tgt <<'EOF'\n${b}\nEOF`,
+  ]) {
+    assert.equal(commandTargetsGuardState(make("// a / b"), project, directory), null, make("// a / b"));
+  }
+});
+
+test("a '#' inside a reaching path cannot slip the veto via the comment-escape (#1734 parser differential)", (t) => {
+  const { directory, project } = guardLayout(t);
+  // `prepareGuardStateCommand` escapes every `#` to `\#` so shell-quote cannot run a comment to the
+  // end of the command and swallow a later reach. Escaping only ADDS a backslash; a backslash is not
+  // special to path resolution, and the hook-state paths hold no `#`, so a reaching operand that
+  // carries a `#` (quoted, double-quoted, unquoted, or hidden behind a `..` pop) still resolves into
+  // the directory and is refused. These guard the escape against the parser-differential class.
+  const rel = "../.wollipog-data/hooks/s1.protections.json";
+  const absHash = join(directory, "x#y/../s1.protections.json"); // a `#` segment the `..` pops away
+  for (const command of [
+    `cat '${rel.replace("hooks/", "hooks/x#y/../")}'`, // single-quoted, `#` popped by `..`
+    `cat "${rel.replace("hooks/", "hooks/x#y/../")}"`, // double-quoted
+    `cat ${rel.replace("hooks/", "hooks/x#y/../")}`, // unquoted (bash: non-word-start `#` is literal)
+    `cat '${rel}/#/..'`, // the file reached as a dir through a `#` segment
+    `cat '${absHash}'`, // the same trick on the absolute path
+    `cat '${rel}#'`, // a sibling INSIDE the hook dir (its name ends in `#`) is still inside → refused
+  ]) {
+    assert.ok(commandTargetsGuardState(command, project, directory) !== null, command);
+  }
+});
+
+test("a quoted '#'-named symlink into the hook directory is refused despite the comment-escape (#1734 Codex round 4 CR-4.1)", (t) => {
+  const { project, directory } = guardLayout(t);
+  // A worktree symlink whose name contains `#` points into the hook dir; bash follows it and reads
+  // the state. The `#`->\# escape would corrupt the quoted token (`alias\#`) for realpath, so the
+  // classifier must resolve the token with `\#` un-escaped too. Before the fix this was allowed.
+  symlinkSync(directory, join(project, "alias#"));
+  symlinkSync(directory, join(project, "q#dir"));
+  symlinkSync(directory, join(project, "a#b"));
+  for (const command of [
+    "cat 'alias#/s1.protections.json'", // single-quoted — the CR-4.1 scenario
+    'cat "q#dir/s1.protections.json"', // double-quoted variant
+    "cat alias#/s1.protections.json", // unquoted variant (shell-quote comments the `#` away → body kept)
+    "cat 'a#b/s1.protections.json'", // an `a#b`-style name
+    "cat 'alias#/./s1.protections.json'", // a `#` mid-path, not just leading
+    "rm -rf 'alias#'", // writing the symlinked directory itself is refused
+  ]) {
+    assert.ok(commandTargetsGuardState(command, project, directory) !== null, command);
+  }
+});
+
+test("an ANSI-C $'…' quote cannot desync the comment-escape to swallow a reaching command (#1734 Codex round 4)", (t) => {
+  const { project, directory } = guardLayout(t);
+  const into = "../.wollipog-data/hooks/s1.protections.json";
+  // bash closes `$'\''` only at the UNESCAPED `'`, so after it the `#` in `x#` is unquoted and the
+  // `; cat <state>` runs. A naive single-quote tracker reopens a quote at the stray `'` and skips
+  // escaping that `#`, letting shell-quote run a comment to the end of the string and hide the read.
+  // The tracker models `$'…'`, and a surviving comment token fails closed — both must refuse.
+  for (const command of [
+    `echo $'\\'' x#; cat ${into}; echo \\'`,
+    `echo $'\\n' x#; cat ${into}`,
+    `X=$'\\''; echo a#; cat ${into}`,
+  ]) {
+    assert.ok(commandTargetsGuardState(command, project, directory) !== null, command);
+  }
+  // Benign ANSI-C strings followed by a real comment stay allowed: the tracker closes `$'…'` where
+  // bash does, escapes the later `#`, and no comment token survives.
+  for (const command of ["echo $'hi' # a note", "echo $'a\\tb' # note"]) {
+    assert.equal(commandTargetsGuardState(command, project, directory), null, command);
+  }
 });

@@ -30,6 +30,7 @@ import {
   AGENT_CONTROL_RELAY_KEY_ENV,
   agentControlRelayFetch,
 } from "./agent-control-relay.js";
+import { AGENT_CONTROL_RELAY_FIFO_ENV, agentControlFifoRelayFetch } from "./agent-control-fifo-relay.js";
 
 type Write = (text: string) => void;
 
@@ -646,8 +647,19 @@ async function compatible(
     }
     return { error: null, protocolVersion: body.protocolVersion };
   } catch (error) {
-    return { error: `control plane compatibility check failed: ${(error as Error).message}` };
+    return { error: `control plane compatibility check failed: ${(error as Error).message}${sandboxRefusalHint(error)}` };
   }
+}
+
+/** A provider sandbox without network access refuses every connect() with EPERM, loopback and
+ * Unix sockets included (#3270). Name that cause and the path that still works, instead of leaving
+ * a bare errno for the agent to puzzle over. */
+function sandboxRefusalHint(error: unknown): string {
+  const codes = [error, (error as { cause?: unknown } | null)?.cause]
+    .map((candidate) => (candidate as NodeJS.ErrnoException | null | undefined)?.code);
+  return codes.includes("EPERM")
+    ? ". This command's sandbox blocks network and loopback connections, so the Wollipog CLI cannot reach the runner from here; use the wollipog MCP tools instead, or run the command outside the sandbox"
+    : "";
 }
 
 export async function runWollipogCli(
@@ -726,7 +738,13 @@ export async function runWollipogCli(
       token = readToken(env, explicitTokenFile);
     } else if (relayEndpoint || relayKey) {
       if (!relayEndpoint || !relayKey) throw new Error("incomplete runner relay configuration");
-      activeFetch = agentControlRelayFetch(relayEndpoint, relayKey);
+      // A shell command may run inside a provider sandbox that refuses every socket, so the CLI
+      // takes the session's FIFO channel when the runner injected one (#3270). The MCP adapter
+      // runs outside any provider sandbox and keeps the loopback relay.
+      const fifoRelay = env[AGENT_CONTROL_RELAY_FIFO_ENV];
+      activeFetch = fifoRelay
+        ? agentControlFifoRelayFetch(fifoRelay, relayKey)
+        : agentControlRelayFetch(relayEndpoint, relayKey);
     } else {
       token = readToken(env, option(args, "--token-file"));
     }
@@ -793,7 +811,10 @@ export async function runWollipogCli(
   const data = payload(result);
   if (json) io.stdout(`${JSON.stringify(data)}\n`);
   else io.stdout(`${JSON.stringify(data, null, 2)}\n`);
-  return result.isError ? 1 : 0;
+  if (result.isError) return 1;
+  // `session wait` exits like `pr wait`: 124 when the timeout elapsed first, so scripts can tell
+  // an unreached state from success without parsing the summary (#3269).
+  return parsed.tool === "wait_session" && (data as { outcome?: unknown }).outcome === "timeout" ? 124 : 0;
 }
 
 export async function runAgentControlMcp(env: NodeJS.ProcessEnv): Promise<void> {

@@ -30,6 +30,7 @@ import { campaignOperationEvidence } from "../campaign-operation-evidence.js";
 import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
 import {
   killTree,
+  ProviderProcessLedger,
   spawnAgent,
   terminateDescendantBoundaries,
   type AgentProcess,
@@ -48,7 +49,8 @@ import type {
 } from "./driver.js";
 import { classifyPoisonedProviderHistory, poisonedProviderHistoryMessage } from "./poisoned-provider-history.js";
 import { providerRejectionShape } from "./provider-rejection-shape.js";
-import { isProviderAuthenticationFailure } from "./provider-auth-failure.js";
+import { isProviderAuthenticationFailure, shouldRecoverProviderAuthentication } from "./provider-auth-failure.js";
+import { codexFailureCategory, type ProviderFailureCategory } from "./provider-failure.js";
 import { codexHttpFallbackWarning, codexInferenceConfiguration, type CodexInferenceConfiguration } from "./codex-inference-transport.js";
 import { stagePromptImages, type StagedPromptImages } from "./prompt-images.js";
 import {
@@ -447,6 +449,25 @@ export class CodexAppServerInitializationStalledError extends Error {
   }
 }
 
+/** `thread/fork` must settle within this bound (#3146). It copies the source thread's history, so
+ * it shares the launch handshake's allowance; an unanswered one would leave the fork pending with
+ * no error. */
+export const CODEX_THREAD_FORK_REQUEST_TIMEOUT_MS = 120_000;
+
+/** `thread/archive` is best-effort cleanup of a failed fork's provider thread (#3146). The fork
+ * failure is reported only after it settles, so its bound is kept short. */
+export const CODEX_THREAD_ARCHIVE_REQUEST_TIMEOUT_MS = 30_000;
+
+/** A request outside the launch handshake that did not settle within its bound. The message names
+ * only the method, never request or provider payload. */
+export class CodexAppServerRequestStalledError extends Error {
+  readonly name = "CodexAppServerRequestStalledError";
+
+  constructor(readonly method: string, timeoutMs: number) {
+    super(`Codex app-server did not answer ${method} within ${formatDuration(timeoutMs)}`);
+  }
+}
+
 function formatDuration(ms: number): string {
   return ms % 1_000 === 0 ? `${ms / 1_000} seconds` : `${ms} ms`;
 }
@@ -553,6 +574,7 @@ export class CodexAppServerDriver implements Driver {
    * answering turn/start with an error, or the driver refusing to send it, proves non-delivery;
    * a transport failure after the write does not. */
   private turnStartError: string | null = null;
+  private turnFailureCategory: ProviderFailureCategory | null = null;
   private turnStartUndelivered = false;
   private promptBusy = false;
   /** Provider diagnostics are held until startup succeeds so an expected unsupported-feature
@@ -563,9 +585,12 @@ export class CodexAppServerDriver implements Driver {
   private readonly spawn: typeof spawnAgent;
   private readonly kill: typeof killTree;
   private readonly readRolloutProof: typeof readCodexRolloutCompletedCommand;
-  private readonly descendantOwner = {};
+  /** Every process this instance starts; its owner is each spawn's descendantOwner. */
+  private readonly processes = new ProviderProcessLedger();
   private readonly deps: { permissionProfile: typeof decideCodexPermissionProfile };
   private readonly initializationRequestTimeoutMs: number;
+  private readonly forkRequestTimeoutMs: number;
+  private readonly archiveRequestTimeoutMs: number;
   /**
    * The permission-profile base the running app-server carries, or null when it carries none.
    * Bound at spawn, because a profile is selected by config and `turn/start` has no per-turn
@@ -601,6 +626,8 @@ export class CodexAppServerDriver implements Driver {
       readRolloutProof: typeof readCodexRolloutCompletedCommand;
       permissionProfile: typeof decideCodexPermissionProfile;
       initializationRequestTimeoutMs: number;
+      forkRequestTimeoutMs: number;
+      archiveRequestTimeoutMs: number;
     }> = {},
   ) {
     this.cwd = opts.cwd;
@@ -610,6 +637,8 @@ export class CodexAppServerDriver implements Driver {
     this.readRolloutProof = deps.readRolloutProof ?? readCodexRolloutCompletedCommand;
     this.deps = { permissionProfile: deps.permissionProfile ?? decideCodexPermissionProfile };
     this.initializationRequestTimeoutMs = deps.initializationRequestTimeoutMs ?? CODEX_INITIALIZATION_REQUEST_TIMEOUT_MS;
+    this.forkRequestTimeoutMs = deps.forkRequestTimeoutMs ?? CODEX_THREAD_FORK_REQUEST_TIMEOUT_MS;
+    this.archiveRequestTimeoutMs = deps.archiveRequestTimeoutMs ?? CODEX_THREAD_ARCHIVE_REQUEST_TIMEOUT_MS;
   }
 
   /** Send one launch handshake request under the initialization bound (#3099). This returns the
@@ -647,6 +676,10 @@ export class CodexAppServerDriver implements Driver {
 
   lastTurnError(): string | null {
     return this.turnStartError;
+  }
+
+  lastTurnFailureCategory(): ProviderFailureCategory | null {
+    return this.turnFailureCategory;
   }
 
   lastPromptUndelivered(): boolean {
@@ -771,12 +804,12 @@ export class CodexAppServerDriver implements Driver {
 
   async forkSession(lastTurnId: string, cwd: string): Promise<string> {
     if (!this.peer || !this.threadId) throw new Error("Codex app-server thread is not ready to fork");
-    const res = await this.peer.request<Json>("thread/fork", {
+    const res = await this.boundedRequest<Json>("thread/fork", {
       threadId: this.threadId,
       lastTurnId,
       cwd,
       ...configuredServiceTier(this.config, this.opts.capabilities),
-    });
+    }, this.forkRequestTimeoutMs);
     const id = res?.thread?.id;
     if (typeof id !== "string" || !id) throw new Error("Codex fork did not return a thread id");
     return id;
@@ -784,7 +817,19 @@ export class CodexAppServerDriver implements Driver {
 
   async archiveSession(threadId: string): Promise<void> {
     if (!this.peer) throw new Error("Codex app-server is not running");
-    await this.peer.request("thread/archive", { threadId });
+    await this.boundedRequest("thread/archive", { threadId }, this.archiveRequestTimeoutMs);
+  }
+
+  /** Send a request that fails with a method-named error once its bound passes (#3146). A live
+   * session may stream large records meanwhile, so a discarded record does not fail it early.
+   * Provider errors pass through unchanged. */
+  private async boundedRequest<T>(method: string, params: Json, timeoutMs: number): Promise<T> {
+    try {
+      return await this.peer!.request<T>(method, params, { deadlineAt: Date.now() + timeoutMs });
+    } catch (error) {
+      if ((error as RpcError | undefined)?.requestTimeout) throw new CodexAppServerRequestStalledError(method, timeoutMs);
+      throw error;
+    }
   }
 
   setConfig(config: SessionConfig): void {
@@ -823,8 +868,9 @@ export class CodexAppServerDriver implements Driver {
     // shape exempts servers the agent definition's own launch arguments declare (ADR 0011); the
     // preset's audited boundary keeps nothing but Wollipog's entry.
     const presetPermissions = this.config.permissionMode === "orchestrator";
+    // MCP inventory probing starts provider processes outside any boundary: no proof while it runs.
     const isolationArgs = presetPermissions || this.opts.orchestrator?.integrationIsolation === true
-      ? await codexOrchestratorMcpArgs(this.opts, this.cwd, {}, !presetPermissions) : [];
+      ? await this.processes.untracked(() => codexOrchestratorMcpArgs(this.opts, this.cwd, {}, !presetPermissions)) : [];
     if (this.disposed) throw new Error("session disposed before provider launch");
     // #1336: bind the permission profile to the mode this app-server starts under. A profile is
     // selected by config, and `turn/start` carries no per-turn selection, so the base is fixed for
@@ -838,7 +884,8 @@ export class CodexAppServerDriver implements Driver {
     // `cancel()` advances `promptGeneration`; the per-prompt `cancelled` flag is NOT used, because
     // it can still be set from an earlier turn.
     const generationBeforeProof = this.promptGeneration;
-    const profile = !this.opts.hookStateDir ? null : await this.deps.permissionProfile({
+    // The probe runs outside any process boundary, so no proof can succeed while it runs.
+    const profile = !this.opts.hookStateDir ? null : await this.processes.untracked(() => this.deps.permissionProfile({
       command: this.opts.command,
       args: [...this.opts.args, ...isolationArgs],
       // Every turn sends its policy explicitly, so that is the legacy launch to reproduce.
@@ -847,14 +894,15 @@ export class CodexAppServerDriver implements Driver {
       nativeHostLaunch: this.opts.context.kind === "native" && !this.opts.isolation,
       hookStateDir: this.opts.hookStateDir,
       cwd: this.cwd,
-    });
+    }));
     if (profile && (this.disposed || this.promptGeneration !== generationBeforeProof)) {
       throw new Error("session disposed before provider launch");
     }
     this.permissionProfileBase = profile?.active ? profile.base : null;
     const launchArgs = profile?.active ? profile.args : [...this.opts.args, ...isolationArgs];
     this.managedWorktreeGuardActive = codexGuardActiveInArgs(launchArgs);
-    const child = this.spawn({
+    this.processes.assertOpen();
+    const child = this.processes.record(this.spawn({
       command: this.opts.command,
       args: codexAppServerArgs(launchArgs, enableDefaultModeQuestions),
       cwd: this.cwd,
@@ -866,9 +914,9 @@ export class CodexAppServerDriver implements Driver {
       isolation: this.opts.isolation,
       containerAgentLaunch: true,
       cloudAgentLaunch: true,
-      descendantOwner: this.descendantOwner,
+      descendantOwner: this.processes.owner,
       descendantMarker: this.opts.descendantMarker,
-    });
+    }));
     this.child = child;
     const peer = new JsonRpcPeer(child.stdin, child.stdout, (err) => this.emitProviderStderr(`transport: ${err.message}`));
     this.peer = peer;
@@ -891,12 +939,22 @@ export class CodexAppServerDriver implements Driver {
         event: "codex_diagnostic_discarded", reason: "oversized_line",
       }));
     }, 64 * 1024);
+    let discardingAuthenticationTail = false;
     child.stderr.on("data", (text: string) => {
       if (this.disposed || this.child !== child) return;
+      if (discardingAuthenticationTail) {
+        const newline = text.indexOf("\n");
+        if (newline < 0) return;
+        text = text.slice(newline + 1);
+        discardingAuthenticationTail = false;
+      }
       // Retain the previous whole-chunk authentication recognition: credential context may
       // occupy a different line from 401/Unauthorized. Never emit any part of a matched chunk.
       if (isProviderAuthenticationFailure(text)) {
         stderrLines.reset();
+        // A suppressed chunk can end inside a credential. Drop its continuation without
+        // buffering or reclassifying it, including on exit, until the line boundary returns.
+        discardingAuthenticationTail = !text.endsWith("\n");
         this.signalAuthenticationFailure();
         if (codexHttpFallbackWarning(text.trim())) this.reportInferenceHttpFallback("unattributed");
         return;
@@ -1163,7 +1221,8 @@ export class CodexAppServerDriver implements Driver {
     const status = payload?.turn?.status;
     if (status === "failed") {
       this.streamedAgentResponse = false;
-      this.emitDriverError(payload?.turn?.error);
+      this.turnFailureCategory = codexFailureCategory(payload?.turn?.error);
+      this.emitDriverError(payload?.turn?.error, this.turnFailureCategory);
       this.settleTurn("refusal");
     } else if (status === "interrupted") {
       this.streamedAgentResponse = false;
@@ -1267,6 +1326,7 @@ export class CodexAppServerDriver implements Driver {
     // An in-flight turn has not settled, so its own outcome is still unset; clearing here keeps a
     // refused submission from reporting the previous one.
     this.turnStartError = null;
+    this.turnFailureCategory = null;
     this.turnStartUndelivered = false;
     if (this.promptBusy) {
       this.cb.onEvent({ kind: "error", message: "codex app-server already has a turn in progress" });
@@ -1333,7 +1393,7 @@ export class CodexAppServerDriver implements Driver {
         // thread is not established yet (#3085), so the turn is never sent and stays retriable.
         this.turnStartUndelivered = true;
         this.turnStartError = "turn/start not sent: threadId is null because the Codex thread is not established";
-        this.emitDriverError(this.turnStartError);
+        this.emitDriverError(this.turnStartError, this.turnFailureCategory);
         this.closeTurnUsage();
         this.settleTurn("refusal");
         return;
@@ -1351,11 +1411,18 @@ export class CodexAppServerDriver implements Driver {
         }
       }).catch((e: Json) => {
         if (generation !== this.promptGeneration || !this.turnResolve) return;
-        this.turnStartError = `turn/start failed: ${e?.message ?? String(e)}`;
+        this.turnFailureCategory = codexFailureCategory(e);
+        const authenticationDiagnostic = isProviderAuthenticationFailure(e?.message);
+        const authentication = shouldRecoverProviderAuthentication(this.turnFailureCategory, authenticationDiagnostic);
+        this.turnStartError = authentication ? "Provider authentication is required."
+          : authenticationDiagnostic ? "The provider could not complete this turn."
+          : `turn/start failed: ${e?.message ?? String(e)}`;
         // Codex's own error response proves no turn started; a broken transport after the write
         // cannot say whether Codex saw the request.
         this.turnStartUndelivered = !e?.transportFailure || e?.notSent === true;
-        this.emitDriverError(this.turnStartError);
+        // Route from original evidence before its safe replacement loses the auth pattern.
+        if (authentication) this.signalAuthenticationFailure();
+        else this.emitDriverError(this.turnStartError, this.turnFailureCategory);
         this.closeTurnUsage();
         this.settleTurn("refusal");
       });
@@ -1527,7 +1594,11 @@ export class CodexAppServerDriver implements Driver {
     this.peer?.dispose("disposed");
     if (this.child) this.kill(this.child);
     this.child = null;
-    terminateDescendantBoundaries(this.descendantOwner);
+    terminateDescendantBoundaries(this.processes.owner);
+  }
+
+  proveProcessTreeExit(options: { terminate: boolean }): Promise<boolean> {
+    return this.processes.prove(options);
   }
 
   private declinePendingRequests(resolutionReason?: "replaced" | "provider_resolved", preserveChildren = false): void {
@@ -2249,7 +2320,7 @@ export class CodexAppServerDriver implements Driver {
     });
   }
 
-  private emitDriverError(error: unknown): void {
+  private emitDriverError(error: unknown, category?: ProviderFailureCategory | null): void {
     let message = "";
     if (typeof error === "string") message = error;
     else if (error && typeof error === "object" && typeof (error as { message?: unknown }).message === "string") {
@@ -2261,12 +2332,16 @@ export class CodexAppServerDriver implements Driver {
         message = String(error);
       }
     }
-    if (!message || this.emittedErrors.has(message)) return;
-    this.emittedErrors.add(message);
-    if (isProviderAuthenticationFailure(message)) {
+    const authenticationDiagnostic = isProviderAuthenticationFailure(message);
+    const authentication = shouldRecoverProviderAuthentication(category, authenticationDiagnostic);
+    const deduplicationKey = authentication ? `authentication:${message}` : message;
+    if (!message || this.emittedErrors.has(deduplicationKey)) return;
+    this.emittedErrors.add(deduplicationKey);
+    if (authentication) {
       this.signalAuthenticationFailure();
       return;
     }
+    if (authenticationDiagnostic) message = "The provider could not complete this turn.";
     const poisoned = classifyPoisonedProviderHistory(message);
     if (poisoned) {
       // The rejection belongs in the transcript as the user-visible evidence for the quarantine,
@@ -2911,6 +2986,9 @@ const MAX_QUESTION_OPTIONS = 20;
 const MAX_QUESTION_ID = 256;
 const MAX_QUESTION_HEADER = 80;
 const MAX_QUESTION_TEXT = 2000;
+// Async titles carry the complete decision brief, including review details and evidence links.
+// Preserve that context verbatim while bounding provider-controlled input separately from labels.
+const MAX_ASYNC_QUESTION_TEXT = 64 * 1024;
 /** Provider free-text bound. The shared protocol default keeps the driver, the dashboard's submit
  * gate, and the control plane's authoritative validation on one number. */
 const MAX_FREE_TEXT = DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH;
@@ -2960,7 +3038,7 @@ export function normalizeCodexAsyncQuestions(raw: unknown): AgentQuestion[] | nu
   const questions: AgentQuestion[] = [];
   for (let index = 0; index < raw.length; index++) {
     const entry = raw[index];
-    const title = boundedString(entry?.title, MAX_QUESTION_TEXT);
+    const title = boundedString(entry?.title, MAX_ASYNC_QUESTION_TEXT);
     if (!title || (entry.options != null && !Array.isArray(entry.options))) return null;
     const options = entry.options == null ? [] : entry.options.map((value: unknown) => boundedString(value, MAX_QUESTION_ID));
     if (options.length > MAX_QUESTION_OPTIONS || options.some((value: string | null) => !value) ||

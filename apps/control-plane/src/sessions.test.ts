@@ -44,6 +44,7 @@ import {
   WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
   WORKSPACE_REFERENCE_MIME_TYPE,
   pendingRequests,
+  projectSessionEventPayloadForProtocol,
 } from "@wollipog/protocol";
 import { dispatch as dispatchManagerTool } from "../../runner/src/session-management-mcp.js";
 import { ControlPlaneDb, campaignRequestToken } from "./db.js";
@@ -80,6 +81,26 @@ import {
   type PreStagedDeliveryPlan,
 } from "./sessions.js";
 import { RunnerFrameQueue } from "./runner-frame-queue.js";
+
+/** A runner capability refusal: the exact sentence, with the versions beside it and never in it. */
+function assertRunnerRefusal(
+  result: { status: number; error?: string; capabilityRequirement?: unknown },
+  error: string,
+  requiredRunnerProtocolVersion: number,
+  runnerProtocolVersion: number,
+  message?: string,
+) {
+  assert.equal(result.status, 409, message);
+  assert.equal(result.error, error, message);
+  assert.doesNotMatch(result.error ?? "", /protocol/i, message);
+  assert.deepEqual(result.capabilityRequirement, { requiredRunnerProtocolVersion, runnerProtocolVersion }, message);
+}
+
+test("session refusals name no runner protocol numbers", () => {
+  // docs/design-system.md §17.2: capability refusals use the shared runner sentence and return the
+  // versions as `requiredRunnerProtocolVersion` and `runnerProtocolVersion` (#3219).
+  assert.doesNotMatch(readFileSync(new URL("./sessions.ts", import.meta.url), "utf8"), /protocol-v\d/);
+});
 
 for (const scenario of ["downgrade", "revision-ahead", "identity-conflict", "stopped", "archived"]) test(`unsupported reconciled snapshot isolates its session and preserves enforcement: ${scenario}`, async () => {
   const { db, hub, svc } = makeHarness();
@@ -186,7 +207,12 @@ test("capability config validation rejects unverified effort and permission mode
   };
   assert.match(capabilityConfigError({ effort: "max" }, caps)!, /effort/);
   assert.match(capabilityConfigError({ model: "missing" }, { ...caps, models: [{ id: "known" }] })!, /model/);
-  assert.match(capabilityConfigError({ permissionMode: "auto" }, caps)!, /permission mode/);
+  assert.equal(capabilityConfigError({ permissionMode: "auto" }, { ...caps, permissionModes: ["acceptEdits", "plan"] }),
+    'permission mode "auto" is not supported by this agent installation; supported permission modes: acceptEdits, plan',
+    "the refusal names the modes the caller can choose instead (#3271)");
+  assert.equal(capabilityConfigError({ permissionMode: "default" }, { ...caps, permissionModes: undefined }),
+    'permission mode "default" is not supported by this agent installation, which advertises no permission modes',
+    "an installation without modes says so instead of listing nothing");
   assert.equal(capabilityConfigError({ effort: "low", permissionMode: "acceptEdits" }, caps), null);
   const perModelCaps = {
     ...caps,
@@ -695,8 +721,12 @@ test("orchestrator separates default provider execution from the negotiated stri
       { ...request, config: { permissionMode: "orchestrator" } },
       undefined, undefined, false, false, false, { defaultOwnerUserId: "human" },
     );
-    assert.equal(unsupportedProviderPolicy.status, 409);
-    assert.match(unsupportedProviderPolicy.error!, /protocol-v144 runner/);
+    assertRunnerRefusal(
+      unsupportedProviderPolicy,
+      "This machine needs a newer runner for an Orchestrator without strict project isolation. Update and restart the runner. To start now, turn on Strict Project Isolation.",
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorExecutionPolicy,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.delegatedParentControl - 1,
+    );
     const olderRunner = svc.createSession(
       { ...request, config: { permissionMode: "orchestrator" },
         orchestrator: { execution: { strictProjectIsolation: true } } },
@@ -763,9 +793,13 @@ test("orchestrator separates default provider execution from the negotiated stri
     const outdatedScope = svc.createSession({ ...request, prompt: "Claim and orchestrate issue 1245.",
       config: { permissionMode: "orchestrator" } },
     undefined, undefined, false, false, false, { defaultOwnerUserId: "human" });
-    assert.equal(outdatedScope.status, 409);
-    assert.match(outdatedScope.error ?? "", /protocol-v158/,
-      "an older runner fails actionably instead of silently losing the issue scope");
+    assertRunnerRefusal(
+      outdatedScope,
+      "This machine needs a newer runner for campaign issue coordination. Update and restart the runner.",
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope - 1,
+      "an older runner fails actionably instead of silently losing the issue scope",
+    );
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     assert.equal(svc.createSession({ ...request, launchSurface: "native_tui",
       config: { permissionMode: "orchestrator" } }).ok, true);
@@ -789,9 +823,13 @@ test("orchestrator separates default provider execution from the negotiated stri
       undefined, undefined, false, false, false,
       { defaultOwnerUserId: "human", orchestratorDefaults: fixedHarnessDefaults, validateOrchestratorDefaults: () => null },
     );
-    assert.equal(mixedVersion.status, 409);
-    assert.match(mixedVersion.error ?? "", /protocol-v157.*Automatic Harness/,
-      "mixed-version campaigns fail actionably instead of dropping a fixed harness");
+    assertRunnerRefusal(
+      mixedVersion,
+      "This machine needs a newer runner for a fixed child harness. Update and restart the runner. To start now, choose Automatic for Child Harness.",
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorChildHarnessPolicy,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorChildHarnessPolicy - 1,
+      "mixed-version campaigns fail actionably instead of dropping a fixed harness",
+    );
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     const advertised = agent.capabilities;
     delete agent.capabilities;
@@ -855,6 +893,82 @@ test("orchestrator separates default provider execution from the negotiated stri
       config: { permissionMode: "orchestrator" } }).status, 409,
     "WSL Orchestrator Native TUI remains unavailable");
   } finally { db.close(); }
+});
+
+test("a fixed Child Harness admits the same harness under another Machine's agent id (#3247)", () => {
+  const { db, svc } = makeHarness();
+  try {
+    const meta = runnerMeta();
+    meta.agents.find((agent) => agent.id === "test-orchestrator")!.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    // The second Machine names its Codex App Server row `codex-app` and uses `codex` for an ACP row.
+    const other = runnerMeta();
+    other.runnerId = "runner-2";
+    const codexApp = other.agents.find((agent) => agent.id === CODEX_APP_AGENT_ID)!;
+    const acp = other.agents.find((agent) => agent.driver === "acp")!;
+    other.agents = [{ ...codexApp, id: "codex-app" }, { ...acp, id: CODEX_APP_AGENT_ID, capabilities: codexApp.capabilities }];
+    db.registerRunner(other, Date.now(), PROTOCOL_VERSION);
+    const settings: OrchestratorSettingsView = {
+      source: "user_default",
+      defaults: {
+        behavior: {
+          childHarness: { agentId: CODEX_APP_AGENT_ID, driver: "codex-app-server", context: { kind: "native" } },
+          childModel: "text-model",
+          childEffort: null,
+          maximumConcurrentChildren: 6,
+          followUps: "recommend_only",
+          completion: "retain",
+        },
+        delegation: {
+          parentControl: "questions",
+          decisions: {
+            implementation_question: "human",
+            pr_merge: "human",
+            merged_branch_deletion: "human",
+            follow_up_issue_publication: "human",
+            ui_evidence_approval: "human",
+          },
+        },
+        execution: { strictProjectIsolation: false, integrationIsolation: false },
+      },
+      capabilities: {
+        models: [{ id: "text-model" }], effortLevels: [], installations: 2, compatibleInstallations: 2, status: "available",
+      },
+    };
+    const created = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, prompt: "Orchestrate.",
+    }, undefined, undefined, false, false, false, {
+      defaultOwnerUserId: "owner", orchestratorDefaults: settings, validateOrchestratorDefaults: () => null,
+    });
+    assert.ok(created.ok && created.data, created.error);
+    const parent = created.data;
+    assert.equal(parent.orchestratorPolicy?.childHarnessMatch, "harness");
+    db.updateSessionStatus(parent.id, "running", Date.now());
+    if (parent.projectId) db.addProjectLocation(parent.projectId, { runnerId: "runner-2", workspaceId: WORKSPACE_ID });
+
+    const child = (agentId: string) => svc.createSession({
+      runnerId: "runner-2", workspaceId: WORKSPACE_ID, agentId, config: { model: "text-model" },
+    }, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+    const sameHarness = child("codex-app");
+    assert.ok(sameHarness.ok, sameHarness.error);
+    const acpNamedCodex = child(CODEX_APP_AGENT_ID);
+    assert.equal(acpNamedCodex.status, 409);
+    assert.match(acpNamedCodex.error ?? "", /fixed by campaign policy at Codex App Server \(native\)/,
+      "an ACP row sharing the policy's agent id is a different harness");
+
+    const legacy = db.sessionOrchestratorPolicy(parent.id)!;
+    delete legacy.childHarnessMatch;
+    db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(legacy), parent.id);
+    const legacyOther = child("codex-app");
+    assert.equal(legacyOther.status, 409, "a campaign created before #3247 keeps enforcing the exact agent id");
+    assert.match(legacyOther.error ?? "", /fixed by campaign policy at codex \(codex-app-server, native\)/);
+  } finally {
+    db.close();
+  }
 });
 
 test("Orchestrator campaign policy resolves precedence, isolates active sessions, and governs child defaults", async () => {
@@ -945,8 +1059,12 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     }, Date.now());
     db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope - 1);
     const legacyRunnerRestart = svc.restart(parent.id);
-    assert.equal(legacyRunnerRestart.status, 409);
-    assert.match(legacyRunnerRestart.error ?? "", /protocol-v158/);
+    assertRunnerRefusal(
+      legacyRunnerRestart,
+      "This machine needs a newer runner for campaign issue coordination. Update and restart the runner.",
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope - 1,
+    );
     assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.issueNumbers, undefined,
       "an old runner cannot make recovered scope durable before it can enforce that scope");
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
@@ -957,9 +1075,13 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     assert.deepEqual(db.getSession(parent.id)?.orchestratorPolicy?.issueNumbers, [1209, 1210, 1211]);
     db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope - 1);
     const outdatedRestart = svc.restart(parent.id);
-    assert.equal(outdatedRestart.status, 409);
-    assert.match(outdatedRestart.error ?? "", /protocol-v158/,
-      "restart fails actionably rather than dropping a persisted campaign issue scope");
+    assertRunnerRefusal(
+      outdatedRestart,
+      "This machine needs a newer runner for campaign issue coordination. Update and restart the runner.",
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope - 1,
+      "restart fails actionably rather than dropping a persisted campaign issue scope",
+    );
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
 
     settings.defaults.behavior.childModel = "changed-later";
@@ -1093,7 +1215,7 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     assert.equal(child.data.orchestratorPolicy?.sources.behavior.childModel, "active_campaign");
     const assignment = hub.sentOfType("start_session").find((message) => message.spec.sessionId === child.data!.id)?.initialPrompt ?? "";
     assert.match(assignment, /Wollipog Campaign Policy — server-derived, revision 1/);
-    assert.match(assignment, new RegExp(`Child Harness ${CODEX_APP_AGENT_ID}`));
+    assert.match(assignment, /Child Harness Codex App Server \(native; use each Machine's agent from get_campaign childHarnessAgents\)/);
     assert.match(assignment, /This is not blanket approval/);
     assert.match(assignment, /exact-head CI/);
     assert.match(assignment, /UI evidence remains human-owned/);
@@ -7943,8 +8065,12 @@ test("provider account selection is capability-gated, persisted, and sent on res
     agentId: AGENT_ID,
     providerAccountId: "personal",
   });
-  assert.equal(unsupported.status, 409);
-  assert.match(unsupported.error ?? "", /protocol-v170/);
+  assertRunnerRefusal(
+    unsupported,
+    "This machine needs a newer runner for choosing an account. Update and restart the runner.",
+    RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccounts,
+    RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccounts - 1,
+  );
 
   db.registerRunner(accountMeta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccounts);
   const created = svc.createSession({
@@ -12716,6 +12842,470 @@ test("live Claude requests show while running, but a runtime snapshot cannot tur
     costUsd: 0.01, costIsEstimate: true, liveUsage: "settled" }, 2);
   session = db.getSession(id)!;
   assert.deepEqual([session.tokensIn, session.costUsd, session.liveUsage], [10, 0.01, undefined]);
+});
+
+function liveClaudeGuardrailHarness() {
+  const harness = makeHarness();
+  harness.db.setUsageRateTable(parseRateTable({
+    "claude-test": { input_cost_per_token: 0.001, output_cost_per_token: 0.002 },
+  }));
+  const id = seedSession(harness.svc, harness.hub);
+  const live = (inputTokens: number, outputTokens: number, model = "claude-test") =>
+    harness.svc.onSessionEvent(id, { kind: "token_usage", model, inputTokens, outputTokens,
+      pricingContext: { requestInputTokens: inputTokens }, liveUsage: "provisional" });
+  return { ...harness, id, live };
+}
+
+test("a running Claude turn parks at its cost budget on the live estimate, and settlement still books the provider total", () => {
+  const { db, hub, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.sentToRunner.length = 0;
+
+  live(10, 5);
+  assert.equal(db.getSession(id)!.status, "running", "$0.02 estimated is below the budget");
+  live(20, 10);
+  let session = db.getSession(id)!;
+  assert.equal(session.status, "input_required", "the estimate crosses the budget before any result");
+  assert.equal(session.pendingApproval?.kind, "cost_budget");
+  assert.equal(session.pendingApproval?.title, "Cost budget reached — $0.06 of $0.05, including an estimate for the running turn. Continue?");
+  assert.equal(session.costUsd, 0, "the estimate is never accrued");
+  assert.deepEqual(hub.sentOfType("priced_session_cost").at(-1), { type: "priced_session_cost", sessionId: id, costUsd: 0 },
+    "the runner's acknowledged price never includes the estimate");
+  assert.equal(hub.sentOfType("rearm_governance").at(-1)?.holdFor, "control_plane",
+    "no runner cancels on the estimate, so the control plane holds its queue");
+
+  // The turn's result settles lower than the estimate. Only the provider total accrues.
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-test", inputTokens: 30, outputTokens: 15,
+    costUsd: 0.045, liveUsage: "settled" });
+  svc.onSessionStatus(id, "idle");
+  session = db.getSession(id)!;
+  assert.deepEqual([session.tokensIn, session.tokensOut, session.costUsd, session.liveUsage], [30, 15, 0.045, undefined]);
+  assert.equal(db.sessionUsageByModel(id).totals.costUsd, 0.045);
+  assert.equal(session.status, "input_required", "the card survives the trailing idle");
+
+  assert.ok(svc.approve(id, session.pendingApproval!.requestId, "continue").ok);
+  session = db.getSession(id)!;
+  assert.equal(session.costBudgetUsd, 0.1, "Continue re-arms one window past the settled spend");
+  assert.deepEqual([session.status, session.costUsd], ["idle", 0.045], "the swallowed idle settles it");
+});
+
+test("a live estimate that crosses the budget interrupts the running turn, holds the queue, and settles to idle", () => {
+  const { db, hub, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.setSessionQueue(id, [], false, "turn-live");
+  hub.sentToRunner.length = 0;
+
+  live(10, 5);
+  assert.equal(hub.sentOfType("interrupt_turn").length, 0, "$0.02 estimated is below the budget");
+  live(20, 10);
+  const interrupt = hub.sentOfType("interrupt_turn");
+  assert.equal(interrupt.length, 1, "the control plane stops the turn it parked");
+  assert.deepEqual([interrupt[0]!.sessionId, interrupt[0]!.turnId], [id, "turn-live"]);
+  assert.equal(hub.sentOfType("rearm_governance").at(-1)?.holdFor, "control_plane", "the queue stays held after the turn settles");
+  assert.deepEqual(hub.sentOfType("priced_session_cost").at(-1), { type: "priced_session_cost", sessionId: id, costUsd: 0 },
+    "the runner's acknowledged price never includes the estimate");
+  let session = db.getSession(id)!;
+  assert.deepEqual([session.status, session.pendingApproval?.kind], ["input_required", "cost_budget"]);
+
+  live(5, 0);
+  assert.equal(hub.sentOfType("interrupt_turn").length, 1, "a parked session is not interrupted again");
+
+  // The interrupted turn settles; its idle is swallowed behind the card, so Continue settles to idle.
+  hub.setSessionQueue(id, [], false);
+  svc.onSessionStatus(id, "idle");
+  assert.equal(db.getSession(id)!.status, "input_required");
+  session = db.getSession(id)!;
+  assert.ok(svc.approve(id, session.pendingApproval!.requestId, "continue").ok);
+  assert.equal(db.getSession(id)!.status, "idle");
+  assert.equal(db.getSession(id)!.costUsd, 0, "the interrupted turn's requests stay open until the next process accounts them");
+});
+
+test("a live estimate crossing behind a pending workflow decision still interrupts the running turn", () => {
+  const { db, hub, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  hub.setSessionQueue(id, [], false, "turn-decision");
+  db.setPendingApproval(id, { requestId: "decision-1", kind: "workflow_decision", title: "PR Merge Approval Required",
+    options: [{ optionId: "approve", name: "Approve", kind: "allow_once" }] });
+  db.updateSessionStatus(id, "input_required", Date.now());
+  hub.sentToRunner.length = 0;
+  live(20, 20);
+  assert.ok(pendingRequests(db.getSession(id)!.pendingApproval).some((request) => request.kind === "cost_budget"));
+  assert.deepEqual(hub.sentOfType("interrupt_turn").map((message) => message.turnId), ["turn-decision"],
+    "the decision does not stop the provider turn, so the budget card does");
+});
+
+test("a live estimate crossing before a reconnecting runner reports its turn interrupts once the turn is known", () => {
+  const { db, hub, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.sentToRunner.length = 0;
+  live(20, 20);
+  assert.equal(db.getSession(id)!.pendingApproval?.kind, "cost_budget");
+  assert.equal(hub.sentOfType("interrupt_turn").length, 0, "no turn coordinate yet");
+  assert.ok(svc.onSessionQueue(RUNNER_ID, id, [], true, "turn-reconnected"));
+  assert.deepEqual(hub.sentOfType("interrupt_turn").map((message) => message.turnId), ["turn-reconnected"]);
+  assert.ok(svc.onSessionQueue(RUNNER_ID, id, [], true, "turn-reconnected"));
+  assert.equal(hub.sentOfType("interrupt_turn").length, 1, "the deferred interruption is sent once");
+});
+
+test("an unanswered estimate-only card stops whichever turn the runner reports next, and an answered one stops none", () => {
+  const { db, hub, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.sentToRunner.length = 0;
+  live(20, 20);
+  assert.ok(svc.onSessionQueue(RUNNER_ID, id, [], true));
+  assert.equal(hub.sentOfType("interrupt_turn").length, 0, "a queue with no active turn has nothing to stop");
+  assert.ok(svc.onSessionQueue(RUNNER_ID, id, [], true, "turn-provider"));
+  assert.deepEqual(hub.sentOfType("interrupt_turn").map((message) => message.turnId), ["turn-provider"],
+    "a turn that starts while the card is unanswered, such as a provider-initiated one, is stopped too");
+
+  const other = liveClaudeGuardrailHarness();
+  other.svc.setConfig(other.id, { costBudgetUsd: 0.05 });
+  other.db.updateSessionStatus(other.id, "running", Date.now());
+  other.live(20, 20);
+  const card = other.db.getSession(other.id)!.pendingApproval!;
+  assert.ok(other.svc.approve(other.id, card.requestId, "continue").ok);
+  other.hub.sentToRunner.length = 0;
+  assert.ok(other.svc.onSessionQueue(RUNNER_ID, other.id, [], false, "turn-admitted"));
+  assert.equal(other.hub.sentOfType("interrupt_turn").length, 0, "an answered card never stops a turn Continue admitted");
+});
+
+test("an estimate-only budget card left by a control-plane restart still stops the turn the runner reports", () => {
+  const { db, hub, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  db.updateSessionStatus(id, "running", Date.now());
+  live(20, 20);
+  assert.equal(db.getSession(id)!.pendingApproval?.kind, "cost_budget");
+  hub.sentToRunner.length = 0;
+
+  // A fresh service has no memory of the parked card; only the durable card remains.
+  const restarted = new SessionsService(db, hub as unknown as Hub, NOOP_LOG);
+  assert.ok(restarted.onSessionQueue(RUNNER_ID, id, [], true, "turn-after-restart"));
+  assert.deepEqual(hub.sentOfType("interrupt_turn").map((message) => message.turnId), ["turn-after-restart"]);
+  assert.ok(restarted.onSessionQueue(RUNNER_ID, id, [], true, "turn-after-restart"));
+  assert.equal(hub.sentOfType("interrupt_turn").length, 1);
+});
+
+test("an estimate interruption that fails to deliver is retried at the runner's next report of the turn", async () => {
+  const { db, hub, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.setSessionQueue(id, [], false, "turn-flaky");
+  let attempts = 0;
+  hub.requestHandler = (message) => {
+    if (message.type !== "interrupt_turn") throw new Error(`unexpected ${message.type}`);
+    if (++attempts === 1) throw new Error("runner is offline");
+    return { type: "interrupt_turn_result", requestId: message.requestId!, sessionId: message.sessionId, applied: true, reason: "applied" };
+  };
+  live(20, 20);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(attempts, 1);
+  assert.ok(svc.onSessionQueue(RUNNER_ID, id, [], true, "turn-flaky"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(attempts, 2, "the reconnected runner's report of the same turn retries the interruption");
+  assert.ok(svc.onSessionQueue(RUNNER_ID, id, [], true, "turn-flaky"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(attempts, 2, "an applied interruption is not repeated");
+});
+
+test("a budget crossed on settled cost is the runner's to cancel, so the control plane does not interrupt", () => {
+  const { db, hub, svc, id } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.setSessionQueue(id, [], false, "turn-settled");
+  hub.sentToRunner.length = 0;
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-test", inputTokens: 10, outputTokens: 30, costUsd: 0.07 });
+  assert.equal(db.getSession(id)!.pendingApproval?.kind, "cost_budget");
+  assert.equal(hub.sentOfType("interrupt_turn").length, 0);
+});
+
+test("an estimate-only budget card on an idle session holds the queue without interrupting", () => {
+  const { db, hub, svc, id, live } = liveClaudeGuardrailHarness();
+  db.updateSessionStatus(id, "running", Date.now());
+  live(20, 20);
+  svc.onSessionStatus(id, "idle");
+  hub.sentToRunner.length = 0;
+  assert.ok(svc.setConfig(id, { costBudgetUsd: 0.05 }).ok);
+  assert.equal(db.getSession(id)!.pendingApproval?.kind, "cost_budget", "a killed turn's open window still counts");
+  assert.equal(hub.sentOfType("interrupt_turn").length, 0, "there is no turn to stop");
+  assert.equal(hub.sentOfType("rearm_governance").at(-1)?.holdFor, "control_plane");
+});
+
+test("a cost checkpoint crossed by the live estimate parks without interrupting the turn", () => {
+  const { db, hub, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costCheckpointsUsd: [0.05] });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.setSessionQueue(id, [], false, "turn-checkpoint");
+  hub.sentToRunner.length = 0;
+  live(20, 20);
+  assert.equal(db.getSession(id)!.pendingApproval?.kind, "cost_checkpoint");
+  assert.equal(hub.sentOfType("interrupt_turn").length, 0, "a soft checkpoint never stopped the turn");
+});
+
+test("an interruption the runner refuses leaves the budget card and its queue hold in place", async () => {
+  const { db, hub, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.setSessionQueue(id, [], false, "turn-raced");
+  hub.requestHandler = (message) => {
+    if (message.type !== "interrupt_turn") throw new Error(`unexpected ${message.type}`);
+    return { type: "interrupt_turn_result", requestId: message.requestId!, sessionId: message.sessionId,
+      applied: false, reason: "turn_not_running" };
+  };
+  live(20, 20);
+  await new Promise((resolve) => setImmediate(resolve));
+  const session = db.getSession(id)!;
+  assert.deepEqual([session.status, session.pendingApproval?.kind], ["input_required", "cost_budget"]);
+  assert.equal(hub.sentOfType("rearm_governance").at(-1)?.holdFor, "control_plane");
+});
+
+test("Continue on an estimate-only budget card keeps the uncancelled turn running until its idle arrives", () => {
+  const { db, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  db.updateSessionStatus(id, "running", Date.now());
+  live(20, 15);
+  const card = db.getSession(id)!.pendingApproval!;
+  assert.equal(card.kind, "cost_budget");
+  assert.ok(svc.approve(id, card.requestId, "continue").ok);
+  assert.equal(db.getSession(id)!.status, "running");
+  assert.equal(db.getSession(id)!.costBudgetUsd, 0.1, "one window past the estimated spend");
+  svc.onSessionStatus(id, "idle");
+  assert.equal(db.getSession(id)!.status, "idle");
+});
+
+test("raising the budget past an estimate-only card keeps the uncancelled turn running", () => {
+  const { db, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  db.updateSessionStatus(id, "running", Date.now());
+  live(20, 20);
+  assert.equal(db.getSession(id)!.pendingApproval?.kind, "cost_budget");
+  assert.ok(svc.setConfig(id, { costBudgetUsd: 0.2 }).ok);
+  const session = db.getSession(id)!;
+  assert.deepEqual([session.status, session.pendingApproval], ["running", null]);
+});
+
+test("a turn settled by republished requests after a live budget card accrues each request once", () => {
+  const { db, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.03 });
+  db.updateSessionStatus(id, "running", Date.now());
+  live(10, 5);
+  live(10, 5);
+  assert.equal(db.getSession(id)!.pendingApproval?.kind, "cost_budget");
+  svc.onSessionStatus(id, "idle");
+  assert.deepEqual(db.getSession(id)!.liveUsage, { tokensIn: 20, tokensOut: 10, costUsd: 0.04 },
+    "a killed process leaves its requests open until the next process accounts them");
+  for (const liveUsage of ["republished", "settled"] as const) {
+    svc.onSessionEvent(id, { kind: "token_usage", model: "claude-test", inputTokens: 10, outputTokens: 5,
+      pricingContext: { requestInputTokens: 10 }, liveUsage });
+  }
+  const session = db.getSession(id)!;
+  assert.deepEqual([session.tokensIn, session.tokensOut, session.costUsd, session.liveUsage], [20, 10, 0.04, undefined]);
+  assert.equal(db.sessionUsageByModel(id).totals.costUsd, 0.04);
+});
+
+test("a cost checkpoint is raised mid-turn when settled cost plus the live estimate crosses it", () => {
+  const { db, hub, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-test", inputTokens: 10, outputTokens: 5, costUsd: 0.02 });
+  svc.setConfig(id, { costCheckpointsUsd: [0.05] });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.sentToRunner.length = 0;
+
+  live(10, 5);
+  assert.equal(db.getSession(id)!.status, "running", "$0.02 settled plus $0.02 estimated is below the checkpoint");
+  live(20, 0);
+  const session = db.getSession(id)!;
+  assert.equal(session.status, "input_required");
+  assert.equal(session.pendingApproval?.kind, "cost_checkpoint");
+  assert.equal(session.pendingApproval?.title, "Cost checkpoint — $0.06 of $0.05, including an estimate for the running turn. Continue?");
+  assert.equal(session.costUsd, 0.02);
+  assert.equal(hub.sentOfType("rearm_governance").at(-1)?.holdFor, "control_plane", "the queue stays held behind the soft card");
+});
+
+test("live tokens without a rate are not free toward a budget", () => {
+  const { db, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-test", inputTokens: 10, outputTokens: 5, costUsd: 0.02 });
+  svc.setConfig(id, { costBudgetUsd: 10 });
+  db.updateSessionStatus(id, "running", Date.now());
+  assert.equal(db.getSession(id)!.pendingApproval, null);
+
+  live(1_000_000, 1_000_000, "claude-unrated");
+  let session = db.getSession(id)!;
+  assert.deepEqual(session.liveUsage, { tokensIn: 1_000_000, tokensOut: 1_000_000, costUsd: 0 });
+  assert.equal(session.status, "input_required", "a priced settled cost does not make unpriced live usage free");
+  assert.equal(session.pendingApproval?.kind, "cost_unpriced");
+
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-unrated", inputTokens: 1_000_000, outputTokens: 1_000_000,
+    costUsd: 3, liveUsage: "settled" });
+  assert.equal(db.sessionLiveUsageUnpriced(id), false);
+  session = db.getSession(id)!;
+  assert.equal(session.costUsd, 3.02);
+  assert.ok(svc.approve(id, session.pendingApproval!.requestId, "continue").ok);
+  assert.equal(db.getSession(id)!.pendingApproval, null, "nothing unpriced remains after settlement");
+});
+
+test("an unpriced live mark lasts until its window closes, even when a rate arrives before republication", () => {
+  const { db, svc, id, live } = liveClaudeGuardrailHarness();
+  db.updateSessionStatus(id, "running", Date.now());
+  live(10, 5, "claude-unrated");
+  live(10, 5);
+  assert.equal(db.sessionLiveUsageUnpriced(id), true);
+  db.setUsageRateTable(parseRateTable({
+    "claude-test": { input_cost_per_token: 0.001, output_cost_per_token: 0.002 },
+    "claude-unrated": { input_cost_per_token: 0.001, output_cost_per_token: 0.002 },
+  }));
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-unrated", inputTokens: 10, outputTokens: 5,
+    pricingContext: { requestInputTokens: 10 }, liveUsage: "republished" });
+  assert.equal(db.sessionLiveUsageUnpriced(id), true, "which open request was unpriced is unknown, so it fails closed");
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-test", inputTokens: 10, outputTokens: 5,
+    pricingContext: { requestInputTokens: 10 }, liveUsage: "settled" });
+  assert.equal(db.sessionLiveUsageUnpriced(id), false, "the record that closes the window clears it");
+  assert.equal(db.getSession(id)!.liveUsage, undefined);
+});
+
+test("an unrated live request of cache tokens alone still fails closed", () => {
+  const { db, svc, id } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 10 });
+  db.updateSessionStatus(id, "running", Date.now());
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-unrated", inputTokens: 0, outputTokens: 0,
+    cachedInputTokens: 50_000, cacheCreationInputTokens: 2_000, liveUsage: "provisional" });
+  const session = db.getSession(id)!;
+  assert.equal(session.liveUsage, undefined, "nothing visible to add to the totals");
+  assert.equal(session.pendingApproval?.kind, "cost_unpriced");
+});
+
+test("arming a budget below a running turn's live estimate parks at once and holds the queue", () => {
+  const { db, hub, svc, id, live } = liveClaudeGuardrailHarness();
+  db.updateSessionStatus(id, "running", Date.now());
+  live(20, 40);
+  assert.equal(db.getSession(id)!.pendingApproval, null);
+  hub.sentToRunner.length = 0;
+  assert.ok(svc.setConfig(id, { costBudgetUsd: 0.05 }).ok);
+  const session = db.getSession(id)!;
+  assert.equal(session.status, "input_required");
+  assert.equal(session.pendingApproval?.kind, "cost_budget");
+  assert.equal(hub.sentOfType("rearm_governance").at(-1)?.holdFor, "control_plane");
+});
+
+test("a multi-model checkpoint does not count its records twice while the window it covers is still open", () => {
+  const { db, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.08, costCheckpointsUsd: [0.07] });
+  db.updateSessionStatus(id, "running", Date.now());
+  live(10, 20);
+  assert.equal(db.getSession(id)!.liveUsage?.costUsd, 0.05);
+
+  // The result's checkpoint covers both models; only its last record is marked settled.
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-test", inputTokens: 10, outputTokens: 20, costUsd: 0.05 });
+  assert.equal(db.getSession(id)!.pendingApproval, null, "$0.05 settled is the same spend as the $0.05 estimate, not $0.10");
+  // Another entry point evaluating the guardrails before the window closes sees the same spend.
+  assert.ok(svc.setConfig(id, { maxToolCalls: 100 }).ok);
+  assert.equal(db.getSession(id)!.pendingApproval, null);
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-other", inputTokens: 5, outputTokens: 0, costUsd: 0.01,
+    liveUsage: "settled" });
+  const session = db.getSession(id)!;
+  assert.deepEqual([session.costUsd, session.liveUsage, session.pendingApproval], [0.06, undefined, null]);
+});
+
+test("a checkpoint that leaves its window open stops suppressing the estimate at the next request", () => {
+  const { db, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.09 });
+  db.updateSessionStatus(id, "running", Date.now());
+  live(10, 0);
+  // A lower restored total accounts part of the window without closing it.
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-test", inputTokens: 5, outputTokens: 0, costUsd: 0.005 });
+  assert.equal(db.sessionLiveGuardrail(id).costUsd, 0, "settled cost alone while the checkpoint is accounting");
+  live(20, 30);
+  assert.equal(db.sessionLiveGuardrail(id).costUsd, 0.09, "the next request ends the suppression");
+  assert.equal(db.getSession(id)!.pendingApproval?.kind, "cost_budget", "$0.005 settled plus $0.09 estimated crosses the budget");
+});
+
+test("a checkpoint record that crosses a budget on settled cost alone still trips while the window is open", () => {
+  const { db, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.04 });
+  db.updateSessionStatus(id, "running", Date.now());
+  live(10, 0);
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-test", inputTokens: 10, outputTokens: 0, costUsd: 0.05 });
+  assert.equal(db.getSession(id)!.pendingApproval?.kind, "cost_budget", "settled cost is a safe lower bound to gate on");
+});
+
+test("a checkpoint record does not raise a false unpriced card for a live request it is accounting", () => {
+  const { db, svc, id, live } = liveClaudeGuardrailHarness();
+  db.updateSessionStatus(id, "running", Date.now());
+  live(10, 5, "claude-unrated");
+  svc.setConfig(id, { costBudgetUsd: 10 });
+  const card = db.getSession(id)!.pendingApproval;
+  assert.equal(card?.kind, "cost_unpriced");
+  assert.ok(svc.approve(id, card!.requestId, "continue").ok);
+  db.raw().prepare("UPDATE sessions SET cost_unpriced_ack=0 WHERE id=?").run(id);
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-unrated", inputTokens: 10, outputTokens: 5, costUsd: 0.02 });
+  assert.equal(db.getSession(id)!.pendingApproval, null, "the provider-costed record covers the unpriced request");
+  svc.onSessionEvent(id, { kind: "token_usage", liveUsage: "settled" });
+  assert.equal(db.getSession(id)!.pendingApproval, null);
+});
+
+test("cost guardrails compare live spend at micro-USD precision", () => {
+  const { db, svc, id, live } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.1 });
+  db.updateSessionStatus(id, "running", Date.now());
+  for (let request = 0; request < 10; request++) live(10, 0);
+  assert.notEqual(db.sessionLiveGuardrail(id).costUsd, 0.1, "ten $0.01 requests accumulate float error");
+  assert.equal(db.getSession(id)!.pendingApproval?.kind, "cost_budget", "ten $0.01 requests reach a $0.10 budget");
+});
+
+test("a settled-only comparison keeps its exact amount", () => {
+  const { db, svc, id } = liveClaudeGuardrailHarness();
+  svc.onSessionEvent(id, { kind: "token_usage", model: "claude-test", inputTokens: 1, outputTokens: 0, costUsd: 0.0999996 });
+  svc.setConfig(id, { costBudgetUsd: 0.1 });
+  assert.equal(db.getSession(id)!.pendingApproval, null, "without an estimate, nothing is rounded up to the budget");
+});
+
+test("a live estimate committed by one hydration page is gated even when a later page fails", async () => {
+  const { db, hub, svc, id } = liveClaudeGuardrailHarness();
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  db.updateSessionStatus(id, "running", Date.now());
+  db.reconcileRunnerHistory(id, 1, 3);
+  const provisional = { kind: "token_usage" as const, model: "claude-test", inputTokens: 20, outputTokens: 20,
+    pricingContext: { requestInputTokens: 20 }, liveUsage: "provisional" as const };
+  let pages = 0;
+  hub.requestHandler = (msg) => {
+    if (++pages > 1) throw new Error("runner did not respond in time");
+    return { type: "session_history_page_result", requestId: "requestId" in msg ? msg.requestId! : "history",
+      sessionId: id, ok: true, events: [{ seq: 1, ts: 100, payload: { kind: "agent_message", text: "working" } }, { seq: 2, ts: 101, payload: provisional }],
+      page: { logEpoch: 1, throughSeq: 3, nextAfterSeq: 2, hasMore: true } };
+  };
+  await svc.hydrateHistory(id);
+  assert.equal(pages, 2, "the second page failed");
+  const session = db.getSession(id)!;
+  assert.equal(session.liveUsage?.costUsd, 0.06);
+  assert.equal(session.pendingApproval?.kind, "cost_budget");
+});
+
+test("a live estimate that arrives through history hydration is gated once the gap is filled", async () => {
+  const { db, hub } = makeHarness();
+  const notified: Array<[SessionStatus, SessionStatus]> = [];
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG, (previous, current) => {
+    notified.push([previous.status, current.status]);
+  });
+  db.setUsageRateTable(parseRateTable({
+    "claude-test": { input_cost_per_token: 0.001, output_cost_per_token: 0.002 },
+  }));
+  const id = seedSession(svc, hub);
+  svc.setConfig(id, { costBudgetUsd: 0.05 });
+  db.updateSessionStatus(id, "running", Date.now());
+  db.reconcileRunnerHistory(id, 1, 2);
+  const provisional = { kind: "token_usage" as const, model: "claude-test", inputTokens: 20, outputTokens: 20,
+    pricingContext: { requestInputTokens: 20 }, liveUsage: "provisional" as const };
+  hub.requestHandler = (msg) => ({ type: "session_history_page_result", requestId: "requestId" in msg ? msg.requestId! : "history",
+    sessionId: id, ok: true, events: [{ seq: 1, ts: 100, payload: { kind: "agent_message", text: "working" } }, { seq: 2, ts: 101, payload: provisional }],
+    page: { logEpoch: 1, throughSeq: 2, nextAfterSeq: 2, hasMore: false } });
+  notified.length = 0;
+  await svc.hydrateHistory(id);
+  const session = db.getSession(id)!;
+  assert.equal(session.liveUsage?.costUsd, 0.06);
+  assert.equal(session.pendingApproval?.kind, "cost_budget", "hydration gates the estimate the live path never saw");
+  assert.deepEqual(notified, [["running", "input_required"]], "the park is pushed, as on the live path");
 });
 
 test("priced cost acknowledgements are not sent to pre-v106 runners", () => {
@@ -21235,6 +21825,151 @@ test("a daily-budget fan-out counts eligible siblings rather than blocked rows t
     ["daily_budget", "workflow_decision"]);
 });
 
+function liveDailyBudgetHarness(budgetUsd: number) {
+  const harness = makeHarness();
+  harness.db.setUsageRateTable(parseRateTable({
+    "claude-test": { input_cost_per_token: 0.001, output_cost_per_token: 0.002 },
+  }));
+  harness.db.setUsageDailyBudget("org_personal", budgetUsd, Date.now());
+  const own = harness.db.raw().prepare("UPDATE session_ownership SET owner_kind='user', owner_id='usr_local_owner' WHERE session_id=?");
+  const seed = () => {
+    const id = seedSession(harness.svc, harness.hub, { prompt: "Spend" });
+    own.run(id);
+    harness.db.updateSessionStatus(id, "running", Date.now());
+    return id;
+  };
+  const live = (id: string, inputTokens: number, outputTokens: number, model = "claude-test") =>
+    harness.svc.onSessionEvent(id, { kind: "token_usage", model, inputTokens, outputTokens,
+      pricingContext: { requestInputTokens: inputTokens }, liveUsage: "provisional" });
+  const settle = (id: string, inputTokens: number, outputTokens: number, costUsd: number) =>
+    harness.svc.onSessionEvent(id, { kind: "token_usage", model: "claude-test", inputTokens, outputTokens, costUsd, liveUsage: "settled" });
+  const today = () => harness.db.userCostTodayUsd("org_personal", "usr_local_owner");
+  return { ...harness, seed, live, settle, today };
+}
+
+test("running turns' live estimates alone park the owner's sessions at the daily budget, and settlement books only provider totals (#3196)", () => {
+  const { db, svc, seed, live, settle, today } = liveDailyBudgetHarness(0.05);
+  const a = seed(), b = seed();
+
+  live(a, 10, 5);
+  live(b, 10, 5);
+  assert.deepEqual([db.getSession(a)!.status, db.getSession(b)!.status], ["running", "running"],
+    "$0.04 estimated across two turns is below the budget, and neither turn alone is near it");
+  live(b, 10, 0);
+  for (const id of [a, b]) {
+    const session = db.getSession(id)!;
+    assert.equal(session.status, "input_required", "the crossing parks every live session the owner has");
+    assert.equal(session.pendingApproval?.kind, "daily_budget");
+    assert.equal(session.pendingApproval?.title, "Daily budget reached — $0.05 of $0.05 today across your sessions, " +
+      "including an estimate for running turns. New turns pause until the day rolls over or an owner or admin raises it.");
+    assert.equal(session.costUsd, 0, "the estimate is never accrued");
+  }
+  assert.equal(today(), 0, "the ledger holds settled cost only");
+
+  const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, useWorktree: false }, undefined, {
+    organizationId: "org_personal", owner: { kind: "user", userId: "usr_local_owner" },
+  });
+  assert.equal(created.ok, false);
+  assert.match(created.error ?? "", /^daily budget reached — \$0\.05 of \$0\.05 today, including an estimate for running turns;/);
+
+  const card = db.getSession(a)!.pendingApproval!;
+  assert.ok(svc.approve(a, card.requestId, "continue").ok);
+  assert.equal(db.getSession(a)!.pendingApproval?.kind, "daily_budget", "Check Again still sees the open estimates");
+
+  // Both turns settle lower than their estimates. Only the provider totals accrue, once each.
+  settle(a, 10, 5, 0.015);
+  settle(b, 20, 5, 0.02);
+  svc.onSessionStatus(a, "idle");
+  svc.onSessionStatus(b, "idle");
+  assert.equal(today(), 0.035);
+  assert.deepEqual([db.getSession(a)!.costUsd, db.getSession(a)!.liveUsage, db.getSession(b)!.costUsd, db.getSession(b)!.liveUsage],
+    [0.015, undefined, 0.02, undefined]);
+  for (const id of [a, b]) {
+    assert.ok(svc.approve(id, db.getSession(id)!.pendingApproval!.requestId, "continue").ok);
+    assert.deepEqual([db.getSession(id)!.pendingApproval, db.getSession(id)!.status], [null, "idle"],
+      "settled spend is below the budget, so Check Again releases the session");
+  }
+});
+
+test("the daily budget compares today's settled spend plus the live estimate (#3196)", () => {
+  const { db, seed, live, today } = liveDailyBudgetHarness(0.05);
+  const a = seed();
+  db.appendEvent(a, { kind: "token_usage", model: "claude-test", inputTokens: 1, costUsd: 0.03 }, Date.now(), { accrueUsage: true });
+  live(a, 10, 0);
+  assert.equal(db.getSession(a)!.status, "running", "$0.03 settled plus $0.01 estimated is below the budget");
+  live(a, 10, 0);
+  assert.match(db.getSession(a)!.pendingApproval?.title ?? "",
+    /^Daily budget reached — \$0\.05 of \$0\.05 today across your sessions, including an estimate/);
+  assert.equal(today(), 0.03);
+});
+
+test("a stopped session's open estimate does not count toward the owner's daily spend (#3196)", () => {
+  const { db, seed, live } = liveDailyBudgetHarness(0.05);
+  const a = seed();
+  live(a, 20, 10);
+  db.updateSessionStatus(a, "stopped", Date.now());
+  const b = seed();
+  live(b, 10, 5);
+  assert.equal(db.getSession(b)!.status, "running",
+    "$0.02 estimated for the running turn; the stopped session's $0.04 is accounted only if it is relaunched");
+});
+
+test("an interrupted turn's open estimate counts toward the day it ran, not every later day (#3196)", (t) => {
+  const { db, svc, seed, live, today } = liveDailyBudgetHarness(0.05);
+  const day = 86_400_000, start = Math.floor(Date.now() / day) * day + 12 * 3_600_000;
+  t.mock.timers.enable({ apis: ["Date"], now: start });
+  const a = seed();
+  live(a, 30, 10);
+  svc.onSessionStatus(a, "idle");
+  const card = db.getSession(a)!.pendingApproval!;
+  assert.equal(card.kind, "daily_budget", "the turn's spend happened today, though no process has accounted it yet");
+  assert.ok(db.getSession(a)!.liveUsage, "an interrupted turn leaves its window open");
+
+  t.mock.timers.setTime(start + day);
+  assert.equal(today(), 0);
+  assert.ok(svc.approve(a, card.requestId, "continue").ok);
+  assert.equal(db.getSession(a)!.pendingApproval, null, "the next day's allowance is not spent by yesterday's window");
+  const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, useWorktree: false }, undefined, {
+    organizationId: "org_personal", owner: { kind: "user", userId: "usr_local_owner" },
+  });
+  assert.ok(created.ok, created.error);
+});
+
+test("live tokens without a rate are not free toward the daily budget, while recorded unpriced usage keeps its old handling (#3196)", () => {
+  const { db, svc, seed, live } = liveDailyBudgetHarness(10);
+  const a = seed();
+  live(a, 10, 5, "unrated-model");
+  let session = db.getSession(a)!;
+  assert.equal(session.status, "input_required");
+  assert.equal(session.pendingApproval?.kind, "cost_unpriced", "the session without its own budget still fails closed");
+  assert.ok(svc.approve(a, session.pendingApproval!.requestId, "continue").ok);
+  session = db.getSession(a)!;
+  assert.deepEqual([session.status, session.pendingApproval], ["running", null], "Continue acknowledges it for the session");
+
+  const b = seed();
+  db.appendEvent(b, { kind: "token_usage", model: "unrated-model", inputTokens: 10, outputTokens: 5 }, Date.now(), { accrueUsage: true });
+  svc.onSessionStatus(b, "idle");
+  assert.equal(db.getSession(b)!.pendingApproval, null, "recorded unpriced usage concerns only a session's own cost guardrails");
+});
+
+test("a stream without live records, as from a peer before v216, gates the daily budget on settled cost alone (#3196)", () => {
+  const { db, svc, seed, today } = liveDailyBudgetHarness(0.05);
+  const a = seed();
+  const turn: SessionEventPayload[] = [
+    { kind: "token_usage", model: "claude-test", inputTokens: 20, outputTokens: 10, pricingContext: { requestInputTokens: 20 }, liveUsage: "provisional" },
+    { kind: "token_usage", model: "claude-test", inputTokens: 20, outputTokens: 10, pricingContext: { requestInputTokens: 20 }, liveUsage: "provisional" },
+    { kind: "token_usage", model: "claude-test", inputTokens: 40, outputTokens: 20, costUsd: 0.07, liveUsage: "settled" },
+  ];
+  const projected = turn.map((payload) => projectSessionEventPayloadForProtocol(payload, 215));
+  assert.deepEqual(projected.slice(0, 2), [null, null], "an older peer never receives provisional records");
+  svc.onSessionEvent(a, projected[2]!);
+  assert.equal(db.getSession(a)!.liveUsage, undefined);
+  svc.onSessionStatus(a, "idle");
+  assert.equal(today(), 0.07);
+  assert.equal(db.getSession(a)!.pendingApproval?.title, "Daily budget reached — $0.07 of $0.05 today across your sessions. " +
+    "New turns pause until the day rolls over or an owner or admin raises it.");
+});
+
 test("arming a soft guardrail on an unparked session that already exceeds it parks it at once", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub, { prompt: "spend" });
@@ -21471,11 +22206,23 @@ test("Orchestrator is an additive role independent of the provider permission mo
       { ...request, role: "orchestrator", config: { permissionMode: "acceptEdits" } },
       undefined, undefined, false, false, false, human,
     );
-    assert.equal(outdated.status, 409, "an older runner would launch this as an ordinary session");
-    assert.match(outdated.error ?? "", /protocol-v160/);
+    const independentPermissionsRefusal =
+      "This machine needs a newer runner for an Orchestrator with independent provider permissions. Update and restart the runner.";
+    assertRunnerRefusal(
+      outdated,
+      `${independentPermissionsRefusal} To start now, choose the Orchestrator preset permission mode.`,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole - 1,
+      "an older runner would launch this as an ordinary session",
+    );
     const outdatedRestart = svc.restart(view.id);
-    assert.equal(outdatedRestart.status, 409, "restart after a runner downgrade fails the same way");
-    assert.match(outdatedRestart.error ?? "", /protocol-v160/);
+    assertRunnerRefusal(
+      outdatedRestart,
+      independentPermissionsRefusal,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole - 1,
+      "restart after a runner downgrade fails the same way, with the shared sentence alone",
+    );
     const legacyOnOlderRunner = svc.createSession(
       { ...request, role: "orchestrator", config: { permissionMode: "orchestrator" } },
       undefined, undefined, false, false, false, human,
@@ -21487,16 +22234,26 @@ test("Orchestrator is an additive role independent of the provider permission mo
       { ...request, agentId: CODEX_APP_AGENT_ID, role: "orchestrator", config: { permissionMode: codexMode } },
       undefined, undefined, false, false, false, human,
     );
-    assert.equal(codexOnV160.status, 409, "a v160 runner has no additive Codex launch shape");
-    assert.match(codexOnV160.error ?? "", /protocol-v162/);
+    assertRunnerRefusal(
+      codexOnV160,
+      `${independentPermissionsRefusal} To start now, choose the Orchestrator preset permission mode.`,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex - 1,
+      "a v160 runner has no additive Codex launch shape",
+    );
     const claudeOnV160 = svc.createSession(
       { ...request, role: "orchestrator", config: { permissionMode: "acceptEdits" } },
       undefined, undefined, false, false, false, human,
     );
     assert.equal(claudeOnV160.ok, true, claudeOnV160.error);
     const codexRestartOnV160 = svc.restart(codex.data!.id);
-    assert.equal(codexRestartOnV160.status, 409, "restart refuses the same combination with the same guidance");
-    assert.match(codexRestartOnV160.error ?? "", /protocol-v162/);
+    assertRunnerRefusal(
+      codexRestartOnV160,
+      independentPermissionsRefusal,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex - 1,
+      "restart refuses the same combination with the same guidance",
+    );
     // #1308: Codex's audited Linux or macOS sandbox is the COUPLED preset's precondition. The
     // additive launch injects no sandbox, approval, or reviewer setting, so it is admitted wherever
     // the runner advertises the role, and the session keeps the sandbox its permission mode already
@@ -21592,8 +22349,12 @@ test("a non-strict Pi Orchestrator keeps its provider permission mode and is gat
       RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditivePi - 1);
     const outdated = svc.createSession({ ...request, role: "orchestrator", config: { permissionMode: "default" } },
       undefined, undefined, false, false, false, human);
-    assert.equal(outdated.status, 409);
-    assert.match(outdated.error ?? "", /protocol-v163 runner/);
+    assertRunnerRefusal(
+      outdated,
+      "This machine needs a newer runner for an Orchestrator with independent provider permissions. Update and restart the runner. To start now, choose the Orchestrator preset permission mode.",
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditivePi,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditivePi - 1,
+    );
     // Pre-existing limitation, unchanged by #1294: the control plane has never admitted a coupled
     // Orchestrator preset for Pi, so the additive shape is the only Pi Orchestrator there is.
     const preset = svc.createSession({ ...request, role: "orchestrator", config: { permissionMode: "orchestrator" } },
@@ -21756,8 +22517,13 @@ test("Integration Isolation is its own policy, gated separately and fixed at cre
       ...request, role: "orchestrator", config: { permissionMode: "acceptEdits" },
       orchestrator: { execution: { strictProjectIsolation: false, integrationIsolation: true } },
     }, undefined, undefined, false, false, false, human);
-    assert.equal(outdated.status, 409);
-    assert.match(outdated.error ?? "", /Integration Isolation requires a protocol-v164 runner/);
+    const integrationIsolationRefusal = "This machine needs a newer runner for integration isolation. Update and restart the runner.";
+    assertRunnerRefusal(
+      outdated,
+      `${integrationIsolationRefusal} To start now, turn off Integration Isolation.`,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIntegrationIsolation,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIntegrationIsolation - 1,
+    );
     // ...and equally for a saved account default. Unlike Parent Control, whose portable default
     // downgrades because dropping delegation only narrows what a session may do, silently dropping
     // this one would BROADEN the launch's reach into the user's credentials and tools.
@@ -21776,7 +22542,12 @@ test("Integration Isolation is its own policy, gated separately and fixed at cre
     });
     assert.equal(outdatedDefault.status, 409,
       "a security-relevant default fails closed for an older peer instead of downgrading");
-    assert.match(outdatedDefault.error ?? "", /Integration Isolation requires a protocol-v164 runner/);
+    assertRunnerRefusal(
+      outdatedDefault,
+      `${integrationIsolationRefusal} To start now, turn off Integration Isolation.`,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIntegrationIsolation,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIntegrationIsolation - 1,
+    );
     // The preset needs nothing new from the runner: it isolates on every runner ever shipped.
     const outdatedPreset = svc.createSession({
       ...request, role: "orchestrator", config: { permissionMode: "orchestrator" },
@@ -21787,8 +22558,13 @@ test("Integration Isolation is its own policy, gated separately and fixed at cre
     // Restart mirrors creation exactly: a runner that lost the capability cannot relaunch a
     // campaign whose stored policy says its integrations are gone.
     const restart = svc.restart(isolated.data!.id);
-    assert.equal(restart.status, 409);
-    assert.match(restart.error ?? "", /Integration Isolation requires a protocol-v164 runner/);
+    assertRunnerRefusal(
+      restart,
+      integrationIsolationRefusal,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIntegrationIsolation,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIntegrationIsolation - 1,
+      "restart gives the shared sentence alone",
+    );
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     assert.equal(svc.restart(isolated.data!.id).ok, true);
     assert.deepEqual(specFor(isolated.data!.id)?.orchestrator,
@@ -26524,7 +27300,8 @@ test("human campaign scope recovery, additions, denial, removal and closure use 
     db.registerRunner(meta, Date.now(),207);
     const unsupported = await svc.proposeCampaignIssueScope(id,{...proposal,requestId:"old-runner",expectedRevision:2,additions:[{repository:"team/repo",number:126}]});
     assert.equal(unsupported.ok,false);
-    assert.match(unsupported.error!,/protocol-v208/);
+    assert.equal(unsupported.error,"This machine needs a newer runner for campaign issue scope changes. Update and restart the runner.");
+    assert.deepEqual(unsupported.capabilityRequirement,{requiredRunnerProtocolVersion:208,runnerProtocolVersion:207});
     assert.equal(db.getSession(id)!.orchestratorPolicy!.issueScope!.revision,2);
     await new Promise((resolve) => setTimeout(resolve,0));
   } finally { db.close(); }

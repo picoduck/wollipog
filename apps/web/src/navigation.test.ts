@@ -487,18 +487,22 @@ test("internal links retain the current trusted origin without credentials", () 
 
 test("browser history canonicalizes once, preserves state, and never pushes during popstate", () => {
   const listeners = new Set<() => void>();
-  const writes: Array<{ kind: "push" | "replace"; state: unknown; path: string }> = [];
+  const writes: Array<{ kind: "push" | "replace"; state: unknown; path: string | null }> = [];
   const location = { pathname: `/sessions/~${encodeResourceId("space id")}/`, search: "?stale=1", hash: "#old" };
   const history = {
-    state: { retained: true },
-    pushState(state: unknown, _unused: string, path: string | URL | null) {
+    state: { retained: true } as unknown,
+    pushState(state: unknown, _unused: string, path?: string | URL | null) {
+      history.state = state;
       writes.push({ kind: "push", state, path: String(path) });
       const url = new URL(String(path), "https://manager.example.test");
       location.pathname = url.pathname;
       location.search = url.search; location.hash = "";
     },
-    replaceState(state: unknown, _unused: string, path: string | URL | null) {
-      writes.push({ kind: "replace", state, path: String(path) });
+    replaceState(state: unknown, _unused: string, path?: string | URL | null) {
+      history.state = state;
+      // Without a URL the entry keeps its address, as a browser's does.
+      writes.push({ kind: "replace", state, path: path == null ? null : String(path) });
+      if (path == null) return;
       const url = new URL(String(path), "https://manager.example.test");
       location.pathname = url.pathname;
       location.search = url.search; location.hash = "";
@@ -512,16 +516,25 @@ test("browser history canonicalizes once, preserves state, and never pushes duri
   };
   const navigation = new BrowserNavigation(target);
   assert.deepEqual(navigation.current(), { name: "session", id: "space id" });
-  assert.deepEqual(writes, [{ kind: "replace", state: { retained: true }, path: `/sessions/~${encodeResourceId("space id")}` }]);
+  const entry = (history.state as { wollipogEntry: { run: string; index: number } }).wollipogEntry;
+  assert.equal(entry.index, 0, "the first entry records its position (#3218)");
+  assert.deepEqual(writes, [
+    { kind: "replace", state: { retained: true }, path: `/sessions/~${encodeResourceId("space id")}` },
+    { kind: "replace", state: { retained: true, wollipogEntry: entry }, path: null },
+  ]);
 
   navigation.push({ name: "automations" });
-  assert.deepEqual(writes.at(-1), { kind: "push", state: { retained: true }, path: "/automations" });
+  assert.deepEqual(writes.at(-1), {
+    kind: "push", state: { retained: true, wollipogEntry: { run: entry.run, index: 1 } }, path: "/automations",
+  });
   navigation.push({ name: "automations" });
-  assert.equal(writes.length, 2, "same-target navigation is inert");
+  assert.equal(writes.length, 3, "same-target navigation is inert");
 
   const sourceView: View = { name: "session", id: "space id", location: { path: "src/a.ts", line: 9 } };
   navigation.push(sourceView);
-  assert.deepEqual(writes.at(-1), { kind: "push", state: { retained: true }, path: viewPath(sourceView) });
+  assert.deepEqual(writes.at(-1), {
+    kind: "push", state: { retained: true, wollipogEntry: { run: entry.run, index: 2 } }, path: viewPath(sourceView),
+  });
   assert.equal(location.search, "?line=9");
 
   const seen: View[] = [];
@@ -530,7 +543,7 @@ test("browser history canonicalizes once, preserves state, and never pushes duri
   location.search = "";
   for (const listener of listeners) listener();
   assert.deepEqual(seen, [{ name: "pod", id: "pod_1" }]);
-  assert.equal(writes.length, 3, "popstate parsing does not push a new entry");
+  assert.equal(writes.length, 4, "popstate parsing does not push a new entry");
   stop();
   assert.equal(listeners.size, 0);
 });
@@ -538,7 +551,7 @@ test("browser history canonicalizes once, preserves state, and never pushes duri
 test("Keyboard folds into Behavior: /settings/keyboard replaces itself and lands on Keyboard Shortcuts (#3023)", () => {
   assert.equal(SETTINGS_SECTIONS.some((section) => section.id === ("keyboard" as never)), false);
   assert.deepEqual(SETTINGS_SECTIONS.map((section) => section.title),
-    ["Appearance", "Notifications", "Behavior", "Approvals", "Orchestrator", "Network", "Experimental", "About"]);
+    ["Appearance", "Notifications", "Behavior", "Approvals", "Orchestrator", "Network", "Storage", "Experimental", "About"]);
   const view = viewFromPath("/settings/keyboard");
   assert.deepEqual(view, { name: "settings", section: "behavior", focus: { target: "keyboard-shortcuts" } });
   assert.equal(viewPath(view!), "/settings/behavior", "the focus target is not part of the address");
@@ -549,8 +562,11 @@ test("Keyboard folds into Behavior: /settings/keyboard replaces itself and lands
     location: { pathname: "/settings/keyboard", search: "", hash: "" },
     history: {
       state: null,
-      pushState(_state: unknown, _unused: string, path: string | URL | null) { writes.push({ kind: "push", path: String(path) }); },
-      replaceState(_state: unknown, _unused: string, path: string | URL | null) { writes.push({ kind: "replace", path: String(path) }); },
+      pushState(_state: unknown, _unused: string, path?: string | URL | null) { writes.push({ kind: "push", path: String(path) }); },
+      // Without a URL a replace records only the entry's position (#3218).
+      replaceState(_state: unknown, _unused: string, path?: string | URL | null) {
+        if (path != null) writes.push({ kind: "replace", path: String(path) });
+      },
     },
     addEventListener() {},
     removeEventListener() {},
@@ -566,7 +582,7 @@ test("unknown browser routes fall back to the canonical Inbox home", () => {
     history: {
       state: null,
       pushState() {},
-      replaceState(_state: unknown, _unused: string, path: string | URL | null) { writes.push(String(path)); },
+      replaceState(_state: unknown, _unused: string, path?: string | URL | null) { if (path != null) writes.push(String(path)); },
     },
     addEventListener() {},
     removeEventListener() {},

@@ -73,7 +73,8 @@ test("Agent Harness defaults aggregate installations, preserve drift, and remain
   const principal = localHuman(db);
   const initial = settings.view(principal);
   assert.equal(initial.defaults.length, 1);
-  assert.equal(initial.defaults[0]?.agentId, "codex");
+  assert.equal(initial.defaults[0]?.agentId, "codex-app-server", "a built-in harness is named by its driver, not a Machine's row id");
+  assert.equal(initial.defaults[0]?.name, "Codex App Server");
   assert.equal(initial.defaults[0]?.installations.length, 2);
   assert.equal(JSON.stringify(initial).includes("must-not-project"), false);
   assert.equal(JSON.stringify(initial).includes("/secret/path"), false);
@@ -149,7 +150,10 @@ test("Agent Harness default parsing rejects ambiguous identities and free-form e
     agentId: "codex", driver: "codex-app-server", context: { kind: "wsl", distro: "Ubuntu" },
   });
   assert.ok(identity);
-  assert.equal(agentHarnessIdentityKey(identity), '["codex","codex-app-server","wsl","Ubuntu"]');
+  assert.equal(agentHarnessIdentityKey(identity), '["codex-app-server","codex-app-server","wsl","Ubuntu"]',
+    "a built-in harness key ignores the Machine-local agent id");
+  assert.equal(agentHarnessIdentityKey({ agentId: "claude", driver: "acp", context: { kind: "native" } }),
+    '["claude","acp","native",""]', "an ACP key keeps its agent id");
   assert.deepEqual(parseAgentHarnessIdentity({
     agentId: "pi", driver: "pi", context: { kind: "native" },
   }), { agentId: "pi", driver: "pi", context: { kind: "native" } });
@@ -217,6 +221,99 @@ test("Agent Harness defaults migration preserves legacy rows and admits Pi", () 
       agentId: "pi", driver: "pi", context: { kind: "native" },
     })?.config.model, "anthropic/sonnet");
     migrated.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function claudeRunner(runnerId: string, agents: Array<{ id: string; driver: "claude-code" | "acp" }>): RunnerMetadata {
+  return {
+    runnerId,
+    hostname: runnerId,
+    os: "linux",
+    version: "1.0.0",
+    workspaces: [{ id: "workspace", name: "Workspace", path: "/workspace" }],
+    agents: agents.map(({ id, driver }) => ({
+      id,
+      name: driver === "acp" ? "Claude Code (ACP)" : `Claude ${id}`,
+      command: "claude",
+      args: [],
+      env: {},
+      driver,
+      available: true,
+      context: { kind: "native" as const },
+      capabilities: {
+        models: [{ id: "opus", displayName: "Opus", default: true, efforts: ["high"] }],
+        effortLevels: ["high"],
+        permissionModes: ["default"],
+        slashCommands: [],
+        supportsImages: true,
+        supportsApprovals: true,
+      },
+    })),
+  };
+}
+
+test("one saved Claude Code default applies on every Machine whatever each names its row (#3247)", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  // Machine A calls its native Claude Code row `claude-code`; Machine B calls it `claude-native`
+  // and uses `claude-code` for an ACP wrapper.
+  db.registerRunner(claudeRunner("machine-a", [{ id: "claude-code", driver: "claude-code" }]), 1, PROTOCOL_VERSION);
+  db.registerRunner(claudeRunner("machine-b", [
+    { id: "claude-native", driver: "claude-code" },
+    { id: "claude-code", driver: "acp" },
+  ]), 2, PROTOCOL_VERSION);
+  const settings = new AgentHarnessDefaultsSettings(db);
+  const principal = localHuman(db);
+  const view = settings.view(principal);
+  const native = view.defaults.filter((option) => option.driver === "claude-code");
+  assert.equal(native.length, 1, "both native rows are one harness");
+  assert.equal(native[0]?.name, "Claude Code");
+  assert.deepEqual(native[0]?.installations.map((installation) => installation.runnerId), ["machine-a", "machine-b"]);
+  assert.deepEqual(view.defaults.filter((option) => option.driver === "acp").map((option) => option.agentId), ["claude-code"],
+    "the ACP row stays its own harness");
+
+  settings.update(principal, {
+    agentId: "claude-code", driver: "claude-code", context: { kind: "native" }, config: { model: "opus" },
+  }, 10);
+  for (const agentId of ["claude-code", "claude-native"]) {
+    assert.equal(db.getAgentHarnessDefault(principal.userId, {
+      agentId, driver: "claude-code", context: { kind: "native" },
+    })?.config.model, "opus", `${agentId} on its Machine receives the saved default`);
+  }
+  assert.equal(db.getAgentHarnessDefault(principal.userId, {
+    agentId: "claude-code", driver: "acp", context: { kind: "native" },
+  }), null, "a native default never applies to an ACP row that shares its id");
+});
+
+test("migration collapses per-row built-in defaults onto one harness and keeps the newest (#3247)", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-harness-defaults-3247-"));
+  const path = join(root, "control-plane.sqlite");
+  try {
+    const initial = ControlPlaneDb.open(path);
+    const userId = initial.localIdentityContext().userId;
+    initial.close();
+    const legacy = new DatabaseSync(path);
+    const insert = legacy.prepare(`INSERT INTO agent_harness_defaults
+      (user_id, agent_id, driver, context_kind, context_distro, model, effort, permission_mode, updated_at)
+      VALUES (?, ?, ?, 'native', '', ?, NULL, NULL, ?)`);
+    insert.run(userId, "claude-code", "claude-code", "sonnet", 5);
+    insert.run(userId, "claude-native", "claude-code", "opus", 9);
+    insert.run(userId, "codex", "codex-app-server", "sol", 3);
+    insert.run(userId, "claude-code", "acp", "haiku", 4);
+    legacy.close();
+
+    const migrated = ControlPlaneDb.open(path);
+    assert.deepEqual(migrated.listAgentHarnessDefaults(userId).map((record) =>
+      [record.agentId, record.driver, record.config.model]).sort(), [
+      ["claude-code", "acp", "haiku"],
+      ["claude-code", "claude-code", "opus"],
+      ["codex-app-server", "codex-app-server", "sol"],
+    ], "the newest native Claude Code row survives under the canonical id; ACP is untouched");
+    migrated.close();
+    const reopened = ControlPlaneDb.open(path);
+    assert.equal(reopened.listAgentHarnessDefaults(userId).length, 3, "the migration is idempotent");
+    reopened.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

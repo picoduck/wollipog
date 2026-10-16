@@ -1248,13 +1248,10 @@ test("the sweep keeps this process's background meta write in flight, however ol
 test("the sweep removes only writer temp files whose writer is gone", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-lock-temps-"));
   try {
-    const store = new SessionStore(root, undefined, {
-      triggerActiveBytes: 64 * 1024 * 1024,
-      retainActiveBytes: 16 * 1024 * 1024,
-      retainActiveEvents: 1_024,
-      maxSegmentBytes: 64 * 1024 * 1024,
-      orphanGraceMs: 0,
-    });
+    // Every file is aged past the default grace period rather than swept with a zero grace: the
+    // sweep compares sub-millisecond mtimes with a whole-millisecond Date.now(), so a file written in
+    // the sweep's own millisecond still looks younger than a zero grace and stays (#3217).
+    const store = new SessionStore(root);
     store.create(sessionMeta());
     const dir = join(root, ID);
     const dead = await deadPid();
@@ -1282,11 +1279,17 @@ test("the sweep removes only writer temp files whose writer is gone", async (t) 
       `meta.json.${dead}.not-a-uuid.tmp`,
       "meta.json.tmp",
     ];
-    for (const name of [...gone, ...kept]) writeFileSync(join(dir, name), "x");
-    assert.equal((await store.maintainHistories("runner-m:history")).orphansRemoved, gone.length);
+    const young = `lock.${dead}.${randomUUID()}.tmp`; // a gone writer's file, inside the grace period
+    for (const name of [...gone, ...kept]) {
+      writeFileSync(join(dir, name), "x");
+      ageFile(join(dir, name), PAST_GRACE_MS);
+    }
+    writeFileSync(join(dir, young), "x");
+    const { orphansRemoved } = await store.maintainHistories("runner-m:history");
     const left = new Set(readdirSync(dir));
-    assert.deepEqual(gone.filter((name) => left.has(name)), []);
-    assert.deepEqual(kept.filter((name) => !left.has(name)), []);
+    assert.deepEqual(gone.filter((name) => left.has(name)), [], "every orphaned writer temp file is removed");
+    assert.deepEqual([...kept, young].filter((name) => !left.has(name)), [], "every other file stays");
+    assert.equal(orphansRemoved, gone.length);
   } finally {
     t.mock.restoreAll();
     rmSync(root, { recursive: true, force: true });

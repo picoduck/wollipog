@@ -54,10 +54,14 @@ for (const width of [1440, 390]) {
 }
 
 test("All and Project lists share priorities; new results defer reordering while selection and keyboard targets stay held", async ({ page }) => {
+  await page.clock.install();
   await page.setViewportSize({ width: 1440, height: 900 });
   await open(page);
   await row(page, work).click();
   const grid = page.getByRole("grid", { name: "Sessions", exact: true });
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1_000));
+  await page.mouse.move(0, 0);
+  await row(page, work).hover();
   await page.evaluate(() => {
     const fixture = window.__WOLLIPOG_PROJECT_INBOX_E2E__;
     const facts = fixture.model().sessions.find((s) => s.id === "session-working")!.attention!;
@@ -68,15 +72,15 @@ test("All and Project lists share priorities; new results defer reordering while
   await expect(row(page, work).locator(".status")).toHaveText("Running");
   await expect.poll(() => titles(page)).toEqual([input, result, work, quiet]);
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-working", { status: "idle" }));
+  await page.clock.runFor(32);
   await expect(row(page, work).locator(".status")).toHaveText("Ready for Review");
   await expect(row(page, work)).toHaveAttribute("aria-selected", "true");
   await expect.poll(() => titles(page)).toEqual([input, result, work, quiet]);
-  const orderLine = page.locator(".inbox-order-line");
-  await expect(orderLine).toBeVisible();
-  await expect(orderLine).toContainText("New activity changed the order.");
-  await orderLine.getByRole("button", { name: "Apply", exact: true }).click();
+  await expect(page.locator(".inbox-order-line")).toHaveCount(0);
+  await page.mouse.move(0, 0);
+  await page.clock.runFor(500);
+  await page.clock.resume();
   await expect.poll(() => titles(page)).toEqual([input, work, result, quiet]);
-  await expect(orderLine).toHaveCount(0);
   await expect(grid).toBeFocused();
   await grid.press("j");
   await expect(row(page, result)).toHaveAttribute("aria-selected", "true");
@@ -169,7 +173,7 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
     const resultBadge = parent.locator(".status");
     const answerBadge = row(page, input).locator(".status");
     await expect(resultBadge).toHaveText("Ready for Review");
-    await expect(resultBadge).toHaveClass(/t-neutral/);
+    await expect(resultBadge).toHaveClass(/t-review/);
     await expect(answerBadge).toHaveText("Answer Required");
     await expect(answerBadge).toHaveClass(/t-warning/);
     expect(await resultBadge.evaluate((badge) => getComputedStyle(badge).color))
@@ -205,3 +209,35 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
     await expect(resultBadge).toHaveCount(0);
   });
 }
+
+
+for (const width of [1440, 390]) test(`idle priorities and a resumed stalled row update without refresh at ${width}px (#3301, #3302)`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 900 });
+  await open(page);
+  await page.mouse.move(0, 0);
+  await page.evaluate(() => {
+    const fixture = window.__WOLLIPOG_PROJECT_INBOX_E2E__;
+    const facts = fixture.model().sessions.find((s) => s.id === "session-working")!.attention!;
+    fixture.replaceSessionSnapshot("session-working", { status: "idle", attention: { ...facts,
+      result: { revision: "new-result", at: Date.now(), owner: "human" } } });
+  });
+  await expect.poll(() => titles(page)).toEqual([input, work, result, quiet]);
+  await expect(row(page, work).locator(".status")).toHaveText("Ready for Review");
+  await page.evaluate(() => {
+    const fixture = window.__WOLLIPOG_PROJECT_INBOX_E2E__;
+    const old = Date.now() - 700_000;
+    fixture.replaceSessionSnapshot("session-working", { status: "input_required", updatedAt: old, lastEventAt: old });
+  });
+  // The prior Running observation has a recent anchor. Use a fresh snapshot to reproduce a
+  // session that was already waiting when this client connected, without waiting ten minutes.
+  await page.reload();
+  await expect(row(page, work)).toHaveClass(/stalled/);
+  await page.evaluate(() => {
+    const fixture = window.__WOLLIPOG_PROJECT_INBOX_E2E__;
+    const facts = fixture.model().sessions.find((s) => s.id === "session-working")!.attention!;
+    fixture.replaceSessionSnapshot("session-working", { status: "running", updatedAt: Date.now(),
+      attention: { ...facts, humanActions: [] }, pendingApproval: null });
+  });
+  await expect(row(page, work)).not.toHaveClass(/stalled/);
+  await expect(row(page, work).locator(".status")).toHaveText("Running");
+});

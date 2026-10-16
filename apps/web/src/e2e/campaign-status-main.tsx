@@ -9,10 +9,14 @@
  * - `legacy`: a campaign on a server without the ledger (no `work` on its projection);
  * - `unrelated`: a session outside any campaign.
  * `theme=light` switches the palette; `open=launcher` starts on the launcher instead of the mode.
+ * `scope=outdated-runner` or `scope=issue-limits` makes issue scope unavailable because a participating
+ * Orchestrator's runner is older than the scope-change or Full Control issue-limit floor.
  */
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
+  campaignIssueLimitsRequirement,
+  campaignIssueScopeChangesRequirement,
   PROTOCOL_VERSION,
   type CampaignWorkItemDetail,
   type CampaignWorkItemSummary,
@@ -225,7 +229,9 @@ const projectionFor = (rev: number) => campaignProjection(
     limits: { maximumConcurrentChildren: 4, occupied: 3, remaining: 1, costBudgetUsd: 40, maxToolCalls: null },
     ...(params.get("budget") === "1" ? { budget: {
       authority: { version: 1 as const, costUsd: 100, toolCalls: 2000, concurrency: 4, acceptedFollowUps: 3, accounting: "managed_workers_only" as const, unpriced: "stop" as const },
-      state: "active" as const, actual: { costUsd: 12, toolCalls: 100 }, outstanding: { costUsd: 50, toolCalls: 900 },
+      // `estimate=1`: recorded spend includes running Claude turns' live estimates (#3196).
+      state: "active" as const, actual: { costUsd: 12, toolCalls: 100, ...(params.get("estimate") === "1" ? { includesEstimate: true } : {}) },
+      outstanding: { costUsd: 50, toolCalls: 900 },
       remaining: { costUsd: 38, toolCalls: 1000 }, occupied: 3, acceptedFollowUps: 1, reachedCheckpointsUsd: [],
       enforcement: "admission_and_best_effort_cancellation" as const, externalWorkers: "unsupported" as const,
       sessionLimits: {costBudgetUsd:40,maxToolCalls:null},rootAllocation:{sessionId:"s_parent",costUsd:25,toolCalls:500},costAccounting:"priced" as const,
@@ -296,10 +302,17 @@ let selectedRequestKey: string | null = null;
 
 const visibleItems = scenario === "planless" ? items.filter((item) => item.id === "cwi_2" || item.id === "cwi_3") : items;
 
+// The same sentence and versions the control plane returns (campaign-issue-scope.ts).
+const scopeRequirement = params.get("scope") === "outdated-runner" ? campaignIssueScopeChangesRequirement(207)
+  : params.get("scope") === "issue-limits" ? campaignIssueLimitsRequirement(216) : null;
+const scopeCompatibility = scopeRequirement ? (({ error, ...versions }) =>
+  ({ supported: false, canPropose: false, compatibilityMessage: error, ...versions }))(scopeRequirement)
+  : { supported: true, canPropose: true };
+
 const client = {
   ...api,
   campaignIssueScope: async (id: string) => ({ campaignSessionId: id, repository: "team/repo", issueNumbers: [], revision: 0,
-    supported: true, canPropose: true, outsideScope: [{ workItemId: "scope-fixture", title: "Member work", issue: { repository: "team/repo", number: 124 }, sessionId: "s_child" }],
+    ...scopeCompatibility, outsideScope: [{ workItemId: "scope-fixture", title: "Member work", issue: { repository: "team/repo", number: 124 }, sessionId: "s_child" }],
     candidates: [{ issue: { repository: "team/repo", number: 123 }, title: "Composer Epic", source: "umbrella" as const },
       { issue: { repository: "team/repo", number: 124 }, title: "Member Work", source: "member_checklist" as const }],
     ...(params.get("completedChildren") === "1" && recoveryRecord?.reason === "failed_checks" ? {

@@ -119,7 +119,7 @@ test.describe("with a mouse at 1440px", () => {
     await expect(page.getByRole("button", { name: "Show Shortcuts Keyboard Shortcuts" })).toBeFocused();
     const sections = page.getByRole("navigation", { name: "Settings Sections" });
     await expect(sections.getByRole("link")).toHaveText(
-      ["Appearance", "Notifications", "Behavior", "Approvals", "Orchestrator", "Network", "Experimental", "About"]);
+      ["Appearance", "Notifications", "Behavior", "Approvals", "Orchestrator", "Network", "Storage", "Experimental", "About"]);
     await sections.getByRole("link", { name: "Appearance" }).click();
     expect(routedPath(page)).toBe("/settings/appearance");
     await page.goBack();

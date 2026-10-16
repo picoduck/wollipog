@@ -1,3 +1,4 @@
+import { openMobileQuestion } from "./open-mobile-question.js";
 import { expect, test, type Page } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFile } from "node:fs/promises";
@@ -8,6 +9,7 @@ import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import type { SessionEventsResponse, SessionView } from "@wollipog/protocol";
+import { readSessionEventHistory } from "../src/e2e/read-session-event-history.js";
 import {
   defaultLocalDeviceTokenPath,
   loadOrCreateLocalDeviceToken,
@@ -98,11 +100,7 @@ async function fetchSession(stack: Pick<LiveStack, "httpBase" | "ownerToken" | "
 async function fetchEvents(
   stack: Pick<LiveStack, "httpBase" | "ownerToken" | "sessionId">,
 ): Promise<SessionEventsResponse> {
-  const response = await fetch(`${stack.httpBase}/api/sessions/${stack.sessionId}/events`, {
-    headers: { authorization: `Bearer ${stack.ownerToken}` },
-  });
-  if (!response.ok) throw new Error(`event lookup failed: ${response.status} ${await response.text()}`);
-  return response.json() as Promise<SessionEventsResponse>;
+  return readSessionEventHistory(stack.httpBase, stack.ownerToken, stack.sessionId);
 }
 
 async function queuePrompt(
@@ -143,7 +141,9 @@ async function expectQuestionControlsInsideCard(page: Page): Promise<void> {
   // The question is the transcript's last row; the virtual list mounts it once the reader is there.
   await page.locator(".detail-scroll").evaluate((element) => { element.scrollTop = element.scrollHeight; });
   await expect(page.locator(".detail-scroll .ask-marker")).toHaveCount(1);
-  await expect(page.locator(".detail-scroll .ask-marker").getByRole("button", { name: "Jump to Question", exact: true })).toBeVisible();
+  const jump = page.locator(".detail-scroll .ask-marker").getByRole("button", { name: "Jump to Question", exact: true });
+  if (await card.getAttribute("data-question-expanded") === "") await expect(jump).toBeHidden();
+  else await expect(jump).toBeVisible();
   await expect(page.locator(".detail-scroll").getByRole("radio")).toHaveCount(0);
 
   const rects = await page.locator(
@@ -167,6 +167,7 @@ async function startLiveStack(
   restartRecovery = false,
   asyncDelivery?: "accepted" | "rejected",
   journalFault = false,
+  asyncQuestionTitle?: string,
 ): Promise<LiveStack> {
   const port = await reservePort();
   const httpBase = `http://127.0.0.1:${port}`;
@@ -283,6 +284,7 @@ async function startLiveStack(
           env: {
             WOLLIPOG_FAKE_CODEX_SCENARIO: codexScenario,
             WOLLIPOG_FAKE_CODEX_RECEIPT: receiptPath,
+            ...(asyncQuestionTitle ? { WOLLIPOG_FAKE_CODEX_ASYNC_TITLE: asyncQuestionTitle } : {}),
             ...(asyncDelivery ? {
               WOLLIPOG_FAKE_CODEX_ASYNC_DELIVERY: asyncDelivery,
               WOLLIPOG_FAKE_CODEX_ASYNC_RELEASE: receiptPath + ".release",
@@ -379,13 +381,13 @@ async function startLiveStack(
       )) return stack;
       if (session.status === "failed") {
         throw new Error(`session failed before asking a question: ${JSON.stringify(session)}\n` +
-          `events: ${JSON.stringify(await fetchEvents(stack))}\n${logs()}`);
+          `events: ${JSON.stringify(await fetchEvents(stack).catch(String))}\n${logs()}`);
       }
       await delay(100);
     }
     throw new Error(`${provider === "codex" ? "Codex" : "Claude"} question never reached the control plane` +
       `${awaitIdle ? " with the session idle" : ""}\n` +
-      `session: ${JSON.stringify(lastSession)}\nevents: ${JSON.stringify(await fetchEvents(stack))}\n${logs()}`);
+      `session: ${JSON.stringify(lastSession)}\nevents: ${JSON.stringify(await fetchEvents(stack).catch(String))}\n${logs()}`);
   } catch (error) {
     await stop();
     throw error;
@@ -411,6 +413,8 @@ for (const style of ["interactive", "composer"] as const) test(`Claude AskUserQu
       localStorage.setItem("wollipog.question-response-style", responseStyle);
     }, style);
     await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
+    await page.locator(".request-dock, .composer-answer").first().waitFor();
+    await openMobileQuestion(page);
 
     // Composer Response shows the question once: Answer Mode opens on its own, and the card leaves
     // the dock (#2212).
@@ -482,6 +486,8 @@ for (const style of ["interactive", "composer"] as const) test(`Codex structured
       localStorage.setItem("wollipog.question-response-style", responseStyle);
     }, style);
     await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
+    await page.locator(".request-dock, .composer-answer").first().waitFor();
+    await openMobileQuestion(page);
 
     // Composer Response shows the question once: Answer Mode opens on its own, and the card leaves
     // the dock (#2212).
@@ -537,17 +543,47 @@ for (const style of ["interactive", "composer"] as const) test(`Codex structured
 for (const viewport of [
   { name: "desktop", width: 1280, height: 800 },
   { name: "mobile", width: 390, height: 844 },
-]) test(`Codex async question remains answerable after continued work on ${viewport.name}`, async ({ page }) => {
+]) test(`long Codex async question remains answerable after continued work on ${viewport.name}`, async ({ page: fixturePage, browser, baseURL }) => {
   test.setTimeout(120_000);
+  const title = "Which path should I use?\n\n" +
+    Array.from({ length: 50 }, (_, index) =>
+      `Context ${index + 1}: Preserve the complete approval details so the decision can be reviewed with its validation results and implementation scope.`)
+      .join("\n\n") + "\n\nEnd of Context. Choose the next action.";
+  expect(title.length).toBeGreaterThan(2000);
+  const stack = await startLiveStack("codex", "async-question", false, undefined, false, title);
+  const evidenceDir = process.env.WOLLIPOG_ISSUE_1602_EVIDENCE_DIR;
+  const recording = evidenceDir ? await browser.newContext({
+    baseURL, viewport: { width: viewport.width, height: viewport.height },
+    recordVideo: { dir: evidenceDir, size: { width: viewport.width, height: viewport.height } },
+  }) : null;
+  const page = recording ? await recording.newPage() : fixturePage;
   await page.setViewportSize(viewport);
-  const stack = await startLiveStack("codex", "async-question");
+  const beat = async (milliseconds: number) => {
+    if (evidenceDir) await page.waitForTimeout(milliseconds);
+  };
   try {
     // Question and turn completion arrive separately; asking is not proof work has settled.
     await expect.poll(async () => (await fetchSession(stack)).status, { timeout: 30_000 }).toBe("idle");
     const pending = await fetchSession(stack);
+    const fragment = new URLSearchParams({
+      origin: stack.httpBase, token: stack.ownerToken,
+      sessionId: stack.sessionId, actualAsyncMessage: "1",
+    });
+    await page.addInitScript(() => localStorage.setItem("wollipog.question-response-style", "interactive"));
+    await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
+    await page.locator(".request-dock, .composer-answer").first().waitFor();
+    await openMobileQuestion(page);
+    await expect(page.locator(".tl-agent-msg")).toHaveCount(1);
+    await expect(page.locator(".tl-agent-msg")).toContainText("I will keep investigating.");
+    if (evidenceDir) {
+      mkdirSync(evidenceDir, { recursive: true });
+      await beat(2_500);
+      await page.screenshot({ path: join(evidenceDir, `async-loaded-${viewport.name}-dark.png`) });
+    }
     expect(pending.status).toBe("idle");
     expect(pending.pendingApproval).toMatchObject({
       kind: "question", async: true, requestId: "codex-async:async-ask",
+      questions: [{ question: title }],
     });
     const events = await fetchEvents(stack);
     const kinds = events.events.map((event) => event.payload.kind);
@@ -555,24 +591,23 @@ for (const viewport of [
     expect(kinds.indexOf("question_request")).toBeLessThan(kinds.indexOf("tool_call"));
     expect(events.events.find((event) => event.payload.kind === "question_request")?.payload).toMatchObject({ async: true });
 
-    const fragment = new URLSearchParams({
-      origin: stack.httpBase, token: stack.ownerToken,
-      sessionId: stack.sessionId, actualAsyncMessage: "1",
-    });
-    await page.addInitScript(() => localStorage.setItem("wollipog.question-response-style", "interactive"));
-    await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
-    await expect(page.locator(".tl-agent-msg")).toHaveCount(1);
-    await expect(page.locator(".tl-agent-msg")).toContainText("I will keep investigating.");
     const card = page.getByRole("region", { name: "Agent Questions" });
     await expect(card.locator(".request-card-kind")).toHaveText("Async Question");
+    await expect(card.locator(".question-text")).toContainText("End of Context. Choose the next action.");
     await page.reload();
+    await page.locator(".request-dock").waitFor();
+    await openMobileQuestion(page);
     await expect(card.locator(".request-card-kind")).toHaveText("Async Question");
     if (viewport.name === "desktop") {
       await stack.restart();
       await page.reload();
       await expect(card.locator(".request-card-kind")).toHaveText("Async Question");
     }
-    const evidenceDir = process.env.WOLLIPOG_ISSUE_1602_EVIDENCE_DIR;
+    if (await card.getAttribute("data-question-expanded") !== "") await card.getByRole("button", { name: "Show Full Question", exact: true }).click();
+    await card.getByText("End of Context. Choose the next action.", { exact: true }).scrollIntoViewIfNeeded();
+    await beat(2_500);
+    await card.getByRole("radio", { name: "Patch" }).click();
+    await beat(1_500);
     if (evidenceDir) {
       mkdirSync(evidenceDir, { recursive: true });
       for (const theme of ["dark", "light"] as const) {
@@ -580,7 +615,6 @@ for (const viewport of [
         await page.screenshot({ path: join(evidenceDir, `async-question-${viewport.name}-${theme}.png`) });
       }
     }
-    await card.getByRole("radio", { name: "Patch" }).click();
     await card.getByRole("button", { name: "Submit Answers" }).click();
     await expect.poll(async () => {
       try { return JSON.parse(await readFile(stack.receiptPath, "utf8")); }
@@ -588,14 +622,20 @@ for (const viewport of [
     }, { timeout: 30_000 }).toEqual({ requestId: "codex-async:async-ask", answer: "Patch" });
     await expect.poll(async () => (await fetchSession(stack)).pendingApproval).toBeNull();
     await expect.poll(async () => (await fetchSession(stack)).preview).toContain("Async answer received by Codex.");
+    await beat(3_500);
     if (evidenceDir) {
       await page.screenshot({ path: join(evidenceDir, `async-answer-${viewport.name}-light.png`) });
     }
   } catch (error) {
     throw new Error(`${error instanceof Error ? error.stack : String(error)}\n` +
       `session: ${JSON.stringify(await fetchSession(stack))}\n` +
-      `events: ${JSON.stringify((await fetchEvents(stack)).events.map((event) => event.payload))}\n${stack.logs()}`);
+      `events: ${JSON.stringify(await fetchEvents(stack).then(result => result.events.map(event => event.payload)).catch(String))}\n${stack.logs()}`);
   } finally {
+    if (recording) {
+      const video = page.video();
+      await recording.close();
+      if (video) await video.saveAs(join(evidenceDir!, `async-question-${viewport.name}.webm`));
+    }
     await stack.stop();
   }
 });
@@ -643,6 +683,8 @@ for (const viewport of [
           });
           await page.addInitScript(() => localStorage.setItem("wollipog.question-response-style", "composer"));
           await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
+          await page.locator(".request-dock, .composer-answer").first().waitFor();
+          await openMobileQuestion(page);
           const answer = page.locator(".composer-answer-input");
           await expect(answer).toBeVisible();
           await capture("before");
@@ -728,6 +770,8 @@ test("an async answer refused by a full queue can be resubmitted safely", async 
       sessionId: stack.sessionId, actualAsyncMessage: "1" });
     await page.addInitScript(() => localStorage.setItem("wollipog.question-response-style", "composer"));
     await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
+    await page.locator(".request-dock, .composer-answer").first().waitFor();
+    await openMobileQuestion(page);
     await page.locator(".composer-answer-input").fill("1");
     await page.getByRole("button", { name: "Submit Answers" }).click();
     await expect.poll(async () => (await fetchSession(stack)).pendingPrompts
@@ -786,6 +830,8 @@ for (const provider of ["claude", "codex"] as const) {
             localStorage.setItem("wollipog.question-response-style", responseStyle);
           }, style);
           await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
+          await page.locator(".request-dock, .composer-answer").first().waitFor();
+          await openMobileQuestion(page);
 
           // The card, or in Composer Response the composer alone (#2212), says the question was
           // recovered and that answering resumes the conversation once.
@@ -933,7 +979,11 @@ for (const viewport of [
           queued: "1",
         });
         await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
+        await page.locator(".request-dock, .composer-answer").first().waitFor();
+        await openMobileQuestion(page);
         await page.reload();
+        await page.locator(".request-dock").waitFor();
+        await openMobileQuestion(page);
 
         const submit = page.getByRole("button", { name: "Submit Answers" });
         const next = page.getByRole("button", { name: "Next", exact: true });
@@ -1037,6 +1087,8 @@ for (const provider of ["claude", "codex"] as const) {
         const fragment = new URLSearchParams({ origin: stack.httpBase, token: stack.ownerToken, sessionId: stack.sessionId });
         await page.addInitScript((value) => localStorage.setItem("wollipog.question-response-style", value), style);
         await page.goto(`/agent-questions-live-e2e.html#${fragment}`);
+        await page.locator(".request-dock, .composer-answer").first().waitFor();
+        await openMobileQuestion(page);
         const answers = provider === "claude" ? ["Regional canary", "Unit Tests"] : ["Canary", "Custom release note"];
         if (style === "interactive") {
           const input = page.locator(".question-input");

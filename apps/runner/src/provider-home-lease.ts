@@ -173,9 +173,11 @@ function providerKey(driver: AgentDriverKind, command: string): string {
   return `acp-${createHash("sha256").update(command).digest("hex").slice(0, 16)}`;
 }
 
-/** bwrap redirects mutable transcripts; container/cloud providers do not mutate the host home. */
+/** Ordinary bwrap redirects mutable transcripts; a protected managed worktree can instead keep
+ * the real provider home writable, which still needs the same cross-runner lease as provider mode. */
 export function providerLaunchNeedsSharedHomeLease(isolation?: SpawnIsolation): boolean {
-  return isolation?.backend !== "bwrap" && isolation?.backend !== "wsl-bwrap" && isolation?.backend !== "container" &&
+  return (isolation?.backend !== "bwrap" || isolation.preservesProviderHome === true) &&
+    isolation?.backend !== "wsl-bwrap" && isolation?.backend !== "container" &&
     isolation?.backend !== "cloud";
 }
 
@@ -237,10 +239,15 @@ function capture(root: string): LeaseIoSnapshot {
   spendVerificationWork(result.work.records, result.work.bytes);
   return result;
 }
+/** Publication staging has validated physical identity, but its bytes are mutable/non-authoritative. */
+function publicationTemporary(entry: LeaseIoEntry): boolean {
+  return entry.directory === "root" && /^\.provider-home-lease-[0-9a-f-]{36}\.tmp$/u.test(entry.name);
+}
+
 const decodedEntries = new WeakMap<LeaseIoEntry, ReadLeaseRecord>();
 function readRecord(path: string): ReadLeaseRecord {
   const cachedEntry = physicalSnapshot ? snapshotEntry(path) : undefined;
-  if (cachedEntry?.links === 3 && physicalSnapshot!.entries.filter((entry) => entry.device === cachedEntry.device && entry.inode === cachedEntry.inode && entry.raw.equals(cachedEntry.raw)).length < 3) throw new Error("unproven lease metadata alias");
+  if (cachedEntry?.links === 3 && physicalSnapshot!.entries.filter((entry) => entry.device === cachedEntry.device && entry.inode === cachedEntry.inode && (entry.raw.equals(cachedEntry.raw) || publicationTemporary(entry))).length < 3) throw new Error("unproven lease metadata alias");
   if (cachedEntry && decodedEntries.has(cachedEntry)) return decodedEntries.get(cachedEntry)!;
   spendVerificationWork(1, 0);
   let bytes: Buffer;
@@ -277,15 +284,31 @@ function unexpectedEntries(lockDir: string): Error {
   return refusal(lockDir, "contains unexpected entries; refusing unsafe recovery");
 }
 
+/** Why a lease was refused, independent of the operator-facing text. `busy` is a lease whose
+ * recorded process is alive; `foreign_owner` is a lease from another runner or control plane whose
+ * recorded process is gone; `foreign_host` is a lease recorded on another host; `unverifiable` is
+ * everything the registry cannot prove. */
+export type ProviderHomeLeaseRefusalKind = "busy" | "foreign_owner" | "foreign_host" | "unverifiable";
+
 class ProviderHomeLeaseRefusal extends Error {
-  constructor(readonly reason: string, message: string) { super(message); }
+  constructor(readonly reason: string, message: string, readonly kind: ProviderHomeLeaseRefusalKind) { super(message); }
 }
 
-function refusal(lockDir: string, reason: string, restartAfterQuarantine = false): Error {
+/** The typed refusal kind, or null when `error` is not a registry refusal. */
+export function providerHomeLeaseRefusalKind(error: unknown): ProviderHomeLeaseRefusalKind | null {
+  return error instanceof ProviderHomeLeaseRefusal ? error.kind : null;
+}
+
+function refusal(
+  lockDir: string,
+  reason: string,
+  restartAfterQuarantine = false,
+  kind: ProviderHomeLeaseRefusalKind = "unverifiable",
+): Error {
   const recovery = restartAfterQuarantine
     ? "restart the runner before retrying; quarantine does not clear this registry's in-memory failed initialization reservations"
     : "retry";
-  return new ProviderHomeLeaseRefusal(reason, `provider home lease directory ${lockDir} ${reason}; after proving no provider process or runner uses this HOME, manually quarantine the entire provider-home-leases-v1 directory (including mutable-home.lock, all lease-/next- records, and mutable-home.recovery.json) and ${recovery}; do not remove individual records`);
+  return new ProviderHomeLeaseRefusal(reason, `provider home lease directory ${lockDir} ${reason}; after proving no provider process or runner uses this HOME, manually quarantine the entire provider-home-leases-v1 directory (including mutable-home.lock, all lease-/next- records, and mutable-home.recovery.json) and ${recovery}; do not remove individual records`, kind);
 }
 
 function verificationRefusal(lockDir: string, error: unknown, restartAfterQuarantine = false): Error {
@@ -293,7 +316,9 @@ function verificationRefusal(lockDir: string, error: unknown, restartAfterQuaran
   // exception into operator-visible output.
   if (error instanceof LeaseIoError && error.kind === "busy") return new LeaseIoError("busy", `provider home lease directory ${lockDir} is already in use: checkpoint publication is in progress; preserve evidence and retry`);
   if (error instanceof LeaseIoError && error.kind === "unavailable") return error;
-  return refusal(lockDir, error instanceof ProviderHomeLeaseRefusal ? error.reason : "cannot be verified: metadata is unsafe or unreadable", restartAfterQuarantine);
+  return error instanceof ProviderHomeLeaseRefusal
+    ? refusal(lockDir, error.reason, restartAfterQuarantine, error.kind)
+    : refusal(lockDir, "cannot be verified: metadata is unsafe or unreadable", restartAfterQuarantine);
 }
 
 function recordsHash(records: Array<{ name: string; hash: string }>): string {
@@ -605,7 +630,7 @@ function lstatExists(path: string): boolean {
   try { lstatSync(path); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
 }
 function ioPlan(snapshot: LeaseIoSnapshot, tip: ReadLeaseRecord, jobs: LeaseIoJob[], barrier?: ProviderHomeLeaseOptions["nativeCheckpointBarrierForTest"]) {
-  const tipIndex = snapshot.entries.findIndex((entry) => entry.directory === "root" && entry.raw.toString("utf8") === tip.raw);
+  const tipIndex = snapshot.entries.findIndex((entry) => entry.directory === "root" && !publicationTemporary(entry) && entry.raw.toString("utf8") === tip.raw);
   if (tipIndex < 0) throw new Error("acquired immutable tip is unavailable");
   const guard = snapshot.entries.find((entry) => entry.directory === "lock" && entry.name === FORMAT_GUARD)?.raw ?? Buffer.alloc(0);
   return { snapshot, guard, guardTemp: `.provider-home-lease-${randomUUID()}.tmp`, tipIndex,
@@ -951,9 +976,9 @@ export class ProviderHomeLeaseRegistry {
   }
 
   private assertAbandoned(record: ProviderHomeLeaseRecord, lockDir: string): void {
-    if (record.hostname !== this.hostname) throw refusal(lockDir, `is leased by host ${record.hostname}; use an isolated OS account`);
-    if (this.isProcessAlive(record.pid)) throw refusal(lockDir, `is already in use by process ${record.pid}; use bwrap or an isolated OS account`);
-    if (record.ownerHash !== this.ownerHash) throw refusal(lockDir, "has a stale lease from another attested owner");
+    if (record.hostname !== this.hostname) throw refusal(lockDir, `is leased by host ${record.hostname}; use an isolated OS account`, false, "foreign_host");
+    if (this.isProcessAlive(record.pid)) throw refusal(lockDir, `is already in use by process ${record.pid}; use bwrap or an isolated OS account`, false, "busy");
+    if (record.ownerHash !== this.ownerHash) throw refusal(lockDir, "has a stale lease from another attested owner", false, "foreign_owner");
   }
 
   private recoverPartialJournal(key: string, root: string, lockDir: string, replacement: ProviderHomeLeaseRecordV2): void {
@@ -1135,7 +1160,7 @@ export class ProviderHomeLeaseRegistry {
         // Absent optional mirrors carry exact canonical identities. A late rollback writer can
         // finish only that same immutable alias; the helper verifies it under the fence too.
         for (const item of retired.values()) if (!snapshot.entries.some((entry) => entry.directory === item.directory && entry.name === item.name)) {
-          const source = snapshot.entries.find((entry) => entry.device === item.device && entry.inode === item.inode);
+          const source = snapshot.entries.find((entry) => !publicationTemporary(entry) && entry.device === item.device && entry.inode === item.inode);
           if (source) snapshot.entries.push({ ...source, directory: item.directory, name: item.name, optional: true });
         }
         apply(chain, [{ name: pendingName, raw, copiesOwner: true, retire: indexes([...retired.values()]) }]);

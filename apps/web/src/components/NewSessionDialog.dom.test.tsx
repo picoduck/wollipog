@@ -771,6 +771,85 @@ test("saved-default recovery buttons name the agent they actually select", async
   }
 });
 
+test("a saved restart-only Codex exec default is not offered or started without a choice (#3224)", async () => {
+  domWindow.localStorage.clear();
+  saveAgentDefault({}, runner.runnerId, "codex-exec");
+  const codexRunner: RunnerView = {
+    ...runner,
+    agents: [
+      ...runner.agents,
+      { id: "codex-app", name: "Codex", command: "codex", args: [], env: {}, driver: "codex-app-server", available: true, source: "discovered" },
+      { id: "codex-exec", name: "Codex (Non-Interactive)", command: "codex", args: [], env: {}, driver: "codex", available: true, source: "discovered" },
+    ],
+  };
+  const fixture = await mountFixture({ runners: [codexRunner] }, { runnerId: runner.runnerId });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    const input = combobox(fixture.container, "Agent");
+    assert.equal(input.value, "", "the saved exec default is not preselected");
+    assert.equal(createButton(fixture.container).disabled, true);
+    assert.match(fixture.container.querySelector(".agent-default-warning")?.textContent ?? "",
+      /non-interactive mode, which new sessions no longer offer/);
+
+    await act(async () => { input.focus(); });
+    assert.deepEqual(comboboxOptions(fixture.container, "Agent").map((option) => option.textContent?.match(/^Codex App Server|^Claude Code/)?.[0]),
+      ["Claude Code", "Codex App Server"]);
+    assert.doesNotMatch(comboboxOptions(fixture.container, "Agent").map((option) => option.textContent).join(" "), /Non-Interactive/);
+
+    const action = [...fixture.container.querySelectorAll("button")].find((button) =>
+      button.textContent?.trim() === "Use Codex App Server") as HTMLButtonElement | undefined;
+    assert.ok(action, "the recovery action selects Codex App Server");
+    await act(async () => { action.click(); });
+    assert.equal(input.value, "Codex App Server");
+    const saved = loadAgentDefaults()[runner.runnerId];
+    assert.equal(typeof saved === "string" ? saved : saved?.agentId, "codex-app");
+    assertNoDomNode(fixture.container.querySelector(".agent-default-warning"));
+    assert.equal(createButton(fixture.container).disabled, false);
+  } finally {
+    await unmountFixture(fixture);
+    domWindow.localStorage.clear();
+  }
+});
+
+test("Codex App Server that failed its check needs setup with the runner's reason, not an exec fallback (#3224)", async () => {
+  domWindow.localStorage.clear();
+  const codexOnly: RunnerView = {
+    ...runner,
+    agents: [
+      {
+        id: "codex-app", name: "Codex", command: "codex", args: [], env: {}, driver: "codex-app-server",
+        available: false, source: "discovered", authStatus: "authenticated",
+        codexAppServer: {
+          status: "unsupported",
+          appServerAvailable: false,
+          failure: {
+            code: "probe_timeout",
+            message: "Wollipog couldn't check this Codex installation in time. Rediscover to try again.",
+            retryable: true,
+          },
+        },
+      },
+      { id: "codex-exec", name: "Codex (Non-Interactive)", command: "codex", args: [], env: {}, driver: "codex", available: true, source: "discovered" },
+    ],
+  };
+  const fixture = await mountFixture({ runners: [codexOnly] });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    const input = combobox(fixture.container, "Agent");
+    assert.equal(input.value, "");
+    await act(async () => { input.focus(); });
+    const options = comboboxOptions(fixture.container, "Agent");
+    assert.deepEqual(optionNamesAndDescriptions(options), [{
+      name: "Codex App Server",
+      description: "Needs setup. Wollipog couldn't check this Codex installation in time. Rediscover to try again.",
+    }]);
+    assert.equal(options[0]?.getAttribute("aria-disabled"), "true");
+    assert.equal(createButton(fixture.container).disabled, true);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("native orchestrator selection is sent at creation", async () => {
   const enabledRunner: RunnerView = {
     ...runner, protocolVersion: PROTOCOL_VERSION,
@@ -909,7 +988,7 @@ test("new Orchestrator sessions send only explicit overrides after showing effec
     assert.match(fixture.container.querySelector('[aria-label^="Child Model:"]')?.getAttribute("aria-label") ?? "", /Test Model/);
     assert.equal(labelledNumberInput(fixture.container, "Maximum Concurrent Children")?.value, "5");
     assert.match(fixture.container.textContent ?? "", /These effective values are resolved and stored before the campaign's first turn/);
-    await chooseSelectOption(fixture.container, "Child Harness", "Pi · Pi · Native");
+    await chooseSelectOption(fixture.container, "Child Harness", "Pi · Native");
     await chooseSelectOption(fixture.container, "Child Model", "Sol");
     await chooseSelectOption(fixture.container, "PR Merge Approval", "Orchestrator");
     assert.match(fixture.container.textContent ?? "", /Session Override/);
@@ -927,7 +1006,7 @@ test("new Orchestrator sessions send only explicit overrides after showing effec
   }
 });
 
-test("a fixed Child Harness on an older runner shows the protocol-v157 recovery message", async () => {
+test("a fixed Child Harness on an older runner shows the server's refusal sentence", async () => {
   const olderRunner: RunnerView = {
     ...runner,
     protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorChildHarnessPolicy - 1,
@@ -957,7 +1036,10 @@ test("a fixed Child Harness on an older runner shows the protocol-v157 recovery 
     await choosePermissionPreset(fixture.container, "Orchestrator");
     const alerts = [...fixture.container.querySelectorAll('[role="alert"]')]
       .map((node) => node.textContent ?? "").join(" ");
-    assert.match(alerts, /requires a protocol-v157 Orchestrator runner.*choose Automatic/i);
+    assert.ok(alerts.includes(
+      "This machine needs a newer runner for a fixed child harness. Update and restart the runner. To start now, choose Automatic for Child Harness.",
+    ), alerts);
+    assert.doesNotMatch(fixture.container.textContent!, /protocol-v/);
     assert.doesNotMatch(alerts, /saved Child Model or Child Effort is no longer advertised/i);
     assert.equal(createButton(fixture.container).disabled, true);
   } finally {
@@ -1003,6 +1085,12 @@ test("Orchestrator defaults without Child Harness policy name Wollipog as the th
   } finally {
     await unmountFixture(fixture);
   }
+});
+
+test("New Session copy names no runner protocol numbers", () => {
+  // docs/design-system.md §17.2: refusals use the shared runner sentence; versions travel as fields.
+  const source = readFileSync(new URL("./NewSessionDialog.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /protocol-v\d|protocol v\d/i);
 });
 
 test("unsupported control-plane combinations explain the upgrade and block Orchestrator creation", async () => {
@@ -2620,11 +2708,39 @@ test("an older runner blocks Integration Isolation rather than letting it be sub
     await act(async () => { await selectProject(fixture.container, project.id); });
     await choosePermissionPreset(fixture.container, "Orchestrator");
     await chooseSelectOption(fixture.container, "Integration Isolation", "Enabled");
-    assert.match(fixture.container.textContent!, /Integration Isolation/);
+    const alerts = [...fixture.container.querySelectorAll('[role="alert"]')]
+      .map((node) => node.textContent ?? "").join(" ");
+    assert.ok(alerts.includes(
+      "This machine needs a newer runner for integration isolation. Update and restart the runner. To start now, turn off Integration Isolation.",
+    ), alerts);
+    assert.doesNotMatch(fixture.container.textContent!, /protocol-v/);
     assert.equal(createButton(fixture.container).disabled, true,
       "the dialog never advertises a shape the control plane refuses");
     await act(async () => { createButton(fixture.container).click(); });
     assert.equal(fixture.requests.length, 0);
+  } finally { await unmountFixture(fixture); }
+});
+
+test("an Orchestrator without Strict Project Isolation on an older runner shows the server's refusal sentence", async () => {
+  const oldRunner: RunnerView = {
+    ...runner,
+    protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorExecutionPolicy - 1,
+    agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "dontAsk", "orchestrator"],
+    } })),
+  };
+  const fixture = await mountFixture({ runners: [oldRunner] });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    const alerts = [...fixture.container.querySelectorAll('[role="alert"]')]
+      .map((node) => node.textContent ?? "").join(" ");
+    assert.ok(alerts.includes(
+      "This machine needs a newer runner for an Orchestrator without strict project isolation. Update and restart the runner. To start now, turn on Strict Project Isolation.",
+    ), alerts);
+    assert.doesNotMatch(fixture.container.textContent!, /protocol-v/);
+    assert.equal(createButton(fixture.container).disabled, true);
   } finally { await unmountFixture(fixture); }
 });
 

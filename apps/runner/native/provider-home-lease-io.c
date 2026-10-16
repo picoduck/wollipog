@@ -144,19 +144,37 @@ static int open_root(const char *path) {
   }
   free(copy); return current;
 }
+static int publication_temporary(unsigned dir, const char *name) {
+  if (dir || strlen(name) != 61 || strncmp(name, ".provider-home-lease-", 21) || strcmp(name + 57, ".tmp")) return 0;
+  for (unsigned i = 21; i < 57; i++) if (!((name[i] >= '0' && name[i] <= '9') || (name[i] >= 'a' && name[i] <= 'f') || name[i] == '-')) return 0;
+  return 1;
+}
 static Entry read_entry(unsigned dir, const char *name) {
   require(valid_name(name), "invalid lease entry name"); alive();
+  int temporary = publication_temporary(dir, name);
   int fd = openat(directory(dir), name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+  if (fd < 0 && temporary && errno == ENOENT) return (Entry){0};
   require(fd >= 0, "lease record unavailable or linked"); struct stat before, after, named;
   require(fstat(fd, &before) == 0 && S_ISREG(before.st_mode) && before.st_size >= 0 && before.st_size <= MAX_FILE &&
-    before.st_nlink >= 1 && before.st_nlink <= 3 && before.st_uid == getuid() && !(before.st_mode & 0022), "unsafe lease record");
+    (before.st_nlink >= 1 || temporary) && before.st_nlink <= 3 && before.st_uid == getuid() && !(before.st_mode & 0022), "unsafe lease record");
   require(before.st_size <= 4096 || (!dir && (slot(name) || !strcmp(name, ANCHOR) || !strcmp(name, ".mutable-home.retired"))), "ordinary lease record byte limit exceeded");
-  require(fstatat(directory(dir), name, &named, AT_SYMLINK_NOFOLLOW) == 0 && same_identity(&before, &named), "lease record identity changed");
-  require(++work_reads <= allowed_reads && (work_bytes += (uint64_t)before.st_size) <= allowed_bytes, "lease verification work limit exceeded");
-  uint32_t size = (uint32_t)before.st_size; unsigned char *raw = calloc((size_t)size + 1, 1); require(raw != NULL, "lease read allocation failed");
-  uint32_t offset = 0; while (offset < size) { ssize_t n = read(fd, raw + offset, size - offset); require(n > 0, "lease record changed during read"); offset += (uint32_t)n; }
-  unsigned char extra; require(read(fd, &extra, 1) == 0 && fstat(fd, &after) == 0 && same_stamp(&before, &after), "lease record changed during read");
-  require(fstatat(directory(dir), name, &named, AT_SYMLINK_NOFOLLOW) == 0 && same_stamp(&before, &named), "lease record pathname changed");
+  if (temporary && before.st_nlink == 0) { close(fd); return (Entry){0}; }
+  int named_status = fstatat(directory(dir), name, &named, AT_SYMLINK_NOFOLLOW);
+  if (named_status != 0 && temporary && errno == ENOENT) { close(fd); return (Entry){0}; }
+  require(named_status == 0 && same_identity(&before, &named), "lease record identity changed");
+  struct stat guard;
+  int immutable = !temporary || (guard_fd >= 0 && fstat(guard_fd, &guard) == 0 && same_identity(&before, &guard));
+  // Staging is mutable and removed by the writer after publication. It carries no ownership
+  // authority: validate its metadata and charge its maximum size, without reading its bytes.
+  // A staging alias of the permanent format guard is an immutable witness, retaining exact bytes.
+  uint32_t size = immutable ? (uint32_t)before.st_size : 4096;
+  require(++work_reads <= allowed_reads && (work_bytes += size) <= allowed_bytes, "lease verification work limit exceeded");
+  unsigned char *raw = calloc((size_t)size + 1, 1); require(raw != NULL, "lease read allocation failed");
+  if (immutable) {
+    uint32_t offset = 0; while (offset < size) { ssize_t n = read(fd, raw + offset, size - offset); require(n > 0, "lease record changed during read"); offset += (uint32_t)n; }
+    unsigned char extra; require(read(fd, &extra, 1) == 0 && fstat(fd, &after) == 0 && same_stamp(&before, &after), "lease record changed during read");
+    require(fstatat(directory(dir), name, &named, AT_SYMLINK_NOFOLLOW) == 0 && same_stamp(&before, &named), "lease record pathname changed");
+  }
   close(fd); char fingerprint[160]; stamp(&before, fingerprint);
   Entry result = {dir, strdup(name), identity_text((uint64_t)before.st_dev), identity_text((uint64_t)before.st_ino), strdup(fingerprint),
     (unsigned)before.st_mode, (unsigned)before.st_nlink, (unsigned)before.st_uid, size, raw, 0}; return result;
@@ -171,7 +189,7 @@ static uint32_t entries(unsigned dir, Entry *values, uint32_t offset) {
     if (!strcmp(item->d_name, ".") || !strcmp(item->d_name, "..")) continue;
     require(++raw_count <= 4096 && offset + count < MAX_ENTRIES, "lease directory scan limit exceeded");
     if (!dir && !strcmp(item->d_name, "mutable-home.lock")) continue;
-    values[offset + count++] = read_entry(dir, item->d_name); errno = 0;
+    values[offset + count] = read_entry(dir, item->d_name); if (values[offset + count].name) count++; errno = 0;
   }
   require(errno == 0, "lease enumeration failed"); closedir(stream);
   qsort(values + offset, count, sizeof(Entry), compare_entry); return count;
@@ -215,7 +233,7 @@ static void expected_identity(const struct stat *info, const char *dev, const ch
   require(!strcmp(a, dev) && !strcmp(b, ino), "lease directory identity changed");
 }
 static int entry_equal(const Entry *a, const Entry *b) {
-  return a->dir == b->dir && !strcmp(a->name, b->name) && !strcmp(a->dev, b->dev) && !strcmp(a->ino, b->ino) &&
+  return a->name && b->name && a->dir == b->dir && !strcmp(a->name, b->name) && !strcmp(a->dev, b->dev) && !strcmp(a->ino, b->ino) &&
     a->size == b->size && (!a->size || !memcmp(a->raw, b->raw, a->size));
 }
 static int compare_pointer(const void *a, const void *b) {

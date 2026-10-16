@@ -88,7 +88,7 @@ test("every watchdog is one notice at the top of its highlighted group, and its 
   const cases = [
     ["terminal_without_continuation", null, "Returning the result of a background job to this conversation."],
     ["continuation_blocked", "Result Blocked",
-      "A background job finished, but its result can't be returned while another job from the same turn is still running."],
+      "A background job finished, but its result is held because another job has no confirmed end."],
     ["accepted_without_result", "Result Missing",
       "A background job finished, but its result never reached this conversation. Wollipog won't retry on its own, so the step can't run twice."],
     ["result_not_projected", null, "The result of a background job reached Wollipog and is being added to this conversation."],
@@ -1064,7 +1064,7 @@ test("Result Blocked offers Stop <job name>… behind the Job Detail confirmatio
     await render(blockedSession("session-blocked-available"));
     assert.equal(notice().querySelector(".notice-title")?.textContent, "Result Blocked");
     assert.equal(notice().querySelector(".notice-body p")?.textContent,
-      "Agent job 04d2e1 finished, but its result can't be returned while another job from the same turn is still running.");
+      "Agent job 04d2e1 finished, but its result is held because another job has no confirmed end.");
     const stop = notice().querySelector<HTMLButtonElement>(".notice-actions button")!;
     assert.equal(stop.textContent, "Stop Monitor Job 7be210…");
     await act(async () => { stop.click(); await Promise.resolve(); await Promise.resolve(); });
@@ -1094,6 +1094,47 @@ test("Result Blocked offers Stop <job name>… behind the Job Detail confirmatio
     await act(async () => root.unmount());
     container.remove();
   }
+});
+
+test("historical unknown-parent Result Blocked explains uncertainty and the applicable session recovery", async () => {
+  const session = blockedSession("historical-session", true);
+  session.status = "idle";
+  session.backgroundWorkState = undefined;
+  session.backgroundJobs = session.backgroundJobs!.map((job) => ({ ...job, parentTurnId: "unknown" }));
+  session.backgroundDeliveries = session.backgroundDeliveries!.map((delivery) => ({ ...delivery, parentTurnId: "unknown" }));
+  const panel = await mountBackgroundWork({ session });
+  try {
+    const notice = panel.container.querySelector<HTMLElement>('.notice[data-state="continuation_blocked"]')!;
+    assert.ok(notice);
+    assert.match(notice.textContent!, /parent turn is unknown/);
+    assert.match(notice.textContent!, /cannot verify that the jobs are still running/);
+    assert.match(notice.textContent!, /Open More Actions and choose Restart Session/);
+    assert.match(notice.textContent!, /Restart ends every job and reports held results; it does not rerun their original commands/);
+    assert.equal([...notice.querySelectorAll("button")].some((button) => /^(Stop |Acknowledge)/.test(button.textContent!)), false);
+    await panel.render({ session, runnerProtocolVersion: 190 });
+    assert.match(panel.container.textContent!, /Restart ends every job and discards held results/);
+  } finally { await panel.dispose(); }
+});
+
+for (const parentTurnId of ["unknown", "known-parent"]) test(`historical ${parentTurnId} result without a continuation explains explicit recovery`, async () => {
+  const session = blockedSession("historical-finished", true);
+  session.status = "idle";
+  session.backgroundWorkState = undefined;
+  session.backgroundJobs = session.backgroundJobs!.map((job) => ({ ...job, parentTurnId,
+    terminalStatus: "completed", terminalObservedAt: 2_000 }));
+  session.backgroundDeliveries = [{ parentTurnId, jobCount: session.backgroundJobs.length,
+    terminalCount: session.backgroundJobs.length, watchdogState: "terminal_without_continuation" }];
+  const panel = await mountBackgroundWork({ session });
+  try {
+    const notice = panel.container.querySelector<HTMLElement>('.notice[data-state="terminal_without_continuation"]')!;
+    assert.ok(notice);
+    assert.match(notice.textContent!, /no recorded return step/);
+    assert.match(notice.textContent!, /will not resubmit them automatically/);
+    assert.match(notice.textContent!, /Open More Actions and choose Restart Session/);
+    assert.doesNotMatch(notice.textContent!, /Returning .* to this conversation/);
+    assert.doesNotMatch(panel.container.textContent!, /Returning Result/,
+      "the group badge must not contradict its explicit historical recovery notice");
+  } finally { await panel.dispose(); }
 });
 
 test("a lost job is one danger notice that names the job and the restart, with View Turn and no empty state (#2859)", async () => {
@@ -1415,4 +1456,45 @@ test("a turn whose unfinished jobs were all lost doesn't say it is waiting for t
   } finally {
     await panel.dispose();
   }
+});
+
+test("retry exhaustion is actionable without replay and cannot acknowledge a later missing result", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const calls: string[] = [];
+  const client = {
+    acknowledgeBackgroundRetryExhaustion: async () => { calls.push("exhaustion"); return {} as SessionView; },
+    acknowledgeBackgroundMissingResult: async () => { calls.push("missing"); return {} as SessionView; },
+  } as unknown as ApiClient;
+  const delivery = {
+    continuationId: "bgcont-exhausted", parentTurnId: "turn-1", jobCount: 1, terminalCount: 1,
+    retryExhaustedAt: 5, watchdogState: "capacity_retry_exhausted" as const,
+  };
+  const render = async (value: import("@wollipog/protocol").BackgroundDeliveryView) => {
+    await act(async () => root.render(<ApiProvider client={client}><BackgroundWorkPanel
+      session={{ id: "session", runnerId: "runner", backgroundWorkTracking: "managed", backgroundJobs: [],
+        backgroundDeliveries: [value] } as unknown as SessionView}
+      runnerOnline runnerProtocolVersion={PROTOCOL_VERSION} parentTurns={new Map()} /></ApiProvider>));
+  };
+  try {
+    await render(delivery);
+    assert.equal(container.querySelector(".notice-title")?.textContent, "Retry Exhausted");
+    assert.equal((container.textContent ?? "").split("Retry Exhausted").length - 1, 1);
+    assert.equal(acknowledgeButtons(container).length, 1);
+    assert.equal([...container.querySelectorAll("button")].some((button) => /retry|rerun/i.test(button.textContent ?? "")), false);
+    await act(async () => { acknowledgeButtons(container)[0]!.click(); await Promise.resolve(); await Promise.resolve(); });
+    assert.deepEqual(calls, ["exhaustion"]);
+    assertNoDomNode(container.querySelector(".notice-title"));
+    assert.match(container.textContent ?? "", /Retry Exhaustion Acknowledged/);
+    await render({ ...delivery, acceptedAt: 6, retryExhaustionAcknowledgedAt: 7, watchdogState: undefined });
+    assert.doesNotMatch(container.textContent ?? "", /Retry Exhaustion Acknowledged/);
+    await render({ ...delivery, acceptedAt: 6, missingResultAt: 8, retryExhaustionAcknowledgedAt: 7,
+      watchdogState: "accepted_without_result" });
+    assert.equal(container.querySelector(".notice-title")?.textContent, "Result Missing");
+    assert.equal(acknowledgeButtons(container).length, 1, "earlier exhaustion acknowledgement cannot hide later accepted missing-result recovery");
+    await act(async () => { acknowledgeButtons(container)[0]!.click(); await Promise.resolve(); await Promise.resolve(); });
+    assert.deepEqual(calls, ["exhaustion", "missing"]);
+    assert.match(container.textContent ?? "", /Missing Result Acknowledged/);
+  } finally { await act(async () => root.unmount()); container.remove(); }
 });

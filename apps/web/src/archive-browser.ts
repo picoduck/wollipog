@@ -37,10 +37,13 @@ export function lifecycleSearchLabels(status: SessionStatus): string[] {
 }
 
 export function sessionArchiveSearchDetail(
-  session: Pick<SessionView, "archived" | "status" | "projectName" | "workspaceName" | "agentName" | "driver" | "agentId" | "capacityWait">,
+  session: Pick<SessionView, "archived" | "status" | "projectName" | "workspaceName" | "agentName" | "driver" | "agentId" | "capacityWait"
+    | "historyPruned">,
 ): string {
   return [
     session.archived ? "Archived" : null,
+    // Only its kept prompts and final response still match a search (#2777).
+    session.historyPruned ? "History Pruned" : null,
     canonicalLifecycleLabel(session.status),
     session.status === "queued" ? session.capacityWait?.description : null,
     session.projectName ?? session.workspaceName,

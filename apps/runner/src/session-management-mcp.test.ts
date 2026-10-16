@@ -12,6 +12,7 @@ import {
 } from "@wollipog/protocol";
 import {
   dispatch,
+  executeManagerTool,
   nextWaitSessionIntervalMs,
   serveSessionManagementMcp,
   SPAWN_APPROVAL_POLL_WINDOW_MS,
@@ -114,7 +115,8 @@ test("decision inspection targets descendants without changing mutation identity
   for (const [name, args] of [["get_workflow_decision", { sessionId: "child", occurrenceId: "occ" }], ["list_workflow_decisions", {}]] as const) {
     const result = await callTool(deps, name, args);
     assert.equal(result.isError, true);
-    assert.match(resultText(result), /v214.*404 never proves consumption/);
+    assert.equal(resultJson(result).requiredControlPlaneProtocolVersion, 214);
+    assert.match(resultJson(result).error, /needs? a newer version of Wollipog.*404 never proves consumption/);
   }
   assert.equal(calls.length, before);
   assert.equal((await callTool(deps, "get_workflow_decision", { occurrenceId: "occ" })).isError, undefined, "old self read is preserved");
@@ -380,10 +382,7 @@ test("PR merge action admission fails closed against mixed-version control plane
     },
   });
   assert.equal(result.isError, true);
-  assert.match(resultText(result), new RegExp(
-    `protocol v${RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionAdmission}`,
-    "u",
-  ));
+  assert.equal(resultJson(result).requiredControlPlaneProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionAdmission);
   assert.equal(calls.length, 0, "an old peer never receives an action-bearing consume request");
 });
 
@@ -400,10 +399,7 @@ test("PR merge reconciliation fails closed against mixed-version control planes"
     },
   });
   assert.equal(result.isError, true);
-  assert.match(resultText(result), new RegExp(
-    `protocol v${RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation}`,
-    "u",
-  ));
+  assert.equal(resultJson(result).requiredControlPlaneProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation);
   assert.equal(calls.length, 0, "an old peer never receives a reconciliation request");
 });
 
@@ -428,9 +424,8 @@ test("a child-facing decision message is forwarded to a current control plane an
     sessionId: "child", occurrenceId: "workflow_2", outcome: "deny", childMessage: "Re-run review.",
   });
   assert.equal(refused.isError, true);
-  assert.match(resultText(refused), new RegExp(
-    `protocol v${RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionChildMessage}`, "u",
-  ));
+  assert.equal(resultJson(refused).requiredControlPlaneProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionChildMessage);
+  assert.match(resultJson(refused).error, /Resolve without childMessage/u);
   assert.equal(older.calls.length, 0,
     "an older control plane would drop the message and still resolve, so it is never asked to");
   await callTool(older.deps, "resolve_descendant_workflow_decision", {
@@ -552,11 +547,108 @@ test("wait_session uses adaptive delays and preserves its exact timeout boundary
     intervalMs: 500,
   });
 
-  assert.equal(result.isError, true);
-  assert.match(resultText(result), /timed out/);
+  assert.equal(result.isError, undefined, "an elapsed timeout is a result, not a tool error");
+  const body = resultJson(result);
+  assert.equal(body.outcome, "timeout");
+  assert.deepEqual(body.waitingFor, ["completed"]);
+  assert.equal(body.session.id, "s_wait");
+  assert.equal(body.session.status, "running");
+  assert.equal(body.reached, undefined);
   assert.deepEqual(delays, [500, 750, 1125, 1625]);
   assert.equal(now, 4_000);
   assert.equal(calls.length, 5, "one immediate read plus four adaptively delayed reads");
+});
+
+test("wait_session timeout carries the last read's metadata", async () => {
+  const statuses = ["starting", "running", "idle"];
+  let reads = 0;
+  const { deps } = makeDeps(() => ({
+    status: 200,
+    body: { session: { id: "s_wait", status: statuses[Math.min(reads++, statuses.length - 1)], runnerId: "r1" } },
+  }));
+  let now = 0;
+  deps.now = () => now;
+  deps.sleep = async (milliseconds) => { now += milliseconds; };
+
+  const result = await callTool(deps, "wait_session", {
+    sessionId: "s_wait", states: ["completed", "failed"], timeoutMs: 1_000, intervalMs: 500,
+  });
+
+  assert.equal(result.isError, undefined);
+  assert.equal(reads, 3);
+  const body = resultJson(result);
+  assert.equal(body.outcome, "timeout");
+  assert.deepEqual(body.waitingFor, ["completed", "failed"]);
+  assert.equal(body.session.status, "idle", "the newest read, not the first");
+  assert.equal(body.session.runnerId, "r1");
+});
+
+test("wait_session reports the reached state with outcome reached", async () => {
+  const { deps } = makeDeps(() => ({
+    status: 200,
+    body: { session: { id: "s_wait", status: "input_required", runnerId: "r1", title: "Waiting" } },
+  }));
+  const result = await callTool(deps, "wait_session", {
+    sessionId: "s_wait", states: ["input_required", "completed"], timeoutMs: 1_000,
+  });
+  assert.equal(result.isError, undefined);
+  const body = resultJson(result);
+  assert.equal(body.outcome, "reached");
+  assert.equal(body.reached, "input_required");
+  assert.equal(body.session.title, "Waiting");
+});
+
+test("wait_session refuses unknown states before any read and lists the valid ones", async () => {
+  const { deps, calls } = makeDeps(() => ({ status: 200, body: { session: { id: "s_wait", status: "running" } } }));
+  const one = await callTool(deps, "wait_session", { sessionId: "s_wait", states: ["needs_input"], timeoutMs: 1_000 });
+  assert.equal(one.isError, true);
+  assert.equal(resultText(one),
+    "unknown session state needs_input; valid states: queued, starting, running, input_required, idle, completed, failed, stopped");
+
+  const mixed = await callTool(deps, "wait_session", {
+    sessionId: "s_wait", states: ["completed", "needs_input", "toString"], timeoutMs: 1_000,
+  });
+  assert.equal(mixed.isError, true);
+  assert.match(resultText(mixed), /^unknown session states needs_input, toString; valid states: queued, /);
+  assert.equal(calls.length, 0, "a refused state never polls the control plane");
+
+  const tool = TOOLS.find((t) => t.name === "wait_session")!;
+  assert.deepEqual((tool.inputSchema as any).properties.states.items.enum,
+    ["queued", "starting", "running", "input_required", "idle", "completed", "failed", "stopped"]);
+  assert.match(tool.description, /outcome "timeout"/);
+});
+
+test("wait_session keeps a missing session and a control-plane failure as errors", async () => {
+  for (const [status, body] of [[404, { error: "session not found" }], [503, { error: "unavailable" }]] as const) {
+    const { deps, calls } = makeDeps(() => ({ status, body }));
+    let now = 0;
+    deps.now = () => now;
+    deps.sleep = async (milliseconds) => { now += milliseconds; };
+    const result = await callTool(deps, "wait_session", { sessionId: "s_gone", states: ["completed"], timeoutMs: 5_000 });
+    assert.equal(result.isError, true, String(status));
+    assert.doesNotMatch(resultText(result), /timeout/);
+    assert.equal(calls.length, 1, `${status} ends the wait at the first read`);
+  }
+});
+
+test("wait_session never turns an unreadable or cancelled session read into a timeout result", async () => {
+  // A 2xx whose body fails to read reaches the handler without a session; past the deadline that
+  // must stay an error rather than a timeout carrying empty metadata.
+  for (const mode of ["reset", "cancelled", "no session"] as const) {
+    let now = 0;
+    const controller = new AbortController();
+    const result = await executeManagerTool("wait_session", { sessionId: "child", states: ["completed"], timeoutMs: 1 }, {
+      cpUrl: CP_URL, selfSessionId: SELF_ID, token: "", signal: controller.signal, now: () => now,
+      fetch: async () => ({ ok: true, status: 200, text: async () => {
+        now = 2;
+        if (mode === "no session") return "{}";
+        if (mode === "cancelled") controller.abort();
+        throw new Error(mode);
+      } }),
+    });
+    assert.equal(result.isError, true, mode);
+    assert.match(resultText(result), mode === "cancelled" ? /^request cancelled$/ : /^control plane returned no session status for child$/, mode);
+  }
 });
 
 test("mutating tools describe governance instead of promising a now-optional human gate", () => {
@@ -791,6 +883,7 @@ test("get_agent_capabilities projects advertised metadata and exact effort fallb
           capabilities: {
             modelSource: "cached",
             effortLevels: ["low", "high"],
+            permissionModes: ["read-only", "on-request", "danger-full-access", "orchestrator", 7],
             models: [
               {
                 id: "model-own", displayName: "Model Own", default: true,
@@ -814,6 +907,10 @@ test("get_agent_capabilities projects advertised metadata and exact effort fallb
   assert.equal(result.agent.command, undefined);
   assert.equal(result.discovery.modelSource, "cached");
   assert.deepEqual(result.harnessEfforts, ["low", "high"]);
+  assert.deepEqual(result.permissionModes, {
+    supported: ["read-only", "on-request", "danger-full-access", "orchestrator"],
+    selectable: ["orchestrator"],
+  }, "harness-specific modes are reported but only create_session's accepted modes are selectable (#3271)");
   assert.deepEqual(result.models, [{
     id: "model-own", displayName: "Model Own", default: true, hidden: false,
     description: "Provider description", contextWindow: 200_000, inputModalities: ["text", "image"],
@@ -837,6 +934,37 @@ test("get_agent_capabilities projects advertised metadata and exact effort fallb
   assert.equal(hidden.models[0].hidden, true);
   assert.equal(hidden.models[0].effortSource, "model");
   assert.equal(hidden.page.targeted, true);
+  assert.deepEqual(hidden.permissionModes, result.permissionModes, "a targeted lookup reports the same modes");
+});
+
+test("get_agent_capabilities reports Claude permission modes without bypass-equivalent selections", async () => {
+  const { deps } = makeDeps(() => ({
+    status: 200,
+    body: { runners: [{ runnerId: "r1", agents: [
+      {
+        id: "claude-code", driver: "claude-code", capabilities: {
+          models: [{ id: "opus" }], effortLevels: [], slashCommands: [],
+          supportsImages: true, supportsApprovals: true,
+          permissionModes: ["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions", "orchestrator"],
+        },
+      },
+      {
+        id: "no-modes", capabilities: {
+          models: [{ id: "fixed" }], effortLevels: [], slashCommands: [],
+          supportsImages: false, supportsApprovals: false,
+        },
+      },
+    ] }] },
+  }));
+  const claude = resultJson(await callTool(deps, "get_agent_capabilities", {
+    runnerId: "r1", agentId: "claude-code",
+  }));
+  assert.deepEqual(claude.permissionModes, {
+    supported: ["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions", "orchestrator"],
+    selectable: ["default", "acceptEdits", "plan", "auto", "orchestrator"],
+  });
+  const none = resultJson(await callTool(deps, "get_agent_capabilities", { runnerId: "r1", agentId: "no-modes" }));
+  assert.deepEqual(none.permissionModes, { supported: [], selectable: [] });
 });
 
 test("get_agent_capabilities distinguishes missing discovery from supported no-effort models", async () => {
@@ -857,6 +985,7 @@ test("get_agent_capabilities distinguishes missing discovery from supported no-e
   }));
   assert.deepEqual(missing.discovery, { status: "unavailable", reason: "not_advertised", modelSource: null });
   assert.deepEqual(missing.models, []);
+  assert.deepEqual(missing.permissionModes, { supported: [], selectable: [] });
 
   const fixed = resultJson(await callTool(deps, "get_agent_capabilities", {
     runnerId: "r1", agentId: "fixed",
@@ -885,6 +1014,8 @@ test("get_agent_capabilities treats the orchestrator-only ACP marker as session-
     status: "unavailable", reason: "session_negotiated", modelSource: null,
   });
   assert.deepEqual(result.models, []);
+  assert.deepEqual(result.permissionModes, { supported: ["orchestrator"], selectable: ["orchestrator"] },
+    "the marker still proves the orchestrator preset");
 });
 
 test("get_agent_capabilities fails closed for invisible installations and invalid bounds", async () => {
@@ -1132,16 +1263,14 @@ test("get_session redacts pendingApproval to its title and caps the preview (no 
   assert.deepEqual(s.liveUsage, { tokensIn: 3, tokensOut: 2, costUsd: 0.01 });
 });
 
-/** A control plane that serves `GET /api/sessions/:id` and the bounded and unbounded events routes
+/** A control plane that serves `GET /api/sessions/:id` and the bounded events route
  * over `total` events, with a forward-hydrated cache holding the first `cached` of them. */
 function eventsCp(
   total: number,
   options: {
-    cached?: number;
+    cached?: number | (() => number);
     eventEpoch?: number;
     text?: (seq: number) => string;
-    runnerOffline?: boolean;
-    replaceDuringFallback?: boolean;
   } = {},
 ) {
   const events = Array.from({ length: total }, (_, i) => ({
@@ -1149,24 +1278,19 @@ function eventsCp(
     ts: 1000 + i,
     payload: { kind: "agent_message", text: options.text?.(i + 1) ?? `line ${i + 1}` },
   }));
-  let cached = options.cached ?? total;
-  let eventEpoch = options.eventEpoch ?? 2;
+  const eventEpoch = options.eventEpoch ?? 2;
   return makeDeps((call) => {
     const url = new URL(call.url);
     if (url.pathname === "/api/sessions/s_1") return { status: 200, body: { session: { id: "s_1", eventEpoch } } };
     assert.equal(url.pathname, "/api/sessions/s_1/events");
     const q = url.searchParams;
     const after = Number(q.get("after") ?? 0);
-    if (!q.has("limit")) {
-      // The unbounded read awaits hydration, which completes the cache unless the runner is offline.
-      if (!options.runnerOffline) cached = total;
-      if (options.replaceDuringFallback) eventEpoch += 1;
-      return { status: 200, body: { events: events.slice(0, cached).filter((e) => e.seq > after) } };
-    }
+    assert.ok(q.has("limit"), "every events request stays bounded, including an incomplete cache");
     if (Number(q.get("eventEpoch")) !== eventEpoch) {
       return { status: 409, body: { error: "session event history was replaced", code: "stale_event_epoch", eventEpoch } };
     }
     const limit = Number(q.get("limit"));
+    const cached = typeof options.cached === "function" ? options.cached() : options.cached ?? total;
     const cache = events.slice(0, cached);
     const cacheComplete = cached >= total;
     if (q.get("direction") === "backward") {
@@ -1234,7 +1358,7 @@ test("get_session_events without after reads the newest events through a bounded
   assert.deepEqual(none, { lines: [], lastSeq: 0, eventEpoch: 2 });
 });
 
-test("get_session_events falls back to the hydrating read only when the cache cannot answer", async () => {
+test("get_session_events returns bounded incomplete pages without a whole-history fallback", async () => {
   // The cache holds seq 1-12 of 30. A full forward page inside it is exact and stays bounded.
   const full = eventsCp(30, { cached: 12 });
   const inside = resultJson(await callTool(full.deps, "get_session_events", { sessionId: "s_1", after: 2, limit: 5 }));
@@ -1243,24 +1367,26 @@ test("get_session_events falls back to the hydrating read only when the cache ca
   assert.equal(inside.historyIncomplete, true, "a full page from an incomplete cache still says so");
   assert.equal(full.calls.length, 2);
 
-  // A short page at the cache edge is not the end of the log; the unbounded read waits for hydration.
+  // A short page at the cache edge is not the end of the log and returns without waiting.
   const edge = eventsCp(30, { cached: 12 });
   const past = resultJson(await callTool(edge.deps, "get_session_events", { sessionId: "s_1", after: 10, limit: 5 }));
-  assert.equal(edge.calls[2]!.url, `${CP_URL}/api/sessions/s_1/events?after=10`);
-  assert.deepEqual(past.lines.map(seqOf), [11, 12, 13, 14, 15], "still the first events after the cursor");
-  assert.equal(past.lastSeq, 15);
+  assert.equal(edge.calls.length, 2, "no unbounded fallback or hydration wait");
+  assert.deepEqual(past.lines.map(seqOf), [11, 12], "the available events after the cursor");
+  assert.equal(past.lastSeq, 12);
   assert.equal(past.hasMore, true);
+  assert.equal(past.historyIncomplete, true);
 
   // The cached tail of an incomplete cache is an old prefix, never the newest events.
   const tail = eventsCp(30, { cached: 12 });
   const newest = resultJson(await callTool(tail.deps, "get_session_events", { sessionId: "s_1", limit: 3 }));
-  assert.equal(tail.calls[2]!.url, `${CP_URL}/api/sessions/s_1/events?after=0`);
-  assert.deepEqual(newest.lines.map(seqOf), [28, 29, 30]);
+  assert.equal(tail.calls.length, 2);
+  assert.deepEqual(newest.lines.map(seqOf), [10, 11, 12]);
+  assert.equal(newest.historyIncomplete, true, "cached tail is explicitly incomplete");
 });
 
 test("get_session_events never reports the end of the log while hydration cannot finish", async () => {
   // The runner is offline: the cache holds seq 1-12 of 30 and the hydrating read cannot add more.
-  const offline = eventsCp(30, { cached: 12, runnerOffline: true });
+  const offline = eventsCp(30, { cached: 12 });
   const page = resultJson(await callTool(offline.deps, "get_session_events", { sessionId: "s_1", after: 10, limit: 5 }));
   assert.deepEqual(page.lines.map(seqOf), [11, 12]);
   assert.equal(page.lastSeq, 12);
@@ -1271,11 +1397,18 @@ test("get_session_events never reports the end of the log while hydration cannot
   const newest = resultJson(await callTool(offline.deps, "get_session_events", { sessionId: "s_1", limit: 3 }));
   assert.equal(newest.historyIncomplete, true, "a stale cached tail is flagged");
 
-  // Hydration completes during the fallback read: the short page is the true end of the log.
-  const online = eventsCp(14, { cached: 12 });
-  const end = resultJson(await callTool(online.deps, "get_session_events", { sessionId: "s_1", after: 10, limit: 5 }));
+  // Hydration completes between pages. The previous cursor resumes without losing or duplicating rows.
+  let cached = 12;
+  const online = eventsCp(14, { cached: () => cached });
+  const start = resultJson(await callTool(online.deps, "get_session_events", { sessionId: "s_1", after: 10, limit: 5 }));
+  assert.deepEqual(start.lines.map(seqOf), [11, 12]);
+  assert.equal(start.historyIncomplete, true);
+  cached = 14;
+  const end = resultJson(await callTool(online.deps, "get_session_events", {
+    sessionId: "s_1", after: start.lastSeq, eventEpoch: start.eventEpoch, limit: 5,
+  }));
   assert.deepEqual(end, {
-    lines: ["(11) agent_message: line 11", "(12) agent_message: line 12", "(13) agent_message: line 13", "(14) agent_message: line 14"],
+    lines: ["(13) agent_message: line 13", "(14) agent_message: line 14"],
     lastSeq: 14,
     hasMore: false,
     eventEpoch: 2,
@@ -1320,34 +1453,13 @@ test("get_session_events fails instead of applying a cursor to a replaced histor
   assert.equal(invalid.isError, true);
 });
 
-test("get_session_events rejects a fallback page read across a history replacement", async () => {
-  // The history is replaced while the unbounded fallback runs; its rows belong to the new log.
-  const pinned = eventsCp(30, { cached: 12, replaceDuringFallback: true });
-  const result = await callTool(pinned.deps, "get_session_events", { sessionId: "s_1", after: 10, limit: 5, eventEpoch: 2 });
-  assert.equal(result.isError, true, "the old cursor is never applied to the new log");
-  assert.match(resultText(result), /history was replaced/);
-
-  // Without a pinned epoch the read restarts once at the new epoch.
-  const unpinned = eventsCp(30, { cached: 12, replaceDuringFallback: true });
-  const data = resultJson(await callTool(unpinned.deps, "get_session_events", { sessionId: "s_1", after: 10, limit: 5 }));
-  assert.equal(data.eventEpoch, 3);
-  assert.deepEqual(data.lines.map(seqOf), [11, 12, 13, 14, 15]);
-
-  // The same-epoch proof itself fails: the unverified fallback page is never returned.
-  let fallbackRead = false;
-  const events = Array.from({ length: 12 }, (_, i) => ({ seq: i + 1, ts: i, payload: { kind: "agent_message", text: "t" } }));
-  const failing = makeDeps((call) => {
-    const q = new URL(call.url).searchParams;
-    if (!q.has("limit")) {
-      fallbackRead = true;
-      return { status: 200, body: { events: events.filter((e) => e.seq > Number(q.get("after"))) } };
-    }
-    if (fallbackRead) return { status: 500, body: { error: "database unavailable" } };
-    return { status: 200, body: { events: events.slice(10), eventEpoch: 2, nextAfter: 12, hasMoreCached: false, cacheComplete: false } };
-  });
+test("get_session_events reports a bounded page failure without an unpaged retry", async () => {
+  const failing = makeDeps(() => ({ status: 500, body: { error: "database unavailable" } }));
   const unverified = await callTool(failing.deps, "get_session_events", { sessionId: "s_1", after: 10, limit: 5, eventEpoch: 2 });
   assert.equal(unverified.isError, true);
   assert.match(resultText(unverified), /database unavailable/);
+  assert.equal(failing.calls.length, 1);
+  assert.equal(failing.calls[0]!.url, `${CP_URL}/api/sessions/s_1/events?after=10&limit=5&eventEpoch=2`);
 });
 
 test("get_session_events pages forward against a control plane without bounded pages", async () => {
@@ -1402,7 +1514,11 @@ test("discard_worktree refuses peers that cannot report deferred retirement", as
   deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRetirement - 1;
   const result = await callTool(deps, "discard_worktree", { path: "/repo/old" });
   assert.equal(result.isError, true);
-  assert.match(resultText(result), /requires control plane protocol v159/);
+  assert.deepEqual(resultJson(result), {
+    error: "Managed worktree retirement needs a newer version of Wollipog. Update Wollipog before discarding a runner-owned worktree.",
+    requiredControlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRetirement,
+    controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRetirement - 1,
+  });
   assert.equal(calls.length, 0);
 });
 
@@ -1612,8 +1728,11 @@ test("create_session fails closed on explicit effort with an older control plane
     runnerId: "r1", agentId: "claude-code", workspaceId: "ws", model: "opus", effort: "high",
   });
   assert.equal(rejected.isError, true);
-  assert.match(resultText(rejected), /requires control plane protocol v138/u);
-  assert.match(resultText(rejected), /omit effort to preserve default resolution/u);
+  assert.deepEqual(resultJson(rejected), {
+    error: "Reasoning effort selection needs a newer version of Wollipog. Update Wollipog, or omit effort to keep the default.",
+    requiredControlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControlReasoningEffort,
+    controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControlReasoningEffort - 1,
+  });
   assert.equal(older.calls.length, 1);
   assert.equal(older.calls[0]!.url, `${CP_URL}/api/compatibility`);
 
@@ -1635,8 +1754,11 @@ test("create_session sends a campaign work item only to a v220 control plane and
   }));
   const rejected = await callTool(older.deps, "create_session", args);
   assert.equal(rejected.isError, true);
-  assert.match(resultText(rejected), /requires control plane protocol v220/u);
-  assert.match(resultText(rejected), /no child was created/u);
+  assert.deepEqual(resultJson(rejected), {
+    error: "Naming a campaign work item at child creation needs a newer version of Wollipog. Update Wollipog and try again; no child was created.",
+    requiredControlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorkItemAtCreation,
+    controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorkItemAtCreation - 1,
+  });
   assert.deepEqual(older.calls.map((call) => call.url), [`${CP_URL}/api/compatibility`],
     "an older control plane would ignore the item, so nothing is sent");
 
@@ -1851,7 +1973,11 @@ test("stop_background_job -> POST /api/sessions/:id/background-jobs/:jobId/stop,
   const old = makeDeps(() => ({ status: 200, body: { protocolVersion: 189 } }));
   const refused = await callTool(old.deps, "stop_background_job", { sessionId: "s_child", jobId: "b1" });
   assert.equal(refused.isError, true);
-  assert.match(resultText(refused), /requires control plane protocol v190/);
+  assert.deepEqual(resultJson(refused), {
+    error: "Stopping one background job needs a newer version of Wollipog. Update Wollipog and try again.",
+    requiredControlPlaneProtocolVersion: 190,
+    controlPlaneProtocolVersion: 189,
+  });
   assert.equal(old.calls.some((call) => call.method === "POST"), false);
 
   const denied = makeDeps((call) => call.url.endsWith("/api/compatibility")
@@ -2184,6 +2310,33 @@ test("create_session refuses bypassPermissions and a missing workspace — no fe
   }
 });
 
+test("create_session points callers to get_agent_capabilities for permission modes (#3271)", async () => {
+  const { deps, calls } = makeDeps(() => ({
+    status: 409,
+    body: {
+      error: 'permission mode "default" is not supported by this agent installation; supported permission modes: read-only, on-request',
+    },
+  }));
+  const tool = TOOLS.find((candidate) => candidate.name === "create_session")!;
+  assert.match(tool.description, /get_agent_capabilities.*permissionModes\.selectable/su);
+  const property = (tool.inputSchema as { properties: Record<string, { description?: string }> }).properties.permissionMode!;
+  assert.match(property.description ?? "", /get_agent_capabilities/u);
+
+  const schemaRefusal = await callTool(deps, "create_session", {
+    runnerId: "r1", agentId: "codex", workspaceId: "ws", permissionMode: "read-only",
+  });
+  assert.equal(schemaRefusal.isError, true);
+  assert.match(resultText(schemaRefusal), /get_agent_capabilities/u);
+  assert.equal(calls.length, 0);
+
+  const installationRefusal = await callTool(deps, "create_session", {
+    runnerId: "r1", agentId: "codex", workspaceId: "ws", permissionMode: "default",
+  });
+  assert.equal(installationRefusal.isError, true);
+  assert.match(resultText(installationRefusal), /supported permission modes: read-only, on-request/u,
+    "the control plane's list of supported modes reaches the caller");
+});
+
 test("set_guardrails without either limit refuses — no fetch", async () => {
   const { deps, calls } = makeDeps();
   const result = await callTool(deps, "set_guardrails", { sessionId: "s_2" });
@@ -2295,9 +2448,11 @@ test("attach_session_artifact uploads video to the gated route without returning
       : { status: 201, body: {} });
     const refused = await callTool(old.deps, "attach_session_artifact", { path: file });
     assert.equal(refused.isError, true);
-    assert.match(resultText(refused), new RegExp(
-      `requires control plane protocol v${RUNNER_CAPABILITY_MIN_PROTOCOL.sessionVideoArtifactAttach}`, "u",
-    ));
+    assert.deepEqual(resultJson(refused), {
+      error: "Attaching a file needs a newer version of Wollipog. Update Wollipog, then attach again.",
+      requiredControlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionVideoArtifactAttach,
+      controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionVideoArtifactAttach - 1,
+    });
     assert.equal(old.calls.some((call) => call.method === "POST"), false);
 
     const current = makeDeps((call) => call.url.endsWith("/api/compatibility")
@@ -2337,7 +2492,11 @@ test("attach_session_artifact refuses before reading or uploading when the reque
     }));
     const outdated = await callTool(old.deps, "attach_session_artifact", { path: file });
     assert.equal(outdated.isError, true);
-    assert.match(resultText(outdated), /requires control plane protocol v\d+.*Update the Wollipog control plane/u);
+    assert.deepEqual(resultJson(outdated), {
+      error: "Attaching a file needs a newer version of Wollipog. Update Wollipog, then attach again.",
+      requiredControlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionArtifactFileAttach,
+      controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionArtifactFileAttach - 1,
+    });
     assert.deepEqual(old.calls.map((call) => call.url), [`${CP_URL}/api/compatibility`],
       "an older control plane is named, not probed with an upload and not worked around");
 
@@ -2533,5 +2692,93 @@ test("campaign work ledger tools require an Orchestrator and a v196 control plan
   });
   assert.deepEqual(current.calls.at(-1)?.body, {
     childSessionId: "child", reportEventSeq: 3, followUpsAccounted: true, workItem: { id: "cwi_1", outcome: "delivered" },
+  });
+});
+
+/* docs/design-system.md §17.2 retires protocol numbers and "control plane" from sentences agents relay
+ * to people. Each floor refuses with a sentence naming what to update, keeps its alternative, and
+ * returns the versions beside it as fields (#3265). The conditions are the existing floors. */
+const NEWER_WOLLIPOG_REFUSALS: ReadonlyArray<{
+  tool: string;
+  args: Record<string, unknown>;
+  floor: keyof typeof RUNNER_CAPABILITY_MIN_PROTOCOL;
+  error: string;
+}> = [
+  { tool: "get_campaign_issue_scope", args: {}, floor: "campaignIssueScopeChanges",
+    error: "Campaign issue scope changes need a newer version of Wollipog. Update Wollipog and try again." },
+  { tool: "list_workflow_decisions", args: {}, floor: "descendantWorkflowDecisionInspection",
+    error: "Descendant reads and decision lists need a newer version of Wollipog. Update Wollipog and try again. " +
+      "Self get_workflow_decision still works; list_descendant_requests shows pending requests only, and a 404 never proves consumption." },
+  { tool: "list_campaign_review_jobs", args: {}, floor: "campaignBudgetAdmission",
+    error: "Campaign budget and review jobs need a newer version of Wollipog. Update Wollipog and try again." },
+  { tool: "allocate_campaign_budget", args: { sessionId: "s_worker", costUsd: 10 }, floor: "campaignBudgetAdmission",
+    error: "Campaign allocations need a newer version of Wollipog. Update Wollipog and try again." },
+  { tool: "request_github_issue_closure", args: {}, floor: "orchestratorIssueClosure",
+    error: "Human-approved issue closure needs a newer version of Wollipog. Update Wollipog and try again." },
+  { tool: "record_campaign_plan", args: { items: [] }, floor: "campaignWorkLedger",
+    error: "The campaign work ledger needs a newer version of Wollipog. Update Wollipog and try again." },
+  { tool: "create_session", args: { runnerId: "r1", agentId: "claude-code", workspaceId: "ws", campaignWorkItemId: "cwi_1" },
+    floor: "campaignWorkItemAtCreation",
+    error: "Naming a campaign work item at child creation needs a newer version of Wollipog. Update Wollipog and try again; no child was created." },
+  { tool: "create_session", args: { runnerId: "r1", agentId: "claude-code", workspaceId: "ws", effort: "high" },
+    floor: "sessionAgentControlReasoningEffort",
+    error: "Reasoning effort selection needs a newer version of Wollipog. Update Wollipog, or omit effort to keep the default." },
+  { tool: "discard_worktree", args: { path: "/repo/old" }, floor: "sessionWorktreeRetirement",
+    error: "Managed worktree retirement needs a newer version of Wollipog. Update Wollipog before discarding a runner-owned worktree." },
+  { tool: "stop_background_job", args: { sessionId: "s_child", jobId: "b1" }, floor: "backgroundJobStop",
+    error: "Stopping one background job needs a newer version of Wollipog. Update Wollipog and try again." },
+  { tool: "consume_workflow_decision",
+    args: { occurrenceId: "o1", resourceSnapshot: { category: "pr_merge" }, action: { kind: "pr_merge_enqueue", command: "gh pr merge" } },
+    floor: "workflowDecisionActionAdmission",
+    error: "PR merge action admission needs a newer version of Wollipog. Update Wollipog before consuming this approval." },
+  { tool: "resolve_descendant_workflow_decision",
+    args: { sessionId: "s_child", occurrenceId: "o1", outcome: "approve", childMessage: "Go ahead." },
+    floor: "workflowDecisionChildMessage",
+    error: "A child-facing decision message needs a newer version of Wollipog. Resolve without childMessage and send it with prompt_session, or update Wollipog." },
+  { tool: "reconcile_workflow_decision", args: { occurrenceId: "o1", resourceSnapshot: { category: "pr_merge" } },
+    floor: "workflowDecisionActionReconciliation",
+    error: "PR merge reconciliation needs a newer version of Wollipog. Update Wollipog before reconciling this approval." },
+];
+
+test("version-floor refusals name Wollipog and return the versions as fields, not in the sentence (#3265)", async () => {
+  for (const { tool, args, floor, error } of NEWER_WOLLIPOG_REFUSALS) {
+    const required = RUNNER_CAPABILITY_MIN_PROTOCOL[floor];
+    const { deps, calls } = makeDeps();
+    deps.orchestrator = true;
+    deps.controlPlaneProtocolVersion = required - 1;
+    const refused = await callTool(deps, tool, args);
+    assert.equal(refused.isError, true, `${tool} refuses below ${floor}`);
+    assert.deepEqual(resultJson(refused), {
+      error, requiredControlPlaneProtocolVersion: required, controlPlaneProtocolVersion: required - 1,
+    }, `${tool} below ${floor}`);
+    assert.doesNotMatch(error, /control plane|protocol|v\d/iu);
+    assert.equal(calls.length, 0, `${tool} refuses before contacting Wollipog`);
+
+    // The floor itself is unchanged: one version newer passes this check and reaches Wollipog.
+    const current = makeDeps(() => ({ status: 200, body: {} }));
+    current.deps.orchestrator = true;
+    current.deps.controlPlaneProtocolVersion = required;
+    const admitted = await callTool(current.deps, tool, args);
+    assert.notDeepEqual(admitted.isError ? resultJson(admitted).requiredControlPlaneProtocolVersion : undefined, required,
+      `${tool} at ${floor} is admitted`);
+  }
+});
+
+test("a version-floor refusal whose Wollipog version is unknown omits it and keeps the cause (#3265)", async () => {
+  const { deps } = makeDeps(() => ({ status: 503, body: { error: "unavailable" } }));
+  const refused = await callTool(deps, "discard_worktree", { path: "/repo/old" });
+  assert.equal(refused.isError, true);
+  const body = resultJson(refused);
+  assert.deepEqual(Object.keys(body).sort(), ["error", "requiredControlPlaneProtocolVersion"]);
+  assert.equal(body.requiredControlPlaneProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRetirement);
+  assert.match(body.error, /^Could not check whether Wollipog supports managed worktree retirement: .*unavailable/u);
+  assert.doesNotMatch(body.error, /control plane|protocol v/iu);
+
+  const older = makeDeps(() => ({ status: 200, body: { protocolVersion: "unknown" } }));
+  older.deps.orchestrator = true;
+  const unreported = await callTool(older.deps, "allocate_campaign_budget", { sessionId: "s_worker", costUsd: 10 });
+  assert.deepEqual(resultJson(unreported), {
+    error: "Campaign allocations need a newer version of Wollipog. Update Wollipog and try again.",
+    requiredControlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.campaignBudgetAdmission,
   });
 });

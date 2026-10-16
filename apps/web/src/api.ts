@@ -127,6 +127,8 @@ import type {
   UsageAggregationResponse,
   SubscriptionUsageResponse,
   UsageRetentionPolicy,
+  ArchivedHistoryRetentionView,
+  UpdateArchivedHistoryRetentionRequest,
   UsagePricingStatus,
   SessionUsageResponse,
   UsageDailyBudgetPolicy,
@@ -188,6 +190,7 @@ async function requestJson<T>(transport: ApiTransport, path: string, init?: Requ
     ...init,
     headers: {
       "content-type": "application/json",
+      "x-wollipog-ui-protocol": String(PROTOCOL_VERSION),
       ...(init?.headers ?? {}),
     },
   });
@@ -392,6 +395,18 @@ export function createApiClient(transport: ApiTransport) {
   usageUsers: () => req<{ users: UserCostWindows[] }>("/api/usage/users"),
   updateUsageRetention: (body: Pick<UsageRetentionPolicy, "hourlyDays" | "dailyDays">) =>
     req<{ retention: UsageRetentionPolicy }>("/api/usage/retention", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+
+  /** The organization's archived-history retention (#2777). `previewDays` adds what that threshold
+   * would prune, for confirming a change before it is saved. */
+  archivedHistoryRetention: (previewDays?: number) => req<ArchivedHistoryRetentionView>(
+    `/api/archived-history-retention${previewDays === undefined ? "" : `?previewDays=${previewDays}`}`,
+  ),
+
+  updateArchivedHistoryRetention: (body: UpdateArchivedHistoryRetentionRequest) =>
+    req<ArchivedHistoryRetentionView>("/api/archived-history-retention", {
       method: "PUT",
       body: JSON.stringify(body),
     }),
@@ -718,8 +733,13 @@ export function createApiClient(transport: ApiTransport) {
         : ((payload as ReportedSkillsState | null) ?? {}),
     ),
 
-  getSessionEvents: (id: string, after = 0) =>
-    req<SessionEventsResponse>(`/api/sessions/${encodeURIComponent(id)}/events?after=${after}`),
+  getSessionPromptHistory: (id: string, before: number | undefined, eventEpoch: number, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ eventEpoch: String(eventEpoch), limit: "100" });
+    if (before !== undefined) query.set("before", String(before));
+    return req<import("@wollipog/protocol").SessionPromptHistoryPage>(
+      `/api/sessions/${encodeURIComponent(id)}/prompt-history?${query}`, { signal },
+    );
+  },
 
   sideChat: (id: string) =>
     req<SideChatResponse>(`/api/sessions/${encodeURIComponent(id)}/side-chat`),
@@ -1146,6 +1166,12 @@ export function createApiClient(transport: ApiTransport) {
   acknowledgeBackgroundMissingResult: (id: string, continuationId: string) =>
     req<SessionView>(
       `/api/sessions/${encodeURIComponent(id)}/background-deliveries/${encodeURIComponent(continuationId)}/acknowledge-missing-result`,
+      { method: "POST" },
+    ),
+
+  acknowledgeBackgroundRetryExhaustion: (id: string, continuationId: string) =>
+    req<SessionView>(
+      `/api/sessions/${encodeURIComponent(id)}/background-deliveries/${encodeURIComponent(continuationId)}/acknowledge-retry-exhaustion`,
       { method: "POST" },
     ),
 

@@ -43,6 +43,7 @@ import {
 } from "./claude-code.js";
 import type { DriverCallbacks, DriverOptions } from "./driver.js";
 import type { ClaudeInitCatalog } from "../discovery/claude-slash-catalog.js";
+import { buildBwrapArgs } from "../spawn.js";
 
 /**
  * Unit tests for the claude stream-json -> SessionEventPayload mapping.
@@ -3334,6 +3335,56 @@ test("Claude fork mints a deterministic target session with a zero-cost local bo
   driver.dispose();
 });
 
+test("Claude fork uses the target worktree isolation for its bootstrap", async () => {
+  const source = "11111111-2222-3333-4444-555555555555";
+  const sourcePath = "/tmp/source-worktree";
+  const targetPath = "/tmp/target-worktree";
+  const sourceIsolation = {
+    backend: "bwrap" as const, command: "/usr/bin/bwrap", args: [], network: "inherit" as const,
+    protectedWorktree: { parent: "/tmp", path: sourcePath, gitWritableRoots: [] },
+  };
+  const targetIsolation = {
+    ...sourceIsolation,
+    protectedWorktree: { ...sourceIsolation.protectedWorktree, path: targetPath },
+  };
+  const child = fakeProcess();
+  const launches: any[] = [];
+  const driver = new ClaudeCodeDriver({
+    ...baseOpts,
+    resumeId: source,
+    isolation: sourceIsolation,
+    descendantMarker: "source-marker",
+    capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+      supportsConversationFork: true, permissionModes: ["acceptEdits"],
+    },
+  }, noopCb, {
+    spawn: (options: any) => {
+      launches.push(options);
+      if (options.isolation?.backend !== "bwrap") throw new Error("Claude fork must use bubblewrap");
+      buildBwrapArgs(options, options.isolation);
+      return child;
+    },
+    kill: () => {},
+  } as any);
+  const fork = driver.forkSession(source, targetPath, {
+    isolation: targetIsolation,
+    descendantMarker: "target-marker",
+  });
+  void fork.catch(() => {});
+  assert.equal(launches[0]?.cwd, targetPath);
+  assert.equal(launches[0]?.isolation, targetIsolation);
+  assert.equal(launches[0]?.descendantMarker, "target-marker");
+  const args = launches[0].args as string[];
+  const target = args[args.indexOf("--session-id") + 1]!;
+  await nextTask();
+  child.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: target }) + "\n");
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success", session_id: target, total_cost_usd: 0 }) + "\n");
+  child.emit("close", 0);
+  assert.equal(await fork, target);
+  driver.dispose();
+});
+
 test("Claude fork bootstrap heals and carries the managed hook settings", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-claude-hook-fork-"));
   try {
@@ -5482,4 +5533,61 @@ test("fixed-rule one-shot native command keeps plain stdin and exact text despit
   child.emit("close", 0);
   assert.equal(await pending, "end_turn");
   driver.dispose();
+});
+
+test("Claude terminal categories reset at turn ownership and preserve settled runner evidence", () => {
+  const h = makeHarness();
+  const driver = h.driver as any;
+  h.feed({ type: "result", is_error: true, api_error_status: 529, result: "new provider wording" });
+  assert.equal(h.driver.lastTurnFailureCategory(), "capacity");
+  driver.resetTurnEventState();
+  assert.equal(h.driver.lastTurnFailureCategory(), null);
+  h.feed({ type: "result", is_error: true, api_error_status: 429, result: "overloaded_error" });
+  assert.equal(h.driver.lastTurnFailureCategory(), "rate_limit");
+  driver.settledRunnerTurnFailureCategory = "rate_limit";
+  driver.resetTurnEventState();
+  h.feed({ type: "result", is_error: true, api_error_status: 529, result: "provider-owned turn" });
+  assert.equal(h.driver.lastTurnFailureCategory(), "rate_limit", "later provider-owned work cannot alter the settled runner turn");
+});
+
+test("Claude structured authentication errors sanitize prose before recovery", () => {
+  const h = makeHarness();
+  h.feed({ type: "result", is_error: true, api_error_status: 401, result: "synthetic-secret" });
+  assert.equal(h.driver.lastTurnFailureCategory(), "authentication");
+  assert.equal(h.authenticationFailures, 1);
+  assert.doesNotMatch(JSON.stringify([h.events, h.stderr]), /synthetic-secret/);
+});
+
+test("Claude structured capacity evidence outranks conflicting authentication prose without leaking it", () => {
+  const h = makeHarness();
+  h.feed({ type: "result", is_error: true, api_error_status: 529, result: "invalid API key supplied: synthetic-secret" });
+  assert.equal(h.driver.lastTurnFailureCategory(), "capacity");
+  assert.equal(h.authenticationFailures, 0);
+  assert.doesNotMatch(JSON.stringify([h.events, h.stderr, h.driver.lastTurnError()]), /synthetic-secret/);
+});
+
+
+test("a local Claude capability rejection cannot inherit prior capacity evidence", async () => {
+  const h = makeHarness({
+    config: { effort: "max" },
+    capabilities: { models: [], effortLevels: ["low"], slashCommands: [], supportsImages: false,
+      supportsApprovals: false, permissionModes: ["acceptEdits"] },
+  });
+  h.feed({ type: "result", is_error: true, api_error_status: 529, result: "provider capacity unavailable" });
+  assert.equal(h.driver.lastTurnFailureCategory(), "capacity");
+  assert.equal(await h.driver.prompt("next task"), "refusal");
+  assert.match(h.driver.lastTurnError()!, /effort/);
+  assert.equal(h.driver.lastTurnFailureCategory(), null);
+  assert.equal((h.driver as any).turnFailureCategory, "capacity", "an active provider accumulator remains owned by its turn");
+  h.driver.dispose();
+});
+
+
+test("Claude revoked OAuth recovery survives generic structured permission status", () => {
+  const h=makeHarness();
+  h.feed({ type: "result", is_error: true, api_error_status: 403,
+    result: "API Error: 403 permission_error OAuth token has been revoked. synthetic-secret" });
+  assert.equal(h.driver.lastTurnFailureCategory(),"permission");
+  assert.equal(h.authenticationFailures,1);
+  assert.doesNotMatch(JSON.stringify([h.events,h.stderr,h.driver.lastTurnError()]),/synthetic-secret/);
 });

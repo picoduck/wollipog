@@ -187,7 +187,7 @@ createRoot(document.getElementById("root")!).render(
               section="behavior"
               onNavigate={() => undefined}
               panels={{
-                appearance: null, notifications: null, approvals: null, orchestrator: null, network: null, experimental: null, about: null,
+                appearance: null, notifications: null, approvals: null, orchestrator: null, network: null, storage: null, experimental: null, about: null,
                 behavior: <BehaviorPanel sessionNaming={<SessionTitlesPanel />} />,
               }}
             />

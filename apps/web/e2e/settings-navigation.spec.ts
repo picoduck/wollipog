@@ -182,13 +182,14 @@ test("in forced colors the current section keeps a visible bar", async ({ page }
 });
 
 test("at 1440px the section nav stays in view after Behavior scrolls 600px", async ({ page }) => {
-  await page.setViewportSize({ width: 1440, height: 600 });
+  await page.setViewportSize({ width: 1440, height: 560 });
   await page.goto(`${frame("/settings/behavior")}&defaults=agent`);
   const scroller = page.locator(".main-body");
   const nav = page.getByRole("navigation", { name: "Settings Sections" });
   await expect(nav.locator('a[aria-current="page"]')).toHaveText("Behavior");
   // Behavior's agent rows, listed without expanding (#3024), and About Artifact Uploads, open, make
-  // it tall enough to scroll 600px in a 600px window.
+  // it tall enough to scroll 600px in a 560px window. One-line rows are 56px (#3140), so a 600px
+  // window left the section 8px short.
   await expect(page.getByRole("button", { name: /^Edit… Codex App Server/ })).toBeVisible();
   await page.getByText("About Artifact Uploads", { exact: true }).click();
   await expect.poll(() => scroller.evaluate((element) => element.scrollHeight - element.clientHeight)).toBeGreaterThan(600);
@@ -199,7 +200,7 @@ test("at 1440px the section nav stays in view after Behavior scrolls 600px", asy
   expect(scrolled, "Behavior is tall enough to scroll 600px here").toBe(600);
   await expect.poll(() => nav.evaluate((element) => Math.round(element.getBoundingClientRect().top))).toBeGreaterThanOrEqual(0);
   const top = await nav.evaluate((element) => element.getBoundingClientRect().top);
-  expect(top, "the nav's top edge is inside the viewport").toBeLessThan(600);
+  expect(top, "the nav's top edge is inside the viewport").toBeLessThan(560);
   await expect(nav.locator('a[aria-current="page"]')).toBeInViewport();
 });
 
@@ -218,11 +219,15 @@ test("at 900px the sections are link tabs in the page header, with About's tab i
   // The tab names the section, so the panel does not repeat it.
   await expect(page.locator("#settings-panel-heading")).toBeHidden();
   await expect(page.getByRole("heading", { name: "About", exact: true })).toHaveCount(0);
-  await expect(page.locator(".settings-panel-desc")).toBeVisible();
+  // About opens with Wollipog's name and version in place of its head (#3028).
+  await expect(page.locator(".about-identity")).toBeVisible();
+  await expect(page.locator(".settings-panel-desc")).toBeHidden();
   // A tab is a link: following one changes the route.
   await tabs.getByRole("link", { name: "Network" }).click();
   await expect(current).toHaveText("Network");
   expect(new URL(page.url()).searchParams.get("route")).toBe("/settings/network");
+  // Any other section keeps its one line under the tabs.
+  await expect(page.locator(".settings-panel-desc")).toBeVisible();
 });
 
 for (const width of [1440, 900]) {

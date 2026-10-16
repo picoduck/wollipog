@@ -139,6 +139,11 @@ test("agent session discovery is a progressive modal instead of an inline runner
   assert.match(discovery, /driver === "codex-app-server"/);
 });
 
+test("discovery's exec row reads as restart-only, never as a fallback (#3224)", () => {
+  assert.match(view, /isRestartOnlyCodexExec\(a\) && \(\s*<span className="atag"[^>]*>\s*Existing Sessions Only/);
+  assert.doesNotMatch(view, /Fallback Ready|Non-Interactive Fallback/);
+});
+
 test("agent cards progressively disclose launch diagnostics with icon-only copy controls", () => {
   assert.match(view, /<AgentDetailsDialog a=\{a\}/);
   assert.match(view, /title=\{`\$\{displayName\} Details`\}/);

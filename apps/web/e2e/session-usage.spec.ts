@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { openMobileQuestion } from "./open-mobile-question.js";
 import { dialogMotionSettled } from "./dialog-motion";
 import { pinWidestFace } from "./font-geometry";
 
@@ -442,6 +443,7 @@ test.describe("Composer Response on a touch phone", () => {
 
   test("the R keycap is absent on a coarse pointer and the × keeps a 44px hit area", async ({ page }) => {
     await page.goto("/session-usage-e2e.html?width=390&height=804&approval=question&draft=Kept%20draft");
+    await openMobileQuestion(page);
     const answer = page.locator(".request-dock").getByRole("button", { name: "Answer", exact: true });
     await expect(answer).toBeVisible();
     await expect(answer.locator("kbd")).toBeHidden();

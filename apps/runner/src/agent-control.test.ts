@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -23,6 +24,8 @@ import {
   agentControlRegistrationsToResend,
   agentControlTokenPath,
   agentControlReadyPath,
+  INTEGRATION_ISOLATION_NEEDS_NEWER_WOLLIPOG,
+  ORCHESTRATOR_PERMISSIONS_NEED_NEWER_WOLLIPOG,
   forgetAgentControlRegistrationAnswers,
   isCurrentAgentControlCredential,
   isStaleAgentControlAnswer,
@@ -41,7 +44,8 @@ import {
   AGENT_CONTROL_RELAY_ENDPOINT_ENV,
   AGENT_CONTROL_RELAY_KEY_ENV,
 } from "./agent-control-relay.js";
-import { CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION } from "./orchestrator-preset.js";
+import { AGENT_CONTROL_RELAY_FIFO_ENV, agentControlFifoRelayBase } from "./agent-control-fifo-relay.js";
+import { CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION, SESSION_CODEX_MCP_MARKER } from "./orchestrator-preset.js";
 import { claudeHookSettingsPath, provisionClaudeHooks, resetClaudeGuardState } from "./hook-settings.js";
 import { PI_ORCHESTRATOR_PRESET_TOOLS_ENV, PI_SECURITY_REQUEST_NONCE_ENV } from "./pi-agent-control-extension.js";
 import { WSL_AGENT_CONTROL_PRIVATE_DIR } from "./wsl-agent-control.js";
@@ -405,14 +409,20 @@ test("a non-strict Pi Orchestrator launches as a normal session plus only the Or
     }), { ...control, orchestratorAgent: piAgent }, () => {}, host),
       /Strict Project Isolation requires the Orchestrator preset/);
 
-    // An older control plane cannot request the additive Pi shape.
+    // An older control plane cannot request the additive Pi shape. The sentence names what to update;
+    // the versions go only to the runner log.
+    const piRefusalLog: string[] = [];
     assert.throws(() => provisionAgentControl(build("s_pi_old", {
       config: { permissionMode: "default" }, orchestrator: { strictProjectIsolation: false },
     }), {
       ...control,
       controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditivePi - 1,
       orchestratorAgent: piAgent,
-    }, () => {}, host), /protocol-v163 control plane/);
+    }, (line) => piRefusalLog.push(line), host), (error: Error) => error.message === ORCHESTRATOR_PERMISSIONS_NEED_NEWER_WOLLIPOG);
+    assert.equal(ORCHESTRATOR_PERMISSIONS_NEED_NEWER_WOLLIPOG,
+      "An Orchestrator with independent provider permissions on this harness needs a newer version of Wollipog. Update Wollipog and try again.");
+    assert.deepEqual(piRefusalLog, [`agent control s_pi_old: refused orchestratorAdditivePi; control plane protocol ${
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditivePi - 1}, requires ${RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditivePi}`]);
 
     // The verified bridge is still required for the additive shape.
     assert.throws(() => provisionAgentControl(build("s_pi_nobridge", {
@@ -1014,6 +1024,63 @@ test("startup sweep removes final and interrupted staging files while retaining 
   }
 });
 
+test("startup sweep also removes FIFO relay channels an earlier runner left (#3270)", { skip: process.platform !== "linux" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-agent-control-fifo-sweep-"));
+  try {
+    const channel = join(agentControlFifoRelayBase(root), `s_old.${"a".repeat(32)}`);
+    mkdirSync(channel, { recursive: true });
+    spawnSync("mkfifo", ["-m", "600", join(channel, "doorbell")]);
+    chmodSync(channel, 0o300);
+    chmodSync(agentControlFifoRelayBase(root), 0o300);
+    assert.equal(sweepAgentControlFiles(root), 1);
+    assert.equal(existsSync(channel), false);
+    assert.equal(existsSync(agentControlFifoRelayBase(root)), false, "no unlistable base is left behind");
+    assert.equal(sweepAgentControlFiles(root), 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("provider mode hands the session's FIFO channel to the CLI only (#3270)", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-provider-fifo-"));
+  try {
+    const host: AgentControlHost = {
+      isSea: true, execPath: "/opt/wollipog-runner", execArgv: [], configDir: root, platform: "linux",
+    };
+    const control = {
+      controlPlaneUrl: "ws://127.0.0.1:4317/runner",
+      controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      executionIsolationMode: "provider" as const,
+      providerRelayEndpoint: "tcp://127.0.0.1:4318",
+      providerRelayFifo: join(agentControlFifoRelayBase(root), "s_agent"),
+    };
+    for (const driver of ["codex-app-server", "claude-code"] as const) {
+      const launch = spec(driver);
+      provisionAgentControl(launch, control, () => {}, host);
+      assert.equal(launch.env[AGENT_CONTROL_RELAY_FIFO_ENV], control.providerRelayFifo);
+      assert.equal(launch.env[AGENT_CONTROL_RELAY_ENDPOINT_ENV], control.providerRelayEndpoint,
+        "the loopback relay stays for the MCP adapter, which runs outside any provider sandbox");
+      if (driver === "claude-code") {
+        const mcpConfig = readFileSync(agentControlMcpConfigPath(root, launch.sessionId), "utf8");
+        assert.equal(mcpConfig.includes(AGENT_CONTROL_RELAY_FIFO_ENV), false);
+      }
+      // A relaunch whose runner established no channel carries no stale path.
+      const { providerRelayFifo: _omitted, ...withoutFifo } = control;
+      provisionAgentControl(launch, withoutFifo, () => {}, host);
+      assert.equal(launch.env[AGENT_CONTROL_RELAY_FIFO_ENV], undefined);
+      removeAgentControlFiles(launch.sessionId, root);
+    }
+    // File-mode credentials have no relay key, so a channel is never handed to them.
+    const fileMode = spec("codex-app-server");
+    provisionAgentControl(fileMode, { ...control, executionIsolationMode: "bwrap" }, () => {}, host);
+    assert.equal(fileMode.env[AGENT_CONTROL_RELAY_FIFO_ENV], undefined);
+    assert.equal(fileMode.env[AGENT_CONTROL_RELAY_KEY_ENV], undefined);
+  } finally {
+    removeAgentControlFiles("s_agent", root);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a non-strict Codex Orchestrator launches as a normal session plus Wollipog's server and instructions", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-additive-codex-orchestrator-"));
   try {
@@ -1149,20 +1216,26 @@ test("an Orchestrator with independent provider permissions keeps the ordinary C
     acp.orchestrator = { strictProjectIsolation: false };
     assert.throws(() => provisionAgentControl(acp, control, () => {}, host),
       /native Claude Code, Codex, and Pi Orchestrators/);
+    const outdatedLog: string[] = [];
+    const outdatedCodexLog: string[] = [];
     const outdated = spec("claude-code");
     outdated.sessionId = "s_outdated_control_plane";
     outdated.config = { permissionMode: "acceptEdits" };
     outdated.orchestrator = { strictProjectIsolation: false };
     assert.throws(() => provisionAgentControl(outdated, {
       ...control, controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole - 1,
-    }, () => {}, host), /protocol-v160/);
+    }, (line) => outdatedLog.push(line), host), (error: Error) => error.message === ORCHESTRATOR_PERMISSIONS_NEED_NEWER_WOLLIPOG);
+    assert.match(outdatedLog.join("\n"), new RegExp(`refused orchestratorAdditiveRole; control plane protocol ${
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole - 1}, requires ${RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole}$`, "u"));
     const outdatedCodex = spec("codex");
     outdatedCodex.sessionId = "s_codex_outdated_control_plane";
     outdatedCodex.config = { permissionMode: "on-request" };
     outdatedCodex.orchestrator = { strictProjectIsolation: false };
     assert.throws(() => provisionAgentControl(outdatedCodex, {
       ...control, controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex - 1,
-    }, () => {}, host), /protocol-v162/);
+    }, (line) => outdatedCodexLog.push(line), host), (error: Error) => error.message === ORCHESTRATOR_PERMISSIONS_NEED_NEWER_WOLLIPOG);
+    assert.match(outdatedCodexLog.join("\n"), new RegExp(`refused orchestratorAdditiveCodex; control plane protocol ${
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex - 1}, requires ${RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex}$`, "u"));
     for (const refused of [strict, pi, acp, outdated, outdatedCodex]) {
       assert.equal(existsSync(agentControlTokenPath(root, refused.sessionId)), false, "refusal precedes credential minting");
     }
@@ -1185,6 +1258,121 @@ test("an additive Codex Orchestrator refuses a launch that already claims the re
     }, () => {}, host), /reserved for Wollipog/);
     assert.deepEqual(launch.args, ["-c", 'mcp_servers.wollipog={ command = "my-server", args = [] }'],
       "the user's server is reported, never silently removed");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+/** A stand-in for `codex mcp list --json` that loads a runner `wollipog` entry from the launch
+ * arguments the way codex-cli 0.162.1 does, unless told this installation refuses it. */
+function fakeCodexMcpInventory(configured: object[], options: { loadsEntry?: boolean; fails?: boolean } = {}) {
+  const reads: Array<{ args: string[]; cwd: string; env: Record<string, string> }> = [];
+  const read: NonNullable<AgentControlHost["readCodexMcpInventory"]> = async (launch, cwd) => {
+    reads.push({ args: [...launch.args], cwd, env: { ...launch.env } });
+    if (options.fails) throw new Error("codex mcp list failed");
+    const entry = launch.args.find((arg) => arg.startsWith("mcp_servers.wollipog="));
+    const command = entry && /"command" = ("[^"]*")/u.exec(entry)?.[1];
+    const timeout = entry && /"tool_timeout_sec" = (\d+)/u.exec(entry)?.[1];
+    return JSON.stringify([
+      ...configured,
+      ...(command && options.loadsEntry !== false ? [{ name: "wollipog", enabled: true,
+        transport: { type: "stdio", command: JSON.parse(command) }, tool_timeout_sec: Number(timeout) }] : []),
+    ]);
+  };
+  return { read, reads };
+}
+
+test("a Codex session without the Orchestrator role gains the wollipog MCP server only when Codex shows it is safe (#3123)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-session-codex-mcp-"));
+  try {
+    const userArgs = ["-c", "model_reasoning_effort=high", "-c", 'mcp_servers.mine={ "command" = "/mine" }'];
+    const mine = { name: "mine", enabled: true, transport: { type: "stdio", command: "/mine" }, tool_timeout_sec: null };
+    const fileMode = { controlPlaneUrl: "ws://127.0.0.1:4317/runner", controlPlaneProtocolVersion: PROTOCOL_VERSION };
+    const relayMode = { ...fileMode, executionIsolationMode: "provider" as const, providerRelayEndpoint: "tcp://127.0.0.1:4318" };
+    for (const driver of ["codex", "codex-app-server"] as const) {
+      for (const [mode, control] of [["file", fileMode], ["relay", relayMode]] as const) {
+        const inventory = fakeCodexMcpInventory([mine]);
+        const host: AgentControlHost = { isSea: true, execPath: "/opt/runner", execArgv: [], configDir: root,
+          platform: "linux", readCodexMcpInventory: inventory.read };
+        const launch = Object.assign(spec(driver), { worktreePath: "/repo/.worktrees/s" });
+        launch.sessionId = `s_${mode}_${driver.replace(/-/gu, "_")}`;
+        launch.args = [...userArgs];
+        launch.config = { permissionMode: "on-request" };
+        const logs: string[] = [];
+        await provisionAgentControl(launch, control, (line) => logs.push(line), host);
+
+        const added = launch.args.slice(userArgs.length);
+        assert.deepEqual(launch.args.slice(0, userArgs.length), userArgs, "the user's arguments are untouched");
+        assert.equal(added.length, 2, `${driver}/${mode} adds one setting`);
+        assert.equal(added[0], "-c");
+        assert.match(added[1]!, /^mcp_servers\.wollipog=\{ "command" = "\/opt\/runner", "args" = \["--agent-control-mcp"\]/u);
+        assert.ok(added[1]!.includes('"tool_timeout_sec" = 10860'));
+        assert.ok(added[1]!.includes(SESSION_CODEX_MCP_MARKER));
+        assert.equal(added[1]!.includes("WOLLIPOG_PERMISSION_PRESET"), false, "no Orchestrator role");
+        assert.equal(launch.env.WOLLIPOG_PERMISSION_PRESET, undefined);
+        assert.equal(launch.env[SESSION_CODEX_MCP_MARKER], "1");
+        if (mode === "relay") {
+          assert.equal(launch.args.some((arg) => arg.includes(launch.env[AGENT_CONTROL_RELAY_KEY_ENV]!)), false,
+            "the relay key is forwarded from the Codex environment, never serialized in argv");
+          assert.match(added[1]!, /"env_vars" = \[[^\]]*"WOLLIPOG_AGENT_CONTROL_RELAY_KEY"/u);
+        } else {
+          assert.match(added[1]!, /"WOLLIPOG_SESSION_TOKEN_FILE" = /u, "a token path, never a token");
+        }
+        assert.deepEqual(logs.at(-1), `agent control ${launch.sessionId}: CLI and MCP provisioned`);
+        assert.deepEqual(inventory.reads.map((read) => read.cwd), ["/repo/.worktrees/s", "/repo/.worktrees/s"]);
+        assert.deepEqual(inventory.reads[0]!.args, userArgs, "the inventory is first read without the entry");
+        assert.deepEqual(inventory.reads[1]!.args, launch.args, "then with exactly the entry that launches");
+
+        const once = [...launch.args];
+        await provisionAgentControl(launch, control, () => {}, host);
+        assert.deepEqual(launch.args, once, "resume is idempotent");
+        assert.deepEqual(inventory.reads[2]!.args, userArgs, "resume re-derives the entry from a clean inventory");
+      }
+    }
+
+    const refusals: Array<[string, ReturnType<typeof fakeCodexMcpInventory>, string[], RegExp]> = [
+      ["a user's configured server", fakeCodexMcpInventory([mine, { name: "wollipog", enabled: false }]), userArgs,
+        /the user's own MCP server named wollipog is kept/u],
+      ["a user's launch argument", fakeCodexMcpInventory([mine]),
+        [...userArgs, "-c", 'mcp_servers.wollipog={ command = "my-server" }'],
+        /the launch arguments already configure a server named wollipog/u],
+      ["an unreadable inventory", fakeCodexMcpInventory([], { fails: true }), userArgs,
+        /the Codex MCP inventory could not be read/u],
+      ["an installation that does not load the entry", fakeCodexMcpInventory([mine], { loadsEntry: false }), userArgs,
+        /did not load the entry as configured/u],
+    ];
+    for (const [name, inventory, args, reason] of refusals) {
+      const host: AgentControlHost = { isSea: true, execPath: "/opt/runner", execArgv: [], configDir: root,
+        platform: "linux", readCodexMcpInventory: inventory.read };
+      const launch = spec("codex-app-server");
+      launch.sessionId = "s_refused";
+      launch.args = [...args];
+      const logs: string[] = [];
+      await provisionAgentControl(launch, fileMode, (line) => logs.push(line), host);
+      assert.deepEqual(launch.args, args, `${name}: the launch is unchanged`);
+      assert.equal(launch.env[SESSION_CODEX_MCP_MARKER], undefined, name);
+      assert.ok(launch.env.WOLLIPOG_CLI, `${name}: the CLI is still provisioned`);
+      assert.match(logs.at(-1)!, reason, name);
+    }
+
+    // A stale session entry never survives into a launch that does not re-derive it: neither an
+    // Orchestrator (after a role conversion) nor a launch whose control plane lacks Agent Control.
+    const stale = Object.assign(spec("codex"), { worktreePath: "/repo" });
+    stale.sessionId = "s_stale";
+    const inventory = fakeCodexMcpInventory([]);
+    const host: AgentControlHost = { isSea: true, execPath: "/opt/runner", execArgv: [], configDir: root,
+      platform: "linux", readCodexMcpInventory: inventory.read };
+    await provisionAgentControl(stale, fileMode, () => {}, host);
+    const staleArgs = [...stale.args];
+    assert.equal(staleArgs.length, 2);
+    stale.config = { permissionMode: "on-request" };
+    stale.orchestrator = { strictProjectIsolation: false };
+    await provisionAgentControl(stale, relayMode, () => {}, host);
+    assert.equal(stale.args.some((arg) => arg.includes(SESSION_CODEX_MCP_MARKER)), false);
+    assert.equal(stale.args.filter((arg) => arg.startsWith("mcp_servers.wollipog=")).length, 1,
+      "only the Orchestrator's own entry remains");
+    assert.equal(stale.env[SESSION_CODEX_MCP_MARKER], undefined);
+    const downgraded = Object.assign(spec("codex"), { args: [...staleArgs] });
+    await provisionAgentControl(downgraded, { ...fileMode, controlPlaneProtocolVersion: null }, () => {}, host);
+    assert.deepEqual(downgraded.args, [], "an entry pointing at a removed credential is dropped");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -1306,7 +1494,9 @@ test("Integration Isolation removes only integrations from an additive launch, a
     assert.throws(() => provisionAgentControl(outdated, {
       ...control,
       controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIntegrationIsolation - 1,
-    }, () => {}, host), /Integration Isolation requires a protocol-v164 control plane/);
+    }, () => {}, host), (error: Error) => error.message === INTEGRATION_ISOLATION_NEEDS_NEWER_WOLLIPOG);
+    assert.equal(INTEGRATION_ISOLATION_NEEDS_NEWER_WOLLIPOG,
+      "Integration Isolation needs a newer version of Wollipog. Update Wollipog and try again.");
     assert.equal(existsSync(agentControlTokenPath(root, outdated.sessionId)), false);
 
     // A harness with no additive shape cannot enforce it either, and says so before minting.

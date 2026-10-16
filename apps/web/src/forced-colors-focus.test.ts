@@ -55,6 +55,8 @@ const REVIEWED: ReadonlyMap<string, string> = new Map([
   [".inbox-list { outline: none }", "the focused grid is marked on its active row by an inset --focus outline, which forced colors repaints"],
   [".inbox-list:focus-visible, .detail-scroll:focus-visible { outline: none }", "the grid is marked on its active row by an inset outline (repainted in forced colors); the transcript scroller is a programmatic focus target, and F6 marks its pane with the zone line"],
   [".usage-chart-hit:focus-visible { outline: none; stroke: var(--accent); stroke-width: 2 }", "an SVG <rect>: the 2px stroke marks focus, and forced colors repaints strokes rather than dropping them"],
+  [".menu.listbox[aria-activedescendant]:focus-visible { outline: none }", "an open Select list while an option is highlighted (#3020): the active option's fill marks focus, and in forced colors that option carries a Highlight outline instead; a list with nothing highlighted keeps the global ring"],
+  ["@media (forced-colors: active) .menu.listbox[aria-activedescendant]:focus-visible .ui-select-option.is-active { outline: var(--focus-width) solid Highlight; outline-offset: calc(-1 * var(--focus-width)) }", "the highlighted option of a focused Select list (#3020), redrawn because forced colors drops its active fill; it is the list's focus cue there"],
   // Not focus indicators.
   [".column.drag-over, .board-column-tab.drag-over { outline: 1px dashed var(--accent); outline-offset: -1px }", "a drop-target cue while dragging, not a focus indicator"],
   ["@media (forced-colors: active) .count-badge.on-icon { outline: 2px solid Canvas }", "the on-icon count badge's ring (§11.4), redrawn because forced colors drops its box-shadow; the badge is not focusable"],

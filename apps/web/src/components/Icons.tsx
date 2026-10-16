@@ -28,6 +28,7 @@ import {
   CircleUserRound as LucideCircleUserRound,
   CircleX as LucideCircleX,
   CircleDot as LucideCircleDot,
+  Database as LucideDatabase,
   CircleGauge as LucideCircleGauge,
   CirclePause as LucideCirclePause,
   ClipboardList as LucideClipboardList,
@@ -117,6 +118,7 @@ import {
   Plus as LucidePlus,
   RefreshCw as LucideRefreshCw,
   Reply as LucideReply,
+  RotateCcw as LucideRotateCcw,
   ScrollText as LucideScrollText,
   Search as LucideSearch,
   SearchX as LucideSearchX,
@@ -381,6 +383,10 @@ export function DownloadIcon(props: IconProps) {
 
 export function RefreshIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideRefreshCw} {...props} />;
+}
+
+export function ResetIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideRotateCcw} {...props} />;
 }
 
 export function UpdateIcon(props: IconProps) {
@@ -953,6 +959,11 @@ export function AppearanceIcon(props: IconProps) {
 
 export function NotificationsIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideBell} {...props} />;
+}
+
+/** Settings › Storage: how long archived sessions keep their history (#2777). */
+export function StorageIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideDatabase} {...props} />;
 }
 
 export function NetworkIcon(props: IconProps) {

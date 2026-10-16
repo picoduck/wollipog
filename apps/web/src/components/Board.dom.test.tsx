@@ -278,8 +278,6 @@ test("no card renders markdown, a tag, an emoji or more than one status badge", 
       assert.ok(card.querySelectorAll(".status").length <= 1, `${id} renders at most one status badge`);
       assert.equal(card.tagName, "ARTICLE");
     }
-    assert.equal(board.card("idle").querySelector(".card-preview")?.textContent,
-      "(27/27) Visual review… design tokens doc done", "the preview is plain text");
     assertNoDomNode(board.card("idle").querySelector(".status"), "an idle card shows no badge");
     assert.equal(board.card("running").querySelectorAll(".status").length, 1);
   } finally {
@@ -296,27 +294,29 @@ test("a returned result keeps one review badge and meaningful time despite newer
   try {
     const card = board.card("result");
     assert.deepEqual([...card.querySelectorAll(".status")].map((badge) => badge.textContent), ["Ready for Review"]);
+    assert.ok(card.querySelector(".status.t-review"));
     // A session still working shows its working status, not its earlier result (#3074).
     assert.deepEqual([...board.card("working").querySelectorAll(".status")].map((badge) => badge.textContent), ["Running"]);
     assert.equal(card.querySelector("time.card-time")?.getAttribute("datetime"), new Date(meaningfulAt).toISOString());
     assert.equal(card.querySelector("time.card-time")?.textContent, "15m ago");
     assert.equal(card.querySelector(".card-sender-text")?.textContent, "Codex App Server · Wollipog");
-    assert.equal(card.querySelector(".card-preview")?.textContent, "Preview for result");
   } finally {
     await board.unmount();
   }
 });
 
-test("every card says Agent · Project, and a request replaces the preview", async () => {
+test("every card says Agent · Project and never shows a transcript preview (#3175)", async () => {
   const board = await mount();
   try {
     for (const card of board.cards()) {
       const source = SESSIONS.find((candidate) => candidate.id === card.dataset["sessionId"])!;
       const agent = sessionAgentLabel(source.agentName, source.driver, source.agentId);
       assert.equal(card.querySelector(".card-sender-text")?.textContent, `${agent} · Wollipog`);
-      const request = card.querySelector(".card-request");
-      assert.equal(Boolean(card.querySelector(".card-preview")), !request,
-        `${card.dataset["sessionId"]} shows the preview exactly when no request shows`);
+      assertNoDomNode(card.querySelector(".card-preview"), `${card.dataset["sessionId"]} shows no preview`);
+      if (source.preview) {
+        assert.doesNotMatch(card.textContent ?? "", /Preview for|Visual review|Ran npm test/,
+          `${card.dataset["sessionId"]} does not repeat its last message`);
+      }
       assert.equal(card.querySelectorAll(".card-open").length, 1, "one stretched open button");
     }
     // One machine: it is not repeated on every card.
@@ -489,6 +489,42 @@ test("the family chip after the badge is an image named by the whole rollup at e
     assert.equal(chip.getAttribute("title"), "2 Children · 1 Awaiting Input · 1 Working", "and a tooltip with the whole rollup");
   } finally {
     await board.unmount();
+  }
+});
+
+test("Board family review uses the review tone and yields to required input in either child order", async () => {
+  const attention = { version: 1 as const, meaningfulAt: 10, humanActions: [],
+    result: { revision: "r1", at: 10, owner: "human" as const }, acknowledgedRevision: null };
+  const parent = session("parent", { status: "running" });
+  const review = session("review", { parentSessionId: "parent", attention });
+  const input = session("input", { parentSessionId: "parent", status: "input_required",
+    pendingApproval: { requestId: "q", kind: "question", title: "Choose", options: [] } });
+  for (const children of [[review], [review, input], [input, review]]) {
+    const board = await mount({ sessions: [parent, ...children] });
+    try {
+      const chip = board.card("parent").querySelector(".inbox-thread-family")!;
+      const reviewOnly = children.length === 1;
+      assert.equal(chip.classList.contains("t-review"), reviewOnly);
+      assert.equal(chip.classList.contains("waiting"), !reviewOnly);
+      assert.equal(chip.getAttribute("aria-label"), reviewOnly ? "1 Child · Ready for Review" : "2 Children · 1 Awaiting Input");
+      assert.equal(board.card("parent").querySelector(".status")?.textContent, "Running");
+    } finally {
+      await board.unmount();
+    }
+  }
+  for (const overrides of [
+    { status: "running" as const },
+    { attention: { ...attention, acknowledgedRevision: "r1" } },
+    { attention: { ...attention, result: { ...attention.result, owner: "orchestrator" as const } } },
+  ]) {
+    const board = await mount({ sessions: [parent, { ...review, ...overrides }] });
+    try {
+      const chip = board.card("parent").querySelector(".inbox-thread-family")!;
+      assert.equal(chip.classList.contains("t-review"), false);
+      assert.doesNotMatch(chip.getAttribute("aria-label") ?? "", /Ready for Review/);
+    } finally {
+      await board.unmount();
+    }
   }
 });
 

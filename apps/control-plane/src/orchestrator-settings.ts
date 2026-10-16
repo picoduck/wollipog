@@ -1,17 +1,26 @@
 import {
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   WORKFLOW_DECISION_CATEGORIES,
+  builtInAgentHarnessName,
+  canonicalAgentHarnessIdentity,
+  exactAgentHarnessIdentityKey,
+  isRestartOnlyCodexExec,
+  modelResolutionDrift,
+  resolveAgentHarnessRow,
   type AgentCapabilities,
   type AgentHarnessIdentity,
   type AgentModel,
   type OrchestratorCampaignOverrides,
   type OrchestratorCampaignPolicy,
+  type OrchestratorChildHarnessAgent,
+  type OrchestratorChildModelMachine,
   type OrchestratorDefaults,
   type OrchestratorExecutionDefaults,
   type OrchestratorPolicySource,
   type OrchestratorSettingsCapabilities,
   type OrchestratorHarnessCapability,
   type OrchestratorSettingsView,
+  type RunnerView,
 } from "@wollipog/protocol";
 import {
   agentHarnessIdentityFor,
@@ -44,10 +53,11 @@ export function parseOrchestratorDefaults(value: unknown): OrchestratorDefaults 
     "childHarness", "childModel", "childEffort", "maximumConcurrentChildren", "followUps", "completion",
   ].includes(key)) || Object.keys(delegation).some((key) => !["parentControl", "decisions"].includes(key))) return null;
   if (!Object.hasOwn(behavior, "childHarness")) return null;
-  const childHarness = behavior.childHarness === null
+  const parsedHarness = behavior.childHarness === null
     ? null
     : parseAgentHarnessIdentity(behavior.childHarness);
-  if (behavior.childHarness !== null && !childHarness) return null;
+  if (behavior.childHarness !== null && !parsedHarness) return null;
+  const childHarness = parsedHarness && canonicalAgentHarnessIdentity(parsedHarness);
   if ((behavior.childModel !== null && !identifier(behavior.childModel)) ||
       (behavior.childEffort !== null && !identifier(behavior.childEffort, 64)) ||
       !Number.isSafeInteger(behavior.maximumConcurrentChildren) ||
@@ -133,6 +143,12 @@ export function parseOrchestratorOverrides(value: unknown): OrchestratorCampaign
   };
 }
 
+// Reasons speak of machines and Connections, the words Settings uses, never of installations or runners.
+const NO_MACHINE_REASON = "No connected machine reports which models and efforts child agents can use. " +
+  "Connect a machine or update Wollipog on it in Connections, then try again.";
+const UNSUPPORTED_COMBINATION_REASON = "No connected machine supports this Child Harness, Child Model and " +
+  "Child Effort together. Choose Automatic or another combination.";
+
 function sameHarness(left: AgentHarnessIdentity, right: AgentHarnessIdentity): boolean {
   return agentHarnessIdentityKey(left) === agentHarnessIdentityKey(right);
 }
@@ -154,12 +170,15 @@ function installationSupportsBehavior(
 }
 
 function harnessCatalogs(installations: Array<{
+  runnerId: string;
   identity: AgentHarnessIdentity;
   name: string;
   capabilities: AgentCapabilities;
 }>): OrchestratorHarnessCapability[] {
   const grouped = new Map<string, OrchestratorHarnessCapability>();
+  const machines = new Map<string, Set<string>>();
   for (const installation of installations) {
+    const builtInName = builtInAgentHarnessName(installation.identity.driver);
     const key = agentHarnessIdentityKey(installation.identity);
     const visible = installation.capabilities.models.filter((model) => model.id !== "default" && !model.hidden);
     const pairs = visible.map((model) => ({
@@ -169,10 +188,11 @@ function harnessCatalogs(installations: Array<{
         : installation.capabilities.effortLevels)].sort(),
     }));
     const current = grouped.get(key);
+    machines.set(key, (machines.get(key) ?? new Set()).add(installation.runnerId));
     if (!current) {
       grouped.set(key, {
-        ...installation.identity,
-        name: installation.name,
+        ...canonicalAgentHarnessIdentity(installation.identity),
+        name: builtInName ?? installation.name,
         models: mergeModels([installation.capabilities]),
         effortLevels: [...new Set([
           ...installation.capabilities.effortLevels,
@@ -184,7 +204,7 @@ function harnessCatalogs(installations: Array<{
       continue;
     }
     current.installations += 1;
-    if (installation.name.localeCompare(current.name) < 0) current.name = installation.name;
+    if (!builtInName && installation.name.localeCompare(current.name) < 0) current.name = installation.name;
     current.models = mergeModels([
       { ...installation.capabilities, models: current.models },
       installation.capabilities,
@@ -196,6 +216,7 @@ function harnessCatalogs(installations: Array<{
     ])].sort();
     current.supportedPairs.push(...pairs);
   }
+  for (const [key, harness] of grouped) harness.machines = machines.get(key)!.size;
   return [...grouped.values()].sort((left, right) =>
     left.name.localeCompare(right.name) || agentHarnessIdentityKey(left).localeCompare(agentHarnessIdentityKey(right)));
 }
@@ -243,6 +264,7 @@ export function resolveOrchestratorCampaignPolicy(
   }
   return {
     version: 1,
+    childHarnessMatch: "harness",
     behavior,
     delegation: {
       parentControl: overrides.delegation?.parentControl ?? defaults.delegation.parentControl,
@@ -281,9 +303,14 @@ export class OrchestratorSettings {
   constructor(private readonly db: ControlPlaneDb) {}
 
   private capabilities(principal: HumanPrincipal, defaults: OrchestratorDefaults): OrchestratorSettingsCapabilities {
-    const installations = this.db.listRunnersForPrincipal(principal).filter((runner) => runner.status === "online").flatMap((runner) =>
-      runner.agents.filter((agent) => agent.available === true && agent.capabilities)
+    const onlineRunners = this.db.listRunnersForPrincipal(principal).filter((runner) => runner.status === "online");
+    const installations = onlineRunners.flatMap((runner) =>
+      // A saved child harness on the restart-only exec row still renders through the stale entry below.
+      runner.agents.filter((agent) => agent.available === true && agent.capabilities && !isRestartOnlyCodexExec(agent))
         .map((agent) => ({
+          runnerId: runner.runnerId,
+          machineName: machineName(runner),
+          launchable: agent.installation?.selection !== "other" && agent.harnessSelectionBlocked !== true,
           identity: agentHarnessIdentityFor(agent),
           name: agent.name,
           capabilities: agent.capabilities!,
@@ -294,8 +321,8 @@ export class OrchestratorSettings {
       sameHarness(harness, defaults.behavior.childHarness!))) {
       harnesses.push({
         ...defaults.behavior.childHarness,
-        name: defaults.behavior.childHarness.agentId,
-        models: [], effortLevels: [], supportedPairs: [], installations: 0,
+        name: builtInAgentHarnessName(defaults.behavior.childHarness.driver) ?? defaults.behavior.childHarness.agentId,
+        models: [], effortLevels: [], supportedPairs: [], installations: 0, machines: 0,
       });
     }
     const models = mergeModels(installations.map((installation) => installation.capabilities));
@@ -316,6 +343,21 @@ export class OrchestratorSettings {
     const status = installations.length > 0 && (!fixed || compatibleInstallations > 0)
       ? "available" as const
       : "unavailable" as const;
+    // Per Machine, not per installation: a Machine can run children when any of its rows can (#3248).
+    // Every connected Machine counts, including one with no usable row, as get_campaign does.
+    const machines = new Map(onlineRunners.map((runner) => [runner.runnerId, { name: machineName(runner), supported: false }]));
+    for (const installation of installations) {
+      const machine = machines.get(installation.runnerId) ?? { name: installation.machineName, supported: false };
+      // A row the Machine's installation choice excludes cannot launch, so it supports nothing.
+      machine.supported ||= installation.launchable && installationSupportsBehavior(installation, defaults.behavior);
+      machines.set(installation.runnerId, machine);
+    }
+    const unsupported = [...machines.values()].filter((machine) => !machine.supported).map((machine) => machine.name).sort();
+    const childModelDrift = defaults.behavior.childModel ? modelResolutionDrift(installations
+      .filter((installation) => installation.launchable &&
+        (!defaults.behavior.childHarness || sameHarness(installation.identity, defaults.behavior.childHarness)))
+      .map((installation) => ({ machineName: installation.machineName, models: installation.capabilities.models })),
+    defaults.behavior.childModel) : null;
     return {
       harnesses,
       models,
@@ -325,10 +367,14 @@ export class OrchestratorSettings {
       compatibleInstallations,
       status,
       ...(status === "unavailable" ? {
-        reason: installations.length === 0
-          ? "No current Agent Harness installation advertises child model and effort capabilities. Connect or update a runner, then retry."
-          : "The saved Child Harness, Child Model, and Child Effort are not supported together by a current installation. Choose Automatic or another advertised combination.",
+        reason: installations.length === 0 ? NO_MACHINE_REASON : UNSUPPORTED_COMBINATION_REASON,
       } : {}),
+      ...(fixed && installations.length > 0 ? { machineSupport: {
+        supported: machines.size - unsupported.length,
+        total: machines.size,
+        unsupportedMachines: unsupported,
+      } } : {}),
+      ...(childModelDrift ? { childModelDrift } : {}),
     };
   }
 
@@ -345,7 +391,7 @@ export class OrchestratorSettings {
   compatibilityError(principal: HumanPrincipal, defaults: OrchestratorDefaults): string | null {
     const capabilities = this.capabilities(principal, defaults);
     return capabilities.status === "unavailable"
-      ? capabilities.reason ?? "No current installation supports this campaign policy."
+      ? capabilities.reason ?? UNSUPPORTED_COMBINATION_REASON
       : null;
   }
 
@@ -356,7 +402,7 @@ export class OrchestratorSettings {
     if ((defaults.behavior.childHarness !== null || defaults.behavior.childModel !== null ||
         defaults.behavior.childEffort !== null) &&
         capabilities.compatibleInstallations === 0) {
-      throw new OrchestratorSettingsUnavailableError(capabilities.reason ?? "The fixed child model and effort are unavailable.");
+      throw new OrchestratorSettingsUnavailableError(capabilities.reason ?? UNSUPPORTED_COMBINATION_REASON);
     }
     this.db.setOrchestratorDefaults(principal.userId, defaults, now);
     return this.view(principal);
@@ -365,3 +411,74 @@ export class OrchestratorSettings {
 
 export class OrchestratorSettingsInputError extends Error {}
 export class OrchestratorSettingsUnavailableError extends Error {}
+
+/** Whether a child launch satisfies the campaign's fixed Child Harness. Campaigns created before
+ * #3247 carry no match marker and keep enforcing the exact Machine-local agent id. */
+export function childHarnessAdmits(
+  policy: Pick<OrchestratorCampaignPolicy, "behavior" | "childHarnessMatch">,
+  launch: AgentHarnessIdentity,
+): boolean {
+  const fixed = policy.behavior.childHarness;
+  if (!fixed) return true;
+  return policy.childHarnessMatch === "harness"
+    ? agentHarnessIdentityKey(launch) === agentHarnessIdentityKey(fixed)
+    : exactAgentHarnessIdentityKey(launch) === exactAgentHarnessIdentityKey(fixed);
+}
+
+export function childHarnessRefusal(policy: Pick<OrchestratorCampaignPolicy, "behavior" | "childHarnessMatch">): string {
+  const fixed = policy.behavior.childHarness!;
+  const context = fixed.context.kind === "wsl" ? `WSL ${fixed.context.distro}` : "native";
+  const name = builtInAgentHarnessName(fixed.driver);
+  return policy.childHarnessMatch === "harness" && name
+    ? `child harness is fixed by campaign policy at ${name} (${context}); use the agent get_campaign lists for this machine in childHarnessAgents`
+    : `child harness is fixed by campaign policy at ${fixed.agentId} (${fixed.driver}, ${context})`;
+}
+
+/** The agent each online Machine uses for a fixed Child Harness, so an Orchestrator never has to
+ * guess a Machine-local agent id from the policy (#3247). Absent while the harness is Automatic. */
+export function childHarnessAgents(
+  policy: Pick<OrchestratorCampaignPolicy, "behavior" | "childHarnessMatch">,
+  runners: readonly RunnerView[],
+): OrchestratorChildHarnessAgent[] | undefined {
+  const fixed = policy.behavior.childHarness;
+  if (!fixed) return undefined;
+  return runners.filter((runner) => runner.status === "online").map((runner) => {
+    // A pre-#3247 campaign admits only its exact agent id, so look that row up rather than the
+    // harness's preferred row on the Machine.
+    const agent = policy.childHarnessMatch === "harness"
+      ? resolveAgentHarnessRow(runner.agents, fixed)
+      : resolveAgentHarnessRow(runner.agents.filter((candidate) => candidate.id === fixed.agentId), fixed);
+    return {
+      runnerId: runner.runnerId,
+      machineName: machineName(runner),
+      agentId: agent && childHarnessAdmits(policy, agentHarnessIdentityFor(agent)) ? agent.id : null,
+    };
+  }).sort((left, right) => left.machineName.localeCompare(right.machineName) || left.runnerId.localeCompare(right.runnerId));
+}
+
+function machineName(runner: Pick<RunnerView, "displayName" | "hostname" | "runnerId">): string {
+  return runner.displayName || runner.hostname || runner.runnerId;
+}
+
+/** Whether each online Machine can run children with the campaign's fixed Child Model and Effort,
+ * through a row its Child Harness admits (#3248). Absent while both are Automatic. */
+export function childModelMachines(
+  policy: Pick<OrchestratorCampaignPolicy, "behavior" | "childHarnessMatch">,
+  runners: readonly RunnerView[],
+): OrchestratorChildModelMachine[] | undefined {
+  if (policy.behavior.childModel === null && policy.behavior.childEffort === null) return undefined;
+  // The harness is checked by childHarnessAdmits, which knows how this campaign matches it.
+  const pair = { ...policy.behavior, childHarness: null };
+  return runners.filter((runner) => runner.status === "online").map((runner) => ({
+    runnerId: runner.runnerId,
+    machineName: machineName(runner),
+    supported: runner.agents.some((agent) => {
+      // A row the Machine's installation choice excludes cannot launch (getAgentLaunch refuses it).
+      if (agent.available !== true || !agent.capabilities || isRestartOnlyCodexExec(agent) ||
+          agent.installation?.selection === "other" || agent.harnessSelectionBlocked === true) return false;
+      const identity = agentHarnessIdentityFor(agent);
+      return childHarnessAdmits(policy, identity) &&
+        installationSupportsBehavior({ identity, capabilities: agent.capabilities }, pair);
+    }),
+  })).sort((left, right) => left.machineName.localeCompare(right.machineName) || left.runnerId.localeCompare(right.runnerId));
+}

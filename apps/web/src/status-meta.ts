@@ -26,7 +26,7 @@ import {
 } from "@wollipog/protocol";
 import { BACKGROUND_DELIVERY_STATUS, backgroundDeliveryNeedsYou, shownWatchdogDelivery } from "./background-delivery-status.js";
 
-export type StatusTone = "info" | "success" | "warning" | "danger" | "neutral";
+export type StatusTone = "info" | "success" | "warning" | "danger" | "neutral" | "review";
 
 export interface StatusMeta {
   label: string;
@@ -65,6 +65,7 @@ const VOCABULARY = {
     stopping: info("Stopping", { pulse: true }),
     input_required: warning("Awaiting Input", { aliases: ["Input Required"] }),
     idle: neutral("Awaiting Prompt", { aliases: ["Idle"] }),
+    ready_for_review: { label: "Ready for Review", tone: "review" },
     stalled: danger("Stalled"),
     failed: danger("Failed"),
     completed: success("Completed"),
@@ -162,6 +163,8 @@ const VOCABULARY = {
     returned: success("Result Returned"),
     result_missing: warning("Result Missing"),
     missing_acknowledged: neutral("Missing Result Acknowledged"),
+    retry_exhausted: warning("Retry Exhausted"),
+    retry_exhaustion_acknowledged: neutral("Retry Exhaustion Acknowledged"),
     unverified: neutral("Unverified", { hollow: true }),
   },
   /** A session's aggregate background work, as its header shows it. */

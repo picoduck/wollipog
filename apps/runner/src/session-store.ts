@@ -451,6 +451,8 @@ export interface DurableBackgroundJob {
   continuationAcceptedAt?: number;
   /** Durable proof that the accepted provider turn ended without a complete assistant result. */
   continuationMissingResultAt?: number;
+  /** Capacity retries ended before provider acceptance; results remain available for inspection. */
+  continuationRetryExhaustedAt?: number;
   assistantResultPersistedAt?: number;
   /** Runner-private proof that v82 structured delivery evidence was durably published. */
   structuredDeliveryPublishedAt?: number;
@@ -3996,6 +3998,9 @@ export function metaToSnapshot(
           continuationQueuedAt: job.continuationQueuedAt,
           continuationSubmittedAt: job.continuationSubmittedAt,
           continuationAcceptedAt: job.continuationAcceptedAt,
+          ...(runnerSupportsProtocol(controlPlaneProtocolVersion, "backgroundRetryExhaustion") &&
+              job.continuationRetryExhaustedAt != null
+            ? { continuationRetryExhaustedAt: job.continuationRetryExhaustedAt } : {}),
           continuationMissingResultAt: runnerSupportsProtocol(
             controlPlaneProtocolVersion,
             "backgroundMissingResultRecovery",

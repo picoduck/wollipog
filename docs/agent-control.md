@@ -9,7 +9,7 @@ The credential transport follows the runner's execution-isolation boundary:
 
 | Execution path | Credential location and transport |
 | --- | --- |
-| Native host, `provider` isolation | **Runner memory only.** Provider-spawned CLI/MCP re-entries carry a random relay key and session-bound loopback endpoint. The runner pins the control-plane origin, supplies its memory-held bearer and exact-session actor header, and returns the response. The key is not accepted by the control plane. |
+| Native host, `provider` isolation | **Runner memory only.** Provider-spawned CLI/MCP re-entries carry a random relay key and session-bound loopback endpoint. The runner pins the control-plane origin, supplies its memory-held bearer and exact-session actor header, and returns the response. The key is not accepted by the control plane. On Linux the CLI reaches the same relay through a FIFO channel instead, so it also works inside a provider sandbox that refuses every socket (see "CLI Inside a Provider Sandbox"). |
 | Native host, `bwrap`, Seatbelt, or Windows Job isolation | Mode-0600 runner-state token and exact-hash acknowledgement files, passed by path to the re-entry. |
 | Verified Direct WSL Orchestrator | The Windows runner owns and rotates the registered credential; the provider sees only the mode-0600 copy inside its private bwrap `/tmp`, through the attested target-local bridge described below. |
 | Container, cloud, generic Direct WSL, and other non-host paths | Agent Control is not injected. |
@@ -43,6 +43,8 @@ The runner injects these non-transcript environment values at launch:
 - `WOLLIPOG_AGENT_CONTROL_RELAY_ENDPOINT`: native provider-mode, session-bound runner listener.
 - `WOLLIPOG_AGENT_CONTROL_RELAY_KEY`: native provider-mode opaque relay authorization; it is not a
   control-plane credential.
+- `WOLLIPOG_AGENT_CONTROL_RELAY_FIFO`: native Linux provider-mode FIFO channel directory for the
+  same relay. Only the CLI reads it; the MCP adapter keeps the loopback endpoint.
 - `WOLLIPOG_CLI`: directly executable session CLI launcher on POSIX and WSL.
 - `WOLLIPOG_CLI_ARGS`: empty on POSIX and WSL; native Windows retains JSON-encoded re-entry arguments. The launcher never contains a bearer credential.
 
@@ -51,6 +53,83 @@ The standalone installer publishes the same verified SEA bytes as both `wollipog
 runtime or second download is required. A paired-device client may instead set
 `WOLLIPOG_CONTROL_PLANE_URL` plus `WOLLIPOG_TOKEN` or `WOLLIPOG_TOKEN_FILE`. Device calls remain
 human-principal requests and do not send an agent-session claim header.
+
+## CLI Inside a Provider Sandbox
+
+Every Codex worker mode except full access and the Orchestrator preset runs shell commands in
+Codex's sandbox with network access off, and so does full access while the session owns a managed
+worktree, which narrows it to on-request. On Linux (codex-cli 0.162.1) that is bubblewrap with
+`--unshare-net` plus a seccomp filter that refuses `connect()` for every socket family, so the
+loopback relay and any Unix socket are unreachable: the CLI failed with
+`connect EPERM 127.0.0.1:<port>` (#3270). MCP servers run outside that sandbox, which is why the MCP
+tools kept working.
+
+On native Linux in `provider` isolation the runner therefore also serves each session's relay
+through FIFOs in its own state directory, and injects that directory as
+`WOLLIPOG_AGENT_CONTROL_RELAY_FIFO`. Opening a FIFO is not a socket operation, and the kernel opens
+FIFOs for writing on read-only mounts, so the CLI reaches the runner from the workspace-write and
+read-only sandboxes alike. The channel carries exactly the relay frame the loopback listener carries:
+the relay key authenticates it, and the runner pins the destination and supplies its memory-held
+bearer. A wrong key is refused before anything reaches the control plane.
+
+What the sandbox gains, per Codex mode, is only `open()`, `read()` and `write()` on FIFOs the runner
+created in that one directory:
+
+| Codex mode | Before | After |
+| --- | --- | --- |
+| Auto-review (default), on-request, untrusted, on-failure, legacy workspace-write | No sockets; writes only in the workspace | Unchanged, plus the session's FIFO channel |
+| Read-only | No sockets; no writes | Unchanged, plus the session's FIFO channel |
+| Full access without a managed worktree, Orchestrator preset | Network on | Unchanged; the CLI takes the FIFO channel there too |
+
+No network access, writable root, socket, port, seccomp rule or namespace setting changes. The
+directory is not a writable root, and the sandbox cannot create files there.
+
+Every other session's sandboxed commands run as the same user and can read the whole disk, so a
+channel must not be findable. The channel layout:
+
+- One directory per session, named after the session plus a random 128-bit suffix that only that
+  session's environment carries, inside a base that cannot be listed (0300). Knowing a session id
+  is therefore not enough to reach its doorbell or exhaust its exchange limit.
+- Each directory is mode 0300 too, so a process can open a name it knows but cannot list the
+  directory.
+- The doorbell FIFO is write-only (0200) once the runner holds it open, so the nonces posted to it
+  cannot be read back.
+- A client writes one `{"nonce":"<32 hex>"}` line in a single atomic write. The runner creates
+  `<nonce>.res` and then `<nonce>.req`.
+- The client opens the response for reading, writes one newline-terminated frame to the request,
+  and keeps the request open until the response ends. Closing it early cancels the relayed request,
+  as a closed socket does.
+- The runner unlinks both names when the first request byte arrives.
+
+Limits:
+
+- At most 16 open exchanges per session; a further nonce is ignored and its client gives up after
+  10 seconds.
+- 10 seconds for a client to arrive.
+- 60 seconds from the first request byte to the end of the frame, so a single byte cannot hold a
+  slot for the whole exchange.
+- 300 seconds for a whole exchange.
+- The loopback relay's frame bounds.
+
+An exchange that misses a limit is abandoned and its FIFOs removed. Session end removes the
+directory, and the base goes with the last channel. Runner shutdown removes everything
+synchronously, because an unlistable directory left behind would block an ordinary recursive
+delete of the data directory. Runner startup sweeps whatever a killed runner left.
+
+Where no channel is established (macOS, Windows, runner `bwrap`/Seatbelt modes, or a failed
+setup), the Artifact Guidance of a Codex session other than the Orchestrator preset stops offering
+the CLI. It names `attach_session_artifact` when the session has its `wollipog` MCP server, and
+otherwise says that file attachment is unavailable. A CLI call that still meets `EPERM` names the
+sandbox as the cause and points to the MCP tools.
+
+Under that seccomp filter, Node cannot identify a socketpair as its standard output and silently
+discards what it writes there. Node's own `child_process` pipes are socketpairs, so a Node program
+that spawns the CLI inside the sandbox must give it a real pipe or a file. A shell pipeline or
+command substitution already does, as does Codex's own command runner.
+
+`agent-control-sandbox-cli.integration.test.ts` proves all of this on a real kernel in the Platform
+Isolation Ubuntu job, which fails if the test skips. Opt-in variants run the same probes under the
+real `codex sandbox` wherever a Codex install can start one.
 
 ## Commands
 
@@ -113,6 +192,16 @@ starts more than 20 seconds past it and one still in flight then is abandoned. R
 number's repository is one of those reads, so `--timeout 1` still returns one snapshot. Polling is clamped to
 10 seconds–10 minutes (default 30 seconds); lists are capped at 30 required checks and 20 failed jobs.
 
+`wollipog session wait` (MCP `wait_session`) polls a session until its status is one of `--for`
+(default `input_required,completed,failed,stopped`) and returns `outcome: "reached"`, the status it
+`reached`, and the session's metadata. A bounded wait usually ends at its timeout (1 ms–1 hour,
+default 60 seconds), so that is a normal result rather than a tool error (#3269):
+`outcome: "timeout"`, the states it was `waitingFor`, and the session's metadata from its last read.
+Call again to keep waiting. A state outside `queued`, `starting`, `running`, `input_required`,
+`idle`, `completed`, `failed`, and `stopped` is refused before any read, with the valid list. A
+missing session, a control-plane failure, and cancellation remain errors. The CLI exits 0 when
+reached, 124 on timeout, and 1 on an error.
+
 `wollipog session steering` (MCP `list_steering_attempts`) returns at most 50 receipts, prioritizing
 pending and unresolved uncertain attempts. `session steering-get` (`get_steering_attempt`) reads an
 exact submission, including its durable resolution. `prompt_session` includes steering receipts in
@@ -132,13 +221,20 @@ return an HTTP error; callers must not treat that error as successful recovery.
 `wollipog session events` (MCP `get_session_events`) without `--after` returns the newest `--limit`
 events (default 30, at most 100). With `--after SEQ` it pages forward: the first `--limit` events
 whose seq is greater than `SEQ`, oldest first. Pass the returned `lastSeq` as the next `--after` while
-`hasMore` is true to read every event exactly once. Each call is one bounded control-plane read; it
-falls back to the full read only while the control plane's event cache is still hydrating. If the
+`hasMore` is true to read every event exactly once. Each call is one bounded control-plane event read,
+including while the control plane's event cache is still hydrating. If the
 cache still cannot hold the whole log (for example, the runner is offline), the result carries
 `historyIncomplete: true` and a forward page keeps `hasMore` true, so retry later instead of stopping.
 Every result carries `eventEpoch`; pass it back with `--event-epoch` (MCP `eventEpoch`) alongside
 `--after`, and the call fails if the session's history was replaced instead of applying the old
 cursor to the new log.
+
+Direct HTTP consumers use a default page of 200 events when `limit` is omitted. A missing limit
+never requests the whole log. See [the session events API migration guide](./session-events-api.md)
+for continuation cursors, incomplete-cache retries, and history replacement handling.
+Upgrade CLI/MCP installations to the protocol-222 reader before rolling out this server change.
+Identifiable older agent-session unpaged fallbacks receive upgrade guidance; human-principal
+paired-device CLI calls must follow the documented upgrade-first migration.
 
 `wollipog admin` is host administration for an SSH operator on the control-plane machine. It
 authenticates with the control plane's protected local credential over loopback instead of a
@@ -216,6 +312,59 @@ Claude Code launches also receive an additive `wollipog` stdio MCP configuration
 execute the existing manager tool table, including bounded output projection and `wait_session`, so
 their schemas, self-targeting checks, and REST paths cannot drift.
 
+### Codex Sessions and the `wollipog` MCP Server
+
+Codex has no per-session MCP configuration file, so the runner names the same `wollipog` server
+inline with one `-c mcp_servers.wollipog={...}` argument (#3123). Native host Codex launches
+(`codex` and `codex-app-server`) receive it whether or not the session has the Orchestrator role, so
+`wait_pull_request` can block for a whole CI or merge-queue run inside one tool call. A shell
+`wollipog pr wait` in Codex is different: Codex checks on a long-running command through the model.
+
+**Per-call limit.** Every runner-built Codex `wollipog` entry sets `tool_timeout_sec = 10860`
+(3 hours 1 minute, `CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC`). That covers `wait_pull_request`'s own
+3-hour maximum plus its at most 20-second read overrun, so even a maximal wait returns its own
+`timeout` summary before Codex cuts the call off. Without it, codex-cli 0.162.1 cuts a call off
+at 300 seconds. The setting sits inside the `wollipog` entry alone: no other MCP server's
+configuration changes, and other Wollipog tools keep their own shorter bounds (control-plane
+requests 30 seconds, `wait_session` one hour).
+
+**What a session without the Orchestrator role gains.** The entry starts the same
+`--agent-control-mcp` re-entry Claude sessions already run, with the same session-scoped transport
+the injected CLI already uses: a token-file path, or in `provider` mode the relay coordinates
+forwarded by name through `env_vars`, never the relay key in argv. Its environment carries no
+Orchestrator role marker, so the server hides and refuses every Orchestrator-only (Parent Control)
+tool, and the control plane still enforces the credential's ownership scope and route allowlist.
+The session can therefore reach nothing through MCP that its CLI could not already reach. Only
+`wait_pull_request` is pre-approved (`tools.wait_pull_request.approval_mode = "approve"`), because
+it reads GitHub through the runner's `gh` login and grants nothing. Every other tool keeps the
+approval behavior the session's own Codex configuration gives it. Without that approval,
+codex-cli 0.162.1 under Guardian review sends one reviewer model request before the call starts.
+
+**A user's own server named `wollipog`.** A dotted `-c` override merges into an existing table
+rather than replacing it, so injecting into a user's server would corrupt it. Against a `url`
+server, Codex refuses to load its configuration at all. The runner therefore reads
+`codex mcp list --json` at the launch directory first, bounded at 10 seconds and 1 MiB and never
+logged. It adds the entry only when no server named `wollipog` exists, then reads the inventory
+again with the entry to confirm that Codex loads it, enabled and with the limit above. A server
+named `wollipog` in the user's configuration or launch arguments, an unreadable inventory, or an
+installation that does not load the entry leaves the launch unchanged with the CLI still available.
+The runner log states which reason applied. Orchestrator launches keep their existing behavior: a
+reserved-name collision in the launch arguments is refused with a rename instruction.
+
+**Resume and isolation.** The session entry carries the `WOLLIPOG_SESSION_MCP` marker in its
+environment. Every launch removes a marked entry from the persisted arguments and derives it again,
+so repeated provisioning is idempotent and the user's own arguments are never touched. A role
+conversion to Orchestrator, or a launch whose control plane lacks Agent Control, drops it. So does
+an ordinary Native TUI, which is not provisioned with Agent Control and must not inherit the
+structured launch's credential coordinates.
+Integration Isolation applies only to Orchestrators and is unchanged: it keeps Wollipog's own entry
+and disables the rest.
+
+`pnpm probe:codex-mcp-wait` re-measures this against a real `codex app-server`, a scripted local
+model, and a stub `wait_pull_request` behind the exact entry the runner builds. It counts every
+model request while the call blocks and can show the default cutoff (`--default-limit`) and the
+reviewer request (`--without-approval`).
+
 Agent-created children do not receive invented cost or tool-call limits. Explicit creation values
 take precedence over the parent Project's child defaults, and a finite parent's remaining ceiling
 still bounds every child at creation. If none of those sources supplies a limit, the child remains
@@ -289,16 +438,20 @@ contract is recorded in [ADR 0007](adr/0007-separate-orchestrator-role-from-proj
 
 ## Managed Worktree Administrative Paths
 
-A runner-owned session worktree is protected against provider commands that remove or unregister it,
-but that protection lives at the command-approval boundary and cannot see a write a script or tool
-performs at runtime. The worktree's `.git` link file is the one path inside an otherwise writable
-worktree where a single stray write is unrecoverable: Git reads it to locate the real administrative
-directory, so a damaged link breaks every later Git operation and the session's pre-launch
-verification while the worktree root and its repository registration both survive.
+A runner-owned session worktree has command-approval protection against removal and unregistration,
+but approval cannot see a write a script or tool performs at runtime. Native Linux provider launches
+whose cwd is a selected runner-owned worktree therefore require runner-owned `bwrap` isolation,
+including when the runner is configured for `provider` mode. Native Agent TUI shell processes use
+a separate launch path and do not receive this provider boundary. The worktree's `.git` link file
+is the one path inside an otherwise writable worktree where a single stray write is unrecoverable: Git
+reads it to locate the real administrative directory, so a damaged link breaks every later Git
+operation and the session's pre-launch verification while the worktree root and its repository
+registration both survive.
 
 Sandbox modes that can express a per-path rule therefore present that link read-only to the provider
-and leave the rest of the worktree writable. Git never rewrites the link, so ordinary edits, staging,
-commits, branch switches, and test runs are unaffected. The repository's own `.git` directory is
+and leave the rest of the worktree writable. For a launch that reaches this boundary, Git never
+rewrites the link, so ordinary edits, staging, commits, branch switches, and test runs are unaffected.
+The repository's own `.git` directory is
 deliberately **not** covered — every worktree's real administrative directory lives inside it, and
 freezing it would break the commits this rule exists to keep working. Attached operator worktrees
 contribute no rule at all: only runner-created identities are managed.
@@ -311,27 +464,58 @@ contribute no rule at all: only runner-created identities are managed.
 | `windows-job` | No | Job Objects manage a process tree. They do not restrict filesystem access at all. |
 | `container` execution targets | No | The workspace is one read-write bind into the image; the rule is not expressed per path today. |
 | `cloud` execution targets | No | The filesystem boundary belongs to the remote adapter, not to this runner. |
-| `provider` | No | There is no runner-owned boundary; the provider's own sandbox decides, and none of the supported providers expose a per-path exclusion inside a writable root. |
+| `provider` | Native Linux selected runner-owned worktrees only | Those launches require `bwrap` and fail before provider start if it is unavailable. Other provider-mode launches keep their existing provider-owned boundary. |
 
-On a non-enforcing mode the behavior is exactly what it was before this rule existed. Nothing is
-newly permitted anywhere: the rule only ever removes provider write access to one runner-owned path.
+The native Linux managed-worktree boundary mounts the immediate parent read-only, then rebinds the
+selected child writable. It also protects the `.git` link, Git registration files, and the
+per-worktree Git config file, creating that config file empty if it is absent. It preserves
+the root and registration, not the contents of the writable child. Attached worktrees, other OSes,
+and sessions outside that selected managed cwd retain their existing boundaries.
+
+Provider-mode managed Linux Claude background work runs inside a namespace tied to the runner.
+If the runner dies or restarts, unfinished work is killed and its result cannot be recovered.
+
+When a `provider`-mode managed Linux launch is forced into `bwrap`, its existing provider transcript
+and credential directory remains writable, together with these default HOME cache directories:
+`.cache`, `.npm`, `.cargo/registry`, `.cargo/git`, `.local/share/pnpm/store`, and `go/pkg/mod`.
+Every writable mount is canonicalized and refused if it aliases a protected worktree root or shared
+Git administration; a cache symlink to separate safe storage is allowed. The whole HOME is never
+writable. The runner creates these cache directories before mounting them; an unusable path (for
+example, a file in place of `~/go`) prevents launch until the operator fixes it. Custom caches and
+other HOME writes, including top-level provider config files, can still fail with a read-only
+filesystem error; configure those
+builds to write inside the worktree or another authorized scratch path.
+
+An ACP provider in a selected managed Linux worktree cannot launch under `provider` mode because
+the runner does not know which provider state root to preserve. Git commands that write shared
+administration outside `objects`, `refs`, and `logs` can also fail inside this boundary. These
+include repository config changes, setting an upstream with `git push -u`, and creating a worktree
+directly with Git; use the runner's managed worktree operation for the latter. Git layouts that
+cannot supply canonical linked-worktree administration and all four narrow writable Git roots fail
+before provider launch, including a linked-worktree Project Location, missing Git logs, and
+symlinked Git object storage.
 
 **The rule is bound at launch, like every other filesystem boundary here.** A `bwrap` or Seatbelt
 sandbox is constructed when the provider starts, so the read-only entries are the ones that exist
-then. A worktree the provider requests *during* a turn is created inside the session's
-requested-worktree boundary, which is already writable, and a worktree switch schedules a relaunch
-rather than rebinding a live sandbox — so that new worktree's link is writable until the relaunch,
-exactly as the **Attach** notice already reports for the worktree root itself. This is the same
-same-turn window the command-approval boundary has, tracked separately; closing it means retiring
-the provider at creation time, not changing the sandbox rule.
+then. When launched in the original worktree, a worktree the provider requests *during* a turn is
+created inside the session's requested-worktree boundary, which is already writable, and a switch
+schedules a relaunch rather than rebinding a live sandbox — so that new worktree's link is writable
+until the relaunch, exactly as the **Attach** notice already reports for the worktree root itself.
+This is the same-turn window the command-approval boundary has, tracked separately; closing it
+means retiring the provider at creation time, not changing the sandbox rule.
+
+For a native Linux provider already launched in a *selected requested worktree*, its requested-
+worktree boundary is the read-only parent of that selected child. A newly requested sibling is
+therefore not writable during the current turn. Select it and relaunch before editing it. This
+keeps the selected root and Git registration intact; it does not preserve writable file contents.
 
 ## Runner Hook State at the Sandbox Boundary
 
 > **Two separate rules, by execution isolation mode.** Where the runner sandboxes its providers
 > (`executionIsolation.mode` of `bwrap` or `seatbelt`), the runner's own sandbox hides the directory
-> from every provider. In the default `provider` mode the runner sandboxes nothing, and **no
-> provider has an OS boundary there today**: the directory stays readable and writable to anything
-> running as the runner's user. Codex's own permission profile can deny it — the machinery to do so
+> from every provider. In `provider` mode outside a selected managed Linux worktree, the runner
+> sandboxes nothing, and **no provider has an OS boundary there today**: the directory stays readable
+> and writable to anything running as the runner's user. Codex's own permission profile can deny it — the machinery to do so
 > ships and is proven per launch — but on codex-cli 0.155.1 a `deny` entry also disables every
 > APPROVED network escalation, so no launch selects one (#1464). See "Codex in `provider` Mode". What changed there (#1336 slice 3, native Linux only) is that **nothing in
 > the directory decides the guard's verdict any more** — see "The Guard's Verdict in `provider`
@@ -625,7 +809,7 @@ a policy is also present.
   reopens ordinary staging, commits, status, and branch operations beneath that carveout while the
   pointer stays protected. The common `.git` root, the primary checkout, and unrelated host paths
   are never granted. Runner-owned filesystem isolation re-applies read-only mounts to the static
-  linked-worktree registration files `gitdir`, `commondir`, and an existing `config.worktree`
+  linked-worktree registration files `gitdir`, `commondir`, and `config.worktree` (created empty if absent)
   beneath that writable admin directory. Without the outer filesystem boundary, the managed
   `PreToolUse` guard refuses direct command-text writes, removals, renames, and replacements under
   the repository's worktree registry. That has the guard's existing same-user, command-text

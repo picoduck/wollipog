@@ -60,6 +60,10 @@ export interface BackgroundRecoveryNoticeProps {
   unfinishedListed?: number;
   unfinishedUnlisted?: boolean;
   restartReportsResult?: boolean;
+  /** Historical sentinels do not prove that these jobs shared a launching turn. */
+  unknownParentTurn?: boolean;
+  unverifiedUnfinished?: boolean;
+  historicalRecovery?: boolean;
 }
 
 /**
@@ -71,8 +75,11 @@ export interface BackgroundRecoveryNoticeProps {
 export function BackgroundRecoveryNotice(props: BackgroundRecoveryNoticeProps) {
   const { state, subject } = props;
   const severity = BACKGROUND_DELIVERY_STATUS[state].severity;
-  if (severity === "missing") return <ResultMissingNotice {...props} />;
+  if (severity === "missing" || state === "capacity_retry_exhausted") return <ResultMissingNotice {...props} />;
   if (severity === "blocked") return <ResultBlockedNotice {...props} />;
+  if (props.historicalRecovery && state === "terminal_without_continuation") {
+    return <ResultBlockedNotice {...props} />;
+  }
   return (
     <Notice tone="info" compact role="status" className="background-recovery-notice" dataState={state}>
       {backgroundRecoverySentence(state, subject)}
@@ -89,7 +96,7 @@ function ResultMissingNotice({ state, subject, finishedAt, now, missingSince, ac
       dataState={state}
       actions={acknowledgement && (
         <>
-          <BusyButton className="btn sm" busy={acknowledgement.busy} progress="Acknowledging the missing result…"
+          <BusyButton className="btn sm" busy={acknowledgement.busy} progress={state === "capacity_retry_exhausted" ? "Acknowledging retry exhaustion…" : "Acknowledging the missing result…"}
             onClick={acknowledgement.onAcknowledge}>
             Acknowledge
           </BusyButton>
@@ -99,7 +106,7 @@ function ResultMissingNotice({ state, subject, finishedAt, now, missingSince, ac
       details={(
         <dl className="facts">
           <div><dt>Finished</dt><dd><RecordedTime at={finishedAt} now={now} /></dd></div>
-          <div><dt>Missing Since</dt><dd><RecordedTime at={missingSince} now={now} /></dd></div>
+          <div><dt>{state === "capacity_retry_exhausted" ? "Exhausted Since" : "Missing Since"}</dt><dd><RecordedTime at={missingSince} now={now} /></dd></div>
           {acknowledgement && <div><dt>Acknowledge</dt><dd>{ACKNOWLEDGE_MISSING_RESULT_EFFECT}</dd></div>}
           <Diagnostic state={state} />
         </dl>
@@ -121,6 +128,9 @@ function ResultBlockedNotice({
   unfinishedListed = 0,
   unfinishedUnlisted = false,
   restartReportsResult = false,
+  unknownParentTurn = false,
+  unverifiedUnfinished = false,
+  historicalRecovery = false,
 }: BackgroundRecoveryNoticeProps) {
   const reasonId = useId();
   // Called with no target too, so the hooks run in the same order whatever the notice offers.
@@ -135,7 +145,15 @@ function ResultBlockedNotice({
   const target = stopTarget && jobStop ? stopTarget : null;
   let reason: string | null = null;
   if (jobStop && !jobStop.available) reason = jobStop.reason;
-  else if (jobStop && !target) {
+  else if (historicalRecovery) {
+    reason = (state === "continuation_blocked"
+      ? "These historical job records have no confirmed end. Wollipog cannot verify that the jobs are still running. "
+      : "These historical results have no recorded return step. Wollipog will not resubmit them automatically. ") +
+      "Review the conversation before recovering. Open More Actions and choose Restart Session to recover in a new conversation. " +
+      (restartReportsResult
+        ? "Restart ends every job and reports held results; it does not rerun their original commands."
+        : "Restart ends every job and discards held results; it does not rerun their original commands.");
+  } else if (jobStop && !target) {
     if (unfinishedListed > 1) reason = "Open one of the unfinished jobs below to stop it.";
     else if (unfinishedUnlisted) reason = "The unfinished job isn't in this list, so it can't be stopped here.";
   }
@@ -169,7 +187,13 @@ function ResultBlockedNotice({
         </dl>
       )}
     >
-      <p>{backgroundRecoverySentence(state, subject)}</p>
+      <p>{state === "terminal_without_continuation"
+        ? "Finished historical results need an explicit recovery step."
+        : unknownParentTurn
+        ? "Finished background results are held by historical job records whose parent turn is unknown."
+        : unverifiedUnfinished
+          ? "Finished background results are held because another job has no confirmed end."
+          : backgroundRecoverySentence(state, subject)}</p>
       {reason && <p id={reasonId}>{reason}</p>}
     </Notice>
   );

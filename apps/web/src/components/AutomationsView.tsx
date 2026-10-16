@@ -15,7 +15,13 @@ import type {
   AutomationTriggerView,
   WorkflowDefinition,
 } from "@wollipog/protocol";
-import { runnerSupportsProtocol } from "@wollipog/protocol";
+import {
+  AUTOMATION_CHOOSE_ALTERNATE_INSTALLATION, AUTOMATION_CHOOSE_INSTALLATION, AUTOMATION_INSTALLATION_UNAVAILABLE,
+  AUTOMATION_SAVED_ALTERNATE_INSTALLATION_UNAVAILABLE, AUTOMATION_SAVED_ALTERNATE_ORCHESTRATOR_INSTALLATION_UNAVAILABLE,
+  AUTOMATION_SAVED_ALTERNATE_ROLE_INSTALLATION_UNAVAILABLE, AUTOMATION_SAVED_INSTALLATION_UNAVAILABLE,
+  AUTOMATION_SAVED_ORCHESTRATOR_INSTALLATION_UNAVAILABLE, AUTOMATION_SAVED_ROLE_INSTALLATION_UNAVAILABLE,
+  automationChooseWorkflowInstallation, isRestartOnlyCodexExec, runnerSupportsProtocol,
+} from "@wollipog/protocol";
 import { AutomationsIcon } from "./Icons.js";
 import { useApi } from "../api-context.js";
 import { startVisiblePolling } from "../visible-polling.js";
@@ -147,7 +153,12 @@ export function AutomationsView() {
   // renders truthfully — the flag hides surfaces, it does not orphan stored data.
   const multiAgentEnabled = useExperiments().flags.multiAgent;
   const defaultAgentId = (agents: readonly AgentDefinition[] | undefined) =>
-    agentOptions([...(agents ?? [])]).find((option) => !option.disabled)?.agent.id ?? agents?.[0]?.id ?? "";
+    agentOptions([...(agents ?? [])]).find((option) => !option.disabled)?.agent.id ??
+      agents?.find((agent) => !isRestartOnlyCodexExec(agent))?.id ?? "";
+  // An automation already bound to discovery's restart-only exec row keeps it listed so editing
+  // renders truthfully; it is never offered to a new or rebound automation.
+  const offeredAgents = (agents: readonly AgentDefinition[] | undefined, current: string) =>
+    (agents ?? []).filter((agent) => !isRestartOnlyCodexExec(agent) || agent.id === current);
   const runners = useStoreSelector((state) => state.runners);
   const boxes = useStoreSelector((state) => state.boxes);
   // Passing the correlated Box matters for an SSH Machine left unnamed: runnerDisplay falls back
@@ -182,17 +193,29 @@ export function AutomationsView() {
   useEffect(() => { setAlternateWorkflowBindingEdits({}); }, [editingId]);
   const [showForm, setShowForm] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ source: "poll" | "mutation" | "refresh"; message: string } | null>(null);
+  // A user action owns its error even if an earlier poll settles later. Effect cleanup also
+  // revokes that ownership so an obsolete API client cannot publish or clear a newer error.
+  const errorRevision = useRef(0);
+  const beginMutation = () => {
+    const revision = ++errorRevision.current;
+    setError(null);
+    return revision;
+  };
+  const mutationFailed = (revision: number, cause: unknown) => {
+    setError((previous) => revision === errorRevision.current
+      ? { source: "mutation", message: (cause as Error).message } : previous);
+  };
 
   // Polls skip a busy refresh. A mutation waits for it and then reads its own authoritative result.
-  const refreshInFlight = useRef<Promise<void> | null>(null);
+  const refreshInFlight = useRef<Promise<boolean> | null>(null);
   const refreshGeneration = useRef(0);
 
-  const refresh = useCallback(async (onlyWhileVisible = false) => {
+  const refresh = useCallback(async (onlyWhileVisible = false, active?: () => boolean) => {
     while (refreshInFlight.current) {
       await refreshInFlight.current.catch(() => {});
     }
-    if (onlyWhileVisible && document.visibilityState === "hidden") return;
+    if (active?.() === false || (onlyWhileVisible && document.visibilityState === "hidden")) return false;
     const work = (async () => {
       const generation = (refreshGeneration.current += 1);
       const current = () => generation === refreshGeneration.current;
@@ -200,7 +223,7 @@ export function AutomationsView() {
       // Commit the authoritative list independently, so a workflow failure cannot leave a deleted
       // automation's editor open and allow Save to send an ID the control plane no longer has.
       const automationResult = await api.automations();
-      if (!current()) return;
+      if (!current()) return false;
       setItems(automationResult.automations);
       setListLoaded(true);
 
@@ -227,14 +250,27 @@ export function AutomationsView() {
       // Keep the refresh busy until every fan-out request settles, even when one endpoint fails.
       const results = await Promise.allSettled([workflowsLoaded, detailsLoaded]);
       for (const result of results) if (result.status === "rejected") throw result.reason;
+      return current();
     })();
     refreshInFlight.current = work;
     try {
-      await work;
+      return await work;
     } finally {
       refreshInFlight.current = null;
     }
   }, [api]);
+
+  // Only call after a write explicitly resolves successfully. A failed authoritative read is
+  // recoverable by polling; a rejected/unknown-acceptance write still belongs to mutationFailed.
+  const refreshAfterMutation = async (revision: number) => {
+    if (revision !== errorRevision.current) return;
+    try {
+      await refresh(false, () => revision === errorRevision.current);
+    } catch (cause) {
+      setError((previous) => revision === errorRevision.current
+        ? { source: "refresh", message: (cause as Error).message } : previous);
+    }
+  };
 
   useEffect(() => {
     let active = true;
@@ -244,12 +280,23 @@ export function AutomationsView() {
       // change. The new effect must refresh after it, rather than wait for the first interval.
       if (refreshInFlight.current && !initialRefresh) return;
       initialRefresh = false;
-      void refresh(true).catch((cause) => active && setError((cause as Error).message));
+      const revision = errorRevision.current;
+      void refresh(true, () => active).then((recovered) => {
+        if (!active || !recovered) return;
+        setError((previous) => revision === errorRevision.current &&
+          (previous?.source === "poll" || previous?.source === "refresh")
+          ? null : previous);
+      }).catch((cause) => {
+        if (!active) return;
+        setError((previous) => revision === errorRevision.current && previous?.source !== "mutation"
+          ? { source: "poll", message: (cause as Error).message } : previous);
+      });
     };
     const stopPolling = startVisiblePolling(load, 5_000);
     return () => {
       active = false;
       refreshGeneration.current += 1;
+      errorRevision.current += 1;
       stopPolling();
     };
   }, [refresh]);
@@ -368,12 +415,12 @@ export function AutomationsView() {
       }
       if (rebindPrimary) {
         const installation = installationFor(selectedRunner, form.agentId);
-        if (!installation) throw new Error("Select an available Agent Harness installation on this Machine.");
+        if (!installation) throw new Error(AUTOMATION_CHOOSE_INSTALLATION);
         spec.action.installationBindings = { ...spec.action.installationBindings, agent: installation };
       }
       if (rebindAlternate && spec.runnerPolicy.kind === "alternate") {
         const installation = installationFor(selectedFallback, form.fallbackAgentId);
-        if (!installation) throw new Error("Select an available Agent Harness installation on the alternate Machine.");
+        if (!installation) throw new Error(AUTOMATION_CHOOSE_ALTERNATE_INSTALLATION);
         spec.runnerPolicy.targets[0]!.installationBindings = {
           ...spec.runnerPolicy.targets[0]!.installationBindings, agent: installation,
         };
@@ -396,8 +443,8 @@ export function AutomationsView() {
         const installation = installationFor(selectedRunner, agentId);
         const configAgent = bindableAgents(selectedRunner).some((option) =>
           option.agent.id === agentId && !option.agent.installation);
-        if (!installation && !configAgent) throw new Error(`Select an available Agent Harness installation for ${
-          key === "orchestrator" ? "the Orchestrator" : titleCaseLabel(key.slice("role:".length))}.`);
+        if (!installation && !configAgent) throw new Error(automationChooseWorkflowInstallation(
+          key === "orchestrator" ? "the Orchestrator" : titleCaseLabel(key.slice("role:".length)), false));
         if (key === "orchestrator") {
           request.orchestratorAgentId = agentId;
           if (installation) installations.orchestrator = installation;
@@ -421,8 +468,8 @@ export function AutomationsView() {
         const installation = installationFor(selectedFallback, agentId);
         const configAgent = bindableAgents(selectedFallback).some((option) =>
           option.agent.id === agentId && !option.agent.installation);
-        if (!installation && !configAgent) throw new Error(`Select an available alternate Agent Harness installation for ${
-          key === "orchestrator" ? "the Orchestrator" : titleCaseLabel(key.slice("role:".length))}.`);
+        if (!installation && !configAgent) throw new Error(automationChooseWorkflowInstallation(
+          key === "orchestrator" ? "the Orchestrator" : titleCaseLabel(key.slice("role:".length)), true));
         if (key === "orchestrator") {
           target.orchestratorAgentId = agentId;
           if (installation) installations.orchestrator = installation;
@@ -442,7 +489,7 @@ export function AutomationsView() {
 
   const save = async () => {
     setBusy(true);
-    setError(null);
+    const revision = beginMutation();
     try {
       const spec = currentSpec();
       if (editingId) await api.updateAutomation(editingId, spec);
@@ -457,9 +504,9 @@ export function AutomationsView() {
       setAlternateWorkflowBindingEdits({});
       setForm(defaults());
       setShowForm(false);
-      await refresh();
+      await refreshAfterMutation(revision);
     } catch (cause) {
-      setError((cause as Error).message);
+      mutationFailed(revision, cause);
     } finally {
       setBusy(false);
     }
@@ -509,12 +556,12 @@ export function AutomationsView() {
 
   const mutate = async (work: () => Promise<unknown>) => {
     setBusy(true);
-    setError(null);
+    const revision = beginMutation();
     try {
       await work();
-      await refresh();
+      await refreshAfterMutation(revision);
     } catch (cause) {
-      setError((cause as Error).message);
+      mutationFailed(revision, cause);
     } finally {
       setBusy(false);
     }
@@ -536,7 +583,7 @@ export function AutomationsView() {
   const createTrigger = async () => {
     if (!triggerDraft) return;
     setBusy(true);
-    setError(null);
+    const revision = beginMutation();
     try {
       const parameterNames = [...new Set(triggerDraft.parameterNames.split(",")
         .map((name) => name.trim()).filter(Boolean))];
@@ -552,9 +599,9 @@ export function AutomationsView() {
       });
       setCredential(created);
       setTriggerDraft(null);
-      await refresh();
+      await refreshAfterMutation(revision);
     } catch (cause) {
-      setError((cause as Error).message);
+      mutationFailed(revision, cause);
     } finally {
       setBusy(false);
     }
@@ -562,13 +609,13 @@ export function AutomationsView() {
 
   const rotateTrigger = async (automationId: string, triggerId: string) => {
     setBusy(true);
-    setError(null);
+    const revision = beginMutation();
     try {
       const rotated = await api.rotateAutomationTrigger(automationId, triggerId);
       setCredential(rotated);
-      await refresh();
+      await refreshAfterMutation(revision);
     } catch (cause) {
-      setError((cause as Error).message);
+      mutationFailed(revision, cause);
     } finally {
       setBusy(false);
     }
@@ -576,13 +623,13 @@ export function AutomationsView() {
 
   const revokeTrigger = async (automationId: string, triggerId: string) => {
     setBusy(true);
-    setError(null);
+    const revision = beginMutation();
     try {
       await api.deleteAutomationTrigger(automationId, triggerId);
       if (credential?.trigger.triggerId === triggerId) setCredential(null);
-      await refresh();
+      await refreshAfterMutation(revision);
     } catch (cause) {
-      setError((cause as Error).message);
+      mutationFailed(revision, cause);
     } finally {
       setBusy(false);
     }
@@ -595,7 +642,7 @@ export function AutomationsView() {
         description={destination("automations").description}
         primary={{ label: "New Automation", onClick: openNewAutomation }}
       />
-      {error && <div className="automation-error" role="alert">{error}</div>}
+      {error && <div className="automation-error" role="alert">{error.message}</div>}
 
       <OutboundEventSubscriptions projects={[...projects.values()]} automations={items} />
 
@@ -642,14 +689,14 @@ export function AutomationsView() {
                   setPrimaryAgentTouched(true);
                   setForm((current) => withAgent(current, event.target.value));
                 }}>
-                  {(selectedRunner?.agents ?? []).map((agent) => <option key={agent.id} value={agent.id}
+                  {offeredAgents(selectedRunner?.agents, form.agentId).map((agent) => <option key={agent.id} value={agent.id}
                     disabled={agentOptions(selectedRunner?.agents ?? []).some((option) => option.agent.id === agent.id && option.disabled)}>{agentDisplayName(agent)}</option>)}
                 </select></label> : <label>Workflow<select value={form.workflowId} onChange={(event) => patch("workflowId", event.target.value)}>
                   {workflows.map((workflow) => <option key={`${workflow.workflowId}:${workflow.version}`} value={workflow.workflowId}>{workflow.name} · v{workflow.version}</option>)}
                 </select></label>}
                 {form.actionKind === "create_session" && primaryInstallationIssue &&
                   <div className="automation-error automation-span" role="alert">
-                    The saved Agent Harness installation is unavailable or unbound. This automation waits until you select an available installation.
+                    {AUTOMATION_SAVED_INSTALLATION_UNAVAILABLE}
                     <button type="button" className="btn ghost sm" disabled={!installationFor(selectedRunner, form.agentId)}
                       onClick={() => setRebindPrimary(true)}>Use Current Installation</button>
                   </div>}
@@ -674,7 +721,7 @@ export function AutomationsView() {
                         ...bindableAgents(selectedRunner).map((option) => ({ value: option.agent.id, label: option.label })),
                       ]} />
                     {unavailable && <p className="automation-error" role="alert">
-                      This saved role installation is unavailable or unbound.
+                      {AUTOMATION_SAVED_ROLE_INSTALLATION_UNAVAILABLE}
                       <button type="button" className="btn ghost sm"
                         disabled={!installationFor(selectedRunner, boundId)}
                         onClick={() => setWorkflowBindingEdits((current) => ({ ...current, [`role:${role}`]: boundId }))}>
@@ -705,7 +752,7 @@ export function AutomationsView() {
                           ...bindableAgents(selectedRunner).map((option) => ({ value: option.agent.id, label: option.label })),
                         ]} />
                       {unavailable && <p className="automation-error" role="alert">
-                        This saved orchestrator installation is unavailable or unbound.
+                        {AUTOMATION_SAVED_ORCHESTRATOR_INSTALLATION_UNAVAILABLE}
                         <button type="button" className="btn ghost sm"
                           disabled={!installationFor(selectedRunner, boundId)}
                           onClick={() => setWorkflowBindingEdits((current) => ({ ...current, orchestrator: boundId }))}>
@@ -804,7 +851,7 @@ export function AutomationsView() {
                       ...bindableAgents(selectedFallback).map((option) => ({ value: option.agent.id, label: option.label })),
                     ]} />
                   {unavailable && <p className="automation-error" role="alert">
-                    This saved alternate role installation is unavailable or unbound.
+                    {AUTOMATION_SAVED_ALTERNATE_ROLE_INSTALLATION_UNAVAILABLE}
                     <button type="button" className="btn ghost sm"
                       disabled={!installationFor(selectedFallback, boundId)}
                       onClick={() => setAlternateWorkflowBindingEdits((current) => ({ ...current, [`role:${role}`]: boundId }))}>
@@ -846,7 +893,7 @@ export function AutomationsView() {
                         ...bindableAgents(selectedFallback).map((option) => ({ value: option.agent.id, label: option.label })),
                       ]} />
                     {unavailable && <p className="automation-error" role="alert">
-                      This saved alternate orchestrator installation is unavailable or unbound.
+                      {AUTOMATION_SAVED_ALTERNATE_ORCHESTRATOR_INSTALLATION_UNAVAILABLE}
                       <button type="button" className="btn ghost sm"
                         disabled={!installationFor(selectedFallback, boundId)}
                         onClick={() => setAlternateWorkflowBindingEdits((current) => ({ ...current, orchestrator: boundId }))}>
@@ -859,7 +906,7 @@ export function AutomationsView() {
                 setRebindAlternate(false);
                 setAlternateAgentTouched(true);
                 patch("fallbackAgentId", event.target.value);
-              }}>{(selectedFallback?.agents ?? []).map((agent) => <option key={agent.id} value={agent.id}
+              }}>{offeredAgents(selectedFallback?.agents, form.fallbackAgentId).map((agent) => <option key={agent.id} value={agent.id}
                 disabled={agentOptions(selectedFallback?.agents ?? []).some((option) => option.agent.id === agent.id && option.disabled)}>{agentDisplayName(agent)}</option>)}</select></label>}
               {form.actionKind === "create_session" && editingSpec?.runnerPolicy.kind === "alternate" &&
                 !rebindAlternate && (() => {
@@ -870,7 +917,7 @@ export function AutomationsView() {
                     : unboundInstallationUnavailable(selectedFallback, form.fallbackAgentId,
                       oldTarget.installationBindings === undefined);
                   return unavailable ? <div className="automation-error automation-span" role="alert">
-                    The alternate Agent Harness installation is unavailable or unbound.
+                    {AUTOMATION_SAVED_ALTERNATE_INSTALLATION_UNAVAILABLE}
                     <button type="button" className="btn ghost sm"
                       disabled={!installationFor(selectedFallback, form.fallbackAgentId)}
                       onClick={() => setRebindAlternate(true)}>Use Current Installation</button>
@@ -967,7 +1014,7 @@ export function AutomationsView() {
             });
           return <AutomationCard key={item.automationId} id={item.automationId} name={item.name} action={actionSummary(item.action)} enabled={item.enabled} unhealthy={Boolean(item.targetHealth)}>
             {(unavailableInstallation || unboundInstallation || unboundWorkflow || unboundOrchestrator || unavailableAlternate) && <p className="automation-execution-error" role="alert">
-              Saved Agent Harness installation unavailable or unbound. Edit this automation to choose an available installation.
+              {AUTOMATION_INSTALLATION_UNAVAILABLE}
             </p>}
             {item.targetHealth && <p className="automation-execution-error" role="alert">
               Waiting for target: {item.targetHealth.error}

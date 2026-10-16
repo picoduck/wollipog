@@ -1,12 +1,10 @@
 import { setHideAccountEmails, useAccountEmailPrivacy } from "../account-email-privacy.js";
-import React, { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { ArtifactUploadSettings } from "./ArtifactUploadSettings.js";
 import { Notice } from "./Notice.js";
 import { State } from "./State.js";
-import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { tailnetAccessDescription, type TailnetAccessSetting } from "../tailnet-access.js";
-import { availableUpdateMessage, type DesktopUpdateSetting } from "../desktop-updates.js";
 import { type PushSetting } from "../push.js";
 import {
   AppearanceIcon,
@@ -19,7 +17,9 @@ import {
   NetworkIcon,
   NotificationsIcon,
   OrchestratorControlsIcon,
+  ResetIcon,
   ShieldCheckIcon,
+  StorageIcon,
   TuningIcon,
 } from "./Icons.js";
 import { VIEW_ICONS } from "./Rail.js";
@@ -28,6 +28,7 @@ import { TabList } from "./Tabs.js";
 import {
   REQUIRED_RAIL_VIEWS,
   moveRailView,
+  phoneBarViews,
   railDigits,
   railPreferencesAreDefault,
   resetRailPreferences,
@@ -41,15 +42,15 @@ import { instancePublicOrigin, useInstances } from "../instances-context.js";
 import { useIsCompact, useIsMobile, useIsTouchOnly } from "./useIsMobile.js";
 import { EXPERIMENT_COPY, experimentForViewName } from "../experiments.js";
 import { useExperiments } from "../use-experiments.js";
-import { destination } from "../navigation.js";
-import { ActionRow, LinkRow, SegmentedRow, SelectRow, SettingRow, SettingsGroup, StaticRow, SwitchRow, ValueRow } from "./ui/SettingsRows.js";
+import { destination, type GlobalViewName } from "../navigation.js";
+import { ActionRow, LinkRow, SAVED_MS, SegmentedRow, SelectRow, SettingRow, SettingsGroup, StaticRow, Switch, SwitchRow, ValueRow } from "./ui/SettingsRows.js";
 import { SCHEME_SWATCHES, type ColorScheme, type ResolvedTheme } from "../theme.js";
 import type { SessionsPreviewLayout } from "../sessions-preview-layout.js";
 import { useSessionsPreviewLayout } from "../use-sessions-preview-layout.js";
 import { setTerminalPlacement, useTerminalPlacement, type TerminalPlacement } from "../terminal-placement.js";
 import { setEnterKeyBehavior, useEnterKeyBehavior, type EnterKeyBehavior } from "../enter-key.js";
 import { setShowAgentLogs, useShowAgentLogs } from "../agent-logs.js";
-import { SETTINGS_SECTIONS, viewPath, type SettingsFocus, type SettingsSection, type SettingsSectionEntry, type View } from "../navigation.js";
+import { EXPERIMENT_OFF_EFFECT, SETTINGS_SECTIONS, viewPath, type SettingsFocus, type SettingsSection, type SettingsSectionEntry, type View } from "../navigation.js";
 import { SHOW_SHORTCUTS_ID, shortcutDisplay } from "../shortcuts.js";
 import type { ExperimentFlags, ExperimentId } from "../experiments.js";
 
@@ -109,6 +110,7 @@ const SECTION_ICONS: Record<SettingsSection, (props: { size?: number }) => React
   approvals: ShieldCheckIcon,
   orchestrator: OrchestratorControlsIcon,
   network: NetworkIcon,
+  storage: StorageIcon,
   experimental: ExperimentIcon,
   about: InfoIcon,
 };
@@ -294,7 +296,10 @@ export function SettingsView({ section, onNavigate, panels }: SettingsViewProps)
           </nav>
         )}
         <section className="settings-panel" aria-labelledby="settings-panel-heading">
-          <div className="settings-panel-head">
+          {/* About opens with Wollipog's name and version in place of its head (#3028). The heading
+              stays in the tree, hidden, so it still names the section and the focus rescue above
+              falls through to the page title. */}
+          <div className="settings-panel-head" hidden={current.id === "about"}>
             <div className="settings-panel-heading">
               <h2 id="settings-panel-heading" ref={headingRef} tabIndex={-1}>{current.title}</h2>
               <p className="settings-panel-desc">{panelHead?.description ?? current.panelDescription ?? current.description}</p>
@@ -365,38 +370,50 @@ export function AppearancePanel({
   density: string;
   onDensityChange: (value: string) => void;
 }) {
+  // A phone never shows the Sessions preview beside or below its list, so the layout does nothing there.
+  const phone = useIsMobile();
+  const [saved, flashSaved] = useSavedRow();
+  // Every row here saves the moment it changes (§8.6), so each says so. Choosing the value it
+  // already has changes nothing and says nothing.
+  const instant = (row: string, current: string, apply: (next: string) => void) => (next: string) => {
+    apply(next);
+    if (next !== current) flashSaved(row);
+  };
   /* ONE group, where there were three.
      A heading per setting made the panel read as three sections that happened to contain one
      control each, and repeated every title immediately below itself — "Theme" over a row called
      "Theme". These are three axes of one thing, which is what the group now says once. It is named
      Display rather than Appearance because the panel is already called Appearance, and a group
-     heading that restates its panel's is the same duplication one level up. */
+     heading that restates its panel's is the same duplication one level up. The panel head carries
+     the scope, This Device, for every group on it. */
   return (
-    <SettingsGroup title="Display">
+    <SettingsGroup title="Display" foot="Motion follows your system's reduce-motion setting.">
       <SegmentedRow
         title="Theme"
         options={options}
         value={value}
         disabled={disabled}
         disabledReason={disabledReason}
-        onChange={onChange}
+        onChange={instant("theme", value, onChange)}
+        saved={saved === "theme"}
       />
       {/* A SEPARATE axis from light/dark: every scheme has both, so choosing Dracula does not
           choose dark. A listbox rather than pills because five names need their descriptions and
-          their swatches to choose between, which a pill cannot carry. */}
+          their swatches to choose between, which a pill cannot carry. Its width is the described
+          list's default (§8.3). Browsing previews without changing anything, so only a commit saves. */}
       <SelectRow
         title="Color Scheme"
-        description="Applies to both the light and the dark theme."
+        description="Applies to both light and dark themes."
         options={schemes.map((option) => ({
           ...option,
           swatch: <SchemeSwatch scheme={option.value} theme={resolvedTheme} />,
         }))}
         value={scheme}
         disabled={disabled}
-        onChange={onSchemeChange}
+        onChange={instant("scheme", scheme, onSchemeChange)}
         onPreview={onSchemePreview}
-        menuWidth={400}
         estimatedOptionHeight={58}
+        saved={saved === "scheme"}
       />
       {/* A THIRD axis, and about spacing rather than colour: every scheme and theme has both
           densities. Compact is the default because it is what the app already renders. */}
@@ -406,67 +423,125 @@ export function AppearancePanel({
         value={density}
         disabled={disabled}
         disabledReason={disabledReason}
-        onChange={onDensityChange}
+        onChange={instant("density", density, onDensityChange)}
+        saved={saved === "density"}
       />
       {/* Where the Sessions preview sits (§6.3, #2219). The Sessions header's Preview Layout control
           writes the same per-device key, and each follows the other live. */}
-      <SessionsLayoutRow disabled={disabled} disabledReason={disabledReason} />
+      {!phone && (
+        <SessionsLayoutRow
+          disabled={disabled}
+          disabledReason={disabledReason}
+          saved={saved === "sessions-layout"}
+          onSaved={() => flashSaved("sessions-layout")}
+        />
+      )}
       {/* Where terminal tabs open (§4.6, #2869). The dock's and the side panel tool's More Terminal
-          Actions write the same per-device key, and each follows the others live. */}
-      <TerminalPlacementRow disabled={disabled} disabledReason={disabledReason} />
+          Actions write the same per-device key, and each follows the others live. Kept on phones,
+          which have both placements. */}
+      <TerminalPlacementRow
+        disabled={disabled}
+        disabledReason={disabledReason}
+        saved={saved === "terminal-placement"}
+        onSaved={() => flashSaved("terminal-placement")}
+      />
     </SettingsGroup>
   );
 }
 
-const SESSIONS_LAYOUT_OPTIONS: ReadonlyArray<{ value: SessionsPreviewLayout; label: string }> = [
-  { value: "below", label: "Preview Below" },
-  { value: "right", label: "Preview Right" },
+/** Which Display row shows its Saved check (§8.6): the one changed last, for `SAVED_MS`. */
+function useSavedRow(): [string | null, (row: string) => void] {
+  const [saved, setSaved] = useState<string | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  const flash = useCallback((row: string) => {
+    clearTimeout(timer.current);
+    setSaved(row);
+    timer.current = setTimeout(() => setSaved(null), SAVED_MS);
+  }, []);
+  return [saved, flash];
+}
+
+/** A Display row that reads and writes its own per-device store. */
+interface DeviceRowProps {
+  disabled: boolean;
+  disabledReason?: string;
+  saved: boolean;
+  /** The row's value changed and is stored. */
+  onSaved: () => void;
+}
+
+const SESSIONS_LAYOUT_OPTIONS: ReadonlyArray<{ value: SessionsPreviewLayout; label: string; description: string }> = [
+  { value: "below", label: "Preview Below", description: "The session list across the top, with the preview under it." },
+  {
+    value: "right",
+    label: "Preview Right",
+    description: "The session list on the left, with the preview beside it, in windows 1100px and wider.",
+  },
 ];
 
-function SessionsLayoutRow({ disabled, disabledReason }: { disabled: boolean; disabledReason?: string }) {
+function SessionsLayoutRow({ disabled, disabledReason, saved, onSaved }: DeviceRowProps) {
   const [layout, setLayout] = useSessionsPreviewLayout();
   return (
     <SegmentedRow
       title="Sessions Layout"
-      description="Preview Right applies in windows 1100px and wider."
       options={SESSIONS_LAYOUT_OPTIONS}
       value={layout}
       disabled={disabled}
       disabledReason={disabledReason}
-      onChange={(value) => setLayout(value === "right" ? "right" : "below")}
+      onChange={(value) => {
+        const next = value === "right" ? "right" : "below";
+        setLayout(next);
+        if (next !== layout) onSaved();
+      }}
+      saved={saved}
     />
   );
 }
 
-const TERMINAL_PLACEMENT_OPTIONS: ReadonlyArray<{ value: TerminalPlacement; label: string }> = [
-  { value: "dock", label: "Bottom Dock" },
-  { value: "panel", label: "Right Panel" },
+const TERMINAL_PLACEMENT_OPTIONS: ReadonlyArray<{ value: TerminalPlacement; label: string; description: string }> = [
+  { value: "dock", label: "Bottom Dock", description: "Terminal tabs open in a dock under the composer." },
+  { value: "panel", label: "Right Panel", description: "Terminal tabs open as the Terminal tool in the right panel." },
 ];
 
-function TerminalPlacementRow({ disabled, disabledReason }: { disabled: boolean; disabledReason?: string }) {
+function TerminalPlacementRow({ disabled, disabledReason, saved, onSaved }: DeviceRowProps) {
   const placement = useTerminalPlacement();
   return (
     <SegmentedRow
       title="Terminal Placement"
-      description="Where terminal tabs open on this device. Running shells keep running when you switch."
       options={TERMINAL_PLACEMENT_OPTIONS}
       value={placement}
       disabled={disabled}
       disabledReason={disabledReason}
-      onChange={(value) => setTerminalPlacement(value === "panel" ? "panel" : "dock")}
+      onChange={(value) => {
+        const next = value === "panel" ? "panel" : "dock";
+        setTerminalPlacement(next);
+        if (next !== placement) onSaved();
+      }}
+      saved={saved}
     />
   );
 }
 
+/** How long a moved destination's row is lit, so the eye can follow it to its new place. */
+export const RAIL_MOVE_FLASH_MS = 600;
+
 /**
- * Settings → Appearance → Navigation (#385): visibility and order for the rail's destinations.
+ * Settings → Appearance → Navigation (#385, #3021): visibility and order for the rail's destinations.
  *
- * The read-only digit chips are the derived bindings — position IS the shortcut, so there is no
- * digit editor to drift from the rail. Sessions is required (hiding it would leave the rail with
- * no home destination), and Settings is absent on purpose: it is not a rail destination, and on
- * a phone it is the only Settings entry point, pinned as the More sheet's trailing row (#458).
- * Reordering uses Move buttons rather than drag-and-drop: one interaction that works for
- * pointer, touch, and keyboard alike, with the effect announced by the updated digit chips.
+ * The read-only digits are the derived bindings — position IS the shortcut, so there is no digit
+ * editor to drift from the rail. Sessions is required (hiding it would leave the rail with no home
+ * destination), and Settings is absent on purpose: it is not a rail destination, and on a phone it is
+ * the only Settings entry point, pinned as the More sheet's trailing row (#458). Reordering uses Move
+ * buttons rather than drag-and-drop: one interaction that works for pointer, touch, and keyboard
+ * alike, with the effect announced by the updated digits. Drag-and-drop (#541) layers onto these rows.
+ *
+ * Every destination row is one fixed grid — icon, name, digit, moves, switch — so the arrows, the
+ * digit and the switch sit at the same x on a normal, hidden, required and experiment-off row. Why a
+ * row's switch cannot be used is visible text in its name cell, never a tooltip.
+ *
+ * A phone binds no digits (the shortcuts are desktop-only), so it has no digit column; the order
+ * there is the More sheet's, and the destinations on the tab bar say so.
  *
  * Show Labels in Rail is the desktop rail's 208px labelled form (#1968). It is not offered on a
  * phone, whose tab bar is always labelled and never takes the rail's width.
@@ -477,10 +552,36 @@ export function NavigationRailPanel() {
   const { flags } = useExperiments();
   const isMobile = useIsMobile();
   const digits = railDigits(visibleRailViews(preferences, flags));
+  const tabBar = isMobile ? new Set(phoneBarViews(preferences, flags)) : null;
+  const id = useId();
+  const listRef = useRef<HTMLUListElement>(null);
+  /** The Move button pressed last, to hand focus back to once the list has re-rendered. */
+  const moved = useRef<{ name: GlobalViewName; direction: "up" | "down" } | null>(null);
+  const [flashed, setFlashed] = useState<GlobalViewName | null>(null);
+  const flashTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(flashTimer.current), []);
+  // Reordering moves the row's element, which takes focus with it. Focus returns to the button that
+  // was pressed, or to its sibling once that one is disabled at the end of the list.
+  useLayoutEffect(() => {
+    const last = moved.current;
+    moved.current = null;
+    if (last === null) return;
+    const row = listRef.current?.querySelector<HTMLElement>(`[data-destination="${last.name}"]`);
+    const pressed = row?.querySelector<HTMLButtonElement>(`[data-move="${last.direction}"]`);
+    const sibling = row?.querySelector<HTMLButtonElement>(`[data-move="${last.direction === "up" ? "down" : "up"}"]`);
+    (pressed && !pressed.disabled ? pressed : sibling)?.focus();
+  }, [preferences.order]);
+  const move = (name: GlobalViewName, direction: "up" | "down") => {
+    moved.current = { name, direction };
+    moveRailView(name, direction, instanceScope);
+    clearTimeout(flashTimer.current);
+    setFlashed(name);
+    flashTimer.current = setTimeout(() => setFlashed(null), RAIL_MOVE_FLASH_MS);
+  };
   return (
     <SettingsGroup
       title="Navigation"
-      // The group's one action and its foot line (§8.2): every child of its surface is a row.
+      // The group's one action (§8.2): every child of its surface is a row.
       action={(
         <button
           type="button"
@@ -488,10 +589,13 @@ export function NavigationRailPanel() {
           disabled={railPreferencesAreDefault(preferences)}
           onClick={() => resetRailPreferences(instanceScope)}
         >
+          <ResetIcon size={14} />
           Reset to Default
         </button>
       )}
-      foot="The visible order assigns the digit shortcuts. Hidden destinations stay reachable from search and direct links, and keep their place here for when they return."
+      intro={isMobile
+        ? "Order sets the More sheet. Tab Bar marks the four pages in the bar."
+        : "Order sets the number shortcuts. Hidden pages stay reachable from search."}
     >
       {!isMobile && (
         <SwitchRow
@@ -501,7 +605,7 @@ export function NavigationRailPanel() {
           onClick={() => setRailLabels(!preferences.labels, instanceScope)}
         />
       )}
-      <ul className="rail-order-list" aria-label="Navigation Destinations">
+      <ul ref={listRef} className={`rail-nav-list${isMobile ? " no-digits" : ""}`} aria-label="Navigation Destinations">
         {preferences.order.map((name, index) => {
           const item = destination(name);
           const Icon = VIEW_ICONS[name];
@@ -510,75 +614,62 @@ export function NavigationRailPanel() {
           const experiment = experimentForViewName(name);
           const experimentOff = experiment !== null && !flags[experiment];
           const digit = digits.get(name);
-          const state = hidden
-            ? "Hidden"
-            : experimentOff
-              ? "Off in Experimental"
-              : digit === undefined
-                ? "No Digit"
-                : null;
+          // Why the switch cannot be used, said beside the name rather than in a tooltip.
+          const reason = required ? "Always Shown" : experimentOff ? "Off in Experimental" : null;
+          const noteId = `${id}-${name}-note`;
           return (
-            <li className={`rail-order-row${hidden || experimentOff ? " is-inactive" : ""}`} key={name}>
-              <span className="rail-order-icon" aria-hidden="true"><Icon size={16} /></span>
-              <span className="rail-order-title">{item.name}</span>
-              <span className="rail-order-state">
-                {digit !== undefined && <kbd aria-label={`Shortcut ${digit}`}>{digit}</kbd>}
-                {state !== null && <span className="rail-order-note">{state}</span>}
+            <li
+              className={`rail-nav-row${hidden || experimentOff ? " is-inactive" : ""}${flashed === name ? " is-moved" : ""}`}
+              key={name}
+              data-destination={name}
+            >
+              <span className="rail-nav-icon" aria-hidden="true"><Icon size={16} /></span>
+              <span className="rail-nav-name">
+                <span className="rail-nav-title">{item.name}</span>
+                {reason !== null && <span className="rail-nav-note" id={noteId}>{reason}</span>}
+                {tabBar?.has(name) && <span className="rail-nav-note">Tab Bar</span>}
               </span>
-              <span className="rail-order-controls">
+              {!isMobile && (
+                <span className="rail-nav-digit">
+                  {digit !== undefined
+                    ? <><span className="sr-only">Shortcut </span><kbd>{digit}</kbd></>
+                    : <span aria-hidden="true">–</span>}
+                </span>
+              )}
+              <span className="rail-nav-moves">
                 <button
                   type="button"
                   className="icon-btn"
+                  data-move="up"
                   disabled={index === 0}
                   aria-label={`Move ${item.name} Up`}
-                  onClick={() => moveRailView(name, "up", instanceScope)}
+                  onClick={() => move(name, "up")}
                 >
-                  <ArrowUpIcon size={14} />
+                  <ArrowUpIcon size={16} />
                 </button>
                 <button
                   type="button"
                   className="icon-btn"
+                  data-move="down"
                   disabled={index === preferences.order.length - 1}
                   aria-label={`Move ${item.name} Down`}
-                  onClick={() => moveRailView(name, "down", instanceScope)}
+                  onClick={() => move(name, "down")}
                 >
-                  <ArrowDownIcon size={14} />
+                  <ArrowDownIcon size={16} />
                 </button>
-                {required ? (
-                  <span className="rail-order-required" title="Sessions is the rail's home destination and cannot be hidden.">
-                    Required
-                  </span>
-                ) : (
-                  <button
-                    type="button"
-                    className="btn ghost sm"
-                    onClick={() => setRailViewHidden(name, !hidden, instanceScope)}
-                  >
-                    {hidden ? "Show" : "Hide"}
-                  </button>
-                )}
               </span>
+              <Switch
+                label={`Show ${item.name} in Navigation`}
+                checked={required || !hidden}
+                disabled={reason !== null}
+                describedBy={reason !== null ? noteId : undefined}
+                onChange={(checked) => setRailViewHidden(name, !checked, instanceScope)}
+              />
             </li>
           );
         })}
       </ul>
     </SettingsGroup>
-  );
-}
-
-/**
- * A setting that exists but cannot be changed here yet.
- *
- * §11.3: never hide a setting that could exist, and every disabled control carries a reason. A
- * missing section teaches a user it is not possible; a disabled one with a sentence teaches them
- * where it lives.
- */
-export function PendingSetting({ title, description, reason }: { title: string; description: string; reason: string }) {
-  return (
-    <StaticRow
-      title={title}
-      description={<>{description} <Notice tone="neutral" compact>{reason}</Notice></>}
-    />
   );
 }
 
@@ -684,7 +775,8 @@ export function BehaviorPanel({
  * plane keeps serving the underlying APIs, and turning a feature back on restores every
  * surface without a reload. The exception to "never hide a setting that could exist" is
  * deliberate here — hiding is the setting. The section's description says once what turning one
- * off does, so each row says only what its feature is.
+ * off does, so each row says only what its feature is. A phone hides that description under its
+ * detail bar (§4.2), so there the group says it instead, above the rows (#3139).
  */
 export function ExperimentalPanel({
   flags,
@@ -693,8 +785,9 @@ export function ExperimentalPanel({
   flags: ExperimentFlags;
   onToggle: (id: ExperimentId, enabled: boolean) => void;
 }) {
+  const phone = useIsMobile();
   return (
-    <SettingsGroup>
+    <SettingsGroup intro={phone ? EXPERIMENT_OFF_EFFECT : undefined}>
       <SwitchRow
         title={EXPERIMENT_COPY.multiAgent.name}
         description="Runs that coordinate several agents in a workflow graph."
@@ -737,6 +830,7 @@ export function NetworkPanel({ tailnet, onNavigate }: { tailnet: TailnetAccessSe
           mono={address !== null}
           copy={address ?? undefined}
           copyLabel="Copy Address"
+          wrap
         />
         {/* Where Connections › Instances exists: the desktop app with more than one instance
             allowed, and not on a phone, whose Connections has no Instances tab (#2984). */}
@@ -833,150 +927,7 @@ function TailnetAccessRow({ tailnet }: { tailnet: TailnetAccessSetting }) {
   );
 }
 
-/** `update` is the shell's state (see `useDesktopUpdateSetting`); absent, this is a browser. */
-export function AboutPanel({ update }: { update?: DesktopUpdateSetting } = {}) {
-  const controlPlaneVersion = useControlPlaneVersion();
-  return (
-    <SettingsGroup>
-      <dl className="facts">
-        {update?.status && <><dt>Desktop App</dt><dd>{update.status.currentVersion}</dd></>}
-        <dt>Control Plane</dt>
-        <dd>{controlPlaneVersion === undefined ? "Reading…" : controlPlaneVersion ?? "Not reported"}</dd>
-        <dt>Protocol</dt><dd>{PROTOCOL_VERSION}</dd>
-      </dl>
-      {update?.desktop ? (
-        <DesktopUpdateRows update={update} />
-      ) : (
-        <PendingSetting
-          title="Updates"
-          description="Whether this build is current."
-          reason="This dashboard is served by its control plane and updates when that control plane is upgraded."
-        />
-      )}
-      <PendingSetting
-        title="Open-Source Licenses"
-        description="What Wollipog is built on."
-        reason="Not compiled into the app yet; see THIRD-PARTY-NOTICES in the repository."
-      />
-    </SettingsGroup>
-  );
-}
-
-/**
- * The version of the control plane this window talks to, from its authenticated instance probe.
- *
- * `undefined` while reading and `null` when it did not say — an older control plane without the
- * probe, or a failed read. The desktop app and the control plane can differ: a desktop window may be
- * connected to a remote server, and updating the app never updates that server.
- */
-function useControlPlaneVersion(): string | null | undefined {
-  const api = useApi();
-  const [version, setVersion] = useState<string | null | undefined>(undefined);
-  useEffect(() => {
-    let disposed = false;
-    setVersion(undefined);
-    api.instanceInfo()
-      .then((info) => { if (!disposed) setVersion(typeof info?.appVersion === "string" && info.appVersion ? info.appVersion : null); })
-      .catch(() => { if (!disposed) setVersion(null); });
-    return () => { disposed = true; };
-  }, [api]);
-  return version;
-}
-
-function formatCheckedAt(checkedAt: number): string {
-  return new Date(checkedAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
-}
-
-/**
- * #1646. What the shell last learned about published releases, and the one action that fits it.
- *
- * Installing restarts the app, so a first attempt while work is in flight is held by the shell and
- * becomes the Restart to Install Update confirmation the update toast opens too (#1975). Nothing
- * here shows the hold: Install Later leaves this row offering Install and Restart as it was.
- */
-function DesktopUpdateRows({ update }: { update: DesktopUpdateSetting }) {
-  const { status } = update;
-  if (!status) {
-    return (
-      <StaticRow
-        title="Updates"
-        description={update.loading
-          ? "Reading the update status…"
-          : `Could not read the update status: ${update.error ?? "the desktop app did not answer."}`}
-      />
-    );
-  }
-  const busy = update.checking || update.installing || update.savingPrerelease;
-  const check = (label: string) => (
-    <button type="button" className="btn ghost sm" disabled={busy} onClick={update.check}>
-      {update.checking ? "Checking…" : label}
-    </button>
-  );
-  const lastCheck = status.lastCheck;
-  let description: ReactNode;
-  if (!status.checksAllowed) {
-    description = "Update checks are turned off for this installation by WOLLIPOG_DISABLE_UPDATE_CHECK.";
-  } else if (update.installing) {
-    description = "Downloading and verifying the update. Wollipog restarts when it is installed.";
-  } else if (lastCheck?.state === "available") {
-    description = status.install.mode === "inPlace" ? (
-      <>
-        {availableUpdateMessage(lastCheck.version)} Installing restarts Wollipog, which stops its local
-        control plane and runner.{" "}
-        <button type="button" className="btn sm" onClick={update.install}>Install and Restart</button>{" "}
-        {check("Check Again")}
-      </>
-    ) : (
-      <>
-        {availableUpdateMessage(lastCheck.version)} {status.install.reason}{" "}
-        <button type="button" className="btn sm" onClick={update.openRelease}>Open Release Page</button>{" "}
-        {check("Check Again")}
-      </>
-    );
-  } else if (lastCheck?.state === "current") {
-    description = (
-      <>
-        {status.currentVersion.includes("-") || status.prereleaseUpdates
-          ? `No newer release is available on the ${status.prereleaseUpdates ? "pre-release" : "stable"} channel.`
-          : `Wollipog ${status.currentVersion} is the latest release.`} Checked {formatCheckedAt(lastCheck.checkedAt)}.{" "}
-        {check("Check Again")}
-      </>
-    );
-  } else {
-    description = <>Not checked yet. {check("Check for Updates")}</>;
-  }
-  return (
-    <>
-      <StaticRow
-        title="Updates"
-        description={
-          <>
-            {description}
-            {update.error && <Notice tone="danger" compact role="alert">{update.error}</Notice>}
-          </>
-        }
-      />
-      <SwitchRow
-        title="Check for Updates Automatically"
-        description={status.checksAllowed
-          ? "Look for a newer published release while Wollipog is open."
-          : "Turned off for this installation."}
-        checked={status.automaticChecks && status.checksAllowed}
-        busy={update.savingAutomatic}
-        disabled={!status.checksAllowed}
-        onClick={update.toggleAutomatic}
-      />
-      {status.prereleaseUpdates !== undefined && <SwitchRow
-        title="Pre-Release Updates"
-        description="Include early versions that may be less reliable. Turning this off waits for a newer stable release; it does not downgrade Wollipog."
-        checked={status.prereleaseUpdates}
-        busy={update.savingPrerelease}
-        disabled={update.checking || update.installing}
-        onClick={update.togglePrerelease}
-      />}
-    </>
-  );
-}
+export { AboutPanel } from "./AboutSettingsPanel.js";
 
 /**
  * Desktop alerts (the Notification API, while a tab is open) as injected state.

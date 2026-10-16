@@ -11,20 +11,42 @@ import {
   backgroundLostSentence,
   backgroundRecoverySentence,
   shownWatchdogDelivery,
+  backgroundDeliveryAcknowledgement,
+  requestBackgroundDeliveryAcknowledgement,
+  historicalBackgroundResultRecovery,
 } from "./background-delivery-status.js";
 
 const states: BackgroundDeliveryWatchdogState[] = [
   "terminal_without_continuation",
   "continuation_blocked",
+  "capacity_retry_exhausted",
   "accepted_without_result",
   "result_not_projected",
   "dashboard_observation_pending",
 ];
 
+test("historical recovery requires an idle Claude session without current running-work proof", () => {
+  const session = { driver: "claude-code" as const, status: "idle" as const,
+    backgroundDeliveries: [{ parentTurnId: "unknown", jobCount: 2, terminalCount: 1,
+      watchdogState: "continuation_blocked" as const }] };
+  assert.equal(historicalBackgroundResultRecovery(session), true);
+  assert.equal(historicalBackgroundResultRecovery({ ...session, backgroundWorkState: "running" }), false);
+  assert.equal(historicalBackgroundResultRecovery({ ...session, status: "running" }), false);
+  assert.equal(historicalBackgroundResultRecovery({ ...session, driver: "codex-app-server" }), false);
+  assert.equal(historicalBackgroundResultRecovery({ ...session, backgroundDeliveries: [] }), false);
+  assert.equal(historicalBackgroundResultRecovery({ ...session, backgroundDeliveries: [
+    { ...session.backgroundDeliveries[0]!, watchdogState: "terminal_without_continuation" },
+  ] }), true, "an unknown-parent result without a recorded return step keeps explicit recovery");
+  assert.equal(historicalBackgroundResultRecovery({ ...session, backgroundDeliveries: [
+    { ...session.backgroundDeliveries[0]!, parentTurnId: "known-parent", watchdogState: "terminal_without_continuation" },
+  ] }), true, "a known parent cannot prove an unqueued historical result will return automatically");
+});
+
 test("delivery-watchdog copy stays compact, plain-language, and complete", () => {
   assert.deepEqual(states.map((state) => BACKGROUND_DELIVERY_STATUS[state].label), [
     "Result Pending",
     "Result Blocked",
+    "Retry Exhausted",
     "Result Missing",
     "Transcript Delayed",
     "Notification Pending",
@@ -47,6 +69,7 @@ test("delivery-watchdog copy stays compact, plain-language, and complete", () =>
 
 test("only a confirmed missing result uses the missing-result severity", () => {
   assert.equal(BACKGROUND_DELIVERY_STATUS.accepted_without_result.severity, "missing");
+  assert.equal(BACKGROUND_DELIVERY_STATUS.capacity_retry_exhausted.severity, "blocked");
   assert.deepEqual(
     states.filter((state) => BACKGROUND_DELIVERY_STATUS[state].severity === "pending"),
     ["terminal_without_continuation", "result_not_projected", "dashboard_observation_pending"],
@@ -134,7 +157,7 @@ test("a recovery notice's one sentence names its job, or counts them (#2859)", (
     "2 background jobs finished, but their result never reached this conversation. Wollipog won't retry on its own, " +
     "so the step can't run twice.");
   assert.equal(backgroundRecoverySentence("continuation_blocked", job),
-    "Shell job a1f3c9 finished, but its result can't be returned while another job from the same turn is still running.");
+    "Shell job a1f3c9 finished, but its result is held because another job has no confirmed end.");
   assert.equal(backgroundRecoverySentence("terminal_without_continuation", job),
     "Returning shell job a1f3c9's result to this conversation.");
   assert.equal(backgroundRecoverySentence("terminal_without_continuation", { count: 1 }),
@@ -146,7 +169,9 @@ test("a recovery notice's one sentence names its job, or counts them (#2859)", (
   for (const state of states) {
     const sentence = backgroundRecoverySentence(state, job);
     assert.doesNotMatch(sentence, /terminal|continuation|projection|delivery|barrier/iu, `${state}: ${sentence}`);
-    assert.match(sentence, /^[A-Z][^A-Z]*(?:Wollipog[^A-Z]*)*\.$/u, `${state}: "${sentence}" is sentence case`);
+    for (const part of sentence.split(/(?<=\.) /u)) {
+      assert.match(part, /^[A-Z][^A-Z]*(?:Wollipog[^A-Z]*)*\.$/u, `${state}: "${part}" is sentence case`);
+    }
   }
 });
 
@@ -157,4 +182,26 @@ test("the Lost sentence names the machine and the job, or counts the jobs (#2859
     "The machine restarted while a background job was running, so its result can't come back to this conversation.");
   assert.equal(backgroundLostSentence("Build Box", [{ launchType: "shell", id: "a" }, { launchType: "agent", id: "b" }]),
     "Build Box restarted while 2 background jobs were running, so their results can't come back to this conversation.");
+});
+
+test("exhaustion acknowledgement has separate authority from accepted missing results", async () => {
+  const exhausted: BackgroundDeliveryView = {
+    continuationId: "continuation", parentTurnId: "parent", jobCount: 1, terminalCount: 1,
+    retryExhaustedAt: 5, watchdogState: "capacity_retry_exhausted",
+  };
+  assert.deepEqual(backgroundDeliveryAcknowledgement(exhausted), { kind: "retry_exhaustion", continuationId: "continuation" });
+  assert.equal(backgroundDeliveryAcknowledgement({ ...exhausted, acceptedAt: 6 }), null);
+  assert.equal(backgroundDeliveryAcknowledgement({ ...exhausted, retryExhaustionAcknowledgedAt: 6 }), null);
+  assert.equal(backgroundDeliveryAcknowledgement({ ...exhausted, runnerResultPersistedAt: 6 }), null);
+  const missing = { ...exhausted, acceptedAt: 6, missingResultAt: 7, retryExhaustionAcknowledgedAt: 6,
+    watchdogState: "accepted_without_result" as const };
+  assert.deepEqual(backgroundDeliveryAcknowledgement(missing), { kind: "missing_result", continuationId: "continuation" });
+  const calls: string[] = [];
+  const api = {
+    acknowledgeBackgroundMissingResult: async () => { calls.push("missing"); return {} as import("@wollipog/protocol").SessionView; },
+    acknowledgeBackgroundRetryExhaustion: async () => { calls.push("exhaustion"); return {} as import("@wollipog/protocol").SessionView; },
+  };
+  assert.equal(await requestBackgroundDeliveryAcknowledgement(api, "session", backgroundDeliveryAcknowledgement(exhausted)!), null);
+  assert.equal(await requestBackgroundDeliveryAcknowledgement(api, "session", backgroundDeliveryAcknowledgement(missing)!), null);
+  assert.deepEqual(calls, ["exhaustion", "missing"]);
 });

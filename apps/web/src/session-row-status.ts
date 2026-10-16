@@ -111,7 +111,7 @@ export function sessionRowStatus(session: SessionStatusSource, context: SessionR
   if ((!primary || (primary.kind === "lifecycle" && primary.meta.tone !== "danger" && !session.stopOperation)) &&
       needs.length === 0 && reminder?.state !== "fired" &&
       session.attention && sessionFollowUp(session as SessionView).group === "ready_for_review") {
-    primary = { kind: "lifecycle", meta: { label: "Ready for Review", tone: "neutral", pulse: false },
+    primary = { kind: "lifecycle", meta: statusMeta("session", "ready_for_review"),
       description: "A new result is waiting for your assessment or next instructions.", needsYou: true };
   }
   const others = needs.slice(1).map(conditionName);
@@ -126,8 +126,10 @@ export function sessionRowStatus(session: SessionStatusSource, context: SessionR
     const description = familyLabel === "Needs Your Input"
       ? "A session in this family is waiting for your input."
       : "A result in this family is waiting for your assessment or next instructions.";
-    primary = { kind: "lifecycle", meta: { label: familyLabel,
-      tone: keepPrevious && previous.meta.tone === "danger" ? "danger" : familyLabel === "Needs Your Input" ? "warning" : "neutral", pulse: false },
+    const familyMeta = familyLabel === "Needs Your Input"
+      ? statusMeta("attention", "input_required") : statusMeta("session", "ready_for_review");
+    primary = { kind: "lifecycle", meta: { ...familyMeta,
+      tone: keepPrevious && previous.meta.tone === "danger" ? "danger" : familyMeta.tone },
       description: keepPrevious ? `${description} ${previous.description}` : description, needsYou: true };
   }
   if (!primary) return { badge: null, others };

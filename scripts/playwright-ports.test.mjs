@@ -50,6 +50,8 @@ test("a malformed or too-small port block fails instead of falling back to a sha
 for (const [file, server, page] of [
   ["playwright.config.ts", "development", "remote-instances-e2e.html"],
   ["playwright.production.config.ts", "production", "timeline-reflow-e2e.html"],
+  // The WebKit specs reuse the development server and its port.
+  ["playwright.webkit.config.ts", "development", "remote-instances-e2e.html"],
 ]) {
   test(`${file} serves, waits for and browses one strict, never-reused port`, () => {
     for (const env of [{ WOLLIPOG_PORT_BLOCK_START: undefined, WOLLIPOG_PORT_BLOCK_END: undefined }, noBlock, block]) {

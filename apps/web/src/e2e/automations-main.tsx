@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import type {
   AutomationExecution,
   AutomationSchedule,
+  AutomationSpec,
   AutomationTriggerView,
   OutboundEventDeliveryView,
   OutboundEventSubscriptionView,
@@ -10,6 +11,7 @@ import type {
   UiSnapshotMessage,
   WorkflowDefinition,
 } from "@wollipog/protocol";
+import { AUTOMATION_TARGET_INSTALLATION_UNAVAILABLE, AUTOMATION_TARGET_UNAVAILABLE } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { AutomationsView } from "../components/AutomationsView.js";
@@ -103,11 +105,14 @@ const items: AutomationSchedule[] = [
   },
 ];
 
+// `waiting-target=installation` shows the control plane's other waiting reason.
+const targetReason = params.get("waiting-target") === "installation"
+  ? AUTOMATION_TARGET_INSTALLATION_UNAVAILABLE : AUTOMATION_TARGET_UNAVAILABLE;
 if (params.has("waiting-target")) {
   items[0]!.targetHealth = {
     scheduledFor: Date.now() - 60_000,
     firstSeenAt: Date.now() - 59_000,
-    error: "No configured automation target is available. Check that its Machine is online.",
+    error: targetReason,
   };
 }
 
@@ -191,6 +196,16 @@ if (params.has("inherited-alternate-pins") && workflowSwitchRunner) {
   }] };
 }
 
+// Every saved workflow pin, primary and alternate, names an installation the Machines no longer have.
+if (params.has("unavailable-pins")) {
+  const first = items[0]!;
+  const bindings = [
+    ...(first.action.kind === "workflow_run" ? [first.action.installationBindings] : []),
+    ...(first.runnerPolicy.kind === "alternate" ? first.runnerPolicy.targets.map((target) => target.installationBindings) : []),
+  ];
+  for (const binding of bindings.flatMap((entry) => Object.values(entry ?? {}))) binding.installationId = "missing";
+}
+
 const triggerItems: AutomationTriggerView[] = [{
   triggerId: "atr_issue_intake",
   automationId: "automation-nightly-sweep",
@@ -228,6 +243,13 @@ const executions: AutomationExecution[] = [{
   startedAt: Date.UTC(2026, 8, 14, 12, 0, 1),
   completedAt: Date.UTC(2026, 8, 14, 12, 4),
 }];
+// A run that expired while it waited keeps the waiting reason as its error.
+if (params.has("expired-run")) executions.unshift({
+  ...executions[0]!, executionId: "axe_expired", idempotencyKey: "schedule:automation-nightly-sweep:expired",
+  scheduledFor: Date.UTC(2026, 8, 15, 2), status: "expired", error: targetReason,
+  sessionId: undefined, triggerDelivery: undefined, startedAt: undefined,
+  createdAt: Date.UTC(2026, 8, 15, 2), completedAt: Date.UTC(2026, 8, 15, 2, 30),
+});
 
 const outboundSubscriptions: OutboundEventSubscriptionView[] = [{
   subscriptionId: "oes_release_events",
@@ -271,6 +293,10 @@ const outboundDeliveries: OutboundEventDeliveryView[] = [{
   nextRetryAt: Date.UTC(2026, 8, 14, 12, 33),
 }];
 
+const fixtureRunners = () => [runner, ...(alternateRunner ? [alternateRunner] : []),
+  ...(workflowSwitchRunner ? [workflowSwitchRunner] : [])];
+let liveSocket: FixtureSocket | null = null;
+
 class FixtureSocket implements UiSocket {
   readonly readyState = UI_SOCKET_OPEN;
   onopen: (() => void) | null = null;
@@ -278,24 +304,27 @@ class FixtureSocket implements UiSocket {
   onclose: ((event: { code: number }) => void) | null = null;
   onerror: (() => void) | null = null;
   constructor() {
+    liveSocket = this;
     window.setTimeout(() => {
       this.onopen?.();
-      this.push({
-        type: "snapshot",
-        capabilities: {
-          sessionSubscriptions: false,
-          boundedDelivery: false,
-          paginatedSessionHistory: false,
-          projects: false,
-        },
-        runners: [runner, ...(alternateRunner ? [alternateRunner] : []),
-          ...(workflowSwitchRunner ? [workflowSwitchRunner] : [])],
-        boxes: [],
-        sessions: [],
-        runs: [],
-        pods: [],
-      });
+      this.pushRunners();
     }, 0);
+  }
+  pushRunners(): void {
+    this.push({
+      type: "snapshot",
+      capabilities: {
+        sessionSubscriptions: false,
+        boundedDelivery: false,
+        paginatedSessionHistory: false,
+        projects: false,
+      },
+      runners: fixtureRunners(),
+      boxes: [],
+      sessions: [],
+      runs: [],
+      pods: [],
+    });
   }
   send() {}
   close() {}
@@ -317,20 +346,60 @@ const navigation: ViewNavigation = {
   listen: () => () => {},
 };
 
+// Rediscovery while an editor is open: another installation becomes selected on every Machine.
+if (params.has("rediscover")) Object.assign(window, { automationsRediscover: () => {
+  for (const agent of fixtureRunners().flatMap((machine) => machine.agents)) {
+    if (agent.installation) agent.installation = { ...agent.installation, selection: "other" };
+  }
+  liveSocket?.pushRunners();
+} });
+
+// Opt-in fault injection for recovery tests; ordinary fixture scenarios keep their API behavior.
+const pollingFixture = params.has("polling-recovery") ? {
+  failure: null as "list" | "trigger" | "workflow" | null,
+  failRefreshAfterMutation: false,
+  mutationCalls: 0,
+  mutationFailure: false,
+  holdTriggers: false,
+  pendingTriggers: [] as Array<() => void>,
+  listCalls: 0,
+  release() { this.pendingTriggers.splice(0).forEach((resolve) => resolve()); },
+} : null;
+if (pollingFixture) Object.assign(window, { automationPollingFixture: pollingFixture });
+
 const client = {
   ...api,
-  automations: async () => ({ automations: items }),
+  automations: async () => {
+    if (pollingFixture) pollingFixture.listCalls++;
+    if (pollingFixture?.failure === "list") throw new Error("Synthetic polling failure");
+    return { automations: items };
+  },
   automation: async (id: string) => ({
     automation: items.find((item) => item.automationId === id)!,
     executions: id === "automation-nightly-sweep" ? executions : [],
     events: [],
   }),
-  automationTriggers: async (id: string) => ({
-    triggers: id === "automation-nightly-sweep" ? triggerItems : [],
-  }),
+  automationTriggers: async (id: string) => {
+    if (pollingFixture?.holdTriggers) {
+      await new Promise<void>((resolve) => { pollingFixture.pendingTriggers.push(resolve); });
+    }
+    if (pollingFixture?.failure === "trigger") throw new Error("Synthetic polling failure");
+    return { triggers: id === "automation-nightly-sweep" ? triggerItems : [] };
+  },
+  ...(pollingFixture ? { updateAutomation: async (id: string, spec: AutomationSpec) => {
+    pollingFixture.mutationCalls++;
+    if (pollingFixture.mutationFailure) throw new Error("Synthetic Pause failure");
+    const index = items.findIndex((item) => item.automationId === id);
+    items[index] = { ...items[index]!, ...spec };
+    if (pollingFixture.failRefreshAfterMutation) pollingFixture.failure = "workflow";
+    return items[index]!;
+  } } : {}),
   outboundEventSubscriptions: async () => outboundSubscriptions,
   outboundEventDeliveries: async () => outboundDeliveries,
-  workflowDefinitions: async () => workflowDefinitions,
+  workflowDefinitions: async () => {
+    if (pollingFixture?.failure === "workflow") throw new Error("Synthetic post-mutation refresh failure");
+    return workflowDefinitions;
+  },
 } as unknown as ApiClient;
 
 const root = document.getElementById("root");

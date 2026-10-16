@@ -222,7 +222,8 @@ export interface DriverOptions {
   cwd: string;
   env: Record<string, string>;
   projectMemoryDirectory?: string;
-  /** Non-secret artifact capability/policy note, re-created at launch/resume. */
+  /** Non-secret per-turn notes (artifact capability/policy, then zsh rules when commands run in zsh),
+   * re-created at launch/resume. */
   artifactGuidance?: string;
   config: SessionConfig;
   orchestrator?: { strictProjectIsolation: boolean; integrationIsolation?: boolean; issueNumbers?: number[]; issueScope?: import("@wollipog/protocol").CampaignIssueScope };
@@ -255,6 +256,8 @@ export interface DriverOptions {
   codexPrompts?: readonly CodexPromptTemplate[];
 }
 
+export type { ProviderFailureCategory } from "./provider-failure.js";
+
 export interface Driver {
   /** PID of the underlying process (for process_status), if currently spawned. */
   readonly pid: number | undefined;
@@ -276,6 +279,9 @@ export interface Driver {
    * a turn the provider itself ended in error; the session manager attaches it to the durable
    * receipt so a scheduler sees the cause instead of a bare stop reason. */
   lastTurnError?(): string | null;
+  /** Reliable provider evidence for the exact runner turn; null preserves diagnostic fallback.
+   * Optional for older drivers. It must reset before submission and ignore unrelated turns. */
+  lastTurnFailureCategory?(): import("./provider-failure.js").ProviderFailureCategory | null;
   /** The provider provably never started a turn for the prompt that just settled: it rejected the
    * submission itself, or the driver refused to send it. False whenever delivery is uncertain. */
   lastPromptUndelivered?(): boolean;
@@ -360,4 +366,9 @@ export interface Driver {
   /** Dispose the process tree and reject in-flight work. Explicit user lifecycle actions request
    * an immediate kill; runner shutdown may allow a provider-specific graceful interval. */
   dispose(options?: { forceImmediate?: boolean }): void;
+  /** After dispose() (`terminate: true`) or after this instance reported its own exit
+   * (`terminate: false`): true only when every process the instance started, with all their
+   * descendants, is proven gone (see ProviderProcessLedger). Memoized and never rejects. A driver
+   * that cannot prove this omits the method, and its provider-HOME reference is kept. */
+  proveProcessTreeExit?(options: { terminate: boolean }): Promise<boolean>;
 }

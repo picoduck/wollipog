@@ -873,6 +873,40 @@ test("CLI emits JSON for get, events, prompt, wait, and stop core commands", asy
   }
 });
 
+test("CLI session wait exits 124 on a timeout result and 1 on an unknown state", async () => {
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "paired-device" };
+  const sessionReads: string[] = [];
+  const fetch: McpFetch = async (url) => {
+    if (url.endsWith("/api/compatibility")) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ protocolVersion: PROTOCOL_VERSION }) };
+    }
+    sessionReads.push(url);
+    return { ok: true, status: 200, text: async () => JSON.stringify({ session: { id: "s_child", status: "running", runnerId: "r1" } }) };
+  };
+  const run = async (...argv: string[]) => {
+    let output = "";
+    const code = await runWollipogCli(
+      ["node", "cli.js", "--wollipog-cli", "session", "wait", "s_child", ...argv, "--json"],
+      env,
+      { stdout: (text) => { output += text; }, stderr: () => {} },
+      fetch,
+    );
+    return { code, body: JSON.parse(output) };
+  };
+
+  const timedOut = await run("--for", "completed", "--timeout", "1", "--interval", "50");
+  assert.equal(timedOut.code, 124);
+  assert.equal(timedOut.body.outcome, "timeout");
+  assert.deepEqual(timedOut.body.waitingFor, ["completed"]);
+  assert.equal(timedOut.body.session.status, "running");
+
+  const readsBefore = sessionReads.length;
+  const refused = await run("--for", "needs_input");
+  assert.equal(refused.code, 1);
+  assert.match(refused.body.error, /^unknown session state needs_input; valid states: queued, starting, running, /);
+  assert.equal(sessionReads.length, readsBefore, "the refusal happens before any session read");
+});
+
 test("CLI session events pages forward with --after and reads the newest events without it", async () => {
   const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "paired-device" };
   const events = Array.from({ length: 12 }, (_, i) => ({ seq: i + 1, ts: i, payload: { kind: "agent_message", text: `m${i + 1}` } }));

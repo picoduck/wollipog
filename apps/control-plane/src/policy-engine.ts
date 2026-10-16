@@ -26,8 +26,11 @@ export interface PolicyInput {
   status: SessionStatus;
   costUsd: number;
   toolCallCount: number;
-  /** Tokens are recorded but none of them could be priced, so `costUsd` says nothing (v105). */
+  /** Tokens are recorded but none of them could be priced, so `costUsd` says nothing (v105), or a
+   * running Claude turn has live tokens without a rate (#3112). */
   unpriced?: boolean;
+  /** `costUsd` includes a running Claude turn's live rate-table estimate (#3112). */
+  includesEstimate?: boolean;
 }
 
 /** The guardrail fields a session carries, as the rule builder reads them (v105 adds the soft
@@ -38,7 +41,7 @@ export interface GuardrailFields {
   costCheckpointsUsd?: number[] | null;
   costCheckpointApprovedUsd?: number | null;
   costUnpricedAcknowledged?: boolean;
-  dailyBudget?: { budgetUsd: number; spentUsd: number } | null;
+  dailyBudget?: { budgetUsd: number; spentUsd: number; includesEstimate?: boolean } | null;
 }
 
 export interface ApprovalPolicyInput {
@@ -393,11 +396,16 @@ export function validateGovernancePolicy(policy: Omit<GovernancePolicy, "created
 export function rulesFromSession(s: GuardrailFields): PolicyRule[] {
   const rules: PolicyRule[] = [];
   if (s.dailyBudget && s.dailyBudget.budgetUsd > 0) {
-    rules.push({ kind: "daily_budget", budgetUsd: s.dailyBudget.budgetUsd, spentUsd: s.dailyBudget.spentUsd });
+    rules.push({ kind: "daily_budget", budgetUsd: s.dailyBudget.budgetUsd, spentUsd: s.dailyBudget.spentUsd,
+      ...(s.dailyBudget.includesEstimate ? { includesEstimate: true } : {}) });
   }
   const hasBudget = s.costBudgetUsd != null && s.costBudgetUsd > 0;
   const checkpoints = (s.costCheckpointsUsd ?? []).filter((usd) => Number.isFinite(usd) && usd > 0).sort((a, b) => a - b);
-  if ((hasBudget || checkpoints.length > 0) && !s.costUnpricedAcknowledged) rules.push({ kind: "cost_unpriced" });
+  // The daily allowance also adds running turns' live estimates (#3196), so a live request it cannot
+  // price fails closed too. The caller decides which unpriced usage each guardrail reads.
+  if ((hasBudget || checkpoints.length > 0 || (s.dailyBudget && s.dailyBudget.budgetUsd > 0)) && !s.costUnpricedAcknowledged) {
+    rules.push({ kind: "cost_unpriced" });
+  }
   const approved = s.costCheckpointApprovedUsd ?? 0;
   // Only the next unapproved checkpoint is a rule: approving it advances `approved`, and the one
   // after it becomes the rule on the next evaluation.
@@ -438,6 +446,7 @@ export function budgetDecision(
 
 /** Evaluate every rule against the session state. Terminal sessions never ask (nothing to park). */
 export function evaluatePolicies(input: PolicyInput, rules: PolicyRule[]): PolicyDecision[] {
+  const estimate = input.includesEstimate ? ", including an estimate for the running turn" : "";
   return rules.map((rule) => {
     if (isTerminal(input.status)) return { rule, decision: "ok" };
     if (rule.kind === "cost_budget") {
@@ -445,7 +454,7 @@ export function evaluatePolicies(input: PolicyInput, rules: PolicyRule[]): Polic
         return {
           rule,
           decision: "ask",
-          title: `Cost budget reached — $${input.costUsd.toFixed(2)} of $${rule.budgetUsd.toFixed(2)}. Continue?`,
+          title: `Cost budget reached — $${input.costUsd.toFixed(2)} of $${rule.budgetUsd.toFixed(2)}${estimate}. Continue?`,
         };
       }
       return { rule, decision: "ok" };
@@ -455,7 +464,7 @@ export function evaluatePolicies(input: PolicyInput, rules: PolicyRule[]): Polic
         return {
           rule,
           decision: "ask",
-          title: `Cost checkpoint — $${input.costUsd.toFixed(2)} of $${rule.checkpointUsd.toFixed(2)}. Continue?`,
+          title: `Cost checkpoint — $${input.costUsd.toFixed(2)} of $${rule.checkpointUsd.toFixed(2)}${estimate}. Continue?`,
         };
       }
       return { rule, decision: "ok" };
@@ -475,7 +484,8 @@ export function evaluatePolicies(input: PolicyInput, rules: PolicyRule[]): Polic
         return {
           rule,
           decision: "ask",
-          title: `Daily budget reached — $${rule.spentUsd.toFixed(2)} of $${rule.budgetUsd.toFixed(2)} today across your sessions. New turns pause until the day rolls over or an owner or admin raises it.`,
+          title: `Daily budget reached — $${rule.spentUsd.toFixed(2)} of $${rule.budgetUsd.toFixed(2)} today across your sessions${
+            rule.includesEstimate ? ", including an estimate for running turns" : ""}. New turns pause until the day rolls over or an owner or admin raises it.`,
         };
       }
       return { rule, decision: "ok" };

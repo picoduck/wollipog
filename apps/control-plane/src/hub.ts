@@ -1,3 +1,4 @@
+import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
 /**
  * Connection hub. Two responsibilities:
  *  1. Track live runner websockets so the control plane can ROUTE commands
@@ -213,6 +214,10 @@ export const MAX_UI_BACKGROUND_OBSERVATIONS_PER_CONNECTION = 1_024;
 export const MAX_UI_BACKGROUND_OBSERVATIONS_PER_WINDOW = 128;
 export const UI_BACKGROUND_OBSERVATION_RATE_WINDOW_MS = 10_000;
 export const INDEFINITE_SESSION_REMINDER_UI_PROTOCOL = 174;
+/** The refusal a client older than that protocol receives when it reads a Someday reminder. The
+ * versions travel beside it as `requiredClientProtocolVersion` and `clientProtocolVersion` (#3254). */
+export const SOMEDAY_REMINDER_CLIENT_UPDATE_REQUIRED =
+  "This reminder uses Someday, which this version of Wollipog can't show. Update Wollipog and try again.";
 /** Minimum spacing of a session's streaming-only upserts, so a dashboard receives at most four per
  * second per session while an agent streams (#2760). Any other change is sent at once. */
 export const SESSION_STREAMING_UPSERT_INTERVAL_MS = 250;
@@ -898,7 +903,8 @@ export class Hub {
     info.hiddenIndefiniteReminderSessionIds = new Set(supportsIndefiniteReminders ? [] : allReminders
       .filter((reminder) => reminder.scheduleKind === "someday" && reminder.state === "pending")
       .map((reminder) => reminder.sessionId));
-    const sessions = allSessions.filter((session) => !info.hiddenIndefiniteReminderSessionIds!.has(session.id));
+    const sessions = allSessions.filter((session) => !info.hiddenIndefiniteReminderSessionIds!.has(session.id))
+      .map((session) => projectBackgroundRetryExhaustionForUi(session, info.uiProtocolVersion));
     const reminders = supportsIndefiniteReminders
       ? allReminders
       : allReminders.filter((reminder) => reminder.scheduleKind !== "someday");
@@ -1716,7 +1722,8 @@ export class Hub {
       if (!this.isSubscribed(info, msg)) continue;
       if (!(predicate ? predicate(info.principal, info) : this.canReceive(info.principal, msg, info))) continue;
       const projectedMessages = this.compatibilityProjection(info, msg);
-      for (const projected of projectedMessages) {
+      for (const compatible of projectedMessages) {
+        const projected = projectBackgroundRetryExhaustionForUi(compatible, info.uiProtocolVersion);
         let clientData = projected === msg ? data : JSON.stringify(projected);
         if (projected.type === "runner_upsert" && info.principal !== undefined) {
           const runner = this.db.listRunnersForPrincipal(info.principal)
@@ -1809,7 +1816,8 @@ export class Hub {
   }
 
   private safeSend(client: Socket, msg: ControlPlaneToUi): void {
-    this.sendRaw(client, JSON.stringify(msg), this.coalesceKey(msg));
+    const projected = projectBackgroundRetryExhaustionForUi(msg, this.uiClients.get(client)?.uiProtocolVersion);
+    this.sendRaw(client, JSON.stringify(projected), this.coalesceKey(projected));
   }
 
   private coalesceKey(msg: ControlPlaneToUi): string | undefined {

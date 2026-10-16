@@ -517,6 +517,23 @@ The lifetime policy is quiescence-aware and fail-safe:
   unfinished sibling from its launching turn, and it gets a continuation id of its own, because a
   sibling's continuation may already be queued without it. A call that a cancelled or failed turn left without a result still ends the job, but it
   keeps the ordinary continuation rule.
+  Historical reconciliation also recognizes a durable successful `TaskStop` tool result correlated
+  by tool-use id with its assistant call and exact task id. Failed, missing-task, unmatched, quoted,
+  or unreadable receipts prove nothing; a later launch/resume invalidates an earlier stop, including
+  a resume racing the stop response. Startup and reconnect inspect retained unfinished rows even
+  without task artifacts or aggregate background state. Confirmed model stops become killed and
+  settled without launching a recovery turn. Existing orphan markers stay with normal orphan
+  recovery, which inspects both pending task ids and retained unfinished job rows, then queues any
+  finished siblings released by the stop. Unknown pending work stays unresolved until provider
+  evidence settles it. When automatic recovery is disabled or blocked, receipt repair still runs
+  read-only without queueing a return step or launching a provider. A retained parent turn id
+  alone never authorizes historical resubmission. Results without a queued return step retain
+  explicit recovery even when their parent turn is known. The Background Work notice explains
+  this uncertainty and exposes an explicit, confirmed Restart Session recovery through More Actions.
+  Restart ends every job and follows the existing result-carrying and at-most-once continuation
+  rules. Repairs emit
+  `historical_claude_jobs_reconciled` with entry point, correlation id, and job counts, without
+  transcript contents.
 - Eviction and runner-shutdown stops send EOF first and allow five seconds for a clean exit before
   `killTree` reaps the remaining native or WSL process group; explicit Stop and cancellation kill
   immediately. A stop with pending work writes the
@@ -544,9 +561,9 @@ The lifetime policy is quiescence-aware and fail-safe:
   restore cumulative conversation totals on resume and fork; older CLIs scope them to the process.
   The driver subtracts raw per-model checkpoints and reconciles the prefix a replacement process
   will restore with a zero-inference local `/context` probe. Against a v216+ control plane each
-  completed top-level request is also published live as a display-only `provisional` record, closed by
+  completed top-level request is also published live as an unaccrued `provisional` record, closed by
   the next checkpoint or republished when none can cover it, so a running or interrupted turn is not
-  invisible until a result. See `usage-cost-aggregation.md`.
+  invisible until a result, and cost guardrails count its estimate. See `usage-cost-aggregation.md`.
 - All three lifetime controls are runner-only and are scrubbed from native, WSL, and standalone
   TUI child environments.
 
@@ -1233,6 +1250,17 @@ Provider `thread/archive` is used only as best-effort cleanup for a newly minted
 fails before the target session becomes durable. That thread is manager-owned and has no external
 consumer yet.
 
+Both requests are bounded. `thread/fork` must settle within `CODEX_THREAD_FORK_REQUEST_TIMEOUT_MS`
+(120 seconds) and `thread/archive` within `CODEX_THREAD_ARCHIVE_REQUEST_TIMEOUT_MS` (30 seconds).
+An unanswered request fails with an error that names only its method (for example
+`Codex app-server did not answer thread/fork within 120 seconds`), never request or provider
+payload. A stalled fork fails the fork operation with that error. A stalled archive is logged and
+abandoned, and the original fork failure is still reported after the target worktree is removed.
+Unlike the launch handshake, these requests do not fail early on a discarded oversized record,
+because a live session may stream unrelated large records while they are pending. If `thread/fork`
+times out but the provider creates the thread later, the runner never learns that thread's id. It
+cannot archive that thread.
+
 ### 3.8 Privacy-safe operational telemetry
 
 Protocol v29 reports content-free observations for `launch`, `resume`, `approval`, `crash`, and
@@ -1451,3 +1479,32 @@ Native MCP enum/boolean forms and Pi boolean confirmations cannot represent arbi
 provider schema. Their questions expose `customAnswerError`: entering custom text shows that limitation
 and retains the question, instead of converting it into an enum, a boolean, or a cancellation.
 These form responses grant no tool or governance authorization.
+
+
+## Provider Failure Categories and Background Retry Exhaustion
+
+`Driver.lastTurnFailureCategory()` is optional and belongs to the exact runner turn. Supported
+drivers reset it before submission and bind terminal evidence to that turn. Codex App Server uses
+its `CodexErrorInfo` and standard request-rejection codes; Claude Code uses terminal API status
+evidence, including [529 overload](https://platform.claude.com/docs/en/api/errors). A known category
+overrides display wording for capacity retries. Unknown codes and drivers without structured
+evidence keep conservative text classification. A precise invalid/revoked credential diagnostic
+still uses existing sign-in recovery with generic permission or transport statuses, including
+OAuth 403; capacity and definite invalid-request evidence take priority over conflicting prose.
+Authentication-looking diagnostics remain redacted in every lane.
+
+The existing capacity retry policy remains three attempts after 1, 2, and 4 seconds. The
+`provider_capacity_retry` log's `classification` is a category or `text_fallback`; it contains no
+prompt, credential, or raw provider error. Background exhaustion additionally records
+`background_capacity_retry_exhausted`, with session correlation, entry point, and attempt count.
+
+Before acceptance, exhausted background delivery has its own `continuationRetryExhaustedAt` runner
+fact and `capacity_retry_exhausted` public watchdog. It never manufactures accepted missing-result
+evidence. **Acknowledge** clears attention while retaining audit history and never resubmits work;
+later acceptance or a valid result supersedes the exhaustion condition. Exhaustion acknowledgment
+cannot acknowledge an accepted missing result that appears later.
+
+The new runner fact requires protocol v221. Current HTTP clients advertise their UI version with
+`x-wollipog-ui-protocol`; WebSockets use the existing `protocolVersion` negotiation. Older UI clients
+receive the legacy view without the new enum or fields, retaining history/log diagnostics. This
+display downgrade does not mutate canonical evidence or create retry authority.

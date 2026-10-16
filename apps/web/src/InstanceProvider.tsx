@@ -43,6 +43,7 @@ import { closeGuardLinks as appCloseGuardLinks, type CloseGuardLinks } from "./d
 import { LOCAL_INSTANCE_SCOPE } from "./instance-storage.js";
 import { sessionsDestination } from "./sessions-view-mode.js";
 import { browserRandomUUID } from "./browser-crypto.js";
+import { pushPositionedEntry } from "./history-position.js";
 import {
   clearAllDurableQueuedEditRecoveries,
   clearRuntimeQueuedEditRecoveriesForInstance,
@@ -277,7 +278,7 @@ export function InstanceProvider({
       holdRedirectFocus(profile.id, destination);
       if (replace) window.history.replaceState(window.history.state, "", path);
       else if (`${window.location.pathname}${window.location.search}` !== path) {
-        window.history.pushState(window.history.state, "", path);
+        pushPositionedEntry(window.history, path);
       }
       await openProfile(profile, registry, generation);
     } catch (error) {
@@ -375,9 +376,14 @@ export function InstanceProvider({
     };
   }, [closeRuntime, desktop, enqueueRegistryMutation, openProfile]);
 
+  // The open instance's navigation, which holds a Back or Forward that would close it (#3218).
+  const navigationRef = useRef<DesktopInstanceNavigation | null>(null);
   useEffect(() => {
     const onPopState = () => {
       const route = instanceRouteFromPath(window.location.pathname, window.location.search);
+      const leaving = route ? route.instanceId !== stateRef.current.activeProfile.id : isInstanceScopedPath(window.location.pathname);
+      // An editor with unsaved changes in the open instance asks first, as a move within it does.
+      if (leaving && navigationRef.current?.holdDeparture()) return;
       if (!route) {
         if (isInstanceScopedPath(window.location.pathname)) {
           generationRef.current += 1;
@@ -517,7 +523,7 @@ export function InstanceProvider({
     const path = instanceViewPath(profileId, view);
     saveLastInstanceView(profileId, view);
     if (`${window.location.pathname}${window.location.search}` !== path) {
-      window.history.pushState(window.history.state, "", path);
+      pushPositionedEntry(window.history, path);
     }
     window.dispatchEvent(new PopStateEvent("popstate"));
   }, [switchTo]);
@@ -536,6 +542,7 @@ export function InstanceProvider({
     ),
     [activateProfileRoute, state.activeProfile.id],
   );
+  navigationRef.current = navigation;
 
   const reportActiveStatus = useCallback((status: InstanceStatus) => {
     const profileId = stateRef.current.activeProfile.id;

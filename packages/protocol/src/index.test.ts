@@ -46,6 +46,9 @@ import {
   runnerCapabilityRequirement,
   runnerCapabilityRequirementDetails,
   runnerCapabilityRequirementError,
+  orchestratorChildHarnessRequirement,
+  orchestratorExecutionPolicyRequirement,
+  orchestratorIntegrationIsolationRequirement,
   runnerSupportsProtocol,
   BOARD_COLUMNS,
   archiveRequiresStop,
@@ -233,12 +236,19 @@ test("older peers never receive display-only live Claude usage, but still accoun
   assert.equal(projectSessionEventPayloadForProtocol(provisional, 216), provisional);
 });
 
-test("PROTOCOL_VERSION is 220", () => {
-  assert.equal(PROTOCOL_VERSION, 220);
+test("PROTOCOL_VERSION is 222", () => {
+  assert.equal(PROTOCOL_VERSION, 222);
   assert.equal(runnerSupportsProtocol(218, "ratePricedSnapshotUsage"), false);
   assert.equal(runnerSupportsProtocol(219, "ratePricedSnapshotUsage"), true);
+  assert.equal(runnerSupportsProtocol(218, "boundedSessionEventReads"), false);
+  assert.equal(runnerSupportsProtocol(219, "boundedSessionEventReads"), false);
+  assert.equal(runnerSupportsProtocol(220, "boundedSessionEventReads"), false);
+  assert.equal(runnerSupportsProtocol(221, "boundedSessionEventReads"), false);
+  assert.equal(runnerSupportsProtocol(222, "boundedSessionEventReads"), true);
   assert.equal(runnerSupportsProtocol(219, "campaignWorkItemAtCreation"), false);
   assert.equal(runnerSupportsProtocol(220, "campaignWorkItemAtCreation"), true);
+  assert.equal(runnerSupportsProtocol(220, "backgroundRetryExhaustion"), false);
+  assert.equal(runnerSupportsProtocol(221, "backgroundRetryExhaustion"), true);
   assert.equal(runnerSupportsProtocol(217, "campaignBudgetAdmission"), false);
   assert.equal(runnerSupportsProtocol(218, "campaignBudgetAdmission"), true);
   assert.equal(runnerSupportsProtocol(215, "claudeLiveUsage"), false);
@@ -1084,6 +1094,22 @@ test("runner capability requirements read as user copy and keep versions out of 
     requiredRunnerProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.directoryListing,
     runnerProtocolVersion: null,
   });
+});
+
+test("Orchestrator start refusals add the setting that starts the session now (#3219)", () => {
+  const cases = [
+    [orchestratorChildHarnessRequirement, "orchestratorChildHarnessPolicy",
+      "This machine needs a newer runner for a fixed child harness. Update and restart the runner. To start now, choose Automatic for Child Harness."],
+    [orchestratorExecutionPolicyRequirement, "orchestratorExecutionPolicy",
+      "This machine needs a newer runner for an Orchestrator without strict project isolation. Update and restart the runner. To start now, turn on Strict Project Isolation."],
+    [orchestratorIntegrationIsolationRequirement, "orchestratorIntegrationIsolation",
+      "This machine needs a newer runner for integration isolation. Update and restart the runner. To start now, turn off Integration Isolation."],
+  ] as const;
+  for (const [requirement, capability, error] of cases) {
+    const floor = RUNNER_CAPABILITY_MIN_PROTOCOL[capability];
+    assert.deepEqual(requirement(floor - 1), { error, requiredRunnerProtocolVersion: floor, runnerProtocolVersion: floor - 1 });
+    assert.deepEqual(requirement(undefined), { error, requiredRunnerProtocolVersion: floor, runnerProtocolVersion: null });
+  }
 });
 
 test("provider-authentication receipts are projected for the peer only at send time", () => {

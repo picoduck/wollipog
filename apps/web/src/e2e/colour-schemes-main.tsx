@@ -299,7 +299,7 @@ function Sample() {
           </div>
           <div className="column">
             {/* `.card`, which is what Board actually renders — `.board-card` does not exist. */}
-            <article className="card"><span className="card-title">A board card</span><span className="card-preview">A one-line preview</span></article>
+            <article className="card"><span className="card-title">A board card</span></article>
           </div>
           {/* The five families round two found still bypassed. Rendered here so "application-wide"
               is a measurement rather than a claim about which rules I remembered to edit. */}

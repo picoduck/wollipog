@@ -5,6 +5,10 @@ description: Operate Wollipog sessions from inside an agent session through the 
 
 # Using Wollipog
 
+For campaign authority, read [Campaign Authority Preflight](references/campaign-authority.md).
+It covers effective mode/boundary, exact decision owners, unresolved human gates, and evidence
+upload/provider disclosure; it does not authorize a campaign or change installed policies.
+
 Use the `wollipog` command when it is on `PATH`. A Wollipog-hosted session supplies
 `WOLLIPOG_CONTROL_PLANE_URL`, `WOLLIPOG_SESSION_ID`, and a protected token file automatically; do
 not print, copy, or pass that token on the command line.
@@ -44,6 +48,17 @@ exist: keep the returned `lastSeq` and retry later instead of treating the page 
 call fails because the event history was replaced, restart from `--after 0` without the old epoch.
 Each event is one summary line capped at 400 characters, so a long message is truncated. The MCP
 `get_session_events` tool takes the same `after`, `limit`, and `eventEpoch`.
+
+Every event read stays paged while history hydrates; a short or empty incomplete page is not the
+end of the log. Without `--after`, an incomplete result is the newest cached window, so retry
+without `--after` for the true newest window once hydration catches up. Direct HTTP reads of
+`GET /api/sessions/:id/events` default to 200 events when `limit` is omitted; use `nextAfter` and
+`eventEpoch` to continue rather than treating one response as the whole log.
+Protocol-222 runners use the bounded reader throughout hydration. Update older CLI/MCP
+installations before upgrading a control plane that serves default pages: an old reader's
+whole-log fallback can mistake a bounded first page for the newest window. Identifiable old
+agent-session fallbacks fail with runner-upgrade guidance; paired-device CLI calls need the
+same upgrade-first migration because their human credentials do not identify the reader version.
 
 `session stop-job` (MCP `stop_background_job`) ends one unfinished background job of a child
 session by its id, which `session get` lists as `unfinishedBackgroundJobs`. Use it when a job that
@@ -100,7 +115,9 @@ relay key, which cannot authenticate direct HTTP calls; upgrade the runner/CLI f
 than seeking a bearer token. Older control planes expose only pending requests through
 `list_descendant_requests`; update them for authoritative descendant state inspection.
 Only the current owner may resolve the exact pending occurrence. Authentication, secrets,
-persistent grants, governance, budgets, and tool guardrails remain human-only.
+persistent grants, governance changes, budget increases, and tool guardrails remain human-only.
+Separate human-established budget authority may permit bounded managed-worker reservations and
+allocations; never infer it from a campaign name or use an unmetered worker to evade accounting.
 A stop or restart revokes every decision the session has not consumed. After a restart the session
 receives a `[Wollipog Session Restart]` message naming each revoked occurrence: do not act on an
 earlier approval of it, and request again what you still need.
@@ -121,6 +138,11 @@ CLI). Every record lands in the root campaign, including from a nested Orchestra
 - Pass `campaignWorkItemId` to `create_session` (`session create --work-item`, protocol v220+) so the
   child's attempt is recorded before its first prompt; if the attempt cannot be recorded, no child is
   created.
+  Verify the actual client schema. On a Custom host lacking that input, a read-only bootstrap may
+  verify configuration before the supported assignment operation binds the original work item;
+  select the dedicated worktree before releasing implementation. This fallback is not atomic
+  creation and cannot bypass required protected admission. Missing assignment support is a blocker,
+  not permission to update the hosting stack or invent an input.
 - `assign_campaign_work_item` records which descendant works on an item. Reusing a child for another
   item or moving an item to another child opens a new attempt; earlier attempts keep their
   verification and accounting.
@@ -194,6 +216,10 @@ position and state, failed jobs with run links, and whether it merged.
 - Use the longest timeout one call can survive in your harness (up to 3 hours) and call again on
   `timeout`. A background shell command that wakes you on exit can use the maximum; an MCP call or
   foreground command must finish inside the harness's tool-call limit.
+- In Codex, use the `wait_pull_request` MCP tool rather than a shell `pr wait`, which Codex checks on
+  through the model. Its per-call limit is 3 hours 1 minute, so any `timeoutMs` up to the 3-hour
+  maximum fits. Without the `wollipog` MCP server (an older runner, or your own server under that
+  name), Codex's default limit is 5 minutes: keep `timeoutMs` at or below the 4-minute default.
 - The wait grants nothing. Enqueueing, retrying, and merging keep their existing gates. After
   enqueueing, wait again: only `merged` means landed; `queue_failed` means GitHub marked the entry
   unmergeable and `queue_ejected` that it left the queue without merging. A failed merge-group
@@ -279,8 +305,11 @@ $launcherArgs = @($env:WOLLIPOG_CLI_ARGS | ConvertFrom-Json)
 & $env:WOLLIPOG_CLI @launcherArgs session list --json
 ```
 
-Claude Code sessions also receive a general `wollipog` MCP server with the same manager tool
-schemas. Prefer MCP tools when attached; use the CLI for scripts, CI, ACP, or Codex sessions.
+Claude Code and Codex sessions also receive a general `wollipog` MCP server with the same manager
+tool schemas. Prefer MCP tools when attached; use the CLI for scripts, CI, ACP, or when a session has
+no `wollipog` MCP server. A provider sandbox without network access, such as Codex's default
+sandbox, refuses the CLI's loopback connection; there the CLI works only when
+`WOLLIPOG_AGENT_CONTROL_RELAY_FIFO` is set, so otherwise use the MCP tools.
 
 The credential is scoped to the current live session and its ownership audience. It may manage
 only that session's worktrees. A command may

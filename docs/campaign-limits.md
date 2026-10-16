@@ -23,7 +23,10 @@ identities are retained across history replacement, so replay is deduplicated an
 consume allowance. Incomplete preauthorization tool history refuses protection. Transcript replacement or deletion cannot refund
 previously observed peaks; this deliberately retains a conservative charge if history is lost or
 cost is corrected downward. The UI calls it recorded spend, separate from the normal priced-cost
-view with its billing provenance.
+view with its billing provenance. A running Claude turn's open live estimate is added to its
+worker's peak without being recorded, so the allowance, allocations and admission see a long turn
+mid-turn, and settlement replaces the estimate with the provider total (#3196, see
+`docs/usage-cost-aggregation.md`). Campaign Status says when recorded spend includes an estimate.
 
 Outstanding allocations are the unspent portion of active workers' cumulative ceilings. Actual
 usage plus outstanding reservations must fit the envelope. Admission and session insertion share

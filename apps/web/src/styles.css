@@ -1968,6 +1968,7 @@ kbd {
 .t-success { --tone: var(--green); --tone-text: var(--green-on-tint); }
 .t-warning { --tone: var(--amber); --tone-text: var(--amber-on-tint); }
 .t-danger { --tone: var(--red); --tone-text: var(--red-on-tint); }
+.t-review { --tone: var(--purple); --tone-text: var(--purple-on-tint); }
 .status {
   display: inline-flex;
   flex: none;
@@ -2803,6 +2804,17 @@ button.status { cursor: pointer; }
   box-shadow: var(--elev-2);
   animation: none;
 }
+/* The highlighted option's fill is where focus is in an open list (§9.1), so the list draws no ring
+   around every option as well (#3020). Only while an option is highlighted: a list with nothing to
+   highlight has no active descendant and keeps its ring, the one sign that focus is there. */
+.menu.listbox[aria-activedescendant]:focus-visible { outline: none; }
+/* Forced colors paints every fill as Canvas, so there the highlighted option carries the ring. */
+@media (forced-colors: active) {
+  .menu.listbox[aria-activedescendant]:focus-visible .ui-select-option.is-active {
+    outline: var(--focus-width) solid Highlight;
+    outline-offset: calc(-1 * var(--focus-width));
+  }
+}
 @keyframes menu-open { from { opacity: 0; transform: translateY(-4px); } }
 
 /* --------------------------------- Toolbar ---------------------------------
@@ -3252,7 +3264,10 @@ input {
 /* Input affix (§8.1): a prefix or unit suffix drawn inside the field's own edge, on its height, in
    --text-dim. The input keeps its border, height and focus ring; its padding makes room for the
    affix, so an affixed field is exactly as tall as a plain one. A suffix sits after the input and
-   a prefix before it; the affix is not a target (a click reaches the input under it). */
+   a prefix before it; the affix is not a target (a click reaches the input under it). A unit's room
+   is the unit as drawn (`affixSuffixRef` measures it into --affix-suffix-w, #3185): it is set in the
+   row's type and the system face, so 2em of the field's font, the room before measuring, cost a
+   96px field a digit and on 16px field text two. */
 .input-affix {
   position: relative;
   display: block;
@@ -3273,9 +3288,25 @@ input {
 .input-affix-text:first-child { inset-inline-start: var(--space-3); }
 .input-affix-text:last-child { inset-inline-end: var(--space-3); }
 .input-affix:has(> .input-affix-text:first-child) > input { padding-inline-start: calc(var(--space-3) + 1em + var(--space-1)); }
-.input-affix:has(> .input-affix-text:last-child) > input { padding-inline-end: calc(var(--space-3) + 2em + var(--space-1)); }
-/* Field widths (§8.3): `.w-xs` for numbers, ports and counts, with the unit inside the field. */
+.input-affix:has(> .input-affix-text:last-child) > input {
+  padding-inline-end: calc(var(--space-3) + var(--affix-suffix-w, 2em) + var(--space-1));
+}
+/* A number field with a unit has no spin buttons: the engine keeps their room (about 15px) beside
+   the value even at rest, which is a digit and a half of a 96px field. The arrow keys still step. */
+.input-affix:has(> .input-affix-text:last-child) > input[type="number"] { appearance: textfield; }
+.input-affix:has(> .input-affix-text:last-child) > input[type="number"]::-webkit-inner-spin-button,
+.input-affix:has(> .input-affix-text:last-child) > input[type="number"]::-webkit-outer-spin-button {
+  appearance: none;
+  margin: 0;
+}
+/* Field widths (§8.3): `.w-xs` for numbers, ports and counts, with the unit inside the field. Field
+   text is 16px on phones and coarse pointers (the iOS focus-zoom guard at the end of this file), and
+   five digits of it beside a unit need 120px. It weighs one class, as `.w-xs` does, so a layout that
+   stretches the field (a stacked setting row) still wins. */
 .w-xs { width: 96px; }
+@media (max-width: 760px), (pointer: coarse) {
+  .w-xs:where(.input-affix:has(> .input-affix-text:last-child)) { width: 120px; }
+}
 /* SSH-config import picker in "Add a box" — match the dialog's text inputs. */
 textarea {
   padding: var(--space-2) var(--space-3);
@@ -3406,8 +3437,8 @@ textarea {
 /* -------------------------------- Cards ---------------------------------
    A Board card (#2222; docs/design-system.md §5.3): an `<article>` whose title button is stretched
    over the whole card. Line 1 is the agent icon and "Agent · Project", the time and ⋯; then the title
-   (2 lines), one status line, and either the request or a one-line preview. Every card in a column
-   has this anatomy, so heights differ only by title lines and whether a request shows. Hover steps
+   (2 lines), one status line, and the request when there is one; no transcript excerpt (#3175). Every
+   card in a column has this anatomy, so heights differ only by title lines and whether a request shows. Hover steps
    the fill up as a row does; nothing moves (§2.9). */
 .card {
   position: relative;
@@ -3528,14 +3559,6 @@ textarea {
   height: 1px;
   overflow: hidden;
   clip-path: inset(50%);
-}
-.card-preview {
-  min-height: 16px;
-  overflow: hidden;
-  color: var(--text-dim);
-  font: var(--type-small);
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 /* ⋯ ends line 1: on hover and focus on fine pointers, always on touch, where it is 36px with a
    44px target. Hidden by opacity rather than display, so it stays in the tab order. */
@@ -7057,6 +7080,15 @@ body.shell-dock-dragging * {
    answer is invalid: one indicator, with the error under the field (§8.5). */
 .composer-box.answer-mode:has(.composer-answer-input[aria-invalid="true"]) {
   border-color: var(--red);
+}
+/* A long question belongs to the session's visible pane (#3256). Let the composer shrink and
+   scroll as a whole rather than overflowing the shell that clips it. Its question, choices and
+   actions then share a reachable surface, including when focus reveals the answer field. */
+.composer:has(.composer-answer) {
+  min-height: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .composer-answer {
   display: flex;
@@ -10810,7 +10842,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   background: var(--bg-elev);
 }
 
-/* The Sessions notice and quiet new-order/Reconnecting lines (#2221, §13.2, §6.3): inset at the
+/* The Sessions notice and Reconnecting line (#2221, §13.2, §6.3): inset at the
    list's edges and 8px from the top as the rows are. Together they take whole stacked-list rows. */
 .inbox-list-head,
 .inbox-list-notices {
@@ -10832,15 +10864,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
     overflow: auto;
     padding-bottom: var(--space-2);
   }
-}
-/* New activity would reorder the rows: one neutral line with Apply, never a notice. */
-.inbox-order-line {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-width: 0;
-  color: var(--text-dim);
-  font: var(--type-body);
 }
 /* Recommended Skills (#1768, #2221): each skill a link with its own Dismiss, then Dismiss All. Where
    the list is 600px or wider they share one line after the body; narrower, one skill per line. */
@@ -13072,7 +13095,8 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .inbox-row-shell.stacked.thread-child::after { top: calc(-1 * var(--space-1)); bottom: calc(-1 * var(--space-1)); }
 .inbox-row-shell.thread-child.thread-last::after { bottom: 50%; }
 .inbox-row-shell.thread-child .inbox-row-primary-cell::before { top: 50%; left: -15px; width: 11px; height: 2px; }
-/* The family chip, directly after a parent's title (#2215): dots first, then the rollup. It is sized
+/* The family chip on a parent's title line (#2215): dots first, then the rollup. A list 880px or wider
+   sets it under the status badge instead of after the title (#3175, below). It is sized
    to the pills it shares a card with, and it never grows the card. Below a 600px list (a narrow
    column, Preview Right, a phone) it keeps its dots and working count; its name and tooltip keep the rollup.
    The list protects its working count at every width, letting the summary and dots yield first. */
@@ -13094,6 +13118,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   cursor: pointer;
 }
 .inbox-thread-family.waiting { border-color: transparent; color: var(--accent-2-on-tint); background: color-mix(in srgb, var(--accent-2) 12%, transparent); }
+.inbox-thread-family.t-review { border-color: transparent; color: var(--tone-text); background: color-mix(in srgb, var(--tone) 12%, transparent); }
 .inbox-thread-family-text { overflow: hidden; text-overflow: ellipsis; }
 .inbox-thread-working { display: none; overflow: hidden; text-overflow: ellipsis; }
 .inbox-row-copy .inbox-thread-working { display: inline; flex: none; }
@@ -13312,14 +13337,15 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   .inbox-row-shell .inbox-row { padding-right: var(--control-h); }
   .inbox-row-shell.stacked .inbox-row { padding-right: calc(var(--control-h) + var(--space-2)); }
 }
-/* What the session wants, after the title (#2218): only a list wide enough for it shows it. */
-.inbox-row-snippet { display: none; }
 /* A wide list's rows (#2218, docs/design-system.md §6.3 "Rows use the width"). At 880px and wider the
-   two lines keep their height. The title line adds the snippet, and the title keeps at most 60% of
-   it. The status line's trailing cluster becomes fixed columns, the same on every row, so the badges
-   start and the times end at one x down the list: status (the badge and "+N"), activity, flags and
-   time; an empty cell keeps its width. The actions get a column of their own after the time, so a
-   hover never covers the status or the time; a coarse pointer's ⋯ sits in the same column. */
+   two lines keep their height. The status line's trailing cluster becomes fixed columns, the same on
+   every row, so the badges start and the times end at one x down the list: status (the badge and
+   "+N"), activity, flags and time; an empty cell keeps its width. The title line repeats those
+   columns, so a parent's family chip starts in the status column under its badge, at one x down the
+   list (#3175), and a long rollup runs on over the empty cells after it; the title takes the whole
+   line, or the line up to the chip. The actions get a column
+   of their own after the time, so a hover never covers the status or the time; a coarse pointer's ⋯
+   sits in the same column. */
 @container list (min-width: 880px) {
   .inbox-row-shell:not(.stacked) .inbox-row { padding-right: var(--inbox-row-col-actions); }
   .inbox-row-shell:not(.stacked) .inbox-row-trail {
@@ -13334,17 +13360,17 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   .inbox-row-trail > .inbox-row-activity { grid-column: 2; }
   .inbox-row-trail > .inbox-row-flags { grid-column: 3; }
   .inbox-row-trail > .inbox-row-time { grid-column: 4; justify-self: end; }
-  .inbox-row-shell:not(.stacked) .inbox-row-copy:has(> .inbox-row-snippet) > .inbox-row-title { max-width: 60%; }
-  .inbox-row-shell:not(.stacked) .inbox-row-snippet {
-    display: block;
-    min-width: 0;
-    flex: 1 1 0;
-    overflow: hidden;
-    color: var(--text-dim);
-    font: var(--type-body);
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  .inbox-row-shell:not(.stacked) .inbox-row-copy {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr)
+      var(--inbox-row-col-status) var(--inbox-row-col-activity) var(--inbox-row-col-flags) var(--inbox-row-col-time);
+    gap: var(--space-3);
   }
+  .inbox-row-shell:not(.stacked) .inbox-row-copy > .inbox-row-title { grid-column: 1 / -1; }
+  .inbox-row-shell:not(.stacked) .inbox-row-copy:has(> .inbox-thread-family) > .inbox-row-title { grid-column: 1; }
+  .inbox-row-shell:not(.stacked) .inbox-row-copy > .inbox-thread-family { grid-column: 2 / -1; justify-self: start; max-width: 100%; }
+  /* The chip's cells end at the time column, so a large family's dots give way before its rollup. */
+  .inbox-row-shell:not(.stacked) .inbox-row-copy .inbox-thread-dots { flex-shrink: 100000; }
   .inbox-row-shell:not(.stacked) .inbox-row-actions {
     top: 50%;
     bottom: auto;
@@ -17195,6 +17221,9 @@ button.review-finding-location {
    their control at the column's right edge and keep it there in a narrow container; select,
    segmented and number controls fill the column and drop under the text below 560px. The container
    is the group's surface (`.settings-group-surface`), never the viewport.
+   A row with one line of title and one of description, or with neither, is exactly --row-h-2
+   (56px, 60 comfortable, 64 on touch), hairline included (#3140): the 8px padding is only the floor
+   that text taller than that keeps, so the token, not the padding, sets the row's height.
    ======================================================================================== */
 .setting-row {
   display: grid;
@@ -17204,7 +17233,7 @@ button.review-finding-location {
   width: 100%;
   min-width: 0;
   min-height: var(--row-h-2);
-  padding: var(--space-3) var(--space-4);
+  padding: var(--space-2) var(--space-4);
   color: var(--text);
   text-align: left;
   transition: background-color var(--dur-fast) var(--ease-out);
@@ -17217,7 +17246,7 @@ button.review-finding-location {
 button.setting-row { cursor: pointer; }
 .setting-row-link.is-disabled { cursor: not-allowed; }
 @media (hover: hover) and (pointer: fine) {
-  button.setting-row:hover:not(:disabled) { background: var(--bg-elev-2); }
+  button.setting-row:hover:not(:disabled, [aria-disabled="true"]) { background: var(--bg-elev-2); }
 }
 /* A row a policy link brought into view, until focus leaves it. */
 .setting-row[data-targeted],
@@ -17296,6 +17325,11 @@ button.setting-row { cursor: pointer; }
   white-space: nowrap;
 }
 .setting-row-value-text.is-mono { font-family: var(--font-mono); font-size: var(--text-sm); }
+/* A value that is only useful whole, an address, wraps between its pieces instead (#3159), on lines
+   of even length, so a phone never leaves `net` alone on the last one. A piece is atomic, so a line
+   never breaks at its hyphen; only a piece wider than the column breaks inside itself. */
+.setting-row-value-text.is-wrapping { white-space: normal; text-wrap: balance; }
+.setting-row-value-part { display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
 .setting-row-link-word { color: var(--text-dim); font: var(--type-small); white-space: nowrap; }
 .setting-row-chevron { display: inline-flex; color: var(--text-dim); }
 /* The switch row is the Switch button itself, so its track and Saved check are the row's own
@@ -17310,9 +17344,10 @@ button.setting-row { cursor: pointer; }
 .setting-row-switch > .setting-row-saved { margin-right: calc(var(--switch-w) + var(--space-3)); }
 
 /* Below 560px of group surface the control drops under its text at full width; a switch, a link or
-   an action stays trailing beside it. */
+   an action stays trailing beside it. A stacked row is taller than its token anyway, so every row
+   here keeps 12px above and below and a narrow group reads as one rhythm (#3140). */
 @container (max-width: 559px) {
-  .setting-row { grid-template-columns: minmax(0, 1fr); }
+  .setting-row { grid-template-columns: minmax(0, 1fr); padding-block: var(--space-3); }
   .setting-row-trailing { grid-template-columns: minmax(0, 1fr) auto; }
   .setting-row-number .w-xs { width: 100%; }
   .setting-row-value > .setting-row-control { justify-content: flex-start; }
@@ -17356,7 +17391,11 @@ button.setting-row { cursor: pointer; }
 /* In a surface a setting row is a row of it: a hairline between rows (above anything that follows
    another child of a group's surface), and its corners follow the surface's where they meet. */
 .settings-group-surface > * + *,
-.surface > * + :is(.setting-row, .setting-row-frame) { border-top: 1px solid var(--border); }
+.surface > * + .setting-row,
+.surface > * + .setting-row-frame > .setting-row:first-child { border-top: 1px solid var(--border); }
+/* A frame passes its hairline to the row inside it, so the line sits inside the row's --row-h-2
+   and a framed row is exactly as tall as an unframed one (#3140). */
+.settings-group-surface > * + .setting-row-frame { border-top: 0; }
 .surface > .setting-row:first-child,
 .surface > .setting-row-frame:first-child > .setting-row {
   border-top-left-radius: var(--radius-md);
@@ -18431,42 +18470,124 @@ a.tab { text-decoration: none; }
 @media (min-width: 761px) and (max-width: 1099px) {
   .settings-panel-heading > h2 { display: none; }
 }
+/* A section that draws its own head (About, #3028) keeps the heading in the tree, hidden. */
+.settings-panel-head[hidden] { display: none; }
 .settings-group { display: flex; flex-direction: column; gap: var(--space-2); }
 
-/* Settings -> Appearance -> Navigation: the rail's visibility and order editor (#385). The list is a
-   child of the group's surface, so it draws no box of its own and its rows start on the group's text
-   edge, as setting rows do. #3021 rebuilds these rows on the setting-row grid. */
-.rail-order-list {
+/* Settings › About opens with what you are running (#3028): the 48px app icon, Wollipog in the
+   title type, and its version under it. */
+.about-identity { display: flex; align-items: center; gap: var(--space-4); min-width: 0; }
+.about-identity-icon { flex: none; width: var(--space-12); height: var(--space-12); border-radius: var(--radius-md); }
+.about-identity-text { display: flex; flex-direction: column; gap: var(--space-0-5); min-width: 0; }
+.about-identity-name { margin: 0; color: var(--text); font: var(--type-title); }
+.about-identity-version { margin: 0; color: var(--text-dim); font: var(--type-body); }
+
+/* The desktop app's update status, one child of the Updates group's surface (§8.2, #3028): a 32px
+   tone tile, the title over one sentence, then the actions with the primary last (§3.2). */
+.update-block {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--row-h-2);
+  padding: var(--space-3) var(--space-4);
+}
+.update-block-tile {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--space-8);
+  height: var(--space-8);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--tone) 14%, transparent);
+  color: var(--tone-text);
+}
+/* At least the tile's height and centred in it, so a title with no sentence under it sits on the
+   tile's middle at every width, including under 560px where the row aligns to the top. */
+.update-block-text {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--space-0-5);
+  min-width: 0;
+  min-height: var(--space-8);
+}
+.update-block-title { margin: 0; font: var(--type-body-strong); overflow-wrap: anywhere; }
+.update-block-desc,
+.update-block-details { margin: 0; color: var(--text-dim); font: var(--type-small); overflow-wrap: anywhere; }
+.update-block-details { padding-top: var(--space-1); }
+.update-block-actions { display: flex; align-items: center; gap: var(--space-2); }
+/* Under 560px of group the actions drop under the text at full width, one per line with the primary
+   last, and 44px tall even under a mouse, as a sheet's footer is (§7.5, §15.1). */
+@container (max-width: 559px) {
+  .update-block { grid-template-columns: auto minmax(0, 1fr); align-items: start; }
+  .update-block-actions {
+    --control-h: 44px;
+    grid-column: 1 / -1;
+    flex-direction: column;
+    align-items: stretch;
+  }
+  /* The phone exception to "buttons never stretch" (§3.1), as in the session notice slot. */
+  .update-block-actions > .btn { max-width: none; }
+}
+
+/* Settings -> Appearance -> Navigation: the rail's visibility and order editor (#385, #3021). The list
+   is a child of the group's surface, so it draws no box of its own and its rows start on the group's
+   text edge, as setting rows do.
+
+   Every row is ONE fixed grid — icon, name, digit, moves, switch — and every cell but the name is a
+   fixed size, so the arrows, the digit and the switch sit at one x on a normal, hidden, required and
+   experiment-off row alike. What differs between them (Always Shown, Off in Experimental, Tab Bar) is
+   a note in the name cell, which wraps there rather than pushing a control. The vertical padding is
+   what is left of --row-h around a control, so a row is --row-h tall on any pointer. */
+.rail-nav-list {
   margin: 0;
   padding: 0;
   list-style: none;
   display: flex;
   flex-direction: column;
 }
-.rail-order-row {
-  display: flex;
+.rail-nav-row {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) 24px auto auto;
   align-items: center;
   gap: var(--space-3);
   min-height: var(--row-h);
-  padding: var(--space-1) var(--space-4);
+  padding: calc((var(--row-h) - var(--control-h)) / 2) var(--space-4);
+  transition: background-color var(--dur-base) var(--ease-out);
 }
-.rail-order-row + .rail-order-row { border-top: 1px solid var(--border); }
-.rail-order-row.is-inactive .rail-order-icon,
-.rail-order-row.is-inactive .rail-order-title { color: var(--text-dim); }
-.rail-order-icon { display: inline-flex; color: var(--text-dim); }
-/* A name that cannot fit wraps rather than drawing into the status beside it. */
-.rail-order-title { flex: 1; min-width: 0; font-size: var(--text-sm); overflow-wrap: anywhere; }
-.rail-order-state { display: inline-flex; align-items: center; gap: 8px; }
-.rail-order-note { font-size: var(--text-xs); color: var(--text-faint); }
-.rail-order-controls { display: inline-flex; align-items: center; gap: 4px; }
-/* Required and Show/Hide share one last column, so every row's controls end on one edge. */
-.rail-order-controls > :last-child { display: inline-flex; justify-content: center; min-width: 64px; }
-.rail-order-required { font-size: var(--text-xs); color: var(--text-faint); }
-/* In a narrow group the name needs the room more than the controls need one column: on a phone with
-   44px buttons a hidden destination's name otherwise ran into its status. */
+/* A phone binds no digits, so it has no digit column. */
+.rail-nav-list.no-digits > .rail-nav-row { grid-template-columns: 16px minmax(0, 1fr) auto auto; }
+.rail-nav-row + .rail-nav-row { border-top: 1px solid var(--border); }
+/* The row a Move button just moved, lit for RAIL_MOVE_FLASH_MS so the eye can follow it. */
+.rail-nav-row.is-moved { background: var(--bg-elev-2); transition: none; }
+.rail-nav-row.is-inactive .rail-nav-icon,
+.rail-nav-row.is-inactive .rail-nav-title { color: var(--text-dim); }
+.rail-nav-icon { display: inline-flex; color: var(--text-dim); }
+/* The name, then any note after it; a pair that cannot fit wraps rather than drawing into the digit. */
+.rail-nav-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--space-3);
+  min-width: 0;
+}
+.rail-nav-title { font: var(--type-body); color: var(--text); overflow-wrap: anywhere; }
+.rail-nav-note { font: var(--type-small); color: var(--text-dim); }
+.rail-nav-digit { display: inline-flex; justify-content: center; color: var(--text-faint); }
+.rail-nav-moves { display: inline-flex; align-items: center; gap: var(--space-1); }
+@media (prefers-reduced-motion: reduce) {
+  .rail-nav-row.is-moved { background: none; }
+}
+/* Keycaps are for a keyboard (§11.5): a touch pointer hides them, so it hides the dash beside them
+   too, and the column stays to keep the rows aligned. */
+@media (pointer: coarse) {
+  .rail-nav-digit { visibility: hidden; }
+}
+/* In a narrow group the name needs the room more than the controls need air. The switch borrows 3px
+   on each side for its 44px touch target, which the 8px gap still leaves clear. */
 @container (max-width: 559px) {
-  .rail-order-row { gap: var(--space-2); }
-  .rail-order-controls > :last-child { min-width: 0; }
+  .rail-nav-row { gap: var(--space-2); }
 }
 
 /* Agent Defaults' dialog (#3024): Model, Reasoning Effort and Permission Mode share one row, and stack
@@ -18490,14 +18611,6 @@ a.tab { text-decoration: none; }
   gap: var(--space-3);
 }
 .title-endpoint-pair > .field { min-width: 0; }
-/* The shared affix keeps 12px insets and 2em for its suffix, which leaves a 96px field about 40px for
-   digits: too little for 30,000 in a wide system face (DejaVu Sans). "ms" needs 1.5em, and 8px
-   insets keep it clear of the edge. */
-.title-endpoint-pair .input-affix:has(> .input-affix-text:last-child) > input {
-  padding-inline-start: var(--space-2);
-  padding-inline-end: calc(var(--space-2) + 1.5em + var(--space-1));
-}
-.title-endpoint-pair .input-affix-text:last-child { inset-inline-end: var(--space-2); }
 .title-endpoint-secret {
   display: flex;
   flex-wrap: wrap;
@@ -18511,12 +18624,6 @@ a.tab { text-decoration: none; }
   color: var(--text-dim);
 }
 .title-endpoint-secret-actions { display: flex; gap: var(--space-2); }
-/* Field text is 16px on phones and coarse pointers (the iOS focus-zoom guard), and a 96px field with
-   "ms" inside it then shows four digits of a five-digit timeout. The field grows just enough to show
-   30,000 whole. */
-@media (max-width: 760px), (pointer: coarse) {
-  .title-endpoint-pair .w-xs { width: 120px; }
-}
 
 /* A phone's Settings index (§6.2): the sections as two-line rows in three surfaces, each opening its
    own page. No row is ever selected. */

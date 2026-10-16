@@ -888,6 +888,9 @@ let cancelTurnCount = 0;
 let failNextCancelTurn = false;
 let deferNextCancelTurnRequest = false;
 let pendingCancelTurnSettlement: (() => void) | null = null;
+let deferNextReviewRequest = false;
+let pendingReviewSettlement: (() => void) | null = null;
+const reviewRequests: Array<{ sessionId: string; revision: string }> = [];
 let deferNextPromptRequest = false;
 let failNextPromptRequest = false;
 let pendingPromptSettlement: (() => void) | null = null;
@@ -2371,6 +2374,19 @@ const client = {
     pushSession(value);
     return structuredClone(value);
   },
+  acknowledgeBackgroundRetryExhaustion: async (id: string, continuationId: string) => {
+    const value = model.sessions.find((candidate) => candidate.id === id);
+    if (!value) throw new Error("session not found");
+    const delivery = value.backgroundDeliveries?.find((candidate) => candidate.continuationId === continuationId);
+    if (!delivery?.retryExhaustedAt || delivery.acceptedAt || delivery.runnerResultPersistedAt) {
+      throw new Error("background delivery has not exhausted its retries");
+    }
+    delivery.retryExhaustionAcknowledgedAt = Date.now();
+    delete delivery.watchdogState;
+    value.updatedAt += 1;
+    pushSession(value);
+    return structuredClone(value);
+  },
   retitleSession: async (id: string) => {
     const value = model.sessions.find((candidate) => candidate.id === id);
     if (!value) throw new Error("session not found");
@@ -2511,6 +2527,12 @@ const client = {
     return structuredClone(value);
   },
   markResultReviewed: async (id: string, revision: string) => {
+    reviewRequests.push({ sessionId: id, revision });
+    if (deferNextReviewRequest) {
+      deferNextReviewRequest = false;
+      await new Promise<void>((resolve) => { pendingReviewSettlement = resolve; });
+      pendingReviewSettlement = null;
+    }
     const value = model.sessions.find((candidate) => candidate.id === id)!;
     const acknowledged = value.attention?.result?.revision === revision;
     if (acknowledged) value.attention!.acknowledgedRevision = revision;
@@ -3124,6 +3146,9 @@ declare global {
       failNextSessionCommandResponse(): void;
       deferNextSessionCommandResponse(): void;
       settleDeferredSessionCommandResponse(): void;
+      reviewRequests(): Array<{ sessionId: string; revision: string }>;
+      deferNextReview(): void;
+      settleDeferredReview(): void;
       deferNextPrompt(): void;
       settleDeferredPrompt(): void;
       steeringRequests(): SteerRequest[];
@@ -3413,6 +3438,15 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
   settleDeferredSessionCommandResponse() {
     if (!pendingSessionCommandSettlement) throw new Error("no session command response is awaiting settlement");
     pendingSessionCommandSettlement();
+  },
+  reviewRequests: () => structuredClone(reviewRequests),
+  deferNextReview() {
+    if (pendingReviewSettlement) throw new Error("a review is already deferred");
+    deferNextReviewRequest = true;
+  },
+  settleDeferredReview() {
+    if (!pendingReviewSettlement) throw new Error("no review is awaiting settlement");
+    pendingReviewSettlement();
   },
   deferNextPrompt() {
     if (pendingPromptSettlement) throw new Error("a prompt is already deferred");

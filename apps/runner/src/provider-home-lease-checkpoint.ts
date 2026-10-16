@@ -76,7 +76,12 @@ def canonical_root_entries(root):
         temporary = PUBLICATION_TEMP.fullmatch(name)
         if not (temporary or name in CHECKPOINT_SLOTS or name in ("mutable-home.recovery.json", ".mutable-home.retired") or re.fullmatch(r"next-([0-9a-f-]+)\.json", name)):
             fail("unexpected canonical lease entries")
-        info = os.stat(name, dir_fd=root, follow_symlinks=False)
+        try: info = os.stat(name, dir_fd=root, follow_symlinks=False)
+        except FileNotFoundError:
+            # A writer removes its staging link after publishing the immutable record. Missing
+            # staging has no ownership meaning; canonical and retained evidence stay mandatory.
+            if temporary: continue
+            raise
         if (not stat.S_ISREG(info.st_mode) or info.st_size > (4096 if temporary else CHECKPOINT_LIMITS["checkpointBytes"]) or
             info.st_nlink < 1 or info.st_nlink > 3 or info.st_uid != os.geteuid() or info.st_mode & 0o022):
             fail("unsafe canonical lease entries")

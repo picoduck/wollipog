@@ -7,7 +7,6 @@ import { relativeTime } from "../format.js";
 import { formatReminderReturn, reminderDisplayZone } from "../reminder-schedule.js";
 import { reminderBadgeDescription } from "../session-reminders.js";
 import { sessionArchiveActionRefusal } from "../session-command-permissions.js";
-import { sessionRowSnippet } from "../session-row-snippet.js";
 import { sessionRowStatus } from "../session-row-status.js";
 import { sessionDisplayTitle } from "../session-title.js";
 import { useOptionalStoreSelector } from "../store.js";
@@ -169,7 +168,7 @@ function InboxRowInner({
   const childrenLabel = children ? inboxThreadChildrenLabel(children) : null;
   const childrenSummary = children ? inboxThreadChildrenLabel(children, { includeWorking: false }) : null;
   const workingChildren = children?.working ?? children?.children.filter((child) => child.state === "running").length ?? 0;
-  /* The family chip: one dot per child and the rollup, directly after the parent's title (#2215). It
+  /* The family chip: one dot per child and the rollup, on the parent's title line (#2215, #3175). It
      reads the same whether the thread is expanded or collapsed, which is the point of putting the
      rollup on the parent — a collapsed thread can never hide a waiting child (#896). Its tint follows
      the attention colour only while a child is waiting. The working count stays separate from the
@@ -179,7 +178,7 @@ function InboxRowInner({
      clicking here merely forwards to it. */
   const familyChip = children && childrenLabel ? (
     <span
-      className={`inbox-thread-family${children.waiting > 0 ? " waiting" : ""}`}
+      className={`inbox-thread-family${children.waiting > 0 ? " waiting" : children.followUpLabel === "Ready for Review" ? " t-review" : ""}`}
       role="img"
       aria-label={childrenLabel}
       title={childrenLabel}
@@ -294,14 +293,12 @@ function InboxRowInner({
       </button>
     </span>
   );
-  /* What the session wants, after the title (#2218, §6.3). Only a list 880px or wider shows it, so a
-     narrow list keeps its title whole; a phone card never carries it. */
-  const snippet = threeRow ? "" : sessionRowSnippet(session);
+  /* The title line holds the title and the family chip, and no transcript excerpt (#3175). A list
+     880px or wider sets the chip in the status column, under the badge (§6.3). */
   const titleLine = (
     <span className="inbox-row-copy">
       <span className="inbox-row-title">{title}</span>
       {familyChip}
-      {snippet && <span className="inbox-row-snippet">{snippet}</span>}
     </span>
   );
 

@@ -1,10 +1,11 @@
+import { formatCampaignAssignment } from "./campaign-assignment.js";
 import { acknowledgementRepairFrame } from "./claude-cost-repair.js";
 import type { HumanPrincipal } from "./identity.js";
 import type { CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl } from "./campaign-authority.js";
 import { campaignAuthorityPreflight, controlledReviewCapabilityKey, standingRootQuestionAnswers, type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary } from "@wollipog/protocol";
 import { CampaignRecoveryService } from "./campaign-recovery.js";
-import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, campaignNeedsEpicScope } from "./campaign-issue-scope.js";
+import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope } from "./campaign-issue-scope.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
 import { issueBoundary, issueEvidenceDigest, issueWork, closureEvidence, publicationEvidence, reservedPublicationSlots } from "./campaign-issue-authority.js";
 import { validIssueAdmission, campaignPublicationSafe } from "@wollipog/protocol";
@@ -19,7 +20,7 @@ import type { GithubIssueClosureRequest, GithubIssueClosureResult, GithubIssueCl
 
 import { createHash, randomUUID } from "node:crypto";
 import { posix, win32 } from "node:path";
-import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
+import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   addPendingRequest, removePendingRequest, pendingRequests, parentControlRequestEligible, campaignHumanAttentionAdded,
   CODEX_APP_SERVER_IMAGE_MIME_TYPES,
   MAX_PROMPT_IMAGE_BYTES,
@@ -38,7 +39,14 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   isOrchestratorOnlyCapabilities,
   mergeSessionCapabilities,
   nativeTuiHasTrackedGuardrails,
+  orchestratorChildHarnessRequirement,
+  orchestratorExecutionPolicyRequirement,
+  orchestratorIntegrationIsolationRequirement,
   runnerCapabilityRequirement,
+  runnerCapabilityRequirementError,
+  runnerCapabilityRequirementWithAlternative,
+  campaignIssueLimitsRequirement,
+  campaignIssueScopeChangesRequirement,
   type RunnerCapabilityRequirementDetails,
   runnerSupportsProtocol,
   validatePromptImageInputs,
@@ -195,7 +203,6 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   sessionRole,
   advertisesOrchestratorAdditiveRole,
   orchestratorAdditiveCapability,
-  RUNNER_CAPABILITY_MIN_PROTOCOL,
   usesOrchestratorPresetPermissions,
   type SessionRole,
 } from "@wollipog/protocol";
@@ -242,7 +249,7 @@ import { childRestartAllowanceError, childSessionGuardrails, DEFAULT_CHILD_SPAWN
 import { capabilityRefusal, failureBody } from "./capability-refusal.js";
 import { NATIVE_TUI_DAILY_BUDGET_ERROR, NATIVE_TUI_TRACKED_GUARDRAILS_ERROR } from "./native-tui-launch.js";
 import { redactOperationalTranscriptText } from "./share-projection.js";
-import { type GuardrailFields, normalizeCostCheckpoints,
+import { type GuardrailFields, type PolicyInput, normalizeCostCheckpoints,
   approvalForDecision,
   sessionSpawnSafetyPolicy,
   evaluateApprovalPolicies,
@@ -256,10 +263,11 @@ import { type GuardrailFields, normalizeCostCheckpoints,
 import { executionTargetRef, relaunchExecutionTarget, resolveExecutionTarget } from "./execution-targets.js";
 import {
   agentHarnessIdentityFor,
-  agentHarnessIdentityKey,
   installationSupportsDefault,
 } from "./agent-harness-defaults.js";
 import {
+  childHarnessAdmits,
+  childHarnessRefusal,
   parseOrchestratorOverrides,
   resolveOrchestratorCampaignPolicy,
 } from "./orchestrator-settings.js";
@@ -588,6 +596,13 @@ function ok<T>(data: T, status = 200): ServiceResult<T> {
 }
 function fail<T>(error: string, status = 400): ServiceResult<T> {
   return { ok: false, status, error };
+}
+/** A refused runner capability gate: a 409 with the shared sentence as `error` and the versions
+ * beside it, never inside it (docs/design-system.md §17.2). */
+function capabilityFail<T>(
+  { error, ...capabilityRequirement }: { error: string } & RunnerCapabilityRequirementDetails,
+): ServiceResult<T> {
+  return { ok: false, status: 409, error, capabilityRequirement };
 }
 
 /** Rolls back a campaign child's creation when its work-item attempt cannot be recorded (#3106). */
@@ -1205,8 +1220,12 @@ export function capabilityConfigError(
       return `service tier ${JSON.stringify(config.serviceTier)} is not supported by this model`;
     }
   }
-  if (config.permissionMode && !(capabilities.permissionModes ?? []).includes(config.permissionMode)) {
-    return `permission mode ${JSON.stringify(config.permissionMode)} is not supported by this agent installation`;
+  const permissionModes = capabilities.permissionModes ?? [];
+  if (config.permissionMode && !permissionModes.includes(config.permissionMode)) {
+    const refusal = `permission mode ${JSON.stringify(config.permissionMode)} is not supported by this agent installation`;
+    return permissionModes.length
+      ? `${refusal}; supported permission modes: ${permissionModes.join(", ")}`
+      : `${refusal}, which advertises no permission modes`;
   }
   return null;
 }
@@ -1606,6 +1625,10 @@ export class SessionsService {
   /** Sessions that saw another gap WHILE a fetch was in flight — forces one more pass afterward so a
    * mid-fetch event (not in the in-flight reply) is never dropped. */
   private readonly rehydrate = new Set<string>();
+  /** The turn last interrupted for an estimate-only budget card, by session (#3112), so repeated
+   * queue reports of the same turn send one interruption. The durable card is the obligation; this
+   * only deduplicates, so a restart at worst repeats a request the runner already applied. */
+  private readonly estimateInterruptedTurns = new Map<string, string>();
   /** Bound v54 history/index work to one page chain per runner. */
   private readonly runnerHydrationTails = new Map<string, Promise<void>>();
   /** Carry an interrupted pass's before-views into its replacement so resolved-request wakeups
@@ -3586,7 +3609,8 @@ export class SessionsService {
     }
     const campaignAuthority = this.orchestratorCampaignController(parent);
     if (campaignAuthority === "refused") return fail(MALFORMED_ANCESTRY_AUTHORITY_REFUSAL, 409);
-    const campaignBehavior = campaignAuthority?.orchestratorPolicy?.behavior;
+    const campaignPolicy = campaignAuthority?.orchestratorPolicy;
+    const campaignBehavior = campaignPolicy?.behavior;
     const reserved = { ...this.db.childSessionAllocations(parentSessionId) };
     if (configs.length > (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.liveCount) {
       const remaining = Math.max(0, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.liveCount);
@@ -3602,16 +3626,7 @@ export class SessionsService {
           driver: member.launch.driver,
           context: member.launch.context,
         });
-        if (campaignBehavior.childHarness &&
-            agentHarnessIdentityKey(launchHarness) !== agentHarnessIdentityKey(campaignBehavior.childHarness)) {
-          const fixed = campaignBehavior.childHarness;
-          return fail(
-            `child harness is fixed by campaign policy at ${fixed.agentId} (${fixed.driver}, ${
-              fixed.context.kind === "wsl" ? `WSL ${fixed.context.distro}` : "native"
-            })`,
-            409,
-          );
-        }
+        if (!childHarnessAdmits(campaignPolicy!, launchHarness)) return fail(childHarnessRefusal(campaignPolicy!), 409);
         if (campaignBehavior.childModel !== null && candidate.model !== undefined &&
             candidate.model !== campaignBehavior.childModel) {
           return fail(`child model is fixed by campaign policy at ${campaignBehavior.childModel}`, 409);
@@ -3775,14 +3790,9 @@ export class SessionsService {
       driver: launch.driver,
       context: launch.context,
     });
-    const fixedChildHarness = campaignController?.orchestratorPolicy?.behavior.childHarness;
-    if (fixedChildHarness && agentHarnessIdentityKey(launchHarness) !== agentHarnessIdentityKey(fixedChildHarness)) {
-      return fail(
-        `child harness is fixed by campaign policy at ${fixedChildHarness.agentId} (${fixedChildHarness.driver}, ${
-          fixedChildHarness.context.kind === "wsl" ? `WSL ${fixedChildHarness.context.distro}` : "native"
-        })`,
-        409,
-      );
+    const controllerPolicy = campaignController?.orchestratorPolicy;
+    if (controllerPolicy && !childHarnessAdmits(controllerPolicy, launchHarness)) {
+      return fail(childHarnessRefusal(controllerPolicy), 409);
     }
     // An ad-hoc directory chosen via the remote browser overrides the preconfigured workspace.
     const adHoc = snapshotSpec
@@ -3853,10 +3863,7 @@ export class SessionsService {
     const usesRunnerProviderAccount = executionTarget.adapter === "host";
     if (usesRunnerProviderAccount && req.providerAccountId &&
         !runnerSupportsProtocol(runner.protocolVersion, "providerAccounts")) {
-      return fail(
-        `Provider account selection requires a protocol-v${RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccounts} runner; update the runner and retry.`,
-        409,
-      );
+      return capabilityFail(runnerCapabilityRequirementError(runner.protocolVersion, "providerAccounts", "choosing an account"));
     }
     const launchProvider = launch.driver === "claude-code" ? "claude"
       : launch.driver === "codex" || launch.driver === "codex-app-server" ? "codex" : null;
@@ -4125,6 +4132,8 @@ export class SessionsService {
         inheritedCampaign ? "active_campaign" : parentSessionId ? "system_default" : configured?.source ?? "system_default",
         inheritedCampaign ? {} : overrides,
       );
+      // A nested Orchestrator joins its campaign's harness matching as well as its settings.
+      if (inheritedCampaign && inheritedCampaign.childHarnessMatch !== "harness") delete orchestratorPolicy.childHarnessMatch;
       if (inheritedCampaign?.control) {
         orchestratorPolicy.control = structuredClone(inheritedCampaign.control);
         const preflight = campaignAuthorityPreflight(orchestratorPolicy.control, launch.driver, runner.protocolVersion);
@@ -4155,14 +4164,11 @@ export class SessionsService {
       if (compatibilityError) return fail(compatibilityError, 409);
       if (orchestratorPolicy.behavior.childHarness &&
           !runnerSupportsProtocol(runner.protocolVersion, "orchestratorChildHarnessPolicy")) {
-        return fail(
-          "A fixed Child Harness requires a protocol-v157 Orchestrator runner. Update the runner or choose Automatic Harness.",
-          409,
-        );
+        return capabilityFail(orchestratorChildHarnessRequirement(runner.protocolVersion));
       }
       if (!orchestratorPolicy.execution.strictProjectIsolation &&
           !runnerSupportsProtocol(runner.protocolVersion, "orchestratorExecutionPolicy")) {
-        return fail("Delegate Implementation without Strict Project Isolation requires a protocol-v144 runner; update the runner or enable Strict Project Isolation.", 409);
+        return capabilityFail(orchestratorExecutionPolicyRequirement(runner.protocolVersion));
       }
       // Every coupled-preset launch — Native TUI, ACP, legacy, and the Claude/Codex non-strict
       // preset shapes — replaces the provider surface with the runner-owned planning surface and so
@@ -4185,9 +4191,7 @@ export class SessionsService {
       // closed for a saved user default exactly as it does for an explicit per-session override.
       if (!presetPermissions && orchestratorPolicy.execution.integrationIsolation &&
           !runnerSupportsProtocol(runner.protocolVersion, "orchestratorIntegrationIsolation")) {
-        return fail(`Integration Isolation requires a protocol-v${
-          RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIntegrationIsolation
-        } runner; update the runner or disable Integration Isolation.`, 409);
+        return capabilityFail(orchestratorIntegrationIsolationRequirement(runner.protocolVersion));
       }
       requestedConfig.maxChildSessions = orchestratorPolicy.behavior.maximumConcurrentChildren;
       parentControl = orchestratorPolicy.delegation.parentControl;
@@ -4220,8 +4224,12 @@ export class SessionsService {
             : "Independent provider permissions for an Orchestrator are supported only by a native Claude Code, Codex, or Pi harness on the host; other harnesses still use the Orchestrator preset permission mode.", 409);
         }
         if (!runnerSupportsProtocol(runner.protocolVersion, additiveCapability)) {
-          return fail(`An Orchestrator with independent provider permissions requires a protocol-v${
-            RUNNER_CAPABILITY_MIN_PROTOCOL[additiveCapability]} runner for this harness; update the runner or choose the Orchestrator preset permission mode.`, 409);
+          return capabilityFail(runnerCapabilityRequirementWithAlternative(
+            runner.protocolVersion,
+            additiveCapability,
+            "an Orchestrator with independent provider permissions",
+            "To start now, choose the Orchestrator preset permission mode.",
+          ));
         }
         // The runner attests the additive role separately from the coupled preset, because the
         // preset advertisement also encodes the strict filesystem boundary that the additive role
@@ -4337,11 +4345,13 @@ export class SessionsService {
       ? campaignController.orchestratorPolicy?.issueNumbers
       : undefined;
     if (campaignController && campaignNeedsEpicScope(this.db, campaignController)) {
-      return fail(scopeCompatibility(this.db, campaignController) ?? "Confirm the epic's authorized issue scope in Campaign Status before delegating work. Use get_campaign_issue_scope and request_campaign_issue_scope_change, then wait for human approval.", 409);
+      const unsupported = scopeCompatibility(this.db, campaignController);
+      if (unsupported) return capabilityFail(unsupported);
+      return fail("Confirm the epic's authorized issue scope in Campaign Status before delegating work. Use get_campaign_issue_scope and request_campaign_issue_scope_change, then wait for human approval.", 409);
     }
     const inheritedIssueScope = campaignController?.orchestratorPolicy?.issueScope ?? snapshotSpec?.orchestrator?.issueScope;
     if (orchestratorPolicy && inheritedIssueScope && !runnerSupportsProtocol(runner.protocolVersion, "campaignIssueScopeChanges")) {
-      return fail("Revisioned campaign issue scope requires a protocol-v208 runner; update and reconnect before creating an Orchestrator participant.", 409);
+      return capabilityFail(campaignIssueScopeChangesRequirement(runner.protocolVersion));
     }
     if (orchestratorPolicy && inheritedIssueScope && campaignController && !campaignIssueNumbers) return fail("A scoped Orchestrator participant must use the campaign's runner and repository workspace. Select that workspace or start an independent campaign.", 409);
     if (orchestratorPolicy && inheritedIssueScope) orchestratorPolicy.issueScope = inheritedIssueScope;
@@ -4352,7 +4362,7 @@ export class SessionsService {
         : []);
     if (orchestratorPolicy && orchestratorIssueNumbers.length &&
         !runnerSupportsProtocol(runner.protocolVersion, "orchestratorIssueScope")) {
-      return fail("Campaign issue coordination requires a protocol-v158 Orchestrator runner; update the runner and retry.", 409);
+      return capabilityFail(runnerCapabilityRequirementError(runner.protocolVersion, "orchestratorIssueScope", "campaign issue coordination"));
     }
     if (orchestratorPolicy && (orchestratorIssueNumbers.length || inheritedIssueScope)) {
       orchestratorPolicy.issueNumbers = [...orchestratorIssueNumbers];
@@ -4557,7 +4567,10 @@ export class SessionsService {
     if (!snapshotCommand && images.length) {
       const externalized = this.externalizePromptImages(id, images);
       if (!externalized.ok || !externalized.data) {
-        this.db.deleteSession(id);
+        // The launch was never sent, so the row created here returns its campaign reservation and
+        // parent charges (#3183). A re-entered pre-staged row keeps the plain deletion.
+        if (existing) this.db.deleteSession(id);
+        else this.db.deleteUnlaunchedSession(id);
         if (session.projectId) this.hub.projectChangedById(session.projectId);
         return failAs(externalized, "prompt images could not be stored");
       }
@@ -5724,7 +5737,8 @@ export class SessionsService {
     if (guardrailChanged && parkedGuardrail) {
       const remaining = removePendingRequest(this.db.getSession(sessionId)?.pendingApproval, parkedGuardrail.requestId);
       this.db.setPendingApproval(sessionId, remaining);
-      this.db.updateSessionStatus(sessionId, hasBlockingPendingRequest(remaining) ? "input_required" : "idle", now);
+      this.db.updateSessionStatus(sessionId, hasBlockingPendingRequest(remaining) ? "input_required" :
+        this.estimateOnlyBudgetCardStatus(session, parkedGuardrail), now);
       this.recordRunnerGuardrailResolution(session, parkedGuardrail, "dismissed", actor, now, { content: config });
       this.gateOnPolicy(sessionId, now);
       this.reconcilePolicyHookTimeouts(now, sessionId);
@@ -6325,6 +6339,13 @@ export class SessionsService {
       this.log.warn(`failed to record steering queue bookkeeping for ${sessionId}: ${(error as Error).message}`);
     }
     this.hub.setSessionQueue(sessionId, queue, held, activeTurnId);
+    // An unanswered estimate-only budget card stops the turn the runner reports, including one that
+    // parked before the turn was known or before a control-plane restart (#3112).
+    if (!activeTurnId) this.estimateInterruptedTurns.delete(sessionId);
+    else if (this.estimateInterruptedTurns.get(sessionId) !== activeTurnId) {
+      const session = this.db.getSession(sessionId);
+      if (session && this.estimateOnlyBudgetCard(session)) this.interruptTurnAtEstimate(session);
+    }
     return true;
   }
 
@@ -6753,17 +6774,22 @@ export class SessionsService {
         return fail("An Orchestrator with independent provider permissions requires a native Claude Code, Codex, or Pi harness on the host that advertises the Orchestrator role; the agent definition no longer matches. Start a new session or choose the Orchestrator preset permission mode.", 409);
       }
       if (!runnerSupportsProtocol(runner?.protocolVersion, additiveCapability)) {
-        return fail(`An Orchestrator with independent provider permissions requires a protocol-v${
-          RUNNER_CAPABILITY_MIN_PROTOCOL[additiveCapability]} runner for this harness; update the runner and retry.`, 409);
+        return capabilityFail(runnerCapabilityRequirementError(
+          runner?.protocolVersion,
+          additiveCapability,
+          "an Orchestrator with independent provider permissions",
+        ));
       }
       // Mirror creation exactly. The stored policy is fixed, so a runner that was downgraded or
       // re-registered without this capability would relaunch the campaign WITH the integrations the
       // human removed, while the session still advertises them as absent.
       if (session.orchestratorPolicy?.execution.integrationIsolation &&
           !runnerSupportsProtocol(runner?.protocolVersion, "orchestratorIntegrationIsolation")) {
-        return fail(`Integration Isolation requires a protocol-v${
-          RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIntegrationIsolation
-        } runner; update the runner and retry.`, 409);
+        return capabilityFail(runnerCapabilityRequirementError(
+          runner?.protocolVersion,
+          "orchestratorIntegrationIsolation",
+          "integration isolation",
+        ));
       }
       // Codex's audited Linux or macOS sandbox is NOT checked here, and creation no longer checks it
       // for this shape either (#1308). That platform rule belongs to the coupled preset, whose
@@ -6777,8 +6803,9 @@ export class SessionsService {
       // the final exact-bridge check before launch.
     }
     const agentId = session.agentId;
-    if (session.orchestratorPolicy?.issueScope && !runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "campaignIssueScopeChanges")) {
-      return fail("Revisioned campaign scope requires a protocol-v208 runner; update and reconnect before restarting.", 409);
+    const restartProtocolVersion = this.db.getRunner(session.runnerId)?.protocolVersion;
+    if (session.orchestratorPolicy?.issueScope && !runnerSupportsProtocol(restartProtocolVersion, "campaignIssueScopeChanges")) {
+      return capabilityFail(campaignIssueScopeChangesRequirement(restartProtocolVersion));
     }
     if (session.orchestratorPolicy?.issueScope) {
       const campaignId = this.db.campaignRootForMember(sessionId);
@@ -6787,16 +6814,18 @@ export class SessionsService {
         return fail("A scoped Orchestrator must restart in the campaign's runner and repository workspace. Restore its campaign workspace or start an independent campaign.", 409);
       }
     }
-    const supportsIssueScope = runnerSupportsProtocol(
-      this.db.getRunner(session.runnerId)?.protocolVersion,
+    const supportsIssueScope = runnerSupportsProtocol(restartProtocolVersion, "orchestratorIssueScope");
+    const issueScopeRefusal = () => capabilityFail<SessionView>(runnerCapabilityRequirementError(
+      restartProtocolVersion,
       "orchestratorIssueScope",
-    );
+      "campaign issue coordination",
+    ));
     if (session.orchestratorPolicy && !session.orchestratorPolicy.issueScope && !session.orchestratorPolicy.issueNumbers?.length &&
         this.db.sessionWasHumanCreatedOrchestrator(sessionId)) {
       const initialPrompt = this.db.initialUserMessageText(sessionId);
       const recovered = initialPrompt ? orchestratorIssueNumbersFromInitialPrompt(initialPrompt) : [];
       if (recovered.length && !supportsIssueScope) {
-        return fail("Campaign issue coordination requires a protocol-v158 Orchestrator runner; update the runner and retry.", 409);
+        return issueScopeRefusal();
       }
       if (recovered.length &&
           this.db.backfillSessionOrchestratorIssueNumbers(sessionId, recovered, Date.now())) {
@@ -6804,7 +6833,7 @@ export class SessionsService {
       }
     }
     if (session.orchestratorPolicy?.issueNumbers?.length && !supportsIssueScope) {
-      return fail("Campaign issue coordination requires a protocol-v158 Orchestrator runner; update the runner and retry.", 409);
+      return issueScopeRefusal();
     }
     const hasStopIntent = this.db.hasSessionStopIntent(sessionId);
     if (hasStopIntent) {
@@ -7476,24 +7505,12 @@ export class SessionsService {
     projection: OrchestratorCampaignProjection,
     task: string,
   ): string {
-    const policy = campaign.orchestratorPolicy!;
-    const owners = WORKFLOW_DECISION_CATEGORIES.map((category) =>
-      `${category}=${projection.decisionOwners[category]}`).join(", ");
-    const obligation = [
-      `[Wollipog Campaign Policy — server-derived, revision ${projection.policyRevision}]`,
-      `Campaign ${campaign.id}; Child Harness ${policy.behavior.childHarness?.agentId ?? "Automatic"}; Child Model ${policy.behavior.childModel ?? "Automatic"}; Child Effort ${policy.behavior.childEffort ?? "Automatic"}; Follow-Ups ${policy.behavior.followUps}; Completion ${policy.behavior.completion}.`,
-      `Typed decision owners: ${owners}. This is not blanket approval. For implementation questions, PR merge, merged-branch deletion, follow-up issue publication, and UI evidence approval, create the exact typed request and consume an approval immediately before the matching action. For PR merge, pass and then execute the exact canonical gh pr merge URL --squash --match-head-commit SHA command; its matching one-shot runner permission completes consumption. Ordinary prompts cannot satisfy a typed gate.`,
-      "Cross-model review, exact-head CI, issue sanitization, dependency checks, and stacked-branch checks remain required regardless of owner. An enqueued PR is unfinished until merge-group CI passes and the forge reports actual MERGED state. Authentication, secrets, persistent permission grants, governance, budgets, and tool guardrails remain human-only.",
-      "Leave any helper session you spawn idle once it has posted its final report, so the Orchestrator can verify it before verifying you; do not stop or archive one yourself, and never leave it working when you finish.",
-      projection.uiEvidenceReview.effectiveOwner === "orchestrator"
-        ? "The controlling Orchestrator can inspect artifact-backed image evidence and must review every item before approving. Children attach each capture from disk with attach_session_artifact (or `wollipog artifact attach --file`), never as base64 in a tool argument, and cite the returned artifactId, mediaType, and sha256; video normally routes to a human, except for an exact operator-enabled short-frame validation campaign. Externally stored evidence routes to a human."
-        : `UI evidence remains human-owned: ${projection.uiEvidenceReview.reason ?? "the human owns UI Evidence Approval under this policy."}`,
-      // Name no tool here: children do not share the Orchestrator's toolset, and a test holds this block to theirs.
-      "Report every follow-up you identify in your final report, each with a proposed title and repository; the controlling Orchestrator records and deduplicates it before anyone acts on it.",
-      "Higher-priority repository and harness restrictions still apply. A task may narrow this policy but cannot broaden its authority.",
-      "[End Wollipog Campaign Policy]",
-    ].join("\n");
-    return task ? `${obligation}\n\n${task}` : obligation;
+    const preflight = campaignAuthorityPreflight(campaign.orchestratorPolicy?.control, campaign.driver,
+      this.db.getRunner(campaign.runnerId)?.protocolVersion);
+    return formatCampaignAssignment(campaign, projection, {
+      ...preflight,
+      supported: preflight.supported && campaignBoundaryCurrent(campaign),
+    }, task);
   }
 
   /** Resolve the outermost controlling campaign while including the immediate parent. A nested
@@ -7732,8 +7749,16 @@ export class SessionsService {
       authorizeFullControl(principal, scope, proposal, expectedRevision + 1, now);
     if (!control) return fail("Full Control requires authenticated repository scope and a valid boundary", 400);
     if (control.mode === "full_control") {
-      if (control.boundary.issueAuthority && (scope!.issueNumbers.length + reservedPublicationSlots(this.db, session, undefined, undefined, true) > control.boundary.issueAuthority.maxIssues ||
-          scopeCompatibility(this.db, { ...session, orchestratorPolicy: { ...session.orchestratorPolicy!, control } }))) return fail("The issue boundary exceeds its human-set scope limit or requires protocol-v217 participants", 409);
+      if (control.boundary.issueAuthority) {
+        if (scope!.issueNumbers.length + reservedPublicationSlots(this.db, session, undefined, undefined, true) > control.boundary.issueAuthority.maxIssues) {
+          return fail("The issue boundary exceeds its human-set scope limit.", 409);
+        }
+        const outdated = scopeParticipants(this.db, session).find((participant) =>
+          !runnerSupportsProtocol(this.db.getRunner(participant.runnerId)?.protocolVersion, "fullControlIssueAuthority"));
+        if (outdated) {
+          return capabilityFail(campaignIssueLimitsRequirement(this.db.getRunner(outdated.runnerId)?.protocolVersion));
+        }
+      }
       if (!session.workspaceId) return fail("Full Control requires a repository workspace binding", 409);
       if(control.boundary.budgetAuthority?.controlledReview) {
         if(this.db.sessionScope(sessionId)?.owner.kind!=="user") return fail("Controlled native review requires a user-owned campaign charge scope.",409);
@@ -8336,7 +8361,7 @@ export class SessionsService {
     if (!root?.orchestratorPolicy || !canAccess(root.id)) return fail("campaign not found", 404);
     const compatibility = scopeCompatibility(this.db, root);
     const stored = root.orchestratorPolicy.issueScope;
-    if (compatibility) return ok({ ...scopeView(this.db, root, stored?.repository ?? ""), supported: false, compatibilityMessage: compatibility });
+    if (compatibility) return ok({ ...scopeView(this.db, root, stored?.repository ?? ""), supported: false, ...compatibilityFields(compatibility) });
     if (!this.hub.isRunnerOnline(root.runnerId)) return ok({
       ...scopeView(this.db, root, stored?.repository ?? ""), supported: false,
       compatibilityMessage: "The campaign runner is disconnected. Saved issue scope is shown; reconnect the runner to verify the repository and request changes.",
@@ -8365,7 +8390,7 @@ export class SessionsService {
     if (!root?.orchestratorPolicy || this.db.campaignRootForMember(sessionId) !== sessionId || !canAccess(sessionId)) return fail("scope proposals require the root campaign", 403);
     if (human && (human.kind !== "human" || !this.db.isSessionOwner(human, sessionId))) return fail("Only the authenticated campaign owner can propose human scope authority", 403);
     const unsupported = scopeCompatibility(this.db, root);
-    if (unsupported) return fail(unsupported, 409);
+    if (unsupported) return capabilityFail(unsupported);
     const view = await this.campaignIssueScope(sessionId, undefined, canAccess, false);
     if (!view.ok || !view.data) return failAs(view);
     if (!view.data.supported) return fail(view.data.compatibilityMessage ?? "Campaign issue scope changes are unavailable.", 409);
@@ -8473,7 +8498,7 @@ export class SessionsService {
     if (unsupported) return unsupported;
     if (issueBoundary(session)) {
       const compatibility = scopeCompatibility(this.db, session);
-      if (compatibility) return fail(compatibility, 409);
+      if (compatibility) return capabilityFail(compatibility);
     }
     if (isTerminal(session.status) || !boundedDecisionString(request?.requestId, 256) ||
         !session.orchestratorPolicy.issueNumbers?.includes(request?.issue) ||
@@ -8864,7 +8889,7 @@ export class SessionsService {
         return fail("Only the campaign owner can approve changes to authorized issue scope", 403);
       }
       const unsupported = scopeCompatibility(this.db, currentChild);
-      if (unsupported) return fail(unsupported, 409);
+      if (unsupported) return capabilityFail(unsupported);
       const request: CampaignIssueScopeRequest = { requestId: decision.requestId, expectedRevision: snapshot.expectedRevision,
         additions: snapshot.additions.map((number) => ({ repository: snapshot.repository, number })),
         removals: snapshot.removals.map((number) => ({ repository: snapshot.repository, number })), explanation: snapshot.explanation,
@@ -10939,7 +10964,9 @@ export class SessionsService {
             nextConfig.costBudgetUsd = null;
           } else {
             if (!session.costBudgetUsd || !step) return fail("cost guardrail has no re-arm window", 409);
-            const observed = Math.max(session.costUsd, pending.runnerGuardrail?.observed ?? session.costUsd);
+            // A running Claude turn's live estimate counts as spend here, as it did for the trip (#3112).
+            const spent = this.policyInput(session, []).costUsd;
+            const observed = Math.max(spent, pending.runnerGuardrail?.observed ?? spent);
             nextConfig.costBudgetUsd = pending.runnerGuardrail && session.costBudgetUsd > observed
               ? session.costBudgetUsd
               : Math.max(session.costBudgetUsd, observed) + step;
@@ -10986,7 +11013,8 @@ export class SessionsService {
         } else if (nextConfig.maxToolCalls != null && nextConfig.maxToolCalls !== session.maxToolCalls) {
           this.db.updateSessionMaxToolCalls(sessionId, nextConfig.maxToolCalls, now, session.maxToolCallsStep);
         }
-        this.db.updateSessionStatus(sessionId, hasBlockingPendingRequest(remaining) ? "input_required" : "idle", now);
+        this.db.updateSessionStatus(sessionId, hasBlockingPendingRequest(remaining) ? "input_required" :
+          this.estimateOnlyBudgetCardStatus(session, pending), now);
         // Asks are serialized through the single approval slot: if ANOTHER rule is also tripped,
         // park again immediately with its own card instead of waiting for the next turn settle.
         this.gateOnPolicy(sessionId, now);
@@ -13353,9 +13381,9 @@ export class SessionsService {
    * inputs re-derived each call, so re-application is idempotent. Returns true if it gated.
    */
   /** The owner's daily allowance and spend, when the session belongs to a user in an
-   * organization that set one. Three statements at most on the ingestion path: owner, budget,
-   * today's sum. */
-  private dailyBudgetFor(sessionId: string): { budgetUsd: number; spentUsd: number } | null {
+   * organization that set one. Four statements at most on the ingestion path: owner, budget,
+   * today's sum, and the open live estimates. */
+  private dailyBudgetFor(sessionId: string): DailyBudget | null {
     const owner = this.db.sessionOwnerUser(sessionId);
     return owner ? this.dailyBudgetForOwner(owner.organizationId, owner.userId) : null;
   }
@@ -13365,13 +13393,21 @@ export class SessionsService {
     if (scope?.owner.kind !== "user") return null;
     const daily = this.dailyBudgetForOwner(scope.organizationId, scope.owner.userId);
     if (!daily || daily.spentUsd < daily.budgetUsd) return null;
-    return `daily budget reached — $${daily.spentUsd.toFixed(2)} of $${daily.budgetUsd.toFixed(2)} today; new sessions wait for the day to roll over or an owner or admin to raise it`;
+    return `daily budget reached — $${daily.spentUsd.toFixed(2)} of $${daily.budgetUsd.toFixed(2)} today${
+      daily.includesEstimate ? ", including an estimate for running turns" : ""}; new sessions wait for the day to roll over or an owner or admin to raise it`;
   }
 
-  private dailyBudgetForOwner(organizationId: string, userId: string): { budgetUsd: number; spentUsd: number } | null {
+  /** Today's settled spend plus the open live estimates of the owner's running Claude turns, which
+   * no settled total includes yet (#3196), at micro-USD precision. The estimate is never accrued:
+   * once the turns settle, the figure is the ledger's again. */
+  private dailyBudgetForOwner(organizationId: string, userId: string): DailyBudget | null {
     const budget = this.db.getUsageDailyBudget(organizationId).perUserUsd;
     if (budget == null || budget <= 0) return null;
-    return { budgetUsd: budget, spentUsd: this.db.userCostTodayUsd(organizationId, userId) };
+    const settled = this.db.userCostTodayUsd(organizationId, userId);
+    const live = this.db.ownerLiveCostUsd(organizationId, userId);
+    return live > 0
+      ? { budgetUsd: budget, spentUsd: roundUsdMicros(settled + live), includesEstimate: true }
+      : { budgetUsd: budget, spentUsd: settled };
   }
 
   /** The guardrail fields the rule builder reads for a session, including the owner's allowance. */
@@ -13385,17 +13421,58 @@ export class SessionsService {
    * run past a soft card (they still stop at the runner-owned thresholds). */
   private runnerHoldAfter(session: SessionView, fields: GuardrailFields): RunnerHoldKind | undefined {
     const rules = rulesFromSession(fields);
-    const ask = firstAsk(evaluatePolicies({
-      status: "idle",
-      costUsd: session.costUsd,
-      toolCallCount: session.toolCallCount ?? 0,
-      unpriced: rules.some((rule) => rule.kind === "cost_unpriced") && this.db.sessionUsageUnpriced(session.id),
-    }, rules))?.rule.kind;
+    const ask = firstAsk(evaluatePolicies(this.policyInput(session, rules, "idle"), rules));
     if (!ask) return undefined;
-    const hard = runnerHoldFor(ask);
+    const hard = this.runnerTrips(session, ask);
     if (hard) return hard;
     const runner = this.db.getRunner(session.runnerId);
     return runnerSupportsProtocol(runner?.protocolVersion, "controlPlaneQueueHold") ? "control_plane" : undefined;
+  }
+
+  /** What the guardrail rules read for a session (#3112). Cost is the settled cost plus a running
+   * Claude turn's live estimate, which no total includes, at micro-USD precision; live tokens
+   * without a rate count as unpriced usage rather than free. While a checkpoint is accounting the
+   * window, its records are already in the settled cost, so the estimate is left out until the
+   * window closes. The unpriced check costs a ledger read, so it runs only when a rule can act. */
+  private policyInput(s: SessionView, rules: readonly PolicyRule[], status = s.status): PolicyInput {
+    const live = this.db.sessionLiveGuardrail(s.id);
+    // Recorded unpriced usage concerns the session's own budget and checkpoints; the daily budget
+    // fails closed only on a live request it would otherwise read as free (#3196).
+    const ownCostGuardrail = (s.costBudgetUsd ?? 0) > 0 || (s.costCheckpointsUsd ?? []).some((usd) => usd > 0);
+    const unpriced = rules.some((rule) => rule.kind === "cost_unpriced") &&
+      ((ownCostGuardrail && this.db.sessionUsageUnpriced(s.id)) || live.unpriced);
+    return {
+      status,
+      costUsd: live.costUsd > 0 ? roundUsdMicros(s.costUsd + live.costUsd) : s.costUsd,
+      toolCallCount: s.toolCallCount ?? 0,
+      unpriced,
+      ...(live.costUsd > 0 ? { includesEstimate: true } : {}),
+    };
+  }
+
+  /** The runner-owned threshold that trips this ask on the runner itself, if any. A runner cancels
+   * only on the settled cost, so a budget crossed by the live estimate alone is a control-plane card
+   * that holds the runner's queue, and the control plane interrupts the running turn (#3112). */
+  private runnerTrips(s: SessionView, ask: PolicyDecision): RunnerGuardrailKind | undefined {
+    if (ask.rule.kind === "cost_budget" && s.costUsd < ask.rule.budgetUsd) return undefined;
+    return runnerHoldFor(ask.rule.kind);
+  }
+
+  /** The unanswered budget card the live estimate alone raised: the runner never tripped it, and
+   * settled cost is still below the budget (#3112). */
+  private estimateOnlyBudgetCard(session: SessionView): PendingApproval | undefined {
+    if (session.costBudgetUsd == null || session.costUsd >= session.costBudgetUsd) return undefined;
+    return pendingRequests(session.pendingApproval).find((request) => request.kind === "cost_budget" && !request.runnerGuardrail);
+  }
+
+  /** A budget card the live estimate alone raised parked a turn that may still be running: the
+   * control plane's interruption is asynchronous, and an older runner may not apply it (#3112).
+   * Like a soft card, clearing it returns the session to idle only if the runner's idle arrived
+   * while parked. */
+  private estimateOnlyBudgetCardStatus(session: SessionView, card: PendingApproval): "running" | "idle" {
+    const uncancelled = card.kind === "cost_budget" && !card.runnerGuardrail && session.costBudgetUsd != null &&
+      session.costUsd < session.costBudgetUsd && this.db.policyResumeStatus(session.id) !== "idle";
+    return uncancelled ? "running" : "idle";
   }
 
   /** Releases or re-holds a runner's queue around a control-plane card. Re-sends the CURRENT
@@ -13425,16 +13502,13 @@ export class SessionsService {
     if (occupied.some((request) => request.kind !== "workflow_decision" && !request.async)) return null;
     const rules = rulesFromSession(this.guardrailFields(s));
     if (rules.length === 0) return null;
-    // sessionView already computed the count when the guardrail is armed — don't re-query.
-    const toolCallCount = s.toolCallCount ?? 0;
-    // The unpriced check costs a ledger read, so it runs only when a rule can act on it.
-    const unpriced = rules.some((rule) => rule.kind === "cost_unpriced") && this.db.sessionUsageUnpriced(s.id);
-    const ask = firstAsk(evaluatePolicies({ status: s.status, costUsd: s.costUsd, toolCallCount, unpriced }, rules));
+    // sessionView already computed the tool-call count when the guardrail is armed — don't re-query.
+    const ask = firstAsk(evaluatePolicies(this.policyInput(s, rules), rules));
     if (!ask) return null;
     // A runner-enforced threshold armed on a live session is the runner's to trip: it receives
     // the threshold with the config write, cancels at the crossing, and settles into this gate.
     // Parking on it here would show a hard card the runner knows nothing about.
-    if (softOnly && runnerHoldFor(ask.rule.kind)) return null;
+    if (softOnly && this.runnerTrips(s, ask)) return null;
     return ask;
   }
 
@@ -13449,7 +13523,7 @@ export class SessionsService {
     if (s.status === "idle") this.db.notePolicyResumeStatus(sessionId, "idle");
     // A control-plane-only card must also stop the runner draining queued prompts behind the
     // turn it parks; the runner-owned thresholds already tripped on the runner itself.
-    if (!runnerHoldFor(ask.rule.kind)) this.rearmRunnerAfterCard(s, "control_plane");
+    if (!this.runnerTrips(s, ask)) this.rearmRunnerAfterCard(s, "control_plane");
     let combined = approval;
     for (const request of occupied) combined = appendPendingApproval(combined, request);
     this.db.setPendingApproval(sessionId, combined);
@@ -13468,7 +13542,52 @@ export class SessionsService {
     this.recordGovernanceAudit(s, approval, "policy_decision", "asked", { kind: "policy", id: ask.rule.kind }, now, {
       policyRule: ask.rule,
     });
+    // No runner cancels on the live estimate, so the control plane stops the turn it parked (#3112).
+    // A pending workflow decision shows the session as input_required while its turn still runs, so
+    // the runner's active-turn coordinate decides, not the status.
+    if (ask.rule.kind === "cost_budget" && !this.runnerTrips(s, ask) && s.status !== "idle" && !isTerminal(s.status)) {
+      this.interruptTurnAtEstimate(s);
+    }
     return true;
+  }
+
+  /** Stop the active turn of a session whose live estimate crossed its budget (#3112). This is the
+   * runner's ordinary turn interruption: it cancels only that turn and holds the queue until the
+   * turn settles, and the card's control-plane hold keeps the queue held after that. The estimate
+   * is compared once, here, against the control plane's own price; the runner compares nothing.
+   * The runner reports the interrupted turn and its idle as usual, and a turn that ended first is
+   * a harmless no-op. */
+  private interruptTurnAtEstimate(session: SessionView): void {
+    const protocolVersion = this.runnerProtocolVersion(session.runnerId);
+    if (!runnerSupportsProtocol(protocolVersion, "turnInterruption")) return;
+    const failed = (reason: string) => this.log.warn(JSON.stringify({
+      event: "live_budget_interrupt_not_applied", sessionId: session.id, runnerId: session.runnerId, reason,
+    }));
+    if (runnerSupportsProtocol(protocolVersion, "turnInterruptionAck")) {
+      // Without a coordinate yet (a reconnecting runner flushes usage before it reports its queue),
+      // the runner's next queue report names the turn, and the unanswered card stops it then.
+      const turnId = this.hub.activeTurnIdForSession(session.id);
+      if (!turnId || this.estimateInterruptedTurns.get(session.id) === turnId) return;
+      this.estimateInterruptedTurns.set(session.id, turnId);
+      // An interruption that did not take effect is retried at the runner's next report of the
+      // same turn, such as after a reconnect; an already-requested one did take effect.
+      const retry = (reason: string) => {
+        failed(reason);
+        if (this.estimateInterruptedTurns.get(session.id) === turnId) this.estimateInterruptedTurns.delete(session.id);
+      };
+      const requestId = `interrupt_${randomUUID().slice(0, 8)}`;
+      void this.hub.requestFromRunner(session.runnerId, requestId, {
+        type: "interrupt_turn", requestId, sessionId: session.id, turnId,
+      }, 5_000).then((result) => {
+        if (result.type !== "interrupt_turn_result") retry("invalid_response");
+        else if (!result.applied && result.reason !== "already_requested") retry(result.reason);
+      }, (error: unknown) => retry((error as Error).message));
+      return;
+    }
+    const turnId = this.db.latestTurnId(session.id);
+    if (!this.hub.sendToRunner(session.runnerId, { type: "interrupt_turn", sessionId: session.id, ...(turnId ? { turnId } : {}) })) {
+      failed("runner_offline");
+    }
   }
 
   /** A durable control-plane decision that restores a swallowed runner idle must replay the same
@@ -14996,6 +15115,7 @@ export class SessionsService {
     let throughSeq: number | undefined;
     let eventEpoch = initial.eventEpoch;
     let trailingAsk: PendingApproval | null = null;
+    let hydratedUsage = false;
     const limit = 200;
     const maxSerializedBytes = 32 * 1024 * 1024;
     let requestId = "";
@@ -15127,6 +15247,7 @@ export class SessionsService {
           const attribution = this.restoreQuestionPolicyAttribution(event);
           if (attribution) this.hub.sessionEvent(attribution);
         }
+        if (applied.events.some(({ payload }) => payload.kind === "token_usage")) hydratedUsage = true;
         if (projectedBackgroundDelivery || projectedSteering) this.hub.sessionChangedById(sessionId);
         // Each page releases its staging once applied, so a long chain holds one page at a time.
         releaseStaged();
@@ -15141,6 +15262,14 @@ export class SessionsService {
       rejectPage("runner_request_or_apply_failed");
     } finally {
       releaseStaged();
+      // A running Claude turn's live estimate may have arrived through this gap rather than the
+      // live path that gates it (#3112). Committed pages are gated even when a later one fails.
+      if (hydratedUsage) {
+        const before = this.db.getSession(sessionId);
+        // A park is an attention moment, as on the live path.
+        if (this.gateOnPolicy(sessionId, Date.now()) && before) this.notifyTransition(before, sessionId);
+        this.hub.sessionChangedById(sessionId);
+      }
     }
   }
 
@@ -15616,6 +15745,14 @@ export class SessionsService {
 }
 
 type RunnerHoldKind = RunnerGuardrailKind | "control_plane";
+
+type DailyBudget = NonNullable<GuardrailFields["dailyBudget"]>;
+
+/** A sum of float USD amounts at the ledger's micro-USD precision, so ten $0.01 requests reach a
+ * $0.10 threshold (#3112). */
+function roundUsdMicros(usd: number): number {
+  return Math.round(usd * 1_000_000) / 1_000_000;
+}
 
 function runnerHoldFor(kind: PolicyRuleKind | undefined): RunnerGuardrailKind | undefined {
   return kind === "cost_budget" || kind === "max_tool_calls" ? kind : undefined;

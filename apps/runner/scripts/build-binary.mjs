@@ -77,6 +77,15 @@ if (process.platform === "linux" || process.platform === "darwin") {
       join(runner, "native", "provider-home-lease-io.c"), "-o", leaseIoHelper], { stdio: "inherit" });
 }
 
+// Protected Claude sessions use a fixed Linux pipe owner to report a provider's
+// exit after its already-written output, independently of inherited pipe EOF.
+const claudePipeHelper = join(buildDir, "claude-provider-pipe");
+if (process.platform === "linux") {
+  execFileSync("/usr/bin/cc", ["-Os", "-std=c11", "-Wall", "-Wextra", "-Werror", "-static",
+    join(runner, "native", "claude-provider-pipe.c"), "-o", claudePipeHelper], { stdio: "inherit" });
+  console.log("compiled Claude provider pipe helper ->", claudePipeHelper);
+}
+
 // Stop here when only validating the bundle (CI / quick check).
 if (process.argv.includes("--bundle-only")) {
   console.log("bundle-only: skipping SEA packaging");
@@ -88,6 +97,7 @@ const seaConfig = join(buildDir, "sea-config.json");
 const blob = join(buildDir, "runner.blob");
 const assets = { "wollipog/provider-home-lease-worker": leaseWorker };
 if (process.platform === "linux" || process.platform === "darwin") assets["wollipog/provider-home-lease-io"] = leaseIoHelper;
+if (process.platform === "linux") assets["wollipog/claude-provider-pipe"] = claudePipeHelper;
 if (process.platform === "darwin") {
   const helper = join(buildDir, "macos-skill-snapshots");
   execFileSync("/usr/bin/clang", ["-Os", "-std=c11", "-Wall", "-Wextra", "-Werror",

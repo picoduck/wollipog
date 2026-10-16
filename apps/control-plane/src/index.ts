@@ -1,3 +1,4 @@
+import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
 import { registerCampaignIssueScopeRoutes } from "./campaign-issue-scope-routes.js";
 /**
  * Control plane: routes UI commands to runners, ingests runner events, persists
@@ -50,6 +51,7 @@ import {
   CONTROL_PLANE_SERVICE,
   providerSupportsConversationFork,
   runnerCapabilityRequirementError,
+  runnerCapabilityRequirementWithAlternative,
   type RunnerCapabilityRequirementDetails,
   runnerSupportsProtocol,
   scopeAudienceContained,
@@ -198,9 +200,11 @@ import {
   SessionNamingSettings,
 } from "./session-naming-settings.js";
 import { registerSessionNamingRoutes } from "./session-naming-route.js";
+import { ArchivedHistoryRetention } from "./archived-history-retention.js";
+import { registerArchivedHistoryRetentionRoutes } from "./archived-history-retention-route.js";
 import { AgentHarnessDefaultsSettings } from "./agent-harness-defaults.js";
 import { registerAgentHarnessDefaultsRoutes } from "./agent-harness-defaults-route.js";
-import { OrchestratorSettings } from "./orchestrator-settings.js";
+import { OrchestratorSettings, childHarnessAgents, childModelMachines } from "./orchestrator-settings.js";
 import { registerArtifactUploadSettingsRoutes } from "./artifact-upload-settings-route.js";
 import { registerOrchestratorSettingsRoutes } from "./orchestrator-settings-route.js";
 import { registerRunnerAttestationRoute } from "./runner-attestation-route.js";
@@ -221,8 +225,10 @@ import {
   Hub,
   INDEFINITE_SESSION_REMINDER_UI_PROTOCOL,
   isRunnerRequestTimeoutError,
+  SOMEDAY_REMINDER_CLIENT_UPDATE_REQUIRED,
 } from "./hub.js";
 import { HistoryPreviewReader } from "./history-preview.js";
+import { registerPromptHistoryRoute } from "./prompt-history-route.js";
 import {
   buildRunnerWsUrl,
   isAllowedOrigin,
@@ -959,6 +965,8 @@ if (VIDEO_FRAME_VALIDATION_SESSION_ID) {
 }
 
 registerSessionNamingRoutes(app, sessionNamingSettings, requestPrincipal);
+const archivedHistoryRetention = new ArchivedHistoryRetention(db, { env: process.env, log: app.log });
+registerArchivedHistoryRetentionRoutes(app, archivedHistoryRetention, requestPrincipal);
 registerAgentHarnessDefaultsRoutes(app, agentHarnessDefaultsSettings, requestPrincipal);
 registerOrchestratorSettingsRoutes(app, orchestratorSettings, requestPrincipal);
 registerArtifactUploadSettingsRoutes(app, db, hub, requestPrincipal);
@@ -1116,6 +1124,14 @@ const orchestrator = new BoxOrchestrator({
 // has no top-level await — required to bundle the control plane into a CJS single
 // executable (the Tauri sidecar) without an ESM wrapper.
 app.register(cors, { origin: isLocalOrigin, methods: [...CORS_METHODS] });
+app.addHook("preSerialization", (req, _reply, payload, done) => {
+  // Agent tools understand data rather than the UI enum; only human clients need this downgrade.
+  if (requestPrincipal(req)?.kind === "agent") { done(null, payload); return; }
+  const protocol = parseUiProtocolVersion(req.query) ?? parseUiProtocolVersion({
+    protocolVersion: req.headers["x-wollipog-ui-protocol"],
+  });
+  done(null, projectBackgroundRetryExhaustionForUi(payload, protocol));
+});
 // @fastify/websocket installs one `upgrade` listener on the underlying HTTP server. Register it
 // exactly once: sibling registrations make both listeners claim every socket and eventually turn
 // an ordinary disconnect into ERR_HTTP_SOCKET_ASSIGNED / ERR_STREAM_WRITE_AFTER_END. The server
@@ -3833,8 +3849,12 @@ app.delete("/api/boxes/:id", async (req, reply) => {
 app.get("/api/sessions", async (req,reply) => {
   const includeArchived = (req.query as { archived?: string })?.archived === "true";
   const principal = requestPrincipal(req);
+  const uiProtocol = parseUiProtocolVersion(req.query) ?? parseUiProtocolVersion({
+    protocolVersion: req.headers["x-wollipog-ui-protocol"],
+  });
+  const supportsRetryExhaustion = principal?.kind === "agent" || runnerSupportsProtocol(uiProtocol, "backgroundRetryExhaustion");
   return reply.type("application/json").send(principal
-    ? db.sessionListJsonForPrincipal(principal,includeArchived)
+    ? db.sessionListJsonForPrincipal(principal,includeArchived,supportsRetryExhaustion)
     : '{"sessions":[]}');
 });
 
@@ -3920,8 +3940,16 @@ app.get("/api/sessions/:id/orchestrator-campaign", async (req, reply) => {
     return reply.code(403).send({ error: "a matching Orchestrator session credential is required" });
   }
   const projection = await svc.campaignProjectionWithHistory(id);
+  const policy = db.getSession(id)?.orchestratorPolicy;
+  const runners = policy ? db.listRunnersForPrincipal(principal) : [];
+  const agents = policy ? childHarnessAgents(policy, runners) : undefined;
+  const modelMachines = policy ? childModelMachines(policy, runners) : undefined;
   return respond(reply, projection.ok && projection.data
-    ? { ...projection, data: withCampaignHoldAdviceFor(db, principal, projection.data) }
+    ? { ...projection, data: {
+      ...withCampaignHoldAdviceFor(db, principal, projection.data),
+      ...(agents ? { childHarnessAgents: agents } : {}),
+      ...(modelMachines ? { childModelMachines: modelMachines } : {}),
+    } }
     : projection);
 });
 
@@ -4345,6 +4373,12 @@ registerSideChatRoutes(app, {
   withQueue: (session) => hub.withQueue(session, true),
 });
 
+registerPromptHistoryRoute(app, {
+  db,
+  hydrateHistory: (id) => svc.hydrateHistory(id),
+  requestPrincipal: (req) => requestPrincipals.get(req) ?? requestPrincipal(req),
+});
+
 app.get("/api/sessions/:id/retained-attachment-events", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const query = req.query as { after?: string; limit?: string; eventEpoch?: string };
@@ -4411,17 +4445,15 @@ app.get("/api/sessions/:id/events", async (req, reply) => {
   };
   const after = Number(query.after ?? 0);
   const currentTurnOpening = query.opening === "current-turn";
-  if (query.opening !== undefined && (!currentTurnOpening || query.limit === undefined ||
+  if (query.opening !== undefined && (!currentTurnOpening ||
       query.after !== undefined || query.before !== undefined || query.direction !== undefined || query.align !== undefined)) {
-    return reply.code(400).send({ error: "opening must be current-turn with limit and no paging cursors",
+    return reply.code(400).send({ error: "opening must be current-turn with no paging cursors",
       code: "invalid_history_page" });
   }
-  if (query.limit === undefined) {
-    await svc.hydrateHistory(id);
-    return { events: db.listEvents(id, after) };
-  }
-  const limit = Number(query.limit);
-  const requestedEpoch = Number(query.eventEpoch);
+  // Omission is a cache-first page, just like explicit paging. Never await whole-log hydration
+  // or serialize all history because an API consumer forgot the page size.
+  const limit = Number(query.limit ?? 200);
+  const requestedEpoch = query.eventEpoch === undefined ? undefined : Number(query.eventEpoch);
   // A backward read serves the bounded opening window: the newest `limit` rows, then older pages
   // below an explicit cursor. Combining it with the forward gap-fill cursor is always a client bug,
   // so it fails closed rather than silently ignoring one of the two.
@@ -4467,7 +4499,7 @@ app.get("/api/sessions/:id/events", async (req, reply) => {
     });
   }
   if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 200 ||
-      !Number.isSafeInteger(requestedEpoch) || requestedEpoch < 0) {
+      (requestedEpoch !== undefined && (!Number.isSafeInteger(requestedEpoch) || requestedEpoch < 0))) {
     return reply.code(400).send({
       error: "after, eventEpoch, and limit must be bounded non-negative integers",
       code: "invalid_history_page",
@@ -4476,21 +4508,40 @@ app.get("/api/sessions/:id/events", async (req, reply) => {
   const session = db.getSession(id);
   const state = db.getRunnerHistoryState(id);
   if (!session || !state) return reply.code(404).send({ error: "session not found" });
-  if (requestedEpoch !== state.eventEpoch) {
+  if (requestedEpoch !== undefined && requestedEpoch !== state.eventEpoch) {
     return reply.code(409).send({
       error: "session event history was replaced",
       code: "stale_event_epoch",
       eventEpoch: state.eventEpoch,
     });
   }
+  // Installed old CLI/MCP readers use exactly this fallback shape, then slice the response as if
+  // it contained the whole log. Their later tail probe can mark a first page as the true newest
+  // window. Fence that identifiable agent call instead of silently supplying misleading rows.
+  const principal = requestPrincipal(req);
+  if (query.limit === undefined && query.after !== undefined && query.eventEpoch === undefined &&
+      principal?.kind === "agent" && principal.credentialSessionId) {
+    const actor = db.getSession(principal.credentialSessionId);
+    const actorProtocolVersion = actor ? db.getRunner(actor.runnerId)?.protocolVersion : undefined;
+    if (!runnerSupportsProtocol(actorProtocolVersion, "boundedSessionEventReads")) {
+      const requirement = runnerCapabilityRequirementWithAlternative(actorProtocolVersion, "boundedSessionEventReads",
+        "paged session event reads", "To read now, request an explicit limit and eventEpoch.");
+      return reply.code(426).send({
+        ...requirement,
+        code: "session_event_reader_upgrade_required",
+        // Installed readers predating the shared runner fields read this one.
+        requiredProtocolVersion: requirement.requiredRunnerProtocolVersion,
+      });
+    }
+  }
   const indexed = runnerSupportsProtocol(db.getRunner(session.runnerId)?.protocolVersion, "indexedHistory");
   const cacheComplete = indexed ? state.complete : state.hydratedSeq >= state.tailSeq;
   if (currentTurnOpening) {
     const opening = db.listCachedCurrentTurnOpening(id, limit);
     void svc.hydrateHistory(id);
-    const preview = cacheComplete ? null : await historyPreviews.read(id, requestedEpoch, { limit });
+    const preview = cacheComplete ? null : await historyPreviews.read(id, state.eventEpoch, { limit });
     const current = db.getRunnerHistoryState(id);
-    if (!current || current.eventEpoch !== requestedEpoch) return reply.code(409).send({
+    if (!current || current.eventEpoch !== state.eventEpoch) return reply.code(409).send({
       error: "session event history was replaced", code: "stale_event_epoch", eventEpoch: current?.eventEpoch,
     });
     return { ...opening, eventEpoch: state.eventEpoch, cacheComplete, ...(preview ? { preview } : {}) };
@@ -5828,7 +5879,9 @@ app.get("/api/sessions/:id/reminder", async (req, reply) => {
     && (parseUiProtocolVersion(req.query) ?? 0) < INDEFINITE_SESSION_REMINDER_UI_PROTOCOL
   ) {
     return reply.code(409).send({
-      error: "This reminder uses Someday and requires Wollipog protocol v174. Update this client and try again.",
+      error: SOMEDAY_REMINDER_CLIENT_UPDATE_REQUIRED,
+      requiredClientProtocolVersion: INDEFINITE_SESSION_REMINDER_UI_PROTOCOL,
+      clientProtocolVersion: parseUiProtocolVersion(req.query),
     });
   }
   return { reminder };
@@ -5897,6 +5950,20 @@ app.post("/api/sessions/:id/background-deliveries/:continuationId/acknowledge-mi
   if (!resolution) return reply.code(404).send({ error: "background delivery not found" });
   if (!changed && resolution === "not_terminal") {
     return reply.code(409).send({ error: "background delivery is not terminally missing" });
+  }
+  if (changed) hub.sessionChangedById(id);
+  return session;
+});
+
+app.post("/api/sessions/:id/background-deliveries/:continuationId/acknowledge-retry-exhaustion", async (req, reply) => {
+  const { id, continuationId } = req.params as { id: string; continuationId: string };
+  const changed = db.acknowledgeBackgroundRetryExhaustion(id, continuationId, Date.now());
+  const session = db.getSession(id);
+  if (!session) return reply.code(404).send({ error: "session not found" });
+  const resolution = db.backgroundRetryExhaustionResolution(id, continuationId);
+  if (!resolution) return reply.code(404).send({ error: "background delivery not found" });
+  if (!changed && resolution === "not_terminal") {
+    return reply.code(409).send({ error: "background delivery has not exhausted its retries" });
   }
   if (changed) hub.sessionChangedById(id);
   return session;
@@ -6382,6 +6449,7 @@ const artifactMaintenanceTimer = setInterval(() => {
   }
 }, 60_000);
 artifactMaintenanceTimer.unref();
+archivedHistoryRetention.start();
 // Half-open-socket liveness sweep. A runner whose socket silently died (sleep / Wi-Fi drop / NAT
 // rebind) stays readyState=OPEN with no FIN/RST, so onGone never fires: the runner reads 'online'
 // and its sessions 'running' forever, and prompts written to the dead socket are lost. The app-level
@@ -6440,6 +6508,7 @@ app.addHook("onClose", async () => {
   clearInterval(backgroundPushRetryTimer);
   clearInterval(policyHookApprovalTimer);
   clearInterval(artifactMaintenanceTimer);
+  archivedHistoryRetention.stop();
   clearInterval(runnerLivenessTimer);
   try {
     await outboundEvents.close();

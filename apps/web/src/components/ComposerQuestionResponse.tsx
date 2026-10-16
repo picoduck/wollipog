@@ -416,8 +416,8 @@ export function ComposerQuestionResponse({
       return;
     }
     if (event.key === "Enter") {
-      // A button keeps its own Enter; the field and the choice rows move on.
-      if (target.closest("button, a[href]")) return;
+      // Reading the panel is not an answer. Only the field and choice rows advance on Enter.
+      if (target === event.currentTarget || target.closest("button, a[href]")) return;
       event.preventDefault();
       if (!event.repeat) accept();
       return;
@@ -456,6 +456,7 @@ export function ComposerQuestionResponse({
     <section
       ref={sectionRef}
       className="composer-answer"
+      tabIndex={0}
       aria-labelledby={titleId}
       aria-busy={busy}
       data-collapsed={collapsed ? "" : undefined}

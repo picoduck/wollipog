@@ -50,6 +50,14 @@ test("evaluatePolicies: cost_budget asks at/over the budget, ok below", () => {
   assert.equal(over.title, "Cost budget reached — $6.00 of $5.00. Continue?"); // shipped Phase 7 copy, verbatim
 });
 
+test("evaluatePolicies: a cost card says when its spend includes a running turn's estimate (#3112)", () => {
+  const rules = rulesFromSession({ costBudgetUsd: 5, costCheckpointsUsd: [2], costUnpricedAcknowledged: true });
+  assert.deepEqual(evaluatePolicies(running({ costUsd: 6, includesEstimate: true }), rules).map((decision) => decision.title), [
+    "Cost checkpoint — $6.00 of $2.00, including an estimate for the running turn. Continue?",
+    "Cost budget reached — $6.00 of $5.00, including an estimate for the running turn. Continue?",
+  ]);
+});
+
 test("evaluatePolicies: max_tool_calls asks at/over the limit, ok below", () => {
   const rules = rulesFromSession({ maxToolCalls: 3 });
   assert.equal(evaluatePolicies(running({ toolCallCount: 2 }), rules)[0]!.decision, "ok");
@@ -335,8 +343,16 @@ test("v105 rules: daily budget first, unpriced fail-closed, then the next checkp
     "an approved last checkpoint and an acknowledged unpriced state leave nothing to ask");
   assert.deepEqual(rulesFromSession({ dailyBudget: { budgetUsd: 20, spentUsd: 3 }, maxToolCalls: 4 }), [
     { kind: "daily_budget", budgetUsd: 20, spentUsd: 3 },
+    { kind: "cost_unpriced" },
     { kind: "max_tool_calls", maxCalls: 4 },
-  ], "no unpriced rule without a session budget or checkpoint");
+  ], "the daily budget fails closed on unpriced live usage too (#3196); the caller decides what is unpriced");
+  assert.deepEqual(rulesFromSession({ maxToolCalls: 4 }), [{ kind: "max_tool_calls", maxCalls: 4 }],
+    "no unpriced rule without a cost guardrail");
+  const daily = rulesFromSession({ dailyBudget: { budgetUsd: 20, spentUsd: 20.04, includesEstimate: true }, costUnpricedAcknowledged: true });
+  assert.deepEqual(daily, [{ kind: "daily_budget", budgetUsd: 20, spentUsd: 20.04, includesEstimate: true }]);
+  assert.equal(firstAsk(evaluatePolicies(running({ costUsd: 0 }), daily))!.title,
+    "Daily budget reached — $20.04 of $20.00 today across your sessions, including an estimate for running turns. " +
+    "New turns pause until the day rolls over or an owner or admin raises it.");
   assert.deepEqual(normalizeCostCheckpoints(["2.5", 1, 1, -3, "x", 0.005]), [0.01, 1, 2.5]);
   assert.equal(normalizeCostCheckpoints([]), null);
   assert.equal(normalizeCostCheckpoints("1,2"), null);

@@ -181,6 +181,16 @@ export function formatUsd(amount: number): string {
   return `$${amount.toFixed(2)}`;
 }
 
+/** The spend a cost guardrail compares, as a sentence. While a Claude turn runs, the control plane's
+ * guardrails add its live rate-table estimate to the settled cost (#3112), and the sentence says so. */
+export function spentSoFar(session: Pick<SessionView, "costUsd" | "liveUsage">): string {
+  const estimate = session.liveUsage?.costUsd ?? 0;
+  const settled = session.costUsd ?? 0;
+  return estimate > 0
+    ? `${formatUsd(settled + estimate)} spent so far, including an estimate for the running turn.`
+    : `${formatUsd(settled)} spent so far.`;
+}
+
 /** The + menu's second line for Guardrails…: what pauses the session and how many children may
  * run, or "No limits set." */
 export function guardrailSummary(session: GuardrailSession): string {

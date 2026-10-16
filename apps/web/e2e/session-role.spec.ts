@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { sessionRoleConversionRequirement } from "@wollipog/protocol";
 
 async function chooseRoleSetting(page: Page, label: string, option: string) {
   await page.getByRole("button", { name: new RegExp(`^${label}:`) }).click();
@@ -24,7 +25,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       await expect(dialog.getByRole("button", { name: "Change to Orchestrator", exact: true })).toBeEnabled();
       await expect(dialog).toContainText("Provider permissions stay unchanged (auto)");
       await expect(dialog).toContainText("PR Merge");
-      await chooseRoleSetting(page, "Child Harness", "Codex App · Codex App Server · Native");
+      await chooseRoleSetting(page, "Child Harness", "Codex App Server · Native");
       await chooseRoleSetting(page, "Child Model", "GPT-6.1 Sol");
       await chooseRoleSetting(page, "Child Effort", "High");
       await dialog.getByLabel("Maximum Concurrent Children", { exact: true }).fill("7");
@@ -60,19 +61,42 @@ for (const scenario of ["busy", "children", "older-runner", "strict", "viewer"])
     const dialog = await openRoleDialog(page);
     await expect(dialog.getByRole("button", { name: /^Change to / })).toBeDisabled();
     await expect(dialog.locator(".notice")).toBeVisible();
-    if (scenario === "older-runner") await expect(dialog.locator(".notice")).toContainText("protocol v203 or later");
+    if (scenario === "older-runner") {
+      await expect(dialog.locator(".notice")).toContainText(sessionRoleConversionRequirement(202).error);
+      await expect(dialog.locator(".notice")).not.toContainText(/protocol|v\d/u);
+    }
     expect(await page.evaluate(() => window.__WOLLIPOG_ROLE_E2E__.calls())).toBe(0);
     await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
     await expect(dialog).toBeHidden();
   });
 }
 
+const ROLE_UPDATE_REQUIRED = "Update Wollipog before changing an existing session's role.";
+
 test("an older control plane disables the role action with upgrade guidance", async ({ page }) => {
   await page.goto("/session-role-e2e.html?scenario=older-control-plane");
   await page.getByRole("button", { name: "More Actions", exact: true }).click();
   const item = page.getByRole("menuitem", { name: "Change Session Role…", exact: true });
   await expect(item).toBeDisabled();
-  await expect(page.getByText("Update the control plane before changing an existing session's role.")).toBeVisible();
+  await expect(page.getByText(ROLE_UPDATE_REQUIRED, { exact: true })).toBeVisible();
+  await expect(page.getByText(/control plane/iu)).toHaveCount(0);
+  expect(await page.evaluate(() => window.__WOLLIPOG_ROLE_E2E__.calls())).toBe(0);
+});
+
+test("the open dialog and the menu read the same update sentence after reconnecting to an older Wollipog", async ({ page }) => {
+  await page.goto("/session-role-e2e.html");
+  const dialog = await openRoleDialog(page);
+  await page.evaluate(() => window.__WOLLIPOG_ROLE_E2E__.reconnectToOlderWollipog());
+  await expect(dialog.getByRole("button", { name: /^Change to / })).toBeDisabled();
+  const notice = dialog.locator(".notice").filter({ hasText: ROLE_UPDATE_REQUIRED });
+  await expect(notice).toHaveText(ROLE_UPDATE_REQUIRED);
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(dialog).toBeHidden();
+
+  await page.getByRole("button", { name: "More Actions", exact: true }).click();
+  await expect(page.getByRole("menuitem", { name: "Change Session Role…", exact: true })).toBeDisabled();
+  await expect(page.getByText(ROLE_UPDATE_REQUIRED, { exact: true })).toBeVisible();
+  await expect(page.getByText(/control plane/iu)).toHaveCount(0);
   expect(await page.evaluate(() => window.__WOLLIPOG_ROLE_E2E__.calls())).toBe(0);
 });
 

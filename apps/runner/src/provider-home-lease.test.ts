@@ -15,12 +15,12 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { after, test } from "node:test";
+import { dirname, join } from "node:path";
+import { after, test, type TestContext } from "node:test";
 const previousMask = process.umask(0o077);
 after(() => process.umask(previousMask));
-import { providerLaunchNeedsSharedHomeLease, ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
-import type { SpawnIsolation } from "./spawn.js";
+import { providerHomeLeaseRefusalKind, providerLaunchNeedsSharedHomeLease, ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
+import { killTreeAndWait, type AgentProcess, type SpawnIsolation } from "./spawn.js";
 
 const OWNER_A = "a".repeat(64);
 const OWNER_B = "b".repeat(64);
@@ -459,6 +459,26 @@ test("container and cloud launches never lease the host provider HOME", () => {
   );
 });
 
+test("protected bwrap with preserved provider state retains the shared-home lease", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-preserved-provider-home-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const isolated: SpawnIsolation = { backend: "bwrap", command: "bwrap", args: [], network: "inherit" };
+  const preserved: SpawnIsolation = { ...isolated, preservesProviderHome: true };
+  assert.equal(providerLaunchNeedsSharedHomeLease(isolated), false);
+  assert.equal(providerLaunchNeedsSharedHomeLease(preserved), true);
+  const first = new ProviderHomeLeaseRegistry(OWNER_A, {
+    pid: 101, hostname: "host-a", isProcessAlive: (pid) => pid === 101,
+  });
+  const second = new ProviderHomeLeaseRegistry(OWNER_B, {
+    pid: 202, hostname: "host-a", isProcessAlive: (pid) => pid === 101,
+  });
+  first.acquire({ ...request(home), isolation: preserved });
+  assert.throws(() => second.acquire({ ...request(home), isolation: preserved }), /already in use by process 101/);
+  first.releaseAll();
+  second.acquire({ ...request(home), isolation: preserved });
+  second.releaseAll();
+});
+
 test("a configured credential home is created before its first lease", (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-provider-home-create-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -553,6 +573,8 @@ test("stale leases with a foreign owner or host and live leases all fail closed"
       assert.ok(String(error).includes(leasePaths(home).lock), "the operator can locate the refused state");
       assert.match(String(error), /quarantine the entire.*do not remove individual records/);
       assert.ok(!String(error).includes(OWNER_A) && !String(error).includes(OWNER_B));
+      assert.equal(providerHomeLeaseRefusalKind(error),
+        scenario === "owner" ? "foreign_owner" : scenario === "host" ? "foreign_host" : "busy");
       return true;
     });
     assert.deepEqual(readdirSync(leasePaths(home).lock), ["lease.json"]);
@@ -689,51 +711,355 @@ test("one fixed successor elects exactly one of two concurrent same-owner reclai
   winner.releaseAll();
 });
 
-test("the exclusive successor elects one winner across real runner processes", async (t) => {
-  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-process-race-"));
-  t.after(() => rmSync(home, { recursive: true, force: true }));
-  writeLegacyLease(home, { pid: 2_147_483_647 });
-  const start = join(home, "start");
-  const release = join(home, "release");
-  const helper = join(home, "race-helper.ts");
+const SUCCESSOR_REPORT_MS = 10_000;
+
+type SuccessorRaceOptions = {
+  startupDelayMs?: number;
+  publicationDelayMs?: number;
+  readinessMs?: number;
+  cleanupGraceMs?: number;
+  signal?: AbortSignal;
+  onReady?: () => void;
+  beforeRemoveRoot?: (root: string) => void;
+  fault?: "before-ready" | "hang-before-ready" | "hang-in-publication" | "hang-after-report" | "both-refuse";
+};
+
+async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOptions = {}) {
+  const root = mkdtempSync(join(process.env.WOLLIPOG_SUCCESSOR_FIXTURE_PARENT ?? tmpdir(), "wollipog-provider-home-process-race-"));
+  const home = join(root, "home");
+  const staging = join(root, "staging");
+  const start = join(root, "start");
+  const release = join(root, "release");
+  const helper = join(root, "race-helper.mjs");
   const moduleUrl = new URL("./provider-home-lease.ts", import.meta.url).href;
-  writeFileSync(helper, `
-    import { existsSync, writeFileSync } from "node:fs";
-    import { ProviderHomeLeaseRegistry } from ${JSON.stringify(moduleUrl)};
-    const [home, result, start, release] = process.argv.slice(2);
-    while (!existsSync(start)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
-    const registry = new ProviderHomeLeaseRegistry(${JSON.stringify(OWNER_A)}, { hostname: "host-a" });
-    try {
-      registry.acquire({ driver: "claude-code", command: "claude", context: { kind: "native" }, env: { HOME: home } });
-      writeFileSync(result, "won");
-      while (!existsSync(release)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
-      registry.releaseAll();
-    } catch (error) {
-      writeFileSync(result, \`lost:\${error instanceof Error ? error.message : String(error)}\`);
+  const ioUrl = new URL("./provider-home-lease-io.ts", import.meta.url).href;
+  const states: Array<{
+    child: AgentProcess; name: string; phase: string; phaseAt: number; spawnedAt: number;
+    ready: boolean; reported: boolean; closed: boolean; code: number | null;
+    signal: NodeJS.Signals | null; stderr: string; error?: string;
+    timings: Record<string, number>; outcome?: string;
+  }> = [];
+  let failure: string | undefined;
+  let cleanupProved = true;
+  const cleanupFailures: string[] = [];
+  let outcomes: string[] = [];
+  const sanitize = (text: string) => text.replaceAll(home, "<fixture-home>")
+    .replaceAll(home.replaceAll("\\", "/"), "<fixture-home>")
+    .replace(/\b[A-Za-z]:[\\/][^\r\n"')]+/g, "<path>")
+    .replace(/\/(?:[^\s:/'")]+\/)+[^\s:'")]+/g, "<path>");
+  const details = () => states.map((state) => ({
+    contender: state.name, phase: state.phase,
+    elapsedMs: Math.round(performance.now() - state.spawnedAt),
+    phaseElapsedMs: Math.round(performance.now() - state.phaseAt),
+    timings: state.timings, outcome: sanitize(state.outcome ?? outcomes[states.indexOf(state)] ?? "unreported"),
+    exitCode: state.code, signal: state.signal, closed: state.closed,
+    stderr: sanitize(state.stderr), error: state.error,
+  }));
+  async function waitUntil(predicate: () => boolean, ms: number, monitor = false): Promise<boolean> {
+    const deadline = performance.now() + ms;
+    for (;;) {
+      if (monitor) {
+        if (t.signal.aborted || options.signal?.aborted) throw new Error("successor election cancelled");
+        if (states.some((state) => state.error || (state.closed && !state.reported))) {
+          throw new Error("contender failed before publishing its result");
+        }
+      }
+      if (predicate()) return true;
+      if (performance.now() >= deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, 10));
     }
-  `);
-  const results = [join(home, "result-a"), join(home, "result-b")];
-  const children = results.map((result) => spawn(process.execPath, ["--import", "tsx", helper, home, result, start, release], {
-    stdio: ["ignore", "pipe", "pipe"],
-  }));
-  const exits = children.map((child) => new Promise<{ code: number | null; stderr: string }>((resolve) => {
-    let stderr = "";
-    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
-    child.on("exit", (code) => resolve({ code, stderr }));
-  }));
-  writeFileSync(start, "go");
-  const deadline = Date.now() + 5_000;
-  while (results.some((result) => !existsSync(result)) && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  const allReported = results.every(existsSync);
-  writeFileSync(release, "done");
-  const statuses = await Promise.all(exits);
-  assert.ok(allReported, "both contenders report before the race deadline");
-  const outcomes = results.map((result) => readFileSync(result, "utf8"));
-  assert.deepEqual(statuses.map((status) => status.code), [0, 0], statuses.map((status) => status.stderr).join("\n"));
-  assert.equal(outcomes.filter((outcome) => outcome === "won").length, 1);
-  assert.equal(outcomes.filter((outcome) => outcome.startsWith("lost:")).length, 1);
+  async function forceCleanup(state: (typeof states)[number]): Promise<boolean> {
+    const child = state.child;
+    if (state.closed) return true;
+    const deadline = performance.now() + 5_000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const cleaned = await Promise.race([
+        killTreeAndWait(child),
+        new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), 5_000); }),
+      ]);
+      return cleaned && await waitUntil(() => state.closed, Math.max(0, deadline - performance.now()));
+    } finally { if (timer) clearTimeout(timer); }
+  }
+  try {
+    mkdirSync(home, { mode: 0o700 });
+    mkdirSync(staging, { mode: 0o700 });
+    writeLegacyLease(home, { pid: 2_147_483_647 });
+    writeFileSync(helper, `
+      import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+      import { ProviderHomeLeaseRegistry } from ${JSON.stringify(moduleUrl)};
+      import { ensureLeaseIoAvailable, withLeaseIoOptions, LeaseIoError } from ${JSON.stringify(ioUrl)};
+      const [home, result, start, release, fault, peerResult] = process.argv.slice(2);
+      const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+      const phase = (name, timings = {}, outcome) => new Promise((resolve, reject) => {
+        process.send({ phase: name, timings, outcome }, (error) => error ? reject(error) : resolve());
+      });
+      const waitFor = (path) => {
+        const deadline = performance.now() + 20_000;
+        while (!existsSync(path)) {
+          if (performance.now() >= deadline) throw new Error("fixture barrier timed out");
+          pause(5);
+        }
+      };
+      const hang = () => {
+        process.on("SIGTERM", () => {});
+        setInterval(() => {}, 1_000);
+        return new Promise(() => {});
+      };
+      let registry;
+      try {
+        await phase("initializing");
+        if (fault === "before-ready") throw new Error("synthetic failure at " + home);
+        if (fault === "hang-before-ready") await hang();
+        const initializedAt = performance.now();
+        withLeaseIoOptions({ providerHome: home }, ensureLeaseIoAvailable);
+        const initializationMs = performance.now() - initializedAt;
+        registry = new ProviderHomeLeaseRegistry(${JSON.stringify(OWNER_A)}, { hostname: "host-a" });
+        pause(${options.startupDelayMs ?? 0});
+        await phase("ready", { initializationMs });
+        waitFor(start);
+        await phase("acquiring");
+        const acquisitionAt = performance.now();
+        let outcome;
+        try {
+          registry.acquire({ driver: "claude-code", command: "claude", context: { kind: "native" }, env: { HOME: home } });
+          outcome = "won";
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          const refusal = (error instanceof Error && typeof error.reason === "string") ||
+            (error instanceof LeaseIoError && error.kind === "busy");
+          if (!refusal && !/already in use by process|lease changed during recovery/.test(message)) throw error;
+          outcome = "lost:" + message;
+        }
+        if (fault === "both-refuse") outcome = "lost:synthetic refusal after acquisition";
+        const acquisitionMs = performance.now() - acquisitionAt;
+        writeFileSync(result + ".claim.tmp", JSON.stringify({ outcome, pid: process.pid }));
+        renameSync(result + ".claim.tmp", result + ".claim");
+        await phase("publishing", { acquisitionMs }, outcome);
+        if (fault === "hang-in-publication") await hang();
+        const publicationAt = performance.now();
+        pause(${options.publicationDelayMs ?? 0});
+        let verificationMs = 0;
+        if (outcome.startsWith("lost:")) {
+          // A transient verification refusal is a valid losing outcome, but after the
+          // winner publishes, its canonical lease must be readable and exclude us.
+          waitFor(peerResult + ".claim");
+          const peer = JSON.parse(readFileSync(peerResult + ".claim", "utf8"));
+          if (peer.outcome !== "won") throw new Error("both contenders refused; no winning claim");
+          if (!Number.isInteger(peer.pid) || peer.pid === process.pid) throw new Error("invalid winning process claim");
+          waitFor(peerResult);
+          const verificationAt = performance.now();
+          const verifier = new ProviderHomeLeaseRegistry(${JSON.stringify(OWNER_A)}, { hostname: "host-a" });
+          let excluded = false;
+          try {
+            verifier.acquire({ driver: "claude-code", command: "claude", context: { kind: "native" }, env: { HOME: home } });
+          } catch (error) {
+            if (!(error instanceof Error)) throw error;
+            const ownerPid = /already in use by process (\\d+)/.exec(error.message)?.[1];
+            if (Number(ownerPid) !== peer.pid) throw error;
+            excluded = true;
+          } finally { verifier.releaseAll(); }
+          if (!excluded) throw new Error("a live winning process must exclude a competing process");
+          verificationMs = performance.now() - verificationAt;
+        }
+        writeFileSync(result, outcome);
+        await phase("reported", { publicationMs: performance.now() - publicationAt, verificationMs });
+        if (fault === "hang-after-report") await hang();
+        if (outcome === "won") {
+          await phase("holding");
+          waitFor(release);
+        }
+      } catch (error) {
+        console.error(error instanceof Error ? error.message : String(error));
+        process.exitCode = 1;
+      } finally {
+        registry?.releaseAll();
+        process.disconnect();
+      }
+    `);
+    const results = [join(root, "result-a"), join(root, "result-b")];
+    for (const [index, result] of results.entries()) {
+      const spawnedAt = performance.now();
+      const child = spawn(process.execPath, ["--import", "tsx", helper, home, result, start, release, (index === 0 || options.fault === "both-refuse") ? options.fault ?? "" : "", results[1 - index]!], {
+        env: { ...process.env, TMPDIR: staging, TMP: staging, TEMP: staging },
+        detached: process.platform !== "win32", stdio: ["ignore", "ignore", "pipe", "ipc"],
+      }) as AgentProcess;
+      const state = {
+        child, name: `contender-${index === 0 ? "a" : "b"}`, phase: "launching", phaseAt: spawnedAt,
+        spawnedAt, ready: false, reported: false, closed: false,
+        code: null as number | null, signal: null as NodeJS.Signals | null, stderr: "",
+        error: undefined as string | undefined, outcome: undefined as string | undefined, timings: {} as Record<string, number>,
+      };
+      states.push(state);
+      child.stderr?.on("data", (chunk) => { state.stderr = (state.stderr + String(chunk)).slice(-8_192); });
+      child.on("message", (message) => {
+        const report = message as { phase: string; timings: Record<string, number>; outcome?: string };
+        state.phase = report.phase;
+        state.phaseAt = performance.now();
+        Object.assign(state.timings, report.timings);
+        if (report.outcome !== undefined) state.outcome = report.outcome;
+        if (report.phase === "ready") {
+          state.ready = true;
+          state.timings.startupMs = state.phaseAt - spawnedAt;
+        }
+        if (report.phase === "reported") state.reported = true;
+      });
+      child.once("error", (error) => { state.error = sanitize(error.message); });
+      child.once("close", (code, signal) => {
+        child.closeObserved = true;
+        state.closed = true; state.code = code; state.signal = signal;
+      });
+      // Advisory evidence only: a PID can be reused after the fixture dies.
+      writeFileSync(join(root, "contenders.json"), JSON.stringify({
+        version: 1, contenders: states.map((entry) => ({ pid: entry.child.pid, detached: process.platform !== "win32" })),
+      }));
+    }
+    // Windows measurements exceeded five seconds during both setup and actual
+    // acquisition/verification. Each phase gets a separate finite ten-second bound;
+    // no production deadline changes.
+    assert.ok(await waitUntil(() => states.every((state) => state.ready), options.readinessMs ?? 10_000, true), "contender readiness timed out");
+    options.onReady?.();
+    if (t.signal.aborted || options.signal?.aborted) throw new Error("successor election cancelled");
+    writeFileSync(start, "go");
+    assert.ok(await waitUntil(() => states.every((state) => state.reported), SUCCESSOR_REPORT_MS, true), "both contenders report before the race deadline");
+    outcomes = results.map((result) => readFileSync(result, "utf8"));
+    assert.equal(outcomes.filter((outcome) => outcome === "won").length, 1, "exactly one winner");
+    assert.equal(outcomes.filter((outcome) => outcome.startsWith("lost:")).length, 1, "exactly one refusal");
+  } catch (error) {
+    failure = sanitize(error instanceof Error ? error.message : String(error));
+  } finally {
+    try { writeFileSync(release, "done"); } catch { cleanupFailures.push("fixture release publication failed"); }
+    if (!await waitUntil(() => states.every((state) => state.closed), options.cleanupGraceMs ?? 5_000)) {
+      failure ??= "contenders required forced cleanup";
+      const cleaned = await Promise.all(states.map((state) => forceCleanup(state)));
+      cleanupProved = cleaned.every(Boolean);
+      if (!cleanupProved) cleanupFailures.push("fixture-owned tree cleanup incomplete");
+    }
+    if (cleanupProved && states.every((state) => state.closed)) {
+      try {
+        options.beforeRemoveRoot?.(root);
+        rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+      } catch (error) { cleanupFailures.push("temporary fixture cleanup failed: " + sanitize(String(error))); }
+    } else {
+      cleanupFailures.push("fixture-owned tree cleanup incomplete; temporary HOME retained");
+    }
+  }
+  if (cleanupFailures.length) failure = [failure, ...cleanupFailures].filter(Boolean).join("; ");
+  if (states.some((state) => state.code !== 0)) failure ??= "contenders must exit successfully";
+  if (failure) throw new Error(`${failure}; ${JSON.stringify(details())}`);
+  t.diagnostic(`successor election phases: ${JSON.stringify(states.map((state) => ({ contender: state.name, ...state.timings })))}`);
+}
+
+function assertSuccessorFailureClosed(error: unknown, expected: RegExp): boolean {
+  assert.ok(error instanceof Error);
+  assert.match(error.message, expected);
+  assert.doesNotMatch(error.message, /cleanup incomplete|temporary fixture cleanup failed/);
+  const marker = error.message.indexOf("; [");
+  assert.ok(marker >= 0, "contender diagnostics are present");
+  const contenders = JSON.parse(error.message.slice(marker + 2)) as Array<{ closed: boolean }>;
+  assert.equal(contenders.length, 2);
+  assert.ok(contenders.every((contender) => contender.closed === true), "both owned contenders closed");
+  return true;
+}
+
+test("the exclusive successor elects one winner across real runner processes", async (t) => {
+  await runSuccessorElectionRace(t);
+});
+
+test("successor election uses its load harness's owned fixture parent", async (t) => {
+  const parent = mkdtempSync(join(tmpdir(), "wollipog-successor-parent-test-"));
+  const previous = process.env.WOLLIPOG_SUCCESSOR_FIXTURE_PARENT;
+  process.env.WOLLIPOG_SUCCESSOR_FIXTURE_PARENT = parent;
+  t.after(() => {
+    if (previous === undefined) delete process.env.WOLLIPOG_SUCCESSOR_FIXTURE_PARENT;
+    else process.env.WOLLIPOG_SUCCESSOR_FIXTURE_PARENT = previous;
+    rmSync(parent, { recursive: true, force: true });
+  });
+  let observedRoot: string | undefined;
+  let recorded: { contenders: Array<{ pid: number }> } | undefined;
+  await runSuccessorElectionRace(t, { beforeRemoveRoot(root) {
+    observedRoot = root;
+    recorded = JSON.parse(readFileSync(join(root, "contenders.json"), "utf8"));
+  } });
+  assert.ok(observedRoot, "the real fixture reached proved cleanup");
+  assert.equal(dirname(observedRoot), parent, "the harness can locate all fixture state after an outer timeout");
+  assert.equal(recorded?.contenders.length, 2);
+  assert.ok(recorded.contenders.every(({ pid }) => Number.isInteger(pid) && pid > 0 && pid !== process.pid));
+  assert.deepEqual(readdirSync(parent), [], "ordinary fixture cleanup leaves an empty parent");
+});
+
+test("successor election keeps slow startup out of the result deadline", async (t) => {
+  // Startup must exceed the reporting window: removing only the readiness wait
+  // must expire reporting before either contender can publish. Keep two seconds
+  // of separation plus the normal ten-second setup margin for native initialization.
+  const startupDelayMs = SUCCESSOR_REPORT_MS + 2_000;
+  await runSuccessorElectionRace(t, { startupDelayMs, readinessMs: startupDelayMs + 10_000 });
+});
+
+test("successor election diagnoses startup failure without exposing fixture paths", async (t) => {
+  await assert.rejects(runSuccessorElectionRace(t, { fault: "before-ready", cleanupGraceMs: 50 }), (error: Error) => {
+    assert.match(error.message, /contender failed before publishing/);
+    assert.match(error.message, /synthetic failure at <fixture-home>/);
+    assert.doesNotMatch(error.message, /wollipog-provider-home-process-race-/);
+    return assertSuccessorFailureClosed(error, /contender failed before publishing/);
+  });
+});
+
+test("successor election bounds a hung readiness phase and reaps owned contenders", async (t) => {
+  await assert.rejects(runSuccessorElectionRace(t, {
+    fault: "hang-before-ready", readinessMs: 1_000, cleanupGraceMs: 50,
+  }), (error) => assertSuccessorFailureClosed(error, /contender readiness timed out/));
+});
+
+test("successor election keeps its result deadline and reaps a stalled publisher", { timeout: 30_000 }, async (t) => {
+  await assert.rejects(runSuccessorElectionRace(t, {
+    fault: "hang-in-publication", cleanupGraceMs: 50,
+  }), (error) => assertSuccessorFailureClosed(error, /both contenders report before the race deadline;.*"phase":"publishing"/));
+});
+
+test("successor election rejects a contender that reports but cannot exit", async (t) => {
+  await assert.rejects(runSuccessorElectionRace(t, {
+    fault: "hang-after-report", cleanupGraceMs: 50,
+  }), (error) => assertSuccessorFailureClosed(error, /contenders required forced cleanup/));
+});
+
+test("successor election diagnoses two refusals without a publication timeout", async (t) => {
+  await assert.rejects(runSuccessorElectionRace(t, { fault: "both-refuse", cleanupGraceMs: 50 }), (error: Error) => {
+    assert.match(error.message, /both contenders refused; no winning claim/);
+    assert.doesNotMatch(error.message, /both contenders report before the race deadline/);
+    assert.equal((error.message.match(/"outcome":"lost:/g) ?? []).length, 2);
+    return assertSuccessorFailureClosed(error, /contender failed before publishing/);
+  });
+});
+
+test("successor election preserves removal errors after an earlier failure", async (t) => {
+  await assert.rejects(runSuccessorElectionRace(t, {
+    fault: "before-ready", cleanupGraceMs: 50,
+    beforeRemoveRoot: (root) => {
+      t.after(() => rmSync(root, { recursive: true, force: true }));
+      throw new Error("synthetic removal failure");
+    },
+  }), (error: Error) => {
+    assert.match(error.message, /contender failed before publishing/);
+    assert.match(error.message, /temporary fixture cleanup failed: Error: synthetic removal failure/);
+    const contenders = JSON.parse(error.message.slice(error.message.indexOf("; [") + 2)) as Array<{ closed: boolean }>;
+    assert.equal(contenders.length, 2);
+    assert.ok(contenders.every((contender) => contender.closed));
+    return true;
+  });
+});
+
+test("successor election cancellation cleans its contenders and preserves an unrelated child", async (t) => {
+  const unrelated = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  const closed = new Promise<void>((resolve) => unrelated.once("close", () => resolve()));
+  t.after(async () => { unrelated.kill("SIGKILL"); await closed; }, { timeout: 5_000 });
+  const controller = new AbortController();
+  await assert.rejects(runSuccessorElectionRace(t, {
+    signal: controller.signal, onReady: () => controller.abort(), cleanupGraceMs: 50,
+  }), (error) => assertSuccessorFailureClosed(error, /successor election cancelled/));
+  assert.equal(unrelated.exitCode, null);
+  assert.equal(unrelated.signalCode, null);
 });
 
 test("completing a verified canonical mirror during takeover succeeds on the first attempt", (t) => {

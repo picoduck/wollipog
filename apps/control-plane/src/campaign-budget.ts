@@ -5,6 +5,15 @@ import { validCampaignBudgetAuthority, type CampaignBudgetAllocation, type Campa
 type Member = { session_id: string; root_id: string; cost: number; tools: number; cost_limit: number | null; tool_limit: number | null;
   user_cost_limit: number | null; user_tool_limit: number | null; active: number };
 
+/** A member session's open live estimate for a running Claude turn, on the terms cost guardrails
+ * use (#3112): none while a checkpoint is accounting the window its recorded cost already holds. */
+const LIVE_COST = "CASE WHEN s.live_settling=0 AND s.live_cost_usd>0 THEN s.live_cost_usd ELSE 0 END";
+
+/** A sum of float USD amounts at the ledger's micro-USD precision. */
+function roundUsdMicros(usd: number): number {
+  return Math.round(usd * 1_000_000) / 1_000_000;
+}
+
 /** No foreign keys: deletion, transcript replacement and retired attempts must not refund spend.
  * Usage is each session's own monotonic peak, never the recursively reserved child charge. */
 export class CampaignBudgetLedger {
@@ -74,20 +83,37 @@ export class CampaignBudgetLedger {
       { authority: string; state: CampaignBudgetView["state"]; reason: string | null; accepted_follow_ups: number } | undefined;
     if (!header) return undefined;
     const authority = JSON.parse(header.authority) as CampaignBudgetAuthority;
+    // An open live request without a rate is unpriced usage too, not free (#3196).
     const unpriced = Boolean(this.sql.prepare(`SELECT 1 FROM usage_session_state u
-      JOIN campaign_budget_members m ON m.session_id=u.session_id WHERE m.root_id=? AND u.unpriced_records>0 LIMIT 1`).get(rootId));
+      JOIN campaign_budget_members m ON m.session_id=u.session_id WHERE m.root_id=? AND u.unpriced_records>0 LIMIT 1`).get(rootId)) ||
+      Boolean(this.sql.prepare(`SELECT 1 FROM sessions s JOIN campaign_budget_members m ON m.session_id=s.id
+        WHERE m.root_id=? AND s.live_settling=0 AND s.live_unpriced_records>0 LIMIT 1`).get(rootId));
     if (header.state === "active" && unpriced) {
       this.stop(rootId, "accounting_unavailable", "Unpriced campaign usage detected; protected admission stopped without a continue prompt.");
       header.state = "accounting_unavailable"; header.reason = "Unpriced campaign usage detected; protected admission stopped without a continue prompt.";
     }
-    const rows = this.sql.prepare("SELECT * FROM campaign_budget_members WHERE root_id=?").all(rootId) as unknown as Member[];
-    const actual = { costUsd: 0, toolCalls: 0 }, outstanding = { costUsd: 0, toolCalls: 0 };
+    const rows = this.sql.prepare(`SELECT m.*, ${LIVE_COST} AS live_cost FROM campaign_budget_members m
+      LEFT JOIN sessions s ON s.id=m.session_id WHERE m.root_id=?`).all(rootId) as unknown as Array<Member & { live_cost: number }>;
+    const actual: CampaignBudgetView["actual"] = { costUsd: 0, toolCalls: 0 }, outstanding = { costUsd: 0, toolCalls: 0 };
+    let live = 0;
     for (const row of rows) {
-      actual.costUsd += row.cost; actual.toolCalls += row.tools;
+      // A running Claude turn's open estimate is spend no settled total includes yet (#3196). It is
+      // never written to the member's recorded peak, so settlement replaces it rather than adding.
+      const cost = row.cost + row.live_cost;
+      live += row.live_cost;
+      actual.costUsd += cost; actual.toolCalls += row.tools;
       if (row.active) {
-        outstanding.costUsd += Math.max(0, (row.cost_limit ?? row.cost) - row.cost);
+        outstanding.costUsd += Math.max(0, (row.cost_limit ?? cost) - cost);
         outstanding.toolCalls += Math.max(0, (row.tool_limit ?? row.tools) - row.tools);
       }
+    }
+    if (live > 0) {
+      // Round the conserved total, then split it, so spend plus reservations stays what the
+      // reservations sum to rather than gaining a rounding unit from each half.
+      const total = roundUsdMicros(actual.costUsd + outstanding.costUsd);
+      actual.costUsd = roundUsdMicros(actual.costUsd);
+      outstanding.costUsd = roundUsdMicros(total - actual.costUsd);
+      actual.includesEstimate = true;
     }
     const exhausted = authority.costUsd !== undefined && actual.costUsd >= authority.costUsd ||
       authority.toolCalls !== undefined && actual.toolCalls >= authority.toolCalls;
@@ -121,25 +147,34 @@ export class CampaignBudgetLedger {
       }
       const members = this.sql.prepare(`WITH RECURSIVE members(id) AS (SELECT ? UNION SELECT s.id FROM sessions s JOIN members m ON s.parent_session_id=m.id)
         SELECT s.id, s.status, MAX(s.cost_usd,s.usage_peak_cost_usd) AS cost,
-          MAX(s.usage_peak_tool_calls,COALESCE((SELECT tool_calls FROM session_tool_call_counts WHERE session_id=s.id),0)) AS tools,
+          MAX(s.usage_peak_tool_calls,COALESCE((SELECT tool_calls FROM session_tool_call_counts WHERE session_id=s.id),0)
+            +s.history_pruned_tool_calls) AS tools, s.history_pruned_tool_calls AS pruned_tools,
           s.cost_budget_usd AS cost_limit, s.max_tool_calls AS tool_limit FROM sessions s JOIN members m ON s.id=m.id`).all(rootId) as unknown as
-          Array<{ id: string; status: string; cost: number; tools: number; cost_limit: number | null; tool_limit: number | null }>;
+          Array<{ id: string; status: string; cost: number; tools: number; pruned_tools: number; cost_limit: number | null; tool_limit: number | null }>;
       for (const m of members) {
-        const count = (this.sql.prepare("SELECT COUNT(DISTINCT json_extract(payload,'$.toolCallId')) AS n FROM session_events WHERE session_id=? AND kind='tool_call'").get(m.id) as { n: number }).n;
+        // Tool calls whose events retention pruned are recorded, not missing history (#2777).
+        const count = (this.sql.prepare("SELECT COUNT(DISTINCT json_extract(payload,'$.toolCallId')) AS n FROM session_events WHERE session_id=? AND kind='tool_call'").get(m.id) as { n: number }).n
+          + m.pruned_tools;
         if (!old && authority.toolCalls !== undefined && m.tools > count) throw new Error("Campaign tool accounting is unavailable because preauthorization history is incomplete; protected admission is refused.");
         this.sql.prepare(`INSERT OR IGNORE INTO campaign_budget_members(session_id,root_id,cost,tools,cost_limit,tool_limit,user_cost_limit,user_tool_limit,active)
           VALUES (?,?,?,?,?,?,?,?,?)`).run(m.id,rootId,m.cost,m.tools,m.cost_limit,m.tool_limit,m.cost_limit,m.tool_limit,["completed","failed","stopped"].includes(m.status)?0:1);
         this.sql.prepare(`INSERT OR IGNORE INTO campaign_budget_tool_calls(session_id,tool_call_id)
           SELECT session_id,json_extract(payload,'$.toolCallId') FROM session_events WHERE session_id=? AND kind='tool_call' AND json_extract(payload,'$.toolCallId') IS NOT NULL`).run(m.id);
+        // Calls retention pruned are recorded by id, so they count once however their history returns.
+        this.sql.prepare(`INSERT OR IGNORE INTO campaign_budget_tool_calls(session_id,tool_call_id)
+          SELECT session_id,tool_call_id FROM session_pruned_tool_calls WHERE session_id=?`).run(m.id);
       }
       // All live members need finite reservations before authority is usable. Preserve tighter
       // existing session ceilings; otherwise divide free capacity, including a root share.
-      const rows = this.sql.prepare("SELECT * FROM campaign_budget_members WHERE root_id=? AND active=1").all(rootId) as unknown as Member[];
+      const rows = this.sql.prepare(`SELECT m.*, ${LIVE_COST} AS live_cost FROM campaign_budget_members m
+        LEFT JOIN sessions s ON s.id=m.session_id WHERE m.root_id=? AND m.active=1`).all(rootId) as unknown as Array<Member & { live_cost: number }>;
       const used = this.view(rootId)!;
       for (const r of rows) {
         if (old && (authority.costUsd === undefined || r.cost_limit !== null) && (authority.toolCalls === undefined || r.tool_limit !== null)) continue;
+        // A turn running at authorization has spent its estimate already, as `used` counts it (#3196).
+        const spent = r.live_cost > 0 ? roundUsdMicros(r.cost + r.live_cost) : r.cost;
         const cost = authority.costUsd === undefined ? r.cost_limit : Math.min(r.cost_limit ?? Infinity,
-          r.cost + Math.max(0, authority.costUsd - used.actual.costUsd) / Math.max(1, rows.length + (authority.concurrency ?? 1)));
+          spent + Math.max(0, authority.costUsd - used.actual.costUsd) / Math.max(1, rows.length + (authority.concurrency ?? 1)));
         const tools = authority.toolCalls === undefined ? r.tool_limit : Math.min(r.tool_limit ?? Infinity,
           r.tools + Math.floor(Math.max(0, authority.toolCalls - used.actual.toolCalls) / Math.max(1, rows.length + (authority.concurrency ?? 1))));
         this.sql.prepare("UPDATE campaign_budget_members SET cost_limit=?,tool_limit=? WHERE session_id=?").run(cost,tools,r.session_id);
@@ -236,6 +271,14 @@ export class CampaignBudgetLedger {
       "AND generation=? AND active=1 AND cost=0 AND tools=0").run(sessionId, expected.rootSessionId, expected.generation).changes) === 1;
   }
 
+  /** Only for a child whose creation failed before its launch was sent (#3183): it never ran, so
+   * its reservation is returned rather than retained like a deleted child's (#1496). */
+  releaseUnlaunched(sessionId: string): void {
+    for (const table of ["campaign_budget_members", "campaign_budget_tool_calls", "campaign_budget_checkpoints", "campaign_budget_settlements"]) {
+      this.sql.prepare(`DELETE FROM ${table} WHERE session_id=?`).run(sessionId);
+    }
+  }
+
   membersForRunner(runnerId:string):string[] {
     return (this.sql.prepare(`SELECT m.session_id FROM campaign_budget_members m JOIN sessions s ON s.id=m.session_id
       WHERE s.runner_id=? AND m.active=1`).all(runnerId) as Array<{session_id:string}>).map((r)=>r.session_id);
@@ -322,8 +365,11 @@ export class CampaignBudgetLedger {
     const rootId = this.root(sessionId); if (!rootId) return null;
     const v = this.view(rootId)!;
     if (v.state !== "active") return v.reason ?? "campaign allowance unavailable";
-    const row = this.sql.prepare("SELECT * FROM campaign_budget_members WHERE session_id=?").get(sessionId) as Member;
-    if (v.authority.costUsd !== undefined && (row.cost_limit === null || row.cost >= row.cost_limit) ||
+    const row = this.sql.prepare(`SELECT m.*, ${LIVE_COST} AS live_cost FROM campaign_budget_members m
+      LEFT JOIN sessions s ON s.id=m.session_id WHERE m.session_id=?`).get(sessionId) as Member & { live_cost: number };
+    // An allocation reached by a running turn's estimate stops its worker, as a settled one does (#3196).
+    const cost = row.live_cost > 0 ? roundUsdMicros(row.cost + row.live_cost) : row.cost;
+    if (v.authority.costUsd !== undefined && (row.cost_limit === null || cost >= row.cost_limit) ||
         v.authority.toolCalls !== undefined && (row.tool_limit === null || row.tools >= row.tool_limit)) return "session campaign allocation reached; reallocate within the existing envelope before dispatch";
     return null;
   }
@@ -332,12 +378,15 @@ export class CampaignBudgetLedger {
   admit(rootId: string, allocation: CampaignBudgetAllocation, userLimits: { costUsd?: number; toolCalls?: number }, activate = true): void {
     this.atomic(() => {
       const v = this.view(rootId); if (!v || v.state !== "active") throw new Error(v?.reason ?? "campaign allowance unavailable");
-      const old = this.sql.prepare("SELECT * FROM campaign_budget_members WHERE session_id=?").get(allocation.sessionId) as Member | undefined;
+      const old = this.sql.prepare(`SELECT m.*, ${LIVE_COST} AS live_cost FROM campaign_budget_members m
+        LEFT JOIN sessions s ON s.id=m.session_id WHERE m.session_id=?`).get(allocation.sessionId) as Member & { live_cost: number } | undefined;
+      // Spend includes a running turn's open estimate, as the view counts it (#3196).
+      const spentCost = old ? old.live_cost > 0 ? roundUsdMicros(old.cost + old.live_cost) : old.cost : 0;
       if (old) allocation = { ...allocation, costUsd: allocation.costUsd ?? old.cost_limit ?? undefined, toolCalls: allocation.toolCalls ?? old.tool_limit ?? undefined };
       if (old && old.root_id !== rootId) throw new Error("session belongs to another allowance");
       if (activate && !old?.active && allocation.sessionId !== rootId && v.authority.concurrency !== undefined && v.occupied >= v.authority.concurrency) throw new Error("campaign concurrency allowance reached");
       for (const [requested, spent, ceiling, userCeiling, remaining, prior] of [
-        [allocation.costUsd, old?.cost ?? 0, v.authority.costUsd, old ? old.user_cost_limit : userLimits.costUsd, v.remaining.costUsd, old?.active ? Math.max(0,(old.cost_limit ?? 0)-old.cost) : 0],
+        [allocation.costUsd, spentCost, v.authority.costUsd, old ? old.user_cost_limit : userLimits.costUsd, v.remaining.costUsd, old?.active ? Math.max(0,(old.cost_limit ?? 0)-spentCost) : 0],
         [allocation.toolCalls, old?.tools ?? 0, v.authority.toolCalls, old ? old.user_tool_limit : userLimits.toolCalls, v.remaining.toolCalls, old?.active ? Math.max(0,(old.tool_limit ?? 0)-old.tools) : 0],
       ]) {
         if (requested != null && (!Number.isFinite(requested) || requested < spent! || (userCeiling != null && requested > userCeiling))) throw new Error("allocation exceeds a tighter session ceiling or is below spent usage");

@@ -101,6 +101,11 @@ test("archive search surfaces archive and every canonical lifecycle label indepe
     })),
     "Queued · codex is using 4 of 4 provider slots · Wollipog · Codex App Server",
   );
+  // A transcript hit on a pruned session matched only its kept prompts or final response (#2777).
+  assert.equal(
+    sessionArchiveSearchDetail(session({ status: "completed", historyPruned: { prunedAt: 1, eventCount: 9, retentionDays: 90 } })),
+    "Archived · History Pruned · Completed · Wollipog · Codex App Server",
+  );
 });
 
 test("archive search accepts the server lifecycle labels used for live reconciliation", () => {

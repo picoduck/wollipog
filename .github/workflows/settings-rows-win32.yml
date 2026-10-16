@@ -35,7 +35,7 @@ permissions:
 jobs:
   scope:
     name: Detect Settings-Rows Changes
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       affected: ${{ steps.scope.outputs.affected }}
@@ -147,6 +147,20 @@ jobs:
 
       # Everything below runs only when the comparison failed, and the job still fails: these
       # steps turn the failure into the files that fix it rather than into a green check.
+
+      # The failed attempts' traces, screenshots and error context, including a test that passed
+      # only on retry, so a failure that is not baseline drift can be diagnosed (#3216). Uploaded
+      # before regeneration, whose own Playwright run empties test-results.
+      - name: Upload the win32 Comparison Test Results
+        if: failure() && steps.compare.outcome == 'failure'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: settings-rows-win32-test-results
+          path: test-results
+          overwrite: true
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Regenerate the Changed win32 Baselines
         if: failure() && steps.compare.outcome == 'failure'
         continue-on-error: true
@@ -199,10 +213,12 @@ jobs:
             if [[ -n "$COUNT" && "$COUNT" != "0" ]]; then
               echo "## The win32 Settings-Rows Baselines Are Stale"
               echo
-              echo "Windows no longer renders what the committed \`*-win32.png\` baselines show. This run regenerated the $COUNT that differ and uploaded them as the \`settings-rows-win32-baselines\` artifact. From the repository root, on this branch:"
+              echo "Windows no longer renders what the committed \`*-win32.png\` baselines show. This run regenerated the $COUNT that differ and uploaded them as the \`settings-rows-win32-baselines\` artifact. \`gh run download\` refuses to overwrite the stale images, so download them to a temporary directory and copy that over the checkout. From the repository root, on this branch:"
               echo
               echo '```sh'
-              echo "gh run download $RUN_ID --repo $REPOSITORY --name settings-rows-win32-baselines --dir ."
+              echo 'dir="$(mktemp -d)"'
+              echo "gh run download $RUN_ID --repo $REPOSITORY --name settings-rows-win32-baselines --dir \"\$dir\""
+              echo 'cp -R "$dir"/. . && rm -rf "$dir"'
               echo "git add apps/web/e2e/settings-rows.spec.ts-snapshots"
               echo "git commit -m \"Regenerate the win32 settings-rows baselines\""
               echo '```'
@@ -213,6 +229,6 @@ jobs:
             else
               echo "## The win32 Settings-Rows Comparison Failed Without a Baseline Difference"
               echo
-              echo "Regenerating changed no \`*-win32.png\` file, so this is not baseline drift. Read the test log above."
+              echo "Regenerating changed no \`*-win32.png\` file, so this is not baseline drift. Read the test log above; the failed attempts' Playwright traces are in this run's \`settings-rows-win32-test-results\` artifact."
             fi
           } >> "$GITHUB_STEP_SUMMARY"

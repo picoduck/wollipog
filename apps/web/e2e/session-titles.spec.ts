@@ -1,5 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { dialogMotionSettled } from "./dialog-motion.js";
+import { expectNumberFieldsWhole, numberFields } from "./number-field-fit.js";
 
 /**
  * Settings › Behavior › Session Titles (#3025) in a real browser: the endpoint dialog's Delete API Key
@@ -25,17 +26,16 @@ async function openSavedEndpoint(page: Page, query = "source=endpoint-key"): Pro
   return dialog;
 }
 
-/** The text of each field that does not fit its content box (placeholder, or value with `value`). */
-async function cutText(dialog: Locator, selector: string, value = false): Promise<string[]> {
-  return dialog.locator(selector).evaluateAll((inputs, readValue) => inputs.flatMap((input) => {
+/** The placeholder of each field that does not fit its content box. */
+async function cutPlaceholders(dialog: Locator): Promise<string[]> {
+  return dialog.locator("input[placeholder]").evaluateAll((inputs) => inputs.flatMap((input) => {
     const field = input as HTMLInputElement;
     const style = getComputedStyle(field);
     const context = document.createElement("canvas").getContext("2d")!;
     context.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
     const room = field.clientWidth - Number.parseFloat(style.paddingLeft) - Number.parseFloat(style.paddingRight);
-    const text = readValue ? field.value : field.placeholder;
-    return context.measureText(text).width > room ? [text] : [];
-  }), value);
+    return context.measureText(field.placeholder).width > room ? [field.placeholder] : [];
+  }));
 }
 
 async function capture(page: Page, name: string, testInfo: { outputPath: (name: string) => string }) {
@@ -82,20 +82,11 @@ test.describe("desktop", () => {
     await dialogMotionSettled(page);
     expect((await timeout.locator("..").boundingBox())?.width).toBe(96);
     await timeout.fill("30000");
-    expect(await cutText(dialog, "input[inputmode=numeric]", true)).toEqual([]);
     await expect(timeout.locator("xpath=following-sibling::*[1]")).toHaveText("ms");
-    // The UI font is the system's, so the digits must fit in a wide one too (CI's Ubuntu falls back
-    // to a DejaVu-class face, whose digits cut "30000" in the shared affix spacing).
-    await withWideFont(page);
-    expect(await cutText(dialog, "input[inputmode=numeric]", true)).toEqual([]);
+    // The shared unit field (#3185) with no rules of the dialog's own, measured in a wide face.
+    await expectNumberFieldsWhole(page, dialog, "30000 whole beside ms at 13px");
   });
 });
-
-/** Draws every field in DejaVu Sans, a wide system face, so a fit check does not depend on the host. */
-async function withWideFont(page: Page) {
-  await page.addStyleTag({ content: ':root input { font-family: "DejaVu Sans", sans-serif !important; }' });
-  await page.evaluate(() => document.fonts.ready);
-}
 
 test.describe("phone", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
@@ -142,10 +133,10 @@ test.describe("phone", () => {
       expect(buttons[0]![1]).toBe(48);
 
       // A placeholder is whole when its text fits the field's content box.
-      expect(await cutText(dialog, "input[placeholder]")).toEqual([]);
+      expect(await cutPlaceholders(dialog)).toEqual([]);
       if (which === "endpoint") {
         await dialog.getByLabel("Timeout").fill("30000");
-        expect(await cutText(dialog, "input[inputmode=numeric]", true)).toEqual([]);
+        await expectNumberFieldsWhole(page, dialog, "30000 whole beside ms in the sheet");
       }
     });
   }
@@ -156,9 +147,9 @@ test("a narrow window's 16px fields still show the longest timeout whole", async
   const dialog = await openSavedEndpoint(page, "source=endpoint");
   await dialog.getByLabel("Timeout").fill("30000");
   await dialogMotionSettled(page);
-  expect(await cutText(dialog, "input[inputmode=numeric]", true)).toEqual([]);
-  await withWideFont(page);
-  expect(await cutText(dialog, "input[inputmode=numeric]", true)).toEqual([]);
+  // 16px digits beside a unit take the shared 120px field (§8.3).
+  expect((await numberFields(dialog).boundingBox())?.width).toBe(120);
+  await expectNumberFieldsWhole(page, dialog, "30000 whole beside ms at 16px");
 });
 
 test("a dropped connection is a plain load-failure notice with Retry", async ({ page }) => {

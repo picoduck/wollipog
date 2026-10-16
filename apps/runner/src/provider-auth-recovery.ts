@@ -26,7 +26,7 @@ import {
   LEGACY_CLAUDE_PERSISTENT_FLAG,
   LEGACY_CLAUDE_PERSISTENT_IDLE_MS,
 } from "./drivers/claude-code.js";
-import { killTree, spawnAgent, type AgentProcess } from "./spawn.js";
+import { killTree, provenProcessTreeExit, spawnAgent, type AgentProcess } from "./spawn.js";
 import type { ProviderLoginSupervisor } from "./provider-login.js";
 import type {
   ProviderAuthIdentityEvidence,
@@ -69,11 +69,18 @@ export interface ProviderAuthIdentityComparison {
   sharedAccountFields: Array<Extract<ProviderAuthIdentityField, "email" | "orgId">>;
 }
 
+/** Learns about every provider process a probe starts. Each proof settles after that process
+ * finished and is true only when its complete process tree is proven gone; a caller holding a
+ * provider-HOME reference for the probe releases it only when every proof is true. */
+export interface ProviderProcessObserver {
+  onProcess(proof: Promise<boolean>): void;
+}
+
 export interface ProviderAuthRecoveryController {
   describe(meta: SessionMeta): ProviderCredentialScope | null;
-  revalidate(meta: SessionMeta): Promise<ProviderAuthObservation>;
+  revalidate(meta: SessionMeta, observer?: ProviderProcessObserver): Promise<ProviderAuthObservation>;
   /** Optional so older test doubles remain valid; absent means identity cannot be displayed. */
-  inspect?(meta: SessionMeta): Promise<ProviderAuthIdentityInspection>;
+  inspect?(meta: SessionMeta, observer?: ProviderProcessObserver): Promise<ProviderAuthIdentityInspection>;
   startLogin(meta: SessionMeta): Promise<"completed" | "cancelled" | "failed">;
   cancel(scopeId: string): boolean;
 }
@@ -398,8 +405,17 @@ class NativeProviderAuthRecovery implements ProviderAuthRecoveryController {
     return meta.env.HOME ?? homedir();
   }
 
-  private runExact(meta: SessionMeta, command: string, args: string[], timeoutMs: number, maxBuffer: number): Promise<ContextCommandResult> {
+  private runExact(
+    meta: SessionMeta,
+    command: string,
+    args: string[],
+    timeoutMs: number,
+    maxBuffer: number,
+    observer?: ProviderProcessObserver,
+  ): Promise<ContextCommandResult> {
     if (this.injectedRun) {
+      // The injected runner's processes are invisible here, so they can never prove a tree exit.
+      observer?.onProcess(Promise.resolve(false));
       return this.injectedRun(meta.context, command, args, {
         cwd: this.stableCwd(meta), env: meta.env, timeoutMs, maxBuffer,
       });
@@ -420,6 +436,10 @@ class NativeProviderAuthRecovery implements ProviderAuthRecoveryController {
         reject(Object.assign(new Error("provider auth command unavailable"), { code: "SPAWN_FAILED", cause: error }));
         return;
       }
+      let markFinished!: () => void;
+      const finished = new Promise<void>((done) => { markFinished = done; });
+      // Proven only after the command finished (closed, timed out, or overflowed and was killed).
+      observer?.onProcess(finished.then(() => provenProcessTreeExit(child)));
       const stdout: Buffer[] = [];
       const stderr: Buffer[] = [];
       let bytes = 0;
@@ -428,6 +448,7 @@ class NativeProviderAuthRecovery implements ProviderAuthRecoveryController {
       const finish = (error?: unknown) => {
         if (settled) return;
         settled = true;
+        markFinished();
         if (timer) clearTimeout(timer);
         const result = { stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") };
         if (error) reject(Object.assign(new Error("provider auth command failed"), { code: error, ...result }));
@@ -463,15 +484,15 @@ class NativeProviderAuthRecovery implements ProviderAuthRecoveryController {
     );
   }
 
-  async revalidate(meta: SessionMeta): Promise<ProviderAuthObservation> {
+  async revalidate(meta: SessionMeta, observer?: ProviderProcessObserver): Promise<ProviderAuthObservation> {
     const scope = this.describe(meta);
     if (!scope) return { status: "unknown" };
     try {
       if (scope.provider === "claude") {
-        const result = await this.runExact(meta, meta.command, providerArgs(meta, ["auth", "status"]), 15_000, 64 * 1024);
+        const result = await this.runExact(meta, meta.command, providerArgs(meta, ["auth", "status"]), 15_000, 64 * 1024, observer);
         return claudeObservation(result, this.digestKey, this.evidenceVersion);
       }
-      await this.runExact(meta, meta.command, providerArgs(meta, ["login", "status"]), 15_000, 64 * 1024);
+      await this.runExact(meta, meta.command, providerArgs(meta, ["login", "status"]), 15_000, 64 * 1024, observer);
       const identityId = codexIdentity(meta, this.digestKey);
       return { status: "authenticated", ...(identityId ? { identityId } : {}) };
     } catch (error) {
@@ -489,14 +510,14 @@ class NativeProviderAuthRecovery implements ProviderAuthRecoveryController {
     }
   }
 
-  async inspect(meta: SessionMeta): Promise<ProviderAuthIdentityInspection> {
+  async inspect(meta: SessionMeta, observer?: ProviderProcessObserver): Promise<ProviderAuthIdentityInspection> {
     const scope = this.describe(meta);
     if (scope?.provider !== "claude") {
-      return { observation: await this.revalidate(meta), emailSupported: false, email: null };
+      return { observation: await this.revalidate(meta, observer), emailSupported: false, email: null };
     }
     let stdout: string;
     try {
-      stdout = (await this.runExact(meta, meta.command, providerArgs(meta, ["auth", "status"]), 15_000, 64 * 1024)).stdout;
+      stdout = (await this.runExact(meta, meta.command, providerArgs(meta, ["auth", "status"]), 15_000, 64 * 1024, observer)).stdout;
     } catch (error) {
       // Same positive-evidence rule as revalidate(): a non-zero exit may still carry the payload.
       const partial = error && typeof error === "object" && "stdout" in error

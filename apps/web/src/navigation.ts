@@ -1,3 +1,4 @@
+import { HistoryPositions, type HistoryTraversal, type PositionedHistory } from "./history-position.js";
 import {
   parseSourceLocation,
   SOURCE_LOCATION_MAX_PATH_LENGTH,
@@ -32,7 +33,7 @@ export type View =
  * section is deep-linkable, which is what makes "see Settings → Appearance" a thing you can send
  * someone.
  */
-export type SettingsSection = "appearance" | "notifications" | "behavior" | "approvals" | "orchestrator" | "network" | "experimental" | "about";
+export type SettingsSection = "appearance" | "notifications" | "behavior" | "approvals" | "orchestrator" | "network" | "storage" | "experimental" | "about";
 
 /**
  * A control a redirect lands on, so an old link arrives where its setting went (#3023):
@@ -57,7 +58,7 @@ export function isSettingsAlias(path: string): boolean {
 }
 
 /** Where a section's settings are kept, when every one of them is kept in the same place. */
-export type SettingsScope = "This Device" | "Your Account";
+export type SettingsScope = "This Device" | "Your Account" | "Your Organization";
 
 export interface SettingsSectionEntry {
   id: SettingsSection;
@@ -76,6 +77,12 @@ export interface SettingsSectionEntry {
   scope?: SettingsScope;
 }
 
+/**
+ * What turning an experiment off does. Experimental's panel head says it, and so does its group on a
+ * phone, where the head's description is hidden (#3139).
+ */
+export const EXPERIMENT_OFF_EFFECT = "Turning one off hides it from navigation and search.";
+
 export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSectionEntry> = [
   { id: "appearance", title: "Appearance", description: "Theme, colors, density and navigation.", scope: "This Device" },
   {
@@ -92,10 +99,17 @@ export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSectionEntry> = [
   { id: "orchestrator", title: "Orchestrator", description: "Defaults for sessions that run others." },
   { id: "network", title: "Network", description: "Reach this machine from other devices." },
   {
+    id: "storage",
+    title: "Storage",
+    description: "History kept for archived sessions.",
+    panelDescription: "How long archived sessions keep their full history in this control plane.",
+    scope: "Your Organization",
+  },
+  {
     id: "experimental",
     title: "Experimental",
     description: "Features that are still being tested.",
-    panelDescription: "Early features. Turning one off hides it from navigation and search.",
+    panelDescription: `Early features. ${EXPERIMENT_OFF_EFFECT}`,
     scope: "This Device",
   },
   { id: "about", title: "About", description: "Versions and updates." },
@@ -454,7 +468,7 @@ export function viewFromPath(pathname: string, search = ""): View | null {
   if (path === "/settings") return { name: "settings" };
   // Keep old bookmarks useful: a copy, so a caller that annotates the view cannot change the table.
   if (isSettingsAlias(path)) return structuredClone(SETTINGS_ALIASES[path]!);
-  const settingsMatch = /^\/settings\/(appearance|notifications|behavior|approvals|orchestrator|network|experimental|about)$/.exec(path);
+  const settingsMatch = /^\/settings\/(appearance|notifications|behavior|approvals|orchestrator|network|storage|experimental|about)$/.exec(path);
   if (settingsMatch) return { name: "settings", section: settingsMatch[1] as SettingsSection };
   const approvalsPolicyMatch = /^\/settings\/approvals\/~([^/]+)$/.exec(path);
   if (approvalsPolicyMatch) {
@@ -562,7 +576,7 @@ export function adoptLegacyNavigationFragment(): boolean {
 
 export interface NavigationWindow {
   location: Pick<Location, "pathname" | "search" | "hash">;
-  history: Pick<History, "state" | "pushState" | "replaceState">;
+  history: PositionedHistory;
   addEventListener(type: "popstate", listener: () => void): void;
   removeEventListener(type: "popstate", listener: () => void): void;
 }
@@ -570,14 +584,25 @@ export interface NavigationWindow {
 export interface ViewNavigation {
   current(): View;
   push(view: View): void;
-  listen(onView: (view: View) => void): () => void;
+  /** Browser Back and Forward. A move that can be held comes with its traversal (#3218). */
+  listen(onView: (view: View, traversal?: HistoryTraversal) => void): () => void;
   activate?(view: View): void;
 }
 
 export class BrowserNavigation implements ViewNavigation {
-  constructor(private readonly target: NavigationWindow = window) {}
+  private readonly positions: HistoryPositions;
+
+  constructor(private readonly target: NavigationWindow = window) {
+    this.positions = new HistoryPositions(target.history);
+  }
 
   current(): View {
+    const view = this.read();
+    this.positions.adopt();
+    return view;
+  }
+
+  private read(): View {
     const parsed = viewFromPath(this.target.location.pathname, this.target.location.search);
     const view = parsed ?? { name: "inbox" as const };
     const canonical = viewPath(view);
@@ -590,11 +615,15 @@ export class BrowserNavigation implements ViewNavigation {
   push(view: View): void {
     const path = viewPath(view);
     if (`${this.target.location.pathname}${this.target.location.search}` === path && !this.target.location.hash) return;
-    this.target.history.pushState(this.target.history.state, "", path);
+    this.positions.push(path);
   }
 
-  listen(onView: (view: View) => void): () => void {
-    const onPopState = () => onView(this.current());
+  listen(onView: (view: View, traversal?: HistoryTraversal) => void): () => void {
+    const onPopState = () => {
+      const view = this.read();
+      const move = this.positions.arrive();
+      if (move) onView(view, move.traversal);
+    };
     this.target.addEventListener("popstate", onPopState);
     return () => this.target.removeEventListener("popstate", onPopState);
   }

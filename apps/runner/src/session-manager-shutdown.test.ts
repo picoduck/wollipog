@@ -171,8 +171,12 @@ test("session naming resolves runner isolation, leases provider HOME, and cleans
     };
   (manager as unknown as { removeIsolationState: (...args: unknown[]) => Promise<void> }).removeIsolationState =
     async (...args: unknown[]) => { removedSessionId = args[4] as string; };
-  (manager as unknown as { providerHomeLeases: { acquire(request: unknown): void; stopAcquisitions(): void } }).providerHomeLeases = {
-    acquire: (request) => { leaseRequest = request; },
+  let released = 0;
+  (manager as unknown as { providerHomeLeases: { acquireReference(request: unknown): unknown; stopAcquisitions(): void } }).providerHomeLeases = {
+    acquireReference: (request) => {
+      leaseRequest = request;
+      return { first: true, release: async () => { released++; return true; }, retain: async () => {} };
+    },
     stopAcquisitions: () => {},
   };
   const agent: AgentDefinition = {
@@ -189,6 +193,7 @@ test("session naming resolves runner isolation, leases provider HOME, and cleans
   });
   await authorization.cleanup();
   assert.equal(removedSessionId, resolvedState?.sessionId);
+  assert.equal(released, 1, "a naming task that started no process releases its reference");
   manager.shutdownAll();
 });
 

@@ -538,3 +538,33 @@ test("scoped campaign requests preserve outermost ownership and the 64-row ances
     assert.equal(db.campaignRequestsForPrincipal(sessionListPrincipal,"root"),undefined,"65 ancestors refuse instead of naming a partial root");
   } finally { db.close(); }
 });
+
+
+test("current and legacy serialized lists share bounded authorized reads without losing canonical exhaustion", () => {
+  const db=ControlPlaneDb.open(":memory:");
+  try {
+    seedSessionList(db,1);
+    db.updateSessionFromSnapshot("s-0", { ...db.getSession("s-0")!, config: {}, seq: 0,
+      backgroundJobs: [{ id: "job", parentTurnId: "turn", runnerId: "r", workspaceId: null,
+        launchType: "agent", registeredAt: 1, terminalStatus: "completed", terminalObservedAt: 2,
+        continuationRequired: true, continuationId: "continuation", continuationQueuedAt: 3,
+        continuationSubmittedAt: 4, continuationRetryExhaustedAt: 5 }] },10);
+    const original=db.listSessionSummaries.bind(db);
+    let reads=0;
+    db.listSessionSummaries=(...args) => { reads++; return original(...args); };
+    const current=db.sessionListJsonForPrincipal(sessionListPrincipal);
+    assert.match(current,/capacity_retry_exhausted/);
+    const legacy=db.sessionListJsonForPrincipal(sessionListPrincipal,false,false);
+    assert.doesNotMatch(legacy,/capacity_retry_exhausted|retryExhaustedAt/);
+    assert.equal(db.sessionListJsonForPrincipal(sessionListPrincipal),current);
+    assert.equal(db.sessionListJsonForPrincipal(sessionListPrincipal,false,false),legacy);
+    assert.equal(reads,1,"negotiation does not repeat authorized summary queries");
+    assert.equal(db.cachedSessionSummariesForPrincipal(sessionListPrincipal)![0]!.backgroundDeliveries![0]!.retryExhaustedAt,5);
+    assert.equal(db.acknowledgeBackgroundRetryExhaustion("s-0","continuation",20),true);
+    assert.doesNotMatch(db.sessionListJsonForPrincipal(sessionListPrincipal),/capacity_retry_exhausted/);
+    assert.doesNotMatch(db.sessionListJsonForPrincipal(sessionListPrincipal,false,false),/retryExhaustionAcknowledgedAt/);
+    assert.equal(db.getSession("s-0")!.backgroundDeliveries![0]!.retryExhaustionAcknowledgedAt,20,
+      "bounded attention summaries omit resolved deliveries while detail retains the audit");
+    assert.equal(reads,2,"writes invalidate both cached views together");
+  } finally { db.close(); }
+});

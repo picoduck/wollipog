@@ -1,22 +1,34 @@
-import { runnerSupportsProtocol, type ArtifactUploadPreference } from "@wollipog/protocol";
+import { runnerSupportsProtocol, usesOrchestratorPresetPermissions, type ArtifactUploadPreference } from "@wollipog/protocol";
+import { AGENT_CONTROL_RELAY_FIFO_ENV } from "./agent-control-fifo-relay.js";
+import { SESSION_CODEX_MCP_MARKER } from "./orchestrator-preset.js";
 import type { SessionMeta } from "./session-store.js";
 
 /** Awareness only. No file contents, paths, credentials, or external-hosting configuration. */
-export function artifactGuidance(meta: Pick<SessionMeta, "driver" | "env" | "context" | "executionTarget" | "orchestrator" | "artifactUploads">,
+export function artifactGuidance(meta: Pick<SessionMeta, "driver" | "env" | "context" | "executionTarget" | "orchestrator" | "artifactUploads"> &
+  Partial<Pick<SessionMeta, "config">>,
   controlPlaneProtocolVersion: number | null, platform = process.platform): string {
   const preference: ArtifactUploadPreference = runnerSupportsProtocol(controlPlaneProtocolVersion, "artifactSessionGuidance")
     ? meta.artifactUploads ?? "manual" : "manual";
   const host = !meta.executionTarget || meta.executionTarget.adapter === "host";
   const bridge = meta.context.kind === "native";
-  const available = host && bridge && Boolean(meta.env.WOLLIPOG_CLI) &&
-    runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionArtifactFileAttach");
+  const fileAttach = host && bridge && runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionArtifactFileAttach");
+  const codex = meta.driver === "codex" || meta.driver === "codex-app-server";
+  // Codex runs shell commands in a sandbox without network access in every mode but the
+  // Orchestrator preset and unnarrowed full access, and that sandbox refuses the CLI's loopback
+  // connection (#3270). There the CLI reaches the runner only through the FIFO channel, so without
+  // one the guidance must not offer it.
+  const cliReachable = !codex || usesOrchestratorPresetPermissions(meta.config) || Boolean(meta.env[AGENT_CONTROL_RELAY_FIFO_ENV]);
+  const cli = fileAttach && Boolean(meta.env.WOLLIPOG_CLI) && cliReachable;
   const command = platform === "win32" && meta.context.kind === "native"
     ? '$launcherArgs = @($env:WOLLIPOG_CLI_ARGS | ConvertFrom-Json); & $env:WOLLIPOG_CLI @launcherArgs artifact attach --file <absolute-path> --json'
     : '\"$WOLLIPOG_CLI\" artifact attach --file <absolute-path> --json';
   const mcp = meta.driver === "claude-code" || meta.driver === "pi" && Boolean(meta.env.WOLLIPOG_PI_AGENT_CONTROL_COMMAND) ||
-    Boolean(meta.orchestrator) && ["codex", "codex-app-server", "acp"].includes(meta.driver);
+    Boolean(meta.orchestrator) && ["codex", "codex-app-server", "acp"].includes(meta.driver) ||
+    codex && meta.env[SESSION_CODEX_MCP_MARKER] === "1";
+  const available = cli || fileAttach && Boolean(meta.env.WOLLIPOG_CLI) && mcp;
+  const attach = cli ? `${mcp ? "attach_session_artifact (absolute path), or " : ""}${command}` : "attach_session_artifact (absolute path)";
   const capability = available
-    ? `Private Session artifacts can be viewed remotely by authorized users in Wollipog. Uploads go to private control-plane storage. Attach a file from disk with ${mcp ? "attach_session_artifact (absolute path), or " : ""}${command}. The runner transfers the bytes directly; never base64 media into a tool argument. Images (PNG, JPEG, GIF, WebP) are limited to 8 MiB.${runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionVideoArtifactAttach") ? " MP4 and WebM videos are limited to 32 MiB." : " This control plane does not support video attachment; update it to upload videos."} Cite the returned artifactId, mediaType, sizeBytes, and sha256; keep the exact metadata and reference the artifact in your result.`
+    ? `Private Session artifacts can be viewed remotely by authorized users in Wollipog. Uploads go to private control-plane storage. Attach a file from disk with ${attach}. The runner transfers the bytes directly; never base64 media into a tool argument. Images (PNG, JPEG, GIF, WebP) are limited to 8 MiB.${runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionVideoArtifactAttach") ? " MP4 and WebM videos are limited to 32 MiB." : " This control plane does not support video attachment; update it to upload videos."} Cite the returned artifactId, mediaType, sizeBytes, and sha256; keep the exact metadata and reference the artifact in your result.`
     : "Private Session artifacts support remote viewing, but file attachment is unavailable in this harness/execution context or with the connected peer versions. Do not invent an upload command. Ask for a supported host session or peer update if Wollipog hosting is required.";
   const policy = preference === "wollipog_automatic"
     ? "Artifact Uploads: Use Wollipog Automatically. This authorizes uploads of relevant task evidence (such as screenshots or short videos), never arbitrary filesystem files."

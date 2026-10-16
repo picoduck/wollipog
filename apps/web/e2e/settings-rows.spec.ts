@@ -32,6 +32,102 @@ type Theme = (typeof THEMES)[number];
  */
 test.use({ reducedMotion: "reduce" });
 
+/**
+ * What each test's page did, for a harness that never set its theme (#3216).
+ *
+ * On Windows a test occasionally found `<html>` without `data-theme` for the whole timeout, which
+ * means the harness module never ran, and the bare assertion could not say why. Navigations,
+ * failed requests, error responses, page errors and console output are recorded from the start of
+ * every test so `expectTheme` can put them in its failure; script requests that failed since the
+ * last navigation are kept apart, because they are what lets it tell a failed load from a broken
+ * harness.
+ */
+interface PageRecord {
+  events: string[];
+  failedScripts: string[];
+}
+const pageRecords = new WeakMap<Page, PageRecord>();
+
+test.beforeEach(({ page }) => {
+  const started = Date.now();
+  const record: PageRecord = { events: [], failedScripts: [] };
+  const note = (event: string) => {
+    record.events.push(`+${Date.now() - started}ms ${event}`);
+    return event;
+  };
+  pageRecords.set(page, record);
+  page.on("framenavigated", (frame) => {
+    if (frame !== page.mainFrame()) return;
+    record.failedScripts = [];
+    note(`navigated to ${frame.url()}`);
+  });
+  page.on("console", (message) => note(`console.${message.type()}: ${message.text()}`));
+  page.on("pageerror", (error) => note(`page error: ${error.stack ?? error.message}`));
+  page.on("requestfailed", (request) => {
+    const event = note(`request failed (${request.failure()?.errorText}): ${request.url()}`);
+    if (request.resourceType() === "script") record.failedScripts.push(event);
+  });
+  page.on("response", (response) => {
+    if (response.status() < 400) return;
+    const event = note(`HTTP ${response.status()}: ${response.url()}`);
+    if (response.request().resourceType() === "script") record.failedScripts.push(event);
+  });
+});
+
+/** Where the harness got to: whether it mounted anything into `#root`. */
+function documentState(page: Page) {
+  return page.evaluate(() => ({
+    url: location.href,
+    readyState: document.readyState,
+    rootChildren: document.getElementById("root")?.childElementCount ?? null,
+  })).catch((reason: unknown) => `unreadable: ${reason}`);
+}
+
+function describeLoad(record: PageRecord, state: Awaited<ReturnType<typeof documentState>>) {
+  return `The document: ${JSON.stringify(state)}\n` +
+    `What the page did since the test started:\n${record.events.join("\n") || "(nothing recorded)"}`;
+}
+
+/**
+ * Asserts the harness applied `theme`; when it did not, the failure carries what the page did.
+ *
+ * One reload is allowed, for exactly one cause: the harness mounted nothing AND a script request of
+ * that load failed, which is a module not being delivered, not the harness failing to apply its
+ * theme. That is what happened on win32 (#3216): a trace caught one static import of the harness
+ * entry failing with `net::ERR_NO_BUFFER_SPACE`, Winsock's WSAENOBUFS — the Windows host briefly
+ * out of socket resources — which aborts the whole module graph while `load` still fires. The
+ * reload is reported as a CI warning with the same diagnostics, so it cannot pass silently.
+ * Anything else fails at once — the harness throwing, mounting without its theme, or a load that
+ * fails again after the reload.
+ */
+async function expectTheme(page: Page, theme: Theme) {
+  const record = pageRecords.get(page)!;
+  const themed = () => expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  const fail = async (error: unknown) => new Error(
+    `${(error as Error).message}\n\nThe harness never set data-theme="${theme}". ${describeLoad(record, await documentState(page))}`,
+  );
+  try {
+    await themed();
+    return;
+  } catch (error) {
+    const state = await documentState(page);
+    if (typeof state === "string" || state.rootChildren !== 0 || record.failedScripts.length === 0) throw await fail(error);
+    const details = `The harness module did not load, so the page was reloaded once.\n${describeLoad(record, state)}`;
+    test.info().annotations.push({ type: "harness reloaded", description: record.failedScripts.join("\n") });
+    await test.info().attach("harness-load-before-reload", { body: details, contentType: "text/plain" });
+    process.stderr.write(
+      `${process.env.GITHUB_ACTIONS ? "::warning title=Settings-Rows Harness Reloaded::" : ""}` +
+        `${test.info().titlePath.join(" › ")}: ${record.failedScripts.join("; ")}\n${details}\n`,
+    );
+  }
+  await page.reload();
+  try {
+    await themed();
+  } catch (error) {
+    throw await fail(error);
+  }
+}
+
 interface HarnessOptions {
   state?: "rest" | "busy-on" | "busy-off" | "disabled";
   topology?: "full" | "minimal";
@@ -41,7 +137,7 @@ interface HarnessOptions {
   /** Notifications where the browser blocks alerts, or where neither kind can work (#3022). */
   alerts?: "available" | "blocked" | "unavailable";
   /** Settings › Network's Tailnet Access in one reported state, or `browser` (#3027). */
-  tailnet?: "browser" | "off" | "on" | "restarting" | "unavailable" | "unmanaged" | "checking" | "read-failed" | "write-failed";
+  tailnet?: "browser" | "off" | "on" | "restarting" | "unavailable" | "unmanaged" | "checking" | "read-failed" | "write-failed" | "write-retry";
   /** `multi`: the desktop app with Connections › Instances. */
   instances?: "single" | "multi";
 }
@@ -61,7 +157,7 @@ async function useHarness(
   await page.goto(
     `/settings-rows-e2e.html?theme=${theme}&state=${state}&topology=${topology}&section=${section}&copy=${copy}&defaults=${defaults}&alerts=${alerts}&instances=${instances}${tailnet ? `&tailnet=${tailnet}` : ""}`,
   );
-  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  await expectTheme(page, theme);
   // The SECTION's own heading, not a fixed control: asserting a radio here would silently pass on
   // the wrong page for five of the six sections, since an absent locator is simply never visible.
   await expect(page.locator("#settings-panel-heading"))
@@ -81,7 +177,7 @@ async function useRow(page: Page, theme: Theme, key: RowKey, options: Omit<Harne
  */
 async function useDisabledNavRow(page: Page, theme: Theme) {
   await page.goto(`/settings-rows-e2e.html?theme=${theme}&view=kinds`);
-  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  await expectTheme(page, theme);
   return page.getByRole("button", { name: /^Manage Instances/ });
 }
 
@@ -773,7 +869,7 @@ test("Notifications says where alerts come from when none can work, and how to a
 test("both Experimental rows are one line at 1440px", async ({ page }) => {
   // The section description says once what turning a feature off does, so each row's own
   // description is short enough for one line (#3022): one line of title and one of description,
-  // the shortest a described row on the shared grid can be (§8.2).
+  // which is exactly --row-h-2 on the shared grid (§8.2, #3140).
   await page.setViewportSize({ width: 1440, height: 900 });
   await useHarness(page, "dark", { section: "experimental" });
   const rows = page.locator(".settings-panel .setting-row");
@@ -783,9 +879,9 @@ test("both Experimental rows are one line at 1440px", async ({ page }) => {
       const element = row.querySelector(selector)!;
       return element.getBoundingClientRect().height / Number.parseFloat(getComputedStyle(element).lineHeight);
     };
-    return { title: lines(".setting-row-title"), description: lines(".setting-row-desc") };
+    return { title: lines(".setting-row-title"), description: lines(".setting-row-desc"), height: row.getBoundingClientRect().height };
   }));
-  for (const row of measured) expect(row).toEqual({ title: 1, description: 1 });
+  for (const row of measured) expect(row).toEqual({ title: 1, description: 1, height: 56 });
 });
 
 /** Every section renders, and each one names itself. A route that 404s inside the app is worse
@@ -804,6 +900,31 @@ test("the tailnet switch says it is busy, not merely unavailable", async ({ page
   await expect(row).toHaveAttribute("aria-checked", "true");
   await expectInk(page, row.locator(".ui-switch"), "the busy tailnet track", INK.track);
   await expectKnob(page, row.locator(".ui-switch"), "the busy tailnet knob");
+});
+
+test("Try Again on a failed tailnet write keeps keyboard focus on the switch while it saves (#3190)", async ({ page }) => {
+  // The browser, not happy-dom, decides what a busy switch can hold: a `disabled` button drops the
+  // focus it has and refuses focus handed to it, so the retry used to leave focus on <body>.
+  for (const saved of [true, false]) {
+    await useHarness(page, "dark", { section: "network", tailnet: "write-retry" });
+    const tryAgain = page.getByRole("button", { name: "Try Again" });
+    await tryAgain.focus();
+    await page.keyboard.press("Enter");
+    const row = page.getByRole("switch", { name: /^Tailnet Access/ });
+    await expect(row).toHaveAttribute("aria-busy", "true");
+    await expect(row, "the busy switch holds focus while the write runs").toBeFocused();
+    await expect(row, "and refuses a second press").toBeDisabled();
+    await page.evaluate((outcome) => {
+      (window as unknown as { settleTailnetWrite(saved: boolean): void }).settleTailnetWrite(outcome);
+    }, saved);
+    if (saved) {
+      await expect(row).toHaveAttribute("aria-checked", "true");
+    } else {
+      await expect(page.locator(".setting-row-failure")).toHaveText("Couldn't change Tailnet Access. Try Again");
+    }
+    await expect(page.getByRole("switch", { name: /^Tailnet Access/ }),
+      `focus stays on the switch after ${saved ? "the write lands" : "a second failure"}`).toBeFocused();
+  }
 });
 
 test("an unavailable tailnet does not take the rest of Network with it", async ({ page }) => {
@@ -837,6 +958,58 @@ test("Manage Instances opens Connections › Instances, and is absent on a phone
   await useHarness(page, "dark", { section: "network", tailnet: "off", instances: "multi" });
   await expect(page.getByText("Connected To", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: /^Manage Instances/ })).toHaveCount(0);
+});
+
+test("Connected To shows a whole tailnet address at 1440px and 390px, and Copy Address copies it", async ({ page, context }) => {
+  // The value column cut the address off after about 26 characters at desktop widths (#3159), so
+  // someone on a remote server saw only `https://studio.example.ts.n…` of their own address.
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  const address = "https://home-studio-01.tail4a3b2c.ts.net";
+  expect(address).toHaveLength(40);
+  for (const [width, height] of [[1440, 900], [390, 844]] as const) {
+    for (const theme of THEMES) {
+      await page.setViewportSize({ width, height });
+      await useHarness(page, theme, { section: "network", tailnet: "off", instances: "multi" });
+      const row = page.locator(".setting-row", { has: page.locator(".setting-row-title").getByText("Connected To", { exact: true }) });
+      const value = row.locator(".setting-row-value-text");
+      await expect(value).toHaveText(address);
+      // As rendered, too: the pieces are inline-blocks, and nothing may come between them when the
+      // address is read aloud or selected by hand.
+      await expect(value).toHaveText(address, { useInnerText: true });
+      const fit = await value.evaluate((element) => {
+        // Every line the address is laid out on, against the row's control column.
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        const control = element.closest(".setting-row-control")!.getBoundingClientRect();
+        return {
+          scrollWidth: element.scrollWidth,
+          clientWidth: element.clientWidth,
+          scrollHeight: element.scrollHeight,
+          clientHeight: element.clientHeight,
+          outside: [...range.getClientRects()].filter((line) => line.left < control.left - 0.5 || line.right > control.right + 0.5).length,
+          // Lines break only after `.`, `/` and `:`: no piece between them, `home-studio-01.` among
+          // them, is split at its hyphen.
+          split: [...element.querySelectorAll(".setting-row-value-part")]
+            .filter((part) => part.getClientRects().length !== 1 || part.getBoundingClientRect().height > parseFloat(getComputedStyle(element).lineHeight) + 1)
+            .map((part) => part.textContent),
+          pieces: element.querySelectorAll(".setting-row-value-part").length,
+        };
+      });
+      const at = `at ${width}px in ${theme}`;
+      expect(fit.scrollWidth, `no part of the address is clipped sideways ${at}`).toBeLessThanOrEqual(fit.clientWidth);
+      expect(fit.scrollHeight, `no line of the address is clipped ${at}`).toBeLessThanOrEqual(fit.clientHeight);
+      expect(fit.outside, `every line of the address stays in the control column ${at}`).toBe(0);
+      expect(fit.pieces, `the address is in its pieces ${at}`).toBe(5);
+      expect(fit.split, `no piece of the address breaks inside itself ${at}`).toEqual([]);
+      // Copy stays beside the value, after it, on the value's row.
+      const [valueBox, copyBox] = await Promise.all([value.boundingBox(), row.getByRole("button", { name: "Copy Address" }).boundingBox()]);
+      expect(copyBox!.x, `Copy Address follows the address ${at}`).toBeGreaterThanOrEqual(valueBox!.x + valueBox!.width);
+    }
+  }
+  const copy = page.getByRole("button", { name: "Copy Address" });
+  await copy.click();
+  await expect(copy.locator(".copy-status-icon-copied"), "Copy Address confirms with its icon").toBeVisible();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(address);
 });
 
 test("a fresh load leaves the tab order at the top of the page", async ({ page }) => {
@@ -1494,6 +1667,124 @@ test.describe("the appearance controls", () => {
       .toHaveText(["Theme", "Color Scheme", "Density", "Sessions Layout", "Terminal Placement"]);
   });
 
+  test("Appearance names its scope once, and Display's foot says motion follows the system (#3020)", async ({ page }) => {
+    await useHarness(page, "dark", { section: "appearance" });
+    await expect(page.locator(".settings-panel-head .settings-panel-scope")).toHaveText("This Device");
+    await expect(display(page).locator(".settings-group-foot"))
+      .toHaveText("Motion follows your system's reduce-motion setting.");
+  });
+
+  /** The Display controls in row order, each with its row. */
+  const displayControls = (page: Page) => display(page).locator(".setting-row").evaluateAll((rows) => rows.map((row) => {
+    const control = row.querySelector<HTMLElement>(":scope > .setting-row-control > :is(.seg, .ui-select)")!;
+    // A Select's root holds its trigger; the trigger is what is drawn.
+    const drawn = control.querySelector<HTMLElement>(":scope > .ui-select-trigger") ?? control;
+    const box = drawn.getBoundingClientRect();
+    const rowBox = row.getBoundingClientRect();
+    const rowStyle = getComputedStyle(row);
+    return {
+      title: row.querySelector(".setting-row-title")!.textContent,
+      left: box.left,
+      right: box.right,
+      height: box.height,
+      titleLeft: row.querySelector(".setting-row-title")!.getBoundingClientRect().left,
+      rowContentRight: rowBox.right - Number.parseFloat(rowStyle.paddingRight) - Number.parseFloat(rowStyle.borderRightWidth),
+    };
+  }));
+
+  test("at 1440px Theme, Color Scheme, Density and Sessions Layout share one 32px control column (#3020)", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await useHarness(page, "dark", { section: "appearance" });
+    const controls = await displayControls(page);
+    expect(controls.map((control) => control.title))
+      .toEqual(["Theme", "Color Scheme", "Density", "Sessions Layout", "Terminal Placement"]);
+    for (const control of controls) {
+      expect(Math.abs(control.left - controls[0]!.left), `"${control.title}" starts on the control column`).toBeLessThanOrEqual(0.5);
+      expect(Math.abs(control.right - controls[0]!.right), `"${control.title}" ends on the control column`).toBeLessThanOrEqual(0.5);
+      expect(control.height, `"${control.title}" is 32px tall`).toBe(32);
+    }
+  });
+
+  test.describe("on a 390px touch phone", () => {
+    test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+    test("every Display control is 44px and full width, Sessions Layout is absent and Terminal Placement stays (#3020)", async ({ page }) => {
+      await useHarness(page, "dark", { section: "appearance" });
+      expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
+      const controls = await displayControls(page);
+      expect(controls.map((control) => control.title), "a phone shows no preview, so it has no Sessions Layout")
+        .toEqual(["Theme", "Color Scheme", "Density", "Terminal Placement"]);
+      for (const control of controls) {
+        expect(control.height, `"${control.title}" is 44px on touch`).toBe(44);
+        expect(Math.abs(control.left - control.titleLeft), `"${control.title}" starts where its title does`).toBeLessThanOrEqual(0.5);
+        expect(Math.abs(control.right - control.rowContentRight), `"${control.title}" fills the row`).toBeLessThanOrEqual(0.5);
+      }
+    });
+  });
+
+  test("a change shows the row's Saved check for 2s (#3020)", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await useHarness(page, "dark", { section: "appearance" });
+    const row = display(page).locator(".setting-row", { has: seg(page, "Sessions Layout") });
+    await expect(row.locator(".setting-row-saved")).toHaveCount(0);
+    await pill(page, "Sessions Layout", "Preview Right").click();
+    await expect(row.locator(".setting-row-desc"))
+      .toHaveText("The session list on the left, with the preview beside it, in windows 1100px and wider.");
+    await expect(row.locator(".setting-row-saved")).toHaveText("Saved");
+    await expect(row.locator(".setting-row-saved")).toHaveCount(0, { timeout: 4000 });
+  });
+
+  for (const theme of THEMES) {
+    test(`opened from the keyboard, the scheme list draws no ring of its own and fills its active option in ${theme} (#3020)`, async ({ page }) => {
+      await useHarness(page, theme, { section: "appearance" });
+      await trigger(page).focus();
+      await page.keyboard.press("Enter");
+      const list = page.getByRole("listbox", { name: "Color Scheme" });
+      await expect(list).toBeFocused();
+      const state = () => list.evaluate((element) => {
+        const active = element.querySelector<HTMLElement>(".ui-select-option.is-active");
+        return {
+          focusVisible: element.matches(":focus-visible"),
+          outline: getComputedStyle(element).outlineStyle,
+          activeLabel: active?.querySelector(".ui-select-option-body > span")?.textContent ?? null,
+          activeFill: active ? getComputedStyle(active).backgroundColor : null,
+        };
+      });
+      const opened = await state();
+      expect(opened.focusVisible, "the keyboard-opened list is where the keyboard is").toBe(true);
+      expect(opened.outline, "and it draws no ring around every option").toBe("none");
+      expect(opened.activeLabel).toBe("Wollipog");
+      expect(parseColor(opened.activeFill!).a, "the active option is filled").toBeGreaterThan(0);
+
+      await page.keyboard.press("ArrowDown");
+      const browsed = await state();
+      expect(browsed.outline).toBe("none");
+      expect(browsed.activeLabel).toBe("GitHub");
+      // Polled: an option's background eases in, so the first frame after the key is still clear.
+      await expect.poll(async () => parseColor((await state()).activeFill!).a,
+        { message: "and so is each option the keyboard moves to" }).toBeGreaterThan(0);
+      await page.keyboard.press("Escape");
+    });
+  }
+
+  test("in forced colors, which drop the fill, the highlighted scheme option carries the ring (#3020)", async ({ page }) => {
+    await page.emulateMedia({ forcedColors: "active" });
+    await useHarness(page, "dark", { section: "appearance" });
+    await trigger(page).focus();
+    await page.keyboard.press("Enter");
+    const list = page.getByRole("listbox", { name: "Color Scheme" });
+    await expect(list).toBeFocused();
+    await page.keyboard.press("ArrowDown");
+    const active = list.locator(".ui-select-option.is-active");
+    await expect(active).toContainText("GitHub");
+    const ring = await active.evaluate((element) => {
+      const computed = getComputedStyle(element);
+      return { style: computed.outlineStyle, width: Number.parseFloat(computed.outlineWidth) };
+    });
+    expect(ring, "the highlighted option is outlined where its fill is gone").toEqual({ style: "solid", width: 2 });
+    await page.keyboard.press("Escape");
+  });
+
   test("the closed controls share an edge and the open scheme list fits readable content", async ({ page }) => {
     await useHarness(page, "dark", { section: "appearance", copy: "long" });
     const controls = [seg(page, "Theme"), trigger(page), seg(page, "Density")];
@@ -1530,7 +1821,8 @@ test.describe("the appearance controls", () => {
           .map((body) => Math.round(body.getBoundingClientRect().left)),
       };
     });
-    expect(geometry.width).toBeGreaterThanOrEqual(398);
+    // The described list's default width (§8.3, #3020), not a width of its own.
+    expect(geometry.width).toBeGreaterThanOrEqual(358);
     expect(Math.abs(geometry.leftDelta)).toBeLessThanOrEqual(1);
     expect(geometry.scrollHeight).toBeLessThanOrEqual(geometry.clientHeight + 1);
     expect(Math.max(...geometry.lines), "localized-length descriptions remain at most two lines").toBeLessThanOrEqual(2);
@@ -1612,6 +1904,45 @@ test.describe("the appearance controls", () => {
     expect(geometry.left).toBeGreaterThanOrEqual(8);
     expect(geometry.right).toBeLessThanOrEqual(geometry.viewportWidth - 8);
     expect(geometry.scrollHeight).toBeGreaterThan(geometry.clientHeight);
+  });
+
+  test("in a list that scrolls, the keyboard keeps the highlighted option in view, since its fill is the only focus cue (#3020)", async ({ page }) => {
+    await page.setViewportSize({ width: 360, height: 240 });
+    await useHarness(page, "dark", { section: "appearance", copy: "long" });
+    await trigger(page).focus();
+    await page.keyboard.press("Enter");
+    const list = page.getByRole("listbox", { name: "Color Scheme" });
+    await expect(list).toBeFocused();
+    const inView = () => list.evaluate((element) => {
+      const active = element.querySelector<HTMLElement>(".ui-select-option.is-active")!;
+      const box = element.getBoundingClientRect();
+      const option = active.getBoundingClientRect();
+      return {
+        scrolls: element.scrollHeight > element.clientHeight,
+        label: active.querySelector(".ui-select-option-body > span")?.textContent,
+        visible: option.top >= box.top - 0.5 && option.bottom <= box.bottom + 0.5,
+      };
+    });
+    expect(await inView()).toEqual({ scrolls: true, label: "Wollipog", visible: true });
+    await page.keyboard.press("End");
+    await expect.poll(inView, { message: "End highlights the last palette below the fold and scrolls to it" })
+      .toEqual({ scrolls: true, label: "Monokai", visible: true });
+    await page.keyboard.press("Home");
+    await expect.poll(inView).toEqual({ scrolls: true, label: "Wollipog", visible: true });
+    await page.keyboard.press("Escape");
+
+    // A highlight the POINTER chose is not scrolled to while the pointer moves, but a shorter window
+    // that turns the list into a scroller still brings it into view.
+    await page.setViewportSize({ width: 360, height: 640 });
+    await trigger(page).focus();
+    await page.keyboard.press("Enter");
+    await expect(list).toBeFocused();
+    await list.getByRole("option", { name: "Monokai" }).hover();
+    await expect.poll(async () => (await inView()).label).toBe("Monokai");
+    await page.setViewportSize({ width: 360, height: 240 });
+    await expect.poll(inView, { message: "the hovered highlight is brought back into view when the list starts to scroll" })
+      .toEqual({ scrolls: true, label: "Monokai", visible: true });
+    await page.keyboard.press("Escape");
   });
 
   for (const theme of THEMES) {
@@ -1777,7 +2108,7 @@ test.describe("the appearance controls", () => {
 test.describe("the setting-row grid", () => {
   async function useKinds(page: Page, theme: Theme, groupWidth?: number) {
     await page.goto(`/settings-rows-e2e.html?theme=${theme}&view=kinds${groupWidth ? `&group-width=${groupWidth}` : ""}`);
-    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    await expectTheme(page, theme);
     await expect(page.locator(".settings-group").first()).toBeVisible();
   }
   const group = (page: Page, title: string) =>
@@ -1995,6 +2326,80 @@ test.describe("the setting-row grid", () => {
     expect(listBottom.y + listBottom.height, "the list reaches over the next group, or this proves nothing")
       .toBeGreaterThan(nextSurface.y);
     expect(reach, "every option is on top and can be clicked").toEqual(reach.map(() => true));
+  });
+
+  /**
+   * Every row on the page with one line of title, at most one line of description and a control no
+   * taller than --control-h, with its height and the --row-h-2 it should equal. Rows with more to
+   * show (a second description line, a reason under the control) grow past the token by design and
+   * are left out, but counted, so a layout that broke every row into two lines cannot pass vacuously.
+   * The height is the surface's child: a row's frame (a switch with Saved or Try Again, Tailnet
+   * Access) when it has one, because that is what a list of rows adds up.
+   */
+  const oneLineRows = (page: Page) => page.evaluate(() => {
+    const linesOf = (element: Element) =>
+      Math.round(element.getBoundingClientRect().height / Number.parseFloat(getComputedStyle(element).lineHeight));
+    const rows = [...document.querySelectorAll<HTMLElement>(".setting-row")].filter((row) => row.checkVisibility());
+    const measured = rows.map((row) => {
+      const root = getComputedStyle(row);
+      const descriptions = [...row.querySelectorAll(".setting-row-desc")]
+        .filter((element) => element.checkVisibility({ visibilityProperty: true }));
+      const control = row.querySelector(":scope > .setting-row-control");
+      const frame = row.parentElement?.classList.contains("setting-row-frame") ? row.parentElement : null;
+      return {
+        title: row.querySelector(".setting-row-title")?.textContent ?? "",
+        described: descriptions.length > 0,
+        framedAfterSibling: Boolean(frame?.previousElementSibling),
+        oneLine: linesOf(row.querySelector(".setting-row-title")!) === 1
+          && descriptions.every((element) => linesOf(element) === 1)
+          && (control?.getBoundingClientRect().height ?? 0) <= Number.parseFloat(root.getPropertyValue("--control-h")),
+        height: (frame ?? row).getBoundingClientRect().height,
+        token: Number.parseFloat(root.getPropertyValue("--row-h-2")),
+      };
+    });
+    return { total: measured.length, rows: measured.filter((row) => row.oneLine) };
+  });
+
+  test("at 1440px a row with one line of title and one of description is exactly --row-h-2, at either density (#3140)", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    for (const [density, height] of [["compact", 56], ["comfortable", 60]] as const) {
+      let described = 0;
+      let framed = 0;
+      // Network with Tailnet Access unread adds a framed row after another row of its group.
+      for (const id of [...SETTINGS_SECTIONS.map((section) => section.id), "kinds", "framed"] as const) {
+        if (id === "kinds") await useKinds(page, "dark");
+        else if (id === "framed") await useHarness(page, "dark", { section: "network", tailnet: "read-failed" });
+        else await useHarness(page, "dark", { section: id });
+        if (density === "comfortable") await page.evaluate(() => { document.documentElement.dataset.density = "comfortable"; });
+        const { total, rows } = await oneLineRows(page);
+        expect(total, `${id}: rows were measured`).toBeGreaterThan(0);
+        for (const row of rows) {
+          expect(row.token, `--row-h-2 is ${height}px at ${density} density`).toBe(height);
+          // A hairline above the row is inside its height, so a list of these rows is a whole
+          // multiple of the token, the same as every other two-line row (§5.2).
+          expect(row.height, `${id} › "${row.title}" is --row-h-2 tall at ${density} density`).toBe(height);
+        }
+        described += rows.filter((row) => row.described).length;
+        framed += rows.filter((row) => row.framedAfterSibling).length;
+      }
+      expect(described, "the described one-line rows across Settings and the gallery were measured").toBeGreaterThan(40);
+      // Its hairline is the frame's to pass on: on the frame itself it sat outside the row's height.
+      expect(framed, "a framed row after another child of its surface was measured").toBeGreaterThan(0);
+    }
+  });
+
+  test.describe("with a coarse pointer on a wide group", () => {
+    test.use({ viewport: { width: 1024, height: 768 }, hasTouch: true, isMobile: true });
+
+    test("a row with one line of title and one of description is exactly the 64px --row-h-2 (#3140)", async ({ page }) => {
+      await useKinds(page, "dark");
+      expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
+      expect((await group(page, "Row Kinds").locator(".settings-group-surface").boundingBox())!.width,
+        "the group is wide enough to keep its controls beside the text").toBeGreaterThanOrEqual(560);
+      const { rows } = await oneLineRows(page);
+      expect(rows.filter((row) => row.described).length).toBeGreaterThan(5);
+      for (const row of rows) expect(row.height, `"${row.title}" is --row-h-2 tall on touch`).toBe(64);
+    });
   });
 
   test.describe("with a coarse pointer", () => {

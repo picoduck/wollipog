@@ -3,6 +3,7 @@ import { CopyButton, Spinner } from "../common.js";
 import { FieldError } from "../FieldError.js";
 import { CheckIcon, ChevronRightIcon } from "../Icons.js";
 import { Notice } from "../Notice.js";
+import { affixSuffixRef } from "./affix-suffix.js";
 import { SegmentedControl, Select, type SelectOption } from "./ChoiceControls.js";
 
 /**
@@ -437,7 +438,7 @@ export function NumberRow({
               onChange={(event) => onChange(event.currentTarget.value)}
               onBlur={onBlur}
             />
-            {unit && <span className="input-affix-text" id={unitId}>{unit}</span>}
+            {unit && <span className="input-affix-text" id={unitId} ref={affixSuffixRef}>{unit}</span>}
           </span>
           {error && <FieldError id={errorId}>{error}</FieldError>}
         </span>
@@ -451,7 +452,8 @@ export function NumberRow({
  * A read-only value in the control column: an address, a version, a count. `mono` for addresses,
  * versions and ids (§11.3). `copy` adds Copy, an `.icon-btn.sm` named "Copy <Title>", or `copyLabel`
  * where the title does not name the value ("Copy Address" for Connected To): `true` copies `value`
- * itself, a string copies that text instead. It confirms with its icon.
+ * itself, a string copies that text instead. It confirms with its icon. `wrap` is for a value that is
+ * only useful whole, an address: it breaks after `.`, `/` and `:` rather than being cut off (#3159).
  */
 export function ValueRow({
   title,
@@ -461,6 +463,7 @@ export function ValueRow({
   mono,
   copy,
   copyLabel,
+  wrap,
 }: {
   title: string;
   description?: ReactNode;
@@ -470,6 +473,7 @@ export function ValueRow({
   copy?: boolean | string;
   /** The Copy button's name, in Title Case. */
   copyLabel?: string;
+  wrap?: boolean;
 }) {
   const copyText = typeof copy === "string" ? copy : copy && typeof value === "string" ? value : undefined;
   return (
@@ -477,10 +481,10 @@ export function ValueRow({
       <RowText title={title} icon={icon} description={description} />
       <span className="setting-row-control">
         <span
-          className={`setting-row-value-text${mono ? " is-mono" : ""}`}
+          className={`setting-row-value-text${mono ? " is-mono" : ""}${wrap ? " is-wrapping" : ""}`}
           title={typeof value === "string" ? value : undefined}
         >
-          {value}
+          {wrap && typeof value === "string" ? withBreaks(value) : value}
         </span>
         {copyText !== undefined && (
           <CopyButton text={copyText} iconOnly className="icon-btn sm" ariaLabel={copyLabel ?? `Copy ${title}`} />
@@ -488,6 +492,18 @@ export function ValueRow({
       </span>
     </div>
   );
+}
+
+/**
+ * `value` in pieces that each end after a run of `.`, `/` and `:`, so `https://` stays whole. A line
+ * breaks only between pieces, never at a hyphen inside one (`home-studio-01`).
+ */
+function withBreaks(value: string): ReactNode[] {
+  // A match rather than a lookbehind split, written when the floor was Safari 16.2. The floor is now
+  // 16.4 (#3213), which parses lookbehind, so either form is safe; this one is simply older syntax.
+  return (value.match(/[^.:/]*[.:/]*/g) ?? []).filter(Boolean).map((part, index) => (
+    <span key={index} className="setting-row-value-part">{part}</span>
+  ));
 }
 
 /**
@@ -654,7 +670,9 @@ export type SwitchProps = SwitchName & {
  * `busy` is for a toggle whose backing request is in flight. Callers must keep passing the last
  * CONFIRMED value as `checked` — reporting the pending value instead announces aria-checked="false"
  * while the thing being switched off is still live, and a slow or failed request leaves that lie
- * on screen until it snaps back.
+ * on screen until it snaps back. A busy switch refuses presses and is `aria-disabled` rather than
+ * `disabled`, as a busy button is (§3.1): `disabled` would drop the focus it was pressed with, or
+ * refuse the focus a failed row's Try Again hands it (#3190).
  */
 export function Switch({ checked, onChange, label, labelledBy, describedBy, disabled, busy, className, children, switchRef }: SwitchProps) {
   return (
@@ -667,9 +685,10 @@ export function Switch({ checked, onChange, label, labelledBy, describedBy, disa
       aria-labelledby={labelledBy}
       aria-describedby={describedBy}
       aria-busy={busy || undefined}
-      disabled={disabled || busy}
+      aria-disabled={(busy && !disabled) || undefined}
+      disabled={disabled}
       className={`ui-switch-control ${className ?? "ui-switch-standalone"}${busy ? " is-busy" : ""}${disabled ? " is-disabled" : ""}`}
-      onClick={() => onChange(!checked)}
+      onClick={() => { if (!busy) onChange(!checked); }}
     >
       {children}
       <span className="ui-switch" aria-hidden="true" />
@@ -696,7 +715,8 @@ export interface RowFailure {
  * sentence then takes the description's place with **Try Again** after it, and the switch keeps the
  * confirmed value. A button cannot hold another button, so while the failure shows the row is a
  * plain row around a standalone switch in the same column. Focus the change of shape drops is
- * handed to the switch; focus that has moved elsewhere is left alone.
+ * handed to the switch, which holds it while Try Again's retry saves because a busy switch stays
+ * focusable; focus that has moved elsewhere is left alone.
  *
  * A row with either is wrapped in `.setting-row-frame` with its status region, so a group's surface
  * sees one child per setting.

@@ -361,11 +361,25 @@ type OrchestratorMcpLaunch = {
   forwardEnv?: boolean;
 };
 
+/**
+ * Per-call limit, in seconds, for every runner-built Codex `wollipog` MCP entry (#3123): three hours
+ * and one minute. It covers `wait_pull_request`'s own maximum (`PULL_REQUEST_WAIT_MAX_TIMEOUT_MS`,
+ * three hours) plus its at most 20-second read overrun, so a maximal wait always returns its own
+ * `timeout` summary before Codex cuts the call off. Without it, Codex applies its default, which
+ * codex-cli 0.162.1 measured at 300 seconds for a call sent through App Server.
+ *
+ * It bounds only how long Codex waits for one call to this server; every other tool keeps its own
+ * shorter bounds (control-plane requests time out after 30 seconds, `wait_session` after one hour).
+ * The setting lives inside the `wollipog` entry, so no other MCP server's configuration changes.
+ */
+export const CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC = 10_860;
+
 function codexMcpLaunch(mcp: OrchestratorMcpLaunch): Record<string, unknown> {
   return {
     command: mcp.command,
     args: mcp.args,
     ...(mcp.forwardEnv ? { env_vars: Object.keys(mcp.env) } : { env: mcp.env }),
+    tool_timeout_sec: CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC,
   };
 }
 
@@ -609,6 +623,90 @@ export function additiveCodexMcpServerArg(
   })}`;
 }
 
+/** The marker a session (non-Orchestrator) Codex `wollipog` entry carries in its environment, so a
+ * resume recognises and replaces the runner's own entry and never a user's. Its value is not read. */
+export const SESSION_CODEX_MCP_MARKER = "WOLLIPOG_SESSION_MCP";
+
+/**
+ * The `wollipog` MCP entry for a Codex session without the Orchestrator role (#3123). Codex has no
+ * per-session MCP configuration file, so the server is named inline, exactly as for an Orchestrator.
+ *
+ * It is the general Agent Control server a Claude session already receives through `--mcp-config`:
+ * the environment carries no Orchestrator role marker, so the server hides and refuses every
+ * Orchestrator-only tool. Only `wait_pull_request` is pre-approved, because it reads GitHub through
+ * the runner's `gh` login and grants nothing. Every other tool keeps whatever approval behavior the
+ * session's own Codex configuration gives it; pre-approving the read-only wait also keeps an
+ * approval reviewer from adding a model request before a wait starts.
+ */
+export function sessionCodexMcpServerArg(mcp: OrchestratorMcpLaunch): string {
+  return `mcp_servers.wollipog=${toml({
+    ...codexMcpLaunch(mcp),
+    enabled: true,
+    tools: { wait_pull_request: { approval_mode: "approve" } },
+  })}`;
+}
+
+/** Remove only a session `wollipog` entry this runner injected (recognised by its marker), in the
+ * `-c value`, `--config value`, and inline `--config=value` forms. Idempotent on every resume. */
+export function stripSessionCodexMcpArgs(args: readonly string[]): string[] {
+  const result: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    const flag = arg.split("=", 1)[0]!;
+    const inline = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : undefined;
+    const value = inline ?? args[i + 1];
+    if ((flag === "-c" || flag === "--config") && typeof value === "string" &&
+        namesReservedCodexMcpServer(value) && value.includes(SESSION_CODEX_MCP_MARKER)) {
+      if (inline === undefined) i++;
+      continue;
+    }
+    result.push(arg);
+  }
+  return result;
+}
+
+export interface CodexMcpInventoryEntry {
+  name: string;
+  enabled: boolean;
+  command: string | null;
+  toolTimeoutSec: number | null;
+}
+
+/** Parse `codex mcp list --json`, or `null` when the output is not that inventory. Only the fields
+ * a decision reads are kept; the output may carry credentials and is never logged. */
+export function parseCodexMcpInventory(output: string): CodexMcpInventoryEntry[] | null {
+  let servers: unknown;
+  try { servers = JSON.parse(output); } catch { return null; }
+  if (!Array.isArray(servers)) return null;
+  const entries: CodexMcpInventoryEntry[] = [];
+  for (const server of servers) {
+    if (!server || typeof server !== "object" || typeof server.name !== "string") return null;
+    const transport = (server as { transport?: { command?: unknown } }).transport;
+    entries.push({
+      name: server.name,
+      enabled: server.enabled === true,
+      command: typeof transport?.command === "string" ? transport.command : null,
+      toolTimeoutSec: typeof server.tool_timeout_sec === "number" ? server.tool_timeout_sec : null,
+    });
+  }
+  return entries;
+}
+
+/** Read the effective Codex MCP inventory for a native host launch at its working directory, with
+ * the same bounds as the Orchestrator isolation probe (10 seconds, 1 MiB). */
+export async function readCodexMcpInventory(
+  opts: { command: string; args: string[]; env?: Record<string, string>; context?: AgentDefinition["context"] },
+  cwd: string,
+): Promise<string> {
+  const { probe, env, nativeCwd } = codexOrchestratorMcpProbe(opts, cwd);
+  const { stdout } = await execFileAsync(probe.file, probe.args, {
+    ...(nativeCwd ? { cwd: nativeCwd } : {}), env, timeout: 10_000, maxBuffer: 1024 * 1024,
+    windowsHide: true,
+    ...(probe.windowsVerbatimArguments ? { windowsVerbatimArguments: true, argv0: probe.argv0 } : {}),
+  });
+  return stdout;
+}
+
 /**
  * Independent provider permissions (protocol v160 for Claude Code, v162 for the Codex drivers, v163
  * for Pi): the harness launches exactly as an equivalent normal session and only gains Wollipog's
@@ -634,7 +732,8 @@ export function additiveCodexMcpServerArg(
  * alone: it adds the per-harness arguments documented above, which remove user-configured MCP
  * servers, hooks, plugins, apps, extensions, skills, prompt templates, and ambient context files.
  * It adds no permission-mode, sandbox, approval, tool-inventory, or working-directory argument, so
- * with it disabled this function returns exactly what it returned at v163.
+ * with it disabled this function returns the same arguments it returned at v163 (the Codex entry
+ * has since gained only its per-call limit, #3123).
  */
 export function additiveOrchestratorLaunchArgs(
   driver: SessionLaunchSpec["driver"],
@@ -964,13 +1063,7 @@ export async function codexOrchestratorMcpArgs(
       const stdout = await (dependencies.runIsolated ?? runIsolatedCodexMcpProbe)(opts, cwd, probeArgs);
       return isolateCodexMcpServers(stdout, exempt);
     }
-    const { probe, env, nativeCwd } = codexOrchestratorMcpProbe(opts, cwd);
-    const { stdout } = await execFileAsync(probe.file, probe.args, {
-      ...(nativeCwd ? { cwd: nativeCwd } : {}), env, timeout: 10_000, maxBuffer: 1024 * 1024,
-      windowsHide: true,
-      ...(probe.windowsVerbatimArguments ? { windowsVerbatimArguments: true, argv0: probe.argv0 } : {}),
-    });
-    return isolateCodexMcpServers(stdout, exempt);
+    return isolateCodexMcpServers(await readCodexMcpInventory(opts, cwd), exempt);
   } catch {
     throw new Error("Orchestrator launch refused: unable to isolate Codex MCP servers.");
   }

@@ -27,6 +27,7 @@ import { activeBoardFilterCount, filterBoardSessions } from "./BoardFilters.js";
 import { showsActivityStrip } from "../activity.js";
 import { boardCardDecisions, boardCardRequestCode, boardCardSignInItems, type BoardCardSignInItem } from "../board-card.js";
 import { sessionRowStatus } from "../session-row-status.js";
+import { sessionFollowUp } from "../session-follow-up.js";
 import { sessionDisplayTitle } from "../session-title.js";
 import { ActivityStrip } from "./ActivityStrip.js";
 import { AgentIcon } from "./AgentIcon.js";
@@ -168,11 +169,18 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
   const threadChildren = useMemo(() => {
     const present = new Set(scoped.map((session) => session.id));
     const map = new Map<string, InboxThreadChildren>();
+    const followUpPriorities = new Map<string, number>();
     for (const session of scoped) {
       const parentId = session.parentSessionId;
       if (!parentId || !present.has(parentId) || parentId === session.id) continue;
       const entry = map.get(parentId) ?? { count: 0, working: 0, waiting: 0, children: [] };
       entry.count += 1;
+      const followUp = sessionFollowUp(session);
+      if (followUp.priority > (followUpPriorities.get(parentId) ?? 0)) {
+        followUpPriorities.set(parentId, followUp.priority);
+        // Keep the existing input count, and only add a review reason when no stronger input wins.
+        entry.followUpLabel = followUp.group === "ready_for_review" ? "Ready for Review" : undefined;
+      }
       if (isInboxBlocked(session)) entry.waiting += 1;
       const stalled = stalledSessionIds.has(session.id);
       const state = inboxThreadChildState(session, stalled);
@@ -608,9 +616,9 @@ function SessionCard({
           ? <CardFamilyChip family={threadChildren} besideKey={[status.badge?.ariaLabel ?? "", ...status.others].join("\n")} />
           : strip && <ActivityStrip activity={activity} now={activityNow} compact />}
       </div>
-      {request
-        ? <CardRequest session={session} request={request} runnerOnline={runnerOnline} onOpen={onOpen} />
-        : <div className="card-preview">{plainTextPreview(session.preview)}</div>}
+      {/* No transcript excerpt (#3175): a card ends on its status line unless a request needs a
+          decision here. */}
+      {request && <CardRequest session={session} request={request} runnerOnline={runnerOnline} onOpen={onOpen} />}
     </article>
   );
 }
@@ -663,7 +671,7 @@ function CardFamilyChip({ family, besideKey }: {
   return (
     <span
       ref={chipRef}
-      className={`inbox-thread-family${family.waiting > 0 ? " waiting" : ""}${dotsOnly ? " dots-only" : ""}`}
+      className={`inbox-thread-family${family.waiting > 0 ? " waiting" : family.followUpLabel === "Ready for Review" ? " t-review" : ""}${dotsOnly ? " dots-only" : ""}`}
       role="img"
       aria-label={label}
       title={label}

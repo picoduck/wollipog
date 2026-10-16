@@ -529,7 +529,7 @@ window.__WOLLIPOG_MACHINE_E2E__ = {
         available: false, authStatus: "authenticated", version: "0.140.0",
         installation: { id: "legacy", path: "C:\\Legacy Tools\\codex.exe", via: "path" },
         codexAppServer: { status: "unsupported", installedVersion: "0.140.0", appServerAvailable: true,
-          failure: { code: "version_unverified", message: "Codex 0.140.0 is older than the verified app-server floor 0.147.0.", retryable: false } },
+          failure: { code: "version_unverified", message: "Codex 0.140.0 is older than the supported version 0.147.0. Update Codex, then rediscover.", retryable: false } },
         update: { status: "update_available", installedVersion: "0.140.0", latestPublishedVersion: "0.210.0",
           checkedAt: Date.UTC(2026, 8, 22), channel: "stable", evidenceSource: "npm dist-tags for @openai/codex",
           managedExternally: true,

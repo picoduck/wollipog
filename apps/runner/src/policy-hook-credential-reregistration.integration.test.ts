@@ -103,7 +103,17 @@ async function stopChild(child: ChildProcess): Promise<void> {
 }
 
 function launches(dir: string): string[] {
-  return readdirSync(dir).filter((name) => name.endsWith(".json")).sort();
+  return readdirSync(dir).filter((name) => {
+    if (!/^\d+\.json$/u.test(name)) return false;
+    const recorded = JSON.parse(readFileSync(join(dir, name), "utf8")) as { args: string[] };
+    // /context uses a separate, nonpersistent process with hooks disabled. It shares the
+    // conversation id, but is not a provider relaunch and must not advance this fixture's fence.
+    return !recorded.args.includes("--no-session-persistence");
+  }).sort((left, right) => {
+    const a = BigInt(left.slice(0, -5));
+    const b = BigInt(right.slice(0, -5));
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
 }
 
 interface HookInvocation {
@@ -149,6 +159,26 @@ async function runHook(hook: HookInvocation): Promise<string> {
 function answeredByControlPlane(hookOutput: string): boolean {
   return hookOutput.includes('"permissionDecision":"deny"') && !hookOutput.includes(TRANSPORT_UNAVAILABLE);
 }
+
+test("policy-hook launch selection excludes nonpersistent accounting probes (#3169)", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "wollipog-policy-hook-selection-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const settings = JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ command: "node", args: ["--policy-hook"] }] }] } });
+  writeFileSync(join(dir, "100.json"), JSON.stringify({ args: ["--settings", "{}"], env: {} }));
+  writeFileSync(join(dir, "200.json"), JSON.stringify({ args: ["--resume", "synthetic", "--settings", settings], env: {} }));
+  // The real driver launches /context with these flags and disables hooks for the accounting probe.
+  writeFileSync(join(dir, "300.json"), JSON.stringify({ args: ["--resume", "synthetic", "--no-session-persistence", "--settings", '{"disableAllHooks":true}'], env: {} }));
+  const selected = launches(dir).at(-1)!;
+  assert.deepEqual(managerPreToolUseHook(dir, selected).args, ["--policy-hook"]);
+  assert.deepEqual(launches(dir), ["100.json", "200.json"], "only persistent provider launches count");
+});
+
+test("policy-hook launch selection orders monotonic timestamps numerically (#3169)", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "wollipog-policy-hook-order-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  for (const name of ["9.json", "10.json", "11.json"]) writeFileSync(join(dir, name), JSON.stringify({ args: [], env: {} }));
+  assert.deepEqual(launches(dir), ["9.json", "10.json", "11.json"]);
+});
 
 test("a relaunch whose policy-hook credential registration is lost recovers after the runner reconnects", {
   timeout: 240_000,

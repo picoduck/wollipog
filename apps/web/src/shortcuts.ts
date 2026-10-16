@@ -46,6 +46,7 @@ export type ShortcutId =
   | "inbox-archive"
   | "inbox-snooze"
   | "inbox-pin"
+  | "inbox-mark-reviewed"
   | "inbox-unread"
   | "inbox-reply"
   | "inbox-page-down"
@@ -66,6 +67,7 @@ export type ShortcutId =
   | "session-reading-archive"
   | "session-reading-snooze"
   | "session-reading-fork"
+  | "session-reading-mark-reviewed"
   | "session-reading-reply"
   | "steer-turn"
   | "stop-turn"
@@ -383,6 +385,13 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     binding: { key: "u", bare: true },
   },
   {
+    id: "inbox-mark-reviewed",
+    group: "Sessions List",
+    label: "Mark Reviewed",
+    scope: "Sessions List",
+    binding: { key: "m", bare: true },
+  },
+  {
     id: "inbox-reply",
     group: "Sessions List",
     label: "Reply to Session",
@@ -516,6 +525,13 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     label: "Fork Conversation",
     scope: "Session Reading",
     binding: { key: "f", bare: true },
+  },
+  {
+    id: "session-reading-mark-reviewed",
+    group: "Session Reading",
+    label: "Mark Reviewed",
+    scope: "Session Reading",
+    binding: { key: "m", bare: true },
   },
   {
     id: "session-reading-reply",

@@ -26,7 +26,9 @@ const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-worker-daemon-"))
 const home = join(root, "home"), temp = join(root, "tmp"), emptyBin = join(root, "bin");
 for (const path of [home, temp, emptyBin]) mkdirSync(path, { mode: 0o700 });
 const instanceId = randomUUID(), runnerId = "isolated-lease-worker", interval = maximal ? 10_000 : 100;
-const children = [], peers = [], states = new Map();
+// Daemons only: Windows requires a native numeric exit receipt from each. Holders are plain Node
+// children whose forced exit reports a signal instead, so they are tracked and reaped separately.
+const children = [], holders = [], peers = [], states = new Map();
 let output = "", lastHeartbeat = 0, delays = [], measuring = false;
 const wss = new WebSocketServer({ noServer: true });
 const server = createServer((request, response) => {
@@ -131,6 +133,27 @@ async function sync(runner, id) {
   }
   throw new Error("startup skill authorization kept changing beyond the finite fixture retry budget");
 }
+/** A live holder outside both daemons: the source registry, the runners' attested owner and its
+ * own live PID. Idle runners release the HOME after each skill transaction (#3228), so contention
+ * and owner-death recovery need a holder whose lifetime this fixture controls. */
+async function hold(ownerHash) {
+  const helperDataDir = join(root, "holder-data"); mkdirSync(helperDataDir, { recursive: true, mode: 0o700 });
+  const script = join(root, "holder.mjs");
+  writeFileSync(script, [
+    `import { ProviderHomeLeaseRegistry } from ${JSON.stringify(pathToFileURL(join(repo, "apps/runner/src/provider-home-lease.ts")).href)};`,
+    `const registry = new ProviderHomeLeaseRegistry(${JSON.stringify(ownerHash)}, { helperDataDir: ${JSON.stringify(helperDataDir)} });`,
+    `registry.acquireHome(${JSON.stringify(home)}, "skills");`,
+    `process.stdout.write("held\\n");`,
+    `setInterval(() => {}, 1 << 30);`,
+  ].join("\n"));
+  const child = spawn(process.execPath, ["--import", loader, script], { cwd: root, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  holders.push(child);
+  let held = false;
+  child.stdout.on("data", b => { output = (output + b).slice(-65536); if (String(b).includes("held")) held = true; });
+  child.stderr.on("data", b => { output = (output + b).slice(-65536); });
+  await until(() => { assert.equal(child.exitCode, null, output); return held; }, "external holder acquisition");
+  return child;
+}
 function evidence() {
   const lease = join(home, ".agent-manager/provider-home-leases-v1");
   return [lease, join(lease, "mutable-home.lock")].flatMap(directory =>
@@ -170,7 +193,8 @@ async function stop(child, signal) {
 try {
   await new Promise(resolveListen => server.listen(0, "127.0.0.1", resolveListen));
   const first = await start(join(root, "runner-a"));
-  if (maximal) seed(JSON.parse(readFileSync(join(first.dataDir, ".wollipog-runner-owner-v2.json"), "utf8")).ownerHash);
+  const ownerHash = JSON.parse(readFileSync(join(first.dataDir, ".wollipog-runner-owner-v2.json"), "utf8")).ownerHash;
+  if (maximal) seed(ownerHash);
   lastHeartbeat = performance.now(); measuring = true;
   const begin = performance.now(); const result = await sync(first, "initial"); const operationDurationMs = performance.now() - begin;
   if (!maximal) await pause(1200);
@@ -180,14 +204,22 @@ try {
   assert.ok(Math.max(...delays) <= 500, `actual heartbeat dispatch delay ${Math.max(...delays)} ms`);
   const active = evidence().filter(item => item.record.state === "active" && item.record.pid === first.child.pid);
   assert.ok(active.length > 0, "the daemon worker published ownership using its parent PID");
-  const before = evidence().map(({ path, hash }) => [path, hash]);
+  assert.ok(evidence().some(item => item.record.state === "released" && item.record.pid === first.child.pid),
+    "an idle runner releases the HOME once its skill transaction finishes");
   const second = await start(join(root, "runner-b"));
+  const shared = await sync(second, "idle-peer");
+  assert.equal(shared.error, undefined, `a live but idle runner must not block another runner\n${output}`);
+  assert.ok(evidence().some(item => item.record.state === "released" && item.record.pid === second.child.pid),
+    "the second runner acquired and released the HOME while the first stayed alive");
+  const holder = await hold(ownerHash);
+  const before = evidence().map(({ path, hash }) => [path, hash]);
   const contended = await sync(second, "contended");
   assert.match(contended.error, /^Provider-home lease unavailable:/iu, "the exact contended request must report lease refusal");
   await until(() => /lease unavailable|already in use/iu.test(output), "contended refusal log delivery");
   assert.match(output, /lease unavailable|already in use/iu);
-  assert.deepEqual(evidence().map(({ path, hash }) => [path, hash]), before, "a second live runner cannot adopt private authority");
-  await stop(first.child, "SIGKILL");
+  assert.deepEqual(evidence().map(({ path, hash }) => [path, hash]), before, "a live runner cannot adopt a live holder's private authority");
+  const holderExit = await stop(holder, "SIGKILL");
+  assert.ok(holderExit && (holderExit.code !== null || holderExit.signaled !== null), "the holder's death was observed before recovery");
   const recovered = await sync(second, "recovery");
   assert.equal(recovered.error, undefined, output);
   assert.ok(evidence().some(item => item.record.state === "active" && item.record.pid === second.child.pid), "actual runner death enables proved recovery");
@@ -197,6 +229,7 @@ try {
     operationDurationMs, heartbeatIntervalMs: interval, heartbeatDispatches: delays.length, maxHeartbeatDelayMs: Math.max(...delays),
     liveOwnerRefused: true, killedRunnerRecovered: true, gracefulReleaseProved: true }));
 } finally {
+  for (const child of holders) await stop(child, "SIGKILL");
   for (const child of children) await stop(child, "SIGKILL");
   for (const { peer } of peers) peer.terminate();
   await new Promise(resolveClose => wss.close(resolveClose));

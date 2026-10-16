@@ -80,7 +80,8 @@ test("every section has an icon-free one-line description and at most one scope 
     if (section.panelDescription !== undefined) {
       assert.match(section.panelDescription, /^[A-Z].*\.$/, `${section.title}: the panel head's sentences end with a period`);
     }
-    assert.ok(section.scope === undefined || section.scope === "This Device" || section.scope === "Your Account");
+    assert.ok(section.scope === undefined || section.scope === "This Device" || section.scope === "Your Account"
+      || section.scope === "Your Organization");
   }
   // Sections whose groups are kept in different places say so per group, never as a whole.
   for (const mixed of ["behavior", "approvals", "network"]) {
@@ -205,26 +206,24 @@ test("the section panel takes focus only when the panel that had it is gone", ()
 
 test("the settings sections name the things the plan says stay discoverable", () => {
   const view = readFileSync(fileURLToPath(new URL("./components/SettingsView.tsx", import.meta.url)), "utf8");
+  const about = readFileSync(fileURLToPath(new URL("./components/AboutSettingsPanel.tsx", import.meta.url)), "utf8");
   // §11.3: never hide a setting that could exist. A missing section teaches a user it is not
-  // possible; a disabled one with a sentence teaches them where it lives. Agent defaults are no longer
-  // one row here: every agent is a row of its own in AgentDefaultsPanel (#3024).
-  for (const named of [
-    "Manage Instances",
-    "Updates",
-    "Open-Source Licenses",
-  ]) {
+  // possible. Agent defaults are no longer one row here: every agent is a row of its own in
+  // AgentDefaultsPanel (#3024).
+  for (const [source, named] of [
+    [view, "Manage Instances"],
+    [about, "Updates"],
+  ] as const) {
     // The exact title, not a substring of one: checking `includes("Updates")` passed against a row
     // renamed "Updates-REMOVED", which is the mutation that found this.
-    assert.ok(view.includes(`title="${named}"`), `${named} is named in the plan and must appear as a setting`);
+    assert.ok(source.includes(`title="${named}"`), `${named} is named in the plan and must appear as a setting`);
   }
-  // Every one of them carries a reason, which is the half that makes a disabled row informative
-  // rather than a dead end.
-  // Behavior's Reduce Motion, Confirm Before Deleting and Default Models fallback are gone (#3023),
-  // and so are Network's (#3027); About keeps its two until #3028.
-  const pending = view.match(/<PendingSetting[\s\S]*?\/>/g) ?? [];
-  assert.ok(pending.length >= 2, "the named-but-unbuilt settings must all be rendered");
-  for (const block of pending) {
-    assert.match(block, /reason=/, "a disabled setting without a reason is worse than none");
+  // But a placeholder is not a setting (§13.2): the last "not built yet" rows went with Behavior's
+  // (#3023), Network's (#3027) and About's (#3028), and so did the component that drew them.
+  for (const [file, source] of [["SettingsView.tsx", view], ["AboutSettingsPanel.tsx", about]] as const) {
+    assert.doesNotMatch(source, /PendingSetting|settings-pending-reason/u, `${file} has no placeholder rows`);
+    assert.doesNotMatch(source, /Open-Source Licenses|THIRD-PARTY-NOTICES/u,
+      `${file}: licenses come back only when the notices are bundled into the app`);
   }
 });
 
@@ -262,15 +261,11 @@ test("both callers mount the same notifications panel", () => {
 });
 
 test("a setting nobody can change is an explanation, not an off switch", () => {
-  const view = readFileSync(fileURLToPath(new URL("./components/SettingsView.tsx", import.meta.url)), "utf8");
   const rows = readFileSync(fileURLToPath(new URL("./components/ui/SettingsRows.tsx", import.meta.url)), "utf8");
   // A disabled SwitchRow announces `aria-checked="false"`, which CLAIMS the setting is off. For the
   // tailnet that claim was made precisely when the value could not be read — a network-exposure
-  // setting reported as off while its own text said the state was unknown.
-  const pending = view.slice(view.indexOf("export function PendingSetting"));
-  assert.doesNotMatch(pending.slice(0, 500), /SwitchRow/,
-    "an unknown or unbuilt setting must not paint or announce a value it does not have");
-  assert.match(pending.slice(0, 500), /<StaticRow/, "it states something instead");
+  // setting reported as off while its own text said the state was unknown. A row that only states
+  // something is a StaticRow.
   const staticRow = rows.slice(rows.indexOf("export function StaticRow"), rows.indexOf("export function LinkRow"));
   assert.doesNotMatch(staticRow, /role=|aria-checked/,
     "there is nothing to operate, so there is no role to announce");

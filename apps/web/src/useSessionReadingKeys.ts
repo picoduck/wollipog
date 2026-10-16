@@ -22,6 +22,7 @@ export interface SessionReadingKeyActions {
   snooze: () => void;
   /** More Actions' Fork Conversation…, and only while that item is offered and enabled. */
   fork: () => void;
+  markReviewed: () => void;
   reply: () => void;
   pauseFollow: () => void;
   resumeFollow: () => void;
@@ -49,6 +50,7 @@ const ACTION_BINDINGS: ReadonlyArray<[
   ["session-reading-archive", "archive"],
   ["session-reading-snooze", "snooze"],
   ["session-reading-fork", "fork"],
+  ["session-reading-mark-reviewed", "markReviewed"],
   ["session-reading-reply", "reply"],
 ];
 
@@ -70,6 +72,12 @@ function questionCardOwnsFocus(targetDocument: Document): boolean {
  * own column owns reading keys regardless of that focus, leaving the hidden transcript alone. */
 function expandedDecisionIsReading(scroll: HTMLElement | null): boolean {
   return Boolean(scroll?.closest(".chat-reading")?.querySelector(".request-card[data-decision-expanded]"));
+}
+
+/** Answer Mode owns bare reading keys; modified session navigation stays available. */
+function composerAnswerOwnsKey(targetDocument: Document, event: KeyboardEvent): boolean {
+  return !event.altKey && !event.ctrlKey && !event.metaKey &&
+    Boolean(targetDocument.activeElement?.closest(".composer-answer"));
 }
 
 function nativeControlOwnsFocus(targetDocument: Document): boolean {
@@ -128,7 +136,7 @@ export function useSessionReadingKeys({
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented || shortcutLayerActive(document, false, event) || terminalOwnsFocus(document) ||
-        expandedDecisionIsReading(scrollRef.current) ||
+        expandedDecisionIsReading(scrollRef.current) || composerAnswerOwnsKey(document, event) ||
         (questionCardOwnsFocus(document) && !matchesShortcut(event, "session-reading-reply"))) {
         sequenceRef.current = null;
         return;

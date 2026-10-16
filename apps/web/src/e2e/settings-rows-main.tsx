@@ -10,18 +10,27 @@ import {
   NotificationsPanel,
   SettingsView,
 } from "../components/SettingsView.js";
-import { DEFAULT_ORCHESTRATOR_DEFAULTS, type AgentHarnessDefaultConfig, type AgentHarnessDefaultsView } from "@wollipog/protocol";
+import {
+  ARCHIVED_HISTORY_RETENTION_LIMITS,
+  DEFAULT_ORCHESTRATOR_DEFAULTS,
+  type AgentHarnessDefaultConfig,
+  type AgentHarnessDefaultsView,
+  type ArchivedHistoryRetentionView,
+} from "@wollipog/protocol";
 import { AgentDefaultsPanel } from "../components/AgentDefaultsPanel.js";
+import { ArchivedHistoryRetentionPanel } from "../components/ArchivedHistoryRetentionPanel.js";
 import { OrchestratorSettingsPanel } from "../components/OrchestratorSettingsPanel.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
-import { interceptLeave } from "../leave-guard.js";
+import { interceptLeave, interceptTraversal } from "../leave-guard.js";
+import { HistoryPositions } from "../history-position.js";
 import { SettingsGroup, StaticRow } from "../components/ui/SettingsRows.js";
+import { NumberFields } from "./setting-number-fields.js";
 import { RowKinds } from "./setting-row-kinds.js";
 import { ApprovalsPanel } from "../components/ApprovalsPanel.js";
 import { createApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ApiTransport } from "../api-transport.js";
-import type { DesktopUpdateSetting, DesktopUpdateStatus } from "../desktop-updates.js";
+import { aboutUpdateFixture, isAboutUpdateState } from "./about-update-fixtures.js";
 import { DEFAULT_EXPERIMENT_FLAGS } from "../experiments.js";
 import {
   COLOR_SCHEMES,
@@ -87,10 +96,20 @@ type Topology = (typeof TOPOLOGIES)[number];
  */
 const TAILNET_STATES = [
   "browser", "off", "on", "restarting", "unavailable", "unmanaged", "checking", "read-failed", "write-failed",
+  "write-retry",
 ] as const;
 type TailnetState = (typeof TAILNET_STATES)[number];
 
-function tailnetFixture(state: TailnetState): TailnetAccessSetting {
+/**
+ * `write-retry`: a failed write whose Try Again saves as the shell's hook does, clearing the failure
+ * and staying busy, until the test settles it with `window.settleTailnetWrite(saved)` (#3190).
+ */
+type TailnetRetryPhase = "failed" | "saving" | "saved";
+declare global {
+  interface Window { settleTailnetWrite?: (saved: boolean) => void }
+}
+
+function tailnetFixture(state: Exclude<TailnetState, "write-retry">): TailnetAccessSetting {
   const base: TailnetAccessSetting = {
     status: { available: true, enabled: false, managed: true },
     loading: false,
@@ -125,7 +144,8 @@ const desktopInstances: InstanceManager = {
     serverInstanceId: "studio",
     kind: "remote",
     label: "Home Studio",
-    origin: "https://studio.example.ts.net",
+    // 40 characters, as a MagicDNS address usually is: Connected To must show all of it (#3159).
+    origin: "https://home-studio-01.tail4a3b2c.ts.net",
     createdAt: "",
   },
 };
@@ -199,6 +219,32 @@ let artifactUploadPreference = "manual";
 /** What a save in Settings › Orchestrator stored, for as long as the page is open. */
 let orchestratorSaved: typeof DEFAULT_ORCHESTRATOR_DEFAULTS | null = null;
 
+/**
+ * Settings › Storage (#2777): `retention=off` starts with it off, `environment` with the host's
+ * default in effect, `viewer` read-only. A save is kept for the page's life, so it reads back.
+ */
+const retentionMode = new URLSearchParams(window.location.search).get("retention");
+let retentionState: Pick<ArchivedHistoryRetentionView, "retentionDays" | "source" | "prunesFrom"> = {
+  retentionDays: retentionMode === "off" ? null : retentionMode === "environment" ? 180 : 90,
+  source: retentionMode === "off" ? "default" : retentionMode === "environment" ? "environment" : "organization",
+  prunesFrom: retentionMode === "off" ? null : Date.UTC(2026, 8, 2, 15, 0),
+};
+const RETENTION_ARMED_AT = Date.UTC(2026, 9, 17, 9, 30);
+
+function retentionView(previewDays: number | null): ArchivedHistoryRetentionView {
+  const counts = (days: number) => days >= 180 ? { sessions: 41, events: 182_340 } : { sessions: 128, events: 604_115 };
+  return {
+    ...retentionState,
+    environmentDays: retentionMode === "environment" ? 180 : null,
+    canManage: retentionMode !== "viewer",
+    nextRunAt: Date.UTC(2026, 9, 16, 10, 0),
+    eligible: retentionState.retentionDays === null ? { sessions: 0, events: 0 } : counts(retentionState.retentionDays),
+    lastRun: retentionMode === "off" ? null : { finishedAt: Date.UTC(2026, 9, 16, 9, 0), sessions: 12, events: 58_204 },
+    limits: ARCHIVED_HISTORY_RETENTION_LIMITS,
+    ...(previewDays === null ? {} : { preview: { retentionDays: previewDays, eligible: counts(previewDays), prunesFrom: RETENTION_ARMED_AT } }),
+  };
+}
+
 const harnessDefaultsTransport: ApiTransport = {
   instanceId: "settings-fixture",
   publicOrigin: window.location.origin,
@@ -213,6 +259,20 @@ const harnessDefaultsTransport: ApiTransport = {
         artifactUploadPreference = (JSON.parse(String(init.body)) as { preference: string }).preference;
       }
       return Response.json({ preference: artifactUploadPreference });
+    }
+    if (path.startsWith("/api/archived-history-retention")) {
+      if (init?.method === "PUT") {
+        const { retentionDays } = JSON.parse(String(init.body)) as { retentionDays: number | null };
+        retentionState = {
+          retentionDays,
+          source: "organization",
+          prunesFrom: retentionDays === null ? null
+            : retentionState.retentionDays === null || retentionDays < retentionState.retentionDays ? RETENTION_ARMED_AT
+            : retentionState.prunesFrom,
+        };
+      }
+      const previewDays = new URL(path, window.location.origin).searchParams.get("previewDays");
+      return Response.json(retentionView(previewDays === null ? null : Number(previewDays)));
     }
     if (path === "/api/instance") {
       return new Response(JSON.stringify({
@@ -242,8 +302,10 @@ const harnessDefaultsTransport: ApiTransport = {
     if (path === "/api/orchestrator-settings") {
       const params = new URLSearchParams(window.location.search);
       const drifted = params.get("defaults") === "agent-repair";
-      // `orchestrator=unavailable`: no machine advertises child capabilities (#3026's warning);
+      // `orchestrator=unavailable`: no connected machine reports child capabilities (#3026's warning);
       // `orchestrator=save-fails`: every save is refused, for the save bar's error state.
+      // `orchestrator=machines`: two connected machines; the saved Claude Code combination runs on
+      // only one, and its `opus` alias is a different model on each (#3248).
       const mode = params.get("orchestrator");
       if (init?.method === "PUT") {
         if (mode === "save-fails") {
@@ -254,6 +316,37 @@ const harnessDefaultsTransport: ApiTransport = {
       }
       const defaults = orchestratorSaved ? structuredClone(orchestratorSaved) : structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS);
       if (drifted) defaults.behavior.childModel = "retired-model";
+      if (mode === "machines" && !orchestratorSaved) {
+        defaults.behavior.childHarness = { agentId: "claude-code", driver: "claude-code", context: { kind: "native" } };
+        defaults.behavior.childModel = "opus";
+        defaults.behavior.childEffort = "max";
+      }
+      if (mode === "machines") {
+        const models = [
+          { id: "opus", displayName: "Opus 5.5", efforts: ["high", "max"] },
+          { id: "claude-opus-5", displayName: "Opus 5", efforts: ["high", "max"] },
+        ];
+        return new Response(JSON.stringify({
+          defaults,
+          source: "user_default",
+          capabilities: {
+            harnesses: [{
+              agentId: "claude-code", driver: "claude-code", context: { kind: "native" }, name: "Claude Code",
+              models, effortLevels: ["high", "max"],
+              supportedPairs: models.map((model) => ({ modelId: model.id, effortLevels: model.efforts })),
+              installations: 2, machines: 2,
+            }],
+            models, effortLevels: ["high", "max"],
+            installations: 2, compatibleInstallations: 1, status: "available",
+            machineSupport: { supported: 1, total: 2, unsupportedMachines: ["Desktop"] },
+            ...(defaults.behavior.childModel === "opus" ? { childModelDrift: {
+              modelId: "opus",
+              machines: [{ machineName: "Desktop", displayName: "Opus 5" }, { machineName: "Laptop", displayName: "Opus 5.5" }],
+              pinned: [{ modelId: "claude-opus-5", displayName: "Opus 5" }],
+            } } : {}),
+          },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
       if (mode === "unavailable") {
         return new Response(JSON.stringify({
           defaults,
@@ -261,7 +354,7 @@ const harnessDefaultsTransport: ApiTransport = {
           capabilities: {
             harnesses: [], models: [], effortLevels: [], supportedPairs: [],
             installations: 0, compatibleInstallations: 0, status: "unavailable",
-            reason: "No current Agent Harness installation advertises child model and effort capabilities. Connect or update a runner, then retry.",
+            reason: "No connected machine reports which models and efforts child agents can use. Connect a machine or update Wollipog on it in Connections, then try again.",
           },
         }), { status: 200, headers: { "content-type": "application/json" } });
       }
@@ -324,51 +417,6 @@ const harnessDefaultsTransport: ApiTransport = {
 };
 const harnessDefaultsApi = createApiClient(harnessDefaultsTransport);
 
-/**
- * #1646's desktop update states, injected the way the shell's hook would report them. Absent, the
- * About panel renders as it does in a browser.
- */
-const UPDATE_STATES = ["current", "available", "release-page", "disabled", "unchecked"] as const;
-type UpdateState = (typeof UPDATE_STATES)[number];
-
-function updateFixture(state: UpdateState | null): DesktopUpdateSetting | undefined {
-  if (!state) return undefined;
-  const available = {
-    state: "available" as const,
-    version: "0.28.0",
-    releaseUrl: "https://github.com/picoduck/wollipog/releases/tag/v0.28.0",
-    checkedAt: Date.UTC(2026, 8, 23, 16, 5),
-  };
-  const status: DesktopUpdateStatus = {
-    currentVersion: "0.27.0",
-    install: state === "release-page"
-      ? { mode: "releasePage", reason: "This app was installed from a .deb package. Install the new package from the release page." }
-      : { mode: "inPlace" },
-    automaticChecks: state !== "disabled",
-    prereleaseUpdates: false,
-    checksAllowed: state !== "disabled",
-    releasesUrl: "https://github.com/picoduck/wollipog/releases",
-    lastCheck: state === "current"
-      ? { state: "current", checkedAt: Date.UTC(2026, 8, 23, 16, 5) }
-      : state === "unchecked" || state === "disabled" ? null : available,
-  };
-  return {
-    desktop: true,
-    status,
-    loading: false,
-    checking: false,
-    installing: false,
-    savingAutomatic: false,
-    savingPrerelease: false,
-    error: null,
-    check: () => undefined,
-    install: () => undefined,
-    openRelease: () => undefined,
-    toggleAutomatic: () => undefined,
-    togglePrerelease: () => undefined,
-  };
-}
-
 function Harness() {
   const params = new URLSearchParams(window.location.search);
   // Selected by query string rather than by a control on the page: a control would sit inside the
@@ -381,24 +429,40 @@ function Harness() {
   const requestedSection = params.get("section") as SettingsSection | null;
   const showAgentDefaults = ["agent", "agent-missing", "agent-repair", "agent-loading", "agent-empty", "agent-save-fails"]
     .includes(params.get("defaults") ?? "");
-  const requestedUpdates = params.get("updates") as UpdateState | null;
-  const update = updateFixture(requestedUpdates && UPDATE_STATES.includes(requestedUpdates) ? requestedUpdates : null);
+  // #1646's and #3028's desktop update states; absent, the About panel renders as it does in a browser.
+  const requestedUpdates = params.get("updates");
+  const update = isAboutUpdateState(requestedUpdates) ? aboutUpdateFixture(requestedUpdates) : undefined;
   // `route` drives the frame itself (#3018): parsed as the shell parses the address, with links and
   // Back pushing the next one, so a phone's index and its section pages are real routes. Without
   // it, `section` picks a section directly.
   const [route, setRoute] = React.useState(() => params.get("route"));
+  const routeRef = React.useRef(route);
+  routeRef.current = route;
+  // Entries carry their positions as the app's own navigation writes them, so Back and Forward are
+  // held exactly as the store holds them (#3218).
+  const [positions] = React.useState(() => {
+    const recorded = new HistoryPositions(window.history);
+    recorded.adopt();
+    return recorded;
+  });
   React.useEffect(() => {
-    const onPop = () => setRoute(new URLSearchParams(window.location.search).get("route"));
+    const onPop = () => {
+      const move = positions.arrive();
+      if (!move) return;
+      const next = new URLSearchParams(window.location.search).get("route");
+      if (next !== routeRef.current && move.traversal && interceptTraversal(move.traversal)) return;
+      setRoute(next);
+    };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
-  }, []);
+  }, [positions]);
   const routed = route === null ? null : viewFromPath(route);
   const navigate = (view: View) => {
     // As the store's navigate does: an editor with unsaved changes asks first (#3026).
     if (interceptLeave(() => navigate(view))) return;
     const next = new URLSearchParams(window.location.search);
     next.set("route", viewPath(view));
-    window.history.pushState(null, "", `?${next}`);
+    positions.push(`?${next}`);
     setRoute(viewPath(view));
   };
   const section: SettingsSection | undefined = routed?.name === "settings"
@@ -422,6 +486,7 @@ function Harness() {
     : COLOR_SCHEMES;
   document.documentElement.setAttribute("data-theme", theme);
   const kinds = params.get("view") === "kinds";
+  const numbers = params.get("view") === "numbers";
   const groupWidth = Number(params.get("group-width")) || null;
 
   const disabled = state === "disabled";
@@ -444,6 +509,11 @@ function Harness() {
   const [scheme, setScheme] = React.useState<ColorScheme>("wollipog");
   const [previewScheme, setPreviewScheme] = React.useState<ColorScheme | null>(null);
   const [experimentFlags, setExperimentFlags] = React.useState(DEFAULT_EXPERIMENT_FLAGS);
+  const [tailnetRetry, setTailnetRetry] = React.useState<TailnetRetryPhase>("failed");
+  React.useEffect(() => {
+    window.settleTailnetWrite = (saved) => setTailnetRetry(saved ? "saved" : "failed");
+    return () => { delete window.settleTailnetWrite; };
+  }, []);
   React.useLayoutEffect(() => {
     applySchemeToDocument(document, previewScheme ?? scheme);
   }, [previewScheme, scheme]);
@@ -460,7 +530,8 @@ function Harness() {
           <SettingsView
             section={section}
             onNavigate={navigate}
-            panels={kinds ? Object.fromEntries(SETTINGS_SECTIONS.map((entry) => [entry.id, groupWidth
+            panels={numbers ? Object.fromEntries(SETTINGS_SECTIONS.map((entry) => [entry.id, <NumberFields />])) as Record<SettingsSection, React.ReactNode>
+              : kinds ? Object.fromEntries(SETTINGS_SECTIONS.map((entry) => [entry.id, groupWidth
               ? <div className="settings-panel" style={{ width: groupWidth }}><RowKinds /></div>
               : <RowKinds />])) as Record<SettingsSection, React.ReactNode> : {
               appearance: (
@@ -540,7 +611,11 @@ function Harness() {
               ),
               network: (
                 <NetworkPanel
-                  tailnet={tailnetState ? tailnetFixture(tailnetState) : {
+                  tailnet={tailnetState === "write-retry" ? {
+                    ...tailnetFixture(tailnetRetry === "failed" ? "write-failed" : tailnetRetry === "saved" ? "on" : "off"),
+                    busy: tailnetRetry === "saving",
+                    retry: () => setTailnetRetry("saving"),
+                  } : tailnetState ? tailnetFixture(tailnetState) : {
                     // `managed: false` is how production reaches a DISABLED tailnet switch: another
                     // Wollipog server is using the port, so the row renders and cannot be operated.
                     // `minimal` is Tailscale missing, the other disabled form.
@@ -556,6 +631,11 @@ function Harness() {
                   }}
                   onNavigate={navigate}
                 />
+              ),
+              storage: (
+                <FeedbackProvider>
+                  <ApiProvider client={harnessDefaultsApi}><ArchivedHistoryRetentionPanel /></ApiProvider>
+                </FeedbackProvider>
               ),
               // The production panel with injected state, like Notifications above. Storage is
               // deliberately not touched.

@@ -719,7 +719,9 @@ export interface ChoiceTileOption<T extends string> {
  *
  * Buttons with the roving pattern, as SegmentedControl's are, so `onChange` can tell a pointer (a
  * click count) from arrows, Space and Enter (none): a tile that reveals a field moves focus there
- * only for a pointer, and arrows keep moving through the tiles.
+ * only for a pointer, and arrows keep moving through the tiles. `onEnter` and `onType` let a form
+ * answer the keyboard as it would a native radio and a text field: Enter submits, typing starts the
+ * free-text choice.
  */
 export function ChoiceTiles<T extends string>({
   options,
@@ -730,10 +732,16 @@ export function ChoiceTiles<T extends string>({
   describedBy,
   invalid,
   groupRef,
+  onEnter,
+  onType,
 }: {
   options: readonly ChoiceTileOption<T>[];
   value: NoInfer<T> | null;
   onChange: (value: T, byPointer: boolean) => void;
+  /** Enter on an available tile, in place of the click a button would get. */
+  onEnter?: (value: T) => void;
+  /** A printable character typed on any tile (no Ctrl, Alt or Meta; Space still chooses). */
+  onType?: (character: string) => void;
   /** The group's accessible name. Required: an unlabelled radiogroup announces only its options. */
   label: string;
   className?: string;
@@ -769,6 +777,16 @@ export function ChoiceTiles<T extends string>({
             aria-describedby={`${id}-detail`}
             tabIndex={index === stopAt ? 0 : -1}
             onClick={(event) => { if (!option.disabled) onChange(option.value, event.detail > 0); }}
+            onKeyDown={(event) => {
+              if (event.nativeEvent.isComposing || event.ctrlKey || event.altKey || event.metaKey) return;
+              if (event.key === "Enter" && onEnter && !option.disabled) {
+                event.preventDefault();
+                onEnter(option.value);
+              } else if (onType && event.key.length === 1 && event.key !== " ") {
+                event.preventDefault();
+                onType(event.key);
+              }
+            }}
           >
             <span className="choice-tile-label" id={`${id}-label`}>{option.label}</span>
             <span className="choice-tile-detail" id={`${id}-detail`}>{option.detail}</span>
@@ -1680,6 +1698,7 @@ export function Select<T extends string>({
     : listStyle;
 
   const openAt = (index: number) => {
+    revealActive.current = true;
     setActive(Math.max(0, index));
     setQuery("");
     if (!searchable) {
@@ -1705,6 +1724,7 @@ export function Select<T extends string>({
     createOption.onSelect(searched);
   };
   const filter = (next: string) => {
+    revealActive.current = true;
     setQuery(next);
     // The first result a keypress can commit, as Home would choose.
     setActive(Math.max(0, filterSearchableComboboxOptions(options, next).findIndex((option) => !option.disabled)));
@@ -1714,6 +1734,24 @@ export function Select<T extends string>({
   const listId = searchable ? `${popover.panelId}-list` : popover.panelId;
   const createId = `${popover.panelId}-create`;
   const activeDescendant = showCreate ? createId : visible[activeIndex] ? optionId(activeIndex) : undefined;
+  /*
+   * The highlighted option is where focus is, and the only place it shows (§9.1): the list draws no
+   * ring of its own while one is highlighted (#3020). So opening the list and every keyboard move keep
+   * that option in view; End in a long list highlighted an option below the scroll fold, and nothing
+   * on screen said where focus was. Not when the pointer moves the highlight: it is already over what
+   * it highlights, and scrolling under it would move a different option beneath it. But always when the
+   * placement changes, whoever moved the highlight last: the list only becomes a scroller once it is
+   * placed, and a shorter window can push a hovered option below the fold. `listStyle` is the placement
+   * itself; `panelStyle` is a fresh object on every render of a searchable list that opened above.
+   */
+  const revealActive = useRef(false);
+  const reveal = () => {
+    if (open && activeDescendant) document.getElementById(activeDescendant)?.scrollIntoView?.({ block: "nearest" });
+  };
+  useLayoutEffect(() => {
+    if (revealActive.current) reveal();
+  }, [open, activeDescendant]);
+  useLayoutEffect(reveal, [listStyle]);
 
   /**
    * The list's keyboard contract, owned by whatever holds focus while it is open: the list itself,
@@ -1721,6 +1759,7 @@ export function Select<T extends string>({
    * commits with it; Escape and Tab are the root's in both forms.
    */
   const navigate = (event: React.KeyboardEvent<HTMLElement>, spaceCommits: boolean) => {
+    revealActive.current = true;
     const step = (delta: number) => {
       event.preventDefault();
       if (visible.length === 0) return;
@@ -1769,7 +1808,7 @@ export function Select<T extends string>({
         tabIndex={-1}
         className={`ui-select-option${option.value === value ? " is-selected" : ""}`
           + `${index === activeIndex ? " is-active" : ""}${option.disabled ? " is-disabled" : ""}`}
-        onMouseEnter={() => setActive(index)}
+        onMouseEnter={() => { revealActive.current = false; setActive(index); }}
         onClick={() => commit(option)}
       >
         {option.swatch}

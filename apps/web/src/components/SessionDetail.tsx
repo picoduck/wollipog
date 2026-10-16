@@ -90,7 +90,9 @@ import { SessionPlaceholder } from "./SessionPlaceholder.js";
 import { sessionArchiveControlLabel, sessionUnarchiveRestarts } from "../archive-actions.js";
 import { unarchiveSession } from "../session-unarchive.js";
 import { TranscriptSkeleton, transcriptLoadingSentence } from "./TranscriptSkeleton.js";
-import { TranscriptEmptyState, TranscriptHistoryNotice, transcriptEmptyKind } from "./TranscriptReadingStates.js";
+import { TranscriptEmptyState, TranscriptHistoryNotice, TranscriptPrunedNotice, transcriptEmptyKind } from "./TranscriptReadingStates.js";
+import { formatRetentionDate, historyPrunesAt } from "../archived-history-retention.js";
+import { useArchivedHistoryRetention } from "./useArchivedHistoryRetention.js";
 import { clearRoutedSessionLookup, setRoutedSessionLookup, useRoutedSessionLookup } from "../routed-session-lookup.js";
 import { runnerDisplay } from "../runners.js";
 import { MoveToProjectDialog, MoveToWorkspaceDialog, NewWorkspaceDialog } from "./SessionMoveDialogs.js";
@@ -102,6 +104,7 @@ import {
   type TimelineItem,
 } from "../timeline.js";
 import { useTimeline } from "./useTimeline.js";
+import { ComposerHistory, type ComposerHistoryPrompt } from "../composer-history.js";
 import { onlyContinuesTrailingText, useLiveTimelineTail } from "./live-timeline-tail.js";
 import type { SessionActivity } from "../activity.js";
 import {
@@ -270,6 +273,7 @@ import {
   type FollowTailState,
   useFollowTail,
 } from "../useFollowTail.js";
+import { useMarkResultReviewed } from "../useMarkResultReviewed.js";
 import { useSessionReadingKeys, type SessionReadingKeyActions } from "../useSessionReadingKeys.js";
 import { VIRTUAL_VIEWPORT_INTENT_EVENT, virtualViewportIntentDirection } from "../viewport-intent.js";
 import { inTypingContext, isMacPlatform, matchesShortcut, shortcutDisplay, shortcutLayerActive } from "../shortcuts.js";
@@ -1165,6 +1169,7 @@ function SessionDetailLoaded({
   );
   const activeComposerMutation = useSyncExternalStore(subscribeMutation, readMutation, readMutation);
   const { confirm, showToast, showUndo } = useFeedback();
+  const markResultReviewed = useMarkResultReviewed();
   // Narrow selector subscriptions: this component must re-render for ITS session's events and
   // row, not for every token-usage upsert of every other session on the board.
   const {
@@ -1582,8 +1587,19 @@ function SessionDetailLoaded({
   // items, or null when nothing is being dragged over it.
   const [dropImageCount, setDropImageCount] = useState<number | null>(null);
   const dragActive = dropImageCount !== null;
-  // Up-arrow history recall (-1 = editing/not browsing). Prior prompts come from the timeline.
-  const [histIdx, setHistIdx] = useState(-1);
+  // The marker controls keyboard engagement; actual recall uses stable identities and its own pages.
+  const promptHistory = useMemo(() => new ComposerHistory(), [sessionId, recoveryEventEpoch, instanceScope]);
+  const promptHistoryRef = useRef(promptHistory);
+  promptHistoryRef.current = promptHistory;
+  const [histIdx, setHistoryIndex] = useState(-1);
+  useEffect(() => {
+    setHistoryIndex(-1);
+    return () => promptHistory.reset();
+  }, [promptHistory]);
+  const setHistIdx = useCallback((value: number) => {
+    if (value === -1) promptHistoryRef.current.reset();
+    setHistoryIndex(value);
+  }, []);
   // Optimistic just-sent message: renders immediately so the send feels instant, then yields to the
   // real user_message event the runner echoes back (deduped by user-message count, see below).
   const [pending, setPending] = useState<{ text: string; images: PromptImageInput[] } | null>(null);
@@ -2173,6 +2189,7 @@ function SessionDetailLoaded({
   }, [mutationKey, replace, sessionId, setProgrammaticComposerText]);
   // Tap-or-hold dictation (browser SpeechRecognition; hidden when unsupported, #2193).
   const dictation = useVoiceDictation((phrase) => {
+    setHistIdx(-1);
     revealOrdinaryComposerRef.current("always");
     markDraftDirty();
     const next = appendTranscript(draftState.current.text, phrase);
@@ -2187,6 +2204,7 @@ function SessionDetailLoaded({
     return () => { sideChatUndoTargetRef.current = null; };
   }, [sessionId]);
   const insertSideChatDraft = useCallback((response: string) => {
+    setHistIdx(-1);
     restoreExpandedPanel();
     revealComposerFromTerminal();
     revealOrdinaryComposerRef.current("always");
@@ -2197,6 +2215,7 @@ function SessionDetailLoaded({
     const target = sessionId;
     showUndo("Inserted into your session draft.", () => {
       if (sideChatUndoTargetRef.current !== target) throw new Error("This session's draft is no longer open.");
+      setHistIdx(-1);
       restoreExpandedPanel();
       revealOrdinaryComposerRef.current("always");
       markDraftDirty();
@@ -3323,8 +3342,9 @@ function SessionDetailLoaded({
     if (clientY === null || state.touchStartY === null) return;
     if (clientY - state.touchStartY < EARLIER_ACTIVITY_HEAD_DRAG_PX) return;
     const scroll = scrollRef.current;
-    if (!scroll || nestedScrollerConsumesUpwardInput(target, scroll)) return;
+    if (!scroll || scroll.scrollTop >= 1 || nestedScrollerConsumesUpwardInput(target, scroll)) return;
     requestEarlierFromInputAtHead();
+    return true;
   }, [requestEarlierFromInputAtHead]);
 
   const loadEarlierFromControl = useCallback((): boolean => {
@@ -3516,9 +3536,10 @@ function SessionDetailLoaded({
     () =>
       items
         .filter((i): i is Extract<TimelineItem, { kind: "user_message" }> => i.kind === "user_message")
-        .map((i) => i.text)
-        .filter(Boolean),
-    [items],
+        .filter((i) => Boolean(i.text) && !historyPreview.active)
+        .map((i): ComposerHistoryPrompt => ({ key: `event:${i.id}`, seq: i.id, text: i.text,
+          queueId: i.turnId, submissionId: i.submissionId })),
+    [items, historyPreview.active],
   );
   const queuedPromptHistoryRef = useRef<{ sessionId: string; prompts: Map<string, string> }>({
     sessionId,
@@ -3548,7 +3569,10 @@ function SessionDetailLoaded({
     else if (item.turnId) queuedPromptHistoryRef.current.prompts.delete(item.turnId);
   }
   const userPrompts = useMemo(
-    () => [...timelineUserPrompts, ...queuedPromptHistoryRef.current.prompts.values()],
+    () => [...timelineUserPrompts.map(prompt => ({ ...prompt,
+      queueId: (prompt.submissionId && promotedQueueBySubmission.get(prompt.submissionId)) || prompt.queueId,
+    })), ...[...queuedPromptHistoryRef.current.prompts].map(([id, text]) =>
+      ({ key: `queue:${id}`, queueId: id, text }))],
     // Queue changes drive recomputation; the ref deliberately retains removed entries for recall.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [timelineUserPrompts, session.queued, session.steeringAttempts],
@@ -3674,6 +3698,9 @@ function SessionDetailLoaded({
   const archivedOrder = sessionArchivedAtRest(session) ? {
     key: "archived", severity: "info", rank: SESSION_NOTICE_RANK.archived,
   } as const : undefined;
+  // Under an archived-history retention policy, the notice also says when the history goes (#2777).
+  const retention = useArchivedHistoryRetention(archivedOrder !== undefined && !session.historyPruned);
+  const historyPrunedOn = historyPrunesAt(session, retention);
   const sessionNoticeReason = [
     worktreeMissingOrder && { ...worktreeMissingOrder, reason: "Worktree recovery is required before sending another message." },
     historyQuarantineOrder && { ...historyQuarantineOrder, reason: "Conversation quarantined. Recover this session to continue." },
@@ -4322,6 +4349,7 @@ function SessionDetailLoaded({
   // D does nothing, so it can never fall through to another request the dock or the Sessions list
   // holds. The question is dismissed from its card once Answer Mode is closed.
   const topQuestionInComposer = answeringInComposer && prioritizedRequests[0]?.requestId === pendingQuestion.requestId;
+  const reviewableResultRevision = outstandingSessionResult(session)?.revision;
   const readingActions = useMemo<SessionReadingKeyActions>(() => ({
     nextSession: () => onNextSession?.(),
     previousSession: () => onPreviousSession?.(),
@@ -4348,11 +4376,14 @@ function SessionDetailLoaded({
     },
     snooze: () => onSnooze?.(),
     fork: () => forkShortcutRef.current?.(),
+    markReviewed: () => {
+      if (reviewableResultRevision) markResultReviewed(session.id, reviewableResultRevision);
+    },
     reply: canAnswerPendingQuestion ? enterAnswerMode : focusComposerAtDraftEnd,
     pauseFollow: followTail.pause,
     resumeFollow: followTail.follow,
   }), [archiveRefusal, canAnswerPendingQuestion, enterAnswerMode, focusComposerAtDraftEnd, followTail.follow, followTail.pause, onApprove, onArchive, onDeny, onNextSession, onPreviousSession, onSnooze, responseRefusal,
-    session.id, topQuestionInComposer, topRequestDocked]);
+    markResultReviewed, reviewableResultRevision, session.id, topQuestionInComposer, topRequestDocked]);
   // The reader's keys (J/K, A/D, R…) act on the transcript and the request dock, so they are off
   // while an expanded side panel hides them (#2845).
   const sessionReadingKeys = mode === "expanded" && !isMobile && !(rightPanel.open && rightPanel.expanded);
@@ -5114,7 +5145,10 @@ function SessionDetailLoaded({
               {unarchiveRestarts ? "Unarchive and Restart" : "Unarchive"}
             </BusyButton>
           )}>
-          <p>This session is archived and stopped.</p>
+          <p>
+            This session is archived and stopped.
+            {historyPrunedOn !== null && ` Its history will be pruned on ${formatRetentionDate(historyPrunedOn)}.`}
+          </p>
           {unarchiveRefusal !== null && <p className="notice-meta" id="session-archived-refusal">{unarchiveRefusal}</p>}
         </Notice>
       ),
@@ -6704,25 +6738,53 @@ function SessionDetailLoaded({
     // ↑/↓ recall previous prompts (palette closed, no modifiers). ↑ engages only when the box is
     // empty or already browsing history, so a multi-line draft's caret navigation isn't hijacked.
     // Alt+↑/↓ is Session Reading's Previous/Next Session, never a recall.
-    if (!queuedEdit && !paletteOpen && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && userPrompts.length) {
+    if (!queuedEdit && !paletteOpen && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
       if (e.key === "ArrowUp" && (histIdx !== -1 || composerText.text === "")) {
         e.preventDefault();
-        const idx = histIdx === -1 ? userPrompts.length - 1 : Math.max(0, histIdx - 1);
-        setHistIdx(idx);
-        markDraftDirty();
-        setProgrammaticComposerText(userPrompts[idx]!);
+        setHistIdx(0);
+        const draftVersion = composerDraftVersionRef.current;
+        const recalledFrom = composerText.text;
+        const apply = (text: string | undefined) => {
+          if (text === undefined) return;
+          // Programmatic writers (dictation, Side Chat, commands, attachments and hydration) can
+          // change the draft without a textarea change event. A late read never wins over them.
+          if (composerDraftVersionRef.current !== draftVersion || composerText.text !== recalledFrom) {
+            setHistIdx(-1);
+            return;
+          }
+          markDraftDirty();
+          setProgrammaticComposerText(text);
+        };
+        const recalled = promptHistory.previous(userPrompts, async (before, signal) => {
+          try {
+            const page = await api.getSessionPromptHistory(sessionId, before, recoveryEventEpoch, signal);
+            if (page.eventEpoch !== recoveryEventEpoch) throw new Error("Message history changed. Reopen the session to try again.");
+            return page;
+          } catch (cause) {
+            // Older servers still provide ordinary recall over their loaded transcript. A missing
+            // endpoint must not turn already available messages into a broken keyboard shortcut.
+            if (!(cause instanceof ApiError) || cause.status !== 404) throw cause;
+            return { prompts: timelineUserPrompts.map(prompt => ({ seq: prompt.seq!, text: prompt.text })),
+              eventEpoch: recoveryEventEpoch, hasMore: false, cacheComplete: true };
+          }
+        }, promotedQueueBySubmission, {
+          localIsTail: !historyPreview.active && eventWindow?.laterGap === undefined && eventWindow?.complete !== false,
+          localIsContiguous: eventWindow?.laterGap === undefined,
+        });
+        if (recalled instanceof Promise) void recalled.then(apply).catch((cause: unknown) => {
+          if (cause instanceof DOMException && cause.name === "AbortError") return;
+          showToast("Could not load older messages. Press Up to try again.", { tone: "error" });
+        });
+        else apply(recalled);
         return;
       }
       if (e.key === "ArrowDown" && histIdx !== -1) {
         e.preventDefault();
-        const idx = histIdx + 1;
-        markDraftDirty();
-        if (idx >= userPrompts.length) {
-          setHistIdx(-1);
-          setProgrammaticComposerText("", 0);
-        } else {
-          setHistIdx(idx);
-          setProgrammaticComposerText(userPrompts[idx]!);
+        const text = promptHistory.next(userPrompts);
+        if (text !== undefined) {
+          markDraftDirty();
+          if (text === "") setHistIdx(-1);
+          setProgrammaticComposerText(text);
         }
         return;
       }
@@ -6965,6 +7027,7 @@ function SessionDetailLoaded({
             if (latestForkAvailability.available) void onFork(latestForkAvailability.forkTurn);
           }}
           forkShortcutRef={sessionReadingKeys ? forkShortcutRef : undefined}
+          onMarkReviewed={(revision) => markResultReviewed(session.id, revision)}
           projectControl={<ProjectMenuButton session={session} />}
           projectName={currentProjectName ?? undefined}
           projectLabel={projectsSupported ? "Project" : "Workspace"}
@@ -7113,6 +7176,11 @@ function SessionDetailLoaded({
             {/* The history notice heads the reading column in its own band above the scroller
                 (#2172): it takes its height, so it never covers a row, and it stays in view while
                 the reader is at the tail. */}
+            {session.historyPruned && (
+              <div className="transcript-history-band">
+                <TranscriptPrunedNotice pruned={session.historyPruned} />
+              </div>
+            )}
             {historyPreview.active && (
               <div className="transcript-history-band" role="status">
                 Recent activity is readable as a snapshot while full history loads. Refresh to check for new activity.
@@ -7166,7 +7234,7 @@ function SessionDetailLoaded({
                 if (!isReaderInput(event)) return;
                 if (event.pointerType === "touch") {
                   markTouchEarlierActivityMovement(event.clientY);
-                  requestEarlierFromTouchAtHead(event.clientY, event.target);
+                  if (requestEarlierFromTouchAtHead(event.clientY, event.target)) followTail.onTouchHistoryGesture();
                   // The press already paused; a drag that reaches the tail must be able to resume.
                   return;
                 }
@@ -7181,7 +7249,7 @@ function SessionDetailLoaded({
                 if (!isReaderInput(event)) return;
                 const clientY = event.touches[0]?.clientY ?? null;
                 markTouchEarlierActivityMovement(clientY);
-                requestEarlierFromTouchAtHead(clientY, event.target);
+                if (requestEarlierFromTouchAtHead(clientY, event.target)) followTail.onTouchHistoryGesture();
               }}
               onKeyDown={(event) => {
                 if (event.defaultPrevented || !isReaderInput(event)) return;
@@ -7210,8 +7278,9 @@ function SessionDetailLoaded({
                   loading={eventWindow?.loadingOlder === true}
                   error={eventWindow?.error ?? null}
                   // Seqs count from 1 without gaps within an epoch, so the loaded window's base
-                  // says how many events sit above it.
-                  olderCount={eventWindow ? eventWindow.baseSeq - 1 : undefined}
+                  // says how many events sit above it. A pruned history keeps only some of them, so
+                  // its count is unknown (#2777).
+                  olderCount={eventWindow && !session.historyPruned ? eventWindow.baseSeq - 1 : undefined}
                   onLoad={loadEarlierFromControl}
                   fallbackFocusRef={scrollRef}
                 />

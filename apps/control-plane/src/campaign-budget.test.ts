@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import fc from "fast-check";
-import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
-  validCampaignBudgetAuthority, type CampaignBudgetAuthority, type RunnerMetadata } from "@wollipog/protocol";
+import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, projectSessionEventPayloadForProtocol,
+  validCampaignBudgetAuthority, type CampaignBudgetAuthority, type RunnerMetadata, type SessionEventPayload } from "@wollipog/protocol";
 import { ControlPlaneDb, RUNNER_REPORTED_STOP } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
@@ -106,6 +107,103 @@ test("a child creation refused or failing while recording its work item leaves n
     const retried = create();
     assert.ok(retried.ok && retried.data, retried.error ?? "retry refused");
     assert.equal(retried.data.campaignMembership?.currentWorkItemId, workItemId);
+  } finally { h.db.close(); }
+});
+
+test("a child creation refused while storing its prompt images releases its reservation and parent charge (#3183)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ toolCalls: 120, concurrency: 1 })).ok);
+    h.db.updateSessionMaxToolCalls("root", 60, 4);
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+    const valid = { mimeType: "image/png", data: png.toString("base64") };
+    const sha256 = createHash("sha256").update(png).digest("hex");
+    h.db.createWorkflowArtifactBytes({ artifactId: "art_root", sessionId: "root", kind: "screenshot", name: "root-image",
+      mimeType: "image/png", encoding: "base64", sizeBytes: png.byteLength, sha256, createdBy: { kind: "system", id: "test" },
+      metadata: {}, createdAt: 4 }, png);
+    const create = (images: Array<Record<string, unknown>>) => h.svc.createSession({ runnerId: "r", workspaceId: "w", agentId: "claude",
+      config: { model: "claude-opus-5-5" }, prompt: "Implement authorized #2936", images: images as never },
+    undefined, undefined, false, false, false, { parentSessionId: "root" });
+    const sql = (h.db as unknown as { db: { prepare(query: string): { get(): unknown } } }).db;
+    const state = () => ({
+      occupied: h.db.campaignBudgets.view("root")!.occupied,
+      members: h.db.campaignBudgets.members("root").filter((id) => id !== "root"),
+      children: sql.prepare("SELECT COUNT(*) AS n FROM sessions WHERE parent_session_id='root'").get(),
+      parent: sql.prepare(`SELECT child_spawn_count AS spawned, child_cost_reserved_usd AS cost,
+        child_tool_calls_reserved AS tools FROM sessions WHERE id='root'`).get(),
+      artifacts: sql.prepare("SELECT COUNT(*) AS n FROM artifacts").get(),
+      launches: h.sent.length,
+    });
+    const before = JSON.stringify(state());
+    const store = h.db.createWorkflowArtifactBytes;
+    for (const [label, images, status, error, failStorage] of [
+      ["invalid bytes after a stored image", [valid, { mimeType: "image/png", data: Buffer.from("not a png").toString("base64") }],
+        400, /do not match the declared MIME type/u, false],
+      ["unsupported image for the driver", [{ mimeType: "image/bmp", data: png.toString("base64") }], 400, /./u, false],
+      ["missing prompt-image artifact", [valid, { artifactId: "art_missing", mimeType: "image/png", sizeBytes: png.byteLength, sha256 }],
+        404, /prompt image artifact not found/u, false],
+      ["artifact owned by another session", [{ artifactId: "art_root", mimeType: "image/png", sizeBytes: png.byteLength, sha256 }],
+        404, /prompt image artifact not found/u, false],
+      ["artifact storage failure", [valid], 500, /could not be stored/u, true],
+    ] as const) {
+      if (failStorage) h.db.createWorkflowArtifactBytes = () => { throw new Error("SQLITE_FULL: artifact write failed"); };
+      const refused = create([...images]);
+      h.db.createWorkflowArtifactBytes = store;
+      assert.equal(refused.status, status, `${label}: ${refused.error}`);
+      assert.match(refused.error ?? "", error, label);
+      assert.equal(JSON.stringify(state()), before, `${label}: creation released everything it reserved`);
+    }
+    const retried = create([valid]);
+    assert.ok(retried.ok && retried.data, retried.error ?? "retry refused");
+    assert.ok(h.sent.slice(JSON.parse(before).launches).some((item) => (item as { type?: string; spec?: { sessionId?: string } }).type === "start_session" &&
+      (item as { spec: { sessionId: string } }).spec.sessionId === retried.data!.id), "the retry's launch is sent");
+    // A launched child keeps its reservation when deleted (#1496).
+    const reservation = () => { const { occupied, members, parent } = state(); return JSON.stringify({ occupied, members, parent }); };
+    const launched = reservation();
+    assert.notEqual(launched, JSON.stringify({ occupied: 0, members: [], parent: JSON.parse(before).parent }));
+    assert.ok(h.svc.delete(retried.data.id).ok);
+    assert.equal(reservation(), launched, "deleting a launched child keeps its reservation");
+  } finally { h.db.close(); }
+});
+
+test("deleting an unlaunched grandchild returns every ancestor's charge and refuses a launched session (#3183)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ toolCalls: 120, concurrency: 2 })).ok);
+    h.make("worker", "root", { maxToolCalls: 4 });
+    const sql = (h.db as unknown as { db: { prepare(query: string): { get(): unknown } } }).db;
+    const state = () => JSON.stringify({
+      members: h.db.campaignBudgets.members("root").sort(),
+      root: sql.prepare(`SELECT child_spawn_count AS spawned, child_cost_reserved_usd AS cost,
+        child_tool_calls_reserved AS tools FROM sessions WHERE id='root'`).get(),
+      worker: sql.prepare(`SELECT child_spawn_count AS spawned, child_cost_reserved_usd AS cost,
+        child_tool_calls_reserved AS tools, parent_charged_tool_calls AS charged FROM sessions WHERE id='worker'`).get(),
+    });
+    const before = state();
+    h.db.createSession({ id: "grandchild", parentSessionId: "worker", runnerId: "r", workspaceId: "w", agentId: "claude",
+      title: "grandchild", useWorktree: false, creationActor: "agent", driver: "claude-code",
+      config: { model: "claude-opus-5-5", maxToolCalls: 10 }, now: 5 });
+    // The grandchild's charge exceeds the worker's own reservation, so it reaches the root too.
+    assert.equal((JSON.parse(state()).root as { tools: number }).tools, (JSON.parse(before).root as { tools: number }).tools + 6);
+    h.db.deleteUnlaunchedSession("grandchild");
+    assert.equal(state(), before);
+    assert.equal(h.db.getSession("grandchild"), null);
+    assert.throws(() => h.db.deleteUnlaunchedSession("worker"), /launch was never sent/u);
+    assert.ok(h.db.getSession("worker"), "a launched session is left in place");
+    // Inside an outer transaction that rolls back, the rows return and so must their blobs.
+    h.db.createSession({ id: "nested", parentSessionId: "worker", runnerId: "r", workspaceId: "w", agentId: "claude",
+      title: "nested", useWorktree: false, creationActor: "agent", driver: "claude-code",
+      config: { model: "claude-opus-5-5", maxToolCalls: 10 }, now: 6 });
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+    h.db.createWorkflowArtifactBytes({ artifactId: "art_nested", sessionId: "nested", kind: "screenshot", name: "nested-image",
+      mimeType: "image/png", encoding: "base64", sizeBytes: png.byteLength, sha256: createHash("sha256").update(png).digest("hex"),
+      createdBy: { kind: "system", id: "test" }, metadata: {}, createdAt: 6 }, png);
+    assert.throws(() => h.db.campaignBudgetTransaction(() => {
+      h.db.deleteUnlaunchedSession("nested");
+      throw new Error("outer rollback");
+    }), /outer rollback/u);
+    assert.ok(h.db.getSession("nested"));
+    assert.deepEqual(h.db.readWorkflowArtifactBytes("art_nested"), png);
   } finally { h.db.close(); }
 });
 
@@ -336,6 +434,131 @@ test("mixed priced and unpriced usage is unavailable rather than zero, even afte
     assert.equal(h.svc.campaignBudgetWorkerPreflight("root", { kind: "managed", sessionId: "root" }).ok, false);
     assert.match(h.db.campaignBudgetAccountingError("codex-app-server", "missing-model", true)!, /unpriced/);
     assert.match(h.db.campaignBudgetAccountingError("codex-exec", "anything", true)!, /unsupported/);
+  } finally { h.db.close(); }
+});
+
+/** A running Claude turn's completed request, priced live at the fixture's $0.000001 per token. */
+const liveRequest = (inputTokens: number, model = "claude-opus-5-5"): SessionEventPayload =>
+  ({ kind: "token_usage", model, inputTokens, outputTokens: 0, pricingContext: { requestInputTokens: inputTokens }, liveUsage: "provisional" });
+const settledTurn = (inputTokens: number, costUsd: number): SessionEventPayload =>
+  ({ kind: "token_usage", model: "claude-opus-5-5", inputTokens, outputTokens: 0, costUsd, liveUsage: "settled" });
+
+test("running turns' live estimates exhaust the campaign mid-turn and refuse new children; settlement books provider totals (#3196)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ costUsd: 1, concurrency: 1 })).ok);
+    h.make("worker", "root");
+    const before = h.db.campaignBudgets.view("root")!;
+    assert.equal(before.actual.costUsd, 0);
+
+    h.svc.onSessionEvent("worker", liveRequest(100_000));
+    let view = h.db.campaignBudgets.view("root")!;
+    assert.equal(view.state, "active");
+    assert.deepEqual(view.actual, { costUsd: 0.1, toolCalls: 0, includesEstimate: true });
+    assert.equal(view.remaining.costUsd, before.remaining.costUsd, "an estimate inside its allocation is not reserved twice");
+    assert.equal(h.db.getSession("worker")!.costUsd, 0, "the estimate is never accrued");
+
+    h.svc.onSessionEvent("root", liveRequest(1_000_000));
+    view = h.db.campaignBudgets.view("root")!;
+    assert.equal(view.state, "exhausted", "the estimate alone crosses the campaign allowance");
+    assert.deepEqual([h.db.getSession("root")!.status, h.db.getSession("worker")!.status], ["stopped", "stopped"],
+      "protected workers stop mid-turn");
+    assert.ok(h.logs.some((line) => JSON.parse(line).event === "campaign_budget_admission_stopped"));
+    const child = h.svc.createSession({ runnerId: "r", workspaceId: "w", agentId: "claude", config: { model: "claude-opus-5-5" }, prompt: "Implement authorized #2936" },
+      undefined, undefined, false, false, false, { parentSessionId: "root" });
+    assert.equal(child.ok, false, "child admission is refused");
+
+    // The stopped turns settle lower than their estimates. Only the provider totals accrue.
+    h.svc.onSessionEvent("worker", settledTurn(100_000, 0.05));
+    h.svc.onSessionEvent("root", settledTurn(1_000_000, 0.6));
+    view = h.db.campaignBudgets.view("root")!;
+    assert.deepEqual(view.actual, { costUsd: 0.65, toolCalls: 0 }, "settled totals replace the estimates, once each");
+    assert.equal(view.state, "exhausted", "a trip on the estimate stays tripped, like any exhausted allowance");
+  } finally { h.db.close(); }
+});
+
+test("authorizing protection during a running turn sizes allocations above its live estimate (#3196)", () => {
+  const h = harness();
+  try {
+    h.svc.onSessionEvent("root", liveRequest(40_000_000));
+    assert.ok(h.enable(allowance({ costUsd: 100, concurrency: 1 })).ok);
+    const allocation = h.db.campaignBudgets.allocation("root")!.costUsd!;
+    assert.ok(allocation > 40, `the $${allocation} allocation leaves room past the $40 already estimated`);
+    assert.equal(h.db.campaignBudgets.admissionError("root"), null);
+    h.svc.onSessionEvent("root", liveRequest(1_000_000));
+    assert.equal(h.db.getSession("root")!.status, "running", "the next request does not stop the root");
+    assert.equal(h.db.campaignBudgets.view("root")!.state, "active");
+  } finally { h.db.close(); }
+});
+
+test("an open live window that survives the upgrade adding its timestamp still counts toward today (#3196)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "live-observed-"));
+  const path = join(dir, "cp.sqlite");
+  try {
+    const h = harness(path);
+    h.svc.onSessionEvent("root", liveRequest(10_000));
+    const owner = [h.principal.organizationId, h.principal.userId] as const;
+    assert.equal(h.db.ownerLiveCostUsd(...owner), 0.01);
+    h.db.raw().prepare("UPDATE sessions SET live_observed_at=NULL").run();
+    assert.equal(h.db.ownerLiveCostUsd(...owner), 0, "as a window opened before the column existed");
+    h.db.close();
+    const reopened = ControlPlaneDb.open(path);
+    try {
+      assert.equal(reopened.ownerLiveCostUsd(...owner), 0.01, "the migration backfills it from its last provisional request");
+    } finally { reopened.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("rounding a live estimate never manufactures spend beyond the reservations it moves (#3196)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ costUsd: 10, concurrency: 1 })).ok);
+    assert.ok(h.svc.allocateCampaignBudget("root", { sessionId: "root", costUsd: 10 }).ok);
+    // $0.1000015 at the fixture's $0.000001 per token, split so the stored sum is not a micro-USD multiple.
+    h.svc.onSessionEvent("root", liveRequest(100_000));
+    h.db.raw().prepare("UPDATE sessions SET live_cost_usd=live_cost_usd+0.0000015 WHERE id='root'").run();
+    const view = h.db.campaignBudgets.view("root")!;
+    assert.equal(view.actual.costUsd + view.outstanding.costUsd, 10, "spend plus reservations is still the allocation");
+    assert.ok(h.enable(allowance({ costUsd: 10, concurrency: 1 }), 2).ok, "the same human grant is still accepted");
+  } finally { h.db.close(); }
+});
+
+test("a worker whose live estimate reaches its allocation stops, as a settled crossing does (#3196)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ costUsd: 10 })).ok);
+    h.make("worker", "root", { costBudgetUsd: 0.5 });
+    assert.equal(h.db.campaignBudgets.allocation("worker")!.costUsd, 0.5);
+    h.svc.onSessionEvent("worker", liveRequest(400_000));
+    assert.equal(h.db.getSession("worker")!.status, "running");
+    h.svc.onSessionEvent("worker", liveRequest(100_000));
+    assert.equal(h.db.getSession("worker")!.status, "stopped", "$0.50 estimated reaches the $0.50 allocation");
+    assert.equal(h.db.campaignBudgets.view("root")!.state, "active", "the campaign allowance is not reached");
+    assert.equal(h.db.getSession("root")!.status, "running");
+  } finally { h.db.close(); }
+});
+
+test("live tokens without a rate stop protected admission rather than reading as free (#3196)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ costUsd: 100 })).ok);
+    h.svc.onSessionEvent("root", liveRequest(100, "unrated-model"));
+    const view = h.db.campaignBudgets.view("root")!;
+    assert.deepEqual([view.state, view.costAccounting], ["accounting_unavailable", "unavailable"]);
+    assert.equal(h.db.getSession("root")!.status, "stopped");
+  } finally { h.db.close(); }
+});
+
+test("a stream without live records, as from a peer before v216, keeps the campaign gate on settled cost (#3196)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ costUsd: 1 })).ok);
+    const turn = [liveRequest(1_000_000), settledTurn(1_000_000, 1.2)].map((payload) => projectSessionEventPayloadForProtocol(payload, 215));
+    assert.equal(turn[0], null, "an older peer never receives provisional records");
+    assert.equal(h.db.campaignBudgets.view("root")!.state, "active");
+    h.svc.onSessionEvent("root", turn[1]!);
+    const view = h.db.campaignBudgets.view("root")!;
+    assert.deepEqual([view.state, view.actual], ["exhausted", { costUsd: 1.2, toolCalls: 0 }]);
   } finally { h.db.close(); }
 });
 

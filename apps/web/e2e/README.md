@@ -166,19 +166,97 @@ CI:
   only when the pull request or merge group changes the spec or its snapshots; otherwise it reports
   success without starting a Windows runner. The required check waits for it either way.
 
+### The linux Set Comes From CI
+
+Do not regenerate the linux set locally. Text-bearing clips such as `settings-rows-*` and
+`colour-schemes-*` render 3–4% differently on an Ubuntu desktop and in the Playwright jammy image
+than on CI's runner. That is above the comparisons' 2% budget, so an image rendered locally fails
+CI's comparison.
+
+Push the change instead and let the comparison fail. The browser shard that ran the spec re-runs it
+with `--update-snapshots=changed`, uploads only the regenerated `*-linux.png` files as the
+`settings-rows-linux-baselines` artifact, and its job summary gives the commands that put them in
+place. `gh run download` refuses to overwrite an existing file, and a stale baseline always exists,
+so they download into a temporary directory and copy it over the checkout:
+
+```bash
+dir="$(mktemp -d)"
+gh run download <run-id> --repo <owner>/<repo> --name settings-rows-linux-baselines --dir "$dir"
+cp -R "$dir"/. . && rm -rf "$dir"
+git add apps/web/e2e/settings-rows.spec.ts-snapshots
+```
+
+Look at each image before committing it: it should show the change you meant to make. The job
+still fails, and so does the required check, until the next run compares against the committed
+images. If the comparison failed but nothing differed, the summary says so instead, and the failure
+is not baseline drift.
+
+### The win32 Set Follows the linux Set
+
 When a change regenerates the linux set, expect the win32 comparison to fail on the same images.
 The failed job re-runs with `--update-snapshots=changed`, uploads only the regenerated
 `*-win32.png` files as the `settings-rows-win32-baselines` artifact, and its job summary gives the
-command that downloads them into place:
+same commands for that artifact:
 
 ```bash
-gh run download <run-id> --repo <owner>/<repo> --name settings-rows-win32-baselines --dir .
+dir="$(mktemp -d)"
+gh run download <run-id> --repo <owner>/<repo> --name settings-rows-win32-baselines --dir "$dir"
+cp -R "$dir"/. . && rm -rf "$dir"
 git add apps/web/e2e/settings-rows.spec.ts-snapshots
 ```
 
 Look at each image before committing it: it should show the same change as its linux pair. If the
 linux set changes outside a pull request, run the **Settings-Rows win32 Baselines** workflow from
 the Actions page for that ref to produce the same artifact.
+
+## WebKit: Specs That Opt In
+
+WebKit is the engine of Safari and iOS, of the macOS desktop app (WKWebView) and of the Linux
+desktop app (WebKitGTK). The rest of the suite runs in Chromium only, and much of it encodes
+Chromium-measured geometry, so WebKit runs just the specs listed in `WEBKIT_SPECS` in
+`playwright.webkit.config.ts`:
+
+- `number-fields.spec.ts`: the 96px number fields keep their values whole beside their units, with
+  no spin buttons (#3185). WebKit draws its own spin buttons and keeps room for them, and with the
+  `appearance: textfield` and spin-button rules removed, three of the five tests fail in WebKit.
+
+CI runs them in the **WebKit End-to-End Tests** job, beside the Chromium shards rather than inside
+one, so they add nothing to the browser job's budget. That job is part of the required check: a
+WebKit result nobody has to read would let a Safari regression land on a green build.
+
+To opt a spec in, add it to `WEBKIT_SPECS` and to the list above, and run it in WebKit first. Run
+them locally from the repository root:
+
+```bash
+pnpm exec playwright install --with-deps webkit   # once; the system packages need sudo
+pnpm test:e2e:webkit
+```
+
+WebKit needs system libraries (libevent, libavif, libjxl and others) that a desktop Ubuntu often
+lacks. Without sudo, run the same command in Playwright's image, matching its tag to the pinned
+`@playwright/test` version:
+
+```bash
+docker run --rm --network host --ipc host --user "$(id -u):$(id -g)" -e HOME=/tmp/home \
+  -e COREPACK_HOME=/tmp/corepack -e npm_config_store_dir=/tmp/pnpm-store -e CHOKIDAR_USEPOLLING=1 \
+  -v "$PWD:$PWD" -w "$PWD" \
+  mcr.microsoft.com/playwright:v<version>-jammy bash -c \
+  'mkdir -p /tmp/home /tmp/bin && corepack enable --install-directory /tmp/bin &&
+   PATH=/tmp/bin:$PATH pnpm exec playwright test --config playwright.webkit.config.ts'
+```
+
+The store directory keeps the container's pnpm from creating a `.pnpm-store` in the checkout.
+
+The WebKit config reuses the development server's port, so it cannot run at the same time as
+`pnpm test:e2e` in the same worktree.
+
+### Check Safari by Hand
+
+Playwright's Linux WebKit does not draw macOS native form controls or use macOS fonts. After a
+change to the number fields' CSS, check them in macOS Safari or the macOS desktop app too. Run
+`pnpm --dir apps/web exec vite`, open `settings-rows-e2e.html?view=numbers` (add `&theme=dark` for
+the dark theme), and confirm that every value is whole beside its unit and that no field shows spin
+buttons. Then focus a field, type `99999`, and confirm it stays whole while focused and hovered.
 
 ## Other Conventions
 

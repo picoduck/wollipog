@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { after, before, test } from "node:test";
+import { after, before, mock, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
@@ -10,6 +10,7 @@ import {
   ActionRow,
   LinkRow,
   NumberRow,
+  SAVED_MS,
   SegmentedRow,
   SelectRow,
   SettingRow,
@@ -19,6 +20,7 @@ import {
   SwitchRow,
   ValueRow,
 } from "./SettingsRows.js";
+import { AFFIX_SUFFIX_PROPERTY } from "./affix-suffix.js";
 import { SELECT_LIST_CHROME_PX, SELECT_LIST_MIN_WIDTH_PX, resetSelectPreviewRegistry, type SelectOption } from "./ChoiceControls.js";
 import { AppearancePanel } from "../SettingsView.js";
 import { ThemeProvider, useTheme } from "../ThemeProvider.js";
@@ -252,16 +254,20 @@ test("Sessions Layout writes the Sessions preview layout and follows it live (#2
   try {
     const group = container.querySelector('[role="radiogroup"][aria-label="Sessions Layout"]')!;
     const row = group.closest(".setting-row")!;
-    assert.equal(row.querySelector(".setting-row-desc")?.textContent, "Preview Right applies in windows 1100px and wider.");
+    const description = () => row.querySelector(".setting-row-desc")?.textContent;
+    assert.equal(description(), "The session list across the top, with the preview under it.");
     const radios = () => [...group.querySelectorAll<HTMLButtonElement>('[role="radio"]')];
     assert.deepEqual(radios().map((radio) => [radio.textContent, radio.getAttribute("aria-checked")]),
       [["Preview Below", "true"], ["Preview Right", "false"]], "Preview Below is the default");
 
     await act(async () => { radios()[1]!.click(); });
     assert.equal(getSessionsPreviewLayout(), "right", "the row writes the one key the Sessions header reads");
+    assert.equal(description(), "The session list on the left, with the preview beside it, in windows 1100px and wider.",
+      "the description says what the chosen layout does");
     // The Sessions header writes it too, and the row follows without a reload.
     await act(async () => { setSessionsPreviewLayout("below"); });
     assert.deepEqual(radios().map((radio) => radio.getAttribute("aria-checked")), ["true", "false"]);
+    assert.equal(description(), "The session list across the top, with the preview under it.");
   } finally {
     setSessionsPreviewLayout("below");
     await cleanup();
@@ -289,8 +295,8 @@ test("Terminal Placement writes the per-device placement and follows both menus 
     const group = container.querySelector('[role="radiogroup"][aria-label="Terminal Placement"]')!;
     assert.ok(group, "the row's group is named Terminal Placement");
     const row = group.closest(".setting-row")!;
-    assert.equal(row.querySelector(".setting-row-desc")?.textContent,
-      "Where terminal tabs open on this device. Running shells keep running when you switch.");
+    const description = () => row.querySelector(".setting-row-desc")?.textContent;
+    assert.equal(description(), "Terminal tabs open in a dock under the composer.");
     const radios = () => [...group.querySelectorAll<HTMLButtonElement>('[role="radio"]')];
     const checked = () => radios().map((radio) => radio.getAttribute("aria-checked"));
     assert.deepEqual(radios().map((radio) => [radio.textContent, radio.getAttribute("aria-checked")]),
@@ -300,6 +306,7 @@ test("Terminal Placement writes the per-device placement and follows both menus 
     assert.equal(domWindow.localStorage.getItem(TERMINAL_PLACEMENT_STORAGE_KEY), "panel",
       "the row writes the key both More Terminal Actions menus read");
     assert.deepEqual(checked(), ["false", "true"]);
+    assert.equal(description(), "Terminal tabs open as the Terminal tool in the right panel.");
 
     // Move to Bottom Dock and Move to Right Panel write it in this window; the row follows.
     await act(async () => { setTerminalPlacement("dock"); });
@@ -358,7 +365,8 @@ test("the scheme list requests readable content dimensions while preserving trig
     assert.ok(list);
     assert.equal(list.querySelectorAll('[role="option"]').length, 5);
     assert.equal(list.style.left, "600px", "the open list keeps the trigger's start edge");
-    assert.equal(list.style.width, "400px", "described schemes get a content-aware width");
+    assert.equal(list.style.width, "360px",
+      "described schemes get the described list's default width (§8.3), wider than the 280px floor");
     // Five rows budgeted at 58px each, plus the list's own box. Derived rather than spelled "298px":
     // that literal silently encoded a chrome budget of 8px, which counted the list's 4px
     // padding on each edge but not its 1px border — and `box-sizing: border-box` is global, so
@@ -715,6 +723,60 @@ test("a preview repaints the document, never reaches storage, and the commit is 
     assert.deepEqual(schemeWrites(), ["wollipog", "one-dark"], "no browsed palette may ever be persisted");
   } finally {
     await cleanup();
+  }
+});
+
+test("Display's descriptions follow the value as sentences, and each change shows Saved for 2s (#3020)", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  const { container, cleanup } = await renderThemed([]);
+  try {
+    const row = (title: string) => [...container.querySelectorAll(".setting-row")]
+      .find((candidate) => candidate.querySelector(".setting-row-title")?.textContent === title)!;
+    const description = (title: string) => row(title).querySelector(".setting-row-desc")?.textContent;
+    const savedRows = () => [...container.querySelectorAll(".setting-row-saved")]
+      .map((check) => check.closest(".setting-row")!.querySelector(".setting-row-title")?.textContent);
+    const pill = (group: string, label: string) => [...container.querySelectorAll<HTMLButtonElement>(
+      `[role="radiogroup"][aria-label="${group}"] [role="radio"]`,
+    )].find((radio) => radio.textContent === label)!;
+
+    assert.equal(description("Theme"), "Follows your system's light or dark setting.");
+    assert.equal(description("Color Scheme"), "Applies to both light and dark themes.");
+    assert.equal(description("Density"), "Fits more on screen.");
+    assert.equal(container.querySelector(".settings-group-foot")?.textContent,
+      "Motion follows your system's reduce-motion setting.");
+    assert.deepEqual(savedRows(), [], "nothing has changed yet");
+
+    await act(async () => { pill("Theme", "Dark").click(); });
+    assert.equal(description("Theme"), "Always dark.");
+    assert.deepEqual(savedRows(), ["Theme"]);
+    assert.equal(row("Theme").querySelector('[role="status"]')?.textContent, "Theme saved");
+
+    await act(async () => { pill("Density", "Comfortable").click(); });
+    assert.equal(description("Density"), "Adds space between rows.");
+    assert.deepEqual(savedRows(), ["Density"], "the latest change is the one that says Saved");
+
+    await act(async () => { mock.timers.tick(SAVED_MS - 1); });
+    assert.deepEqual(savedRows(), ["Density"]);
+    await act(async () => { mock.timers.tick(1); });
+    assert.deepEqual(savedRows(), [], "and only for SAVED_MS");
+
+    // Choosing what is already chosen changes nothing, so nothing says it saved.
+    await act(async () => { pill("Density", "Comfortable").click(); });
+    assert.deepEqual(savedRows(), []);
+
+    // Browsing previews without saving; Escape saves nothing; a commit saves.
+    const list = await openList(container);
+    await key(list, "ArrowDown");
+    assert.deepEqual(savedRows(), [], "a preview is not a change");
+    await key(list, "Escape");
+    assert.deepEqual(savedRows(), []);
+    const second = await openList(container);
+    await key(second, "ArrowDown");
+    await key(second, "Enter");
+    assert.deepEqual(savedRows(), ["Color Scheme"]);
+  } finally {
+    await cleanup();
+    mock.timers.reset();
   }
 });
 
@@ -1098,7 +1160,7 @@ test("each option's sentence is attached to the control it describes", async () 
     }
 
     const trigger = container.querySelector(".ui-select-trigger")!;
-    assert.equal(describedBy(trigger), "Applies to both the light and the dark theme.",
+    assert.equal(describedBy(trigger), "Applies to both light and dark themes.",
       "the picker's helper text has to reach someone who tabbed straight to the trigger");
 
     // The visible sentence for a segmented row is the SELECTED option's, and the pill already
@@ -1349,9 +1411,11 @@ test("a busy switch keeps its confirmed value and says it is working", async () 
     assert.equal(row.getAttribute("aria-checked"), "true",
       "the confirmed value must survive the pending request, not flip early");
     assert.equal(row.getAttribute("aria-busy"), "true", "and the transition must be announced");
-    assert.equal(row.disabled, true, "a second toggle mid-request would race the first");
+    // Refused, but still focusable: `disabled` would drop the focus it was pressed with (#3190).
+    assert.equal(row.getAttribute("aria-disabled"), "true", "it says it cannot be pressed");
+    assert.equal(row.disabled, false, "and keeps the focus it holds");
     await act(async () => { row.click(); });
-    assert.deepEqual(clicks, []);
+    assert.deepEqual(clicks, [], "a second toggle mid-request would race the first");
   } finally {
     await cleanup();
   }
@@ -1431,12 +1495,14 @@ test("a standalone switch that is busy or disabled refuses activation and says w
   try {
     const busySwitch = busy.container.querySelector('[role="switch"]') as unknown as HTMLButtonElement;
     assert.equal(busySwitch.getAttribute("aria-busy"), "true");
-    assert.equal(busySwitch.disabled, true, "a second toggle mid-request would race the first");
+    assert.equal(busySwitch.getAttribute("aria-disabled"), "true", "a second toggle mid-request would race the first");
+    assert.equal(busySwitch.disabled, false, "busy keeps focus; only disabled drops it");
     assert.ok(busySwitch.classList.contains("is-busy"));
     assert.ok(!busySwitch.classList.contains("is-disabled"), "busy keeps the live look, not the disabled one");
     const disabledSwitch = disabled.container.querySelector('[role="switch"]') as unknown as HTMLButtonElement;
     assert.equal(disabledSwitch.disabled, true);
     assert.equal(disabledSwitch.getAttribute("aria-busy"), null);
+    assert.equal(disabledSwitch.getAttribute("aria-disabled"), null, "native disabled already says it");
     assert.ok(disabledSwitch.classList.contains("is-disabled"));
     await act(async () => { busySwitch.click(); disabledSwitch.click(); });
     assert.deepEqual(toggles, []);
@@ -1570,12 +1636,12 @@ test("a switch remounted mid-request still reports its confirmed value", async (
     assert.equal(row()!.getAttribute("aria-checked"), "true",
       "a ref living inside the row would have re-initialised from \"busy\" and reported off here");
     assert.equal(row()!.getAttribute("aria-busy"), "true");
-    assert.equal(row()!.disabled, true);
+    assert.equal(row()!.getAttribute("aria-disabled"), "true");
 
     await show(true, "off");                       // request resolves
     assert.equal(row()!.getAttribute("aria-checked"), "false");
     assert.equal(row()!.getAttribute("aria-busy"), null);
-    assert.equal(row()!.disabled, false);
+    assert.equal(row()!.getAttribute("aria-disabled"), null);
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();
@@ -1663,6 +1729,61 @@ test("a number row is a 96px field with its unit inside, named by the title and 
   }
 });
 
+test("a number row's unit reserves its drawn width, written only on change, until the unit goes (#3185)", async () => {
+  // happy-dom does no layout, so the observer is one this test fires by hand.
+  const live = new Set<FakeResizeObserver>();
+  class FakeResizeObserver {
+    readonly targets: Element[] = [];
+    constructor(readonly callback: ResizeObserverCallback) { live.add(this); }
+    observe(target: Element) { this.targets.push(target); }
+    unobserve() {}
+    disconnect() { live.delete(this); }
+    resize(inlineSize: number) {
+      const entry = { borderBoxSize: [{ inlineSize, blockSize: 16 }], contentRect: { width: inlineSize } };
+      this.callback([entry as unknown as ResizeObserverEntry], this as unknown as ResizeObserver);
+    }
+  }
+  const priorObserver = (globalThis as Record<string, unknown>).ResizeObserver;
+  Object.defineProperty(globalThis, "ResizeObserver", { configurable: true, writable: true, value: FakeResizeObserver });
+  let setUnit!: (unit: string | undefined) => void;
+  function Row() {
+    const [unit, update] = React.useState<string | undefined>("min");
+    setUnit = update;
+    return <NumberRow title="Idle Timeout" value="30" unit={unit} onChange={() => undefined} />;
+  }
+  const { container, cleanup } = await render(<Row />);
+  try {
+    const field = container.querySelector<HTMLElement>(".input-affix")!;
+    assert.equal(live.size, 1, "one observer per unit");
+    const [observer] = live;
+    assert.equal(observer!.targets[0], field.querySelector(".input-affix-text"), "it watches the unit");
+    assert.equal(field.style.getPropertyValue(AFFIX_SUFFIX_PROPERTY), "", "unmeasured, the stylesheet's 2em holds");
+
+    const writes: string[] = [];
+    const setProperty = field.style.setProperty.bind(field.style);
+    field.style.setProperty = (name: string, value: string | null, priority?: string) => {
+      writes.push(`${name}: ${value}`);
+      setProperty(name, value, priority);
+    };
+    observer!.resize(21.703125);
+    observer!.resize(21.703125);
+    assert.deepEqual(writes, [`${AFFIX_SUFFIX_PROPERTY}: 21.703125px`], "an unchanged width writes nothing");
+    assert.equal(field.style.getPropertyValue(AFFIX_SUFFIX_PROPERTY), "21.703125px");
+
+    await act(async () => { setUnit(undefined); });
+    assert.equal(container.querySelector(".input-affix"), field, "the same field, now without a unit");
+    assert.equal(live.size, 0, "removing the unit disconnects its observer");
+    assert.equal(field.style.getPropertyValue(AFFIX_SUFFIX_PROPERTY), "", "and clears its reservation");
+
+    await act(async () => { setUnit("s"); });
+    assert.equal(live.size, 1, "a unit that returns is measured again");
+  } finally {
+    await cleanup();
+    Object.defineProperty(globalThis, "ResizeObserver", { configurable: true, writable: true, value: priorObserver });
+  }
+  assert.equal(live.size, 0, "unmounting the row disconnects its observer");
+});
+
 test("an invalid number is aria-invalid with a field error under the field, which it points at first", async () => {
   const { container, cleanup } = await render(
     <NumberRow
@@ -1717,6 +1838,42 @@ test("a value row shows its value in the control column, mono when asked, with a
     assert.deepEqual(writes.at(-1), "Wollipog 0.30.0 (protocol 142)", "a string copies that text instead of the value");
 
     assertNoDomNode(channel!.querySelector("button"), "no Copy unless asked");
+  } finally {
+    await cleanup();
+    if (priorClipboard) Object.defineProperty(domWindow.navigator, "clipboard", priorClipboard);
+    else delete (domWindow.navigator as unknown as Record<string, unknown>).clipboard;
+  }
+});
+
+test("a wrapping value breaks only after `.`, `/` and `:`, and still reads and copies whole", async () => {
+  // #3159: Connected To's address is only useful whole, so it wraps between these pieces rather
+  // than being cut off; every other value row keeps one unbroken line.
+  const writes: string[] = [];
+  const priorClipboard = Object.getOwnPropertyDescriptor(domWindow.navigator, "clipboard");
+  Object.defineProperty(domWindow.navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: async (text: string) => { writes.push(text); } },
+  });
+  const address = "https://home-studio-01.tail4a3b2c.ts.net:4417";
+  const { container, cleanup } = await render(
+    <>
+      <ValueRow title="Connected To" value={address} mono copy copyLabel="Copy Address" wrap />
+      <ValueRow title="Server" value="0.30.0" mono />
+    </>,
+  );
+  try {
+    const [wrapping, plain] = [...container.querySelectorAll(".setting-row-value-text")];
+    assert.ok(wrapping!.classList.contains("is-wrapping"));
+    assert.deepEqual([...wrapping!.querySelectorAll(".setting-row-value-part")].map((part) => part.textContent),
+      ["https://", "home-studio-01.", "tail4a3b2c.", "ts.", "net:", "4417"], "`://` stays whole, and a hyphen is no break");
+    assert.equal(wrapping!.textContent, address, "the pieces read as the address, with nothing between them");
+    assert.equal(wrapping!.getAttribute("title"), address);
+    await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Copy Address"]')!.click(); });
+    await act(async () => { await Promise.resolve(); });
+    assert.deepEqual(writes, [address]);
+
+    assert.ok(!plain!.classList.contains("is-wrapping"), "a value row wraps only when asked");
+    assertNoDomNode(plain!.querySelector(".setting-row-value-part"), "and keeps its value as plain text");
   } finally {
     await cleanup();
     if (priorClipboard) Object.defineProperty(domWindow.navigator, "clipboard", priorClipboard);
@@ -2008,5 +2165,51 @@ test("a switch row with saved or failure state is one framed child of its group,
     assert.match(failed!.querySelector(':scope > [role="status"]')?.textContent ?? "", /^Release Notes not saved\./);
   } finally {
     await cleanup();
+  }
+});
+
+/**
+ * Try Again goes away as the retry starts, and the switch it hands focus to is busy until the save
+ * lands (#3190). A busy switch that was `disabled` could not take that focus, so keyboard and screen
+ * reader users were left on <body> for the whole save.
+ */
+test("Try Again keeps focus on the switch while the retry saves, and after it succeeds or fails again", async () => {
+  for (const outcome of ["succeeds", "fails again"] as const) {
+    const toggles: string[] = [];
+    let settle: (saved: boolean) => void = () => undefined;
+    function Owner() {
+      const [state, setState] = React.useState<"failed" | "saving" | "saved">("failed");
+      settle = (saved) => setState(saved ? "saved" : "failed");
+      return (
+        <SwitchRow
+          title="Release Notes"
+          checked={false}
+          busy={state === "saving"}
+          saved={state === "saved"}
+          failure={state === "failed" ? { message: "Couldn't save this change.", onRetry: () => setState("saving") } : null}
+          onClick={() => toggles.push("toggled")}
+        />
+      );
+    }
+    const { container, cleanup } = await render(<Owner />);
+    try {
+      const tryAgain = [...container.querySelectorAll("button")].find((button) => button.textContent === "Try Again")!;
+      tryAgain.focus();
+      await act(async () => { tryAgain.click(); });
+      assert.equal(tryAgain.isConnected, false, "the retry removes Try Again");
+      const saving = container.querySelector<HTMLButtonElement>('[role="switch"]')!;
+      assert.equal(saving.getAttribute("aria-busy"), "true");
+      assert.ok(domWindow.document.activeElement === (saving as never), `${outcome}: the busy switch holds focus, not <body>`);
+      assert.equal(saving.getAttribute("aria-disabled"), "true", "it says it cannot be pressed");
+      await act(async () => { saving.click(); });
+      assert.deepEqual(toggles, [], "and a second press mid-save does nothing");
+
+      await act(async () => { settle(outcome === "succeeds"); });
+      const settled = container.querySelector<HTMLButtonElement>('[role="switch"]')!;
+      assert.equal(settled.getAttribute("aria-busy"), null);
+      assert.ok(domWindow.document.activeElement === (settled as never), `${outcome}: focus stays on the switch once it settles`);
+    } finally {
+      await cleanup();
+    }
   }
 });

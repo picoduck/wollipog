@@ -4,8 +4,9 @@ import { after, before, test } from "node:test";
 import React, { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import { SETTINGS_SECTIONS, type SettingsSection, type View } from "../navigation.js";
-import { SETTINGS_DESCRIPTION, SettingsView, settingsIndexGroups } from "./SettingsView.js";
+import { DEFAULT_EXPERIMENT_FLAGS } from "../experiments.js";
+import { EXPERIMENT_OFF_EFFECT, SETTINGS_SECTIONS, type SettingsSection, type View } from "../navigation.js";
+import { ExperimentalPanel, SETTINGS_DESCRIPTION, SettingsView, settingsIndexGroups } from "./SettingsView.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
 /**
@@ -68,7 +69,7 @@ const panels = Object.fromEntries(SETTINGS_SECTIONS.map(({ id, title }) => [
   <Counter key={id} title={title} />,
 ])) as Record<SettingsSection, ReactNode>;
 
-async function render(at: Tier, section?: SettingsSection) {
+async function render(at: Tier, section?: SettingsSection, shown: Record<SettingsSection, ReactNode> = panels) {
   tier = at;
   const navigated: View[] = [];
   // The shell's `.main-body` is Settings' one scroller (§4.5).
@@ -77,7 +78,7 @@ async function render(at: Tier, section?: SettingsSection) {
   document.body.append(scroller);
   const root = createRoot(scroller);
   const view = (next?: SettingsSection) => (
-    <SettingsView section={next} onNavigate={(target) => navigated.push(target)} panels={panels} />
+    <SettingsView section={next} onNavigate={(target) => navigated.push(target)} panels={shown} />
   );
   await act(async () => root.render(view(section)));
   return {
@@ -282,5 +283,32 @@ test("crossing 1100px moves a focused section link's focus to the current link t
     assert.equal(document.activeElement, current(), "and back to the current nav item");
   } finally {
     await view.unmount();
+  }
+});
+
+// #3139: a phone hides the panel head's description under the detail bar, and Experimental's head is
+// the one place that says what turning a feature off does.
+test("Experimental says what turning a feature off does once at every width: in its head, or above its rows on a phone", async () => {
+  const shown = { ...panels, experimental: <ExperimentalPanel flags={DEFAULT_EXPERIMENT_FLAGS} onToggle={() => undefined} /> };
+  for (const at of ["desktop", "compact", "phone"] as const) {
+    const view = await render(at, "experimental", shown);
+    try {
+      const page = view.scroller;
+      assert.equal(page.querySelector(".settings-panel-desc")?.textContent,
+        `Early features. ${EXPERIMENT_OFF_EFFECT}`, `${at}: the head keeps its sentence (CSS hides it on a phone)`);
+      const intros = [...page.querySelectorAll(".settings-panel .settings-group-desc")].map((element) => element.textContent);
+      if (at === "phone") {
+        assert.ok(page.querySelector(".settings-detail"), "a phone shows the section page under its detail bar");
+        assert.deepEqual(intros, [EXPERIMENT_OFF_EFFECT], "the group says it once");
+        const intro = page.querySelector(".settings-group-desc")!;
+        const firstRow = page.querySelector(".settings-group-surface")!;
+        assert.equal(intro.nextElementSibling, firstRow, "above the rows");
+      } else {
+        assert.deepEqual(intros, [], `${at}: no group intro repeats the head`);
+      }
+      assert.equal(page.querySelectorAll('[role="switch"]').length, 2);
+    } finally {
+      await view.unmount();
+    }
   }
 });

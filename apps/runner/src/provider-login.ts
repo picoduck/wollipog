@@ -141,6 +141,10 @@ export interface ProviderLoginSupervisorOptions {
   removalBlocker?: (account: RunnerProviderAccount) => string | undefined;
   /** Whether any session on this Machine is bound to the account's credential home. */
   credentialHomeInUse?: (account: RunnerProviderAccount) => boolean;
+  /** Runs credential-home deletion outside any skill transaction. Skill transactions release
+   * their provider-HOME references when they finish, so without this a pass that captured the
+   * account before removal could re-acquire the HOME between deletion's release and its removal. */
+  serializeHomeRetirement?: <T>(work: () => Promise<T>) => Promise<T>;
   timeoutMs?: number;
   ceremonyTimeoutMs?: number;
   spawn?: typeof spawnAgent;
@@ -575,7 +579,8 @@ export class ProviderLoginSupervisor {
       throw new Error("The runner configuration could not be updated.");
     }
     this.options.accounts.splice(this.options.accounts.indexOf(account), 1);
-    const credentialsRetained = !await this.deleteRemovedCredentialHome(account);
+    const retire = () => this.deleteRemovedCredentialHome(account);
+    const credentialsRetained = !await (this.options.serializeHomeRetirement?.(retire) ?? retire());
     await this.options.onAccountRemoved?.(account);
     return { credentialsRetained };
   }

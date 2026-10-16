@@ -2376,7 +2376,7 @@ test("repeated compaction, orphan collection, and reset retain no destructive ar
     retainActiveBytes: 80,
     retainActiveEvents: 2,
     maxSegmentBytes: 2 * 1024,
-    orphanGraceMs: 0,
+    orphanGraceMs: 60 * 60 * 1_000,
   };
   try {
     const store = new SessionStore(root, undefined, policy);
@@ -2395,8 +2395,22 @@ test("repeated compaction, orphan collection, and reset retain no destructive ar
     const sessionDir = join(root, "s_abc");
     const beforeMaintenance = readdirSync(sessionDir);
     assert.ok(beforeMaintenance.some((file) => file === "events.ndjson"), "superseded readers get a grace generation");
+    // The retired file is aged past the grace period rather than swept with a zero grace: the sweep
+    // compares sub-millisecond mtimes with a whole-millisecond Date.now(), so a file written in the
+    // sweep's own millisecond still looks younger than a zero grace and stays (#3250).
+    const { activeFile } = JSON.parse(readFileSync(join(sessionDir, "events.manifest.json"), "utf8")) as {
+      activeFile: string;
+    };
+    const retired = beforeMaintenance.find((file) => file.startsWith("events.retired."))!;
+    const superseded = beforeMaintenance.find((file) => file.startsWith("events.active.") && file !== activeFile)!;
+    assert.ok(retired && superseded, "the first compaction left a retired file and a superseded active file");
+    const old = new Date(Date.now() - 2 * 60 * 60 * 1_000);
+    utimesSync(join(sessionDir, retired), old, old);
     const maintenance = await store.maintainHistories("idle-maintenance", 1);
-    assert.ok(maintenance.orphansRemoved >= 1);
+    const left = new Set(readdirSync(sessionDir));
+    assert.equal(left.has(retired), false, "an orphan past the grace period is removed");
+    assert.equal(left.has(superseded), true, "an orphan inside the grace period stays");
+    assert.equal(maintenance.orphansRemoved, 1);
     assert.deepEqual(store.readEvents("s_abc").map((event) => event.seq), Array.from({ length: 60 }, (_, i) => i + 1));
 
     const oldEpoch = store.readMeta("s_abc")?.logEpoch ?? 0;
@@ -3261,19 +3275,28 @@ test("orphan collection during the copy never leaves a manifest naming removed f
     const root = mkdtempSync(join(tmpdir(), "wollipog-store-compact-collect-"));
     try {
       megabyteSession(root);
-      const zeroGrace = { ...COMPACT_MEGABYTES, orphanGraceMs: 0 };
-      const compactor = new SessionStore(root, undefined, zeroGrace);
-      const peer = new SessionStore(root, undefined, zeroGrace);
+      const compactor = new SessionStore(root, undefined, COMPACT_MEGABYTES);
+      const peer = new SessionStore(root, undefined, COMPACT_MEGABYTES);
       const sessionDir = join(root, "s_abc");
+      const young = "events.segment.young.ndjson"; // an unreferenced file inside the grace period
+      let prepared: string[] = [];
       let collected = -1;
       const { result } = await duringEachTurn(compactor.maintainHistories("maintenance", 1), () => {
         if (collected >= 0 || !readdirSync(sessionDir).some((file) => file.startsWith("events.active."))) return;
+        // The prepared files are aged past the grace period rather than collected with a zero grace,
+        // which keeps a file written in the sweep's own millisecond (#3250).
+        prepared = readdirSync(sessionDir).filter((file) => /^events\.(active|segment)\./.test(file));
+        const old = new Date(Date.now() - 2 * 60 * 60 * 1_000);
+        for (const file of prepared) utimesSync(join(sessionDir, file), old, old);
+        writeFileSync(join(sessionDir, young), "");
         const store = collector === "peer_store" ? peer : compactor;
         collected = (store as unknown as { cleanupHistoryOrphans(id: string): number }).cleanupHistoryOrphans("s_abc");
       });
       assert.ok(collected >= 0, `${collector}: collection ran while the copy was in flight`);
+      assert.equal(existsSync(join(sessionDir, young)), true, `${collector}: a file inside the grace period stays`);
       if (collector === "peer_store") {
-        assert.ok(collected >= 1, "the peer removed the unreferenced prepared files");
+        assert.ok(prepared.length >= 2, "the compaction had prepared its segment and active files");
+        assert.equal(collected, prepared.length, "the peer removed the unreferenced prepared files");
         assert.equal(result.compacted, 0);
         assert.equal(result.errors, 1);
         assert.equal(existsSync(join(sessionDir, "events.manifest.json")), false);
@@ -3354,4 +3377,21 @@ test("upgrade anchor absence never forces an existing healthy index to rebuild o
     assert.ok(page.ok);
     assert.equal(page.page.turnStartSeq, 402);
   } finally { store.flush("s_abc"); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("pre-acceptance retry exhaustion is protocol gated and never becomes a missing-result marker", () => {
+  const m = meta({ backgroundJobs: [{
+    id: "job", parentTurnId: "turn", runnerId: "runner", workspaceId: null,
+    context: { kind: "native" }, launchType: "agent", registeredAt: 1,
+    terminalStatus: "completed", terminalObservedAt: 2, continuationRequired: true,
+    continuationId: "continuation", continuationQueuedAt: 3, continuationSubmittedAt: 4,
+    continuationRetryExhaustedAt: 5,
+  }] });
+  assert.equal(metaToSnapshot(m, 218).backgroundJobs![0]!.continuationRetryExhaustedAt, undefined);
+  assert.equal(metaToSnapshot(m, 219).backgroundJobs![0]!.continuationRetryExhaustedAt, undefined);
+  assert.equal(metaToSnapshot(m, 220).backgroundJobs![0]!.continuationRetryExhaustedAt, undefined);
+  const current = metaToSnapshot(m, CURRENT_PEER).backgroundJobs![0]!;
+  assert.equal(current.continuationRetryExhaustedAt, 5);
+  assert.equal(current.continuationAcceptedAt, undefined);
+  assert.equal(current.continuationMissingResultAt, undefined);
 });

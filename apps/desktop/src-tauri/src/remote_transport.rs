@@ -659,7 +659,7 @@ fn request_headers(values: &[(String, String)]) -> Result<HeaderMap, String> {
     let mut headers = HeaderMap::new();
     for (name, value) in values {
         let name = name.to_ascii_lowercase();
-        if name != "content-type" && name != "accept" {
+        if name != "content-type" && name != "accept" && name != "x-wollipog-ui-protocol" {
             return Err("The remote request header is not allowed.".into());
         }
         if value.len() > 512 || value.chars().any(char::is_control) {
@@ -1625,7 +1625,6 @@ mod tests {
                 "/api/runners/r_1/orphaned-skill-copies/discard",
             ),
             (Method::GET, "/api/sessions/s_1/child-sessions?limit=50"),
-            (Method::GET, "/api/sessions/s_1/events?after=0"),
         ] {
             assert_eq!(
                 budget(method.clone(), path),
@@ -1666,6 +1665,8 @@ mod tests {
             (Method::POST, "/api/sessions//fork"),
             (Method::POST, "/api/sessions/s_1/parent-control-policy"),
             (Method::GET, "/api/sessions/s_1/events?after=0&limit=200"),
+            (Method::GET, "/api/sessions/s_1/events"),
+            (Method::GET, "/api/sessions/s_1/events?after=0"),
             (Method::GET, "/api/sessions/s_1/events?after=0&li%6Dit=200"),
             (
                 Method::POST,
@@ -2084,9 +2085,11 @@ mod tests {
         let accepted = request_headers(&[
             ("content-type".into(), "application/json".into()),
             ("accept".into(), "application/json".into()),
+            ("x-wollipog-ui-protocol".into(), "220".into()),
         ])
         .unwrap();
-        assert_eq!(accepted.len(), 2);
+        assert_eq!(accepted.len(), 3);
+        assert_eq!(accepted.get("x-wollipog-ui-protocol").unwrap(), "220");
         for name in [
             "authorization",
             "cookie",

@@ -1,4 +1,4 @@
-import type { AgentDefinition } from "@wollipog/protocol";
+import { isRestartOnlyCodexExec, type AgentDefinition } from "@wollipog/protocol";
 import { agentProvider } from "./AgentIcon.js";
 import type { SavedAgentChoice } from "../agent-defaults.js";
 
@@ -50,8 +50,9 @@ export interface AgentOption {
    * Shown greyed-out with a "needs setup" hint rather than hidden — the user should learn the
    * agent could exist here — but it must never be auto-selected or launched. */
   disabled?: boolean;
-  /** Compatibility/batch targets stay available, but do not compete with interactive agents in
-   * the ordinary picker or get selected into a new multi-agent run by default. */
+  /** A `codex exec` agent the user configured stays available, but does not compete with
+   * interactive agents in the ordinary picker or get selected into a new multi-agent run by
+   * default. Discovery's own exec row is never an option (`isRestartOnlyCodexExec`). */
   advanced?: boolean;
 }
 
@@ -63,12 +64,14 @@ export function agentOptions(
   // Hide the generic ACP path for a provider once a USABLE native harness for it exists — it's a
   // weaker duplicate (no model picker / slash commands). ACP stays for providers with no native
   // driver, and an unavailable or unverified native entry must not hide a working ACP fallback.
+  // Nor may discovery's restart-only exec row, which is never offered itself.
   const nativeProviders = new Set(
     agents
-      .filter((a) => a.driver && a.driver !== "acp" && a.available === true)
+      .filter((a) => a.driver && a.driver !== "acp" && a.available === true && !isRestartOnlyCodexExec(a))
       .map((a) => agentProvider(a.driver!, a.name)),
   );
   const visible = agents.filter((a) => {
+    if (isRestartOnlyCodexExec(a)) return false;
     if (options.includeProviderAdapters) return true;
     const driver = a.driver ?? "acp";
     if (driver !== "acp") return true;
@@ -143,13 +146,28 @@ function sameContext(a: AgentDefinition, b: AgentDefinition): boolean {
 }
 
 /** Resolve a saved per-runner default without silently rewriting it. Legacy/unavailable choices
- * remain visible so the dialog can explain them and offer an explicit one-click migration. */
+ * remain visible so the dialog can explain them and offer an explicit one-click migration.
+ * `agents` is the runner's full list, needed to recognize a saved choice of discovery's
+ * restart-only exec row, which `options` never contains. */
 export function savedAgentSelection(
   options: AgentOption[],
   choice: string | SavedAgentChoice | undefined,
+  agents: readonly AgentDefinition[] = [],
 ): { agentId: string; issue?: SavedAgentDefaultIssue; recommendedId: string } {
   const recommendedId = firstEnabledAgentId(options);
   if (!choice) return { agentId: recommendedId, recommendedId };
+  const restartOnly = agents.find((agent) => isRestartOnlyCodexExec(agent) && (typeof choice === "string"
+    ? agent.id === choice
+    : agent.installation?.id === choice.installationId && agent.driver === choice.driver &&
+      sameContext(agent, { context: choice.context } as AgentDefinition)));
+  if (restartOnly) {
+    // Nothing is preselected: a new session must never start on exec without the user choosing.
+    const appServers = options.filter((option) =>
+      option.agent.driver === "codex-app-server" && !option.disabled && sameContext(option.agent, restartOnly));
+    const sibling = appServers.find((option) => option.agent.installation?.id === restartOnly.installation?.id) ??
+      appServers[0];
+    return { agentId: "", issue: "legacy", recommendedId: sibling?.agent.id ?? recommendedId };
+  }
   if (typeof choice !== "string") {
     const matching = options.find(({ agent }) =>
       agent.installation?.id === choice.installationId && agent.driver === choice.driver &&
@@ -184,9 +202,10 @@ export function currentAgentSelectionIssue(
   options: AgentOption[],
   selectedId: string,
   choice: string | SavedAgentChoice | undefined,
+  agents: readonly AgentDefinition[] = [],
 ): SavedAgentDefaultIssue | undefined {
   if (options.find((option) => option.agent.id === selectedId)?.disabled) return "unavailable";
-  return savedAgentSelection(options, choice).issue;
+  return savedAgentSelection(options, choice, agents).issue;
 }
 
 /** Multi-agent runs must never preselect or render a discovery row known to be unavailable. */
@@ -265,6 +284,15 @@ export function agentMeta(a: AgentDefinition): string {
     if (a.claudeCode.launchSource && a.claudeCode.launchSource !== "path") bits.push("PATH recovered");
   }
   return bits.join(" · ");
+}
+
+/** Why discovery could not verify a signed-in Codex App Server, in the words the runner wrote for
+ * people. Without the exec row to fall back on, this is the only explanation of why Codex cannot
+ * start here. A signed-out row keeps `agentMeta`'s `codex login` instruction. */
+export function codexAppServerSetupReason(a: AgentDefinition): string | undefined {
+  if (a.driver !== "codex-app-server" || a.authStatus === "unauthenticated") return undefined;
+  const status = a.codexAppServer?.status;
+  return status === "unsupported" || status === "unavailable" ? a.codexAppServer?.failure?.message : undefined;
 }
 
 /** Persisted sessions keep their actual transport visible even after the runner's stable `codex`
