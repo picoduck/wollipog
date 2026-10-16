@@ -47,6 +47,18 @@ test("trusted paths refuse session-writable roots and other-user-writable compon
     "every hop's directory is checked, not only the final path");
 });
 
+test("a sticky shared directory like /tmp is a safe ancestor even when its group can write it", posixOnly, (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-review-sticky-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  chmodSync(root, 0o755); // no private ancestor below the system temporary directory, as on CI
+  const shared = join(root, "shared"); mkdirSync(shared); chmodSync(shared, 0o1777);
+  const safe = join(shared, "safe"); mkdirSync(safe, { mode: 0o755 });
+  const tool = executable(join(safe, "tool"));
+  assert.equal(trustedPath(tool, [], uid, rootUid), tool);
+  chmodSync(safe, 0o1777);
+  assert.throws(() => trustedPath(safe, [], uid, rootUid), /writable by every user/, "the path itself never may be writable");
+});
+
 function fakeHome(t: { after(fn: () => void): void }) {
   const root = mkdtempSync(join(tmpdir(), "wollipog-review-install-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));

@@ -118,11 +118,11 @@ function checkResolved(real: string, roots: readonly string[], uid: number, root
   for (const [index, component] of ordered.entries()) {
     const info = lstatSync(component);
     if (info.uid !== uid && info.uid !== rootUid) throw new Error(`${component} is owned by another user`);
-    // A sticky world-writable directory (like /tmp) cannot have entries it does not own replaced,
-    // so it is a safe ancestor; the path itself must never be world-writable.
+    // A sticky directory (like /tmp, mode 1777) cannot have entries it does not own replaced by
+    // anyone, its group included, so it is a safe ancestor; the path itself never may be writable.
     const stickyAncestor = info.isDirectory() && (info.mode & 0o1000) !== 0 && index < ordered.length - 1;
     if ((info.mode & 0o002) && !stickyAncestor) throw new Error(`${component} is writable by every user`);
-    if ((info.mode & 0o020) && !privateAncestor) throw new Error(`${component} is writable by its group`);
+    if ((info.mode & 0o020) && !privateAncestor && !stickyAncestor) throw new Error(`${component} is writable by its group`);
     if (info.isDirectory() && info.uid === uid && (info.mode & 0o077) === 0) privateAncestor = true;
   }
 }
