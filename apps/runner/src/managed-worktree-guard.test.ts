@@ -1413,8 +1413,11 @@ test("ordinary commands reaching nothing are allowed, and every real access stay
     // ANSI-C `$'...'` is modelled, so a benign one with escapes and a following comment is allowed.
     "printf $'a\\tb\\n'",
     "echo $'hi' # a note",
-    // A benign kept heredoc with a comment in its body does not refuse the command after it.
+    // A benign kept heredoc with a comment in its body does not refuse the command after it, and a
+    // mid-word `#` in a body stays literal rather than splitting into a spurious `/` ancestor.
     "bash <<'EOF'\necho hi # a note\nEOF\necho done",
+    "bash <<'EOF'\nx=a#/b\nEOF\necho done",
+    "bash <<'EOF'\n#!/bin/sh\necho hi\nEOF\necho done",
   ]) {
     assert.equal(commandTargetsGuardState(command, project, directory), null, command);
   }

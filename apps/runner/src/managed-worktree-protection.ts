@@ -2784,6 +2784,28 @@ function reduceBraceSubstitutions(text: string): string {
   return out;
 }
 
+/**
+ * Neutralise `#` in one heredoc body line the way bash reads it: a `#` that starts a word begins a
+ * comment to the end of that line (dropped), a `#` inside a word is literal (escaped so the
+ * tokenizer keeps it rather than running its own comment to the end of the whole command). Keeping a
+ * mid-word `#` literal, instead of blanking every `#`, avoids splitting a word into a spurious
+ * `/`-ancestor. Quotes in a heredoc body are the consumer's to interpret, not the shell's, so only
+ * word boundaries are tracked here; the worst a misread does is scan a line more, never less.
+ */
+function neutralizeBodyLineComment(line: string): string {
+  let out = "";
+  let inWord = false;
+  for (const ch of line) {
+    if (ch === "#") {
+      if (!inWord) return out;    // comment: drop the rest of the line
+      out += "\\#"; continue;     // mid-word: literal
+    }
+    if (ch === " " || ch === "\t") { inWord = false; out += ch; continue; }
+    out += ch; inWord = true;
+  }
+  return out;
+}
+
 interface PendingHeredoc { delimiter: string; dashStrip: boolean; strip: boolean }
 
 /**
@@ -2863,9 +2885,9 @@ export function prepareGuardStateCommand(command: string): PreparedGuardStateCom
       for (const { line, sep, isTerminator } of lines) {
         scan += line + sep;
         // A kept body line is still scanned (a shell executes it). Reduce its `${...}` so a literal
-        // substitution does not break tokenizing, and blank its `#` so the tokenizer's comment rule
-        // cannot run from a body `#` to the end of the command and swallow what follows the heredoc.
-        out += (isTerminator ? line : reduceBraceSubstitutions(line)).replaceAll("#", " ") + sep;
+        // substitution does not break tokenizing, and neutralise its `#` so the tokenizer's comment
+        // rule cannot run from a body `#` to the end of the command and swallow what follows.
+        out += neutralizeBodyLineComment(isTerminator ? line : reduceBraceSubstitutions(line)) + sep;
       }
     }
   };
