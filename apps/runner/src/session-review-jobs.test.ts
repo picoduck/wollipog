@@ -911,6 +911,40 @@ test("a restart between the spawn and the running record adopts the controller f
   assert.equal(processRunning(controller.pid!), false, "cancel signalled the adopted controller's group");
 });
 
+test("a restart keeps supervising the summary's reviewer when a short-lived marked helper is found first", { skip: process.platform !== "linux" }, async (t) => {
+  const h = harness(t);
+  const marker = "srj_00000009:aaaabbbbccccddddeeeeffff00001111";
+  const pids = join(h.root, "pids");
+  // The controller (group leader) exits at once, leaving a helper that lives briefly and was started
+  // first (so it is enumerated first) and the long-lived reviewer, both carrying the marker.
+  const controller = spawnProcess("sh", ["-c", `sleep 0.8 & h=$!; sleep 300 & r=$!; echo "$h $r" > ${pids}; exit 0`], {
+    detached: true, stdio: "ignore", env: { ...process.env, WOLLIPOG_SESSION_REVIEW_JOB: marker },
+  });
+  t.after(() => { try { process.kill(-controller.pid!, "SIGKILL"); } catch { /* gone */ } });
+  await once(controller, "exit");
+  for (let i = 0; i < 100 && !existsSync(pids); i++) await delay(10);
+  const [helper, reviewer] = readFileSync(pids, "utf8").trim().split(" ").map(Number) as [number, number];
+  assert.ok(helper < reviewer, "the helper is enumerated before the reviewer");
+  launchingJob(h, marker, "none");
+  const job = JSON.parse(readFileSync(join(h.root, "reviews", "jobs", "srj_00000009.json"), "utf8")) as { attemptDir: string };
+  mkdirSync(job.attemptDir);
+  writeFileSync(join(job.attemptDir, "summary.json"), JSON.stringify({ phase: "execution", status: "running", pid: reviewer }));
+
+  const { jobs, updates } = restart(h, t);
+  const adopted = JSON.parse(readFileSync(join(h.root, "reviews", "jobs", "srj_00000009.json"), "utf8")) as { pid?: number; reviewerPid?: number };
+  assert.equal(adopted.pid, controller.pid, "the group is the dead controller's");
+  assert.equal(adopted.reviewerPid, reviewer, "the summary's reviewer is recorded, not the helper found first");
+  await delay(2_500); // the helper exits and the job polls past it
+  assert.equal(processRunning(helper), false);
+  assert.deepEqual(updates.map((update) => update.state), ["running"], "the job stays supervised while its reviewer runs");
+  assert.equal(existsSync(job.attemptDir), true);
+
+  jobs.cancel("srj_00000009", "nonce-1");
+  for (let i = 0; i < 500 && updates.length < 2; i++) await delay(10);
+  assert.equal(updates.at(-1)?.state, "failed");
+  assert.equal(processRunning(reviewer), false, "cancel reached the surviving reviewer");
+});
+
 test("a restart finds no controller and no attempt for a launching job: not launched, and the attempt is returned", posixOnly, (t) => {
   const h = harness(t);
   launchingJob(h, "srj_00000009:fedcba9876543210fedcba9876543210", "none");

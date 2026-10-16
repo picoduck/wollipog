@@ -649,7 +649,11 @@ export class SessionReviewJobs {
   private reconcileLaunch(state: JobState): void {
     const marked = state.marker ? markedProcesses(state.marker) : [];
     const leader = marked.find((pid) => processGroup(pid) === pid);
-    const member = leader ?? marked[0];
+    // Without the controller, the reviewer its running summary names is the process to record; any
+    // other marked member (a short-lived helper, say) only proves the group is still live.
+    const named = leader === undefined ? this.runningSummaryPid(state) : undefined;
+    const reviewer = named !== undefined && marked.includes(named) ? named : undefined;
+    const member = leader ?? reviewer ?? marked[0];
     const group = member === undefined ? null : processGroup(member);
     const launched = Boolean(state.attemptDir && existsSync(state.attemptDir)) ||
       Boolean(state.stdoutPath && (statSync(state.stdoutPath, { throwIfNoEntry: false })?.size ?? 0) > 0);
@@ -657,9 +661,9 @@ export class SessionReviewJobs {
       state.pid = group;
       if (leader !== undefined) {
         state.startIdentity = processIdentity(leader) ?? undefined;
-      } else {
-        state.reviewerPid = member;
-        state.reviewerIdentity = processIdentity(member) ?? undefined;
+      } else if (reviewer !== undefined) {
+        state.reviewerPid = reviewer;
+        state.reviewerIdentity = processIdentity(reviewer) ?? undefined;
       }
     } else if (!launched) {
       this.releaseAttempt(state);
@@ -1063,9 +1067,26 @@ export class SessionReviewJobs {
       processIdentity(state.reviewerPid) === state.reviewerIdentity && processGroup(state.reviewerPid) === state.pid);
   }
 
-  /** The controller or the reviewer it started is still running. */
+  /** Any process in the controller's group still carrying this launch's marker: everything the
+   * controller started inherits it, so this covers a reviewer the runner never identified. */
+  private markedAlive(state: JobState): boolean {
+    if (!state.pid || !state.marker) return false;
+    return markedProcesses(state.marker).some((pid) => processGroup(pid) === state.pid);
+  }
+
+  /** The controller, the reviewer it started, or anything else it started is still running. */
   private alive(state: JobState): boolean {
-    return this.controllerAlive(state) || this.reviewerAlive(state);
+    return this.controllerAlive(state) || this.reviewerAlive(state) || this.markedAlive(state);
+  }
+
+  /** The reviewer pid the controller's running summary names, if any. */
+  private runningSummaryPid(state: JobState): number | undefined {
+    if (!state.attemptDir) return undefined;
+    try {
+      const summary = JSON.parse(readFileSync(join(state.attemptDir, "summary.json"), "utf8")) as Record<string, unknown>;
+      return summary.status === "running" && typeof summary.pid === "number" && Number.isSafeInteger(summary.pid)
+        ? summary.pid : undefined;
+    } catch { return undefined; }
   }
 
   /**
@@ -1110,7 +1131,7 @@ export class SessionReviewJobs {
     let summary: Record<string, unknown> | undefined;
     try { summary = JSON.parse(readFileSync(join(state.attemptDir, "summary.json"), "utf8")) as Record<string, unknown>; } catch { /* not yet */ }
     this.trackReviewer(state, summary);
-    const alive = controllerAlive || this.reviewerAlive(state);
+    const alive = controllerAlive || this.reviewerAlive(state) || this.markedAlive(state);
     // A preflight failure creates no attempt directory; the controller reports it on stdout only.
     let stdoutSummary: string | undefined;
     // Only a genuine preflight failure is read from stdout: no attempt directory, no reviewer ever
