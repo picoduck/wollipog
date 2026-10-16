@@ -48,6 +48,11 @@ Inside the data directory: `control-plane/control-plane.db` (with its `.artifact
 `control-plane.env` (mode 0600, every control-plane setting), `runner.config.json`, and
 `runner.token` (mode 0600, the runner's one-time credential written by install).
 
+To prune the transcripts of long-archived sessions, add
+`CONTROL_PLANE_ARCHIVED_HISTORY_RETENTION_DAYS=<days>` (7–3650) to `control-plane.env` and restart.
+It is off by default, takes effect 24 hours after it is first seen, and an organization's own saved
+setting overrides it. See [archived-history retention](./archived-history-retention.md).
+
 The generated units state the account and the data locations they use; read them before enabling
 in an environment with its own conventions.
 

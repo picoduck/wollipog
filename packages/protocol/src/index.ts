@@ -5763,6 +5763,54 @@ export interface UsageRetentionPolicy {
   coverageStartedAt: number;
 }
 
+/** Archived-history retention (#2777): bounds, in whole days after archiving. */
+export const ARCHIVED_HISTORY_RETENTION_LIMITS = { minDays: 7, maxDays: 3650, suggestedDays: 90 } as const;
+/** Turning retention on or shortening it takes effect only after this delay, so it can be undone. */
+export const ARCHIVED_HISTORY_RETENTION_DELAY_MS = 24 * 60 * 60_000;
+
+export interface ArchivedHistoryRetentionCounts {
+  sessions: number;
+  /** Approximate: the cached events of those sessions, including the few a prune keeps. */
+  events: number;
+}
+
+/** One organization's archived-history retention policy. Organization owners and admins can change
+ * it; everyone in the organization can read it. */
+export interface ArchivedHistoryRetentionView {
+  /** Days after archiving before a session's history is pruned; null when retention is off. */
+  retentionDays: number | null;
+  /** `organization` is a saved value (including a saved off), which overrides the host environment. */
+  source: "default" | "environment" | "organization";
+  /** CONTROL_PLANE_ARCHIVED_HISTORY_RETENTION_DAYS, or null when unset or off. */
+  environmentDays: number | null;
+  canManage: boolean;
+  /** No pruning runs before this time; null when retention is off. */
+  prunesFrom: number | null;
+  /** The control plane's next scheduled pass; null when none is scheduled. */
+  nextRunAt: number | null;
+  /** Archived sessions the current policy would prune now, or once prunesFrom passes. */
+  eligible: ArchivedHistoryRetentionCounts;
+  lastRun: (ArchivedHistoryRetentionCounts & { finishedAt: number }) | null;
+  limits: typeof ARCHIVED_HISTORY_RETENTION_LIMITS;
+  /** Present when the request asked what a different threshold would prune. */
+  preview?: { retentionDays: number; eligible: ArchivedHistoryRetentionCounts; prunesFrom: number };
+}
+
+export interface UpdateArchivedHistoryRetentionRequest {
+  /** Whole days between the limits, or null to turn retention off for the organization. */
+  retentionDays: number | null;
+}
+
+/** The archived-history retention policy pruned this session's transcript: everything except its
+ * prompts, final response, turn-completion and report, usage, and attachment events (#2777). */
+export interface SessionHistoryPruned {
+  prunedAt: number;
+  /** Events removed by every prune of this session. */
+  eventCount: number;
+  /** The threshold, in days after archiving, of the latest prune. */
+  retentionDays: number;
+}
+
 export interface UsageTimeBucket extends UsageAmount {
   bucketTs: number;
 }
@@ -7143,6 +7191,10 @@ export interface SessionView {
   /** Protocol-v62 cloud acceptance proof. Absent until the runner's adapter accepts the handoff. */
   executionHandoff?: ExecutionHandoffReceipt;
   archived: boolean;
+  /** When the session was archived. Absent while it is not archived, and from older control planes. */
+  archivedAt?: number;
+  /** Present once archived-history retention pruned this session's transcript. */
+  historyPruned?: SessionHistoryPruned;
   /** Durable server-owned stop-and-archive state. While pending, `archived` remains false so the
    * session cannot disappear from ordinary clients before capacity release is confirmed. */
   archiveStatus?: ArchiveStatus;
