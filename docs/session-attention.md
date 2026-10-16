@@ -19,6 +19,13 @@ when the browser takes over a pan; momentum scrolling renews the settle interval
 transient order line or Apply button to shift the rows during these brief holds. Selection and the virtual list's scroll anchor stay
 attached to session identity when canonical order is applied.
 
+Review readiness waits for foreground turns, pending stops, background jobs and their returning
+continuations to settle. A parent's own result and descendant result rollups stay out of Ready for
+Review while any unarchived descendant has unfinished work, including children hidden by filters or
+collapsed threads. An at-rest parent shows Children Working instead; human questions and approvals
+keep priority. Child dots and working counts include background work, and dot tooltips name Waiting
+on External Job or Continuation Pending. Intermediate results remain stored for later review.
+
 Only a successful response-completed boundary following live top-level output creates a result.
 An individually completed message can still be intermediate commentary; older peers without an
 unambiguous response boundary remain conservative. Tool events, deltas, heartbeats, historical imports and transcript cache

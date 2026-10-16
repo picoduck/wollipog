@@ -17,7 +17,7 @@ import { useStoreActions, useStoreSelector } from "../store.js";
 import { destination } from "../navigation.js";
 import { runnerDisplay } from "../runners.js";
 import { SessionPinIndicator, ThreadDot } from "./common.js";
-import { inboxProjectName, inboxThreadChildrenLabel, inboxThreadChildState, isInboxBlocked, type InboxThreadChildren } from "../inbox.js";
+import { inboxProjectName, inboxThreadChildrenLabel, threadInboxRows, type InboxThreadChildren } from "../inbox.js";
 import { useAccessibleMenu, useLongPress } from "./interactions.js";
 import { sessionCommandRefusal } from "../session-command-permissions.js";
 import { sessionAgentLabel } from "./agent-options.js";
@@ -27,7 +27,6 @@ import { activeBoardFilterCount, filterBoardSessions } from "./BoardFilters.js";
 import { showsActivityStrip } from "../activity.js";
 import { boardCardDecisions, boardCardRequestCode, boardCardSignInItems, type BoardCardSignInItem } from "../board-card.js";
 import { sessionRowStatus } from "../session-row-status.js";
-import { sessionFollowUp } from "../session-follow-up.js";
 import { sessionDisplayTitle } from "../session-title.js";
 import { ActivityStrip } from "./ActivityStrip.js";
 import { AgentIcon } from "./AgentIcon.js";
@@ -166,30 +165,12 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
 
   // The family chip on a parent's card (#896). The Board does not nest, and a parent's children
   // are usually in other columns, so the rollup is read off the whole scope rather than a column.
-  const threadChildren = useMemo(() => {
-    const present = new Set(scoped.map((session) => session.id));
-    const map = new Map<string, InboxThreadChildren>();
-    const followUpPriorities = new Map<string, number>();
-    for (const session of scoped) {
-      const parentId = session.parentSessionId;
-      if (!parentId || !present.has(parentId) || parentId === session.id) continue;
-      const entry = map.get(parentId) ?? { count: 0, working: 0, waiting: 0, children: [] };
-      entry.count += 1;
-      const followUp = sessionFollowUp(session);
-      if (followUp.priority > (followUpPriorities.get(parentId) ?? 0)) {
-        followUpPriorities.set(parentId, followUp.priority);
-        // Keep the existing input count, and only add a review reason when no stronger input wins.
-        entry.followUpLabel = followUp.group === "ready_for_review" ? "Ready for Review" : undefined;
-      }
-      if (isInboxBlocked(session)) entry.waiting += 1;
-      const stalled = stalledSessionIds.has(session.id);
-      const state = inboxThreadChildState(session, stalled);
-      if (!stalled && state === "running") entry.working = (entry.working ?? 0) + 1;
-      entry.children.push({ id: session.id, title: session.title, state });
-      map.set(parentId, entry);
-    }
-    return map;
-  }, [scoped, stalledSessionIds]);
+  const threadChildren = useMemo(() => new Map(
+    threadInboxRows(scoped.map((session) => ({ session })), new Set(), stalledSessionIds, [...allSessions.values()])
+      .filter((row) => row.thread.children !== null)
+      .map((row) => [row.session.id, { ...row.thread.children!, followUpLabel:
+        row.thread.children!.followUpLabel === "Ready for Review" ? "Ready for Review" as const : undefined }]),
+  ), [scoped, stalledSessionIds, allSessions]);
 
   // Drag a card onto a column to file the session there manually (server-side
   // setColumn override). Depth counter per column: dragleave fires when crossing
@@ -520,6 +501,7 @@ function SessionCard({
   const status = sessionRowStatus(session, {
     runnerOnline: runnerConnected,
     reminder,
+    familyWorking: threadChildren?.hasActiveWork,
     stalledForMs: sessionStalledForMs(stalled, activityNow, lastActivityAt),
   });
   const strip = showsActivityStrip(session.status, activity, activityNow);
@@ -677,7 +659,7 @@ function CardFamilyChip({ family, besideKey }: {
       title={label}
     >
       <span className="inbox-thread-dots" aria-hidden="true">
-        {family.children.map((child) => <ThreadDot key={child.id} state={child.state} title={child.title} />)}
+        {family.children.map((child) => <ThreadDot key={child.id} state={child.state} title={child.statusLabel ? `${child.title}: ${child.statusLabel}` : child.title} />)}
       </span>
       <span className="inbox-thread-family-text" aria-hidden="true">{label}</span>
     </span>

@@ -9,12 +9,32 @@ export function outstandingSessionResult(session: Pick<SessionView, "attention">
     ? facts.result : null;
 }
 
-/** Queued, starting, running, or stopping: a result is only ready for review once the session has stopped (#3074). */
-export function sessionWorking(session: Pick<SessionView, "status" | "stopOperation">) {
-  return ["running", "starting", "queued"].includes(session.status) || session.stopOperation?.status === "stop_pending";
+/** Foreground work, a pending stop, or background work still returning to the conversation. */
+export function sessionWorking(session: Pick<SessionView, "status" | "stopOperation" | "backgroundWorkState">) {
+  return ["running", "starting", "queued"].includes(session.status) || session.stopOperation?.status === "stop_pending" ||
+    session.backgroundWorkState === "running" || session.backgroundWorkState === "continuation_pending";
 }
 
-export function sessionFollowUp(session: SessionView) {
+/** Ancestors whose work is unfinished, even when intermediate turns or sibling results are at rest.
+ * Stop on cycles and already marked paths. */
+export function sessionsWithWorkingDescendants(sessions: readonly SessionView[]): ReadonlySet<string> {
+  const byId = new Map(sessions.map((session) => [session.id, session]));
+  const active = new Set<string>();
+  for (const session of sessions) {
+    if (!sessionWorking(session) && session.status !== "input_required") continue;
+    let parentId = session.parentSessionId;
+    const seen = new Set([session.id]);
+    while (parentId && byId.has(parentId) && !seen.has(parentId)) {
+      if (active.has(parentId)) break;
+      seen.add(parentId);
+      active.add(parentId);
+      parentId = byId.get(parentId)!.parentSessionId;
+    }
+  }
+  return active;
+}
+
+export function sessionFollowUp(session: SessionView, { familyWorking = false }: { familyWorking?: boolean } = {}) {
   const humanActions = session.attention?.humanActions ?? pendingRequests(session.pendingApproval)
     .filter((request) => {
       const owners = session.pendingRequestOwners;
@@ -27,11 +47,11 @@ export function sessionFollowUp(session: SessionView) {
   const recovery = !session.attention && (session.historyQuarantine || session.worktreeRecovery || session.stopOperation?.status === "stop_failed" ||
     session.backgroundDeliveries?.some((delivery) =>
       delivery.watchdogState === "continuation_blocked" || delivery.watchdogState === "accepted_without_result"));
-  const result = sessionWorking(session) ? null : outstandingSessionResult(session);
+  const result = sessionWorking(session) || familyWorking ? null : outstandingSessionResult(session);
   const group: SessionFollowUpGroup = firstAction || recovery || (sessionCampaignRequests(session)?.human ?? 0) > 0 ||
     (!session.attention && !session.pendingRequestOwners && session.status === "input_required")
     ? "needs_input" : result ? "ready_for_review" :
-      sessionWorking(session) || session.status === "input_required" ? "working" : "quiet";
+      sessionWorking(session) || familyWorking || session.status === "input_required" ? "working" : "quiet";
   return { group, priority: { needs_input: 3, ready_for_review: 2, working: 1, quiet: 0 }[group],
     requestRank: firstAction?.rank ?? (recovery ? 0 : 6),
     at: firstAction?.requestedAt ?? result?.at ?? session.attention?.meaningfulAt ?? session.createdAt ?? 0,

@@ -156,6 +156,7 @@ function InboxRowInner({
     runnerOnline,
     reminder,
     familyFollowUpLabel: children?.followUpLabel,
+    familyWorking: children?.hasActiveWork,
     stalledForMs: sessionStalledForMs(stalled, activityNow, lastActivityAt),
   });
   const strip = showsActivityStrip(session.status, activity, activityNow);
@@ -189,7 +190,7 @@ function InboxRowInner({
       }}
     >
       <span className="inbox-thread-dots" aria-hidden="true">
-        {children.children.map((child) => <ThreadDot key={child.id} state={child.state} title={child.title} />)}
+        {children.children.map((child) => <ThreadDot key={child.id} state={child.state} title={child.statusLabel ? `${child.title}: ${child.statusLabel}` : child.title} />)}
       </span>
       <span className="inbox-thread-family-text" aria-hidden="true">{childrenSummary}</span>
       {workingChildren > 0 && (

@@ -207,3 +207,18 @@ test("available results use a review badge while required answers keep warning p
   assert.equal(question.badge?.meta.label, "Answer Required");
   assert.equal(question.badge?.meta.tone, "warning");
 });
+
+
+test("family work suppresses review readiness without hiding requests or recovery (#3328)", () => {
+  const attention = { version: 1 as const, humanActions: [], meaningfulAt: 1,
+    result: { revision: "r1", at: 1, owner: "human" as const }, acknowledgedRevision: null };
+  assert.equal(label(sessionRowStatus(session({ attention }), { familyWorking: true,
+    familyFollowUpLabel: "Ready for Review" })), "Children Working");
+  assert.equal(label(sessionRowStatus(session({ attention }), { familyWorking: true,
+    familyFollowUpLabel: "Needs Your Input" })), "Needs Your Input");
+  assert.equal(label(sessionRowStatus(session({ status: "failed", attention }), { familyWorking: true })), "Failed");
+  for (const [backgroundWorkState, expected] of [["running", "Waiting on External Job"],
+    ["continuation_pending", "Continuation Pending"]] as const) {
+    assert.equal(label(sessionRowStatus(session({ attention, backgroundWorkState }))), expected);
+  }
+});
