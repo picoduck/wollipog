@@ -23,7 +23,7 @@ const HOOK_DIR = "/data/hooks/abc123";
 function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
   return {
     sessionId: "codex-session", agentId: "agent", workspaceId: "workspace",
-    repoPath: "/repo", worktreePath: null, driver: "codex", command: "codex", args: [],
+    repoPath: "/repo", worktreePath: null, driver: "codex-app-server", command: "codex", args: [],
     env: {}, context: { kind: "native" }, agentSessionId: "thread-1", status: "idle",
     title: "Test", config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null,
     pendingApproval: null, seq: 0, createdAt: 1, updatedAt: 1,

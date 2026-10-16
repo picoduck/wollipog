@@ -6,7 +6,7 @@ import type { AgentTuiGuardProvisioning } from "./agent-tui-guard.js";
 import type { SessionMeta } from "./session-store.js";
 import type { ShellProcessLaunch } from "./shell-manager.js";
 import { windowsCommandLine } from "./windows-conpty.js";
-import { isOrchestratorLaunch, runnerSupportsProtocol, usesOrchestratorPresetPermissions } from "@wollipog/protocol";
+import { CODEX_EXEC_RETIRED_REASON, isOrchestratorLaunch, isRetiredCodexExec, runnerSupportsProtocol, usesOrchestratorPresetPermissions } from "@wollipog/protocol";
 import {
   codexOrchestratorMcpArgs,
   stripSessionCodexMcpArgs,
@@ -18,7 +18,8 @@ import { inheritProviderPlugins, pluginProviderForDriver } from "./provider-plug
 
 import { decideCodexPermissionProfile } from "./codex-permission-profile.js";
 
-const TUI_DRIVERS = new Set(["claude-code", "codex", "codex-app-server"]);
+// The retired Codex exec driver (#3259) has no Native TUI either: its persisted launch may be `codex exec`.
+const TUI_DRIVERS = new Set(["claude-code", "codex-app-server"]);
 
 /** Durable metadata intentionally omits credentials. Rebuild runner-owned launch state for
  * each TUI and probe at its exact cwd, including manual attachment after a runner restart. */
@@ -60,6 +61,8 @@ export async function prepareAgentTuiLaunch(
     permissionProfile?: typeof decideCodexPermissionProfile;
   },
 ): Promise<ShellProcessLaunch | null> {
+  // Before any provider home, provisioning, or guard work for a session that can no longer run.
+  if (isRetiredCodexExec(meta)) throw new Error(CODEX_EXEC_RETIRED_REASON);
   if (!isOrchestratorLaunch(meta)) {
     await dependencies.acquireProviderHome?.(meta);
     dependencies.assertSessionNotDeleted(meta.sessionId);

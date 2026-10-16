@@ -6,7 +6,7 @@ import { test } from "node:test";
 import type { SessionMeta } from "./session-store.js";
 import { agentTuiLaunch, prepareAgentTuiLaunch } from "./agent-tui.js";
 import { provisionAgentControl } from "./agent-control.js";
-import { PROTOCOL_VERSION } from "@wollipog/protocol";
+import { CODEX_EXEC_RETIRED_REASON, PROTOCOL_VERSION } from "@wollipog/protocol";
 import { waitForPendingKills } from "./spawn.js";
 import { openWindowsConpty } from "./windows-conpty.js";
 import { SESSION_CODEX_MCP_MARKER, orchestratorLaunchArgs, sessionCodexMcpServerArg } from "./orchestrator-preset.js";
@@ -57,7 +57,7 @@ test("TUI ownership waits before guard and MCP probe preparation", async () => {
     const ownership = new Promise<void>((resolve) => { grant = resolve; });
     const effects: string[] = [];
     const launch = prepareAgentTuiLaunch(meta({
-      driver: "codex", command: "codex", args: [],
+      driver: "codex-app-server", command: "codex", args: [],
       ...(orchestrator ? { config: { permissionMode: "orchestrator" }, orchestrator: { strictProjectIsolation: false } } : {}),
     }), {
       controlPlaneProtocolVersion: PROTOCOL_VERSION,
@@ -95,6 +95,21 @@ test("TUI ownership refusal and deletion during the wait write no guard", async 
     }), failure === "refused" ? /lease refused/ : /being deleted/);
     assert.equal(guards, 0);
   }
+});
+
+test("a retired Codex exec session never prepares or launches a Native TUI (#3259)", async () => {
+  const exec = meta({ driver: "codex", command: "codex", args: ["exec"] });
+  let touched = 0;
+  await assert.rejects(prepareAgentTuiLaunch(exec, {
+    controlPlaneProtocolVersion: PROTOCOL_VERSION,
+    prepareScratch: async () => { touched++; return "/scratch"; },
+    provision: () => { touched++; },
+    assertSessionNotDeleted: () => {},
+    acquireProviderHome: async () => { touched++; },
+    provisionManagedWorktreeGuard: (spec) => { touched++; return unguarded(spec); },
+  }), new Error(CODEX_EXEC_RETIRED_REASON));
+  assert.equal(touched, 0, "no provider home, provisioning, scratch, or guard work happens first");
+  assert.equal(agentTuiLaunch(exec, { platform: "linux" }), null);
 });
 
 const CLAUDE_RUNNER_ENV = [
@@ -214,7 +229,7 @@ test("Windows Claude Orchestrator TUI argv carries a single-line system prompt",
 test("orchestrator TUIs rebuild credentials and restrictions without mutating durable metadata", async () => {
   const dir = mkdtempSync(join(tmpdir(), "orchestrator-tui-"));
   try {
-    for (const driver of ["claude-code", "codex", "codex-app-server"] as const) {
+    for (const driver of ["claude-code", "codex-app-server"] as const) {
       const source = meta({ driver, args: [], env: {}, config: { permissionMode: "orchestrator" } });
       const original = JSON.stringify(source);
       let probes = 0;
@@ -295,7 +310,7 @@ test("provider-mode Claude Orchestrator TUI keeps the project cwd and provider t
 });
 
 test("orchestrator TUI preparation fails closed for old peers, unsupported targets, terminal sessions and probes", async () => {
-  const source = meta({ driver: "codex", config: { permissionMode: "orchestrator" } });
+  const source = meta({ driver: "codex-app-server", config: { permissionMode: "orchestrator" } });
   const dependencies = {
     controlPlaneProtocolVersion: PROTOCOL_VERSION, platform: "linux" as const,
     provision: () => {}, prepareScratch: async () => "/scratch",
@@ -333,7 +348,7 @@ test("an ordinary Codex TUI launches without the structured launch's session wol
     env: { WOLLIPOG_SESSION_TOKEN_FILE: "/state/s.token", [SESSION_CODEX_MCP_MARKER]: "1" },
   });
   const user = ["-c", "model=\"o3\"", "-c", 'mcp_servers.wollipog={ command = "mine" }'];
-  for (const driver of ["codex", "codex-app-server"] as const) {
+  for (const driver of ["codex-app-server"] as const) {
     const launch = await prepareAgentTuiLaunch(meta({ driver, command: "codex", args: [...user, "-c", entry] }), {
       controlPlaneProtocolVersion: PROTOCOL_VERSION,
       provision: () => assert.fail("ordinary TUI must not reprovision"),

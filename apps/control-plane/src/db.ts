@@ -2620,6 +2620,7 @@ CREATE TABLE IF NOT EXISTS agent_harness_defaults (
 -- default; existing sessions snapshot their own policy and never read through this table.
 CREATE TABLE IF NOT EXISTS orchestrator_settings (
   user_id                     TEXT PRIMARY KEY,
+  control_mode                TEXT CHECK (control_mode IN ('custom','full_control')),
   child_harness               TEXT,
   child_model                 TEXT,
   child_effort                TEXT,
@@ -2638,6 +2639,17 @@ CREATE TABLE IF NOT EXISTS artifact_upload_settings (
   user_id TEXT PRIMARY KEY,
   preference TEXT NOT NULL CHECK (preference IN ('manual','wollipog_automatic','external_hosting')),
   FOREIGN KEY (user_id) REFERENCES identity_users(user_id) ON DELETE CASCADE
+);
+
+-- Human launch identity survives Session deletion: deletion cannot authorize replay or refund.
+CREATE TABLE IF NOT EXISTS human_campaign_launches (
+  user_id TEXT NOT NULL,
+  request_id TEXT NOT NULL,
+  digest TEXT NOT NULL,
+  session_id TEXT NOT NULL UNIQUE,
+  dispatch_state TEXT NOT NULL CHECK (dispatch_state IN ('committed','uncertain','sent','unsent')),
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, request_id)
 );
 
 CREATE TABLE IF NOT EXISTS session_naming_custom_models (
@@ -6688,6 +6700,9 @@ export class ControlPlaneDb {
     } catch {
       /* column already present */
     }
+    if (!(db.prepare("PRAGMA table_info(orchestrator_settings)").all() as Array<{ name: string }>).some((column) => column.name === "control_mode")) {
+      db.exec("ALTER TABLE orchestrator_settings ADD COLUMN control_mode TEXT CHECK (control_mode IN ('custom','full_control'))");
+    }
     if (needsCreationActorBackfill) {
       // Parent attribution is durable CP-owned proof of agent creation. Existing top-level
       // Orchestrators qualify only when their already-persisted campaign snapshot establishes a
@@ -10605,10 +10620,11 @@ export class ControlPlaneDb {
 
   getOrchestratorDefaults(userId: string): OrchestratorDefaultsRecord | null {
     const row = this.stmt(
-      `SELECT child_harness, child_model, child_effort, maximum_concurrent_children, follow_ups, completion,
+      `SELECT control_mode, child_harness, child_model, child_effort, maximum_concurrent_children, follow_ups, completion,
               strict_project_isolation, integration_isolation, parent_control, decision_policy, updated_at
        FROM orchestrator_settings WHERE user_id=?`,
     ).get(userId) as {
+      control_mode: OrchestratorDefaults["controlMode"] | null;
       child_harness: string | null;
       child_model: string | null;
       child_effort: string | null;
@@ -10626,6 +10642,7 @@ export class ControlPlaneDb {
     if (!decisions) return null;
     return {
       defaults: {
+        ...(row.control_mode == null ? {} : { controlMode: row.control_mode }),
         behavior: {
           // Saved before #3247 under a Machine-local agent id; read as the harness it names.
           childHarness: canonicalChildHarness(parseJson<unknown>(row.child_harness)),
@@ -10648,10 +10665,11 @@ export class ControlPlaneDb {
   setOrchestratorDefaults(userId: string, defaults: OrchestratorDefaults, now = Date.now()): void {
     this.stmt(
       `INSERT INTO orchestrator_settings
-         (user_id, child_harness, child_model, child_effort, maximum_concurrent_children, follow_ups, completion,
+         (user_id, control_mode, child_harness, child_model, child_effort, maximum_concurrent_children, follow_ups, completion,
           strict_project_isolation, integration_isolation, parent_control, decision_policy, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(user_id) DO UPDATE SET
+         control_mode=COALESCE(excluded.control_mode, orchestrator_settings.control_mode),
          child_harness=excluded.child_harness, child_model=excluded.child_model, child_effort=excluded.child_effort,
          maximum_concurrent_children=excluded.maximum_concurrent_children,
          follow_ups=excluded.follow_ups, completion=excluded.completion,
@@ -10661,6 +10679,7 @@ export class ControlPlaneDb {
          updated_at=excluded.updated_at`,
     ).run(
       userId,
+      defaults.controlMode ?? null,
       defaults.behavior.childHarness ? JSON.stringify(defaults.behavior.childHarness) : null,
       defaults.behavior.childModel,
       defaults.behavior.childEffort,
@@ -14750,6 +14769,60 @@ export class ControlPlaneDb {
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
+  /** Internal Human admission, never an HTTP/agent-provided grant. All resources and initial
+   * reservation commit together; callers may send a provider command only after this returns. */
+  createHumanCampaignLaunch(input: NewSessionInput, principal: HumanPrincipal, requestId: string, digest: string): { session: SessionView; created: boolean } {
+    const policy = input.orchestratorPolicy;
+    const control = policy?.control;
+    const boundary = control?.mode === "full_control" ? control.boundary : undefined;
+    const scope = policy?.issueScope;
+    if (principal.kind !== "human" || input.parentSessionId || input.creationActor !== "human" || input.role !== "orchestrator" ||
+        input.scope?.owner.kind !== "user" || input.scope.owner.userId !== principal.userId || input.scope.organizationId !== principal.organizationId ||
+        !boundary || !validCampaignControl(control) || !scope || boundary.authorizedByUserId !== principal.userId ||
+        scope.authorizedByUserId !== principal.userId || scope.repository !== boundary.repository ||
+        scope.revision !== 1 || boundary.issueScopeRevision !== 1 || boundary.revision !== 1 ||
+        scope.authorizedAt !== boundary.authorizedAt || !boundary.budgetAuthority ||
+        !boundary.issueAuthority || scope.issueNumbers.length < 1 || scope.issueNumbers.length > boundary.issueAuthority.maxIssues ||
+        scope.issueNumbers.some((n) => !Number.isSafeInteger(n) || n < 1) || new Set(scope.issueNumbers).size !== scope.issueNumbers.length ||
+        JSON.stringify(policy?.issueNumbers) !== JSON.stringify(scope.issueNumbers) ||
+        boundary.budgetAuthority.costUsd === undefined || boundary.budgetAuthority.toolCalls === undefined ||
+        boundary.budgetAuthority.concurrency === undefined || boundary.budgetAuthority.acceptedFollowUps === undefined ||
+        !input.parentControlPolicy || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId) || !/^[a-f0-9]{64}$/.test(digest)) {
+      throw new Error("Human campaign launch admission is invalid");
+    }
+    return this.atomic(() => {
+      const existing = this.stmt("SELECT digest,session_id FROM human_campaign_launches WHERE user_id=? AND request_id=?")
+        .get(principal.userId, requestId) as { digest: string; session_id: string } | undefined;
+      if (existing) {
+        const session = this.getSession(existing.session_id);
+        if (existing.digest !== digest || !session) throw new Error("Human launch identity changed or its retained Session is unavailable; no launch was replayed");
+        return { session, created: false };
+      }
+      this.createSession(input);
+      if (input.config.costBudgetUsd !== undefined) this.updateSessionCostBudget(input.id, input.config.costBudgetUsd, input.now);
+      if (input.config.maxToolCalls !== undefined) this.updateSessionMaxToolCalls(input.id, input.config.maxToolCalls, input.now);
+      if (input.config.costCheckpointsUsd?.length) this.updateSessionCostCheckpoints(input.id, input.config.costCheckpointsUsd, input.now);
+      this.campaignBudgets.authorize(input.id, boundary.budgetAuthority!);
+      const allocation = this.campaignBudgets.allocation(input.id)!;
+      if (allocation.costUsd !== undefined) this.updateSessionCostBudget(input.id, allocation.costUsd, input.now);
+      if (allocation.toolCalls !== undefined) this.updateSessionMaxToolCalls(input.id, allocation.toolCalls, input.now);
+      this.stmt("INSERT INTO human_campaign_launches VALUES (?,?,?,?, 'committed',?)")
+        .run(principal.userId, requestId, digest, input.id, input.now);
+      return { session: this.getSession(input.id)!, created: true };
+    });
+  }
+
+  /** Claim once before sending. A crash or ambiguous transport never permits an automatic replay. */
+  claimHumanCampaignDispatch(sessionId: string): boolean {
+    return Number(this.stmt("UPDATE human_campaign_launches SET dispatch_state='uncertain' WHERE session_id=? AND dispatch_state='committed'")
+      .run(sessionId).changes) === 1;
+  }
+
+  settleHumanCampaignDispatch(sessionId: string, sent: boolean): void {
+    this.stmt("UPDATE human_campaign_launches SET dispatch_state=? WHERE session_id=? AND dispatch_state='uncertain'")
+      .run(sent ? "sent" : "unsent", sessionId);
+  }
+
   createSession(input: NewSessionInput): SessionView {
     const budgetRoot = input.parentSessionId ? this.campaignBudgets.root(input.parentSessionId) : null;
     const budgetView = budgetRoot ? this.campaignBudgets.view(budgetRoot) : undefined;
@@ -18472,6 +18545,8 @@ export class ControlPlaneDb {
     return {
       status,
       policyRevision: campaign.parent_control_policy_revision,
+      ...(this.campaignRootAudienceCanSee(campaignSessionId)(resolvedCampaignId)
+        ? { control: structuredClone(policy.control ?? { mode: "custom" as const }) } : {}),
       ...(budget && this.campaignBudgets.members(resolvedCampaignId).every((id) => !this.stmt("SELECT 1 FROM sessions WHERE id=?").get(id) || this.campaignRootAudienceCanSee(resolvedCampaignId)(id))
         ? { budget } : {}),
       decisionOwners: effectiveOwners,

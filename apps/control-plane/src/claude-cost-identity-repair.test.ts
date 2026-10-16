@@ -38,7 +38,7 @@ function repairEvidence(db: ControlPlaneDb, snapshot: SessionSnapshot) {
     repairId: snapshot.costReconciliationRepairId, costUsd: snapshot.costUsd, tokensIn: snapshot.tokensIn, tokensOut: snapshot.tokensOut, seq: snapshot.seq, historyEpoch: snapshot.historyEpoch! } };
 }
 
-for (const driver of ["claude-code", "codex"] as const) for (const corrected of [false, true]) for (const confirmed of [false, true]) test(`Claude Restart preserves cross-peer repair acknowledgement: driver=${driver}, corrected=${corrected}, confirmed=${confirmed}`, async () => {
+for (const driver of ["claude-code", "codex-app-server"] as const) for (const corrected of [false, true]) for (const confirmed of [false, true]) test(`Claude Restart preserves cross-peer repair acknowledgement: driver=${driver}, corrected=${corrected}, confirmed=${confirmed}`, async () => {
   const root = mkdtempSync(join(tmpdir(), "repair-restart-"));
   const store = new SessionStore(join(root, "runner-sessions"));
   const f = fixture(":memory:", store.projectedHistoryEpoch(1, PROTOCOL_VERSION));

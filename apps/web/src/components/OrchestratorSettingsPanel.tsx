@@ -30,6 +30,7 @@ import { SaveBar } from "./SaveBar.js";
 import { useSettingsPanelHead } from "./SettingsView.js";
 import type { SelectOption } from "./ui/ChoiceControls.js";
 import { NumberRow, SegmentedRow, SelectRow, SettingsGroup } from "./ui/SettingsRows.js";
+import { FullControlModeChoice, FullControlPreparation } from "./FullControlPreparation.js";
 
 const AUTO = "__automatic__";
 const DECISION_LABELS: Record<DelegatableWorkflowDecisionCategory, string> = {
@@ -102,6 +103,7 @@ function saveFailure(caught: unknown): string {
 
 function cloneDefaults(defaults: OrchestratorDefaults): OrchestratorDefaults {
   return {
+    ...(defaults.controlMode === undefined ? {} : { controlMode: defaults.controlMode }),
     behavior: { ...defaults.behavior },
     delegation: { ...defaults.delegation, decisions: { ...defaults.delegation.decisions } },
     execution: { ...defaults.execution },
@@ -133,6 +135,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
   const [failure, setFailure] = useState<LoadFailure | null>(null);
   const [showSkeleton, setShowSkeleton] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [controlPreview, setControlPreview] = useState<"custom" | "full_control">("custom");
   const [saveError, setSaveError] = useState<string | null>(null);
   const generation = useRef(0);
 
@@ -166,9 +169,20 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
     return () => window.clearTimeout(timer);
   }, []);
 
-  useSettingsPanelHead({
+  const controlMode = view?.controlModeSupported ? draft?.controlMode ?? "custom" : controlPreview;
+  const changeControlMode = useCallback((mode: "custom" | "full_control") => {
+    if (view?.controlModeSupported) setDraft((current) => current ? { ...current, controlMode: mode } : current);
+    else setControlPreview(mode);
+  }, [view?.controlModeSupported]);
+  const controlLoaded = Boolean(view && draft);
+  const headControl = useMemo(() => controlLoaded
+    ? <FullControlModeChoice mode={controlMode} onChange={changeControlMode}
+      disabled={busy} preferenceSupported={view?.controlModeSupported} />
+    : null, [controlLoaded, controlMode, changeControlMode, busy, view?.controlModeSupported]);
+  const hasPanelHead = useSettingsPanelHead({
     description: PANEL_DESCRIPTION,
     meta: view ? (view.source === "user_default" ? "Your Defaults" : "Wollipog Defaults") : null,
+    action: headControl,
   });
 
   const askToLeave = (leave: () => void) => {
@@ -413,7 +427,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
   });
 
   const save = async () => {
-    if (!draft || busy || invalidCount > 0) return;
+    if (!draft || busy || invalidCount > 0 || (controlPreview === "full_control" && !view?.controlModeSupported)) return;
     generation.current += 1;
     busyRef.current = true;
     setBusy(true);
@@ -475,8 +489,12 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
 
   const limit = draft.behavior.maximumConcurrentChildren;
   return <>
+    <FullControlPreparation surface="defaults" defaults={draft} mode={controlMode}
+      onChange={changeControlMode} disabled={busy} preferenceSupported={view.controlModeSupported} />
     <SettingsGroup
       title="Children"
+      action={!hasPanelHead ? <FullControlModeChoice mode={controlMode} onChange={changeControlMode}
+        disabled={busy} preferenceSupported={view.controlModeSupported} /> : undefined}
       notice={capabilityNotice && <Notice
         tone="warning"
         compact
@@ -679,7 +697,8 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
       busy={busy}
       error={saveError}
       saveLabel="Save Defaults"
-      blockedReason={invalidCount > 0 ? `Fix ${invalidCount} setting${invalidCount === 1 ? "" : "s"} to save` : null}
+      blockedReason={controlPreview === "full_control" && !view.controlModeSupported ? "Full Control activation is unavailable. Choose Custom to save defaults."
+        : invalidCount > 0 ? `Fix ${invalidCount} setting${invalidCount === 1 ? "" : "s"} to save` : null}
       onDiscard={discard}
       onSave={() => void save()}
     />

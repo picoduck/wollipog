@@ -23,6 +23,7 @@ import {
   runnerSupportsProtocol,
   type BoxView,
   type AgentHarnessDefaultsView,
+  type CreateSessionRequest,
   type ParentControlMode,
   type OrchestratorDefaults,
   type OrchestratorSettingsView,
@@ -78,6 +79,7 @@ import { ProjectLocationDialog } from "./ProjectLocationDialog.js";
 import { nativeTuiAccountingDetail } from "../native-tui-accounting.js";
 import { projectAvailabilityLabel, projectAvailabilityMeta, type ProjectLocationCandidate } from "../project-management.js";
 import { StatusBadge } from "./StatusBadge.js";
+import { FullControlPreparation } from "./FullControlPreparation.js";
 import { projectAudienceVisibilitySummary } from "../session-project-assignment.js";
 import { supportsAgentTui } from "../shells-panel.js";
 import { nativeTuiUnavailableReason } from "../native-tui-availability.js";
@@ -102,6 +104,7 @@ const ORCHESTRATOR_DECISION_LABELS: Record<DelegatableWorkflowDecisionCategory, 
 
 function cloneOrchestratorDefaults(defaults: OrchestratorDefaults): OrchestratorDefaults {
   return {
+    ...(defaults.controlMode === undefined ? {} : { controlMode: defaults.controlMode }),
     behavior: { ...defaults.behavior },
     delegation: { ...defaults.delegation, decisions: { ...defaults.delegation.decisions } },
     execution: { ...defaults.execution },
@@ -260,6 +263,7 @@ export function NewSessionDialog({
     () => cloneOrchestratorDefaults(DEFAULT_ORCHESTRATOR_DEFAULTS),
   );
   const [orchestratorOverrides, setOrchestratorOverrides] = useState(() => new Set<string>());
+  const [controlPreview, setControlPreview] = useState<"custom" | "full_control">("custom");
   const [liveChildLimitDraft, setLiveChildLimitDraft] = useState(String(DEFAULT_LIVE_CHILD_LIMIT));
   const [harnessDefaults, setHarnessDefaults] = useState<{
     api: typeof api; scope: typeof instanceScope; view: AgentHarnessDefaultsView | null; error: boolean;
@@ -291,6 +295,7 @@ export function NewSessionDialog({
         const defaults = cloneOrchestratorDefaults(view.defaults);
         setOrchestratorSettings({ api, scope: instanceScope, view, error: null });
         setOrchestratorDraft(defaults);
+        setControlPreview(defaults.controlMode ?? "custom");
         setLiveChildLimitDraft(String(defaults.behavior.maximumConcurrentChildren));
         setOrchestratorOverrides(new Set());
       },
@@ -399,9 +404,7 @@ export function NewSessionDialog({
     return {
       value: option.agent.id,
       label: option.label,
-      description: option.disabled
-        ? option.advanced ? "Advanced Agent" : undefined
-        : `${option.advanced ? "Advanced Agent · " : ""}${metadata}`,
+      description: option.disabled ? undefined : metadata,
       disabled: option.disabled,
       disabledReason: option.disabled
         ? `Needs setup. ${codexAppServerSetupReason(option.agent) ?? metadata}`
@@ -1007,7 +1010,7 @@ export function NewSessionDialog({
     : savedPiModeUnavailableForTarget ? "Target Default — Full Access"
     : savedPermissionMode ? `Saved Default — ${titleCaseLabel(permissionModeLabel(savedPermissionMode, agent?.driver))}`
     : "Harness Default";
-  const valid = projectPlacementValid && !!agentId && !!selectedAgentOption && !selectedAgentOption.disabled &&
+  const launchSelectionValid = projectPlacementValid && !!agentId && !!selectedAgentOption && !selectedAgentOption.disabled &&
     !missingRequiredAccountChoice &&
     (!executionTarget || executionTarget.available) && cloudBudgetValid &&
     (launchSurface !== "native_tui" || nativeTuiSupported) &&
@@ -1016,6 +1019,7 @@ export function NewSessionDialog({
       orchestratorCapabilitiesValid && orchestratorDelegationValid && orchestratorExecutionValid)) &&
     liveChildLimitValid &&
     (!directWslRequiresSafeOrchestrator || (orchestrator && orchestratorSupported)) && !retainedSessionId;
+  const valid = launchSelectionValid && (!orchestrator || controlPreview !== "full_control");
 
   // Validation feedback describes the state that produced it. Once any value participating in
   // validation changes, remove that stale diagnosis; request failures remain until the next submit.
@@ -1024,7 +1028,7 @@ export function NewSessionDialog({
   }, [
     projectSelection, selectedProject?.id, projectLocationId, projectLocationLaunchable,
     runnerId, workspaceId, browsedPath, agentId, selectedAgentOption?.disabled, providerAccountId,
-    defaultsReady, harnessDefaults?.error, roleOverride, orchestrator, orchestratorSupported,
+    defaultsReady, harnessDefaults?.error, roleOverride, orchestrator, orchestratorSupported, controlPreview,
     directWslRequiresSafeOrchestrator, launchSurface, nativeTuiSupported,
     executionTargetId, executionTarget?.id, executionTarget?.available,
     cloudBudgetUsd, cloudBudgetValid, retainedSessionId,
@@ -1072,6 +1076,73 @@ export function NewSessionDialog({
     }
   };
 
+  const buildSessionRequest = (): CreateSessionRequest => {
+    const placement = projectSessionPlacement(
+      projectsSupported,
+      projectSelection === NO_PROJECT_SELECTION ? null : selectedProject,
+      projectSelection === NO_PROJECT_SELECTION ? null : selectedProjectLocation,
+      { runnerId, workspaceId },
+    );
+    // An explicitly chosen Orchestrator sends the coupled preset only where it still applies;
+    // otherwise the ordinary provider mode is resolved by the server exactly as for a normal
+    // session. A saved Orchestrator default keeps delegating both role and mode to the server.
+    const config: SessionConfig = {
+      ...(roleOverride === "orchestrator" && (providerPermissionsPreset || !orchestratorRoleSupported)
+        ? { permissionMode: "orchestrator" }
+        : {}),
+      ...(executionTarget?.adapter === "cloud" ? { costBudgetUsd: cloudBudget } : {}),
+    };
+    const decisionOverrides = Object.fromEntries(WORKFLOW_DECISION_CATEGORIES.flatMap((category) =>
+      orchestratorOverrides.has(`delegation.decisions.${category}`)
+        ? [[category, orchestratorDraft.delegation.decisions[category]]]
+        : [],
+    ));
+    const executionOverridden = orchestratorOverrides.has("execution.strictProjectIsolation") ||
+      orchestratorOverrides.has("execution.integrationIsolation");
+    const orchestratorRequest = orchestrator ? {
+      behavior: {
+        ...(orchestratorOverrides.has("behavior.childHarness") ? { childHarness: orchestratorDraft.behavior.childHarness } : {}),
+        ...(orchestratorOverrides.has("behavior.childModel") ? { childModel: orchestratorDraft.behavior.childModel } : {}),
+        ...(orchestratorOverrides.has("behavior.childEffort") ? { childEffort: orchestratorDraft.behavior.childEffort } : {}),
+        ...(orchestratorOverrides.has("behavior.maximumConcurrentChildren") ? { maximumConcurrentChildren: liveChildLimit } : {}),
+        ...(orchestratorOverrides.has("behavior.followUps") ? { followUps: orchestratorDraft.behavior.followUps } : {}),
+        ...(orchestratorOverrides.has("behavior.completion") ? { completion: orchestratorDraft.behavior.completion } : {}),
+      },
+      delegation: {
+        ...(orchestratorOverrides.has("delegation.parentControl") ? { parentControl: orchestratorDraft.delegation.parentControl } : {}),
+        ...(Object.keys(decisionOverrides).length ? { decisions: decisionOverrides } : {}),
+      },
+      // Each execution policy is sent only when this session actually overrode it, so an
+      // untouched one keeps the provenance of the default it came from. Integration Isolation is
+      // withheld while it is implied: the preset and Strict Project Isolation both launch without
+      // integrations, the server derives `true` and attributes it to the policy that implied it,
+      // and an explicit `false` in that state is a shape the control plane refuses.
+      ...(executionOverridden ? { execution: {
+        ...(orchestratorOverrides.has("execution.strictProjectIsolation")
+          ? { strictProjectIsolation: orchestratorDraft.execution.strictProjectIsolation }
+          : {}),
+        // An older control plane rejects this key outright, so it is never sent there.
+        ...(orchestratorOverrides.has("execution.integrationIsolation") &&
+          !integrationIsolationImplied && integrationIsolationControlPlane
+          ? { integrationIsolation: orchestratorDraft.execution.integrationIsolation }
+          : {}),
+      } } : {}),
+    } : undefined;
+    return {
+      ...placement,
+      agentId,
+      ...(hostExecutionTarget && providerAccountId && accountChosenByUser.current ? { providerAccountId } : {}),
+      ...(orchestratorRoleSupported && roleOverride !== undefined ? { role: roleOverride } : {}),
+      useWorktree,
+      executionTargetId: executionTarget?.id,
+      config: Object.keys(config).length ? config : undefined,
+      ...(orchestratorRequest ? { orchestrator: orchestratorRequest } : {}),
+      workspacePath: (!projectsSupported || projectSelection === NO_PROJECT_SELECTION) ? browsedPath ?? undefined : undefined,
+      acpSessionContext: additionalDirectories.length ? { additionalDirectories } : undefined,
+      ...(launchSurface === "native_tui" ? { launchSurface: "native_tui" as const } : {}),
+    };
+  };
+
   const submit = async () => {
     // Re-entrancy guard: the Enter path bypasses the footer button's disabled attribute, and a
     // second submit while createSession is in flight would spawn a duplicate session.
@@ -1079,7 +1150,10 @@ export function NewSessionDialog({
     setValidationError(null);
     setRequestError(null);
     if (!valid) {
-      if (retainedSessionId) {
+      if (orchestrator && controlPreview === "full_control") {
+        setValidationError("Full Control activation is unavailable. Review the preflight or choose Custom.");
+        focusValidationProblem('[data-control-mode="full_control"]');
+      } else if (retainedSessionId) {
         setValidationError("Open the retained session before creating another one.");
         retainedSessionButtonRef.current?.focus();
       } else if (projectsSupported && !projectSelection) {
@@ -1153,70 +1227,7 @@ export function NewSessionDialog({
     busyRef.current = true;
     setBusy(true);
     try {
-      const placement = projectSessionPlacement(
-        projectsSupported,
-        projectSelection === NO_PROJECT_SELECTION ? null : selectedProject,
-        projectSelection === NO_PROJECT_SELECTION ? null : selectedProjectLocation,
-        { runnerId, workspaceId },
-      );
-      // An explicitly chosen Orchestrator sends the coupled preset only where it still applies;
-      // otherwise the ordinary provider mode is resolved by the server exactly as for a normal
-      // session. A saved Orchestrator default keeps delegating both role and mode to the server.
-      const config: SessionConfig = {
-        ...(roleOverride === "orchestrator" && (providerPermissionsPreset || !orchestratorRoleSupported)
-          ? { permissionMode: "orchestrator" }
-          : {}),
-        ...(executionTarget?.adapter === "cloud" ? { costBudgetUsd: cloudBudget } : {}),
-      };
-      const decisionOverrides = Object.fromEntries(WORKFLOW_DECISION_CATEGORIES.flatMap((category) =>
-        orchestratorOverrides.has(`delegation.decisions.${category}`)
-          ? [[category, orchestratorDraft.delegation.decisions[category]]]
-          : [],
-      ));
-      const executionOverridden = orchestratorOverrides.has("execution.strictProjectIsolation") ||
-        orchestratorOverrides.has("execution.integrationIsolation");
-      const orchestratorRequest = orchestrator ? {
-        behavior: {
-          ...(orchestratorOverrides.has("behavior.childHarness") ? { childHarness: orchestratorDraft.behavior.childHarness } : {}),
-          ...(orchestratorOverrides.has("behavior.childModel") ? { childModel: orchestratorDraft.behavior.childModel } : {}),
-          ...(orchestratorOverrides.has("behavior.childEffort") ? { childEffort: orchestratorDraft.behavior.childEffort } : {}),
-          ...(orchestratorOverrides.has("behavior.maximumConcurrentChildren") ? { maximumConcurrentChildren: liveChildLimit } : {}),
-          ...(orchestratorOverrides.has("behavior.followUps") ? { followUps: orchestratorDraft.behavior.followUps } : {}),
-          ...(orchestratorOverrides.has("behavior.completion") ? { completion: orchestratorDraft.behavior.completion } : {}),
-        },
-        delegation: {
-          ...(orchestratorOverrides.has("delegation.parentControl") ? { parentControl: orchestratorDraft.delegation.parentControl } : {}),
-          ...(Object.keys(decisionOverrides).length ? { decisions: decisionOverrides } : {}),
-        },
-        // Each execution policy is sent only when this session actually overrode it, so an
-        // untouched one keeps the provenance of the default it came from. Integration Isolation is
-        // withheld while it is implied: the preset and Strict Project Isolation both launch without
-        // integrations, the server derives `true` and attributes it to the policy that implied it,
-        // and an explicit `false` in that state is a shape the control plane refuses.
-        ...(executionOverridden ? { execution: {
-          ...(orchestratorOverrides.has("execution.strictProjectIsolation")
-            ? { strictProjectIsolation: orchestratorDraft.execution.strictProjectIsolation }
-            : {}),
-          // An older control plane rejects this key outright, so it is never sent there.
-          ...(orchestratorOverrides.has("execution.integrationIsolation") &&
-            !integrationIsolationImplied && integrationIsolationControlPlane
-            ? { integrationIsolation: orchestratorDraft.execution.integrationIsolation }
-            : {}),
-        } } : {}),
-      } : undefined;
-      const session = await api.createSession({
-        ...placement,
-        agentId,
-        ...(hostExecutionTarget && providerAccountId && accountChosenByUser.current ? { providerAccountId } : {}),
-        ...(orchestratorRoleSupported && roleOverride !== undefined ? { role: roleOverride } : {}),
-        useWorktree,
-        executionTargetId: executionTarget?.id,
-        config: Object.keys(config).length ? config : undefined,
-        ...(orchestratorRequest ? { orchestrator: orchestratorRequest } : {}),
-        workspacePath: (!projectsSupported || projectSelection === NO_PROJECT_SELECTION) ? browsedPath ?? undefined : undefined,
-        acpSessionContext: additionalDirectories.length ? { additionalDirectories } : undefined,
-        ...(launchSurface === "native_tui" ? { launchSurface: "native_tui" as const } : {}),
-      });
+      const session = await api.createSession(buildSessionRequest());
       navigate({ name: "session", id: session.id });
       if (launchSurface === "native_tui") onOpenTerminal?.();
       onClose();
@@ -1564,7 +1575,7 @@ export function NewSessionDialog({
               <div className="agent-default-warning" role="alert">
                 <span>
                   {selectionIssue === "legacy"
-                    ? "Your saved default uses Codex non-interactive mode, which new sessions no longer offer. Codex App Server supports interactive approvals and resumable conversations."
+                    ? "Your saved default uses Codex non-interactive mode, which is no longer supported. Codex App Server supports interactive approvals and resumable conversations."
                     : selectionIssue === "unbound"
                       ? "This older saved agent choice has no installation identity. Select the installation shown here to keep future sessions bound to it."
                     : selectionIssue === "unavailable"
@@ -1692,6 +1703,14 @@ export function NewSessionDialog({
               >Retry Orchestrator Defaults</button>}
             </div>}
             {orchestrator && orchestratorSettingsReady && <div className="new-session-orchestrator-policy" data-validation-target="orchestrator-defaults">
+              <FullControlPreparation surface="launch" defaults={{ ...orchestratorDraft,
+                execution: { ...orchestratorDraft.execution, integrationIsolation: effectiveIntegrationIsolation } }} mode={controlPreview}
+                onChange={setControlPreview} disabled={busy}
+                launchRequest={buildSessionRequest} launchSelectionValid={launchSelectionValid}
+                onCampaignCreated={(id) => { navigate({ name: "session", id }); onClose(); }}
+                root={{ driver: agent?.driver, permissionMode: roleOverride === "orchestrator" &&
+                  (providerPermissionsPreset || !orchestratorRoleSupported) ? "orchestrator" : savedPermissionMode }}
+                workspace={workspaceId || browsedPath} />
               <fieldset className="orchestrator-policy-area">
                 <legend>Behavior</legend>
                 <p className="muted">These effective values are resolved and stored before the campaign's first turn.</p>

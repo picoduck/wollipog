@@ -85,18 +85,22 @@ export interface SettingsViewProps {
 export interface SettingsPanelHead {
   description?: string;
   meta?: string | null;
+  /** A section-wide control. Memoize its React node so publishing it cannot loop. */
+  action?: ReactNode;
 }
 
-const SettingsPanelHeadContext = createContext<(head: SettingsPanelHead | null) => void>(() => undefined);
+const ignoreSettingsPanelHead = (_head: SettingsPanelHead | null): void => undefined;
+const SettingsPanelHeadContext = createContext<(head: SettingsPanelHead | null) => void>(ignoreSettingsPanelHead);
 
 /** Sets the open section's head (see `SettingsPanelHead`) for as long as the calling panel is open. */
-export function useSettingsPanelHead({ description, meta }: SettingsPanelHead): void {
+export function useSettingsPanelHead({ description, meta, action }: SettingsPanelHead): boolean {
   const setHead = useContext(SettingsPanelHeadContext);
   // Before paint, so the head never shows the entry's line for a frame and then changes.
   useLayoutEffect(() => {
-    setHead({ description, meta });
+    setHead({ description, meta, action });
     return () => setHead(null);
-  }, [setHead, description, meta]);
+  }, [setHead, description, meta, action]);
+  return setHead !== ignoreSettingsPanelHead;
 }
 
 /** The page header's one line (§4.2), hidden on phones as every page description is. */
@@ -301,10 +305,14 @@ export function SettingsView({ section, onNavigate, panels }: SettingsViewProps)
               falls through to the page title. */}
           <div className="settings-panel-head" hidden={current.id === "about"}>
             <div className="settings-panel-heading">
-              <h2 id="settings-panel-heading" ref={headingRef} tabIndex={-1}>{current.title}</h2>
+              <div className="settings-panel-title-row">
+                <h2 id="settings-panel-heading" ref={headingRef} tabIndex={-1}>{current.title}</h2>
+                {!phone && panelHead?.action && <span className="settings-panel-action">{panelHead.action}</span>}
+              </div>
               <p className="settings-panel-desc">{panelHead?.description ?? current.panelDescription ?? current.description}</p>
             </div>
             {scope && <span className="settings-panel-scope">{scope}</span>}
+            {phone && panelHead?.action && <span className="settings-panel-action">{panelHead.action}</span>}
           </div>
           <SettingsPanelHeadContext.Provider value={setPanelHead}>{panels[current.id]}</SettingsPanelHeadContext.Provider>
         </section>

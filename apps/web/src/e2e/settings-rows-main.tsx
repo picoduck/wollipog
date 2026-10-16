@@ -313,6 +313,11 @@ const harnessDefaultsTransport: ApiTransport = {
             { status: 503, headers: { "content-type": "application/json" } });
         }
         orchestratorSaved = (JSON.parse(String(init.body)) as { defaults: typeof DEFAULT_ORCHESTRATOR_DEFAULTS }).defaults;
+        if (params.get("fullControlFixture") === "1") {
+          const writes: string[] = JSON.parse(document.documentElement.dataset.fullControlFixtureWrites ?? "[]");
+          writes.push(String(init.body));
+          document.documentElement.dataset.fullControlFixtureWrites = JSON.stringify(writes);
+        }
       }
       const defaults = orchestratorSaved ? structuredClone(orchestratorSaved) : structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS);
       if (drifted) defaults.behavior.childModel = "retired-model";
@@ -361,6 +366,7 @@ const harnessDefaultsTransport: ApiTransport = {
       return new Response(JSON.stringify({
         defaults,
         source: orchestratorSaved || drifted ? "user_default" : "system_default",
+        ...(params.get("fullControlFixture") === "1" ? { controlModeSupported: true } : {}),
         capabilities: {
           harnesses: [{
             agentId: "codex-app-server",

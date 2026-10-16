@@ -36,6 +36,8 @@ import {
   POLICY_HOOK_ABANDONMENT_MS,
   PROTOCOL_VERSION,
   SPAWN_APPROVAL_ABANDONMENT_MS,
+  CODEX_EXEC_RETIRED_CONFIG_REASON,
+  CODEX_EXEC_RETIRED_REASON,
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   CAMPAIGN_WORK_LEDGER_LIMITS,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
@@ -6243,33 +6245,6 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
     }
   });
 
-  await t.test("native Codex fails closed before arming because it has no approval receipt", async () => {
-    const { db, svc, child } = setup(CODEX_AGENT_ID);
-    try {
-      const headSha = "d".repeat(40);
-      const snapshot = {
-        category: "pr_merge" as const, repository: "picoduck/wollipog", pullRequest: 1160,
-        headSha, reviewResult: "merge" as const,
-        requiredChecks: { headSha, status: "passed" as const, checkedAt: 10,
-          checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" as const }] },
-      };
-      const decision = svc.createWorkflowDecision(child.id, {
-        requestId: "native-unsupported", resourceKey: "picoduck/wollipog#1160", resourceSnapshot: snapshot,
-      });
-      assert.ok(decision.ok && decision.data);
-      const parentId = decision.data.controllingSessionId;
-      assert.ok(svc.resolveDescendantRequest(parentId, child.id, decision.data.occurrenceId,
-        { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
-      const result = await svc.consumeWorkflowDecision(child.id, decision.data.occurrenceId, {
-        resourceSnapshot: snapshot,
-        action: { kind: "pr_merge_enqueue", command: canonicalPrMergeEnqueueCommand(snapshot) },
-      });
-      assert.equal(result.status, 409);
-      assert.match(result.error ?? "", /does not expose trusted correlated command-decision evidence/u);
-      assert.equal(db.workflowDecisionByOccurrence(decision.data.occurrenceId)?.status, "revoked");
-    } finally { db.close(); }
-  });
-
   await t.test("a legacy successful Guardian enqueue reconciles only from exact provider and forge proof", async () => {
     const { db, hub, svc, child, arm } = setup();
     try {
@@ -8114,7 +8089,7 @@ test("saved per-provider defaults govern new sessions but explicit choices and e
   assert.equal(first.data.providerAccountId, "personal", "the saved provider choice wins over agent configuration");
   assert.equal(hub.sentOfType("start_session").at(-1)!.spec.providerAccountId, "personal");
 
-  const codex = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_AGENT_ID });
+  const codex = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID });
   assert.ok(codex.ok && codex.data, codex.error);
   assert.equal(codex.data.providerAccountId, "codex-personal", "provider defaults are independent");
 
@@ -8243,24 +8218,6 @@ test("createSession rejects images for an explicitly text-only live model", () =
   assert.match(res.error!, /text-model.*does not support image input/);
   assert.equal(db.listSessions().length, 0);
   assert.equal(hub.sentToRunner.length, 0);
-});
-
-test("Codex exec sessions retain existing JPG attachment compatibility", () => {
-  const { hub, svc } = makeHarness();
-  const res = svc.createSession({
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    agentId: CODEX_AGENT_ID,
-    prompt: "look",
-    images: [{ mimeType: "image/jpg", data: "/9j/2Q==" }],
-  });
-  assert.equal(res.ok, true, res.error);
-  const sent = hub.lastSent();
-  assert.ok(sent?.type === "start_session");
-  assert.equal(sent.initialImages?.[0]?.mimeType, "image/jpg");
-  assert.ok(sent.initialImages?.[0] && "artifactId" in sent.initialImages[0]);
-  assert.equal(JSON.stringify(sent).includes("/9j/2Q=="), false);
-  assert.equal(sent.spec.codexExecFallbackReason, "explicit_exec");
 });
 
 test("prompt images fail closed against a pre-v56 runner", () => {
@@ -8404,26 +8361,6 @@ test("workspace references fail closed against a pre-v106 runner", () => {
   assert.equal(result.capabilityRequirement?.requiredRunnerProtocolVersion, 106);
   assert.equal(db.listSessions().length, 0);
   assert.equal(hub.sentToRunner.length, 0);
-});
-
-test("Codex exec telemetry is compatibility usage when same-context app-server is unavailable", () => {
-  const { db, hub, svc } = makeHarness();
-  db.updateRunnerAgents(
-    RUNNER_ID,
-    runnerMeta().agents.map((agent) =>
-      agent.id === CODEX_APP_AGENT_ID ? { ...agent, available: false } : agent,
-    ),
-    Date.now(),
-  );
-  const res = svc.createSession({
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    agentId: CODEX_AGENT_ID,
-  });
-  assert.equal(res.ok, true, res.error);
-  const sent = hub.lastSent();
-  assert.ok(sent?.type === "start_session");
-  assert.equal(sent.spec.codexExecFallbackReason, "compatibility_exec");
 });
 
 test("createSession fails 404 for an unknown agent", () => {
@@ -8845,7 +8782,7 @@ test("createSession selects and persists an exact compatible container environme
   assert.deepEqual(db.getSession(result.data.id)!.executionTarget, containerStart.spec.executionTarget);
 
   const incompatible = svc.createSession({
-    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_AGENT_ID,
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID,
     executionTargetId: container.id, useWorktree: true,
   });
   assert.equal(incompatible.ok, false);
@@ -14127,7 +14064,7 @@ test("Claude policy hook defers on no match and durably resolves non-interactive
   assert.equal(countQueries, 1, "history is counted lazily only when a rule needs it");
   assert.equal(svc.evaluatePolicyHook(id, { ...request, raw: "not allowed" }).status, 400);
 
-  const codex = seedSession(svc, hub, { agentId: CODEX_AGENT_ID });
+  const codex = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
   db.updateSessionStatus(codex, "running", Date.now());
   assert.equal(svc.evaluatePolicyHook(codex, request).status, 409);
 
@@ -17687,101 +17624,83 @@ test("restart backfills a pre-v60 session with the runner's current execution ta
   assert.equal(restart.spec.useWorktree, true);
 });
 
-test("restart preserves a persisted legacy codex driver after the codex id becomes app-server", () => {
+test("restart refuses every persisted Codex exec session instead of launching App Server in its place (#3259)", () => {
   const { db, hub, svc } = makeHarness();
-  const id = "legacy-codex-session";
-  db.createSession({
-    id,
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    agentId: "codex",
-    title: "Legacy Codex",
-    useWorktree: false,
-    driver: "codex",
-    config: {},
-    now: Date.now(),
-  });
-
-  const res = svc.restart(id);
-  assert.ok(res.ok, res.error);
-  const start = hub.sentOfType("start_session").at(-1)!;
-  assert.equal(start.spec.agentId, "codex", "persisted identity is not rewritten");
-  assert.equal(start.spec.driver, "codex", "stored exec driver wins over the new exact-id app-server row");
-  assert.equal(start.spec.command, "codex");
-  assert.deepEqual(start.spec.args, ["exec"]);
+  db.updateRunnerAgents(RUNNER_ID, [
+    ...runnerMeta().agents,
+    {
+      id: "codex-wsl-Ubuntu",
+      name: "Codex App Server (WSL: Ubuntu)",
+      command: "wsl.exe",
+      args: ["-d", "Ubuntu", "--", "codex"],
+      env: {},
+      driver: "codex-app-server",
+      available: true,
+      context: { kind: "wsl", distro: "Ubuntu" },
+    },
+  ], Date.now());
+  // The stable ids an exec session was created under; `codex` and `codex-wsl-*` now name App Server.
+  for (const agentId of ["codex", "codex-native", "codex-wsl-Ubuntu", CODEX_AGENT_ID]) {
+    const id = `legacy-exec-${agentId}`;
+    db.createSession({
+      id, runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId, title: "Legacy Codex exec",
+      useWorktree: false, driver: "codex", config: {}, now: Date.now(),
+    });
+    const before = hub.sentOfType("start_session").length;
+    const res = svc.restart(id);
+    assert.equal(res.ok, false, agentId);
+    assert.equal(res.status, 409, agentId);
+    assert.equal(res.error, CODEX_EXEC_RETIRED_REASON, agentId);
+    assert.equal(hub.sentOfType("start_session").length, before, `${agentId} never reaches the runner`);
+    assert.equal(db.getSession(id)?.driver, "codex", "the session stays readable as the exec session it was");
+  }
 });
 
-test("restart routes a persisted codex-native exec session to the native compatibility row", () => {
-  const { db, hub, svc } = makeHarness();
-  const id = "legacy-codex-native-session";
-  db.createSession({
-    id,
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    agentId: "codex-native",
-    title: "Legacy Native Codex",
-    useWorktree: false,
-    driver: "codex",
-    config: {},
-    now: Date.now(),
+for (const runnerShape of ["older runner, exec available", "current runner, exec unavailable"] as const) {
+  test(`creating a session, run, or workflow on a Codex exec agent is refused with the retired reason: ${runnerShape} (#3259)`, () => {
+    const { db, hub, svc } = makeHarness();
+    if (runnerShape === "current runner, exec unavailable") {
+      db.updateRunnerAgents(RUNNER_ID, runnerMeta().agents.map((agent) => agent.id === CODEX_AGENT_ID
+        ? { ...agent, available: false, unavailableReason: CODEX_EXEC_RETIRED_CONFIG_REASON }
+        : agent), Date.now());
+    }
+    const startsBefore = hub.sentOfType("start_session").length;
+    const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_AGENT_ID });
+    assert.equal(created.ok, false);
+    assert.equal(created.status, 409);
+    assert.equal(created.error, CODEX_EXEC_RETIRED_REASON);
+    const run = svc.createRun({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID, CODEX_AGENT_ID], task: "Fan out",
+    });
+    assert.equal(run.status, 409);
+    assert.equal(run.error, `${CODEX_AGENT_ID}: ${CODEX_EXEC_RETIRED_REASON}`, "never a partial run without the exec member");
+    const workflow = svc.createWorkflowRun({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, workflowId: "builtin:build-review", task: "Build and review",
+      agentBindings: { claude: AGENT_ID, codex: CODEX_AGENT_ID },
+    });
+    assert.equal(workflow.status, 409);
+    assert.equal(workflow.error, `${CODEX_AGENT_ID}: ${CODEX_EXEC_RETIRED_REASON}`);
+    assert.equal(db.listRuns().length, 0, "nothing was created");
+    assert.equal(hub.sentOfType("start_session").length, startsBefore, "nothing reached the runner");
   });
+}
 
-  const res = svc.restart(id);
-  assert.ok(res.ok, res.error);
-  const start = hub.sentOfType("start_session").at(-1)!;
-  assert.equal(start.spec.agentId, "codex-native");
-  assert.equal(start.spec.driver, "codex");
-  assert.deepEqual(start.spec.args, ["exec"]);
-});
-
-test("restart routes a persisted WSL exec session to its distro compatibility row", () => {
+test("a persisted Codex exec session refuses prompts and submitted answers before anything reaches the runner (#3259)", () => {
   const { db, hub, svc } = makeHarness();
-  db.updateRunnerAgents(
-    RUNNER_ID,
-    [
-      ...runnerMeta().agents,
-      {
-        id: "codex-wsl-Ubuntu",
-        name: "Codex App Server (WSL: Ubuntu)",
-        command: "wsl.exe",
-        args: ["-d", "Ubuntu", "--", "codex"],
-        env: {},
-        driver: "codex-app-server",
-        available: true,
-        context: { kind: "wsl", distro: "Ubuntu" },
-      },
-      {
-        id: "codex-exec-wsl-Ubuntu",
-        name: "Codex Exec (WSL: Ubuntu)",
-        command: "wsl.exe",
-        args: ["-d", "Ubuntu", "--", "codex", "exec"],
-        env: {},
-        driver: "codex",
-        available: true,
-        context: { kind: "wsl", distro: "Ubuntu" },
-      },
-    ],
-    Date.now(),
-  );
-  const id = "legacy-codex-wsl-session";
+  hub.online = true;
   db.createSession({
-    id,
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    agentId: "codex-wsl-Ubuntu",
-    title: "Legacy WSL Codex",
-    useWorktree: false,
-    driver: "codex",
-    config: {},
-    now: Date.now(),
+    id: "legacy-exec", runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_AGENT_ID,
+    title: "Legacy Codex exec", useWorktree: false, driver: "codex", config: {}, now: Date.now(),
   });
-
-  const res = svc.restart(id);
-  assert.ok(res.ok, res.error);
-  const start = hub.sentOfType("start_session").at(-1)!;
-  assert.equal(start.spec.agentId, "codex-wsl-Ubuntu");
-  assert.equal(start.spec.driver, "codex");
-  assert.deepEqual(start.spec.args, ["-d", "Ubuntu", "--", "codex", "exec"]);
+  db.updateSessionStatus("legacy-exec", "idle", Date.now());
+  const prompted = svc.prompt("legacy-exec", "keep going");
+  assert.equal(prompted.status, 409);
+  assert.equal(prompted.error, CODEX_EXEC_RETIRED_REASON);
+  const answered = svc.answerQuestion("legacy-exec", "question-1", { choice: "yes" });
+  assert.equal(answered.status, 409);
+  assert.equal(answered.error, CODEX_EXEC_RETIRED_REASON);
+  assert.equal(hub.sentOfType("prompt_session").length, 0);
+  assert.equal(hub.sentOfType("durable_session_command").length, 0);
 });
 
 test("restart follows a current non-Codex driver reconfiguration", () => {

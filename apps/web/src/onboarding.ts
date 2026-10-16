@@ -1,6 +1,6 @@
 /** Pure helpers for the "Add a runner" onboarding flow (no DOM, unit-tested). */
 
-import { isRestartOnlyCodexExec, type AgentDefinition, type RunnerView } from "@wollipog/protocol";
+import { CODEX_EXEC_RETIRED_CONFIG_REASON, isRetiredCodexExec, type AgentDefinition, type RunnerView } from "@wollipog/protocol";
 import { agentDriverLabel } from "./agent-presentation.js";
 import { codexUpgradeGuidance } from "./runners.js";
 
@@ -71,6 +71,9 @@ export interface OnboardingHealthCheck {
 }
 
 function agentProblem(agent: AgentDefinition, os: RunnerView["os"]): { detail: string; command?: string } | null {
+  // The retired Codex exec driver (#3259) is never ready, even when an older runner reports its
+  // discovered row available, and its problem is the configuration fix.
+  if (isRetiredCodexExec(agent)) return { detail: CODEX_EXEC_RETIRED_CONFIG_REASON };
   const label = agentDriverLabel(agent);
   if (agent.driver === "claude-code") {
     if (agent.authStatus === "unauthenticated" || agent.claudeCode?.status === "unauthenticated") {
@@ -96,10 +99,6 @@ function agentProblem(agent: AgentDefinition, os: RunnerView["os"]): { detail: s
     if (agent.codexAppServer?.status === "unavailable") {
       return { detail: `${label} is unavailable or could not be launched. ${codexUpgradeGuidance(agent, os)}` };
     }
-  } else if (agent.driver === "codex") {
-    if (agent.authStatus === "unauthenticated") {
-      return { detail: `${label} is installed but not signed in.`, command: "codex login" };
-    }
   } else if (agent.driver === "pi") {
     if (agent.authStatus === "unauthenticated") {
       return { detail: `${label} is installed but has no authenticated model.`, command: "pi" };
@@ -121,11 +120,6 @@ function agentProblem(agent: AgentDefinition, os: RunnerView["os"]): { detail: s
         : { detail: `${label} is unavailable. Check its launch command on the runner.` };
   }
   return null;
-}
-
-/** Discovery's restart-only exec row would otherwise report Codex ready when App Server is not. */
-function offeredAgents(runner: RunnerView): AgentDefinition[] {
-  return runner.agents.filter((agent) => !isRestartOnlyCodexExec(agent));
 }
 
 function agentVerifiedReady(agent: AgentDefinition, os: RunnerView["os"]): boolean {
@@ -161,8 +155,8 @@ export function localRunnerReadiness(runner: RunnerView | undefined): LocalRunne
       agentLabels: [],
     };
   }
-  const agents = offeredAgents(runner);
-  const labels = [...new Set(agents.map(agentDriverLabel))];
+  const agents = runner.agents;
+  const labels = [...new Set(agents.filter((agent) => !isRetiredCodexExec(agent)).map(agentDriverLabel))];
   const ready = agents.filter((agent) => agentVerifiedReady(agent, runner.os));
   if (ready.length) {
     return {
@@ -243,7 +237,7 @@ export function onboardingHealth(input: {
   if (runner.agentsRefreshed !== true) {
     checks.push({ id: "agents", label: "Agent Readiness", status: "pending", detail: "Waiting for this connection to finish live agent verification. Upgrade the runner if this does not complete." });
   } else {
-    const agents = offeredAgents(runner);
+    const agents = runner.agents;
     const ready = agents.find((agent) => agentVerifiedReady(agent, runner.os));
     if (ready) {
       checks.push({

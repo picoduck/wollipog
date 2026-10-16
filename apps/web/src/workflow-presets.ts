@@ -1,4 +1,4 @@
-import { isRestartOnlyCodexExec, type AgentDefinition, type WorkflowDefinition } from "@wollipog/protocol";
+import { isRetiredCodexExec, type AgentDefinition, type WorkflowDefinition } from "@wollipog/protocol";
 
 export type RunWorkMode = "parallel" | "workflow";
 
@@ -15,7 +15,7 @@ export function defaultWorkflowBindings(
   definition: WorkflowDefinition | undefined,
   agents: AgentDefinition[],
 ): Record<string, string> {
-  const available = agents.filter((agent) => agent.available === true && !isRestartOnlyCodexExec(agent));
+  const available = agents.filter((agent) => agent.available === true && !isRetiredCodexExec(agent));
   const bindings: Record<string, string> = {};
   for (const role of workflowAgentRoles(definition)) {
     const codexRole = /codex/i.test(role);

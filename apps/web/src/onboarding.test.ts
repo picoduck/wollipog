@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { RunnerView } from "@wollipog/protocol";
+import { CODEX_EXEC_RETIRED_CONFIG_REASON, type RunnerView } from "@wollipog/protocol";
 import {
   buildRunnerConfigJson,
   buildRunnerStartCommand,
@@ -239,8 +239,8 @@ test("onboarding health requires ACP live evidence and promotes configured ACP a
   assert.equal(initialized.find((check) => check.id === "agents")?.status, "pass");
 });
 
-test("onboarding health accepts runnable Codex batch fallback and labels offline problems as last-known", () => {
-  const batch = onboardingHealth({
+test("onboarding health never counts Codex exec as ready and labels offline problems as last-known", () => {
+  const exec = onboardingHealth({
     credentialAvailable: true,
     runnerId: "laptop",
     workspaceId: "repo",
@@ -249,7 +249,9 @@ test("onboarding health accepts runnable Codex batch fallback and labels offline
       codexAppServer: { status: "unsupported", appServerAvailable: false },
     }] }),
   });
-  assert.equal(batch.find((check) => check.id === "agents")?.status, "pass");
+  const execCheck = exec.find((check) => check.id === "agents")!;
+  assert.equal(execCheck.status, "fail", "the retired exec driver is not a working agent (#3259)");
+  assert.equal(execCheck.detail, CODEX_EXEC_RETIRED_CONFIG_REASON);
 
   const offline = onboardingHealth({
     credentialAvailable: true,

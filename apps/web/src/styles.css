@@ -12217,21 +12217,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .agent-default-warning .btn {
   flex: none;
 }
-.advanced-agents {
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-}
-.advanced-agents summary {
-  cursor: pointer;
-  color: var(--text-dim);
-  font-size: 13px;
-  font-weight: 600;
-}
-.advanced-agents > p {
-  margin: 7px 0;
-  font-size: 12px;
-}
 /* New-Session "Location" quick-pick — a project's machines/directories (Q2a). */
 .new-session-project-actions {
   display: flex;
@@ -18463,12 +18448,16 @@ a.tab { text-decoration: none; }
    where that is (§11.3 meta), so the rows need not repeat it. */
 .settings-panel-head { display: flex; align-items: baseline; gap: var(--space-4); min-width: 0; }
 .settings-panel-heading { display: flex; flex: 1; flex-direction: column; gap: var(--space-1); min-width: 0; }
-.settings-panel-heading > h2 { margin: 0; color: var(--text); font: var(--type-title); }
+.settings-panel-title-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); min-width: 0; }
+.settings-panel-action { flex: none; min-width: 0; }
+.settings-panel-heading > h2,
+.settings-panel-title-row > h2 { margin: 0; color: var(--text); font: var(--type-title); }
 .settings-panel-desc { margin: 0; color: var(--text-dim); font: var(--type-body); }
 .settings-panel-scope { flex: none; color: var(--text-dim); font: var(--type-small); }
 /* In the compact tier the current tab names the section, so the panel does not repeat it. */
 @media (min-width: 761px) and (max-width: 1099px) {
-  .settings-panel-heading > h2 { display: none; }
+  .settings-panel-heading > h2,
+  .settings-panel-title-row > h2 { display: none; }
 }
 /* A section that draws its own head (About, #3028) keeps the heading in the tree, hidden. */
 .settings-panel-head[hidden] { display: none; }
@@ -18634,7 +18623,7 @@ a.tab { text-decoration: none; }
 .settings-detail { padding-bottom: var(--space-16); }
 .settings-detail > .settings-view { margin: var(--space-5) var(--page-gutter) 0; }
 .settings-detail .settings-panel-heading { display: none; }
-.settings-detail .settings-panel-head:not(:has(> .settings-panel-scope)) { display: none; }
+.settings-detail .settings-panel-head:not(:has(> .settings-panel-scope, > .settings-panel-action)) { display: none; }
 
 
 

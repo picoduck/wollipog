@@ -34,7 +34,6 @@
     "src/drivers/claude-code.test.ts",
     "src/drivers/codex-app-server.test.ts",
     "src/drivers/codex-rollout-proof.test.ts",
-    "src/drivers/codex.test.ts",
     "src/drivers/pi-rpc.test.ts",
     "src/execution-isolation.test.ts",
     "src/external/sources.test.ts",

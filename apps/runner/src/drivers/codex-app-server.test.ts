@@ -4191,6 +4191,24 @@ test("approvalResponse: permissions approvals use {permissions, scope} — NOT a
   assert.equal("decision" in approvalResponse("item/permissions/requestApproval", params, true), false);
 });
 
+test("permission-profile option discloses the session lifetime returned to Codex", async () => {
+  const h = makeHarness();
+  const requests = new Map<string, (params: any, id?: string) => Promise<any>>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: (params: any) => Promise<any>) => requests.set(method, handler),
+    onNotification: () => {},
+  });
+  const pending = requests.get("item/permissions/requestApproval")!({ permissions: { network: true } }, "session-grant");
+  const event = h.events.at(-1);
+  assert.equal(event?.kind, "permission_request");
+  if (event?.kind === "permission_request") {
+    assert.deepEqual(event.options[0], { optionId: "allow", name: "Allow for Session", kind: "allow_always" });
+    h.driver.resolvePermission("session-grant", "allow");
+    assert.deepEqual(await pending, { permissions: { network: true }, scope: "session" });
+  }
+  h.driver.dispose();
+});
+
 test("resolvePermission builds the permissions-grant shape for a permissions request", () => {
   const h = makeHarness();
   let sent: unknown = null;

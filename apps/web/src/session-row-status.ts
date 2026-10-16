@@ -19,6 +19,10 @@ export interface SessionRowStatusContext {
   stalledForMs?: number;
   /** A parent's human-owned descendant reason, visible even when its family chip is dots. */
   familyFollowUpLabel?: "Needs Your Input" | "Ready for Review";
+  /** Any descendant still has work, including background jobs, blocked input, or a pending stop. */
+  familyWorking?: boolean;
+  /** False when unfinished descendants are all stalled or blocked rather than progressing. */
+  familyProgressing?: boolean;
 }
 
 /** The one badge a row draws. */
@@ -78,11 +82,12 @@ function snoozedCondition(session: SessionStatusSource, needs: readonly SessionC
  * 2. Else Background Work Lost, Disconnected, then Waiting on External Job (`sessionStatusSummary()`).
  * 3. Else a fired reminder's Returned.
  * 4. Else an outstanding human result's Ready for Review, once the session has stopped working (#3074).
- * 5. Else the lifecycle status, except Awaiting Prompt, which shows no badge.
+ * 5. Else Children Working while an at-rest parent's descendants have unfinished work.
+ * 6. Else the lifecycle status, except Awaiting Prompt, which shows no badge.
  *
  * A family's human-attention reason is visible on its parent's badge at every list width, including
  * narrow desktop columns where the chip shows only dots. The parent's own higher-ranked request wins,
- * and a working parent keeps its working status over the family's Ready for Review (#3074).
+ * and an unfinished family keeps its working status over Ready for Review (#3074, #3328).
  * Stalled is not a second badge (#2215). A stalled session whose badge would be its busy lifecycle
  * (Queued, Starting, Running) reads Stalled instead; an attention badge keeps its own label.
  * Either way the badge takes the danger tone, stops pulsing, and its tooltip says how long the session
@@ -110,14 +115,14 @@ export function sessionRowStatus(session: SessionStatusSource, context: SessionR
   }
   if ((!primary || (primary.kind === "lifecycle" && primary.meta.tone !== "danger" && !session.stopOperation)) &&
       needs.length === 0 && reminder?.state !== "fired" &&
-      session.attention && sessionFollowUp(session as SessionView).group === "ready_for_review") {
+      session.attention && sessionFollowUp(session as SessionView, { familyWorking: context.familyWorking }).group === "ready_for_review") {
     primary = { kind: "lifecycle", meta: statusMeta("session", "ready_for_review"),
       description: "A new result is waiting for your assessment or next instructions.", needsYou: true };
   }
   const others = needs.slice(1).map(conditionName);
   const familyLabel = context.familyFollowUpLabel;
   if (familyLabel && primary?.meta.label !== familyLabel && needs.length === 0 &&
-      (familyLabel === "Needs Your Input" || !sessionWorking(session as SessionView)) &&
+      (familyLabel === "Needs Your Input" || (!context.familyWorking && !sessionWorking(session as SessionView))) &&
       (familyLabel === "Needs Your Input" ? 3 : 2) >= sessionFollowUp(session as SessionView).priority) {
     const previous = primary;
     const keepPrevious = previous && previous.meta.label !== familyLabel &&
@@ -131,6 +136,12 @@ export function sessionRowStatus(session: SessionStatusSource, context: SessionR
     primary = { kind: "lifecycle", meta: { ...familyMeta,
       tone: keepPrevious && previous.meta.tone === "danger" ? "danger" : familyMeta.tone },
       description: keepPrevious ? `${description} ${previous.description}` : description, needsYou: true };
+  }
+  if (context.familyWorking && needs.length === 0 && !sessionWorking(session as SessionView) &&
+      (!primary || (primary.kind === "lifecycle" && !primary.needsYou && primary.meta.tone !== "danger" &&
+        !session.stopOperation && reminder?.state !== "fired"))) {
+    primary = { kind: "lifecycle", meta: statusMeta("session", context.familyProgressing === false ? "children_pending" : "children_working"),
+      description: "Child sessions still have unfinished work.", needsYou: false };
   }
   if (!primary) return { badge: null, others };
 

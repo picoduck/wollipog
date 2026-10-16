@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { CreateSessionRequest, SessionView } from "@wollipog/protocol";
+import { CODEX_EXEC_RETIRED_REASON, type CreateSessionRequest, type SessionView } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import {
   nativeTuiCreationError,
@@ -83,6 +83,12 @@ test("v66 keeps manual Agent TUI attachment but rejects initial Native TUI launc
   assert.equal(nativeTuiSessionError(fakeDb({ protocolVersion: 66 }), online, session), null);
 });
 
+test("Native TUI is refused for the retired Codex exec driver, as a session or a new launch (#3259)", () => {
+  const session = { runnerId: "runner", agentId: "codex-exec", driver: "codex" } as unknown as SessionView;
+  assert.deepEqual(nativeTuiSessionError(fakeDb(), online, session), { status: 409, error: CODEX_EXEC_RETIRED_REASON });
+  assert.match(nativeTuiCreationError(fakeDb({ driver: "codex" }), online, request())!.error, /does not expose/);
+});
+
 test("materialized session validation rejects non-host Agent TUI isolation", () => {
   const session = {
     runnerId: "runner",
@@ -121,7 +127,7 @@ test("materialized session validation rejects user daily cost governance", () =>
 });
 
 test("orchestrator TUI manual attachment requires v112 and an active session", () => {
-  const session = { runnerId: "runner", agentId: "agent", driver: "codex", status: "idle",
+  const session = { runnerId: "runner", agentId: "agent", driver: "codex-app-server", status: "idle",
     permissionMode: "orchestrator" } as SessionView;
   assert.equal(nativeTuiSessionError(fakeDb({ protocolVersion: 111 }), online, session)?.capabilityRequirement?.requiredRunnerProtocolVersion, 112);
   assert.equal(nativeTuiSessionError(fakeDb({ protocolVersion: 112 }), online, session), null);

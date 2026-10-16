@@ -209,6 +209,7 @@ import { registerAgentHarnessDefaultsRoutes } from "./agent-harness-defaults-rou
 import { OrchestratorSettings, childHarnessAgents, childModelMachines } from "./orchestrator-settings.js";
 import { registerArtifactUploadSettingsRoutes } from "./artifact-upload-settings-route.js";
 import { registerOrchestratorSettingsRoutes } from "./orchestrator-settings-route.js";
+import { registerFullControlLaunchRoutes } from "./full-control-launch-route.js";
 import { registerRunnerAttestationRoute } from "./runner-attestation-route.js";
 import {
   canAssignSessionProject,
@@ -975,6 +976,7 @@ const archivedHistoryRetention = new ArchivedHistoryRetention(db, { env: process
 registerArchivedHistoryRetentionRoutes(app, archivedHistoryRetention, requestPrincipal);
 registerAgentHarnessDefaultsRoutes(app, agentHarnessDefaultsSettings, requestPrincipal);
 registerOrchestratorSettingsRoutes(app, orchestratorSettings, requestPrincipal);
+registerFullControlLaunchRoutes(app, { db, hub, sessions: svc, settings: orchestratorSettings, requestPrincipal });
 registerArtifactUploadSettingsRoutes(app, db, hub, requestPrincipal);
 
 // An attempt session's observed status moves its work item without a ledger write; give such
@@ -1428,6 +1430,7 @@ app.register(async (instance) => {
         }
         break;
       case "campaign_issue_scope_result":
+      case "campaign_launch_inspection_result":
         if (runnerId) hub.resolveRunnerRequest(msg, runnerId);
         break;
       case "github_issue_closure_result":

@@ -12,13 +12,14 @@ import type { OperatorVideoValidationPermits } from "./operator-video-validation
 import type { OperatorVideoValidationPurpose } from "@wollipog/protocol";
 import { acknowledgementRepairFrame } from "./claude-cost-repair.js";
 import type { HumanPrincipal } from "./identity.js";
+import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl } from "./campaign-authority.js";
 import { campaignAuthorityPreflight, controlledReviewCapabilityKey, standingRootQuestionAnswers, type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary } from "@wollipog/protocol";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope } from "./campaign-issue-scope.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
 import { issueBoundary, issueEvidenceDigest, issueWork, closureEvidence, publicationEvidence, reservedPublicationSlots } from "./campaign-issue-authority.js";
-import { validIssueAdmission, campaignPublicationSafe } from "@wollipog/protocol";
+import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe } from "@wollipog/protocol";
 import { normalizeCampaignIssueScopeSnapshot, titleFromPrompt, type CampaignIssueScopeRequest, type CampaignIssueScopeView, type CampaignIssueScopeSnapshot } from "@wollipog/protocol";
 import { normalizeIssueClosureSnapshot, issueClosureActiveChildren } from "./github-issue-closure.js";
 import { observeReconciliationSnapshot, reconciliationSnapshotAvailable, correctionFrame, latestReconciliationRepair, normalizeReconciledSnapshot, reconciliationRevision } from "./claude-cost-reconciliation.js";
@@ -1358,26 +1359,14 @@ export function sessionBlocksConversationFork(status: SessionStatus): boolean {
   return ["queued", "running", "starting", "input_required"].includes(status);
 }
 
-function legacyCodexExecAgentId(agentId: string): string | null {
-  if (agentId === "codex" || agentId === "codex-native") return "codex-exec";
-  if (agentId.startsWith("codex-wsl-")) return agentId.replace(/^codex-wsl-/, "codex-exec-wsl-");
-  return null;
-}
-
-/** Preserve the session's persisted driver when discovery reassigns the old `codex` id to app-server. */
+/** The runner's current launch for a session's agent. Driver changes for configured agents restart
+ * with the runner's current definition. A session persisted on the retired Codex exec driver has no
+ * launch (#3259): its old stable `codex` id now names App Server, which must not silently replace
+ * the conversation it ran. */
 export function launchForRestart(db: ControlPlaneDb, session: SessionView): AgentLaunch | null {
-  if (!session.agentId) return null;
+  if (!session.agentId || isRetiredCodexExec(session)) return null;
   const targetBound = session.executionTarget !== undefined && session.executionTarget.adapter !== "host";
-  const exact = db.getAgentLaunch(session.runnerId, session.agentId, targetBound);
-  if (exact?.driver === session.driver) return exact;
-  // Driver changes for ordinary configured agents have always restarted with the runner's
-  // current definition. Codex exec is the one exception: discovery deliberately migrated its
-  // old stable id to app-server, so a persisted exec session must use the compatibility row.
-  if (session.driver !== "codex") return exact;
-  const compatibilityId = legacyCodexExecAgentId(session.agentId);
-  if (!compatibilityId) return null;
-  const compatibility = db.getAgentLaunch(session.runnerId, compatibilityId, targetBound);
-  return compatibility?.driver === "codex" ? compatibility : null;
+  return db.getAgentLaunch(session.runnerId, session.agentId, targetBound);
 }
 
 /** Placeholder title for a session created without a first prompt (named by its first message). */
@@ -1402,11 +1391,19 @@ export function defaultPermissionModeForNewSession(
   return modes.includes("acceptEdits") ? "acceptEdits" : undefined;
 }
 
+/** Whether the runner's catalog names this agent as the retired Codex exec driver (#3259). A current
+ * runner marks a configured exec agent unavailable, and `getAgentLaunch` returns only available
+ * rows, so the catalog, not the launch, is what lets a refusal name the reason. */
+function retiredCodexExecAgent(db: ControlPlaneDb, runnerId: string, agentId: string): boolean {
+  return db.getRunner(runnerId)?.agents.some((agent) => agent.id === agentId && isRetiredCodexExec(agent)) ?? false;
+}
+
 function workflowMemberCapabilityError(
   agentId: string,
   config: SessionConfig | undefined,
   launch: AgentLaunch,
 ): string | null {
+  if (isRetiredCodexExec(launch)) return `${agentId}: ${CODEX_EXEC_RETIRED_REASON}`;
   if (config?.serviceTier && launch.driver !== "codex-app-server") {
     return `${agentId}: service tier selection is supported only by Codex app-server sessions`;
   }
@@ -1449,25 +1446,6 @@ export function workflowRunCapabilityError(
     if (launch) return workflowMemberCapabilityError(req.orchestratorAgentId, req.config, launch);
   }
   return null;
-}
-
-/** Classify exec usage without recording a session/user identifier. Same-context app-server
- * availability means the user explicitly chose Advanced exec; otherwise exec is compatibility. */
-function codexExecFallbackReason(
-  db: ControlPlaneDb,
-  runnerId: string,
-  launch: AgentLaunch,
-): "explicit_exec" | "compatibility_exec" | undefined {
-  if (launch.driver !== "codex") return undefined;
-  const interactive = db.getRunner(runnerId)?.agents.some(
-    (agent) =>
-      agent.driver === "codex-app-server" &&
-      agent.available === true &&
-      (agent.context?.kind ?? "native") === launch.context.kind &&
-      (launch.context.kind !== "wsl" ||
-        (agent.context?.kind === "wsl" && agent.context.distro === launch.context.distro)),
-  );
-  return interactive ? "explicit_exec" : "compatibility_exec";
 }
 
 function auditDigest(value: unknown): string | undefined {
@@ -3831,6 +3809,14 @@ export class SessionsService {
       orchestratorDefaults?: OrchestratorSettingsView;
       validateOrchestratorDefaults?: (defaults: OrchestratorCampaignPolicy) => string | null;
       [PREPARED_MEDIA_CAPTURE]?: PreparedMediaCapture;
+      /** Trusted internal inspection seam. Returns before any stage, insert or provider call. */
+      inspectLaunchPlan?: (plan: PreparedCampaignLaunch) => void;
+      /** Internal fixture/admission seam; never accepted from ordinary session request JSON. */
+      humanCampaignLaunch?: {
+        principal: HumanPrincipal; requestId: string; digest: string;
+        control: Extract<import("@wollipog/protocol").CampaignControl, { mode: "full_control" }>;
+        issueScope: import("@wollipog/protocol").CampaignIssueScope;
+      };
     },
   ): ServiceResult<SessionView> {
     // Attribution is supplied only by the authenticated route, never by the request payload.
@@ -3939,6 +3925,9 @@ export class SessionsService {
       version: snapshotSpec.agentVersion,
       capabilities: snapshotSpec.capabilities,
     } : this.db.getAgentLaunch(req.runnerId, req.agentId, targetBoundLaunch);
+    if (isRetiredCodexExec(launch ?? {}) || (!launch && retiredCodexExecAgent(this.db, req.runnerId, req.agentId))) {
+      return fail(CODEX_EXEC_RETIRED_REASON, 409);
+    }
     if (!launch) return fail(`unknown agent '${req.agentId}' on runner '${req.runnerId}'`, 404);
     const launchHarness = agentHarnessIdentityFor({
       id: req.agentId,
@@ -4606,6 +4595,45 @@ export class SessionsService {
         this.db.getUsageDailyBudget(effectiveSessionScope.organizationId).perUserUsd !== null) {
       return fail(NATIVE_TUI_DAILY_BUDGET_ERROR, 409);
     }
+    if (creationContext?.inspectLaunchPlan) {
+      if (parentSessionId || delivery || !orchestratorPolicy || !workspaceId || adHoc ||
+          executionTarget.adapter !== "host" || launch.context.kind !== "native" || images.length ||
+          req.launchSurface === "native_tui" || effectiveSessionScope?.owner.kind !== "user" ||
+          effectiveSessionScope.owner.userId !== creationContext.defaultOwnerUserId) {
+        return fail("Full Control launch preparation requires a Human-owned managed root in a registered native workspace", 409);
+      }
+      creationContext.inspectLaunchPlan(structuredClone({ runnerId: req.runnerId, workspaceId,
+        ...requestedProject.data, agentId: req.agentId, driver: launch.driver, providerAccountId: providerAccount?.id,
+        config, useWorktree, executionTarget, policy: orchestratorPolicy, scope: effectiveSessionScope }));
+      return fail("internal launch preparation completed without creating a session", 409);
+    }
+    const humanLaunch = creationContext?.humanCampaignLaunch;
+    if (humanLaunch) {
+      if (parentSessionId || delivery || !orchestratorPolicy || !workspaceId || adHoc || images.length ||
+          req.launchSurface === "native_tui" || launch.context.kind !== "native" || executionTarget.adapter !== "host" ||
+          humanLaunch.principal.kind !== "human" ||
+          creationContext.defaultOwnerUserId !== humanLaunch.principal.userId ||
+          effectiveSessionScope?.owner.kind !== "user" || effectiveSessionScope.owner.userId !== humanLaunch.principal.userId) {
+        return fail("atomic Human launch requires the exact Human-owned managed root", 409);
+      }
+      const authoritySupport = campaignAuthorityPreflight(humanLaunch.control, launch.driver, runner.protocolVersion);
+      if (!authoritySupport.supported) return fail(authoritySupport.reason ?? "campaign authority is unsupported", 409);
+      const accountingError = this.db.campaignBudgetAccountingError(launch.driver, config.model, true);
+      if (accountingError) return fail(accountingError, 409);
+      const nativeReview = humanLaunch.control.boundary.budgetAuthority?.controlledReview;
+      if (nativeReview && (!runner.runtime?.campaignReview || controlledReviewCapabilityKey(nativeReview) !== controlledReviewCapabilityKey(runner.runtime.campaignReview))) {
+        return fail("the required native reviewer does not match current runner discovery", 409);
+      }
+      if (humanLaunch.control.boundary.delegatablePolicyIds.some((policyId) => !this.governancePolicies().some((rule) =>
+          rule.policyId === policyId && rule.enabled && rule.effect === "ask" && !rule.builtin && !rule.conditions?.humanRequired))) {
+        return fail("unknown, disabled or Human Required policy asks cannot enter the launch boundary", 400);
+      }
+      orchestratorPolicy.control = structuredClone(humanLaunch.control);
+      orchestratorPolicy.issueScope = structuredClone(humanLaunch.issueScope);
+      orchestratorPolicy.issueNumbers = [...humanLaunch.issueScope.issueNumbers];
+      parentControlPolicy = { decisions: structuredClone(orchestratorPolicy.delegation.decisions) };
+      text = requestedText || humanLaunch.control.boundary.objective;
+    }
     const commandSpec: SessionLaunchSpec = {
       sessionId: id,
       workspaceId,
@@ -4615,7 +4643,6 @@ export class SessionsService {
       providerAccountLabel: providerAccount?.label,
       agentVersion: launch.version,
       capabilities: launch.capabilities,
-      codexExecFallbackReason: codexExecFallbackReason(this.db, req.runnerId, launch),
       title,
       titleSource,
       command: launch.command,
@@ -4629,8 +4656,9 @@ export class SessionsService {
       config,
       ...(orchestratorPolicy ? { orchestrator: {
         ...orchestratorPolicy.execution,
-        ...(orchestratorIssueNumbers.length || orchestratorPolicy.issueScope ? { issueNumbers: orchestratorIssueNumbers } : {}),
+        ...(orchestratorIssueNumbers.length || orchestratorPolicy.issueScope ? { issueNumbers: orchestratorPolicy.issueNumbers ?? orchestratorIssueNumbers } : {}),
         ...(orchestratorPolicy.issueScope ? { issueScope: orchestratorPolicy.issueScope } : {}),
+        ...(orchestratorPolicy.control ? { control: orchestratorPolicy.control } : {}),
       } } : {}),
       acpSessionContext,
     };
@@ -4672,7 +4700,7 @@ export class SessionsService {
     }
     if (delivery) delivery.stage(plan!);
     let session: SessionView;
-    const insert = () => this.db.createSession({
+    const sessionInput: Parameters<ControlPlaneDb["createSession"]>[0] = {
       campaignBudgetUserLimits,
       id,
       parentSessionId,
@@ -4703,23 +4731,30 @@ export class SessionsService {
       scope: sessionScope,
       automationOrigin: delivery?.automationOrigin,
       now,
-    });
+    };
+    const insert = () => this.db.createSession(sessionInput);
     try {
-      session = existing ?? (campaignWorkScope
+      if (humanLaunch) {
+        const admitted = this.db.createHumanCampaignLaunch(sessionInput, humanLaunch.principal, humanLaunch.requestId, humanLaunch.digest);
+        if (!admitted.created) return ok(admitted.session);
+        session = admitted.session;
+        config.costBudgetUsd = session.costBudgetUsd ?? undefined;
+        config.maxToolCalls = session.maxToolCalls ?? undefined;
+      } else session = existing ?? (campaignWorkScope
         ? this.insertCampaignChild(campaignWorkScope, campaignWorkItemId!, insert)
         : insert());
     } catch (error) {
       if (error instanceof CampaignAttemptRefusal) return fail(error.message, error.status);
-      if (budgetRoot) return fail((error as Error).message, 409);
+      if (budgetRoot || humanLaunch) return fail((error as Error).message, 409);
       throw error;
     }
-    if (config.costBudgetUsd && config.costBudgetUsd > 0) {
+    if (!humanLaunch && config.costBudgetUsd && config.costBudgetUsd > 0) {
       this.db.updateSessionCostBudget(id, config.costBudgetUsd, now);
     }
-    if (config.maxToolCalls && Math.floor(config.maxToolCalls) > 0) {
+    if (!humanLaunch && config.maxToolCalls && Math.floor(config.maxToolCalls) > 0) {
       this.db.updateSessionMaxToolCalls(id, Math.floor(config.maxToolCalls), now);
     }
-    if (config.costCheckpointsUsd?.length) {
+    if (!humanLaunch && config.costCheckpointsUsd?.length) {
       this.db.updateSessionCostCheckpoints(id, config.costCheckpointsUsd, now);
     }
     if (!snapshotCommand && images.length) {
@@ -4750,7 +4785,6 @@ export class SessionsService {
       providerAccountLabel: providerAccount?.label,
       agentVersion: launch.version,
       capabilities: launch.capabilities,
-      codexExecFallbackReason: codexExecFallbackReason(this.db, req.runnerId, launch),
       title,
       titleSource,
       command: launch.command,
@@ -4764,8 +4798,9 @@ export class SessionsService {
       config,
       ...(orchestratorPolicy ? { orchestrator: {
         ...orchestratorPolicy.execution,
-        ...(orchestratorIssueNumbers.length || orchestratorPolicy.issueScope ? { issueNumbers: orchestratorIssueNumbers } : {}),
+        ...(orchestratorIssueNumbers.length || orchestratorPolicy.issueScope ? { issueNumbers: orchestratorPolicy.issueNumbers ?? orchestratorIssueNumbers } : {}),
         ...(orchestratorPolicy.issueScope ? { issueScope: orchestratorPolicy.issueScope } : {}),
+        ...(orchestratorPolicy.control ? { control: orchestratorPolicy.control } : {}),
       } } : {}),
       acpSessionContext,
     };
@@ -4783,11 +4818,21 @@ export class SessionsService {
       delivery.activate(plan!);
     } else {
       if (command.type !== "start_session") return fail("session launch command is malformed", 409);
+      if (humanLaunch && !this.db.claimHumanCampaignDispatch(session.id)) {
+        return fail("the committed Human launch was already claimed; no provider command was replayed", 409);
+      }
       const sent = this.hub.sendToRunner(req.runnerId, {
         ...command,
         spec,
       });
+      if (humanLaunch && sent) this.db.settleHumanCampaignDispatch(session.id, true);
       if (!sent) {
+        if (humanLaunch) {
+          // Hub's boolean collapses a missing socket and a send failure. It cannot prove that
+          // no bytes escaped; retain the root/reservation and the claimed uncertain identity.
+          return { ok: false, status: 409, error: "Human campaign delivery was not confirmed; the committed Session is retained and no launch will be replayed",
+            errorDetails: { sessionId: session.id, code: "FULL_CONTROL_LAUNCH_RETAINED" } };
+        }
         // The runner can disconnect after the online preflight. Keep the durable row observable but
         // terminal instead of reporting that a launch was accepted when no runner owns it.
         if (cleanupUndelivered) {
@@ -5001,6 +5046,8 @@ export class SessionsService {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     if (this.mediaSessionPurposes.owns(sessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
+    // An older runner would still resume a persisted exec session for this turn (#3259).
+    if (isRetiredCodexExec(session)) return fail(CODEX_EXEC_RETIRED_REASON, 409);
     const budgetError = this.db.campaignBudgets.admissionError(sessionId);
     if (budgetError) return fail(budgetError, 409);
     const requestedConfig = snapshotCommand?.type === "prompt_session" ? snapshotCommand.config : config;
@@ -6949,6 +6996,7 @@ export class SessionsService {
     const reconciliationBlock = this.podReconciliationMutationError(sessionId);
     if (reconciliationBlock) return fail(reconciliationBlock, 409);
     if (!session.agentId) return fail("session is missing its agent", 400);
+    if (isRetiredCodexExec(session)) return fail(CODEX_EXEC_RETIRED_REASON, 409);
     const launch = launchForRestart(this.db, session);
     if (!launch) return fail(`unknown agent '${session.agentId}' on runner '${session.runnerId}'`, 404);
     // Resolve the launch directory: an ad-hoc browsed path (workspaceId is null) takes precedence over
@@ -7106,7 +7154,6 @@ export class SessionsService {
       providerAccountLabel: session.providerAccountLabel,
       agentVersion: launchVersion,
       capabilities: launchCapabilities,
-      codexExecFallbackReason: codexExecFallbackReason(this.db, session.runnerId, launch),
       title: session.title,
       titleSource: session.titleSource,
       command: launch.command,
@@ -10919,6 +10966,9 @@ export class SessionsService {
   ): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    // The exec driver never asked questions, so an answer here is to a recovered one, and submitting
+    // it would resume the retired driver (#3259). Dismissing it stays available.
+    if (action === "submit" && isRetiredCodexExec(session)) return fail(CODEX_EXEC_RETIRED_REASON, 409);
     const campaignBefore = session.parentSessionId
       ? this.campaignEventController(this.db.getSession(session.parentSessionId))
       : null;
@@ -12292,6 +12342,9 @@ export class SessionsService {
         version: snapshot.spec.agentVersion,
         capabilities: snapshot.spec.capabilities,
       } : this.db.getAgentLaunch(req.runnerId, agentId);
+      if (!launch && retiredCodexExecAgent(this.db, req.runnerId, agentId)) {
+        return fail(`${agentId}: ${CODEX_EXEC_RETIRED_REASON}`, 409);
+      }
       if (!launch) return fail(`workflow role '${roleId}' is bound to unknown agent '${agentId}'`, 404);
       const configError = workflowMemberCapabilityError(agentId, req.config, launch);
       if (configError) return fail(configError, 409);
@@ -12311,6 +12364,9 @@ export class SessionsService {
         version: snapshot.spec.agentVersion,
         capabilities: snapshot.spec.capabilities,
       } : this.db.getAgentLaunch(req.runnerId, req.orchestratorAgentId);
+      if (!launch && retiredCodexExecAgent(this.db, req.runnerId, req.orchestratorAgentId)) {
+        return fail(`${req.orchestratorAgentId}: ${CODEX_EXEC_RETIRED_REASON}`, 409);
+      }
       if (!launch) return fail(`unknown orchestrator agent '${req.orchestratorAgentId}'`, 404);
       const configError = workflowMemberCapabilityError(req.orchestratorAgentId, req.config, launch);
       if (configError) return fail(configError, 409);
@@ -12435,7 +12491,6 @@ export class SessionsService {
           agentId: member.agentId,
           agentVersion: member.launch.version,
           capabilities: member.launch.capabilities,
-          codexExecFallbackReason: codexExecFallbackReason(this.db, req.runnerId, member.launch),
           title: memberTitle,
           titleSource,
           command: member.launch.command,
@@ -12575,7 +12630,6 @@ export class SessionsService {
         agentId: member.agentId,
         agentVersion: member.launch.version,
         capabilities: member.launch.capabilities,
-        codexExecFallbackReason: codexExecFallbackReason(this.db, req.runnerId, member.launch),
         title: memberTitle,
         titleSource,
         command: member.launch.command,
@@ -13398,6 +13452,10 @@ export class SessionsService {
     const unknown: string[] = [];
     for (const agentId of req.agentIds) {
       const launch = this.db.getAgentLaunch(req.runnerId, agentId);
+      // Checked against the catalog too, so a retired member never leaves a partial run behind.
+      if ((launch && isRetiredCodexExec(launch)) || retiredCodexExecAgent(this.db, req.runnerId, agentId)) {
+        return fail(`${agentId}: ${CODEX_EXEC_RETIRED_REASON}`, 409);
+      }
       const configCapabilityError = capabilityConfigError(req.config, launch?.capabilities);
       if (configCapabilityError) return fail(`${agentId}: ${configCapabilityError}`, 409);
       if (req.config?.serviceTier && launch?.driver !== "codex-app-server") {
@@ -13500,7 +13558,6 @@ export class SessionsService {
         agentId,
         agentVersion: launch.version,
         capabilities: launch.capabilities,
-        codexExecFallbackReason: codexExecFallbackReason(this.db, req.runnerId, launch),
         title: `${title} · ${agentId}`,
         titleSource,
         command: launch.command,

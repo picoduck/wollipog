@@ -688,6 +688,10 @@ export * from "./campaign-budget.js";
 export * from "./campaign-review-job.js";
 export * from "./rate-priced-usage.js";
 import type { CampaignControl, CampaignRequestSource, CampaignAuthorityEvaluation } from "./campaign-authority.js";
+export type {
+  CampaignLaunchProposal, FullControlLaunchRequest, PreparedCampaignLaunch,
+  CampaignLaunchInspectionMessage, CampaignLaunchInspectionResult, CampaignLaunchPreflight,
+} from "./campaign-control-launch.js";
 export const SESSION_SUMMARY_UI_PROTOCOL = 212;
 export const SKILL_REPORT_REQUEST_LIFETIME_MS = 30_000;
 export const MAX_SKILL_REPORT_REQUESTS = 64;
@@ -2512,6 +2516,8 @@ export interface OrchestratorLaunchPolicy extends OrchestratorExecutionDefaults 
 }
 
 export interface OrchestratorDefaults {
+  /** Future-campaign UI preference only. Omission means Custom; never a human authority grant. */
+  controlMode?: import("./campaign-authority.js").CampaignControlMode;
   behavior: OrchestratorBehaviorDefaults;
   delegation: OrchestratorDelegationDefaults;
   execution: OrchestratorExecutionDefaults;
@@ -2624,6 +2630,8 @@ export interface UiEvidenceReviewDelivery {
 /** Credential-free, server-derived campaign state. The stored policy remains the source of truth;
  * this projection applies runtime compatibility fallbacks without mutating or broadening it. */
 export interface OrchestratorCampaignProjection {
+  /** Current authorized root control, paired with policyRevision; child snapshots may be stale. */
+  control?: CampaignControl;
   budget?: import("./campaign-budget.js").CampaignBudgetView;
   status: OrchestratorCampaignStatus;
   policyRevision: number;
@@ -2880,6 +2888,8 @@ export interface OrchestratorSettingsView {
   defaults: OrchestratorDefaults;
   source: "system_default" | "user_default";
   capabilities: OrchestratorSettingsCapabilities;
+  /** Optional UI API feature, distinct from runner launch capability or readiness. */
+  controlModeSupported?: boolean;
 }
 
 export interface UpdateOrchestratorSettingsRequest {
@@ -3041,12 +3051,20 @@ export interface AgentDefinition {
   };
 }
 
-/** Discovery pairs every Codex App Server row with a `codex exec` row that exists only so sessions
- * already running on it can restart. It is never offered for new work; an agent the user
- * configured with `driver: "codex"` is a deliberate choice and stays selectable. */
-export function isRestartOnlyCodexExec(agent: Pick<AgentDefinition, "driver" | "source">): boolean {
-  return agent.source === "discovered" && agent.driver === "codex";
+/** Codex Non-Interactive (`driver: "codex"`, `codex exec`) is retired (#3259). Sessions that used it
+ * stay readable, but nothing launches or offers it: not a configured agent, and not the row an
+ * older runner's discovery still emits beside App Server. */
+export function isRetiredCodexExec(agent: Pick<AgentDefinition, "driver">): boolean {
+  return agent.driver === "codex";
 }
+
+/** Why a session on the retired Codex exec driver cannot be created, started, or restarted. */
+export const CODEX_EXEC_RETIRED_REASON =
+  "Codex Non-Interactive is no longer supported. Start a new session with Codex App Server to continue.";
+
+/** Why a runner-configured `driver: "codex"` agent is unavailable, and how to fix the configuration. */
+export const CODEX_EXEC_RETIRED_CONFIG_REASON =
+  "Codex Non-Interactive is no longer supported. Change this agent's driver to codex-app-server in the runner configuration.";
 
 /** Secret-free runner-local provider account safe for a principal-scoped Machine view. */
 export interface ProviderAccountDefinition {
@@ -3292,6 +3310,8 @@ export interface RunnerMetadata {
 export interface RunnerRuntimeInfo {
   /** Guarded capability, independent of numeric protocol support. Missing is unsupported. */
   campaignReview?: import("./campaign-review-job.js").ControlledReviewCapability;
+  /** Exact read-only workspace inspection path only; never Full Control readiness. */
+  campaignLaunchInspection?: { version: 1 };
   /** Native-host runner data root. WSL contexts use the same `.agent-manager` layout in-distro. */
   dataDir: string;
   worktreeRoot: string;
@@ -6041,15 +6061,15 @@ export function builtInAgentHarnessName(driver: AgentDriverKind): string | null 
 /**
  * The agent row one Machine uses for a harness identity: an available row of the same harness, the
  * Machine's selected installation first, then the lowest agent id, so the same inputs always pick
- * the same row. Rows the Machine's installation choice excludes cannot launch, and restart-only
- * Codex exec rows are never used for new work, so neither is chosen.
+ * the same row. Rows the Machine's installation choice excludes cannot launch, and retired Codex
+ * exec rows never launch, so neither is chosen.
  */
 export function resolveAgentHarnessRow<T extends Pick<AgentDefinition, "id" | "driver" | "context" |
   "available" | "source" | "installation" | "harnessSelectionBlocked">>(agents: readonly T[], identity: AgentHarnessIdentity): T | undefined {
   const key = agentHarnessIdentityKey(identity);
   const rank = (agent: T) => agent.installation?.selection === "selected" ? 0 : 1;
   return agents
-    .filter((agent) => agent.available === true && !isRestartOnlyCodexExec(agent) &&
+    .filter((agent) => agent.available === true && !isRetiredCodexExec(agent) &&
       agent.installation?.selection !== "other" && agent.harnessSelectionBlocked !== true &&
       agentHarnessIdentityKey({
         agentId: agent.id,
@@ -9006,6 +9026,7 @@ export interface SessionNamingCustomModelResultMessage {
 export type RunnerToControlPlane =
   | { type: "media_review_stop_acknowledged"; receipt: import("./media-active-stop.js").MediaActiveStopAcknowledgement }
   | { type: "media_review_never_dispatched"; receipt: import("./media-dispatch-fence.js").MediaNeverDispatchedFence }
+  | import("./campaign-control-launch.js").CampaignLaunchInspectionResult
   | import("./campaign-review-job.js").CampaignReviewJobUpdate
   | RegisterMessage
   | HeartbeatMessage
@@ -9143,8 +9164,6 @@ export interface SessionLaunchSpec {
   agentVersion?: string;
   /** Discovery-verified launch capabilities; the runner re-checks these before emitting CLI flags. */
   capabilities?: AgentCapabilities;
-  /** Why exec is being used instead of the interactive app-server path (telemetry only). */
-  codexExecFallbackReason?: "explicit_exec" | "compatibility_exec";
   /** Display title (so the box store — and other dashboards — can show it). */
   title?: string;
   titleSource?: SessionTitleSource;
@@ -10787,6 +10806,7 @@ export interface GitActionResultMessage {
 
 export type ControlPlaneToRunner =
   | { type: "media_review_stop"; request: import("./media-active-stop.js").MediaActiveStopRequest }
+  | import("./campaign-control-launch.js").CampaignLaunchInspectionMessage
   | import("./campaign-review-job.js").CampaignReviewJobCommand
   | { type: "cancel_campaign_review_job"; jobId: string; nonce: string }
   | RegisteredMessage

@@ -65,6 +65,8 @@ const VOCABULARY = {
     stopping: info("Stopping", { pulse: true }),
     input_required: warning("Awaiting Input", { aliases: ["Input Required"] }),
     idle: neutral("Awaiting Prompt", { aliases: ["Idle"] }),
+    children_working: info("Children Working", { pulse: true }),
+    children_pending: neutral("Child Work Pending"),
     ready_for_review: { label: "Ready for Review", tone: "review" },
     stalled: danger("Stalled"),
     failed: danger("Failed"),

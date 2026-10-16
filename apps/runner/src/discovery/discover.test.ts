@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { AgentDefinition } from "@wollipog/protocol";
+import { CODEX_EXEC_RETIRED_CONFIG_REASON, type AgentDefinition } from "@wollipog/protocol";
 import { capabilitiesFor } from "../catalog.js";
 import {
   applyAgentModelDiscovery,
@@ -261,7 +261,7 @@ const SUPPORTED_APP_SERVER = {
   contractFingerprint: "contract",
 };
 
-test("supported Codex discovery emits app-server primary then stable exec compatibility target", () => {
+test("supported Codex discovery emits only its App Server row (#3259)", () => {
   const native = codexAgentDefinitions(
     cfg({ id: "codex", name: "Codex", driver: "codex", bin: "codex", version: "0.147.0", source: "discovered" }),
     SUPPORTED_APP_SERVER,
@@ -269,19 +269,16 @@ test("supported Codex discovery emits app-server primary then stable exec compat
   );
   assert.deepEqual(native.map((agent) => [agent.id, agent.driver, agent.available]), [
     ["codex", "codex-app-server", true],
-    ["codex-exec", "codex", true],
   ]);
   assert.deepEqual(native[0]!.capabilities?.slashCommands, [{ name: "review", source: "user" }]);
   assert.equal(native[0]!.capabilities?.supportsSteering, true);
-  assert.equal(native[1]!.capabilities?.supportsSteering, undefined);
-  assert.equal(native[1]!.codexAppServer?.status, "supported");
 
   const wsl = codexAgentDefinitions(
     cfg({ id: "codex-wsl-Ubuntu", name: "Codex (WSL: Ubuntu)", driver: "codex", context: { kind: "wsl", distro: "Ubuntu" } }),
     SUPPORTED_APP_SERVER,
     [],
   );
-  assert.deepEqual(wsl.map((agent) => agent.id), ["codex-wsl-Ubuntu", "codex-exec-wsl-Ubuntu"]);
+  assert.deepEqual(wsl.map((agent) => [agent.id, agent.driver]), [["codex-wsl-Ubuntu", "codex-app-server"]]);
 });
 
 test("a Codex replacement during discovery keeps the primary driver and rediscovery guidance", () => {
@@ -305,19 +302,18 @@ test("a Codex replacement during discovery keeps the primary driver and rediscov
   }
 });
 
-test("a signed-out Codex is discovered but not ready, and signing in restores both rows", () => {
+test("a signed-out Codex is discovered but not ready, and signing in restores it", () => {
   const base = cfg({ id: "codex", name: "Codex", driver: "codex", source: "discovered" });
   const signedOut = codexAgentDefinitions({ ...base, authStatus: "unauthenticated" }, SUPPORTED_APP_SERVER, []);
   assert.deepEqual(signedOut.map((agent) => [agent.id, agent.available, agent.authStatus]), [
     ["codex", false, "unauthenticated"],
-    ["codex-exec", false, "unauthenticated"],
   ]);
   // Only a confirmed missing login gates; unknown auth must not disable a working install.
   const unknown = codexAgentDefinitions({ ...base, authStatus: "unknown" }, SUPPORTED_APP_SERVER, []);
-  assert.deepEqual(unknown.map((agent) => agent.available), [true, true]);
+  assert.deepEqual(unknown.map((agent) => agent.available), [true]);
   const signedIn = codexAgentDefinitions({ ...base, authStatus: "authenticated" }, SUPPORTED_APP_SERVER, []);
-  assert.deepEqual(signedIn.map((agent) => agent.available), [true, true]);
-  assert.deepEqual(signedIn.map((agent) => agent.codexBillingSource), ["provider_account", "provider_account"]);
+  assert.deepEqual(signedIn.map((agent) => agent.available), [true]);
+  assert.deepEqual(signedIn.map((agent) => agent.codexBillingSource), ["provider_account"]);
 });
 
 test("a config-declared OPENAI_API_KEY keeps Codex available despite a missing auth file", () => {
@@ -365,7 +361,7 @@ test("a native stat error that is not confirmed absence reports unknown", () => 
   assert.equal(localAuthFileStatus("/p", err("EIO") as never), "unknown");
 });
 
-test("unsupported Codex keeps a disabled primary and an enabled exec row carrying the fallback reason", () => {
+test("unsupported Codex keeps a disabled App Server row with its reason and no exec fallback (#3259)", () => {
   const compatibility = {
     status: "unsupported" as const,
     installedVersion: "0.143.0",
@@ -376,8 +372,8 @@ test("unsupported Codex keeps a disabled primary and an enabled exec row carryin
   assert.equal(agents[0]!.driver, "codex-app-server");
   assert.equal(agents[0]!.available, false);
   assert.equal(agents[0]!.capabilities?.supportsSteering, undefined);
-  assert.equal(agents[1]!.available, true);
-  assert.equal(agents[1]!.codexAppServer?.failure?.message, "Upgrade Codex for app-server.");
+  assert.equal(agents[0]!.codexAppServer?.failure?.message, "Upgrade Codex for app-server.");
+  assert.equal(agents.length, 1);
 });
 
 test("missing Codex produces one explicit unavailable primary and no fake exec fallback", () => {
@@ -1036,7 +1032,6 @@ test("image tool results are live discovery evidence, never configuration (#1492
   const supported = codexAgentDefinitions(codexBase, SUPPORTED_APP_SERVER, []);
   assert.equal(supported[0]!.driver, "codex-app-server");
   assert.equal(supported[0]!.capabilities?.imageToolResults, true);
-  assert.equal(supported[1]!.capabilities?.imageToolResults, undefined);
   const unsupported = codexAgentDefinitions(codexBase, {
     status: "unsupported", installedVersion: "0.143.0", appServerAvailable: true,
     failure: { code: "version_unverified", message: "Old Codex." },
@@ -1086,6 +1081,20 @@ test("a configured wrapper matched only by name never inherits the image tool-re
   assert.equal(codexWrapper!.capabilities?.imageToolResults, undefined);
 });
 
+test("a configured Codex exec agent stays listed but unavailable, naming the config fix (#3259)", () => {
+  const discovered = codexAgentDefinitions(
+    cfg({ id: "codex", name: "Codex", driver: "codex", command: "/usr/bin/codex", bin: "codex", source: "discovered", version: "0.147.0" }),
+    SUPPORTED_APP_SERVER,
+    [],
+  );
+  const merged = mergeAgents([cfg({ id: "my-exec", driver: "codex", command: "codex", args: ["exec"] })], discovered);
+  assert.deepEqual(merged.map((agent) => [agent.id, agent.driver, agent.available]), [
+    ["my-exec", "codex", false],
+    ["codex", "codex-app-server", true],
+  ], "the configured exec entry never swallows discovery's App Server row");
+  assert.equal(merged[0]!.unavailableReason, CODEX_EXEC_RETIRED_CONFIG_REASON);
+});
+
 test("explicit app-server config enriches from the primary without duplicating its launch", () => {
   const config = [cfg({ id: "my-interactive-codex", driver: "codex-app-server", command: "codex" })];
   const discovered = codexAgentDefinitions(
@@ -1096,7 +1105,6 @@ test("explicit app-server config enriches from the primary without duplicating i
   const merged = mergeAgents(config, discovered);
   assert.deepEqual(merged.map((agent) => [agent.id, agent.driver]), [
     ["my-interactive-codex", "codex-app-server"],
-    ["codex-exec", "codex"],
   ]);
   assert.equal(merged[0]!.version, "0.147.0");
   assert.equal(merged[0]!.codexAppServer?.status, "supported");

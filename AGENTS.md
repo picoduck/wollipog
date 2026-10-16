@@ -20,6 +20,9 @@
   `apps/control-plane/src/built-in-skills.generated.ts`.
 - `.agents/skills/` holds contributor-only skills for this repository. Read
   `skills/using-wollipog/SKILL.md` when working with Wollipog's agent-facing tools.
+- For third-party PR reviews and contributor feedback, use
+  `.agents/skills/review-contributor-pr/SKILL.md`, which reuses the installed
+  `cross-model-review` skill and independently verifies findings before publication.
 
 ## Stylesheet Debt Inventory
 

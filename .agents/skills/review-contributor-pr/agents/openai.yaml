@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review Contributor PR"
+  short_description: "Cross-model PR review and verified contributor feedback"
+  default_prompt: "Use $review-contributor-pr to review a contributor PR and post verified feedback."

@@ -56,7 +56,7 @@ for (const viewport of [
       await openFixture(page, viewport.width, viewport.height);
       await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
       const dialog = await openControls(page);
-      await expect(dialog.locator(".section-title")).toHaveText(["Child Session Requests", "Workflow Decisions", "Campaign Behavior"]);
+      await expect(dialog.locator(".section-title")).toHaveText(["Orchestrator Control", "Child Session Requests", "Workflow Decisions", "Campaign Behavior"]);
       const requests = dialog.getByRole("radiogroup", { name: "Child Session Requests" });
       await expect(requests.getByRole("radio", { name: "Questions and Approvals" })).toBeChecked();
       for (const [label, checked] of GATES) {

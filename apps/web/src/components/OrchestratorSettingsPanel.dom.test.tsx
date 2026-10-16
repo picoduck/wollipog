@@ -189,13 +189,113 @@ function fieldError(control: Element): Element | null {
   return node?.classList.contains("field-error") ? node : null;
 }
 
-test("the editor has three groups and no footer row, and a change saves the whole default from the save bar", async () => {
+function controlMode(container: Element, label: "Custom" | "Full Control"): HTMLElement {
+  const group = container.querySelector('[role="radiogroup"][aria-label="Orchestrator Control"]');
+  assert.ok(group, "the mode field is accessible by its visible title");
+  const radio = [...group.querySelectorAll<HTMLElement>('[role="radio"]')]
+    .find((node) => node.textContent?.trim() === label);
+  assert.ok(radio, `the ${label} choice is present`);
+  return radio;
+}
+
+test("the panel header saves only the future preference and clears its control when the editor leaves", async () => {
+  let setView: (view: View) => void = () => undefined;
+  const store = new Store({ name: "settings", section: "orchestrator" }, (view) => setView(view));
+  const initial = { ...settings(), controlModeSupported: true };
+  const { transport, writes } = server(initial);
+  const view = await mount(<SettingsShell store={store} transport={transport} onView={(set) => { setView = set; }} />);
+  try {
+    const head = view.container.querySelector(".settings-panel-head")!;
+    assert.equal(head.querySelectorAll('[role="radiogroup"][aria-label="Orchestrator Control"]').length, 1);
+    assert.equal(view.container.querySelectorAll('[role="radiogroup"][aria-label="Orchestrator Control"]').length, 1);
+    assert.equal(head.querySelector("h2")?.textContent, "Orchestrator");
+    await act(async () => controlMode(head, "Full Control").click());
+    assert.match(view.container.textContent ?? "", /Activation Unavailable/);
+    assert.equal(button(view.container, "Authorize Full Control")?.disabled, true);
+    await act(async () => button(view.container, "Save Defaults")!.click());
+    await settle();
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0]!.defaults.controlMode, "full_control");
+    assert.deepEqual(writes[0]!.defaults.behavior, initial.defaults.behavior);
+    assert.deepEqual(writes[0]!.defaults.delegation, initial.defaults.delegation);
+    assert.deepEqual(writes[0]!.defaults.execution, initial.defaults.execution);
+    await act(async () => setView({ name: "settings", section: "appearance" }));
+    await settle();
+    assertNoDomNode(view.container.querySelector('[role="radiogroup"][aria-label="Orchestrator Control"]'), "leaving the editor clears the published head control");
+    assert.equal(view.container.querySelector(".settings-panel-head h2")?.textContent, "Appearance");
+  } finally { await view.cleanup(); }
+});
+
+test("the panel header keeps unsupported Full previews fenced and Custom defaults saveable", async () => {
+  let setView: (view: View) => void = () => undefined;
+  const store = new Store({ name: "settings", section: "orchestrator" }, (view) => setView(view));
+  const { transport, writes } = server(settings());
+  const view = await mount(<SettingsShell store={store} transport={transport} onView={(set) => { setView = set; }} />);
+  try {
+    const head = view.container.querySelector(".settings-panel-head")!;
+    const limit = view.container.querySelector<HTMLInputElement>("#orchestrator-max-children")!;
+    await act(async () => fireDomEvent.change(limit, { target: { value: "8" } }));
+    await act(async () => controlMode(head, "Full Control").click());
+    const save = button(view.container, "Save Defaults")!;
+    assert.equal(save.getAttribute("aria-disabled"), "true");
+    await act(async () => save.click());
+    assert.equal(writes.length, 0);
+    await act(async () => controlMode(head, "Custom").click());
+    assert.equal(save.getAttribute("aria-disabled"), null);
+    await act(async () => save.click());
+    await settle();
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0]!.defaults.behavior.maximumConcurrentChildren, 8);
+    assert.equal(Object.hasOwn(writes[0]!.defaults, "controlMode"), false);
+  } finally { await view.cleanup(); }
+});
+
+test("Full Control defaults preview blocks saving and never mutates authenticated defaults", async () => {
+  const { transport, writes } = server(settings());
+  const view = await mount(panel(transport));
+  try {
+    const { container } = view;
+    const limit = container.querySelector<HTMLInputElement>("#orchestrator-max-children")!;
+    await act(async () => fireDomEvent.change(limit, { target: { value: "8" } }));
+    const save = button(container, "Save Defaults")!;
+    await act(async () => controlMode(container, "Full Control").click());
+    assert.match(container.textContent ?? "", /Activation Unavailable/);
+    assert.match(container.textContent ?? "", /Defaults apply only to new campaigns/);
+    assert.equal(save.getAttribute("aria-disabled"), "true");
+    await act(async () => save.click());
+    assert.equal(writes.length, 0);
+    await act(async () => controlMode(container, "Custom").click());
+    assert.equal(save.getAttribute("aria-disabled"), null);
+    await act(async () => save.click());
+    await settle();
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0]!.defaults.behavior.maximumConcurrentChildren, 8);
+  } finally { await view.cleanup(); }
+});
+
+test("a supported Full Control default saves only the preference and preserves other defaults", async () => {
+  const initial = { ...settings(), controlModeSupported: true };
+  const { transport, writes } = server(initial);
+  const view = await mount(panel(transport));
+  try {
+    await act(async () => controlMode(view.container, "Full Control").click());
+    assert.match(view.container.textContent ?? "", /Save Defaults records a preferred mode; it grants no campaign authority/);
+    await act(async () => button(view.container, "Save Defaults")!.click());
+    await settle();
+    assert.equal(writes.length, 1);
+    assert.deepEqual(writes[0]!.defaults, { ...initial.defaults, controlMode: "full_control" });
+    assertNoDomNode(view.container.querySelector(".save-bar"));
+  } finally { await view.cleanup(); }
+});
+
+test("the editor has control preparation and three settings groups, and a change saves the whole default from the save bar", async () => {
   const { transport, writes } = server(settings());
   const view = await mount(panel(transport));
   try {
     const { container } = view;
     assert.deepEqual([...container.querySelectorAll("h3")].map((node) => node.textContent),
       ["Children", "Execution Permissions", "Decision Delegation"]);
+    assert.equal(controlMode(container, "Custom").getAttribute("aria-checked"), "true");
     assertNoDomNode(container.querySelector(".save-bar"), "with no changes, no save bar renders");
     assert.doesNotMatch(container.textContent ?? "", /Current Source|Human-Only Decisions|Effective Boundary|Effective Integrations/);
     assertNoDomNode(container.querySelector(".form-error"));

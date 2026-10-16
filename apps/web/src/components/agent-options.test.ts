@@ -2,15 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AgentDefinition } from "@wollipog/protocol";
 import {
-  advancedAgentOptions,
   agentDriverLabel,
   agentMeta,
   agentOptions,
   codexAppServerSetupReason,
   currentAgentSelectionIssue,
-  defaultRunAgentIds,
   firstEnabledAgentId,
-  primaryAgentOptions,
   runnableAgentIds,
   savedAgentSelection,
   sessionAgentLabel,
@@ -40,10 +37,10 @@ test("Pi RPC remains distinct in native and WSL choices", () => {
 
 test("families group and order: Claude Code, then Codex", () => {
   const out = labels([
-    agent({ id: "codex", name: "Codex (native)", driver: "codex" }),
+    agent({ id: "codex", name: "Codex", driver: "codex-app-server" }),
     agent({ id: "claude", name: "Claude Code", driver: "claude-code" }),
   ]);
-  assert.deepEqual(out, ["Claude Code", "Codex — Non-Interactive (codex exec)"]);
+  assert.deepEqual(out, ["Claude Code", "Codex App Server"]);
 });
 
 test("single-variant family drops the redundant 'Native' suffix", () => {
@@ -80,124 +77,72 @@ test("saved installation follows rediscovered id and stays missing if only a reu
   assert.equal(savedAgentSelection(agentOptions([local, system]), "codex").issue, "unbound");
 });
 
-test("Codex variants keep app-server and exec distinct per context, with app-server first", () => {
-  const out = labels([
-    agent({ id: "codex-wsl", name: "Codex (WSL: Ubuntu-24.04)", driver: "codex", context: { kind: "wsl", distro: "Ubuntu-24.04" } }),
-    agent({ id: "codex-app", name: "Codex (app-server)", driver: "codex-app-server" }),
-    agent({ id: "codex-native", name: "Codex (native)", driver: "codex" }),
-  ]);
-  assert.deepEqual(out, [
-    "Codex App Server",
-    "Codex — Non-Interactive (codex exec)",
-    "Codex — Non-Interactive (codex exec) · WSL: Ubuntu-24.04",
-  ]);
-});
-
-test("ordinary and advanced disclosures separate interactive Codex from exec", () => {
-  const opts = agentOptions([
-    agent({ id: "codex", name: "Codex", driver: "codex-app-server" }),
-    agent({ id: "codex-exec", name: "Codex exec", driver: "codex" }),
+test("the retired Codex exec driver is never an option, configured or discovered (#3259)", () => {
+  const agents = [
+    agent({ id: "codex-wsl", name: "Codex (WSL)", driver: "codex", context: { kind: "wsl", distro: "Ubuntu" } }),
+    agent({ id: "codex", name: "Codex", driver: "codex-app-server", source: "discovered" }),
+    agent({ id: "codex-exec", name: "Codex (Non-Interactive)", driver: "codex", source: "discovered" }),
+    agent({ id: "my-exec", name: "My Codex exec", driver: "codex", source: "config" }),
     agent({ id: "claude", name: "Claude", driver: "claude-code" }),
-  ]);
-  assert.deepEqual(primaryAgentOptions(opts).map((option) => option.agent.id), ["claude", "codex"]);
-  assert.deepEqual(advancedAgentOptions(opts).map((option) => option.agent.id), ["codex-exec"]);
+  ];
+  assert.deepEqual(labels(agents), ["Claude Code", "Codex App Server"]);
+  assert.deepEqual(agentOptions(agents, { includeProviderAdapters: true }).map((option) => option.agent.id), ["claude", "codex"]);
+  assert.deepEqual(runnableAgentIds(agents), ["claude", "codex"]);
+  assert.equal(firstEnabledAgentId(agentOptions(agents)), "claude");
 });
 
-test("fresh selection preserves family order while preferring app-server within Codex", () => {
-  const opts = agentOptions([
-    agent({ id: "codex-exec", name: "Codex exec", driver: "codex" }),
-    agent({ id: "codex", name: "Codex", driver: "codex-app-server" }),
-    agent({ id: "claude", name: "Claude", driver: "claude-code" }),
-  ]);
-  assert.equal(firstEnabledAgentId(opts), "claude");
-  assert.deepEqual(
-    opts.filter((option) => option.agent.driver?.startsWith("codex")).map((option) => option.agent.id),
-    ["codex", "codex-exec"],
-  );
-});
-
-test("a disabled primary does not belong to the Advanced disclosure", () => {
-  const opts = agentOptions([
-    agent({ id: "claude", name: "Claude", driver: "claude-code", available: false }),
-    agent({ id: "codex-exec", name: "Codex exec", driver: "codex" }),
-  ]);
+test("a disabled agent is an unavailable saved default", () => {
+  const opts = agentOptions([agent({ id: "claude", name: "Claude", driver: "claude-code", available: false })]);
   assert.equal(savedAgentSelection(opts, "claude").issue, "unavailable");
   assert.equal(currentAgentSelectionIssue(opts, "claude", undefined), "unavailable");
 });
 
 test("saved legacy, unavailable, and missing defaults require an explicit migration", () => {
-  const opts = agentOptions([
+  const agents = [
     agent({ id: "codex", name: "Codex", driver: "codex-app-server" }),
     agent({ id: "codex-exec", name: "Codex exec", driver: "codex" }),
     agent({ id: "missing", name: "Missing", driver: "claude-code", available: false }),
-  ]);
-  assert.deepEqual(savedAgentSelection(opts, undefined), { agentId: "codex", recommendedId: "codex" });
-  assert.deepEqual(savedAgentSelection(opts, "codex-exec"), {
-    agentId: "codex-exec",
+  ];
+  const opts = agentOptions(agents);
+  assert.deepEqual(savedAgentSelection(opts, undefined, agents), { agentId: "codex", recommendedId: "codex" });
+  assert.deepEqual(savedAgentSelection(opts, "codex-exec", agents), {
+    agentId: "",
     issue: "legacy",
     recommendedId: "codex",
   });
-  assert.deepEqual(savedAgentSelection(opts, "missing"), {
+  assert.deepEqual(savedAgentSelection(opts, "missing", agents), {
     agentId: "missing",
     issue: "unavailable",
     recommendedId: "codex",
   });
-  assert.deepEqual(savedAgentSelection(opts, "gone"), {
+  assert.deepEqual(savedAgentSelection(opts, "gone", agents), {
     agentId: "",
     issue: "missing",
     recommendedId: "codex",
   });
 });
 
-test("legacy exec migration targets interactive Codex in the same context, never Claude", () => {
-  const opts = agentOptions([
+test("legacy exec migration targets App Server in the same context, never Claude", () => {
+  const agents = [
     agent({ id: "claude", name: "Claude", driver: "claude-code" }),
     agent({ id: "codex", name: "Codex", driver: "codex-app-server" }),
     agent({ id: "codex-exec", name: "Codex exec", driver: "codex" }),
-    agent({
-      id: "codex-wsl-Ubuntu",
-      name: "Codex WSL",
-      driver: "codex-app-server",
-      context: { kind: "wsl", distro: "Ubuntu" },
-    }),
-    agent({
-      id: "codex-exec-wsl-Ubuntu",
-      name: "Codex exec WSL",
-      driver: "codex",
-      context: { kind: "wsl", distro: "Ubuntu" },
-    }),
-  ]);
-  assert.equal(savedAgentSelection(opts, "codex-exec").recommendedId, "codex");
-  assert.equal(
-    savedAgentSelection(opts, "codex-exec-wsl-Ubuntu").recommendedId,
-    "codex-wsl-Ubuntu",
-  );
+    agent({ id: "codex-wsl-Ubuntu", name: "Codex WSL", driver: "codex-app-server", context: { kind: "wsl", distro: "Ubuntu" } }),
+    agent({ id: "codex-exec-wsl-Ubuntu", name: "Codex exec WSL", driver: "codex", context: { kind: "wsl", distro: "Ubuntu" } }),
+  ];
+  const opts = agentOptions(agents);
+  assert.equal(savedAgentSelection(opts, "codex-exec", agents).recommendedId, "codex");
+  assert.equal(savedAgentSelection(opts, "codex-exec-wsl-Ubuntu", agents).recommendedId, "codex-wsl-Ubuntu");
 });
 
-test("exec-only runners do not nag about an unavailable interactive migration", () => {
-  const opts = agentOptions([
-    agent({ id: "codex-exec", name: "Codex exec", driver: "codex" }),
-  ]);
-  assert.deepEqual(savedAgentSelection(opts, "codex-exec"), {
-    agentId: "codex-exec",
-    recommendedId: "codex-exec",
+test("an exec-only runner's saved exec default selects nothing", () => {
+  const agents = [agent({ id: "codex-exec", name: "Codex exec", driver: "codex" })];
+  assert.deepEqual(savedAgentSelection(agentOptions(agents), "codex-exec", agents), {
+    agentId: "", issue: "legacy", recommendedId: "",
   });
 });
 
-test("discovery's restart-only exec row is never an option; a configured exec agent still is", () => {
-  const agents = [
-    agent({ id: "codex", name: "Codex", driver: "codex-app-server", source: "discovered" }),
-    agent({ id: "codex-exec", name: "Codex (Non-Interactive)", driver: "codex", source: "discovered" }),
-    agent({ id: "my-exec", name: "My Codex exec", driver: "codex", source: "config" }),
-  ];
-  const opts = agentOptions(agents);
-  assert.deepEqual(opts.map((option) => option.agent.id), ["codex", "my-exec"]);
-  assert.deepEqual(advancedAgentOptions(opts).map((option) => option.agent.id), ["my-exec"]);
-  assert.deepEqual(agentOptions(agents, { includeProviderAdapters: true }).map((option) => option.agent.id), ["codex", "my-exec"]);
-  assert.deepEqual(runnableAgentIds(agents), ["codex", "my-exec"]);
-});
-
-test("the restart-only exec row does not hide a working Codex ACP adapter", () => {
+test("the retired exec row does not hide a working Codex ACP adapter", () => {
   const agents = [
     agent({ id: "codex", name: "Codex", driver: "codex-app-server", source: "discovered", available: false }),
     agent({ id: "codex-exec", name: "Codex (Non-Interactive)", driver: "codex", source: "discovered" }),
@@ -233,7 +178,7 @@ test("App Server failing its check leaves no selectable Codex instead of falling
     "a signed-out row keeps agentMeta's codex login instruction");
 });
 
-test("a saved restart-only exec default selects nothing and recommends its App Server sibling", () => {
+test("a saved retired exec default selects nothing and recommends its App Server sibling", () => {
   const installation = { id: "inst-1", path: "/usr/bin/codex", via: "path", selection: "selected" } as const;
   const agents = [
     agent({ id: "claude", name: "Claude", driver: "claude-code" }),
@@ -266,10 +211,10 @@ test("config-authored and discovered names both normalize to the same variant la
 
 test("same variant from two sources collapses to one, preferring the available agent", () => {
   const opts = agentOptions([
-    agent({ id: "codex-cfg", name: "Codex (native)", driver: "codex", available: false }),
-    agent({ id: "codex-disc", name: "Codex", driver: "codex", available: true }),
+    agent({ id: "codex-cfg", name: "Codex (native)", driver: "codex-app-server", available: false }),
+    agent({ id: "codex-disc", name: "Codex", driver: "codex-app-server", available: true }),
   ]);
-  assert.deepEqual(opts.map((o) => o.label), ["Codex — Non-Interactive (codex exec)"]);
+  assert.deepEqual(opts.map((o) => o.label), ["Codex App Server"]);
   assert.equal(opts[0]!.agent.id, "codex-disc"); // the available one wins
 });
 
@@ -313,7 +258,7 @@ test("agentMeta describes where it runs, version, and auth", () => {
     "Runs on WSL · Ubuntu-24.04 · v1.2.3",
   );
   assert.equal(
-    agentMeta(agent({ id: "b", name: "B", driver: "codex", authStatus: "unauthenticated" })),
+    agentMeta(agent({ id: "b", name: "B", driver: "codex-app-server", authStatus: "unauthenticated" })),
     "Not signed in · run `codex login` on the runner host, then rediscover · runs on native host",
   );
 });
@@ -372,7 +317,7 @@ test("agentMeta exposes configured ACP as runner-local stdio", () => {
   assert.match(agentMeta(agent({ id: "acp", name: "ACP", driver: "acp", acpTransport: "stdio" })), /ACP stdio/);
 });
 
-test("agentMeta surfaces interactive readiness and a safe batch fallback reason", () => {
+test("agentMeta surfaces interactive readiness and the App Server failure", () => {
   assert.match(
     agentMeta(agent({
       id: "ready",
@@ -384,16 +329,16 @@ test("agentMeta surfaces interactive readiness and a safe batch fallback reason"
   );
   assert.match(
     agentMeta(agent({
-      id: "fallback",
+      id: "unsupported",
       name: "Codex",
-      driver: "codex",
+      driver: "codex-app-server",
       codexAppServer: {
         status: "unsupported",
         appServerAvailable: false,
-        failure: { code: "app_server_unavailable", message: "This Codex installation does not expose app-server." },
+        failure: { code: "app_server_unavailable", message: "This Codex installation doesn't include App Server." },
       },
     })),
-    /batch fallback: This Codex installation does not expose app-server/,
+    /interactive target unavailable: This Codex installation doesn't include App Server/,
   );
 });
 
@@ -401,18 +346,6 @@ test("agentMeta does not promise image support when capabilities are unknown", (
   const meta = agentMeta(agent({ id: "unknown", name: "Codex", driver: "codex-app-server" }));
   assert.doesNotMatch(meta, /images/);
   assert.match(meta, /Interactive approvals.*resumable conversations/);
-});
-
-test("agentMeta identifies a supported exec row as non-interactive rather than the App Server target", () => {
-  assert.match(
-    agentMeta(agent({
-      id: "codex-exec",
-      name: "Codex exec",
-      driver: "codex",
-      codexAppServer: { status: "supported", appServerAvailable: true, transport: "stdio" },
-    })),
-    /Non-interactive via codex exec.*approval settings are fixed before each turn.*non-interactive fallback ready/,
-  );
 });
 
 test("agentMeta surfaces an explicit not-installed reason", () => {
@@ -450,19 +383,9 @@ test("a newly available native harness removes its now-hidden ACP duplicate from
 test("multi-agent runs exclude unavailable and unverified discovery rows", () => {
   assert.deepEqual(runnableAgentIds([
     agent({ id: "codex", name: "Codex", driver: "codex-app-server", available: false }),
-    agent({ id: "codex-exec", name: "Codex exec", driver: "codex", available: true }),
+    agent({ id: "claude", name: "Claude", driver: "claude-code", available: true }),
     agent({ id: "config", name: "Config agent", driver: "acp", available: undefined }),
-  ]), ["codex-exec"]);
-});
-
-test("multi-agent run defaults exclude advanced exec while keeping it explicitly runnable", () => {
-  const agents = [
-    agent({ id: "codex", name: "Codex", driver: "codex-app-server" }),
-    agent({ id: "codex-exec", name: "Codex exec", driver: "codex" }),
-    agent({ id: "claude", name: "Claude", driver: "claude-code" }),
-  ];
-  assert.deepEqual(defaultRunAgentIds(agents), ["claude", "codex"]);
-  assert.deepEqual(runnableAgentIds(agents), ["claude", "codex", "codex-exec"]);
+  ]), ["claude"]);
 });
 
 test("persisted session labels audit the actual Codex driver", () => {

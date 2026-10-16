@@ -4,7 +4,7 @@ import {
   builtInAgentHarnessName,
   canonicalAgentHarnessIdentity,
   exactAgentHarnessIdentityKey,
-  isRestartOnlyCodexExec,
+  isRetiredCodexExec,
   modelResolutionDrift,
   resolveAgentHarnessRow,
   type AgentCapabilities,
@@ -42,7 +42,8 @@ const EXECUTION_KEYS = ["strictProjectIsolation", "integrationIsolation"] as con
 export function parseOrchestratorDefaults(value: unknown): OrchestratorDefaults | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const input = value as Partial<OrchestratorDefaults>;
-  if (Object.keys(input).some((key) => !["behavior", "delegation", "execution"].includes(key))) return null;
+  if (Object.keys(input).some((key) => !["behavior", "delegation", "execution", "controlMode"].includes(key))) return null;
+  if (input.controlMode !== undefined && input.controlMode !== "custom" && input.controlMode !== "full_control") return null;
   const behavior = input.behavior;
   const delegation = input.delegation;
   const execution = input.execution;
@@ -75,6 +76,7 @@ export function parseOrchestratorDefaults(value: unknown): OrchestratorDefaults 
       !WORKFLOW_DECISION_CATEGORIES.every((category) =>
         decisions[category] === "human" || decisions[category] === "orchestrator")) return null;
   return {
+    ...(input.controlMode === undefined ? {} : { controlMode: input.controlMode }),
     behavior: {
       childHarness,
       childModel: behavior.childModel,
@@ -306,7 +308,7 @@ export class OrchestratorSettings {
     const onlineRunners = this.db.listRunnersForPrincipal(principal).filter((runner) => runner.status === "online");
     const installations = onlineRunners.flatMap((runner) =>
       // A saved child harness on the restart-only exec row still renders through the stale entry below.
-      runner.agents.filter((agent) => agent.available === true && agent.capabilities && !isRestartOnlyCodexExec(agent))
+      runner.agents.filter((agent) => agent.available === true && agent.capabilities && !isRetiredCodexExec(agent))
         .map((agent) => ({
           runnerId: runner.runnerId,
           machineName: machineName(runner),
@@ -385,6 +387,7 @@ export class OrchestratorSettings {
       defaults,
       source: record ? "user_default" : "system_default",
       capabilities: this.capabilities(principal, defaults),
+      controlModeSupported: true,
     };
   }
 
@@ -474,7 +477,7 @@ export function childModelMachines(
     machineName: machineName(runner),
     supported: runner.agents.some((agent) => {
       // A row the Machine's installation choice excludes cannot launch (getAgentLaunch refuses it).
-      if (agent.available !== true || !agent.capabilities || isRestartOnlyCodexExec(agent) ||
+      if (agent.available !== true || !agent.capabilities || isRetiredCodexExec(agent) ||
           agent.installation?.selection === "other" || agent.harnessSelectionBlocked === true) return false;
       const identity = agentHarnessIdentityFor(agent);
       return childHarnessAdmits(policy, identity) &&

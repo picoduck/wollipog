@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { CODEX_EXEC_RETIRED_REASON } from "@wollipog/protocol";
 import type {
   DurableSessionCommand,
   DurableSessionCommandErrorCode,
@@ -494,6 +495,31 @@ test("flush fails a stored durable prompt whose payload digest no longer matches
     assert.match(failed?.error ?? "", /digest does not match/u);
     assert.deepEqual(changed, [SESSION_ID]);
     assert.match(warnings.at(-1) ?? "", /digest does not match/u);
+  } finally {
+    db.close();
+  }
+});
+
+test("a prompt queued for a persisted Codex exec session never reaches the runner (#3259)", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    db.registerRunner({ runnerId: "runner", hostname: "test", os: "linux", version: "test", agents: [], workspaces: [] }, NOW, 107);
+    db.createSession({ id: "legacy-exec", runnerId: "runner", agentId: null, workspaceId: null, title: "Legacy exec",
+      useWorktree: false, driver: "codex", config: {}, now: NOW });
+    db.updateSessionStatus("legacy-exec", "idle", NOW);
+    const sent: unknown[] = [];
+    const hub = {
+      isRunnerOnline: () => true,
+      sendToRunner: (_runnerId: string, message: unknown) => { sent.push(message); return true; },
+      sessionChangedById: () => {},
+    } as unknown as Hub;
+    const outbox = new SessionPromptOutbox(db, hub, { warn: () => {} });
+    const staged = outbox.stage("legacy-exec", "runner",
+      { type: "prompt_session", sessionId: "legacy-exec", text: "continue" } as DurableSessionCommand, NOW);
+    assert.equal(outbox.flush(NOW), 0);
+    assert.deepEqual(sent, [], "an older runner would still resume the retired driver");
+    assert.equal(db.getSessionPromptCommand(staged.commandId)?.state, "failed");
+    assert.equal(db.getSessionPromptCommand(staged.commandId)?.error, CODEX_EXEC_RETIRED_REASON);
   } finally {
     db.close();
   }

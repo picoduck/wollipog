@@ -368,6 +368,10 @@ test("harness labels stay concise alone and distinguish native and multiple WSL 
 
   assert.deepEqual(settings.view("org_personal", true).harnessMachines?.[0]?.harnesses.map((item) => item.name),
     ["Codex App Server"], "a native-only choice stays concise");
+  // An older runner still advertises discovery's exec row as available; it is never offered (#3259).
+  agents = [codex("codex-native", { kind: "native" }), { ...codex("codex-exec", { kind: "native" }), driver: "codex" }];
+  assert.deepEqual(settings.view("org_personal", true).harnessMachines?.[0]?.harnesses.map((item) => item.agentId),
+    ["codex-native"]);
   agents = [codex("codex-wsl-Ubuntu", { kind: "wsl", distro: "Ubuntu" })];
   assert.deepEqual(settings.view("org_personal", true).harnessMachines?.[0]?.harnesses.map((item) => item.name),
     ["Codex App Server"], "a WSL-only choice stays concise");

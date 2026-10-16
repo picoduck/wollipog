@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import {
+  CODEX_EXEC_RETIRED_REASON,
   isDurableSessionCommandErrorCode,
+  isRetiredCodexExec,
   runnerSupportsProtocol,
   type DurableSessionCommand,
   type DurableSessionCommandMessage,
@@ -165,6 +167,22 @@ export class SessionPromptOutbox {
       }
       if (automationCommandDigest(command) !== row.payloadSha256) {
         this.failMalformed(row, "stored durable prompt digest does not match", now);
+        continue;
+      }
+      // A prompt or answer queued for a persisted exec session before the retirement (#3259) never
+      // reaches a runner that may still resume that driver. One already sent may have landed.
+      const target = this.db.getSession(row.sessionId);
+      if (target && isRetiredCodexExec(target)) {
+        this.db.recordSessionPromptCommandReceipt({
+          commandId: row.commandId,
+          runnerId: row.runnerId,
+          sessionId: row.sessionId,
+          state: row.state === "pending" ? "failed" : "uncertain",
+          revision: row.revision + 1,
+          error: CODEX_EXEC_RETIRED_REASON,
+          now,
+        });
+        this.hub.sessionChangedById(row.sessionId);
         continue;
       }
       if (command.type === "prompt_session" && command.campaignContinuation) {

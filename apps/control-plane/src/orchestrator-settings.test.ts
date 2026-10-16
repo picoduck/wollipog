@@ -134,6 +134,26 @@ test("Orchestrator defaults persist per authenticated user and preserve capabili
   }
 });
 
+test("Full Control defaults are a future-launch preference, never campaign authority or child overrides", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    const settings = new OrchestratorSettings(db);
+    const principal = human(db);
+    const saved = { ...defaults(), controlMode: "full_control" as const };
+    assert.equal(settings.view(principal).controlModeSupported, true);
+    assert.deepEqual(settings.update(principal, { defaults: saved }).defaults, saved);
+    assert.equal(settings.view({ ...principal, userId: "other" }).defaults.controlMode, undefined);
+    assert.equal(resolveOrchestratorCampaignPolicy(saved, "user_default").control, undefined,
+      "a Full preference cannot manufacture a campaign boundary");
+    assert.equal(parseOrchestratorOverrides({ controlMode: "full_control" }), null,
+      "agent/child overrides cannot inject even the preference");
+    assert.equal(parseOrchestratorDefaults({ ...saved, controlMode: "unknown" }), null);
+    assert.deepEqual(settings.update(principal, { defaults: defaults() }).defaults, saved,
+      "legacy omission preserves the mode the human previously chose");
+    assert.equal(settings.update(principal, { defaults: { ...saved, controlMode: "custom" } }).defaults.controlMode, "custom");
+  } finally { db.close(); }
+});
+
 test("Orchestrator capabilities keep identical model ids scoped to stable harness identities", () => {
   const db = ControlPlaneDb.open(":memory:");
   try {

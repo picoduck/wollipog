@@ -189,7 +189,8 @@ function sameContext(left: AgentContext, right: AgentContext): boolean {
 function namingHarnesses(agents: AgentDefinition[]): SessionNamingHarnessMachine["harnesses"] {
   const candidates = agents.flatMap((agent) => {
     const driver = agent.driver ?? "acp";
-    if (driver !== "codex" && driver !== "codex-app-server" && driver !== "claude-code") return [];
+    // An older runner may still advertise the retired Codex exec row (#3259); it is never offered.
+    if (driver !== "codex-app-server" && driver !== "claude-code") return [];
     const context = harnessContext(agent);
     if (!validHarnessContext(context)) return [];
     const account = accountForAgent(agent);

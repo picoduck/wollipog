@@ -683,7 +683,7 @@ test("an exhausted structured window schedules an automatic switch only after th
   }
 });
 
-for (const driver of ["claude-code", "codex", "codex-app-server"] as const) {
+for (const driver of ["claude-code", "codex-app-server"] as const) {
   for (const scenario of ["idle", "dormant", "interrupted transfer", "before first turn", "legacy missing history"] as const) {
     test(`${driver} account switching preserves the transcript for resume and switching back (${scenario})`, async () => {
       const root = mkdtempSync(join(tmpdir(), "wollipog-account-switch-transcript-"));

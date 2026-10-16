@@ -187,6 +187,37 @@ test("Full Control cannot delegate persistent grants or Human Required provider 
   } finally { h.db.close(); }
 });
 
+test("Codex permission-profile grants cannot be approved by Custom or Full Control root and children", () => {
+  for (const fullControl of [false, true]) {
+  const h = harness(PROTOCOL_VERSION, "/repos/test", "codex-app-server");
+  try {
+    if (fullControl) assert.ok(h.enable().ok);
+    else assert.ok(h.svc.setParentControl("root", "questions_and_approvals").ok);
+    for (const sessionId of ["root", "child"]) {
+      const driver = new CodexAppServerDriver({ command: "codex", args: [], cwd: "/repos/test", env: {}, context: { kind: "native" }, config: { permissionMode: "on-request" } }, {
+        onEvent: (event) => h.svc.onSessionEvent(sessionId, event), onStderr() {}, onExit() {},
+      });
+      const requests = new Map<string, (params: unknown, id: string) => Promise<unknown>>();
+      (driver as unknown as { registerHandlers(peer: unknown): void }).registerHandlers({
+        onRequest: (method: string, handler: (params: unknown, id: string) => Promise<unknown>) => requests.set(method, handler),
+        onNotification() {},
+      });
+      void requests.get("item/permissions/requestApproval")!({ permissions: { network: true } }, `grant-${sessionId}`);
+      const session = h.db.getSession(sessionId)!;
+      assert.equal(session.pendingApproval!.options[0]!.name, "Allow for Session");
+      assert.equal(session.pendingApproval!.options[0]!.kind, "allow_always");
+      if (fullControl) assert.equal(session.pendingRequestOwners!.human, 1);
+      else if (sessionId === "child") assert.equal(session.pendingRequestOwners!.orchestrator, 1, "Custom may delegate rejection, never a persistent grant");
+      else assert.equal(session.pendingRequestOwners, undefined, "Custom root requests stay in the direct human request card");
+      assert.equal(h.svc.resolveDescendantRequest("root", sessionId, session.pendingApproval!.occurrenceId!,
+        { action: "approve", optionId: "allow" }, () => true).ok, false);
+      assert.equal(h.sent.length, 0, "session grants never get standing root or delegated child admission");
+      driver.dispose();
+    }
+  } finally { h.db.close(); }
+  }
+});
+
 test("trusted in-bound auth source inspection has the same owner in every server projection", () => {
   const h = harness();
   try {
