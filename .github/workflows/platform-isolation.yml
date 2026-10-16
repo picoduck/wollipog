@@ -275,6 +275,12 @@ jobs:
             $uid = ((wsl.exe -d Ubuntu-24.04 --exec id -u | Out-String) -replace "`0", "").Trim()
             if ($LASTEXITCODE -ne 0 -or $uid -eq "0" -or $uid -notmatch '^[0-9]+$') { throw "WSL default user is not non-root: $uid" }
 
+            # #1503: Fresh /proc hides binfmt control files without removing the kernel handler.
+            # Reproduced on windows-2025-vs2026 20261007.264.1 with baseline PE interop enabled.
+            # The transport assertion also runs when a hosted image lacks baseline PE interop.
+            # Exercise the installed production launcher, not a hand-maintained bwrap argument copy.
+            # Its regression requires Linux smoke/Unix sockets to work, VM sockets to be denied,
+            # and cmd.exe /d /c exit 0 to fail with both inherited and denied networking.
             $env:WOLLIPOG_WSL_FAIL_CLOSED_DISTRO = "Ubuntu-24.04"
             $savedBoundaryPreference = $ErrorActionPreference
             $ErrorActionPreference = "Continue"
@@ -310,41 +316,6 @@ jobs:
             if ($safeWslOutput -notmatch '(?m)^# pass 1\r?$' -or $safeWslOutput -notmatch '(?m)^# skipped 0\r?$') {
               throw "safe Direct WSL Agent Control integration test did not execute exactly once"
             }
-
-            $cmdPath = ((wsl.exe -d Ubuntu-24.04 --exec sh -c 'command -v cmd.exe' | Out-String) -replace "`0", "").Trim()
-            if ($LASTEXITCODE -ne 0 -or -not $cmdPath.StartsWith('/')) { throw "WSL Windows interop probe could not resolve cmd.exe: $cmdPath" }
-            $savedPreference = $ErrorActionPreference
-            $ErrorActionPreference = "Continue"
-            # Hosted Windows images differ: some expose WSL's PE binfmt handler and some resolve
-            # cmd.exe but reject it even outside bwrap. Record that host capability without making
-            # it a prerequisite. The security invariant below is that the fresh provider /proc
-            # never gains automatic PE/binfmt interop in either case. The read-only distro root
-            # still contains /init, so this check deliberately makes no broader interop claim.
-            $interopRegistration = ((wsl.exe -d Ubuntu-24.04 --exec sh -c 'if test -r /proc/sys/fs/binfmt_misc/WSLInterop; then printf present; else printf absent; fi' | Out-String) -replace "`0", "").Trim()
-            $registrationExit = $LASTEXITCODE
-            if ($registrationExit -ne 0) { throw "WSLInterop registration probe failed outside bwrap" }
-            $outsideOutput = (wsl.exe -d Ubuntu-24.04 -- cmd.exe /d /c exit 0 2>&1 | Out-String) -replace "`0", ""
-            $outsideExit = $LASTEXITCODE
-            $outsideInterop = $outsideExit -eq 0
-            if (-not $outsideInterop -and $outsideOutput -notmatch 'Exec format error') {
-              throw "WSL Windows interop probe failed unexpectedly outside bwrap: $outsideOutput"
-            }
-            if (-not $outsideInterop) {
-              Write-Host "::notice::Hosted WSL baseline lacks PE interop; verifying bwrap does not add it."
-            }
-            Write-Host "WSLInterop registration outside bwrap: $interopRegistration; cmd.exe executable outside bwrap: $outsideInterop"
-
-            wsl.exe -d Ubuntu-24.04 --exec bwrap --die-with-parent --new-session --unshare-pid --unshare-ipc --unshare-uts --ro-bind / / --dev /dev --dir /dev/shm --proc /proc --tmpfs /tmp --chdir / -- /bin/true
-            if ($LASTEXITCODE -ne 0) { throw "production-shaped bwrap smoke test failed" }
-            wsl.exe -d Ubuntu-24.04 --exec bwrap --die-with-parent --new-session --unshare-pid --unshare-ipc --unshare-uts --ro-bind / / --dev /dev --dir /dev/shm --proc /proc --tmpfs /tmp --chdir / -- sh -c 'test ! -e /proc/sys/fs/binfmt_misc/WSLInterop'
-            if ($LASTEXITCODE -ne 0) { throw "fresh bwrap /proc unexpectedly exposed the WSLInterop binfmt registration" }
-            Write-Host "WSLInterop registration inside bwrap: absent"
-
-            $blockedOutput = (wsl.exe -d Ubuntu-24.04 --exec bwrap --die-with-parent --new-session --unshare-pid --unshare-ipc --unshare-uts --ro-bind / / --dev /dev --dir /dev/shm --proc /proc --tmpfs /tmp --chdir / -- $cmdPath /d /c exit 0 2>&1 | Out-String) -replace "`0", ""
-            $blockedExit = $LASTEXITCODE
-            $ErrorActionPreference = $savedPreference
-            if ($blockedExit -eq 0) { throw "bwrap unexpectedly preserved automatic PE/binfmt interop: $blockedOutput" }
-            Write-Host "PE launch remained fail-closed inside bwrap (exit $blockedExit)."
           }
           finally {
             wsl.exe --unregister Ubuntu-24.04

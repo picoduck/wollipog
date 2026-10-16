@@ -247,7 +247,11 @@ and provider-HOME descriptors through exec and leases HOME for the sandbox lifet
 separate fixed-command WSL relay's standard pipes carry only authenticated, bounded Agent Control
 frames to the runner-side
 closed CLI/MCP implementation. The provider never receives a Windows executable path or a general
-execution route; its bwrap namespace still has no WSL PE/binfmt registration. Credential
+execution route. The native launcher denies the VM socket transport required by WSL2 interop,
+masks the interop endpoints, and removes `WSL_INTEROP` for the provider and its descendants. A fresh
+`/proc` only hides the binfmt control file; it does not disable the registered kernel handler (#1503).
+Provider-side VM sockets, io_uring, and non-native syscall ABIs are unavailable; ordinary Unix and
+TCP sockets retain the existing network policy. Credential
 acknowledgement precedes launch, restart rotates the token, and terminal lifecycle removes it.
 Direct WSL provider mode, conversation fork/state adoption, Native TUI, and generic ACP remain unavailable. Container and cloud targets deliberately
 advertise `secrets: none` and mount only

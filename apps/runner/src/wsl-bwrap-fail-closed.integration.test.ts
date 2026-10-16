@@ -4,7 +4,6 @@ import { test } from "node:test";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { runContextCommand } from "./context-command.js";
 import {
-  WSL_BWRAP_LAUNCHER_PATH,
   buildWslBwrapLaunchArgs,
   installWslBwrapLauncher,
   prepareWslBwrapIsolation,
@@ -67,39 +66,61 @@ test("real WSL Direct launcher rejects aliases and Windows PE execution", {
       bwrap: "/usr/bin/bwrap", home: root, cwd: root,
     });
     // Keep the Windows-side stdin pipe open until exit, as the real provider transport does.
-    const launch = (command: string, args: string[], trace = false) => new Promise<{
+    const wsl = (args: string[]) => new Promise<{
       code: number; stdout: string; stderr: string;
     }>((resolve, reject) => {
-      const outer = buildWslBwrapLaunchArgs({
-        distro: distro!, bwrap: "/usr/bin/bwrap", preparation, network: "inherit",
-        pidfile: `${root}/provider.pgid`, command, args,
-      });
-      if (trace) outer.splice(outer.indexOf(WSL_BWRAP_LAUNCHER_PATH), 0,
-        "/usr/bin/strace", "-f", "-e", "trace=execve,execveat,socket,connect", "-o", `${root}/interop.trace`);
-      execFile("wsl.exe", outer, { timeout: 20_000, windowsHide: true }, (error, stdout, stderr) => {
+      execFile("wsl.exe", args, { timeout: 20_000, windowsHide: true }, (error, stdout, stderr) => {
         if (!error) resolve({ code: 0, stdout, stderr });
         else if (typeof error.code === "number") resolve({ code: error.code, stdout, stderr });
         else reject(error);
       });
     });
-    const smoke = await launch("/bin/true", []);
-    assert.equal(smoke.code, 0, smoke.stderr);
     const cmd = (await runContextCommand(context, "sh", ["-c", "command -v cmd.exe"], {
       cwd: "/", timeoutMs: 5_000,
     })).stdout.trim();
     assert.match(cmd, /^\//u);
-    // [DEBUG-1503] Temporary CI-only diagnostics of the existing benign probe's runtime route.
-    await new Promise<void>((resolve, reject) => execFile("wsl.exe", ["-d", distro!, "-u", "root",
-      "--exec", "/bin/sh", "-c", "apt-get install -y strace"],
-    { timeout: 60_000, windowsHide: true }, (error) => error ? reject(error) : resolve()));
-    console.log("[DEBUG-1503]", (await runContextCommand(context, "sh", ["-c",
-      'uname -r; cat /proc/sys/fs/binfmt_misc/WSLInterop; if test -S "$WSL_INTEROP"; then printf "interop socket present\\n"; fi',
-    ], { cwd: "/", timeoutMs: 5_000 })).stdout);
-    const pe = await launch(cmd, ["/d", "/c", "exit", "0"], true);
-    console.log("[DEBUG-1503]", (await runContextCommand(context, "cat", [`${root}/interop.trace`], {
-      cwd: "/", timeoutMs: 5_000,
-    })).stdout);
-    assert.notEqual(pe.code, 0, `WSL Direct native launcher must reject Windows PE execution: ${pe.stdout}${pe.stderr}`);
+    const registration = (await runContextCommand(context, "sh", ["-c",
+      "if test -r /proc/sys/fs/binfmt_misc/WSLInterop; then printf present; else printf absent; fi",
+    ], { cwd: "/", timeoutMs: 5_000 })).stdout.trim();
+    const outside = await wsl(["-d", distro!, "--", "cmd.exe", "/d", "/c", "exit", "0"]);
+    if (outside.code !== 0) assert.match(`${outside.stdout}${outside.stderr}`, /Exec format error/u);
+    console.log(`WSLInterop control file outside: ${registration}; PE executable outside: ${outside.code === 0}`);
+
+    // Assert the transport restriction even on hosted images whose baseline PE execution is off.
+    // This fixture performs no connection or process-creation request.
+    const transportProbe = `${root}/transport-probe`;
+    await runContextCommand(context, "/usr/bin/cc", ["-x", "c", "-o", transportProbe, "-"], {
+      cwd: root, timeoutMs: 15_000, stdin: `#include <errno.h>
+#include <sys/socket.h>
+#include <unistd.h>
+int main(void) {
+  int fd = socket(AF_VSOCK, SOCK_STREAM, 0);
+  if (fd != -1 || errno != EPERM) return 1;
+  int pair[2];
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) != 0) return 2;
+  close(pair[0]); close(pair[1]);
+  return 0;
+}
+`,
+    });
+    for (const network of ["inherit", "deny"] as const) {
+      const launch = (command: string, args: string[]) => wsl(buildWslBwrapLaunchArgs({
+        distro: distro!, bwrap: "/usr/bin/bwrap", preparation, network,
+        pidfile: `${root}/provider.pgid`, command, args,
+      }));
+      const smoke = await launch("/bin/true", []);
+      assert.equal(smoke.code, 0, `native launcher smoke (${network}): ${smoke.stderr}`);
+      const visibility = await launch("/bin/sh", ["-ec",
+        'test ! -e /proc/sys/fs/binfmt_misc/WSLInterop; test -z "${WSL_INTEROP+x}"; test ! -s /init',
+      ]);
+      assert.equal(visibility.code, 0, `interop masks (${network}): ${visibility.stderr}`);
+      const transport = await launch(transportProbe, []);
+      assert.equal(transport.code, 0, `VM socket must be denied while Unix sockets work (${network}): ${transport.stderr}`);
+      const pe = await launch(cmd, ["/d", "/c", "exit", "0"]);
+      assert.notEqual(pe.code, 0, `WSL Direct native launcher must reject Windows PE execution (${network}): ${pe.stdout}${pe.stderr}`);
+      assert.doesNotMatch(`${pe.stdout}${pe.stderr}`, /CMD\.EXE was started/u);
+      console.log(`PE launch remained fail-closed through the native WSL launcher (${network}, exit ${pe.code}).`);
+    }
   } finally {
     await runContextCommand(context, "rm", ["-rf", "--", root], {
       cwd: "/", timeoutMs: 5_000,

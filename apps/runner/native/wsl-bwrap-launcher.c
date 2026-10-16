@@ -3,16 +3,21 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <linux/audit.h>
+#include <linux/filter.h>
 #include <linux/openat2.h>
+#include <linux/seccomp.h>
 #include <linux/stat.h>
 #include <poll.h>
 #include <signal.h>
+#include <stddef.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
 #include <sys/prctl.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
@@ -45,6 +50,52 @@ static volatile sig_atomic_t child_group = -1;
 static void fail(const char *message) {
   fprintf(stderr, "wsl-bwrap-launcher: %s\n", message);
   exit(125);
+}
+
+/* WSL2 interop needs a VM socket, including when the kernel's binfmt handler is hidden by a
+ * fresh /proc. Deny that transport in the kernel for bwrap and every provider descendant. The
+ * separate runner-owned relay is deliberately outside this filter. */
+static void restrict_windows_interop(void) {
+#if defined(__x86_64__)
+  const unsigned int audit_arch = AUDIT_ARCH_X86_64;
+#elif defined(__aarch64__)
+  const unsigned int audit_arch = AUDIT_ARCH_AARCH64;
+#else
+#error "WSL interop filtering requires an audited x86-64 or AArch64 syscall ABI"
+#endif
+  struct sock_filter instructions[] = {
+    BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
+    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, audit_arch, 1, 0),
+    BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
+    BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+#if defined(__x86_64__)
+    /* x32 shares the x86-64 audit architecture but uses a different syscall ABI. */
+    BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, 0x40000000U, 0, 1),
+    BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | ENOSYS),
+#endif
+    /* io_uring can create sockets without entering the socket syscall filter. */
+    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_io_uring_setup, 0, 1),
+    BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_io_uring_enter, 0, 1),
+    BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_io_uring_register, 0, 1),
+    BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_socket, 2, 0),
+    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_socketpair, 1, 0),
+    BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+    BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])),
+    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AF_VSOCK, 0, 1),
+    BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+    BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+  };
+  struct sock_fprog program = {
+    .len = (unsigned short)(sizeof(instructions) / sizeof(instructions[0])),
+    .filter = instructions,
+  };
+  if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 ||
+      prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program, 0, 0) != 0) {
+    fail("cannot enforce the WSL interop transport restriction");
+  }
 }
 
 static void fail_path(const char *message, const char *path) {
@@ -459,6 +510,7 @@ static int launch_main(int argc, char **argv) {
   if (child < 0) fail("cannot fork bwrap");
   if (child == 0) {
     if (setsid() < 0) _exit(125);
+    restrict_windows_interop();
     /* F_DUPFD returns a distinct inherited descriptor with FD_CLOEXEC clear. Do not assume WSL
      * gives this process a small inherited descriptor table. */
     int bind_fds[MAX_BINDS];
@@ -489,6 +541,12 @@ static int launch_main(int argc, char **argv) {
       args[n++] = fd_text(bind_fds[i]); args[n++] = (char *)binds[i].target;
     }
     args[n++] = (char *)"--bind-fd"; args[n++] = fd_text(cwd_bind_fd); args[n++] = (char *)cwd;
+    /* Apply masks after all caller-requested mounts. They are defence in depth; the transport
+     * filter above also covers a pinned binfmt interpreter or a copied Linux interop client. */
+    args[n++] = (char *)"--ro-bind"; args[n++] = (char *)"/dev/null"; args[n++] = (char *)"/init";
+    args[n++] = (char *)"--tmpfs"; args[n++] = (char *)"/run/WSL";
+    args[n++] = (char *)"--remount-ro"; args[n++] = (char *)"/run/WSL";
+    args[n++] = (char *)"--unsetenv"; args[n++] = (char *)"WSL_INTEROP";
     args[n++] = (char *)"--chdir"; args[n++] = (char *)cwd; args[n++] = (char *)"--";
     for (int i = command_at; i < argc; i++) args[n++] = argv[i];
     args[n] = NULL;
@@ -584,6 +642,9 @@ static int self_test_main(int argc) {
   int root = open_directory("/", false);
   if (root < 0) fail("openat2 self-test failed");
   close(root);
+  restrict_windows_interop();
+  if (socket(AF_VSOCK, SOCK_STREAM, 0) != -1 || errno != EPERM)
+    fail("WSL interop transport self-test failed");
   puts("wsl-bwrap-launcher-v1");
   return 0;
 }
