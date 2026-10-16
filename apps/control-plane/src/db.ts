@@ -1477,6 +1477,16 @@ CREATE INDEX IF NOT EXISTS idx_session_events_parent_tool_use_id
   WHERE json_type(payload,'$.parentToolUseId')='text';
 -- Transcript search rows whose row id is not their event's (#2777): rows indexed before keyed
 -- search rows, by an older build, or after a row id collision. Retention deletes through it.
+-- Distinct tool calls whose events archived-history retention removed (#2777). A campaign allowance
+-- granted later records them as its own, so a replayed history never counts them twice and a lost
+-- one never drops them. A replacement history brings them back, so it clears them.
+CREATE TABLE IF NOT EXISTS session_pruned_tool_calls (
+  session_id   TEXT NOT NULL,
+  tool_call_id TEXT NOT NULL,
+  PRIMARY KEY (session_id, tool_call_id),
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+) WITHOUT ROWID;
+
 CREATE TABLE IF NOT EXISTS session_events_fts_legacy_rowids (
   event_id  INTEGER PRIMARY KEY REFERENCES session_events(id) ON DELETE CASCADE,
   fts_rowid INTEGER NOT NULL
@@ -5160,7 +5170,8 @@ const FOLD_LAST_EVENT_AT = `last_event_at=CASE WHEN COALESCE(message_count,0)=0
  * tool calls return with it, so the pruned ones stop counting separately. */
 const CLEAR_HISTORY_PRUNE_SQL = `history_pruned_at=NULL, history_pruned_retention_days=NULL,
   history_pruned_events=0, history_pruned_tool_calls=0, history_prune_through_seq=NULL,
-  history_prune_run_events=NULL, history_prune_run_days=NULL, history_prune_run_seq=NULL`;
+  history_prune_run_events=NULL, history_prune_run_days=NULL, history_prune_run_seq=NULL,
+  history_prune_run_response_seq=NULL`;
 
 function sessionHistoryRetentionView(
   row: Pick<SessionRow, "archived" | "archived_at" | "history_pruned_at" | "history_pruned_retention_days" | "history_pruned_events">,
@@ -6630,11 +6641,13 @@ export class ControlPlaneDb {
       "history_pruned_tool_calls INTEGER NOT NULL DEFAULT 0",
       // Highest seq a prune has covered. New events are numbered above it, so no seq is reused.
       "history_prune_through_seq INTEGER",
-      // Events removed so far by a prune still in progress, its threshold, and the seq it has read
-      // through: every row at or below that seq is kept. NULL when no prune is in progress.
+      // Events removed so far by a prune still in progress, its threshold, the seq it has read
+      // through (every row at or below it is kept), and the seq of the final response it keeps.
+      // NULL when no prune is in progress.
       "history_prune_run_events INTEGER",
       "history_prune_run_days INTEGER",
       "history_prune_run_seq INTEGER",
+      "history_prune_run_response_seq INTEGER",
     ]) {
       try {
         db.exec(`ALTER TABLE sessions ADD COLUMN ${col}`);
@@ -16120,6 +16133,7 @@ export class ControlPlaneDb {
         attachments.length ? attachments.reduce((latest, attachment) => Math.max(latest, attachment.ts), 0) : null,
         attachments.length,
         id);
+      this.stmt("DELETE FROM session_pruned_tool_calls WHERE session_id=?").run(id);
     } else if (historyEpoch !== undefined) {
       this.stmt(
         "UPDATE sessions SET runner_history_epoch=?, runner_history_tail_seq=? WHERE id=?",
@@ -16302,6 +16316,7 @@ export class ControlPlaneDb {
             runner_registration_snapshot_fingerprint=NULL,
             event_epoch=event_epoch+1, retained_attachment_through_seq=0, ${CLEAR_HISTORY_PRUNE_SQL} WHERE id=?`,
       ).run(id);
+      this.stmt("DELETE FROM session_pruned_tool_calls WHERE session_id=?").run(id);
       this.db.exec("COMMIT");
       this.settleIngestRollback(id);
       this.collectWorkflowArtifactBlobs();
@@ -16452,7 +16467,9 @@ export class ControlPlaneDb {
 
   /** Locate the session's final response: its last top-level agent message, grouped as the
    * transcript groups it — by provider message id, or else as the contiguous untagged run. */
-  private historyPruneFinalResponse(sessionId: string): { messageId: string | null; afterSeq: number; lastSeq: number } {
+  private historyPruneFinalResponse(sessionId: string): {
+    messageId: string | null; afterSeq: number; lastSeq: number; seq: number;
+  } {
     const last = this.stmt(
       `SELECT seq, json_extract(payload, '$.messageId') AS message_id,
               json_type(payload, '$.messageId') AS message_id_type
@@ -16460,8 +16477,8 @@ export class ControlPlaneDb {
         WHERE session_id=? AND kind='agent_message' AND json_type(payload, '$.parentToolUseId') IS NULL
         ORDER BY seq DESC LIMIT 1`,
     ).get(sessionId) as { seq: number; message_id: string | null; message_id_type: string | null } | undefined;
-    if (!last) return { messageId: null, afterSeq: 0, lastSeq: 0 };
-    if (last.message_id_type === "text") return { messageId: last.message_id, afterSeq: 0, lastSeq: 0 };
+    if (!last) return { messageId: null, afterSeq: 0, lastSeq: 0, seq: 0 };
+    if (last.message_id_type === "text") return { messageId: last.message_id, afterSeq: 0, lastSeq: 0, seq: last.seq };
     const boundary = this.stmt(
       `SELECT seq FROM session_events
         WHERE session_id=? AND seq<? AND kind!='token_usage' AND NOT (
@@ -16469,7 +16486,7 @@ export class ControlPlaneDb {
           AND json_type(payload, '$.messageId') IS NULL AND COALESCE(json_extract(payload, '$.final'), 0)=0)
         ORDER BY seq DESC LIMIT 1`,
     ).get(sessionId, last.seq) as { seq: number } | undefined;
-    return { messageId: null, afterSeq: boundary?.seq ?? 0, lastSeq: last.seq };
+    return { messageId: null, afterSeq: boundary?.seq ?? 0, lastSeq: last.seq, seq: last.seq };
   }
 
   /**
@@ -16508,29 +16525,35 @@ export class ControlPlaneDb {
   }): { removed: number; searchLength: number } | { complete: boolean } {
     const session = this.stmt(
       `SELECT s.archived, s.archived_at, s.status, s.history_prune_run_events, s.history_prune_run_seq,
+              s.history_prune_run_response_seq,
               EXISTS (SELECT 1 FROM session_stop_intents intent WHERE intent.session_id=s.id) AS stopping
          FROM sessions s WHERE s.id=?`,
     ).get(sessionId) as {
-      archived: number; archived_at: number | null; status: string;
-      history_prune_run_events: number | null; history_prune_run_seq: number | null; stopping: number;
+      archived: number; archived_at: number | null; status: string; history_prune_run_events: number | null;
+      history_prune_run_seq: number | null; history_prune_run_response_seq: number | null; stopping: number;
     } | undefined;
     const eligible = session !== undefined && session.archived === 1 && session.archived_at !== null &&
       session.archived_at <= input.cutoff && TERMINAL_STATUSES.includes(session.status as SessionStatus) &&
       session.stopping === 0;
     if (!eligible) return { complete: false };
-    if (session.history_prune_run_events === null) {
-      this.stmt("UPDATE sessions SET history_prune_run_events=0, history_prune_run_days=?, history_prune_run_seq=0 WHERE id=?")
-        .run(input.retentionDays, sessionId);
-    }
     // Each batch tests the keep rule on at most one window of rows past where its run has read
     // through, so a long kept stretch costs one window per batch instead of being read again by
-    // every batch. A run reads a session once: a final response that moves mid-run keeps the earlier
-    // one too, and the next run removes it.
-    const after = session.history_prune_run_seq ?? 0;
+    // every batch. A final response that moved since (delayed history can add a later one) sends
+    // the run back to the first row, so the response it replaced, already read past, goes too.
+    const response = this.historyPruneFinalResponse(sessionId);
+    const restart = session.history_prune_run_events === null || session.history_prune_run_response_seq !== response.seq;
+    if (session.history_prune_run_events === null) {
+      this.stmt("UPDATE sessions SET history_prune_run_events=0, history_prune_run_days=? WHERE id=?")
+        .run(input.retentionDays, sessionId);
+    }
+    if (restart) {
+      this.stmt("UPDATE sessions SET history_prune_run_seq=0, history_prune_run_response_seq=? WHERE id=?")
+        .run(response.seq, sessionId);
+    }
+    const after = restart ? 0 : session.history_prune_run_seq ?? 0;
     const windowEnd = (this.stmt(
       "SELECT seq FROM session_events WHERE session_id=? AND seq>? ORDER BY seq LIMIT 1 OFFSET ?",
     ).get(sessionId, after, HISTORY_PRUNE_SCAN_ROWS - 1) as { seq: number } | undefined)?.seq ?? null;
-    const response = this.historyPruneFinalResponse(sessionId);
     const candidates = this.stmt(
       `SELECT e.id, e.seq, length(e.payload) AS bytes FROM session_events e
         WHERE e.session_id=? AND e.seq>? AND e.seq<=? AND NOT ${HISTORY_PRUNE_KEEP_SQL}
@@ -16564,6 +16587,12 @@ export class ControlPlaneDb {
     const readThrough = windowEnd !== null && events.length === candidates.length && candidates.length < input.maxEvents
       ? windowEnd : throughSeq;
     const toolCallsBefore = this.storedToolCalls(sessionId);
+    this.stmt(
+      `INSERT OR IGNORE INTO session_pruned_tool_calls (session_id, tool_call_id)
+       SELECT session_id, json_extract(payload, '$.toolCallId') FROM session_events
+        WHERE id IN (${events.map(() => "?").join(",")}) AND kind='tool_call'
+          AND json_extract(payload, '$.toolCallId') IS NOT NULL`,
+    ).run(...events);
     for (const rowid of searchRows) this.stmt("DELETE FROM session_events_fts WHERE rowid=?").run(rowid);
     this.stmt(`DELETE FROM session_events WHERE id IN (${events.map(() => "?").join(",")})`).run(...events);
     this.stmt(
@@ -16601,13 +16630,13 @@ export class ControlPlaneDb {
       this.stmt(
         `UPDATE sessions SET history_pruned_at=?, history_pruned_retention_days=history_prune_run_days,
             history_pruned_events=history_pruned_events+?, history_prune_run_events=NULL, history_prune_run_days=NULL,
-            history_prune_run_seq=NULL
+            history_prune_run_seq=NULL, history_prune_run_response_seq=NULL
           WHERE id=?`,
       ).run(now, runEvents, sessionId);
       this.advanceEventEpochInTransaction(sessionId);
     } else {
-      this.stmt("UPDATE sessions SET history_prune_run_events=NULL, history_prune_run_days=NULL, history_prune_run_seq=NULL WHERE id=?")
-        .run(sessionId);
+      this.stmt(`UPDATE sessions SET history_prune_run_events=NULL, history_prune_run_days=NULL, history_prune_run_seq=NULL,
+          history_prune_run_response_seq=NULL WHERE id=?`).run(sessionId);
     }
     return { prunedEvents: runEvents, removedArtifacts };
   }

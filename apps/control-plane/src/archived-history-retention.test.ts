@@ -367,6 +367,32 @@ test("a campaign root pruned before its allowance keeps counting its pruned tool
   }
 });
 
+for (const replay of ["the same calls", "nothing"] as const) {
+  test(`a campaign charges pruned tool calls once when a replaced history brings back ${replay}`, () => {
+    const db = openDb();
+    try {
+      createSession(db, "root");
+      const tool = (id: string, at: number) =>
+        db.appendEvent("root", { kind: "tool_call", toolCallId: id, title: "Read", status: "completed" }, at);
+      for (const id of ["one", "two", "three"]) tool(id, T0 + 1);
+      archive(db, "root", T0 + 2);
+      const input = { cutoff: T0 + 100, retentionDays: 7, now: T0 + 100, maxEvents: 500, maxPayloadBytes: 2 * 1024 * 1024,
+        maxSearchLength: 64 * 1024 };
+      while (!db.pruneArchivedHistoryBatch("root", input).finished) { /* batches */ }
+      db.setSessionArchived("root", false, T0 + 101);
+      db.campaignBudgets.authorize("root", { version: 1, accounting: "managed_workers_only", unpriced: "stop", toolCalls: 100,
+        concurrency: 1 });
+      db.clearSessionEvents("root");
+      if (replay === "the same calls") for (const id of ["one", "two", "three"]) tool(id, T0 + 102);
+      assert.equal(db.campaignBudgets.view("root")!.actual.toolCalls, 3, "a replayed call was already charged");
+      tool("four", T0 + 103);
+      assert.equal(db.campaignBudgets.view("root")!.actual.toolCalls, 4, "a new call adds to the pruned ones");
+    } finally {
+      db.close();
+    }
+  });
+}
+
 test("prunes visit only archived, settled sessions past the threshold", async () => {
   const db = openDb();
   const clock = new Clock();
@@ -451,6 +477,28 @@ test("a long kept stretch is read one window per batch, and every removable row 
     assert.ok(batches <= Math.ceil(2_512 / 1_024) + Math.ceil(11 / 2) + 6, `${batches} batches`);
     assert.equal((db.raw().prepare("SELECT history_prune_run_seq AS v FROM sessions WHERE id='kept'").get() as { v: number | null }).v,
       null, "closing the run clears where it read through");
+  } finally {
+    db.close();
+  }
+});
+
+test("a final response that arrives after a run read past the earlier one sends the run back, so the earlier one goes", () => {
+  const db = openDb();
+  try {
+    createSession(db, "moved");
+    db.appendEvent("moved", { kind: "agent_message", text: "earlier response", messageId: "A" }, T0 + 1);
+    for (let index = 0; index < 1_023; index += 1) db.appendEvent("moved", { kind: "user_message", text: `prompt ${index}` }, T0 + 1);
+    archive(db, "moved", T0 + 2);
+    const input = { cutoff: T0 + 100, retentionDays: 7, now: T0 + 100, maxEvents: 500, maxPayloadBytes: 2 * 1024 * 1024,
+      maxSearchLength: 64 * 1024 };
+    assert.equal(db.pruneArchivedHistoryBatch("moved", input).finished, false, "the first window holds only kept rows");
+    // Delayed history adds a later response while the run is open.
+    db.appendEvent("moved", { kind: "agent_message", text: "latest response", messageId: "B" }, T0 + 3);
+    while (!db.pruneArchivedHistoryBatch("moved", input).finished) { /* batches */ }
+    const answers = db.listEvents("moved").flatMap((event) =>
+      event.payload.kind === "agent_message" ? [event.payload.messageId] : []);
+    assert.deepEqual(answers, ["B"]);
+    assert.equal(db.getSession("moved")!.historyPruned!.eventCount, 1);
   } finally {
     db.close();
   }

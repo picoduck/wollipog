@@ -87,8 +87,10 @@ which threshold, and gives the session a new event epoch, as crash recovery does
 then reload the transcript, campaign and work-item proofs move to the new epoch with their kept
 report events, and accounting keeps its epoch (`accountingEventEpoch`), so cost corrections are not
 fenced. The session's tool-call count, which guardrails and campaign budgets read, keeps counting
-the removed tool calls. A campaign allowance granted after a prune counts them too, and adds each
-new call to them.
+the removed tool calls. Their ids are kept, so a campaign allowance granted after a prune charges
+each of them once: a history replaced later, whether it brings them back or not, never charges them
+again or drops them. A run that finds a later final response than the one it started with (delayed
+history can add one) reads the session again from the first row, so only the latest is kept.
 
 Removal batches commit without their own WAL flush, like runner ingest: a batch an OS crash rolls
 back is removed again by the next pass. The final step flushes, and blob files are deleted only
