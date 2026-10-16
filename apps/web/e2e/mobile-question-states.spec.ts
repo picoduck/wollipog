@@ -42,7 +42,7 @@ async function expectExpanded(page: Page) {
 }
 
 for (const viewport of [
-  { width: 390, height: 844 }, { width: 844, height: 390 }, { width: 390, height: 500 },
+  { width: 390, height: 844 }, { width: 844, height: 390 }, { width: 932, height: 430 }, { width: 390, height: 500 },
 ]) {
   for (const set of ["short", "long-text"]) {
     test(`a ${set} question uses only strip and full reading mode at ${viewport.width}×${viewport.height}`, async ({ page }) => {

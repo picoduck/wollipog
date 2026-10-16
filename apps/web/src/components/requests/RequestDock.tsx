@@ -13,7 +13,7 @@ import type { FollowTailState } from "../../useFollowTail.js";
 import { ChevronRightIcon, ChevronUpIcon } from "../Icons.js";
 import { SessionQuestionBanner } from "../SessionApproval.js";
 import { useRemovedFocus } from "../useRemovedFocus.js";
-import { useIsCoarsePointer, useIsMobile, useIsShortViewport } from "../useIsMobile.js";
+import { useIsMobileInEitherOrientation } from "../useIsMobile.js";
 import { registerRequestIntent, registerRequestRevealer } from "./request-reveal.js";
 import { RequestCard, type RequestIntentHandler } from "./RequestCard.js";
 import { PreviewQuestionCard } from "./PreviewQuestionCard.js";
@@ -61,7 +61,7 @@ export interface DockWhereAsked {
  * until the reader is back at the tail.
  *
  * Mobile session questions (#3308) start in that strip, including at the live tail. Expanding
- * opens full reading mode directly, and collapsing returns to the strip. A short coarse-pointer
+ * opens full reading mode directly, and collapsing returns to the strip. A coarse-pointer
  * viewport keeps this behavior when the phone rotates. Desktop and Sessions previews retain
  * the compact card.
  */
@@ -120,13 +120,10 @@ export function RequestDock({
    * `requests`, so the question shows once. */
   composerAnswer?: { requestId: string; onAnswer: () => void };
 }) {
-  const mobile = useIsMobile();
-  const coarsePointer = useIsCoarsePointer();
-  const shortViewport = useIsShortViewport();
+  const mobile = useIsMobileInEitherOrientation();
   // A phone on its side can be wider than the mobile breakpoint. Previews keep their
   // own capped presentation; only a full session has a reading column to expand into.
-  const singleLineQuestions = readingAvailable && !onAnswerInSession &&
-    (mobile || (coarsePointer && shortViewport));
+  const singleLineQuestions = readingAvailable && !onAnswerInSession && mobile;
   const [selectedId, setSelectedId] = useState<string | null>(() => revealRequestId ?? null);
   const [moreOpen, setMoreOpen] = useState(false);
   const listId = useId();
@@ -423,7 +420,7 @@ export function RequestDock({
             keyboardOpen={keyboardOpen}
             intentRef={intentRef}
             topRequest={expanded === requests[0]}
-            readingExpanded={readingAvailable ? reading : undefined}
+            readingExpanded={singleLineQuestions ? reading : undefined}
             onReadingChange={readingAvailable ? (next) => readingChange(expanded.requestId, next) : undefined}
             onAnswer={composerAnswer?.requestId === expanded.requestId ? composerAnswer.onAnswer : undefined}
             whereAsked={whereAsked && {

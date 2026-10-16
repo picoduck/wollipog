@@ -25,7 +25,7 @@ async function expectHeaderVisible(card: Locator) {
   }), { message: "the entire collapsed header stays visible and its toggle is clickable" }).toBe(true);
 }
 
-for (const viewport of [{ width: 1024, height: 600 }, { width: 932, height: 430 }]) {
+for (const viewport of [{ width: 1280, height: 600 }, { width: 1280, height: 430 }]) {
   for (const activation of ["focused click", "nonfocusing click", "touch"] as const) {
     test(`header collapse after scrolling preserves the answer and transcript at ${viewport.width}×${viewport.height} with ${activation} (#2928)`, async ({ page }) => {
       await page.setViewportSize(viewport);
@@ -69,7 +69,7 @@ for (const viewport of [{ width: 1024, height: 600 }, { width: 932, height: 430 
 }
 
 test("nonfocusing header collapse also reveals the header after inline expansion (#2928)", async ({ page }) => {
-  await page.setViewportSize({ width: 932, height: 430 });
+  await page.setViewportSize({ width: 1280, height: 430 });
   await page.goto("/agent-questions-e2e.html?set=long-text&more=1&after=40");
   const card = page.locator(".request-dock .question-card");
   await card.getByRole("button", { name: "Show Full Question" }).click();

@@ -42,7 +42,7 @@ async function expectReadingMode(page: Page) {
 test.describe("workflow decision reading mode (#2874)", () => {
   test.use({ hasTouch: true });
   for (const viewport of [
-    { width: 932, height: 430 }, { width: 1440, height: 900 },
+    { width: 1280, height: 430 }, { width: 1440, height: 900 },
   ]) {
     test(`the question header expands and collapses in place at ${viewport.width}px`, async ({ page }) => {
       await page.setViewportSize(viewport);

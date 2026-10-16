@@ -1707,3 +1707,55 @@ test("mobile questions start as a strip, expand directly, and keep drafts throug
     domWindow.happyDOM.setWindowSize(priorSize);
   }
 });
+
+test("desktop question reading stays per-step and releases the dock on resolution (#3308)", async () => {
+  const question: PendingApproval = {
+    requestId: "desktop-steps", kind: "question", title: "Agent Questions", options: [],
+    questions: [
+      { id: "first", question: "First question?", options: [{ label: "Yes" }] },
+      { id: "second", question: "Second question?", options: [{ label: "No" }] },
+    ],
+  };
+  const dock = (requests: PendingApproval[], state: FollowTailState = "following") =>
+    <RequestDock session={sessionWith(requests[0] ?? null)} requests={requests} runnerOnline followTailState={state} />;
+  const view = await render(dock([question, permission()]));
+  const click = async (selector: string) => {
+    await act(async () => { view.container.querySelector<HTMLButtonElement>(selector)!.click(); await tick(); });
+  };
+  try {
+    await click('[aria-label="Expand Question"]');
+    await click('input[type="radio"]');
+    await click('.request-card-foot .primary');
+    assertNoDomNode(view.container.querySelector(".question-card[data-question-expanded]"), "the next desktop step starts compact");
+    assertNoDomNode(view.container.querySelector(".request-dock[data-reading]"));
+    await click('[data-session-request-control="back"]');
+    assert.ok(view.container.querySelector(".request-dock[data-reading]"), "Back restores the first step's expansion");
+    await click('.request-dock-more .disclosure-trigger');
+    await click('.request-dock-row');
+    await click('.request-dock-more .disclosure-trigger');
+    await click('.request-dock-row');
+    assertNoDomNode(view.container.querySelector(".request-dock[data-reading]"), "returning to the desktop question starts compact");
+    await click('[aria-label="Expand Question"]');
+    await view.rerender(dock([question, permission()], "paused"));
+    await view.rerender(dock([permission()], "paused"));
+    assertNoDomNode(view.container.querySelector(".dock-strip"), "resolution leaves the next desktop request open");
+    assertNoDomNode(view.container.querySelector(".request-dock[data-reading]"));
+  } finally { await view.unmount(); }
+});
+
+test("an explicitly revealed mobile question stays expanded through Strict Mode effect replay (#3308)", async () => {
+  const priorSize = { width: domWindow.innerWidth, height: domWindow.innerHeight };
+  domWindow.happyDOM.setWindowSize({ width: 390, height: 844 });
+  const request: PendingApproval = {
+    requestId: "mobile-reveal", kind: "question", title: "Agent Questions", options: [],
+    questions: [{ id: "q", question: "Choose?", options: [{ label: "Yes" }] }],
+  };
+  const view = await render(<React.StrictMode><RequestDock session={sessionWith(request)} requests={[request]}
+    runnerOnline revealRequestId={request.requestId} /></React.StrictMode>);
+  try {
+    assert.ok(view.container.querySelector(".request-dock[data-reading] .question-card[data-question-expanded]"));
+  } finally {
+    await view.unmount();
+    domWindow.happyDOM.setWindowSize(priorSize);
+  }
+});

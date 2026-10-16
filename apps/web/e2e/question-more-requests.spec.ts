@@ -24,8 +24,8 @@ async function expectHeaderReachable(card: Locator) {
 }
 
 for (const viewport of [
-  { width: 932, height: 430 },
-  { width: 1024, height: 600 },
+  { width: 1280, height: 430 },
+  { width: 1280, height: 600 },
   { width: 1440, height: 900 },
 ]) {
   for (const activation of ["pointer", "touch"] as const) {
@@ -66,7 +66,7 @@ for (const viewport of [
   }
 }
 
-for (const viewport of [{ width: 932, height: 430 }]) {
+for (const viewport of [{ width: 1280, height: 430 }]) {
   test(`wheel scrolling reaches the footer with More Requests open at ${viewport.width}×${viewport.height} (#2942)`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto("/agent-questions-e2e.html?set=long-text&more=1&after=40");

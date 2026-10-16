@@ -2934,7 +2934,8 @@ follows these rules so it never crowds out the conversation it asks about:
   44px strip, including at the live tail. Expand Request opens full reading mode in one action;
   Collapse Question returns directly to the strip and restores the transcript's reading position.
   Returning to the tail does not reopen it. Draft answers and the current step survive both
-  transitions. This applies below 760px and in a coarse-pointer viewport at most 420px tall, so
+  transitions. This applies below 760px and in a coarse-pointer viewport below 1100px wide and at
+  most 760px tall, so
   rotating a phone keeps the same interaction. Desktop compact cards and Sessions previews retain
   their existing presentation.
 - **Other compact cards leave room for the transcript.** The dock caps at 40% of the chat column (the space between

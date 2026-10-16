@@ -495,6 +495,12 @@ export function SessionQuestionBanner({
   const step = Math.min(Math.max(ownDrafts ? drafts.step : 0, 0), Math.max(stepCount - 1, 0));
   const question = questions[step];
   const lastStep = step >= stepCount - 1;
+  // Keep the local per-step disclosure ready for a mobile-to-desktop resize. Mobile's
+  // dock owns reading mode; desktop resumes the existing per-question disclosure.
+  if (readingExpanded !== undefined) {
+    const nextExpanded = readingExpanded ? question?.id ?? null : null;
+    if (expandedQuestion !== nextExpanded) setExpandedQuestion(nextExpanded);
+  }
   const titleExpanded = readingExpanded ?? (question !== undefined && expandedQuestion === question.id);
 
   // Whether the clamp hides any of the question is measured, never guessed from its length: against
@@ -569,11 +575,17 @@ export function SessionQuestionBanner({
       : titleToggleRef.current ?? headerToggleRef.current ?? titleRef.current)?.focus({ preventScroll: true });
   }, [titleExpanded]);
   const reading = titleExpanded;
+  const reportedReading = useRef(false);
   useEffect(() => {
-    if (!reading || readingExpanded !== undefined) return;
-    onReadingChangeRef.current?.(true);
-    return () => onReadingChangeRef.current?.(false);
-  }, [reading, readingExpanded]);
+    if (reportedReading.current === reading) return;
+    reportedReading.current = reading;
+    onReadingChangeRef.current?.(reading);
+  }, [reading]);
+  useEffect(() => () => {
+    if (!reportedReading.current) return;
+    reportedReading.current = false;
+    onReadingChangeRef.current?.(false);
+  }, []);
   const toggleQuestion = (event: React.MouseEvent<HTMLButtonElement>) => {
     if (!question && !titleExpanded) return;
     headerCollapsePending.current = titleExpanded && event.currentTarget === headerToggleRef.current;
